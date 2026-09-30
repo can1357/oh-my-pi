@@ -633,18 +633,26 @@ export class SelectorController {
 	 * Effort follow-up for a session-only switch (`/switch`, alt+p): when the
 	 * target model reasons with selectable efforts, offer them before applying.
 	 * Cancelling (Esc) resolves `undefined`, preserving the previous
-	 * role-configured/model-default behavior. Non-reasoning models (and
-	 * reasoners without an effort ladder) resolve immediately with no prompt.
+	 * role-configured/model-default behavior. Skipped (same outcome) when the
+	 * session runs `auto`/`off`, which have no row to offer, and for
+	 * non-reasoning models (and reasoners without an effort ladder).
 	 */
 	#promptSwitchEffort(model: Model): Promise<Effort | undefined> {
+		const configured = this.ctx.session.configuredThinkingLevel();
+		// `auto` and `off` have no row in the effort list, so there is no
+		// faithful default to offer: skip the prompt and keep the previous
+		// outcome (an explicit `:level` still applies, bypassing this).
+		if (configured === AUTO_THINKING || configured === ThinkingLevel.Off) {
+			return Promise.resolve(undefined);
+		}
 		const efforts = getSupportedEfforts(model);
 		if (efforts.length === 0) return Promise.resolve(undefined);
 		// Preselect the level the switch would have applied without the prompt
 		// (role-configured level, else the model's default, else the current
 		// effective level), so Enter keeps the previous outcome instead of
-		// silently pinning the lowest effort when `auto`/`off` is configured.
+		// silently pinning the lowest effort.
 		const supported = (level: unknown): level is Effort =>
-			typeof level === "string" && (efforts as readonly string[]).includes(level);
+			typeof level === "string" && efforts.some(effort => effort === level);
 		const roleLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 		const modelDefault = model.thinking?.defaultLevel;
 		const current = this.ctx.session.thinkingLevel;
@@ -652,7 +660,7 @@ export class SelectorController {
 			(supported(roleLevel) ? roleLevel : undefined) ??
 			(supported(modelDefault) ? modelDefault : undefined) ??
 			(supported(current) ? current : undefined) ??
-			efforts[0]!;
+			efforts[0];
 		const { promise, resolve } = Promise.withResolvers<Effort | undefined>();
 		const { ThinkingSelectorComponent } = loadModelOverlayComponents();
 		const selector = new ThinkingSelectorComponent(

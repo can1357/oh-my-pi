@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "bun:test";
 import { ThinkingLevel, type ThinkingLevel as ThinkingLevelType } from "@oh-my-pi/pi-agent-core";
 import type { Effort, Model } from "@oh-my-pi/pi-ai";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelPickerCallbacks } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import * as thinkingSelectorModule from "@oh-my-pi/pi-tui/overlays/thinking-selector";
@@ -54,9 +54,14 @@ const plainModel = {
 	reasoning: false,
 } as unknown as Model;
 
-function start(options?: { roleLevel?: ConfiguredThinkingLevel; currentLevel?: ThinkingLevelType | undefined }) {
+function start(options?: {
+	roleLevel?: ConfiguredThinkingLevel;
+	currentLevel?: ThinkingLevelType | undefined;
+	configured?: ConfiguredThinkingLevel;
+}) {
 	const setModelTemporary = vi.fn(async () => {});
 	const resolveTemporaryModelThinkingLevel = vi.fn(() => options?.roleLevel);
+	const compact = vi.fn(async () => "ok" as const);
 	const shownHides: Array<Mock<() => void>> = [];
 	const showOverlay = vi.fn(() => {
 		const hide = vi.fn(() => {});
@@ -67,6 +72,7 @@ function start(options?: { roleLevel?: ConfiguredThinkingLevel; currentLevel?: T
 		session: {
 			getContextUsage: () => undefined,
 			thinkingLevel: options?.currentLevel,
+			configuredThinkingLevel: () => options?.configured,
 			resolveTemporaryModelThinkingLevel,
 			setModelTemporary,
 			scopedModels: [],
@@ -77,6 +83,7 @@ function start(options?: { roleLevel?: ConfiguredThinkingLevel; currentLevel?: T
 			setFocus: vi.fn(),
 			requestRender: vi.fn(),
 		},
+		handleCompactCommand: compact,
 	});
 	return {
 		ctx,
@@ -85,6 +92,7 @@ function start(options?: { roleLevel?: ConfiguredThinkingLevel; currentLevel?: T
 		resolveTemporaryModelThinkingLevel,
 		showOverlay,
 		shownHides,
+		compact,
 	};
 }
 
@@ -149,6 +157,24 @@ describe("SelectorController.switchSessionModel effort prompt", () => {
 		await switched;
 	});
 
+	it("skips the prompt when the session runs auto", async () => {
+		const harness = start({ configured: AUTO_THINKING, currentLevel: ThinkingLevel.Medium });
+
+		await harness.controller.switchSessionModel(reasoningModel);
+
+		expect(harness.showOverlay).not.toHaveBeenCalled();
+		expect(harness.setModelTemporary).toHaveBeenCalledWith(reasoningModel, undefined);
+	});
+
+	it("skips the prompt when thinking is off", async () => {
+		const harness = start({ configured: ThinkingLevel.Off, currentLevel: ThinkingLevel.Off });
+
+		await harness.controller.switchSessionModel(reasoningModel);
+
+		expect(harness.showOverlay).not.toHaveBeenCalled();
+		expect(harness.setModelTemporary).toHaveBeenCalledWith(reasoningModel, undefined);
+	});
+
 	it("switches immediately with no prompt for non-reasoning models", async () => {
 		const harness = start();
 
@@ -182,5 +208,35 @@ describe("SelectorController.switchSessionModel effort prompt", () => {
 		expect(harness.showOverlay).toHaveBeenCalledTimes(2);
 		expect(harness.shownHides).toHaveLength(2);
 		for (const hide of harness.shownHides) expect(hide).toHaveBeenCalledTimes(1);
+	});
+
+	it("prompts before compacting on an over-context picker pick", async () => {
+		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
+			pickerCallbacks = args[4] as ModelPickerCallbacks;
+			return {};
+		} as never);
+		const harness = start({ currentLevel: ThinkingLevel.Medium });
+
+		harness.controller.showModelSelector({ temporaryOnly: true });
+		if (!pickerCallbacks) throw new Error("model picker was not shown");
+
+		const picked = pickerCallbacks.onPick(reasoningModel, "anthropic/claude-opus-4-5", {
+			overContext: true,
+		}) as unknown as Promise<void>;
+		// The effort choice precedes compaction: no compaction starts while
+		// the prompt is open.
+		if (!captured) throw new Error("effort prompt was not shown");
+		expect(harness.compact).not.toHaveBeenCalled();
+
+		captured.onSelect(ThinkingLevel.High);
+		await picked;
+
+		expect(harness.compact).toHaveBeenCalledTimes(1);
+		expect(harness.setModelTemporary).toHaveBeenCalledWith(reasoningModel, ThinkingLevel.High);
+		const [, effortShownAt] = harness.showOverlay.mock.invocationCallOrder;
+		const [compactAt] = harness.compact.mock.invocationCallOrder;
+		const [appliedAt] = harness.setModelTemporary.mock.invocationCallOrder;
+		expect(effortShownAt).toBeLessThan(compactAt);
+		expect(compactAt).toBeLessThan(appliedAt);
 	});
 });
