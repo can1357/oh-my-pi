@@ -22,6 +22,16 @@ async function readIfPresent(filePath: string): Promise<string | undefined> {
 	}
 }
 
+/** Where a write lands and with which mode: through a symlink to its target, keeping an existing file's permissions (a new file stays private). */
+async function writeTarget(filePath: string): Promise<{ target: string; mode: number | undefined }> {
+	const target = await fs.realpath(filePath).catch(() => filePath);
+	const mode = await fs.stat(target).then(
+		stat => stat.mode & 0o777,
+		() => undefined,
+	);
+	return { target, mode };
+}
+
 /** A `models.yml` edit: the bytes it replaced (`undefined` when the file was absent) and the bytes it wrote. */
 interface ModelsEdit {
 	previous: string | undefined;
@@ -113,9 +123,12 @@ async function editModelsConfig(
 
 	// Not locked: an editor that saves between this recheck and the rename still loses its change, but the
 	// recheck runs after the new file is staged and synced, so the window is the rename itself.
-	const target = await fs.realpath(filePath).catch(() => filePath);
-	await writeFileAtomically(target, written, async () => {
-		if ((await readIfPresent(filePath)) !== previous) throw new Error(CHANGED_ON_DISK);
+	const { target, mode } = await writeTarget(filePath);
+	await writeFileAtomically(target, written, {
+		mode,
+		beforePublish: async () => {
+			if ((await readIfPresent(filePath)) !== previous) throw new Error(CHANGED_ON_DISK);
+		},
 	});
 	configFile.invalidate();
 	return { previous, written };
@@ -133,7 +146,10 @@ async function restoreModelsConfig(
 	};
 	await recheck();
 	if (previous === undefined) await fs.rm(filePath, { force: true });
-	else await writeFileAtomically(await fs.realpath(filePath).catch(() => filePath), previous, recheck);
+	else {
+		const { target, mode } = await writeTarget(filePath);
+		await writeFileAtomically(target, previous, { mode, beforePublish: recheck });
+	}
 	configFile.invalidate();
 }
 
