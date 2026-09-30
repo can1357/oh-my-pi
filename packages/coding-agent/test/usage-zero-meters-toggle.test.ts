@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
@@ -105,4 +108,49 @@ describe("display.showZeroUsageMeters", () => {
 			expect(await build(false, reports)).toContain("Only quota");
 		});
 	}
+	it("native dashboard detail filters zero meters on open and after refresh", async () => {
+		const fresh = usageReports();
+		fresh[0].limits = [
+			limit("fresh-base", "Fresh base", 0.3, { provider: fresh[0].provider }),
+			limit("fresh-zero", "Fresh unused", 0, { provider: fresh[0].provider, modelId: "fresh-unused" }),
+			limit("fresh-active", "Fresh active", 0.4, { provider: fresh[0].provider, modelId: "fresh-active" }),
+		];
+		const dashboards: UsageDashboardComponent[] = [];
+		const updated = Promise.withResolvers<void>();
+		const cx = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
+		const describe = (): string => JSON.stringify(dashboards[0]?.describe(cx));
+		const ctx = {
+			settings: settingsDouble(false),
+			session: {
+				model: undefined,
+				modelRegistry: {
+					authStorage: { credentials: { all: () => ({}) }, usage: { providerFor: () => undefined } },
+				},
+				getUsageReportingModelSelectors: () => [],
+				fetchUsageReports: async () => fresh,
+			},
+			ui: {
+				showOverlay: (component: UsageDashboardComponent) => {
+					dashboards.push(component);
+					return { hide: () => {} };
+				},
+				setFocus: () => {},
+				requestRender: () => {
+					if (describe().includes("Fresh active")) updated.resolve();
+				},
+			},
+		} as unknown as InteractiveModeContext;
+		new SelectorController(ctx).showUsageDashboard(usageReports());
+		const dashboard = dashboards[0];
+		if (!dashboard) throw new Error("Usage dashboard did not open");
+		dashboard.handleNativeEvent({ type: "select", key: "head/tabs", item: "detail" });
+		expect(describe()).toContain("Base quota");
+		expect(describe()).not.toContain("Unused model short");
+		expect(describe()).not.toContain("Unused tier");
+		dashboard.handleNativeEvent({ type: "action", key: "head/refresh", act: "refresh", mods: [] });
+		await updated.promise;
+		expect(describe()).toContain("Fresh active");
+		expect(describe()).not.toContain("Fresh unused");
+		dashboard.dispose();
+	});
 });
