@@ -7,6 +7,8 @@ import { parseModelString, splitUpstreamRouting, formatModelSelectorValue } from
  * {@link ModelBrowser} body. The Roles view manages assignments directly:
  * pick a role, pick a model, adjust thinking in an inline strip, or clear the
  * role back to auto-selection. Locked providers forward to the /login flow.
+ * When the host supplies `providerEditor`, a trailing "+ Add provider…" row
+ * and ^N/^E/^D manage custom OpenAI-compatible providers from models.yml.
  * Fully mouse-navigable (hover, wheel, click). Session-only switching lives
  * in the compact alt+p picker ({@link ./model-picker}).
  */
@@ -38,8 +40,9 @@ import { actionHint, hintsRow, type NativeHint } from "../native/overlay";
 import { plainText } from "../native/spans";
 import { isNativeRendering } from "../native/state";
 import { Input } from "../components/input";
+import { CustomProviderForm, type CustomProviderFormHost } from "../setup/scenes/custom-provider";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
-import { truncateToWidth, visibleWidth } from "../utils";
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "../utils";
 import type {
 	ModelBrowserSource,
 	ModelBrowserRegistry,
@@ -146,6 +149,15 @@ export interface ScopedModelItem {
 
 export type ModelRoleSelectionScope = "global" | "project";
 
+/** Create, edit, and delete the custom OpenAI-compatible providers declared in models.yml. */
+export interface ModelHubProviderEditor {
+	/** The provider's current declaration; undefined when it is not in models.yml and so not editable. */
+	get(id: string): { baseUrl: string | undefined; hasKey: boolean } | undefined;
+	add(values: { id: string; baseUrl: string; apiKey: string }): Promise<void>;
+	update(id: string, update: { baseUrl?: string; apiKey?: string; clearApiKey?: boolean }): Promise<void>;
+	remove(id: string): Promise<void>;
+}
+
 export interface ModelHubCallbacks {
 	/** Persist a role assignment. */
 	onAssign: (
@@ -190,6 +202,8 @@ export interface ModelHubCallbacks {
 	 * typing; undefined for input that does not parse or fit.
 	 */
 	previewCompactionPoint?: (model: Model, input: string) => string | undefined;
+	/** Enables the `+ Add provider…` row and the ^N/^E/^D provider editing keys. */
+	providerEditor?: ModelHubProviderEditor;
 	onCancel: () => void;
 }
 
@@ -203,7 +217,7 @@ export interface ModelHubOptions {
 	currentSelector?: string;
 }
 
-interface SidebarEntry extends HubSidebarEntry<"recent" | "roles" | "all" | "separator" | "provider"> {
+interface SidebarEntry extends HubSidebarEntry<"recent" | "roles" | "all" | "separator" | "provider" | "addProvider"> {
 	providerId?: string;
 	locked?: boolean;
 	oauth?: boolean;
@@ -261,6 +275,15 @@ type StripState =
 			error?: string;
 			confirm?: { value: string; message: string };
 			preview?: { value: string; text: string | undefined };
+	  }
+	| {
+			/** Footer confirmation before removing a custom provider and its stored key. */
+			kind: "deleteProvider";
+			providerId: string;
+			/** `remove` is in flight; input is ignored until it settles. */
+			pending: boolean;
+			/** Message of the last failed removal, shown in place of the prompt. */
+			error?: string;
 	  };
 
 /** A Roles-view command; keys and the picker's action bar both run {@link ModelHubComponent}'s `#runRolesAction`. */
@@ -443,6 +466,8 @@ export class ModelHubComponent implements Component {
 
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
+	/** Add/edit form for custom providers; owns the body pane and all input while open. */
+	#providerForm: CustomProviderForm | undefined;
 	#assignmentPending = false;
 	/**
 	 * Last preset ctrl+←/→ tried in this hub, with the settings revision after the
@@ -463,12 +488,17 @@ export class ModelHubComponent implements Component {
 	#refreshSpinnerInterval?: Timer;
 	#renderBodyPane = (width: number, height: number | undefined): readonly string[] => {
 		const rows = Math.max(1, Math.floor(height ?? 10));
-		const lines: string[] = [this.#statusRow(width)];
+		const form = this.#providerForm;
+		const lines: string[] = form ? [] : [this.#statusRow(width)];
 		const entry = this.#activeEntry();
-		if (entry.kind === "roles" && this.#assigning === null) {
+		if (form) {
+			lines.push(...form.render(width, rows));
+		} else if (entry.kind === "roles" && this.#assigning === null) {
 			lines.push(...this.#renderRolesView(width, rows - 1));
 		} else if (entry.kind === "provider" && entry.locked && this.#assigning === null) {
 			lines.push(...this.#renderLockedView(entry, width, rows - 1));
+		} else if (entry.kind === "addProvider" && this.#assigning === null) {
+			lines.push(...this.#renderAddProviderView(width));
 		} else {
 			lines.push(this.#renderModelKindTabs(width));
 			this.#browser.setMaxVisible(rows - 2 - 5);
@@ -564,6 +594,7 @@ export class ModelHubComponent implements Component {
 	/** Cancel pending provider refresh timers and the spinner. Host calls this on overlay close. */
 	dispose(): void {
 		this.#disposed = true;
+		this.#closeProviderForm();
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
 		this.#refreshingProviders.clear();
@@ -775,6 +806,12 @@ export class ModelHubComponent implements Component {
 		if (this.#lockedProviderEntries.length > 0) {
 			entries.push({ id: "sep:locked", kind: "separator", label: "" }, ...this.#lockedProviderEntries);
 		}
+		if (this.#callbacks.providerEditor) {
+			entries.push(
+				{ id: "sep:add", kind: "separator", label: "" },
+				{ id: "addProvider", kind: "addProvider", label: "+ Add provider…" },
+			);
+		}
 
 		this.#entries = entries;
 		if (!entries.some(entry => entry.id === this.#activeEntryId)) {
@@ -816,7 +853,8 @@ export class ModelHubComponent implements Component {
 		for (let radius = 0; radius < entries.length; radius++) {
 			for (const index of radius === 0 ? [start] : [start + radius, start - radius]) {
 				const entry = entries[index];
-				if (entry && !this.#isHopSkipped(entry)) return entry;
+				// The add row is an action, never a place for focus to land after a rebuild.
+				if (entry && entry.kind !== "addProvider" && !this.#isHopSkipped(entry)) return entry;
 			}
 		}
 		return undefined;
@@ -1043,10 +1081,12 @@ export class ModelHubComponent implements Component {
 	/**
 	 * Entries the scope hop skips: separators always; while searching, also
 	 * the Roles view (not a model scope), an empty Recent, locked providers,
-	 * and providers without matches.
+	 * and providers without matches; while searching or assigning, the add
+	 * row (an action, not a model scope).
 	 */
 	#isHopSkipped(entry: SidebarEntry): boolean {
 		if (entry.kind === "separator") return true;
+		if (entry.kind === "addProvider") return this.#searchCounts !== null || this.#assigning !== null;
 		if (!this.#searchCounts) return false;
 		if (entry.kind === "roles") return true;
 		if (entry.kind === "recent") return this.#recentSearchCount === 0;
@@ -1588,7 +1628,7 @@ export class ModelHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (!strip || strip.kind === "name") return;
+		if (!strip || strip.kind === "name" || strip.kind === "deleteProvider") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
 		switch (chip.action) {
@@ -1891,6 +1931,99 @@ export class ModelHubComponent implements Component {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
+	// Custom provider editing
+	// ═══════════════════════════════════════════════════════════════════════
+
+	/** The focused provider's models.yml declaration, shaped for the edit form; undefined when it is not editable. */
+	#editableProvider(entry: SidebarEntry): { id: string; baseUrl: string; hasKey: boolean } | undefined {
+		const id = entry.kind === "provider" ? entry.providerId : undefined;
+		const info = id ? this.#callbacks.providerEditor?.get(id) : undefined;
+		return id && info ? { id, baseUrl: info.baseUrl ?? "", hasKey: info.hasKey } : undefined;
+	}
+
+	/**
+	 * Open the add form, or the edit form when `edit` names a declared provider. The form
+	 * reports a saved provider through `finish`, which closes it and rebuilds the sidebar.
+	 */
+	#openProviderForm(edit?: { id: string; baseUrl: string; hasKey: boolean }): void {
+		const editor = this.#callbacks.providerEditor;
+		if (!editor) return;
+		const host: CustomProviderFormHost = {
+			requestRender: () => this.#tui.requestRender(),
+			// The hub already holds keyboard focus; the form never has to win it back.
+			restoreFocus: () => {},
+			finish: result => {
+				if (this.#providerForm !== form) return;
+				this.#closeProviderForm();
+				if (result === "done") this.#refreshAfterMutation();
+			},
+		};
+		const form = new CustomProviderForm(
+			host,
+			async values => {
+				if (!edit) return editor.add(values);
+				return editor.update(edit.id, {
+					...(values.baseUrl !== edit.baseUrl ? { baseUrl: values.baseUrl } : {}),
+					...(values.apiKey ? { apiKey: values.apiKey } : {}),
+					...(values.clearApiKey ? { clearApiKey: true } : {}),
+				});
+			},
+			() => this.#closeProviderForm(),
+			edit ? { edit } : {},
+		);
+		this.#providerForm = form;
+		form.onActivate();
+	}
+
+	#closeProviderForm(): void {
+		const form = this.#providerForm;
+		if (!form) return;
+		this.#providerForm = undefined;
+		form.dispose();
+		this.#tui.requestRender();
+	}
+
+	/** Sidebar-focus keys: ^N adds a provider; ^E edits and ^D/Delete deletes the focused one when models.yml declares it. */
+	#handleProviderEditorKey(data: string, entry: SidebarEntry): boolean {
+		if (!this.#callbacks.providerEditor) return false;
+		if (matchesKey(data, "ctrl+n")) {
+			this.#openProviderForm();
+			return true;
+		}
+		const provider = this.#editableProvider(entry);
+		if (!provider) return false;
+		if (matchesKey(data, "ctrl+e")) {
+			this.#openProviderForm(provider);
+			return true;
+		}
+		if (matchesKey(data, "ctrl+d") || matchesKey(data, "delete")) {
+			this.#strip = { kind: "deleteProvider", providerId: provider.id, pending: false };
+			return true;
+		}
+		return false;
+	}
+
+	/** Enter on the delete prompt: remove the provider, then rebuild the sidebar; a failure stays on the prompt. */
+	async #confirmDeleteProvider(): Promise<void> {
+		const strip = this.#strip;
+		const editor = this.#callbacks.providerEditor;
+		if (strip?.kind !== "deleteProvider" || strip.pending || !editor) return;
+		strip.pending = true;
+		strip.error = undefined;
+		try {
+			await editor.remove(strip.providerId);
+		} catch (error) {
+			strip.pending = false;
+			strip.error = error instanceof Error ? error.message : String(error);
+			if (!this.#disposed) this.#tui.requestRender();
+			return;
+		}
+		if (this.#disposed) return;
+		this.#closeStrip();
+		this.#refreshAfterMutation();
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
 	// Input
 	// ═══════════════════════════════════════════════════════════════════════
 
@@ -1967,6 +2100,11 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 
+		if (this.#providerForm) {
+			this.#providerForm.handleInput(data);
+			return;
+		}
+
 		if (this.#strip) {
 			this.#handleStripInput(data);
 			return;
@@ -1980,6 +2118,11 @@ export class ModelHubComponent implements Component {
 		const entry = this.#activeEntry();
 		const rolesView = entry.kind === "roles" && this.#assigning === null;
 		const lockedView = entry.kind === "provider" && entry.locked && this.#assigning === null;
+		const addProviderView = entry.kind === "addProvider" && this.#assigning === null;
+
+		// ^E/^D double as the search input's caret/delete keys, so they only act
+		// on the sidebar; in the list they keep their editing meaning.
+		if (this.#focus === "scope" && this.#assigning === null && this.#handleProviderEditorKey(data, entry)) return;
 
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
 			this.#focus = this.#focus === "scope" ? "list" : "scope";
@@ -2068,6 +2211,19 @@ export class ModelHubComponent implements Component {
 			}
 			return;
 		}
+		if (addProviderView) {
+			const printable = extractPrintableText(data);
+			if (printable !== undefined && printable.trim().length > 0) {
+				this.#setActiveEntry("all");
+				this.#focus = "list";
+				this.#browser.handleInput(data);
+				return;
+			}
+			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+				this.#openProviderForm();
+			}
+			return;
+		}
 
 		// Enter on the sidebar is a pane switch, like →: it lands on the model
 		// rows instead of acting on a row the user cannot see is selected.
@@ -2113,8 +2269,16 @@ export class ModelHubComponent implements Component {
 	#handleStripInput(data: string): void {
 		const strip = this.#strip;
 		if (!strip) return;
+		// Input is ignored while the removal is in flight so Enter can't fire it twice.
+		if (strip.kind === "deleteProvider" && strip.pending) return;
 		if (matchesSelectCancel(data)) {
 			this.#closeStrip();
+			return;
+		}
+		if (strip.kind === "deleteProvider") {
+			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+				void this.#confirmDeleteProvider();
+			}
 			return;
 		}
 		if (strip.kind === "name") {
@@ -2314,6 +2478,8 @@ export class ModelHubComponent implements Component {
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
 		if (this.#assignmentPending) return true;
+		// The form and the delete prompt own the screen; clicks behind them must not navigate.
+		if (this.#providerForm || this.#strip?.kind === "deleteProvider") return true;
 		const { footerColumn, bodyHeight, contentLine, overSidebar, overBody, bodyLine } = this.#frame.locate(
 			event.row,
 			event.col,
@@ -2400,6 +2566,10 @@ export class ModelHubComponent implements Component {
 	/** Pointer activation of a sidebar entry: pick the scope; a second click on a locked provider logs in. */
 	#clickSidebarEntry(clicked: SidebarEntry | undefined): void {
 		if (!clicked || clicked.kind === "separator") return;
+		if (clicked.kind === "addProvider") {
+			if (this.#assigning === null) this.#openProviderForm();
+			return;
+		}
 		const already = clicked.id === this.#activeEntryId;
 		if (clicked.kind === "roles") this.#assigning = null;
 		this.#setActiveEntry(clicked.id);
@@ -2454,6 +2624,8 @@ export class ModelHubComponent implements Component {
 			icon = theme.icon.extensionSkill;
 		} else if (entry.kind === "all") {
 			icon = theme.icon.model;
+		} else if (entry.kind === "addProvider") {
+			icon = " "; // the label already leads with "+"
 		} else {
 			icon = muted ? theme.status.shadowed : theme.status.enabled;
 		}
@@ -2543,6 +2715,9 @@ export class ModelHubComponent implements Component {
 				break;
 			case "roles":
 				text = `Model roles — ${formatKeyHint("f")} adds a retry fallback, cleared roles fall back to auto-selection`;
+				break;
+			case "addProvider":
+				text = "Add a custom OpenAI-compatible provider";
 				break;
 			case "provider":
 				if (entry.locked) {
@@ -2759,6 +2934,32 @@ export class ModelHubComponent implements Component {
 		return lines.slice(0, rows);
 	}
 
+	#renderAddProviderView(width: number): string[] {
+		return [
+			"",
+			truncateToWidth(theme.fg("muted", "  Register an OpenAI-compatible endpoint and discover its models."), width),
+			"",
+			truncateToWidth(theme.fg("accent", `  ${theme.nav.cursor} Press Enter to add a provider (or ^N)`), width),
+		];
+	}
+
+	#deleteProviderPrompt(strip: { providerId: string; pending: boolean; error?: string }): string {
+		// IDs and error messages come from models.yml and the filesystem; keep the one-row footer escape-free.
+		const id = stripTerminalSequences(strip.providerId).replace(/\s+/g, " ").trim();
+		if (strip.pending) return `Deleting provider "${id}"…`;
+		if (strip.error !== undefined) {
+			const reason = stripTerminalSequences(strip.error).replace(/\s+/g, " ").trim();
+			return `Delete failed: ${reason} · Enter retry · Esc cancel`;
+		}
+		return `Delete provider "${id}" and its stored key? Enter confirm · Esc cancel`;
+	}
+
+	/** Advertise the provider keys only where they act: on the sidebar, outside assignment. */
+	#providerEditorHint(entry: SidebarEntry): string {
+		if (!this.#callbacks.providerEditor || this.#focus !== "scope" || entry.kind === "addProvider") return "";
+		return this.#editableProvider(entry) ? "^E edit · ^D delete · ^N add provider · " : "^N add provider · ";
+	}
+
 	#footerHint(): string {
 		const enter = formatKeyHint("enter");
 		const cancel = editorKey("tui.select.cancel");
@@ -2769,6 +2970,7 @@ export class ModelHubComponent implements Component {
 		const altLeftRight = formatKeyHints(["alt+left", "alt+right"]);
 		const strip = this.#strip;
 		if (strip) {
+			if (strip.kind === "deleteProvider") return this.#deleteProviderPrompt(strip);
 			if (strip.kind === "name") {
 				if (strip.purpose === "compaction") {
 					return `${enter} ${compactionConfirmPending(strip) ? "accept" : "set"} compaction point · ${cancel} cancel`;
@@ -2782,6 +2984,7 @@ export class ModelHubComponent implements Component {
 			if (strip.kind === "scope") return `${leftRight} save scope · ${enter} choose · ${cancel} cancel`;
 			return `${leftRight} thinking level · ${enter} apply · ${cancel} keep`;
 		}
+		if (this.#providerForm) return "Enter continue · Esc cancel";
 		if (this.#assigning !== null) {
 			if (this.#focus === "scope") {
 				return `${enterRight} models · ${upDown} providers · type to search · ${altLeftRight} kind · ${cancel} cancel`;
@@ -2797,6 +3000,11 @@ export class ModelHubComponent implements Component {
 			}
 		}
 		const entry = this.#activeEntry();
+		return `${this.#providerEditorHint(entry)}${this.#entryFooterHint(entry)}`;
+	}
+
+	#entryFooterHint(entry: SidebarEntry): string {
+		if (entry.kind === "addProvider") return "Enter add provider · ↑/↓ scopes · Esc close";
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
 				const presets =
@@ -2877,6 +3085,12 @@ export class ModelHubComponent implements Component {
 				hint = theme.fg("dim", "(letters, digits, - and _)");
 			}
 			return truncateToWidth(`${label} ${inputLine} ${hint}`, width);
+		}
+		if (strip.kind === "deleteProvider") {
+			return truncateToWidth(
+				theme.fg(strip.error === undefined ? "warning" : "error", this.#deleteProviderPrompt(strip)),
+				width,
+			);
 		}
 
 		const prefix =
