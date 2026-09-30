@@ -87,6 +87,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	AUTO_THINKING,
 	concreteThinkingLevel,
+	parseThinkingLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
@@ -283,6 +284,8 @@ interface ActiveAdvisor {
 	providerSessionId: string | undefined;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
+	/** Provider/model[:effort] captured when the current advisor request starts. */
+	requestModelAttribution?: string;
 	/** Count of consecutive usage-limit block waits, bounded by retry.maxRetries; reset on turn success. */
 	usageLimitRetries: number;
 	signature: string;
@@ -1065,8 +1068,9 @@ export class SessionAdvisors {
 			// accepted notes and acknowledges truthfully. No separate accept wrapper.
 			const emissionGuard = new AdvisorEmissionGuard({ budgetPerUpdate });
 			const adviseTool = new AdviseTool(
-				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
+				(note, severity, model) => this.#routeAdvice(advisorRef, note, severity, model),
 				emissionGuard,
+				() => advisorRef.requestModelAttribution,
 			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
@@ -1167,6 +1171,14 @@ export class SessionAdvisors {
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
+				// Agent core snapshots these options before asynchronous credential
+				// resolution. They remain the request's truth even if a later primary
+				// boundary retunes the live auto advisor before this wrapper runs.
+				const requestThinkingLevel =
+					streamOptions?.disableReasoning === true
+						? ThinkingLevel.Off
+						: (parseThinkingLevel(streamOptions?.reasoning) ?? ThinkingLevel.Inherit);
+				advisorRef.requestModelAttribution = formatRetryFallbackSelector(requestModel, requestThinkingLevel);
 				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
 				const options = {
 					...streamOptions,
@@ -1459,10 +1471,14 @@ export class SessionAdvisors {
 	 *  admission — the note cleared the emission guard inside AdviseTool when it
 	 *  was emitted, so a deferred flush replays the backlog without
 	 *  re-filtering. */
-	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
+	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity, model?: string): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
+		// `model` was captured by AdviseTool when admission succeeded. A deferred
+		// note may flush after fallback or primary restoration, so reading the
+		// live advisor model here would misattribute it.
+		const routedNote = { note, severity, advisor: source, model } satisfies AdvisorNote;
 		const interrupting = isInterruptingSeverity(severity);
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
 		const terminalUnwindPreserve = this.#terminalUnwindActive && severity !== "blocker" && terminalAnswerNoQueuedWork;
@@ -1479,10 +1495,10 @@ export class SessionAdvisors {
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
 		});
 		if (channel === "aside") {
-			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
+			this.#host.yieldQueue.enqueue("advisor", routedNote);
 			return;
 		}
-		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
+		const notes: AdvisorNote[] = [routedNote];
 		const content = formatAdvisorBatchContent(notes);
 		const details = { notes } satisfies AdvisorMessageDetails;
 		if (channel === "preserve") {

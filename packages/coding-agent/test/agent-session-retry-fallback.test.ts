@@ -22,6 +22,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AdviseTool, type AdvisorMessageDetails } from "@oh-my-pi/pi-coding-agent/advisor/advise-tool";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -1920,6 +1921,28 @@ describe("AgentSession retry fallback", () => {
 				role: "advisor",
 			},
 		]);
+
+		const liveAdvisor = session.getAdvisorAgent();
+		if (!liveAdvisor) throw new Error("Expected fallback advisor agent");
+		const adviseTool = liveAdvisor.state.tools.find(tool => tool.name === "advise");
+		if (!(adviseTool instanceof AdviseTool)) throw new Error("Expected advisor advise tool");
+		adviseTool.beginUpdate(false);
+		await adviseTool.execute("attribution-note", {
+			note: "This note was emitted by the fallback model.",
+			severity: "nit",
+		});
+		const advisorCard = session.messages.findLast(
+			message =>
+				message.role === "custom" &&
+				message.customType === "advisor" &&
+				typeof message.content === "string" &&
+				message.content.includes("This note was emitted by the fallback model."),
+		);
+		if (!advisorCard || advisorCard.role !== "custom") throw new Error("Expected advisor card");
+		const advisorDetails = advisorCard.details as AdvisorMessageDetails;
+		expect(advisorDetails.notes).toContainEqual(
+			expect.objectContaining({ model: `${advisorFallbackSelector}:high` }),
+		);
 		expect(advisorFailures).toEqual([]);
 
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");

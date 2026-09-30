@@ -199,6 +199,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		key: string;
 		note: string;
 		severity?: AdviseDetails["severity"];
+		model?: string;
 	}[] = [];
 
 	/**
@@ -209,10 +210,14 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *   note is emitted (live or deferred). Defaults to a stock
 	 *   {@link AdvisorEmissionGuard} (default budget
 	 *   {@link ADVISOR_DEFAULT_BUDGET_PER_UPDATE}).
+	 * @param getModelAttribution Snapshots the live provider/model identity when
+	 *   admission succeeds. Deferred notes retain this value through later model
+	 *   fallback or primary restoration.
 	 */
 	constructor(
-		private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void,
+		private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"], model?: string) => void,
 		guard?: AdvisorEmissionGuard,
+		private readonly getModelAttribution?: () => string | undefined,
 	) {
 		this.#guard = guard ?? new AdvisorEmissionGuard();
 	}
@@ -286,7 +291,12 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 				const displacedIndex = this.#deferredNotes.findIndex(item => item.key === decision.displacedKey);
 				if (displacedIndex !== -1) this.#deferredNotes.splice(displacedIndex, 1);
 			}
-			this.#deferredNotes.push({ key, note: args.note, severity: args.severity });
+			this.#deferredNotes.push({
+				key,
+				note: args.note,
+				severity: args.severity,
+				model: this.getModelAttribution?.(),
+			});
 			return this.#result(ADVISOR_ACK_DEFERRED, args);
 		}
 		// Live path (completed update, or a blocker that must interrupt now). A
@@ -298,7 +308,9 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		if (reservedIndex !== -1) this.#deferredNotes.splice(reservedIndex, 1);
 		const decision = this.#guard.admit(args.note, { rank, pending: false });
 		if (!decision.accepted) return this.#suppressed(args, decision.reason);
-		this.onAdvice(args.note, args.severity);
+		const model = this.getModelAttribution?.();
+		if (model === undefined) this.onAdvice(args.note, args.severity);
+		else this.onAdvice(args.note, args.severity, model);
 		return this.#result(ADVISOR_ACK_SENT, args);
 	}
 
@@ -309,9 +321,10 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		if (this.#deferredNotes.length === 0) return;
 		const pending = this.#deferredNotes;
 		this.#deferredNotes = [];
-		for (const { note, severity } of pending) {
+		for (const { note, severity, model } of pending) {
 			this.#guard.markRouted(note);
-			this.onAdvice(note, severity);
+			if (model === undefined) this.onAdvice(note, severity);
+			else this.onAdvice(note, severity, model);
 		}
 	}
 

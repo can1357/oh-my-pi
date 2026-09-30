@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { AdvisorMessageDetails } from "@oh-my-pi/pi-tui/chat/messages";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 // `auto` is a session-level selector: the per-turn difficulty classifier runs
@@ -158,6 +159,55 @@ describe("advisor auto thinking level", () => {
 
 		expect(s.getAdvisorAgent()).toBe(advisorBefore);
 		expect(advisorBefore.state.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("attributes an in-flight auto advisor note to the effort used when its request started", async () => {
+		const primary = createMockModel({
+			responses: [{ content: ["first primary complete"] }, { content: ["second primary complete"] }],
+		});
+		const requestStarted = Promise.withResolvers<void>();
+		const releaseRequest = Promise.withResolvers<void>();
+		const advisorMock = createMockModel({
+			responses: [
+				async () => {
+					requestStarted.resolve();
+					await releaseRequest.promise;
+					return {
+						content: [
+							{
+								type: "toolCall",
+								name: "advise",
+								arguments: { note: "The low-effort request found this.", severity: "nit" },
+							},
+						],
+					};
+				},
+				{ content: ["second review complete"] },
+			],
+		});
+		const s = newSession(primary.stream, { "advisor.syncBacklog": "off" }, advisorMock.stream);
+		s.setThinkingLevel(Effort.Low);
+		expect(s.setAdvisorEnabled(true)).toBe(true);
+
+		await s.prompt("first turn");
+		await requestStarted.promise;
+		s.setThinkingLevel(Effort.High);
+		await s.prompt("second turn retunes the live advisor");
+		releaseRequest.resolve();
+		expect(await s.waitForAdvisorCatchup(5_000)).toBe(true);
+
+		const card = s.messages.findLast(
+			message =>
+				message.role === "custom" &&
+				message.customType === "advisor" &&
+				typeof message.content === "string" &&
+				message.content.includes("The low-effort request found this."),
+		);
+		if (!card || card.role !== "custom") throw new Error("Expected attributed advisor card");
+		const details = card.details as AdvisorMessageDetails;
+		expect(details.notes).toContainEqual(
+			expect.objectContaining({ model: `${model.provider}/${model.id}:${Effort.Low}` }),
+		);
 	});
 
 	it("an auto advisor on a retry-fallback model is not retuned when the primary's level changes; it follows again once back on its main model", async () => {

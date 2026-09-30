@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Advisor cards now show immutable per-note model attribution next to the configured advisor name, so fallback-produced notes remain distinguishable ([#10863](https://github.com/can1357/oh-my-pi/issues/10863)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

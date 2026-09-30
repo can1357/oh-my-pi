@@ -791,6 +791,32 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledTimes(3);
 		});
 
+		it("keeps the admission-time model when a deferred note flushes after a model switch", async () => {
+			const delivered: { note: string; severity?: string; model?: string }[] = [];
+			let liveModel = "anthropic/claude-sonnet-4-5:high";
+			const tool = new AdviseTool(
+				(note, severity, model) => delivered.push({ note, severity, model }),
+				new AdvisorEmissionGuard(),
+				() => liveModel,
+			);
+
+			tool.beginUpdate(true);
+			await tool.execute("model-0", {
+				note: "The fallback must retain the source identity.",
+				severity: "concern",
+			});
+			liveModel = "google/gemini-2.5-flash:high";
+			tool.flushDeferredNotes();
+
+			expect(delivered).toEqual([
+				{
+					note: "The fallback must retain the source identity.",
+					severity: "concern",
+					model: "anthropic/claude-sonnet-4-5:high",
+				},
+			]);
+		});
+
 		it("does not pile up duplicate deferred notes during a long mid-turn", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -6402,24 +6428,54 @@ describe("advisor", () => {
 			expect(text).toContain("watch the empty case");
 		});
 
-		it("prefixes the note with a named-advisor label, but not for the default advisor", async () => {
+		it("prefixes each note with immutable advisor and model attribution", async () => {
 			const uiTheme = await getThemeByName("dark");
 			if (!uiTheme) throw new Error("theme unavailable");
 			const card = createAdvisorMessageCard(
 				{
 					notes: [
-						{ note: "module boundary leak", severity: "concern", advisor: "Architecture" },
-						{ note: "default-advisor note", advisor: "default" },
+						{
+							note: "module boundary leak",
+							severity: "concern",
+							advisor: "Architecture",
+							model: "openai-codex/gpt-6.1-sol:high",
+						},
+						{
+							note: "default-advisor note",
+							advisor: "default",
+							model: "google-antigravity/gemini-3.8-flash:medium",
+						},
 					],
 				},
 				() => true,
 				uiTheme,
 			);
-			const text = strip(card.render(80));
-			expect(text).toContain("[Architecture]");
+			const text = strip(card.render(100));
+			expect(text).toContain("[Architecture · openai-codex/gpt-6.1-sol:high]");
+			expect(text).toContain("[google-antigravity/gemini-3.8-flash:medium]");
 			expect(text).toContain("module boundary leak");
-			// The implicit "default" advisor stays unlabeled.
-			expect(text).not.toContain("[default]");
+			expect(text).not.toContain("[default");
+		});
+
+		it("keeps the complete note when attribution does not fit on the first row", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			const card = createAdvisorMessageCard(
+				{
+					notes: [
+						{
+							note: "Do not delete the production database.",
+							severity: "concern",
+							model: "anthropic/claude-sonnet-4-5:high",
+						},
+					],
+				},
+				() => true,
+				uiTheme,
+			);
+			const text = strip(card.render(30));
+			expect(text).toContain("Do not delete");
+			expect(text).toContain("production database.");
 		});
 
 		it("collapses to the first notes with an overflow hint", async () => {
