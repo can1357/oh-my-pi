@@ -388,7 +388,9 @@ export class SelectorController {
 			loadActivity: loadDailyActivity,
 			refresh: async () => {
 				const refreshed = await this.ctx.session.fetchUsageReports();
-				return refreshed ? filterUsageReportsForDisplay(collapseSharedUsageReports(refreshed), displayOptions) : refreshed;
+				return refreshed
+					? filterUsageReportsForDisplay(collapseSharedUsageReports(refreshed), displayOptions)
+					: refreshed;
 			},
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
