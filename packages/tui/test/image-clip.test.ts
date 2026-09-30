@@ -80,16 +80,16 @@ describe("kitty direct-placement wire format", () => {
 		const base = { imageId: 7, columns: 4, rows: 6, imageHeightPx: 60 };
 		// Whole block visible (last line at viewport row 9): full anchored form.
 		expect(encodeKittyPlacementLine({ ...base, placementId: 1, screenRow: 9 })).toBe(
-			"\x1b7\x1b[5A\x1b_Ga=p,q=2,C=1,i=7,p=1,c=4,r=6\x1b\\\x1b8",
+			"\x1b7\x1b[5A\x1b_Ga=p,q=2,C=1,i=7,p=1,c=4,r=6,z=-2147483648\x1b\\\x1b8",
 		);
 		// Straddling (last line at row 3): two rows hidden above, four visible —
 		// the source slice starts at 60*2/6 = 20px.
 		expect(encodeKittyPlacementLine({ ...base, placementId: 2, screenRow: 3 })).toBe(
-			"\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=7,p=2,c=4,r=4,y=20,h=40\x1b\\\x1b8",
+			"\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=7,p=2,c=4,r=4,y=20,h=40,z=-2147483648\x1b\\\x1b8",
 		);
 		// Only the last row visible: no cursor movement, bottom slice only.
 		expect(encodeKittyPlacementLine({ ...base, placementId: 3, screenRow: 0 })).toBe(
-			"\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\",
+			"\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10,z=-2147483648\x1b\\",
 		);
 	});
 });

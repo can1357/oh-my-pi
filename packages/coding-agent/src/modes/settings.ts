@@ -51,6 +51,43 @@ export const cfgGitEnabled = register({
 });
 
 // ────────────────────────────────────────────────────────────────────────
+export const cfgDisplayPopupFill = register({
+	id: "display.popupFill",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Popup Background Fill",
+		description: "Fill bordered command and argument suggestion popups with the message surface color",
+	},
+});
+
+export const cfgDisplayCommandSuggestionsPopup = register({
+	id: "display.commandSuggestionsPopup",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Command Suggestions Popup",
+		description:
+			"Show slash-command and argument suggestions in a bordered popup without moving the chat or changing native scrolling",
+	},
+});
+
+export const cfgDisplayAutocompleteSuggestionsPopup = register({
+	id: "display.autocompleteSuggestionsPopup",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Autocomplete Suggestions Popup",
+		description: "Show @, #, and : autocomplete suggestions in the bordered popup",
+	},
+});
+
 // Appearance
 // ────────────────────────────────────────────────────────────────────────
 
