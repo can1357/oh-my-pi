@@ -181,6 +181,63 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.error).toBeUndefined();
 	});
 
+	it("waits for session_start extension sendUserInput before prompting the subagent", async () => {
+		let extensionSendUserInput: ExtensionActions["sendUserInput"] | undefined;
+		let inputInFlight = false;
+		let inputStarted = false;
+
+		const session = createMockSession(async ({ text, emit }) => {
+			if (text === "hello from session_start") {
+				inputStarted = true;
+				inputInFlight = true;
+				// Like the sendUserMessage case above: the input must still be in flight when the
+				// executor would prompt its task, a moment the test cannot observe.
+				await Bun.sleep(20);
+				inputInFlight = false;
+				return;
+			}
+			if (inputInFlight) {
+				throw new AgentBusyError();
+			}
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-extension-session-start-input",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const mutableSession = session as unknown as {
+			extensionRunner: NonNullable<AgentSession["extensionRunner"]>;
+		};
+		mutableSession.extensionRunner = {
+			initialize: (actions: ExtensionActions) => {
+				extensionSendUserInput = actions.sendUserInput;
+			},
+			onError: () => {},
+			emit: async (event: { type: string }) => {
+				if (event.type === "session_start") {
+					void extensionSendUserInput?.("hello from session_start", { deliverAs: "followUp" });
+				}
+				return undefined;
+			},
+		} as unknown as NonNullable<AgentSession["extensionRunner"]>;
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-session-start-extension-input",
+		});
+
+		expect(inputStarted).toBe(true);
+		expect(result.exitCode).toBe(0);
+		expect(result.error).toBeUndefined();
+	});
+
 	it("skips modelRegistry.refresh when reusing the parent registry", async () => {
 		const session = createMockSession(({ emit }) => {
 			emit({

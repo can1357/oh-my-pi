@@ -1,9 +1,9 @@
 /**
  * Helper for wiring the `sendUserInput` action of {@link ExtensionAPI}.
  *
- * Runs text the way the RPC mode runs a `prompt` command, so the five wiring
- * sites (interactive UI twice, ACP, print/RPC, child task executor) cannot
- * drift, in this order:
+ * Runs text the way the RPC mode runs a `prompt` command, so the four wiring
+ * sites (interactive UI twice, ACP, and `initializeExtensions`, which print,
+ * RPC and subagent sessions use) cannot drift, in this order:
  *   1. `/skill:<name>` through the RPC skill invocation (`resolveRpcSkillInvocation`
  *      and `runRpcSkillCommand`);
  *   2. built-in slash commands: those with a text-mode `handle` (the ones RPC and
