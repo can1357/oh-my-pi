@@ -1,5 +1,6 @@
 # This is an upstream vendored snapshot. Its documentation is not maintained by
 # OMP, so checking it would make the repository gate depend on unrelated links.
+# Released changelog sections are immutable, so their historical links stay untouched.
 exclude_path = [
 	"(^|/)crates/vendor/",
 	"(^|/)CHANGELOG\\.md$",

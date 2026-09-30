@@ -244,7 +244,7 @@ The two systems intersect only indirectly: both reduce session JSONL bloat, but 
 
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — blob reference format, hashing, put/get, externalize/resolve helpers.
 - [`src/session/artifacts.ts`](../packages/coding-agent/src/session/artifacts.ts) — session artifact directory model and numeric artifact ID/path allocation.
-- [`src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink` truncation/spill-to-file behavior and summary metadata.
+- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink` truncation/spill-to-file behavior and summary metadata.
 - [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts) — `BlobStore`/`ArtifactManager` construction, persistence-transform and blob-rehydration call sites, session fork/move interactions.
 - [`src/session/session-persistence.ts`](../packages/coding-agent/src/session/session-persistence.ts) — `prepareEntryForPersistence()`: large-string truncation, transient-field stripping, and synchronous image-blob externalization.
 - [`src/session/session-loader.ts`](../packages/coding-agent/src/session/session-loader.ts) — `resolveBlobRefsInEntries()`: blob-ref rehydration to base64 / data URLs on load.

@@ -12,7 +12,7 @@ The critical distinction: **notebook support is file conversion/editing, not not
 - [`src/tools/eval.ts`](../packages/coding-agent/src/tools/eval.ts)
 - [`src/eval/py/executor.ts`](../packages/coding-agent/src/eval/py/executor.ts)
 - [`src/eval/py/kernel.ts`](../packages/coding-agent/src/eval/py/kernel.ts)
-- [`src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts)
+- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts)
 
 ## 1) Runtime boundary: editing vs executing
 

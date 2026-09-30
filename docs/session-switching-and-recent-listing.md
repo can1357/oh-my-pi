@@ -10,7 +10,7 @@ It focuses on current implementation behavior, including fallback paths and cave
 - [`../src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts)
 - [`../src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts)
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
-- [`src/apps/session-picker.ts`](../packages/tui/src/apps/session-picker.ts)
+- [`packages/tui/src/apps/session-picker.ts`](../packages/tui/src/apps/session-picker.ts)
 - [`packages/tui/src/overlays/session-selector.ts`](../packages/tui/src/overlays/session-selector.ts)
 - [`../src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts)
 - [`../src/main.ts`](../packages/coding-agent/src/main.ts)
@@ -117,7 +117,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 
 ## Picker-based selection internals
 
-## CLI picker (`src/apps/session-picker.ts`)
+## CLI picker (`packages/tui/src/apps/session-picker.ts`)
 
 `selectSession(sessions, options)` creates a fullscreen alternate-screen TUI with `SessionSelectorComponent` and resolves exactly once:
 

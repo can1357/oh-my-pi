@@ -2,6 +2,8 @@ name: Markdown links
 
 on:
    workflow_dispatch:
+   schedule:
+      - cron: "17 4 * * 1"
    push:
       branches:
          - main
@@ -11,6 +13,7 @@ on:
          - "**/*.markdown"
          - "lychee.toml"
          - ".github/workflows/markdown-links.yml"
+         - "!**/CHANGELOG.md"
    pull_request:
       paths:
          - "**/*.md"
@@ -18,15 +21,16 @@ on:
          - "**/*.markdown"
          - "lychee.toml"
          - ".github/workflows/markdown-links.yml"
+         - "!**/CHANGELOG.md"
 
 permissions:
    contents: read
 
 jobs:
    check:
-      runs-on: ubuntu-22.04
+      runs-on: ubuntu-24.04
       steps:
          - uses: actions/checkout@v4
          - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
            with:
-              args: .
+              args: ${{ github.event_name == 'pull_request' && '--offline .' || '.' }}
