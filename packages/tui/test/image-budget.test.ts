@@ -1625,10 +1625,11 @@ describe("TUI inline-image budget", () => {
 			// Pressure retires images 0 and 1 during the live frame, already text there.
 			// The capped batch then holds images 8-11, under the cap; the uncapped one
 			// holds images 2-11, of which the oldest two are past the cap.
-			for (const [maxRows, expected] of [
+			const cases: [maxRows: number | undefined, expected: string[]][] = [
 				[18, ["0:text", "1:text", ...images(8, "live")]],
 				[undefined, [...images(0, "text").slice(0, 4), ...images(4, "live")]],
-			] as const) {
+			];
+			for (const [maxRows, expected] of cases) {
 				const term = new VirtualTerminal(40, 40, 1_000);
 				const composer = new Composer({
 					terminal: term,
