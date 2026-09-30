@@ -2,14 +2,17 @@
 
 RPC mode runs the coding agent as a newline-delimited JSON protocol over stdio.
 
-- **stdin**: commands (`RpcCommand`), extension UI responses, and host-tool updates/results
-- **stdout**: a ready frame, command responses (`RpcResponse`), session/agent events, extension UI requests, host-tool requests/cancellations
+- **stdin**: commands (`RpcCommand`), extension UI responses, host-tool updates/results, and host-URI results
+- **stdout**: a ready frame, command responses (`RpcResponse`), session/agent events, extension UI requests, and host-tool/host-URI requests and cancellations
+
+This is a custom JSONL protocol, not JSON-RPC 2.0.
 
 Primary implementation:
 
 - `packages/coding-agent/src/modes/rpc/rpc-mode.ts`
 - `packages/coding-agent/src/modes/rpc/rpc-types.ts`
 - `packages/coding-agent/src/session/agent-session.ts`
+- `packages/coding-agent/src/session/agent-session-events.ts`
 - `packages/agent/src/agent.ts`
 - `packages/agent/src/agent-loop.ts`
 
@@ -23,16 +26,16 @@ Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.
 - `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, dialogs resolve to their defaults, and extension presentation updates are dropped. With `rpc-ui`, tool UI such as `ask` remains enabled. With `rpc`, no UI requests are emitted except for a host-issued `login`. See [Extension UI Sub-Protocol](#extension-ui-sub-protocol) for the exact boundaries.
-- RPC mode disables automatic session title generation by default to avoid an extra model call.
-- RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
+- CLI RPC modes disable automatic session title generation (`PI_NO_TITLE=1`) to avoid an extra model call. `rpc-ui` also sets `PI_NO_PTY=1`.
+- RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and the process exits with code `0`.
+- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
 ## Transport and Framing
 
-Protocol v1 stdout frames are a single JSON object followed by `\n`. The server caps each physical stdout frame at 1 MiB. Inbound commands are always one unchunked JSONL object; clients SHOULD keep them within the advertised physical-frame limit.
+Protocol v1 stdout frames are a single JSON object followed by `\n`. The server caps each physical stdout frame at 1 MiB, including the newline. Inbound frames are always one unchunked JSONL object; clients SHOULD keep them within the advertised physical-frame limit. Input is not reassembled from `rpc_chunk` frames.
 
 The initial ready frame uses protocol v1 and advertises the opt-in lossless transport:
 
@@ -52,7 +55,7 @@ Clients that support protocol v2 SHOULD immediately send:
 { "id": "protocol-1", "type": "negotiate_protocol", "protocolVersion": 2 }
 ```
 
-After the success response, oversized stdout objects are emitted losslessly as an uninterrupted sequence of `rpc_chunk` frames. Each chunk carries a base64 segment of the original UTF-8 JSON object:
+After the success response, oversized stdout objects use an uninterrupted sequence of `rpc_chunk` frames rather than content truncation. Each chunk carries a base64 segment of the UTF-8 JSON object:
 
 ```json
 {
@@ -67,7 +70,9 @@ After the success response, oversized stdout objects are emitted losslessly as a
 
 Clients MUST validate `chunkId`, `index`, `count`, and `byteLength`, reject interleaved or interrupted sequences, enforce the advertised reassembly limit, concatenate decoded bytes in index order, decode them as strict UTF-8, and parse the result as one JSON object. The TypeScript `RpcFrameDecoder`, exported from `@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame`, implements this validation. The bundled TypeScript and Python `RpcClient` implementations negotiate v2 automatically when the ready frame advertises it.
 
-Legacy clients may ignore the added ready fields and remain on v1. V1 retains its bounded fallback behavior for oversized output. Frames above the v2 reassembly ceiling still fail explicitly; large history APIs should use pagination rather than depending on arbitrarily large logical frames.
+For an oversized `agent_end` in either version, the encoder first removes the leading messages already delivered unchanged in `message_end` frames and adds `messageCount` with the original count. Hosts must retain streamed messages rather than treating `agent_end.messages` as a complete transcript.
+
+Legacy clients may ignore the added ready fields and remain on v1. In v1, an oversized response becomes `success: false` with `error: "RPC response exceeded the transport limit"`; oversized events may have strings, arrays, or object fields elided. If a v2 logical frame exceeds 64 MiB after terminal-frame compaction, responses receive the same overflow error, other events produce `rpc_frame_error`, and `agent_end` falls back to an empty `messages` array plus `messageCount`. Large history APIs should use pagination rather than depending on arbitrarily large logical frames.
 
 Output goes directly to stdout while the reader keeps up. Under backpressure, the server spills pending bytes to a private temporary file and drains it in 64 KiB blocks, preserving frame order. This limits queued output memory at the cost of disk I/O and temporary disk usage, which can grow until the reader catches up. The file is removed when the backlog drains or the process shuts down. Output or spool failures are logged, dispose the session, and exit with code `1`.
 
@@ -83,10 +88,13 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Prompt completion (`{ type: "prompt_result", id?, agentInvoked, status, error?, sessionSettled }`), one per accepted prompt; see [`prompt` payload](#prompt-payload)
+9. Prompt completion (`{ type: "prompt_result", id?, agentInvoked, status, error?, sessionSettled }`), unless the response already completed the prompt locally; see [`prompt` payload](#prompt-payload)
 10. Session quiescence (`{ type: "session_settled" }`); see [Yield vs settled](#yield-vs-settled)
 11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+13. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
+
+Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
 ### Inbound frame categories (stdin)
 
@@ -105,8 +113,8 @@ All commands accept optional `id?: string`.
 Important edge behavior from runtime:
 
 - Unknown command responses echo the request `id` when one was provided.
-- Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
-- `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
+- Malformed JSON and synchronous dispatch failures emit `command: "parse"` without an `id`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
+- Ordinary `prompt` handling acknowledges without awaiting the agent run; `abort_and_prompt` first awaits the abort. Both may emit a later error response with the **same** id if asynchronous prompt dispatch fails. Skill-file loading and builtin slash-command handlers run before the acknowledgement, so not every prompt response is immediate.
 - An accepted `prompt` or `abort_and_prompt` completes exactly once: either its success response carries `data.agentInvoked: false` (finished locally), or a later `prompt_result` frame with the same `id` reports how its work ended. `prompt_result` is always written after the response for that `id`.
 
 ## Command Schema (canonical)
@@ -149,11 +157,15 @@ Important edge behavior from runtime:
 - `{ id?, type: "cycle_model" }`
 - `{ id?, type: "get_available_models" }`
 
+`get_available_models` waits for background model discovery before returning. `set_model` also waits when the requested model is not already in the available catalog; it returns the selected `Model` or a `Model not found: <provider>/<modelId>` failure.
+
 ### Thinking
 
 - `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
 - `{ id?, type: "get_available_thinking_levels" }`
+
+`ThinkingLevel` is `"inherit" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`. Discovery returns `"off"` followed by the live model's supported efforts, omitting `"inherit"` and the session-only `"auto"` selector.
 
 ### Queue modes
 
@@ -211,12 +223,14 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "set_session_name", name: string }`
 - `{ id?, type: "handoff", customInstructions?: string }`
 
+`handoff` fails while a response is streaming. On success, its payload is `{ savedPath? }` or `null` when no handoff was produced. Session transitions (`new_session`, `switch_session`, `branch`, `open_session`) report cancellation when an extension prevents the transition.
+
 ### Messages
 
 - `{ id?, type: "get_messages" }`
 - `{ id?, type: "get_messages_page", cursor?: string, limit?: number }`
 
-`get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is streaming or compacting. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is streaming or compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages contain at most 256 messages and normally stay below the v1 physical-frame ceiling. A v1 caller can page ordinary histories, but an individual message whose response exceeds that ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
+`get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is streaming or compacting. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is streaming or compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages default to 100 messages; `limit` must be an integer from 1 through 256. The page builder normally caps serialized message content at 768 KiB, but always includes at least one message, so a single large message can exceed that budget. A v1 caller can page ordinary histories, but an individual message whose response exceeds the 1 MiB physical-frame ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
 
 The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messages()` drain this paged endpoint automatically after negotiating v2. They retain the legacy monolithic command when connected to a v1 server, and on either `session_busy` or `stale_cursor` they discard partial pages and fall back to the legacy best-effort snapshot. Direct `getMessagesPage()` and `get_messages_page()` calls remain strict so incremental hosts never mix snapshots silently.
 
@@ -253,14 +267,14 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 }
 ```
 
-`data.agentInvoked: false` is the completion signal for slash commands that finish synchronously without starting an agent turn; no `prompt_result` follows. Every other accepted `prompt` (and every `abort_and_prompt`) is completed by one `prompt_result` frame carrying the command `id`, emitted once all work the prompt caused has settled:
+`data.agentInvoked: false` is the completion signal for builtin slash commands that finish synchronously without starting an agent turn; no `prompt_result` follows. Every other accepted `prompt` (and every `abort_and_prompt`) is completed by one `prompt_result` frame carrying the command `id`, once its local outcome or agent yield is known. Background work need not have settled:
 
 ```json
 { "type": "prompt_result", "id": "req_1", "agentInvoked": true, "status": "completed", "sessionSettled": true }
 ```
 
 - `agentInvoked: false`: the prompt finished locally (an extension or custom command that started no turn) or failed before reaching the agent.
-- `agentInvoked: true`: the prompt reached the agent and the agent **yielded** — see [Yield vs settled](#yield-vs-settled). A prompt dispatched as a fresh turn reports the first run that started after it was accepted, so a late `agent_end` from an earlier run never completes it. A prompt queued into a live run (`streamingBehavior`) reports at the first yield after its message left the queue. An `agent_end` with `yielded: false` (the agent is retrying, compacting, or answering a stop-time reminder) never completes a prompt.
+- `agentInvoked: true`: the prompt was dispatched or queued for agent work; normal completion reports when the agent **yielded** — see [Yield vs settled](#yield-vs-settled). An abort that wins before dispatch can still report `true` with `status: "aborted"`. A prompt dispatched as a fresh turn reports the first run that started after it was accepted, so a late `agent_end` from an earlier run never completes it. A prompt queued into a live run (`streamingBehavior`) reports at the first yield after its message left the queue. An `agent_end` with `yielded: false` (the agent is retrying, compacting, or answering a stop-time reminder) never completes a prompt.
 - `status`: `"completed"`, `"aborted"` (interrupted by `abort`, `abort_and_prompt`, or a session transition, or dropped by an abort before dispatch), or `"error"`.
 - `error` (only with `status: "error"`): `{ message, provider?, model?, httpStatus?, retryable }`. `message` is the provider's error text with OMP-local diagnostics (such as saved request-dump paths) removed. `retryable` marks a transient failure; OMP's own automatic retries have already been exhausted. A prompt that fails before reaching the agent also gets the legacy error response with the same `id` before its `prompt_result`.
 - `sessionSettled`: whether the session is already done when the result is written — see [Yield vs settled](#yield-vs-settled). `false` means background work can still wake the agent; a `session_settled` frame follows once it has.
@@ -271,7 +285,7 @@ Local-only slash commands may emit `command_output` frames before completing. Th
 
 ### Yield vs settled
 
-A prompt's `prompt_result` means the **agent yielded**: it finished its turn (`agent_end` with `yielded: true`). The **session is done** only when, in addition, nothing can wake it again — no run is live or admitted, no steer/follow-up is queued, and no background job (auto-backgrounded `bash`, async `task`, `eval`) or pending delivery will inject its result and start a follow-up turn.
+For agent-invoking work, a prompt's `prompt_result` reports the **agent yield**: it finished its turn (`agent_end` with `yielded: true`), or the prompt was aborted before dispatch or by a session transition. Local-only results and pre-dispatch errors do not require an `agent_end`. The **session is done** only when nothing can wake it again — no run is live or admitted, no steer/follow-up is queued, and no background job (auto-backgrounded `bash`, async `task`, `eval`) or pending delivery will inject its result and start a follow-up turn.
 
 - `session_settled` is written once per stretch of agent activity, when the session becomes done. If background work was pending at the yield, OMP waits it out; any follow-up runs it triggers stream normally (`agent_start` … `agent_end`) before `session_settled`. It always follows the `prompt_result` frames of the final yield, and is not emitted for prompts that never reached the agent.
 - `prompt_result.sessionSettled` answers the same question at the yield, so a host can tear down immediately when it is `true`.
@@ -289,6 +303,8 @@ Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (o
 
 `resumed` is `false` when a fresh session was started. The command fails when the process runs without persistence (`--no-session`).
 
+A successful `open_session` also marks still-open RPC prompt tickets aborted, even for an already-open directory; in that no-op case the underlying turn continues streaming. `cancelled: true` leaves the active session and prompt tickets unchanged.
+
 ### `remove_queued_message` payload
 
 Remove the first matching user-authored message from the selected pending queue:
@@ -298,26 +314,26 @@ Remove the first matching user-authored message from the selected pending queue:
 {"id":"req_2","type":"response","command":"remove_queued_message","success":true,"data":{"removed":true}}
 ```
 
-`message` matches the queue-chip text or its prompt-template expansion. Queued RPC skill commands retain their original `/skill:<name>` invocation as the chip text. Removal also drops that message's attachments and contiguous preceding hidden user companions (keyword notices, image descriptions, and video source paths), preserving other messages and the other queue.
+`message` first matches the original submitted text retained before slash/custom-command rewriting, prompt-template expansion, or `^model` mention substitution; if that finds nothing, it matches the exact queue-chip text. Removal never reruns a command or template to find a match. Queued RPC skill commands retain their original `/skill:<name>` invocation as the chip text. Removal also drops that message's attachments and contiguous preceding hidden user companions (keyword notices, image descriptions, and video source paths), preserving other messages and the other queue.
 
 Companions and their prompt are enqueued and dequeued as a complete group, including in `one-at-a-time` mode. Once that group leaves the pending queue for delivery, a removal request cannot report success after only part of its context has been emitted.
 
 Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
 
-The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
+The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. Live-steered input may remain visible in queue snapshots until the transcript records it, even though it has already left the removable pending queue. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
 
-Clients must hide the chip or restore its draft only after `removed: true`. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
+A removal request may hide the chip or restore its draft only after `removed: true`; normal delivery still removes chips through queue snapshots. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
 
 The official Python client exposes `remove_queued_message(message, queue) -> RemoveQueuedMessageResult`; inspect its `.removed` boolean rather than the result object's truthiness.
 
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
-otherwise. `fastModeEnabled` reports the session setting, while
-`fastModeActive` reports the actual computed active state. For Fireworks,
-`providers.fireworksTier: priority` is a provider-level setting independent of
-the `/fast` family setting, so `fastModeActive` may remain `true` for an
-unsupported Fireworks model.
+otherwise. `fastModeEnabled` reports the session's selected model-family tier
+(`priority` or `ultrafast`), while `fastModeActive` reports the actual computed
+active state. For Fireworks, `providers.fireworksTier: priority` is independent
+of the `/fast` family setting, so `fastModeActive` may remain `true` for a model
+that `/fast` cannot toggle. Fireworks `-fast` serving variants do not use priority.
 
 For direct Anthropic, a provider rejection of `speed: "fast"` uses a sticky
 fallback scoped by the resolved endpoint and exact model: `fastModeEnabled` may
@@ -343,14 +359,14 @@ is re-armed.
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
+  "hasPendingAsyncWork": false,
+  "isSettled": true,
   "queuedMessages": { "steering": [], "followUp": [] },
   "todoPhases": [
     {
-      "id": "phase-1",
       "name": "Todos",
       "tasks": [
         {
-          "id": "task-1",
           "content": "Map the tool surface",
           "status": "in_progress"
         }
@@ -373,12 +389,17 @@ is re-armed.
 }
 ```
 
+Fields whose values are `undefined` are omitted from JSON, including an unset
+model/thinking level, session name/file, or unavailable `contextUsage`.
+`dumpTools` may also include each tool's `examples` alongside its schema.
+
 `queuedMessages` holds the same displayable queue-chip text as the `queue_update`
-event below — every entry is a `message` value that `remove_queued_message`
-will match against that queue. Clients should render the pending-message queue
-from these snapshots instead of tracking chips independently, and treat
-`remove_queued_message` responses as confirmation of the change rather than a
-second source of truth.
+event below. Use this text with `remove_queued_message`, subject to its pending-queue
+boundary: live-steered input stays visible until recorded but is no longer removable.
+Clients should render the queue from these snapshots instead of tracking chips
+independently, and treat removal responses as confirmation rather than a second
+source of truth. `queuedMessageCount` also includes advisor cards and pending
+next-turn messages, so it is not necessarily the number of user-authored chips.
 
 ### `set_fast_mode` payload
 
@@ -407,8 +428,8 @@ the sticky rejection fallback, even when fast mode was already enabled.
 }
 ```
 
-Enabling fast mode on a model without a service-tier family fails with the
-exact error below:
+Enabling fast mode on a model without a service-tier family, or an OpenAI-family
+model that does not offer the priority tier, fails with the error below:
 
 ```json
 {
@@ -449,7 +470,11 @@ The corresponding `get_state` result reports the same computed state:
 
 ### `set_todos` payload
 
-Replaces the in-memory todo state for the current session and returns the normalized phase list:
+Replaces the in-memory todo state for the current session and returns `{ todoPhases }`.
+Phases use `{ name, tasks }`; tasks retain `{ content, status, blocker? }`. There
+are no phase or task IDs. Status is `"pending"`, `"in_progress"`, `"completed"`,
+`"abandoned"`, or `"blocked"`. Snapshot cloning drops extra fields, including
+task `details` and `notes`.
 
 ```json
 {
@@ -457,16 +482,13 @@ Replaces the in-memory todo state for the current session and returns the normal
   "type": "set_todos",
   "phases": [
     {
-      "id": "phase-1",
       "name": "Evaluation",
       "tasks": [
         {
-          "id": "task-1",
           "content": "Map the read tool surface",
           "status": "in_progress"
         },
         {
-          "id": "task-2",
           "content": "Exercise edit operations",
           "status": "pending"
         }
@@ -513,13 +535,19 @@ The response payload is:
 }
 ```
 
-These tools are added to the active session tool registry before the next model
-call. Re-sending `set_host_tools` replaces the previous host-owned set.
+These tools are registered before the next model call. New non-hidden tools
+are enabled automatically; new hidden tools are registered without being enabled.
+Re-sending `set_host_tools` replaces the previous host-owned set, preserving the
+enabled state of surviving host tools. Names must be unique and cannot conflict
+with an existing non-host tool.
 
-Definitions also accept `hidden?: boolean` and
-`loadMode?: "essential" | "discoverable"`. An explicit mode wins. When omitted,
-known essential built-in names remain `"essential"`; other host tools default
-to `"discoverable"`. `toolNames` in the response lists the registered names.
+Definitions also accept `hidden?: boolean`,
+`loadMode?: "essential" | "discoverable"`, and `readsSkillUris?: boolean`.
+Set `readsSkillUris: true` when the tool can read `skill://` instruction content;
+prompt builders use this capability to decide whether to include skill guidance.
+An explicit load mode wins. When omitted, known essential built-in names remain
+`"essential"`; other host tools default to `"discoverable"`. `toolNames` in the
+response lists the registered names.
 
 ### `set_host_uri_schemes` payload
 
@@ -549,9 +577,10 @@ The response payload is:
 }
 ```
 
-Schemes are case-insensitive on the wire and normalized to lowercase before
-the response is sent. Re-sending `set_host_uri_schemes` replaces the entire
-previous set — schemes missing from the new list are unregistered.
+Scheme names are trimmed and lowercased and must match `[a-z][a-z0-9+.-]*`.
+`writable` and `immutable` default to `false`. Re-sending `set_host_uri_schemes`
+replaces the entire previous set — schemes missing from the new list are
+unregistered; an empty list clears all host schemes.
 
 Every built-in scheme (`local://`, `skill://`, `artifact://`, `security://`,
 `mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
@@ -566,12 +595,13 @@ Common event types:
 - `agent_start`, `agent_end`
 - `turn_start`, `turn_end`
 - `message_start`, `message_update`, `message_end`
-- `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
+- `tool_execution_start`, `tool_execution_update`, `tool_stream_update`, `tool_execution_end`
 - `auto_compaction_start`, `auto_compaction_end`
 - `auto_retry_start`, `auto_retry_end`
 - `cache_warming_start`, `cache_warming_end`
 - `retry_fallback_applied`, `retry_fallback_succeeded`
-- `model_changed`, `thinking_level_changed`
+- `model_changed`, `thinking_level_changed`, `config_warnings_changed`
+- `advisor_cost_changed`, `advisor_yielded`
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
@@ -584,16 +614,17 @@ Common event types:
 ```
 
 Emitted whenever the displayable steering/follow-up queue changes: a `steer`,
-`follow_up`, or queued `prompt` adds to it; delivery at the start of the next
-turn, `remove_queued_message`, an abort that drops in-flight queued messages,
+`follow_up`, or queued `prompt` adds to it; delivery into the transcript,
+`remove_queued_message`, an abort that drops in-flight queued messages,
 or a session switch removes from or clears it. The server coalesces this
 against the last value sent — a mutation that leaves the snapshot unchanged
 (for example, an agent-authored aside that never renders as a chip) never
 re-emits. `steering`/`followUp` mirror `get_state`'s `queuedMessages` field and
-carry the exact `message` text `remove_queued_message` expects back. Render
-the queue from this event rather than tracking chips independently, and treat
-`remove_queued_message`/promotion replies as confirmation of a change this
-event will also report.
+carry the queue-chip text accepted by `remove_queued_message` while the message
+is still pending. Live-steered messages stay listed until recorded in the
+transcript, even after they cease to be removable. Render the queue from this
+event rather than tracking chips independently, and treat removal replies as
+confirmation of a change rather than independent queue state.
 
 Extension runner errors are emitted separately as:
 
@@ -610,11 +641,11 @@ Extension runner errors are emitted separately as:
 
 `message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
 
-`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies only to the session events listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is always written. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
 
 The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message. Block-ending events such as `text_end`, `thinking_end`, and `toolcall_end` retain their block content or tool call, so hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
 
-Each command replaces the whole filter state: omitting `messageUpdates` resets it to `"full"`, the default, which retains the original full snapshots. Invalid events or a mode other than `"full"` or `"delta"` return an error without changing either setting. Projection works in protocol v1 and v2, including with `events: null`. Detect support from the echoed `data.messageUpdates` field: older servers ignore the option and do not echo it. This opt-in is raw-protocol only; the TypeScript `RpcClient` and Python client keep their full-message listener contracts.
+Each command replaces the whole filter state: omitting `messageUpdates` resets it to `"full"`, the default, which retains the original full snapshots. An invalid `events` shape (anything other than `null` or an array of non-empty strings), or a mode other than `"full"` or `"delta"`, returns an error without changing either setting. Event names are not checked against a fixed catalog; unknown non-empty names are accepted. Projection works in protocol v1 and v2, including with `events: null`. Detect support from the echoed `data.messageUpdates` field: older servers ignore the option and do not echo it. This opt-in is raw-protocol only; the TypeScript `RpcClient` and Python client keep their full-message listener contracts.
 
 `agent_end` has this session-level shape (in addition to optional telemetry fields):
 
@@ -624,15 +655,19 @@ Each command replaces the whole filter state: omitting `messageUpdates` resets i
   messages: AgentMessage[];
   isTerminal?: boolean;
   yielded?: boolean;
+  awaitingAsyncWork?: boolean;
 }
 ```
 
 `yielded` is `true` when the agent finished its turn: the end is terminal, or the session resumes only for queued input or background-job results. It is `false` while the agent continues its own work (retry, compaction continuation, stop-time reminders). Frames from older runtimes omit it; treat those as yielded only when terminal.
 
-`isTerminal: false` means maintenance or async delivery has scheduled more work,
-so the session will resume before its true final settle. Treat an `agent_end` as
-run completion only when `isTerminal !== false`; the field is optional so frames
-from older runtimes, where it is absent, remain terminal-compatible.
+`isTerminal: false` means a continuation or possible async delivery remains.
+`awaitingAsyncWork: true` identifies a non-terminal end whose only possible
+resume is a background-job result; cancelled or suppressed delivery may mean
+no follow-up run occurs. The optional fields keep older frames terminal-compatible
+when `isTerminal` is absent. Use `yielded` for a prompt's yield and
+`session_settled` for quiescence, rather than assuming every non-terminal end
+guarantees another turn.
 
 ### Cache warming events
 
@@ -719,9 +754,10 @@ for the live model with `"off"` first (it is accepted by
 `set_thinking_level` but excluded from the effort-only model helper). OMP-only
 `auto`/`inherit` selectors are intentionally omitted from discovery.
 
-Lifecycle stays OMP: terminal settle is `agent_end` with
-`isTerminal !== false`, not Pi's `agent_settled`; `prompt_result`/
-`agentInvoked`, `open_session`, `set_event_filter`, `messageId`, `ready`,
+Lifecycle stays OMP: `agent_end` carries `isTerminal`, `yielded`, and optional
+`awaitingAsyncWork`; `prompt_result` correlates prompt completion and
+`session_settled` reports quiescence. There is no Pi `agent_settled` frame.
+These, `agentInvoked`, `open_session`, `set_event_filter`, `messageId`, `ready`,
 negotiation, chunking, host tools, and subagents are OMP extensions a
 Pi-family adapter must dialect around.
 
@@ -734,19 +770,28 @@ Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
 - `"events"`: lifecycle, progress, and full subagent event frames
 
 `get_subagents` returns the registry snapshot sorted by subagent index and id.
-`get_subagent_messages` selects a transcript by `subagentId` or `sessionFile`;
-`fromByte` supports incremental reads. Its result contains `sessionFile`,
-`fromByte`, `nextByte`, `reset`, raw transcript `entries`, and converted
-`messages`. If `fromByte` exceeds the current file size, reading restarts at
-byte zero and reports `reset: true`.
+`get_subagent_messages` selects a transcript by `subagentId` or a registered
+`sessionFile` (`subagentId` takes precedence); arbitrary file paths are rejected.
+`fromByte` supports incremental reads, defaults to zero, and is clamped to a
+non-negative integer. Non-finite values fail. The result contains `sessionFile`,
+`fromByte`, `nextByte`, `reset`, raw transcript `entries`, and `messages` from
+message entries. Only complete newline-terminated records are consumed; reuse
+`nextByte` on the next request. A missing transcript returns empty arrays.
+If `fromByte` exceeds the current file size, reading restarts at byte zero and
+reports `reset: true`.
 
 ## Prompt/Queue Concurrency and Ordering
 
-This is the most important operational behavior.
+Ordinary commands run on a serialized queue. Extension UI responses and host
+tool/URI updates/results bypass that queue, so they can complete a request
+while its command handler is waiting. `bash` also bypasses the serial queue and
+is tracked as background command work; its response may arrive out of order.
 
 ### Immediate ack vs completion
 
-`prompt` and `abort_and_prompt` are **acknowledged immediately**:
+Ordinary `prompt` requests are **acknowledged without waiting for the agent run**;
+`abort_and_prompt` first waits for the abort. Builtin slash-command handlers and
+skill-file loading can delay acknowledgement:
 
 ```json
 { "id": "req_1", "type": "response", "command": "prompt", "success": true }
@@ -768,22 +813,32 @@ That means:
 
 If omitted during streaming, prompt fails.
 
+Providers supporting live steering may consume queued steering during the
+streaming response; otherwise it is delivered at a turn/tool-batch boundary.
+`follow_up` waits until the agent would otherwise stop.
+
 ### Queue defaults
 
-From `packages/agent/src/agent.ts` defaults:
+From `packages/coding-agent/src/modes/settings.ts` (also the core `Agent` defaults):
 
 - `steeringMode`: `"one-at-a-time"`
 - `followUpMode`: `"one-at-a-time"`
 - `interruptMode`: `"immediate"`
 
+CLI settings can change these initial values. `set_steering_mode`,
+`set_follow_up_mode`, and `set_interrupt_mode` affect the calling session only;
+they do not write global `config.yml`. `set_auto_compaction` and
+`set_auto_retry` likewise use session-scoped settings overrides.
+
 ### Mode semantics
 
 - `set_steering_mode` / `set_follow_up_mode`
-  - `"one-at-a-time"`: dequeue one queued message per turn
-  - `"all"`: dequeue entire queue at once
+  - `"one-at-a-time"`: dequeue one delivery group per queue drain, keeping hidden companions with their user message
+  - `"all"`: dequeue the entire queue at once
 - `set_interrupt_mode`
-  - `"immediate"`: tool execution checks steering between tool calls; pending steering can abort remaining tool calls in the turn
-  - `"wait"`: defer steering until turn completion
+  - `"immediate"`: queued steering raises a cooperative signal for foreground tools, allowing auto-backgroundable work to step aside; it does not hard-kill or skip non-interruptible tools
+  - `"wait"`: omit that cooperative steering signal and let side-effecting work finish before injecting steering at the tool-batch boundary
+  - In both modes, interruptible waits are cancelled or skipped when steering arrives. This setting is not equivalent to `abort`.
 
 ## Extension UI Sub-Protocol
 
@@ -809,7 +864,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
     `optionDetails: Array<{ description?: string }>` array. Hosts that do not
     render descriptions can continue using `options` alone.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
-- `open_url` (emitted by RPC login flows)
+- `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
 Runtime note:
 
@@ -839,7 +894,16 @@ Example:
 - `{ type: "extension_ui_response", id: string, confirmed: boolean }`
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 
-If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires.
+`select` and `input` resolve to `undefined`, and `confirm` to `false`, on
+cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
+with `targetId`; the server's timeout resolves locally without emitting that
+request. `editor` supports cancellation and signal abort but has no wire timeout.
+Presentation methods and `open_url` are fire-and-forget and require no response.
+
+Terminal-only UI features are unsupported: component factories, custom
+headers/footers/editors, raw terminal input, autocomplete composition, theme
+switching, and tool expansion. `getEditorText()` returns `""`;
+`pasteToEditor()` falls back to `set_editor_text`.
 
 ## Host Tool Sub-Protocol
 
@@ -919,7 +983,7 @@ When a session tool resolves a host-owned URL, RPC mode emits:
 ```
 
 Writes look the same with `"operation": "write"` and an additional
-`"content": "..."` field carrying the full replacement bytes.
+`"content": "..."` field carrying the full replacement text.
 
 If the request is later aborted (caller cancels, session ends), RPC mode
 emits:
@@ -973,10 +1037,10 @@ a message or fall back to `content` for textual error surfacing:
 - Schemes are global to the process; `set_host_uri_schemes` replaces the
   previous set, unregistering anything not in the new list.
 - Schemes are normalized to lowercase before registration.
-- Successful reads require `content`. `contentType` defaults to `text/plain`
-  and, when supplied, is `"text/plain"`, `"text/markdown"`, or
-  `"application/json"`. A result-level `immutable` overrides the registered
-  scheme's value for that read.
+- Send `content` for successful reads; the current bridge treats an omitted
+  value as an empty string. `contentType` defaults to `text/plain` and its
+  declared values are `"text/plain"`, `"text/markdown"`, or `"application/json"`.
+  A result-level `immutable` overrides the registered scheme's value for that read.
 
 ## Error Model and Recoverability
 
@@ -999,8 +1063,9 @@ Failures are `success: false` with string `error`.
 - Most command failures are recoverable; process remains alive.
 - Malformed JSONL / parse-loop exceptions emit a `parse` error response and continue reading subsequent lines.
 - Empty `set_session_name` is rejected (`Session name cannot be empty`).
-- Extension UI responses with unknown `id` are ignored.
-- Process termination conditions are stdin close or explicit extension-triggered shutdown after the current command.
+- Extension UI responses and valid host-tool/host-URI updates/results with unknown `id` are ignored. These side-channel frames do not receive command response frames.
+- Normal termination occurs on stdin close or extension-triggered shutdown. Output/spool failures and unrecovered session-persistence failures are fatal.
+- Session-persistence errors emit an unfiltered `{ type: "notice", level: "error", message, source: "session-persistence" }` frame and a stderr mirror. A recovered failure can still shut down normally; a failure still latched during disposal exits with code `1` after draining stdout.
 
 ## Compact Command Flows
 
@@ -1012,13 +1077,13 @@ stdin:
 { "id": "req_1", "type": "prompt", "message": "Summarize this repo" }
 ```
 
-stdout sequence (typical):
+stdout sequence (simplified; message contents omitted):
 
 ```json
 { "id": "req_1", "type": "response", "command": "prompt", "success": true }
 { "type": "agent_start" }
 { "type": "message_update", "messageId": "msg-2", "assistantMessageEvent": { "type": "text_delta", "delta": "..." }, "message": { "role": "assistant", "content": [] } }
-{ "type": "agent_end", "messages": [], "isTerminal": true }
+{ "type": "agent_end", "messages": [], "isTerminal": true, "yielded": true }
 { "type": "prompt_result", "id": "req_1", "agentInvoked": true, "status": "completed", "sessionSettled": true }
 { "type": "session_settled" }
 ```
@@ -1074,11 +1139,13 @@ stdin:
 
 Current helper characteristics:
 
-- Spawns `bun <cliPath> --mode rpc`
-- Correlates responses by generated `req_<n>` ids
-- Dispatches recognized core `AgentEvent` types to listeners
+- Spawns `bun <cliPath> --mode rpc` by default (`cliPath` defaults to `dist/cli.js`). A `command` argv prefix receives generated agent arguments; a command builder returns complete argv. A custom `spawn` transport takes precedence.
+- Correlates responses by generated `req_<n>` ids, negotiates v2, reassembles chunks, and pages message history
+- Dispatches recognized core `AgentEvent` types through `onEvent()` and recognized session events through `onSessionEvent()`; the raw server stream can include additional event types
+- Exposes `onPromptResult()`, `onSessionSettled()`, command-availability and subagent listeners, plus extension UI requests
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
-- Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`; use raw protocol frames for any surface not wrapped by the helper.
+- `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
+- Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
 
 ### Python package
 
