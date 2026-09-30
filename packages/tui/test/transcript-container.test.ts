@@ -762,6 +762,40 @@ describe("TranscriptContainer", () => {
 		}
 	});
 
+	it("keeps the blank a fully emitted head owes until a batch writes a row", () => {
+		for (const path of ["pressure", "flush", "capped flush"] as const) {
+			const transcript = new TranscriptContainer();
+			const rows = ["a0", "a1", "a2", "a3"];
+			const head = new AppendBlock(rows, rows);
+			transcript.addChild(head);
+			transcript.renderViewport(80, 2, frame);
+			const emitted = transcript.peekFinalizedBatch(80, 0)!;
+			transcript.acknowledgeFinalizedBatch(emitted.id);
+			head.finalize(rows);
+			// A settled block that renders nothing, then one still streaming: the
+			// first batch retires only the empty block and writes no row.
+			transcript.addChild(new Block([], true));
+			const streaming = new Block(["b0"], false);
+			transcript.addChild(streaming);
+			const written = [...emitted.rows];
+			const drain = () => {
+				for (let batches = 0; batches < 5; batches++) {
+					const batch =
+						path === "pressure"
+							? transcript.peekFinalizedBatch(80, 0)
+							: transcript.peekFlushBatch(80, path === "flush" ? undefined : 10);
+					if (batch === undefined) break;
+					written.push(...batch.rows);
+					transcript.acknowledgeFinalizedBatch(batch.id);
+				}
+			};
+			drain();
+			streaming.finalize(["b0"]);
+			drain();
+			expect(written).toEqual(["a0", "a1", "a2", "a3", "", "b0", ""]);
+		}
+	});
+
 	it("an exit flush that leaves out a partly emitted head separates it from the next block", () => {
 		const transcript = new TranscriptContainer();
 		const head = new AppendBlock(["a0", "a1", "a2", "a3"], ["a0", "a1"]);

@@ -183,7 +183,8 @@ export class TranscriptContainer extends Container {
 	#frontier = 0;
 	/**
 	 * A head that progressive append emitted in full retired without the blank
-	 * that follows a block, so the next append or commit batch opens with it.
+	 * that follows a block, so the next append or commit batch that writes a row
+	 * opens with it.
 	 */
 	#separatorOwed = false;
 	#nextBatchId = 1;
@@ -781,9 +782,9 @@ export class TranscriptContainer extends Container {
 			}
 			this.#frontier = offered.end;
 		}
-		// An append or commit that opened with the owed blank paid it; a replay
-		// rewrites the committed ledger with every separator.
-		if (offered.kind === "replay" || offered.lead) this.#separatorOwed = false;
+		// An append or commit that wrote a row opened with the owed blank and paid
+		// it; a replay rewrites the committed ledger with every separator.
+		if (offered.kind === "replay" || (offered.lead && offered.batch.rows.length > 0)) this.#separatorOwed = false;
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
 	}

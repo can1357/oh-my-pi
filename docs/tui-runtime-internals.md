@@ -44,8 +44,9 @@ one. InteractiveMode's provider applies quit's saved-session condition, and
 also flushes in full after a failed teardown or while the session manager has
 a disk failure latched, since the file then lacks the newest entries.
 A head that progressive append emitted in full retires without its
-separator, so the next batch on any path opens with a blank; so does a capped
-batch that leaves out the rest of a partly emitted frontier head. The frame that writes a fresh flush
+separator, so the next batch on any path that writes a row opens with a blank;
+so does a capped batch that leaves out the rest of a partly emitted frontier
+head. The frame that writes a fresh flush
 batch comes from a second, display-order pass whenever the first one saw
 images, so the image budget demotes the oldest images rather than the newest.
 A handoff stop that resumes with
