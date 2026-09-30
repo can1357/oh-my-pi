@@ -639,9 +639,20 @@ export class SelectorController {
 	#promptSwitchEffort(model: Model): Promise<Effort | undefined> {
 		const efforts = getSupportedEfforts(model);
 		if (efforts.length === 0) return Promise.resolve(undefined);
-		const configured = this.ctx.session.configuredThinkingLevel();
-		const preselect: Effort =
-			configured !== undefined && efforts.includes(configured as Effort) ? (configured as Effort) : efforts[0]!;
+		// Preselect the level the switch would have applied without the prompt
+		// (role-configured level, else the model's default, else the current
+		// effective level), so Enter keeps the previous outcome instead of
+		// silently pinning the lowest effort when `auto`/`off` is configured.
+		const supported = (level: unknown): level is Effort =>
+			typeof level === "string" && (efforts as readonly string[]).includes(level);
+		const roleLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+		const modelDefault = model.thinking?.defaultLevel;
+		const current = this.ctx.session.thinkingLevel;
+		const preselect =
+			(supported(roleLevel) ? roleLevel : undefined) ??
+			(supported(modelDefault) ? modelDefault : undefined) ??
+			(supported(current) ? current : undefined) ??
+			efforts[0]!;
 		const { promise, resolve } = Promise.withResolvers<Effort | undefined>();
 		const { ThinkingSelectorComponent } = loadModelOverlayComponents();
 		const selector = new ThinkingSelectorComponent(
