@@ -75,6 +75,9 @@
 ### Fixed
 
 - Fixed Mnemopi embedding API failures (rejected key, unknown model, missing `input_type`) silently degrading recall to keyword search; they now show a warning with the provider's response, and print mode writes it to stderr ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
+### Fixed
+
+- Artifact reads now preserve full requested lines within the existing byte and paging limits instead of reapplying the ordinary-file column cap, so long single-line JSON output can be recovered without `:raw`. Off-window bracket context retains the configured column cap; oversized multi-range content reports its byte-budget omission ([#13947](https://github.com/can1357/oh-my-pi/pull/13947) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.20.2] - 2026-11-14
 
