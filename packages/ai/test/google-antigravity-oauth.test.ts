@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 	googleAntigravityProjectHook,
@@ -18,7 +22,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 async function discoverAntigravityProject() {
 	return googleAntigravityProjectHook(
-		{ access: "access-token", refresh: "refresh-token", expires: 0 },
+		{ access: "access-token", refresh: "refresh-token", expires: 0, email: "user@example.com" },
 		{
 			provider: "google-antigravity",
 			phase: "login",
@@ -31,6 +35,103 @@ async function discoverAntigravityProject() {
 describe("Antigravity OAuth project discovery", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("rejects a login when userinfo did not identify the account", async () => {
+		await expect(
+			googleAntigravityProjectHook(
+				{ access: "access-token", refresh: "refresh-token", expires: 0 },
+				{
+					provider: "google-antigravity",
+					phase: "login",
+					raw: { refresh_token: "refresh-token" },
+					fetch,
+				},
+			),
+		).rejects.toThrow("Could not identify the Antigravity account");
+	});
+	it("does not merge unrelated unidentified grants sharing a project", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-antigravity-identity-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		try {
+			await store.upsertAuthCredential("google-antigravity", {
+				type: "oauth",
+				access: "first-grant",
+				refresh: "first-refresh",
+				expires: Date.now() + 60_000,
+				projectId: "aicode-consumers",
+			});
+			const rows = await store.upsertAuthCredential("google-antigravity", {
+				type: "oauth",
+				access: "second-grant",
+				refresh: "second-refresh",
+				expires: Date.now() + 60_000,
+				projectId: "aicode-consumers",
+			});
+			expect(rows.map(row => row.id)).toEqual([1, 2]);
+			expect(rows.map(row => row.credential.type === "oauth" && row.credential.access)).toEqual([
+				"first-grant",
+				"second-grant",
+			]);
+		} finally {
+			store.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("claims only the legacy project row belonging to the re-logged Google account", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-antigravity-legacy-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		try {
+			for (const access of ["legacy-a", "legacy-b"]) {
+				await store.upsertAuthCredential("google-antigravity", {
+					type: "oauth",
+					access,
+					refresh: access,
+					expires: Date.now() + 60_000,
+					projectId: "aicode-consumers",
+				});
+			}
+			const auth = new AuthStorage(store);
+			await auth.reload();
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(
+					async () =>
+						jsonResponse({
+							currentTier: { id: "free-tier" },
+							paidTier: { id: "standard-tier" },
+							cloudaicompanionProject: "aicode-consumers",
+						}),
+					{ preconnect: fetch.preconnect },
+				),
+			);
+			let authUrl = "";
+			await auth.oauth.login("google-antigravity", {
+				onAuth: info => {
+					authUrl = info.url;
+				},
+				onPrompt: async () => "",
+				onManualCodeInput: async () => `callback-code#${new URL(authUrl).searchParams.get("state")}`,
+				fetch: async (url, init) => {
+					if (String(url).includes("/userinfo")) {
+						const token = new Headers(init?.headers).get("authorization");
+						return jsonResponse({
+							email: token === "Bearer legacy-b" ? "other@example.com" : "same@example.com",
+						});
+					}
+					return jsonResponse({ access_token: "new-grant", refresh_token: "new-refresh", expires_in: 3600 });
+				},
+			});
+			const rows = store.listAuthCredentials("google-antigravity");
+			expect(rows.map(row => row.id)).toEqual([1, 2]);
+			expect(rows.map(row => row.credential.type === "oauth" && row.credential.access)).toEqual([
+				"new-grant",
+				"legacy-b",
+			]);
+		} finally {
+			store.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("loads and refreshes an existing account through the daily endpoint", async () => {

@@ -23,6 +23,7 @@ auth "devin" {
 			api-endpoint literal="https://api.devin.ai"
 			enterprise-url literal="https://app.devin.ai"
 		}
+		after-exchange hook="devin-identity"
 	}
 	refresh "none"
 }

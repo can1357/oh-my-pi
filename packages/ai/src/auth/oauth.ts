@@ -1,5 +1,8 @@
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { applyUserinfo } from "../registry/engine/common";
+import { fetchDevinIdentity } from "../registry/oauth/devin";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
 import { getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
@@ -103,6 +106,30 @@ export class OAuthAccounts implements OAuthApi {
 			...result,
 			authorizedAt: Date.now(),
 		};
+		// Old grants may predate identity capture or have been stored after a
+		// failed userinfo request. Resolve them before matching the new grant:
+		// project-only and NULL keys cannot prove two users are the same.
+		if (provider === "devin" || provider === "google-antigravity") {
+			const storedProvider = def.storeCredentialsAs ?? provider;
+			const loginRule = authPolicyFor(provider)?.login;
+			const userinfo = loginRule?.kind === "oauth-code" ? loginRule.userinfo : undefined;
+			for (const row of this.#deps.pool.list(storedProvider)) {
+				const stored = row.credential;
+				if (stored.type !== "oauth" || stored.email || stored.accountId) continue;
+				if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+				const recovered =
+					provider === "devin"
+						? await fetchDevinIdentity(stored.access, ctrl.fetch ?? fetch, ctrl.signal)
+						: await applyUserinfo(userinfo, stored, {
+								provider,
+								fetch: ctrl.fetch ?? fetch,
+								signal: ctrl.signal,
+							});
+				if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+				if (!recovered?.email && !recovered?.accountId) continue;
+				this.#deps.pool.replaceById(storedProvider, row.id, { ...stored, ...recovered });
+			}
+		}
 		// Use pool.upsertOAuth to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.

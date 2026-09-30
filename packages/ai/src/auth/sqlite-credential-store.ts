@@ -189,7 +189,10 @@ function resolveProviderCredentialIdentityKey(provider: string, identifiers: str
 	const accountIdentifier = identifiers.find(identifier => identifier.startsWith("account:"));
 	if (accountIdentifier) return accountIdentifier;
 	if (emailIdentifier) return emailIdentifier;
-	const projectIdentifier = identifiers.find(identifier => identifier.startsWith("project:"));
+	// Antigravity's default project is shared across Google users; it cannot
+	// identify a credential when the userinfo request fails.
+	const projectIdentifier =
+		provider === "google-antigravity" ? undefined : identifiers.find(identifier => identifier.startsWith("project:"));
 	if (projectIdentifier) return projectIdentifier;
 	return null;
 }

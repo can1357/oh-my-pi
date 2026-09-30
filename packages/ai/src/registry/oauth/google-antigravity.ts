@@ -304,6 +304,12 @@ export const googleAntigravityProjectHook: AfterExchangeHook = async (credential
 	if (context.phase === "refresh") {
 		return context.stored?.projectId ? { ...credentials, projectId: context.stored.projectId } : credentials;
 	}
+	if (!credentials.email?.trim()) {
+		throw new AIError.OAuthError("Could not identify the Antigravity account. Please sign in again.", {
+			kind: "validation",
+			provider: PROVIDER,
+		});
+	}
 	const raw = context.raw;
 	if (
 		raw === null ||
