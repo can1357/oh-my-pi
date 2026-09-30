@@ -23,6 +23,91 @@ function resolveSelection(pendingRequests: Map<string, PendingExtensionRequest>,
 }
 
 describe("RPC extension UI", () => {
+	it("keeps extension dialogs headless while tool selections round-trip", async () => {
+		await using temp = await TempDir.create("@rpc-headless-tool-ui-");
+		const fixturePath = temp.join("runtime.ts");
+		const sourceDir = path.resolve(import.meta.dir, "../src");
+		await Bun.write(
+			fixturePath,
+			`
+import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
+import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+globalThis.fetch = async () => { throw new Error("Offline UI fixture refuses network"); };
+let extensionState;
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  toolNames: [],
+  enableMCP: false,
+  enableLsp: false,
+  disableExtensionDiscovery: true,
+  settings: Settings.isolated({ "compaction.enabled": false }),
+  extensions: [pi => {
+    pi.on("session_start", async (_event, ctx) => {
+      const confirmed = await ctx.ui.confirm("Extension confirm", "Must not reach the host");
+      ctx.ui.notify("Extension notification");
+      extensionState = { hasUI: ctx.hasUI, confirmed };
+    });
+  }],
+});
+await runRpcMode(session, {
+  headless: true,
+  setToolUIContext(ui, hasUI) {
+    void ui.select("Tool choice", ["Keep", "Deploy"]).then(selected => {
+      ui.notify(JSON.stringify({ toolHasUI: hasUI, selected, extension: extensionState }));
+    });
+  },
+});
+`,
+		);
+		const child = Bun.spawn([process.execPath, fixturePath], {
+			cwd: temp.path(),
+			env: {
+				PATH: Bun.env.PATH,
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				XDG_CONFIG_HOME: temp.join("config"),
+				XDG_DATA_HOME: temp.join("data"),
+				XDG_CACHE_HOME: temp.join("cache"),
+				CI: "true",
+				PI_NO_TITLE: "1",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 20_000,
+		});
+		const stderr = new Response(child.stderr).text();
+		const requests: Record<string, unknown>[] = [];
+		let result: unknown;
+		try {
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame) || frame.type !== "extension_ui_request") continue;
+				requests.push(frame);
+				if (frame.method === "select") {
+					child.stdin.write(
+						`${JSON.stringify({ type: "extension_ui_response", id: frame.id, value: "Deploy" })}\n`,
+					);
+					await child.stdin.flush();
+				} else if (frame.method === "notify") {
+					if (typeof frame.message === "string") result = JSON.parse(frame.message);
+					break;
+				} else {
+					throw new Error(`Unexpected extension UI: ${JSON.stringify(frame)}`);
+				}
+			}
+		} finally {
+			child.stdin.end();
+			await child.exited;
+		}
+		expect(result, await stderr).toEqual({
+			toolHasUI: true,
+			selected: "Deploy",
+			extension: { hasUI: false, confirmed: false },
+		});
+		expect(requests.map(frame => frame.method)).toEqual(["select", "notify"]);
+		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
+	}, 30_000);
+
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

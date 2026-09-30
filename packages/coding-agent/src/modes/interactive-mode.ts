@@ -8,6 +8,7 @@ import {
 	type Agent,
 	AgentBusyError,
 	type AgentMessage,
+	agentPauseGate,
 	EventLoopKeepalive,
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
@@ -160,8 +161,10 @@ import {
 	formatFeedModelBadge,
 	formatMoreItems,
 	isFeedModelBadgeEnabled,
+	previewLine,
 	replaceTabs,
 	shortenEmbeddedPaths,
+	shortenToolArgumentPaths,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -327,6 +330,7 @@ import {
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplaySubagentLivePreview,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
@@ -400,6 +404,7 @@ const cfgLiveUiSettings = combine({
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
+	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
 	"compaction.idleThresholdTokens": cfgCompactionIdleThresholdTokens,
 	"compaction.idleTimeoutSeconds": cfgCompactionIdleTimeoutSeconds,
@@ -562,6 +567,10 @@ function parseGoalSubcommand(args: string): {
 
 function formatContextTokenCount(value: number): string {
 	return formatNumber(Math.max(0, Math.round(value))).toLowerCase();
+}
+
+function hasAssistantToolCall(message: AgentMessage): boolean {
+	return message.role === "assistant" && message.content.some(block => block.type === "toolCall");
 }
 
 /**
@@ -804,7 +813,7 @@ function isHudSubagent(session: ObservableSession): boolean {
  */
 export class SubagentHudComponent implements Component {
 	readonly #text: Text;
-	readonly #lines: readonly string[];
+	#lines: readonly string[];
 	readonly #order: readonly string[];
 	readonly #toggleLine: number | undefined;
 	readonly #native: SubagentHudNative | undefined;
@@ -827,6 +836,20 @@ export class SubagentHudComponent implements Component {
 	/** A click on the pill opens the agent hub, as the hub key does. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "action" && event.act === "agents.open") this.#native?.onOpen();
+	}
+	/** Same agents and expander row as `order`/`toggleRow`, so `setLines` can repaint in place. */
+	hasLayout(order: readonly string[], toggleRow: number | undefined): boolean {
+		return (
+			this.#toggleLine === toggleRow &&
+			this.#order.length === order.length &&
+			this.#order.every((id, index) => id === order[index])
+		);
+	}
+	/** Repaint rows in place (keeps component identity for the HUD memo); the click map rebuilds lazily. */
+	setLines(lines: readonly string[]): void {
+		if (!this.#text.setText(lines.join("\n"))) return;
+		this.#lines = lines;
+		this.#physicalOwner = undefined;
 	}
 	render(width: number): readonly string[] {
 		const rows = this.#text.render(width);
@@ -917,6 +940,9 @@ export function describeSubagentHud(sessions: ObservableSession[]): NativeNode {
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
+/** Repaint cadence for live-preview elapsed markers while a subagent tool call runs. */
+const SUBAGENT_PREVIEW_TICK_MS = 1000;
+
 /** Item rows a collapsed jump list shows before the expander. */
 const SUBAGENT_HUD_COLLAPSED_LIMIT = 3;
 
@@ -954,6 +980,78 @@ export function layoutPinnedHud(runningTotal: number, expanded: boolean): Pinned
 	};
 }
 
+/** A running tool call earns an elapsed marker in the live preview once it outlasts this. */
+const SUBAGENT_PREVIEW_ELAPSED_MIN_MS = 5000;
+
+/** Narrowest detail worth showing after the tool name in the live preview. */
+const SUBAGENT_PREVIEW_MIN_DETAIL_WIDTH = 8;
+
+/**
+ * Delay until the live preview next needs a repaint with no progress event to
+ * trigger it: when the first listed in-flight call crosses the elapsed-marker
+ * threshold, then once a second while any marker is showing. Undefined when no
+ * listed agent is mid-call, so an idle or thinking agent never arms a timer.
+ */
+export function nextSubagentPreviewTickMs(sessions: readonly ObservableSession[], now: number): number | undefined {
+	let delay: number | undefined;
+	for (const session of sessions) {
+		const progress = session.progress;
+		if (progress?.status !== "running" || !progress.currentTool || progress.currentToolStartMs === undefined)
+			continue;
+		const untilMarker = progress.currentToolStartMs + SUBAGENT_PREVIEW_ELAPSED_MIN_MS + 1 - now;
+		const next = untilMarker > 0 ? untilMarker : SUBAGENT_PREVIEW_TICK_MS;
+		delay = delay === undefined ? next : Math.min(delay, next);
+	}
+	return delay;
+}
+
+/**
+ * Live-preview row for a running subagent: its current (or, between calls,
+ * most recent) tool call with a one-line detail and, once the call has run a
+ * while, an elapsed marker. The detail is that call's own intent, else its
+ * args — never an earlier call's intent. Undefined when the agent has not
+ * called a tool yet. The row never overflows `width`.
+ */
+function renderSubagentToolPreview(session: ObservableSession, width: number): string | undefined {
+	const progress = session.progress;
+	if (progress?.status !== "running") return undefined;
+	const currentTool = progress.currentTool;
+	const recent = progress.recentTools[0];
+	const tool = currentTool ?? recent?.tool;
+	if (!tool) return undefined;
+	const intent = currentTool ? progress.currentToolIntent : recent?.intent;
+	const args = currentTool ? progress.currentToolArgs : recent?.args;
+	const argsKey = currentTool ? progress.currentToolArgsKey : recent?.argsKey;
+	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
+	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
+	const detail = intent
+		? shortenEmbeddedPaths(replaceTabs(intent))
+		: args
+			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
+			: undefined;
+	const elapsed = currentTool && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
+	const elapsedLabel =
+		elapsed > SUBAGENT_PREVIEW_ELAPSED_MIN_MS
+			? `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`
+			: "";
+	const elapsedWidth = visibleWidth(elapsedLabel);
+	const hook = `${theme.fg("dim", theme.tree.hook)} `;
+	// Between calls the row keeps the last call, marked with how it ended.
+	const status =
+		!currentTool && recent
+			? `${theme.styledSymbol(recent.isError ? "status.error" : "status.success", recent.isError ? "error" : "success")} `
+			: "";
+	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
+	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
+	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
+	let line = `${hook}${status}${theme.fg(currentTool ? "muted" : "dim", shortTool)}`;
+	const detailBudget = width - prefixWidth - visibleWidth(shortTool) - elapsedWidth - visibleWidth(": ");
+	if (detail && detailBudget >= SUBAGENT_PREVIEW_MIN_DETAIL_WIDTH) {
+		line += `: ${theme.fg("dim", previewLine(detail, Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
+	}
+	return truncateToWidth(`${line}${elapsedLabel}`, width, "");
+}
+
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
@@ -962,22 +1060,34 @@ export function layoutPinnedHud(runningTotal: number, expanded: boolean): Pinned
  * `renderTreeList` rows (dim connectors) shifted right by one space.
  * Every active subagent is listed — detached background spawns and sync task
  * calls alike — so the pinned block doubles as a click jump list.
+ * With `livePreview` (`display.subagentLivePreview`), a row that has called a
+ * tool carries a second physical row showing that call; both rows share one
+ * returned line (joined by a newline) so line N still maps to agent N - 2.
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number, expanded = false): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	expanded = false,
+	livePreview = false,
+): string[] {
 	const running = sessions.filter(isHudSubagent);
 	if (running.length === 0) return [];
+	// `SubagentHudComponent` paints through `Text` with horizontal padding, so
+	// rows budgeted to the full terminal width would wrap.
+	const contentColumns = Math.max(0, columns - getPaddingX(1) * 2);
 	const layout = layoutPinnedHud(running.length, expanded);
 	const dot = theme.styledSymbol("status.done", "accent");
 	const items = running.slice(0, layout.itemRows);
 	const showModelBadge = isFeedModelBadgeEnabled();
 	const outerIndent = " ";
+	const itemLineCounts = new Map<ObservableSession, number>();
 	const rows = renderTreeList(
 		{
 			items,
 			expanded: true,
 			renderItem: (session, context) => {
-				const rowWidth = Math.max(0, columns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
+				const rowWidth = Math.max(0, contentColumns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
 				const role = session.agent ?? session.progress?.agent;
 				const displayId = truncateToWidth(
 					formatTaskId(session.id),
@@ -1018,7 +1128,10 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
-				return truncateToWidth(line, rowWidth, "");
+				const head = truncateToWidth(line, rowWidth, "");
+				const preview = livePreview ? renderSubagentToolPreview(session, rowWidth) : undefined;
+				itemLineCounts.set(session, preview ? 2 : 1);
+				return preview ? [head, preview] : head;
 			},
 		},
 		theme,
@@ -1032,14 +1145,26 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 							"dim",
 							layout.toggle === "expand" ? `… ${running.length - layout.itemRows} more — expand` : "… show less",
 						)}`,
-						columns,
+						contentColumns,
 						"",
 					),
 				];
+	const itemLines: string[] = [];
+	let cursor = 0;
+	for (const session of items) {
+		const count = itemLineCounts.get(session) ?? 1;
+		itemLines.push(
+			rows
+				.slice(cursor, cursor + count)
+				.map(row => truncateToWidth(`${outerIndent}${row}`, contentColumns, ""))
+				.join("\n"),
+		);
+		cursor += count;
+	}
 	return [
 		"",
-		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), columns),
-		...rows.map(line => truncateToWidth(`${outerIndent}${line}`, columns, "")),
+		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), contentColumns),
+		...itemLines,
 		...toggleRow,
 	];
 }
@@ -1374,6 +1499,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
+	// True from `/guided-goal` kickoff until the interview ends: a goal record
+	// appears, a turn makes tool calls (the interview itself is tool-free, so
+	// tool use means it was abandoned for real work), the kickoff fails, or the
+	// session switches. While set, short replies like "c" are answers, not
+	// continue shortcuts.
+	#guidedGoalInterviewActive = false;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
 	// In-flight #enterVibeMode promise: set before the activateVibeTools await
@@ -1539,6 +1670,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
 	#mouseCapture = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
+	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
+	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
@@ -2072,6 +2205,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
 		});
+		// `/pause` stops the live-preview tick (the fullscreen pause screen covers
+		// the HUD); resuming repaints so elapsed markers catch up immediately.
+		this.#eventBusUnsubscribers.push(
+			agentPauseGate.onChange(paused => {
+				if (!cfgDisplaySubagentLivePreview.get(settings)) return;
+				this.#renderSubagentList();
+				if (!paused) this.ui.requestRender();
+			}),
+		);
 		// Let the transient todo tool result light up pending todos executed by a
 		// live subagent, matching the sticky HUD's active set (#5873).
 		setActiveTodoDescriptionsProvider(() => this.#getActiveSubagentDescriptions());
@@ -3288,6 +3430,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("composer.shape")) this.syncComposerShape();
 		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
+		if (any("display.subagentLivePreview")) {
+			this.#renderSubagentList();
+			this.ui.requestRender();
+		}
 		if (any("compaction.idleEnabled", "compaction.idleThresholdTokens", "compaction.idleTimeoutSeconds")) {
 			this.#eventController.refreshIdleCompactionTimer();
 		}
@@ -3904,6 +4050,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#observerUiSyncTimer = undefined;
 		}
 		this.#observerUiSyncNeedsTodoReconcile = false;
+		this.#cancelSubagentPreviewTick();
 	}
 
 	#renderTodoList(): void {
@@ -4214,25 +4361,82 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
 	 * editor. Driven entirely by observer-registry change events, so rows appear
 	 * on spawn and the whole block clears itself once the last subagent leaves
-	 * the "active" state.
+	 * the "active" state. With the live preview on, a tool call running without
+	 * progress events (a long quiet bash) still needs its elapsed marker to
+	 * appear and advance, so a repaint is armed for when the marker first shows
+	 * and then once a second while a listed agent stays mid-call.
 	 */
 	#renderSubagentList(): void {
+		this.#cancelSubagentPreviewTick();
 		this.subagentContainer.clear();
-		const mode = cfgDisplayPinnedAgents.get(settings);
-		if (mode === "off") return;
-		const sessions = this.#observerRegistry.getSessions();
-		const running = sessions.filter(isHudSubagent);
-		const expanded = this.#pinnedHudOverride ?? mode === "full";
-		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded);
-		if (lines.length === 0) return;
-		const layout = layoutPinnedHud(running.length, expanded);
-		const order = running.map(session => session.id);
+		const view = this.#buildSubagentHudView();
+		if (!view) return;
 		this.subagentContainer.addChild(
-			new SubagentHudComponent(lines, order, layout.toggleRow, {
-				node: describeSubagentHud(sessions),
+			new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
+				node: describeSubagentHud(view.sessions),
 				onOpen: () => this.showAgentHub(),
 			}),
 		);
+		this.#armSubagentPreviewTick(view.tickMs);
+	}
+
+	/** Inputs for one HUD paint; undefined when the HUD is off or nothing is running. */
+	#buildSubagentHudView():
+		| {
+				sessions: ObservableSession[];
+				lines: string[];
+				order: string[];
+				toggleRow: number | undefined;
+				tickMs: number | undefined;
+		  }
+		| undefined {
+		const mode = cfgDisplayPinnedAgents.get(settings);
+		if (mode === "off") return undefined;
+		const sessions = this.#observerRegistry.getSessions();
+		const running = sessions.filter(isHudSubagent);
+		const expanded = this.#pinnedHudOverride ?? mode === "full";
+		const livePreview = cfgDisplaySubagentLivePreview.get(settings);
+		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview);
+		if (lines.length === 0) return undefined;
+		const layout = layoutPinnedHud(running.length, expanded);
+		const tickMs =
+			livePreview && !agentPauseGate.paused
+				? nextSubagentPreviewTickMs(running.slice(0, layout.itemRows), Date.now())
+				: undefined;
+		return { sessions, lines, order: running.map(session => session.id), toggleRow: layout.toggleRow, tickMs };
+	}
+
+	#armSubagentPreviewTick(tickMs: number | undefined): void {
+		if (tickMs === undefined) return;
+		this.#subagentPreviewTickTimer = setTimeout(() => {
+			this.#subagentPreviewTickTimer = undefined;
+			this.#tickSubagentPreview();
+		}, tickMs);
+		this.#subagentPreviewTickTimer.unref?.();
+	}
+
+	/**
+	 * Elapsed-marker tick: with the same agents listed, repaint the existing HUD
+	 * in place so the native HUD memo and component identity survive; any
+	 * layout change falls back to a full rebuild.
+	 */
+	#tickSubagentPreview(): void {
+		const hud = this.subagentContainer.children[0];
+		const view = this.#buildSubagentHudView();
+		if (view && hud instanceof SubagentHudComponent && hud.hasLayout(view.order, view.toggleRow)) {
+			hud.setLines(view.lines);
+			this.#armSubagentPreviewTick(view.tickMs);
+		} else {
+			this.#renderSubagentList();
+		}
+		this.ui.requestRender();
+	}
+
+	#cancelSubagentPreviewTick(): void {
+		if (this.#subagentPreviewTickTimer) {
+			clearTimeout(this.#subagentPreviewTickTimer);
+			this.#subagentPreviewTickTimer = undefined;
+		}
 	}
 
 	#vibeParentSession(): VibeParentSession {
@@ -4336,6 +4540,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (event.type === "goal_updated") {
+			if (event.state) this.#guidedGoalInterviewActive = false;
 			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
 			// still restore the previous tool set while the flag is true.
 			if (event.state?.goal?.status === "dropped") {
@@ -4352,6 +4557,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (event.type !== "agent_end") {
 			return;
+		}
+		if (this.#guidedGoalInterviewActive && event.messages.some(hasAssistantToolCall)) {
+			this.#guidedGoalInterviewActive = false;
 		}
 		if (this.#pendingGoalContinuationTurns > 0) {
 			this.#pendingGoalContinuationTurns--;
@@ -4530,6 +4738,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
+		this.#guidedGoalInterviewActive = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
 		const vibeSession = this.#vibeParentSession();
 		const targetVibeScope = VibeSessionRegistry.global().ownerScope(vibeSession);
@@ -5886,6 +6095,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
+			this.#guidedGoalInterviewActive = true;
 
 			// The interview is a normal conversation: the kickoff rides in as a
 			// hidden developer message, the agent asks its questions as regular
@@ -5907,6 +6117,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			return true;
 		} catch (error) {
+			this.#guidedGoalInterviewActive = false;
 			this.showError(error instanceof Error ? error.message : String(error));
 			return false;
 		}
@@ -7710,6 +7921,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	canCopyBtw(): boolean {
 		return this.#btwController.canCopy();
+	}
+
+	isGuidedGoalInterviewActive(): boolean {
+		return this.#guidedGoalInterviewActive && !this.goalModeEnabled && !this.goalModePaused;
 	}
 
 	handleBtwCopyKey(): Promise<boolean> {
