@@ -1657,6 +1657,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		/** Target the in-body continuation hints name (a located read's URL, else empty). */
 		selectorBase: string,
 		signal: AbortSignal | undefined,
+		maxColumns: number,
 		allowBridge = true,
 	): Promise<{
 		outputText: string;
@@ -1693,7 +1694,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 		const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
-		const maxColumns = resolveOutputMaxColumns(this.session.settings);
 
 		const blocks: string[] = [];
 		const notices: string[] = [];
@@ -2084,6 +2084,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const rawImages = toolContext?.rawImages === true;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
+		// Artifact recovery must not reapply the column cap that elided the original output.
+		// Line and byte budgets still bound each page.
+		const maxColumns = located?.spec.artifactStore ? 0 : resolveOutputMaxColumns(this.session.settings);
 		// In-body continuation hints name the URL for located reads, so paging stays on the URL.
 		const selectorBase = located?.url ?? "";
 
@@ -2587,6 +2590,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						suffixResolution,
 						selectorBase,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
+						maxColumns,
 						!located, // located URLs read their backing file directly, as their handlers do
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
@@ -2670,10 +2674,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const prefixReserve = Math.min(lineCount * prefixWidth, Math.floor(threshold / 2));
 						return Math.min(scaled, threshold - prefixReserve);
 					};
-					// Per-line column cap. Skipped in raw mode so `:raw` always returns
-					// verbatim bytes for paste-back-into-tool workflows. Numbered pages
-					// charge a cut line its capped width, so the budget bounds what is shown.
-					const maxColumns = resolveOutputMaxColumns(this.session.settings);
+					// Per-line column cap. Raw reads and artifact recovery preserve full
+					// lines within the byte budget. Numbered pages charge a cut line its
+					// capped width, so the budget bounds what is shown.
 					const displayColumns = rawSelector ? 0 : maxColumns;
 					const collectWindow = async (
 						firstLine: number,
