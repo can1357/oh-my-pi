@@ -144,7 +144,7 @@ type ProjectSettingsReadResult = {
 type PersistedReloadMode = "strict" | "keep-last-good";
 
 /** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
-type LayerRefreshKind = PersistedReloadMode | "rescope";
+type LayerRefreshKind = PersistedReloadMode | "rescope" | "global";
 
 /** Quiet period after the last config-file event before the watcher reloads from disk. */
 const CONFIG_WATCH_DEBOUNCE_MS = 200;
@@ -168,6 +168,22 @@ export interface SettingsOptions {
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
 }
+/** Result of an explicit reload of the global config and its overlays. */
+export interface SettingsReloadReport {
+	status: "applied" | "unchanged" | "failed";
+	changed: string[];
+	restartRequired: string[];
+	partiallyApplied: Array<{ key: string; reason: string }>;
+	error?: string;
+}
+
+const RESTART_REQUIRED_SETTINGS = new Set(["includeWorkspaceTree"]);
+const PARTIAL_RELOAD_SETTINGS = new Map([
+	["disabledProviders", "provider availability updates immediately, but discovered providers require a restart"],
+	["extensions", "run /reload-plugins to refresh extension discovery"],
+	["disabledExtensions", "run /reload-plugins to refresh extension discovery"],
+	["plan.enabled", "plan mode updates now; a write tool absent at startup requires a restart"],
+]);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Path Utilities
@@ -622,6 +638,12 @@ export class Settings {
 	#modifiedGlobalModelRoleMutations = new Map<string, PendingYamlMutation>();
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
+	/** Change stamp across the main config and overlays at the last outside-edit check. */
+	#configSignature: string | undefined;
+	/** Whether {@link Settings.reloadGlobalIfChangedOnDisk} has taken its baseline yet. */
+	#configSignatureSeen = false;
+	/** Serializes config reloads so overlapping callers cannot skip an uncommitted one. */
+	#configReloadInFlight: Promise<unknown> | undefined;
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -1206,12 +1228,79 @@ export class Settings {
 		}
 	}
 
+	/** Serialize change-detection checks until their reload has fully committed. */
+	async #serializeConfigReload<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.#configReloadInFlight;
+		const run = (async () => {
+			if (previous) await previous.catch(() => {});
+			return operation();
+		})();
+		this.#configReloadInFlight = run;
+		try {
+			return await run;
+		} finally {
+			if (this.#configReloadInFlight === run) this.#configReloadInFlight = undefined;
+		}
+	}
+
+	async reloadGlobalIfChangedOnDisk(): Promise<SettingsReloadReport | undefined> {
+		if (!this.#persist || !this.#configPath) return undefined;
+		// The stat and the reload share one critical section. Checked outside it, a
+		// caller could stat while another reload was mid-commit, see that reload's
+		// already-recorded signature, conclude there was nothing to do, and return —
+		// letting an awaiting prompt start on settings that had not landed yet.
+		return this.#serializeConfigReload(async () => {
+			const signature = await this.#readConfigSignature();
+			if (this.#configSignatureSeen && this.#configSignature === signature) return undefined;
+			this.#configSignature = signature;
+			this.#configSignatureSeen = true;
+			return this.reloadGlobal();
+		});
+	}
+
 	/**
-	 * Independent instance scoped to `cwd`: same global, `--config` overlay, and runtime layers, the
-	 * project layer re-read for `cwd` (persisted instances). An {@link overlay} clones its parent for
-	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
+	 * Change stamp across every file the global layer could be built from: each
+	 * `MAIN_CONFIG_FILENAMES` candidate in the agent dir, plus each `--config` /
+	 * `PI_CONFIG_FILES` overlay.
 	 *
-	 * @throws Error when a configured value fails its definition's `validate` check.
+	 * Every candidate is stamped rather than just the currently selected
+	 * `#configPath`, because `#readExistingMainYaml` picks the first that exists: creating a
+	 * higher-priority filename changes which file wins, and watching only the old
+	 * selection would miss that entirely. Overlays are included because they are
+	 * re-staged in the same transaction and outrank global in the merge. Absent files
+	 * contribute a marker instead of being skipped, so a file appearing or
+	 * disappearing counts as a change.
+	 *
+	 * Each stamp carries more than `mtime` because a rewrite inside the filesystem's
+	 * timestamp granularity can reuse the same value, which would make a rapid edit
+	 * invisible. Nanosecond mtime, inode-change time, size and inode together catch
+	 * that: a same-mtime rewrite still moves `ctime` and usually `size`, and a
+	 * replace-by-rename moves `ino`. Still one `stat` per path.
+	 */
+	async #readConfigSignature(): Promise<string> {
+		const candidates = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			...this.#configFiles,
+		];
+		const parts: string[] = [];
+		for (const filePath of candidates) {
+			let stamp = "absent";
+			try {
+				const stats = await fs.promises.stat(filePath, { bigint: true });
+				stamp = `${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}:${stats.ino}`;
+			} catch {
+				// Missing or unreadable: the marker above is the signal.
+			}
+			parts.push(`${filePath}@${stamp}`);
+		}
+		return parts.join("|");
+	}
+
+	/**
+	 * Independent instance scoped to `cwd`: copy global, overlay, and runtime layers,
+	 * then read the project layer for the new directory.
+	 *
+	 * @throws Error when a configured value fails its definition's validate check.
 	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		let cloned: Settings;
@@ -1258,6 +1347,73 @@ export class Settings {
 	async reloadFromDisk(): Promise<void> {
 		if (!this.#persist) return;
 		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
+	}
+
+	/** Refresh the global config and explicit overlays without re-reading the project layer. */
+	async reloadGlobal(): Promise<SettingsReloadReport> {
+		const unchanged = (): SettingsReloadReport => ({
+			status: "unchanged",
+			changed: [],
+			restartRequired: [],
+			partiallyApplied: [],
+		});
+		if (!this.#persist) return unchanged();
+		let result = unchanged();
+		await this.#exclusive("global", async () => {
+			const settings = allSettings();
+			// A save may adopt external edits before the refresh starts. Capture values first
+			// so their listeners and the command report still account for those edits.
+			const previous = this.#snapshot();
+			for (let attempt = 0; attempt < 3; attempt++) {
+				try {
+					await this.flush();
+					if (this.#modified.size || this.#modifiedGlobalModelRoles.size) {
+						throw new Error("unsaved global settings could not be persisted");
+					}
+					const generation = this.#persistedMutationGeneration;
+					const [global, overlay] = await Promise.all([
+						this.#readExistingMainYaml(false),
+						this.#readConfigOverlays(false),
+					]);
+					if (generation !== this.#persistedMutationGeneration) continue;
+					const layers: OwnLayers = {
+						...this.#ownLayers(),
+						global: global.settings ?? {},
+						configOverlay: overlay.settings,
+					};
+					const settled = this.#settlePins(layers);
+					this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
+					this.#global = layers.global;
+					this.#configOverlay = layers.configOverlay;
+					this.#overrides = layers.overrides;
+					this.#configPath = global.configPath;
+					this.#overlayShellPathSource = overlay.shellPathSource;
+					for (const setting of settled) this.#softPins.delete(setting);
+					this.#rebuildMerged();
+					const changed = settings
+						.filter((setting, i) => !settingValuesEqual(setting.get(this), previous[i]))
+						.map(setting => setting.id);
+					this.#fireChangesSince(previous);
+					result = changed.length
+						? {
+								status: "applied",
+								changed,
+								restartRequired: changed.filter(key => RESTART_REQUIRED_SETTINGS.has(key)),
+								partiallyApplied: changed.flatMap(key => {
+									const reason = PARTIAL_RELOAD_SETTINGS.get(key);
+									return reason ? [{ key, reason }] : [];
+								}),
+							}
+						: unchanged();
+					return;
+				} catch (error) {
+					result = { ...unchanged(), status: "failed", error: String(error) };
+					return;
+				}
+			}
+			result = { ...unchanged(), status: "failed", error: "global settings changed during each reload attempt" };
+		});
+		return result;
 	}
 
 	/**
