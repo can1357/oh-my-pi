@@ -765,25 +765,26 @@ tui:
   hyperlinks: auto # off, auto, always
 ```
 
-| Key                         | Type    | Default          | Values                                                                    |
-| --------------------------- | ------- | ---------------- | ------------------------------------------------------------------------- |
-| `theme.dark`                | string  | `titanium`       | Theme used on a dark terminal background.                                 |
-| `theme.light`               | string  | `light`          | Theme used on a light terminal background.                                |
-| `symbolPreset`              | enum    | `unicode`        | `unicode`, `nerd`, `ascii`.                                               |
-| `colorBlindMode`            | boolean | `false`          | Use blue instead of green for diff additions.                             |
-| `showHardwareCursor`        | boolean | `true`           | Show the terminal hardware cursor.                                        |
-| `statusLine.preset`         | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.       |
-| `statusLine.separator`      | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`. |
-| `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
-| `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
-| `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
-| `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
-| `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
-| `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |
-| `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
-| `tui.mouse`                 | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
-| `display.pinnedAgents`      | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
-| `tui.resizeScrollback`      | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
+| Key                           | Type    | Default          | Values                                                                    |
+| ----------------------------- | ------- | ---------------- | ------------------------------------------------------------------------- |
+| `theme.dark`                  | string  | `titanium`       | Theme used on a dark terminal background.                                 |
+| `theme.light`                 | string  | `light`          | Theme used on a light terminal background.                                |
+| `symbolPreset`                | enum    | `unicode`        | `unicode`, `nerd`, `ascii`.                                               |
+| `colorBlindMode`              | boolean | `false`          | Use blue instead of green for diff additions.                             |
+| `showHardwareCursor`          | boolean | `true`           | Show the terminal hardware cursor.                                        |
+| `statusLine.preset`           | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.       |
+| `statusLine.separator`        | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`. |
+| `statusLine.sessionAccent`    | boolean | `true`           | Tint the editor border with the session color.                            |
+| `statusLine.transparent`      | boolean | `false`          | Use the terminal background for the status line.                          |
+| `statusLine.showHookStatus`   | boolean | `true`           | Show hook status messages.                                                |
+| `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                     |
+| `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
+| `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
+| `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
+| `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
+| `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
+| `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row. |
+| `tui.resizeScrollback`        | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
 

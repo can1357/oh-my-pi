@@ -8,7 +8,7 @@
  * `OMP_AUTH_BROKER_URL` / `auth.broker.url` precedence used elsewhere).
  *
  * Sub-verbs:
- *   - `serve [--bind=…]` — boots the gateway against the configured broker.
+ *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the gateway against the configured broker.
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
  *   - `status` — prints the locally-stored gateway token and bind hint.
  */
@@ -50,6 +50,7 @@ export interface AuthGatewayCommandArgs {
 		json?: boolean;
 		bind?: string;
 		regenerate?: boolean;
+		trustProxyHeaders?: boolean;
 		/**
 		 * Disable bearer-token auth on inbound requests. Useful when the gateway
 		 * is bound to loopback (the default `127.0.0.1:4000`) and you don't want
@@ -289,6 +290,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		storage,
 		bind,
 		bearerTokens: gatewayToken ? [gatewayToken] : [],
+		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
 		resolveModel: (id: string) => modelById.get(id),
 		listModels: () => modelById.values(),
