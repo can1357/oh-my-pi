@@ -24,6 +24,8 @@ import { createSessionDefaults } from "../helpers/session-defaults";
  * 3. A cancelled/aborted child that produced no completed output salvages its
  *    last assistant text into a `[cancelled after N req, …]` summary instead
  *    of the parent seeing "(no output)" and redoing the work.
+ * 4. Each data-less incremental `yield` section resolves from the assistant
+ *    message that submitted it, not from the run's final report.
  */
 
 interface SteerCall {
@@ -68,6 +70,31 @@ function yieldToolEnd(): AgentSessionEvent {
 		},
 		isError: false,
 	} as AgentSessionEvent;
+}
+
+/** Assistant message carrying `texts` as separate text blocks plus a `yield` tool call. */
+function yieldMessageEnd(toolCallId: string, ...texts: string[]): AgentSessionEvent {
+	return {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [
+				...texts.map(text => ({ type: "text", text })),
+				{ type: "toolCall", id: toolCallId, name: "yield", arguments: {} },
+			],
+			usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+		},
+	} as unknown as AgentSessionEvent;
+}
+
+function yieldEnd(toolCallId: string, details: Record<string, unknown>): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "yield",
+		result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success", ...details } },
+		isError: false,
+	} as unknown as AgentSessionEvent;
 }
 
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
@@ -276,6 +303,48 @@ describe("runSubprocess request guards", () => {
 		expect(result.abortReason).toContain("request budget exceeded");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(handle.steerCalls.length).toBe(1);
+	});
+
+	it("binds each data-less incremental section to the message that submitted it", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [
+				yieldMessageEnd("y1", "first finding report"),
+				yieldEnd("y1", { type: ["findings"], useLastTurn: true }),
+				yieldMessageEnd("y2", "second ", "finding report"),
+				yieldEnd("y2", { type: ["findings"], useLastTurn: true }),
+				yieldMessageEnd("y3"),
+				yieldEnd("y3", { type: "result", useLastTurn: true }),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-incremental-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		// Neither section collapses onto the run's final report, and multi-block
+		// text is kept byte-exact.
+		expect(JSON.parse(result.output)).toEqual({ findings: ["first finding report", "second finding report"] });
+	});
+
+	it("keeps assistant prose off incremental sections that carry data", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [
+				yieldMessageEnd("y1", "analysis prose the caller never selected"),
+				yieldEnd("y1", { type: ["notes"], data: "explicit note" }),
+				yieldMessageEnd("y2"),
+				yieldEnd("y2", { type: "result", useLastTurn: true }),
+			],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-structured-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ notes: "explicit note" });
+		const items = result.extractedToolData?.yield as Array<Record<string, unknown>> | undefined;
+		expect(items?.[0]?.lastTurnText).toBeUndefined();
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {

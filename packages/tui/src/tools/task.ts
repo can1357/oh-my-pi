@@ -124,6 +124,7 @@ function extractIncrementalReviewResult(
 		type: item.type,
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
 		useLastTurn: item.useLastTurn,
+		lastTurnText: item.lastTurnText,
 	}));
 	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
@@ -154,6 +155,7 @@ interface RenderYieldItem {
 	type?: string | string[];
 	status?: string;
 	useLastTurn?: boolean;
+	lastTurnText?: string;
 }
 
 /**
@@ -193,6 +195,7 @@ function normalizeYieldData(value: unknown): RenderYieldItem[] {
 			type,
 			status: typeof record.status === "string" ? record.status : undefined,
 			useLastTurn: record.useLastTurn === true ? true : undefined,
+			lastTurnText: typeof record.lastTurnText === "string" ? record.lastTurnText : undefined,
 		});
 	}
 	return normalized;
@@ -2229,6 +2232,12 @@ export interface YieldItem {
 	type?: string | string[];
 	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
 	useLastTurn?: boolean;
+	/**
+	 * Text of the assistant message that submitted a data-less incremental section, stamped by
+	 * the executor when the yield runs (see `isLastTurnSection`). Resolves that section instead
+	 * of the run's final report, so each section keeps its own report; `""` means it had none.
+	 */
+	lastTurnText?: string;
 	/** True when an incremental workpool yield completed every item in its batch. */
 	complete?: boolean;
 	/**

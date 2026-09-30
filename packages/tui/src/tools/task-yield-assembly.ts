@@ -16,7 +16,7 @@ interface AssembledYieldResult {
 	missingData: boolean;
 }
 
-function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
+function isIncrementalYieldType(type: unknown): type is string[] {
 	return Array.isArray(type) && type.length > 0;
 }
 
@@ -35,6 +35,17 @@ function getYieldLabels(type: YieldItem["type"]): string[] {
 	return labels;
 }
 
+/**
+ * True when `item` is an incremental section whose payload is the assistant text that
+ * submitted it rather than `data`. The executor stamps that text as `lastTurnText` when the
+ * yield runs, so `assembleYieldResult` resolves each section from its own report.
+ */
+export function isLastTurnSection(item: { type?: unknown; data?: unknown; useLastTurn?: unknown }): boolean {
+	const { type } = item;
+	if (!isIncrementalYieldType(type)) return false;
+	return item.useLastTurn === true || (item.data === undefined && getYieldLabels(type).length > 0);
+}
+
 function resolveYieldPayload(
 	item: YieldItem,
 	lastAssistantText: string | undefined,
@@ -42,11 +53,14 @@ function resolveYieldPayload(
 ): { value: unknown; fromLastAssistantText: boolean; missingData: boolean } {
 	const hasData = item.data !== undefined;
 	const shouldUseLastTurn = item.useLastTurn === true || (labels.length > 0 && !hasData);
-	if (shouldUseLastTurn && lastAssistantText !== undefined) {
+	// Text bound at yield time wins over the run's final report; unbound items
+	// (terminal yields, legacy transcripts) fall back to it.
+	const lastTurnText = item.lastTurnText ?? lastAssistantText;
+	if (shouldUseLastTurn && lastTurnText !== undefined) {
 		return {
-			value: lastAssistantText,
+			value: lastTurnText,
 			fromLastAssistantText: true,
-			missingData: lastAssistantText.length === 0,
+			missingData: lastTurnText.length === 0,
 		};
 	}
 	return {

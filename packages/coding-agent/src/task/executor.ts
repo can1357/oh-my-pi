@@ -111,7 +111,7 @@ import {
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
-import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { assembleYieldResult, isLastTurnSection } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
@@ -1311,6 +1311,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// itself is usually text-less. Turns that started more work are excluded on
 	// purpose: mid-run narration must never surface as a final result.
 	let lastReportTurnText: string | undefined;
+	// Text of the most recent assistant message, concatenated like the yield
+	// tool's last-turn guard (`getLastAssistantText`) reads it. A data-less
+	// incremental section is bound to this at execution, since its message
+	// completes before the tool runs.
+	let lastAssistantMessageText = "";
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
 	const abortActiveSession = (): Promise<void> => {
@@ -1758,6 +1763,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						});
 						if (data !== undefined) {
+							if (event.toolName === "yield" && isRecord(data) && isLastTurnSection(data)) {
+								data.lastTurnText = lastAssistantMessageText;
+							}
 							recordExtractedToolData(event.toolName, data);
 						}
 					}
@@ -1877,6 +1885,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
+					lastAssistantMessageText = "";
 					if (messageContent && Array.isArray(messageContent)) {
 						const turnText: string[] = [];
 						let startedMoreWork = false;
@@ -1897,6 +1906,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							}
 							startedMoreWork = true;
 						}
+						lastAssistantMessageText = turnText.join("");
 						// Only the report turn immediately preceding the finalize is
 						// harvestable. A turn that started more work invalidates any
 						// earlier candidate: the model took the reminder's "resume
