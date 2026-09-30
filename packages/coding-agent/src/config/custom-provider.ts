@@ -167,6 +167,14 @@ function notDefined(id: string): Error {
 	return new Error(`Provider "${id}" is not defined in models.yml.`);
 }
 
+type ProviderNode = NonNullable<ModelsConfig["providers"]>[string];
+
+/** Own-property lookup, so inherited keys like `constructor` are never providers. */
+function findProvider(config: ModelsConfig | null | undefined, id: string): ProviderNode | undefined {
+	const providers = config?.providers;
+	return providers && Object.hasOwn(providers, id) ? providers[id] : undefined;
+}
+
 /** Read a provider declared in a successfully loaded `models.yml`. */
 export function getCustomProvider(
 	id: string,
@@ -174,17 +182,19 @@ export function getCustomProvider(
 	authStorage?: AuthStorage,
 ): CustomProviderInfo | undefined {
 	const loaded = configFile.tryLoad();
-	const node = loaded.status === "ok" ? loaded.value.providers?.[id] : undefined;
+	const node = loaded.status === "ok" ? findProvider(loaded.value, id) : undefined;
 	if (!node) return undefined;
 	return { id, baseUrl: node.baseUrl, hasKey: Boolean(node.apiKey) || (authStorage?.credentials.has(id) ?? false) };
 }
 
 /** Fail before touching credentials when the ID is absent or the file is unloadable. */
-function requireProvider(id: string, configFile: ConfigFile<ModelsConfig>): void {
+function requireProvider(id: string, configFile: ConfigFile<ModelsConfig>): ProviderNode {
 	configFile.invalidate();
 	const loaded = configFile.tryLoad();
 	if (loaded.status === "error") throw loaded.error;
-	if (!loaded.value?.providers?.[id]) throw notDefined(id);
+	const node = findProvider(loaded.value, id);
+	if (!node) throw notDefined(id);
+	return node;
 }
 
 /** Run every rollback step even if earlier ones fail, then surface all failures together. */
@@ -210,7 +220,13 @@ export async function updateCustomProvider(
 	if (apiKey && clearApiKey) throw new Error("Cannot both set and clear the API key.");
 	const baseUrl = update.baseUrl === undefined ? undefined : parseEndpoint(update.baseUrl);
 	const configFile = context.config ?? ModelsConfigFile;
-	requireProvider(id, configFile);
+	const node = requireProvider(id, configFile);
+	// A new key leaves the node (dropping `auth: none`), and custom models need the key or oauth in the file.
+	if (apiKey && node.models?.length && node.auth !== "oauth") {
+		throw new Error(
+			`Provider "${id}" defines its own models, so its API key must stay in models.yml. Edit the file directly.`,
+		);
+	}
 
 	const { credentials } = context.authStorage;
 	const previousCredential = credentials.get(id);
