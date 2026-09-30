@@ -143,7 +143,7 @@ import {
 	splitTranscriptReadTarget,
 	transcribeMediaFile,
 } from "../stt/media-transcript";
-import { cfgSttLanguage } from "../stt/settings";
+import { cfgSttLanguage, cfgSttTranscribeFiles } from "../stt/settings";
 import type { SttModel } from "../stt/models";
 import { formatTranscriptLines, formatTranscriptTime } from "../stt/transcript";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
@@ -867,6 +867,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
 			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
+			TRANSCRIBE_FILES: cfgSttTranscribeFiles.get(this.session.settings),
 		});
 	}
 	readonly parameters = readSchema;
@@ -1098,17 +1099,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 	/**
 	 * Reinterpret a read target pointing at an audio or video file. The
-	 * transcript mode (`clip.mp4:transcript`, `clip.mp4:transcript:40-80`) and
-	 * video timestamp selectors (`clip.mp4:1h5m42s`, `clip.mp4:0:05`) never
-	 * survive line-selector parsing, so peel one off the raw path whenever the
-	 * base names an existing media file; a literal file named by the full path
-	 * (colon included) still wins.
+	 * transcript mode (`clip.mp4:transcript`, `clip.mp4:transcript:40-80`, only
+	 * with `stt.transcribeFiles` on) and video timestamp selectors
+	 * (`clip.mp4:1h5m42s`, `clip.mp4:0:05`) never survive line-selector parsing,
+	 * so peel one off the raw path whenever the base names an existing media
+	 * file; a literal file named by the full path (colon included) still wins.
 	 */
 	async #applyMediaSelectorFallback(
 		literalSplit: { path: string; sel?: string },
 		readPath: string,
+		transcribeFiles: boolean,
 	): Promise<{ path: string; sel?: string }> {
-		const mediaSplit = splitTranscriptReadTarget(readPath) ?? splitVideoReadTarget(readPath);
+		const mediaSplit =
+			(transcribeFiles ? splitTranscriptReadTarget(readPath) : null) ?? splitVideoReadTarget(readPath);
 		if (!mediaSplit) return literalSplit;
 		if ((await probeLiteralPathExists(mediaSplit.path, this.session.cwd)) === "missing") return literalSplit;
 		if ((await probeLiteralPathExists(readPath, this.session.cwd)) === "exists") return literalSplit;
@@ -1134,7 +1137,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const selector = parseVideoSelector(sel);
 		if (selector === null && sel !== undefined) {
 			throw new ToolError(
-				`Invalid selector ':${sel}' on '${resolvedDisplayPath}'. Use :<frame> (e.g. :412) or :<timestamp> (e.g. :1h5m42s, :90s) to extract a frame, :transcript for a timestamped transcript of the soundtrack, or read without a selector for a preview grid.`,
+				`Invalid selector ':${sel}' on '${resolvedDisplayPath}'. Use :<frame> (e.g. :412) or :<timestamp> (e.g. :1h5m42s, :90s) to extract a frame, ${cfgSttTranscribeFiles.get(this.session.settings) ? ":transcript for a timestamped transcript of the soundtrack, " : ""}or read without a selector for a preview grid.`,
 			);
 		}
 		const applySuffix = (text: string): string =>
@@ -1771,13 +1774,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					: null;
 		}
 
+		// Audio and video transcripts are opt-in (`stt.transcribeFiles`); off, audio
+		// files read as binary and `:transcript` is not a selector, as before.
+		const transcribeFiles = cfgSttTranscribeFiles.get(this.session.settings);
 		const localTarget = pdfImageRead
 			? { path: pdfImageRead.pdfPath, sel: undefined }
-			: await this.#applyMediaSelectorFallback(literalSplit, readPath);
+			: await this.#applyMediaSelectorFallback(literalSplit, readPath, transcribeFiles);
 		const localReadPath = localTarget.path;
 		// `:transcript` switches a video read to its soundtrack's transcript (audio
 		// files transcribe without it); any line selector after it pages the text.
-		const transcriptSel = parseTranscriptSel(localTarget.sel);
+		const transcriptSel = transcribeFiles ? parseTranscriptSel(localTarget.sel) : null;
 		// Video frame selectors (`:412`, `:1h5m42s`, `:0:05`) are not line selectors;
 		// keep them out of the line parser so they reach the video reader intact.
 		const parsed = transcriptSel
@@ -1958,7 +1964,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			  }
 			| undefined;
 
-		if (isAudioPath(absolutePath) || (transcriptSel && isVideoPath(absolutePath))) {
+		if (transcribeFiles && (isAudioPath(absolutePath) || (transcriptSel && isVideoPath(absolutePath)))) {
 			return this.#readMediaTranscript(absolutePath, parsed, fileSize, suffixResolution, question, signal);
 		}
 		if (isVideoPath(absolutePath)) {

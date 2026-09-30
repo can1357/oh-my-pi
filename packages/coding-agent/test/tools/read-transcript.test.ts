@@ -16,12 +16,13 @@ import * as sttDownloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import type { SttSegment } from "@oh-my-pi/pi-coding-agent/stt/transcript";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import * as videoUtils from "@oh-my-pi/pi-coding-agent/utils/video";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const hasFfmpeg = Boolean($which("ffmpeg") && $which("ffprobe"));
 const SAMPLE_RATE = 16_000;
 
-function makeSession(testDir: string): ToolSession {
+function makeSession(testDir: string, transcribeFiles = true): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
 	return {
 		cwd: testDir,
@@ -30,7 +31,7 @@ function makeSession(testDir: string): ToolSession {
 		getArtifactsDir: () => sessionFile.slice(0, -6),
 		getSessionSpawns: () => null,
 		getActiveModel: () => createMockModel({ id: "text-only" }),
-		settings: Settings.isolated(),
+		settings: Settings.isolated({ "stt.transcribeFiles": transcribeFiles }),
 	} as unknown as ToolSession;
 }
 
@@ -128,5 +129,33 @@ describe.skipIf(!hasFfmpeg)("read transcript", () => {
 		await expect(tool.execute("call", { path: `${clip}:transcript` })).rejects.toThrow(
 			"'silent.mp4' has no audio stream to transcribe.",
 		);
+	});
+
+	it("reads audio as binary and runs no speech work while stt.transcribeFiles is off", async () => {
+		const audio = path.join(testDir, "memo.wav");
+		await ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", audio);
+		const modelCheck = spyOn(sttDownloader, "isSttModelCached").mockResolvedValue(true);
+		const probe = spyOn(videoUtils, "probeVideo");
+		const transcribe = spyOn(sttClient, "transcribe").mockResolvedValue([]);
+		const tool = new ReadTool(makeSession(testDir, false));
+
+		const text = textOf(await tool.execute("call", { path: audio }));
+		expect(text).toContain("Cannot read binary file");
+		expect(text).toContain("Use ':raw' to read bytes verbatim.");
+		expect(text).not.toContain("transcri");
+		expect(modelCheck).not.toHaveBeenCalled();
+		expect(probe).not.toHaveBeenCalled();
+		expect(transcribe).not.toHaveBeenCalled();
+	});
+
+	it("treats `:transcript` as part of the path while stt.transcribeFiles is off", async () => {
+		const clip = path.join(testDir, "talk.mkv");
+		await ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", clip);
+		spyOn(sttDownloader, "isSttModelCached").mockResolvedValue(true);
+		const transcribe = spyOn(sttClient, "transcribe").mockResolvedValue([]);
+		const tool = new ReadTool(makeSession(testDir, false));
+
+		await expect(tool.execute("call", { path: `${clip}:transcript` })).rejects.toThrow("not found");
+		expect(transcribe).not.toHaveBeenCalled();
 	});
 });
