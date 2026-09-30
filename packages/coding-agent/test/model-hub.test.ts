@@ -198,6 +198,8 @@ function makeProviderEditor(
 		remove?: ProviderEditor["remove"];
 		declared?: string;
 		keepsKeyOnRemove?: boolean;
+		/** The declaration has no provider-level `baseUrl` (a headers-only override, per-model URLs). */
+		withoutBaseUrl?: boolean;
 	} = {},
 ): ProviderEditorHarness {
 	const add = vi.fn(overrides.add ?? (async () => {}));
@@ -208,7 +210,7 @@ function makeProviderEditor(
 		get: id =>
 			id === declared
 				? {
-						baseUrl: "https://gw.example/v1",
+						baseUrl: overrides.withoutBaseUrl ? undefined : "https://gw.example/v1",
 						hasKey: true,
 						keepsKeyOnRemove: overrides.keepsKeyOnRemove ?? false,
 					}
@@ -2329,6 +2331,24 @@ describe("ModelHub custom provider editor", () => {
 		await settle();
 		expect(sidebarCells(hub.render(220)).some(cell => /newgw\s+1$/.test(cell))).toBe(true);
 		expect(normalize(hub.render(220))).not.toContain("Saving provider");
+	});
+
+	test("a provider without an endpoint offers delete but not edit", () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { editor, update } = makeProviderEditor({ withoutBaseUrl: true });
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		const footer = footerLine(hub.render(220));
+		expect(footer).toContain("^D delete");
+		expect(footer).not.toContain("^E edit");
+
+		hub.handleInput(CTRL_E);
+		expect(normalize(hub.render(220))).not.toContain("Edit provider");
+		expect(update).not.toHaveBeenCalled();
+
+		hub.handleInput(CTRL_D);
+		expect(footerLine(hub.render(220))).toContain('Delete provider "custom-gw" and its stored key? Enter confirm');
 	});
 
 	test("a rebound select key keeps navigating instead of opening the add form", () => {
