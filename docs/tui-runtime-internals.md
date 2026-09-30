@@ -35,10 +35,17 @@ always capped, because the terminal is usually gone. Postmortem's
 `tui-restore` runs synchronously on any exit that finds the TUI still running.
 On a signal it is capped: after SIGHUP the terminal is gone, and SIGTERM or
 SIGINT must end the process before postmortem's deadline or a kill, so an
-unsaved session loses the skipped rows there. On a fatal error, or the
-`postmortem.quit(130)` escape hatch after a failed teardown, it flushes as the
-owner's `TUI.setExitFlushProvider()` says, and in full without one;
-InteractiveMode's provider applies the same saved-session condition as quit.
+unsaved session loses the skipped rows there. For every other reason (a fatal
+error, `postmortem.quit()` without a prior stop, as in the escape hatch after a
+failed teardown or the stdout-EPIPE route, or a bare `process.exit()`) it
+flushes as the owner's `TUI.setExitFlushProvider()` says, and in full without
+one. InteractiveMode's provider applies quit's saved-session condition, and
+also flushes in full after a failed teardown or while the session manager has
+a disk failure latched, since the file then lacks the newest entries.
+A partly emitted frontier head that a capped batch leaves out gets its
+separator: the batch opens with a blank. The frame that writes a fresh flush
+batch comes from a second, display-order pass whenever the first one saw
+images, so the image budget demotes the oldest images rather than the newest.
 A handoff stop that resumes with
 `start()` (`TUI.stop({ resuming: true })`: suspend, external editors) keeps the
 full flush, except while a fullscreen overlay holds the screen: it resumes into
@@ -145,4 +152,4 @@ Inline image data and purge commands are emitted before row placements. Active i
 
 ## Shutdown
 
-Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`, passing `{ maxRows: EXIT_FLUSH_MAX_ROWS }` only when the session is saved (the condition the resume hint uses). TUI exits any alternate buffer, asks the provider to Flush eligible finalized history (a capped stop writes only its newest whole blocks within `maxRows` rows; for a saved session `omp --resume` restores the older messages), ends the flush with `endHistoryFlush()`, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.
+Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`, passing `{ maxRows: EXIT_FLUSH_MAX_ROWS }` only when the session is saved (the condition the resume hint uses). TUI exits any alternate buffer, asks the provider to Flush eligible finalized history (a capped stop writes only its newest whole blocks within `maxRows` rows, or the newest block whole when it alone is taller; for a saved session `omp --resume` restores the older messages), ends the flush with `endHistoryFlush()`, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.

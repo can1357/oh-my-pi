@@ -223,6 +223,11 @@ export class ImageBudget {
 		return this.#cap > 0;
 	}
 
+	/** How many images the in-flight or most recent pass observed. */
+	get observedCount(): number {
+		return this.#passIds.length;
+	}
+
 	setRequestRender(requestRender: () => void): void {
 		this.#requestRender = requestRender;
 	}

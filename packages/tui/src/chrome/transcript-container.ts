@@ -93,13 +93,18 @@ interface TranscriptEntry {
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
-	| { batch: HistoryBatch; kind: "commit"; start: number; end: number; dropped: number | undefined }
+	| { batch: HistoryBatch; kind: "commit"; start: number; end: number; dropped: number | undefined; lead: boolean }
 	| { batch: HistoryBatch; kind: "replay" };
 
-/** Where a capped shutdown flush starts, and the older block it measured and left out, if any. */
+/**
+ * Where a capped shutdown flush starts, the older block it measured and left
+ * out, if any, and whether the batch opens with a blank: the separator a partly
+ * emitted frontier head owes the next block when the cap leaves its rest out.
+ */
 interface FlushTail {
 	start: number;
 	dropped: number | undefined;
+	lead: boolean;
 }
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
@@ -605,6 +610,7 @@ export class TranscriptContainer extends Container {
 			if (offered.start > this.#frontier) this.#measuredRows(this.#entries[this.#frontier]!, width);
 			if (offered.dropped !== undefined) this.#measuredRows(this.#entries[offered.dropped]!, width);
 			rows = this.#renderRange(offered.start, offered.end, width, true).rows;
+			if (offered.lead && rows.length > 0) rows = ["", ...rows];
 		} else {
 			rows = this.#renderReplay(width);
 		}
@@ -714,7 +720,7 @@ export class TranscriptContainer extends Container {
 			// rest on the next frames.
 			tail =
 				maxRows === undefined
-					? { start: this.#frontier, dropped: undefined }
+					? { start: this.#frontier, dropped: undefined, lead: false }
 					: this.#flushTail(end, width, maxRows);
 			retirement = this.#renderRange(
 				tail.start,
@@ -731,10 +737,17 @@ export class TranscriptContainer extends Container {
 		}
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: retirement.rows,
+			rows: tail.lead && retirement.rows.length > 0 ? ["", ...retirement.rows] : retirement.rows,
 			kind: "append",
 		};
-		this.#offered = { batch, start: tail.start, end: retirement.end, dropped: tail.dropped, kind: "commit" };
+		this.#offered = {
+			batch,
+			start: tail.start,
+			end: retirement.end,
+			dropped: tail.dropped,
+			lead: tail.lead,
+			kind: "commit",
+		};
 		return batch;
 	}
 
@@ -997,23 +1010,31 @@ export class TranscriptContainer extends Container {
 	 * its last row, moving the cursor up over the rows it reserved, and cut off
 	 * from them it would paint over whatever precedes the batch. The newest
 	 * non-empty block stays whole even when it alone passes `maxRows`: dropping
-	 * it would leave scrollback without the last message. The walk measures
-	 * newest-first and stops at the first block that does not fit (`dropped`), or
-	 * before it once no block could, so older blocks never render, apart from
-	 * the frontier head #peekBatch has already measured.
+	 * it would leave scrollback without the last message. A frontier head that
+	 * progressive append has partly emitted already sits in scrollback without
+	 * its trailing separator; a batch that leaves its rest out opens with that
+	 * blank, and it counts against `maxRows`. The walk measures newest-first and
+	 * stops at the first block that does not fit (`dropped`), or before it once
+	 * no block could, so older blocks never render, apart from the frontier head
+	 * #peekBatch has already measured.
 	 */
 	#flushTail(end: number, width: number, maxRows: number): FlushTail {
+		const head = this.#entries[this.#frontier]!;
+		const headEmitted = head.mode === "appendOnly" && head.emitted > 0;
 		let rows = 0;
 		for (let index = end - 1; index >= this.#frontier; index--) {
 			// A non-empty block adds its rows and one blank: the separator after
-			// it, or the trailing blank.
-			if (rows > 0 && rows + 2 > maxRows) return { start: index + 1, dropped: undefined };
+			// it, or the trailing blank. Any block but the head, as the oldest,
+			// also brings the blank a partly emitted head owes.
+			const lead = headEmitted && index > this.#frontier ? 1 : 0;
+			if (rows > 0 && rows + 2 + lead > maxRows) return { start: index + 1, dropped: undefined, lead: headEmitted };
 			const height = this.#liveBlockRows(this.#entries[index]!, index, width).length;
 			if (height === 0) continue;
-			if (rows > 0 && rows + height + 1 > maxRows) return { start: index + 1, dropped: index };
+			if (rows > 0 && rows + height + 1 + lead > maxRows)
+				return { start: index + 1, dropped: index, lead: headEmitted };
 			rows += height + 1;
 		}
-		return { start: this.#frontier, dropped: undefined };
+		return { start: this.#frontier, dropped: undefined, lead: false };
 	}
 
 	/**

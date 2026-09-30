@@ -191,11 +191,12 @@ export interface TerminalFrameProvider {
 /** How the stop-time history flush writes un-retired rows; what a provider's beginHistoryFlush receives. */
 export interface HistoryFlushOptions {
 	/**
-	 * Write at most this many of the newest un-retired rows, as whole blocks; the
-	 * older eligible blocks retire without being written anywhere. Pass a cap
-	 * only when the process is exiting and either another copy survives (a saved
-	 * session file, which `omp --resume` restores) or a fast exit matters more
-	 * than scrollback (a disconnect, a signal restore).
+	 * Write the newest un-retired rows as whole blocks, at most this many rows,
+	 * except that the newest block is written whole even when it alone is
+	 * taller; the older eligible blocks retire without being written anywhere.
+	 * Pass a cap only when the process is exiting and either another copy
+	 * survives (a saved session file, which `omp --resume` restores) or a fast
+	 * exit matters more than scrollback (a disconnect, a signal restore).
 	 */
 	maxRows?: number;
 }
@@ -1301,12 +1302,13 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * How the transcript flushes when postmortem stops a still-running TUI for a
-	 * fatal error, or for `postmortem.quit()` without a prior stop (an owner's
-	 * teardown-failure escape hatch). Read at that moment: return `{ maxRows }`
-	 * only while another copy of the transcript survives, such as a saved
-	 * session file. Without a provider that restore flushes in full; a signal's
-	 * restore is always capped.
+	 * How the transcript flushes when postmortem stops a still-running TUI for
+	 * any reason but a signal: a fatal error, `postmortem.quit()` without a
+	 * prior stop (an owner's teardown-failure escape hatch, or the stdout-EPIPE
+	 * route), or a bare `process.exit()`. Read at that moment: return
+	 * `{ maxRows }` only while another copy of the transcript survives, such as
+	 * a saved session file. Without a provider that restore flushes in full; a
+	 * signal's restore is always capped.
 	 */
 	setExitFlushProvider(provider: (() => HistoryFlushOptions) | undefined): void {
 		this.#exitFlushProvider = provider;
@@ -1463,9 +1465,10 @@ export class TUI extends Container {
 		// Postmortem runs this synchronously on any exit that finds the TUI still
 		// running. A signal caps it: after SIGHUP the terminal is gone, and
 		// SIGTERM/SIGINT want the process gone before postmortem's deadline or a
-		// kill. A fatal error or `postmortem.quit()` without a prior stop (the
-		// teardown-failure escape hatch) flushes as the exit flush provider says,
-		// in full without one: scrollback may be the only copy of what led there.
+		// kill. Every other reason (a fatal error, `postmortem.quit()` without a
+		// prior stop, a bare `process.exit()`) flushes as the exit flush provider
+		// says, in full without one: scrollback may be the only copy of what led
+		// there.
 		this.#cancelPostmortemRestore = postmortem.register("tui-restore", reason =>
 			this.stop(
 				reason === postmortem.Reason.SIGHUP ||
@@ -2282,12 +2285,22 @@ export class TUI extends Container {
 			while (true) {
 				let plan: TerminalFramePlan;
 				let viewport: string[];
+				let passes = 0;
+				// The pass that composes a fresh batch measures blocks out of display
+				// order (a capped flush walks newest-first), so when it saw images the
+				// budget may have demoted the newest ones; the frame that writes the
+				// batch then comes from a later pass, which re-renders the offer in
+				// display order.
 				do {
 					this.#imageBudget.beginPass();
 					plan = provider.renderFrame({ columns: width, rows: height });
 					viewport = Array.from(plan.viewport);
 					if (viewport.length > height) viewport = viewport.slice(0, height);
-				} while (this.#imageBudget.endPass());
+					passes++;
+				} while (
+					this.#imageBudget.endPass() ||
+					(passes === 1 && plan.history !== undefined && this.#imageBudget.observedCount > 0)
+				);
 				if (plan.history === undefined) return;
 				const acceptedBefore = this.#acceptedHistoryBatchId;
 				this.#emitPlanFrame(width, height, viewport, plan.history, provider);

@@ -2631,6 +2631,14 @@ export class SessionManager {
 		return !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);
 	}
 
+	/**
+	 * Whether a disk failure is latched: the session file stopped being written,
+	 * and the failed entry and any later ones live only in memory.
+	 */
+	hasPersistenceFailure(): boolean {
+		return this.#diskFailure !== undefined;
+	}
+
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);

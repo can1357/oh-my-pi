@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
@@ -539,18 +540,22 @@ describe("Composer prepaint", () => {
 
 	it("flushes a fatal-error or failed-teardown restore as a quit would, and caps a hangup's", async () => {
 		// Postmortem restores the terminal when the process ends with the TUI still
-		// running. Only a saved session's file keeps the rows a cap skips; after a
-		// hangup no terminal is left to show them.
+		// running. Only a saved session's file keeps the rows a cap skips, and only
+		// while it is still being written; after a hangup no terminal is left to
+		// show them.
 		const blocks = 1_100; // one row and one blank each: 2,200 rows, over the cap
 		const capped = EXIT_FLUSH_MAX_ROWS / 2;
 		const cases = [
-			{ saved: false, reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: blocks },
-			// `postmortem.quit()` after a failed teardown, which finds the TUI running.
-			{ saved: false, reason: postmortem.Reason.MANUAL, kept: blocks },
-			{ saved: true, reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: capped },
-			{ saved: false, reason: postmortem.Reason.SIGHUP, kept: capped },
-		];
-		for (const { saved, reason, kept } of cases) {
+			{ saved: false, state: "healthy", reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: blocks },
+			{ saved: true, state: "healthy", reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: capped },
+			// The escape hatch: `postmortem.quit()` after a failed teardown, which
+			// quits without writing the session log and finds the TUI running.
+			{ saved: true, state: "teardown failed", reason: postmortem.Reason.MANUAL, kept: blocks },
+			// After a latched disk failure the newest entries live only in memory.
+			{ saved: true, state: "disk failure", reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: blocks },
+			{ saved: false, state: "healthy", reason: postmortem.Reason.SIGHUP, kept: capped },
+		] as const;
+		for (const { saved, state, reason, kept } of cases) {
 			const callbacks = new Map<string, (reason: postmortem.Reason) => void | Promise<void>>();
 			vi.spyOn(postmortem, "register").mockImplementation((id, callback) => {
 				callbacks.set(id, callback);
@@ -580,7 +585,28 @@ describe("Composer prepaint", () => {
 			for (let i = 0; i < blocks; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
 			lease.composer.setRuntimeChildren([transcript]);
 			try {
-				await callbacks.get("tui-restore")!(reason);
+				if (state === "disk failure") {
+					// #12238: an outside write to the file makes the next full rewrite
+					// refuse to clobber it, and the manager latches that failure.
+					const sessionFile = testSession.session.sessionManager.getSessionFile()!;
+					await fs.appendFile(sessionFile, "outside write\n");
+					await testSession.session.sessionManager.rewriteEntries().catch(() => undefined);
+				}
+				if (state === "teardown failed") {
+					// dispose() begins, then fails to write the session log.
+					vi.spyOn(testSession.session, "dispose").mockImplementation(async () => {
+						testSession.session.beginDispose();
+						throw new Error("session log not written");
+					});
+					vi.spyOn(mode, "showError").mockImplementation(() => {});
+					vi.spyOn(postmortem, "quit").mockImplementation(async () => {
+						await callbacks.get("tui-restore")?.(reason);
+					});
+					await mode.shutdown(); // the teardown fails and arms the escape hatch
+					await mode.shutdown();
+				} else {
+					await callbacks.get("tui-restore")!(reason);
+				}
 				await terminal.flush();
 				const rows = terminal
 					.getScrollBuffer()
@@ -590,8 +616,12 @@ describe("Composer prepaint", () => {
 			} finally {
 				mode.stop();
 				lease.dispose();
-				await testSession.cleanup();
+				// The real dispose, not the failing spy, releases the session.
 				vi.restoreAllMocks();
+				// Closing rethrows the latched disk failure; nothing else may fail here.
+				await testSession.cleanup().catch(error => {
+					if (state !== "disk failure") throw error;
+				});
 			}
 		}
 	});

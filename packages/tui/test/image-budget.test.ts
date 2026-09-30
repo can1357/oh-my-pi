@@ -1605,6 +1605,65 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("never writes an older image live while a newer one is demoted at a stop", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		setKittyGraphics({ unicodePlaceholders: true });
+		const renderScheduler = {
+			now: () => 0,
+			scheduleImmediate: (callback: () => void) => callback(),
+			scheduleRender: (callback: () => void) => {
+				callback();
+				return { cancel() {} };
+			},
+		};
+		try {
+			// The live frame shows more images than the default cap of 8, so the budget
+			// demotes the oldest ones. A capped flush walks newest-first; the frame that
+			// writes the batch must still demote in display order.
+			for (const maxRows of [18, undefined]) {
+				const term = new VirtualTerminal(40, 40, 1_000);
+				const composer = new Composer({
+					terminal: term,
+					tuiOptions: { renderScheduler },
+					preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+				});
+				const transcript = new TranscriptContainer();
+				composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+				composer.start({ playWelcomeIntro: false });
+				transcript.addChild(new Text("head", 0, 0));
+				for (let i = 0; i < 12; i++) {
+					transcript.addChild(new Text(`label-${i}`, 0, 0));
+					transcript.addChild(
+						new Image(
+							BASE64_ONE_PIXEL_PNG,
+							"image/png",
+							{ fallbackColor: text => text },
+							{ maxWidthCells: 1, maxHeightCells: 1, budget: composer.ui.imageBudget, imageKey: `image-${i}` },
+							{ widthPx: 10, heightPx: 10 },
+						),
+					);
+				}
+				composer.ui.requestRender();
+				await term.flush();
+				composer.ui.stop(maxRows === undefined ? {} : { maxRows });
+				await term.flush();
+				const rows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+				// Each label row is followed by a blank and its image's row.
+				const written = rows.flatMap((row, index) => {
+					if (!/^label-\d+$/.test(row)) return [];
+					const image = rows[index + 2] ?? "";
+					return [image.includes(KITTY_PLACEHOLDER) ? "live" : image.includes("[Image:") ? "text" : "missing"];
+				});
+				expect(written).not.toContain("missing");
+				const firstLive = written.indexOf("live");
+				expect(firstLive).toBeGreaterThanOrEqual(0);
+				expect(written.slice(firstLive).every(image => image === "live")).toBe(true);
+			}
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
 	it("does not demote transcript images under a closing overlay's suppression threshold", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		const term = new VirtualTerminal(40, 12);

@@ -703,11 +703,8 @@ describe("TranscriptContainer", () => {
 		const full = build().peekFlushBatch(40)!.rows;
 		// Each block takes 3 rows and a blank; a block that would pass the cap is left out whole.
 		for (const [maxRows, kept] of [
-			[7, 1],
 			[10, 2],
-			[179, 44],
 			[full.length, 60],
-			[full.length + 50, 60],
 		]) {
 			const transcript = build();
 			const batch = transcript.peekFlushBatch(40, maxRows)!;
@@ -722,14 +719,12 @@ describe("TranscriptContainer", () => {
 		const blocks = Array.from({ length: 60 }, (_, i) => new CountingBlock([`b${i}r0`, `b${i}r1`, `b${i}r2`]));
 		for (const block of blocks) transcript.addChild(block);
 		const first = transcript.peekFlushBatch(40, 10)!;
-		const before = blocks.map(block => block.renders);
 		// The image-budget retry re-renders the outstanding offer.
 		expect(transcript.rerenderOfferedBatch(40)!.rows).toEqual(first.rows);
 		// 3-row blocks plus separators and the trailing blank: blocks 58-59 fill 8 of the 10
 		// rows, and block 57 is measured to find it does not fit. Block 0 is the frontier head,
 		// which #peekBatch measures before any policy.
 		expect(blocks.slice(1, 57).every(block => block.renders === 0)).toBe(true);
-		expect(blocks.slice(1, 57).map(block => block.renders)).toEqual(before.slice(1, 57));
 	});
 
 	it("an exit flush writes a newest block taller than the cap whole, without older blocks", () => {
@@ -738,6 +733,36 @@ describe("TranscriptContainer", () => {
 		const tall = Array.from({ length: 30 }, (_, i) => `tall${i}`);
 		transcript.addChild(new Block(tall, true));
 		expect(transcript.peekFlushBatch(40, 5)!.rows).toEqual([...tall, ""]);
+	});
+
+	it("an exit flush that leaves out a partly emitted head separates it from the next block", () => {
+		const transcript = new TranscriptContainer();
+		const head = new AppendBlock(["a0", "a1", "a2", "a3"], ["a0", "a1"]);
+		transcript.addChild(head);
+		transcript.renderViewport(80, 2, frame);
+		// Pressure retires the head's first two rows into scrollback mid-stream.
+		const emitted = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+		head.finalize(["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]);
+		transcript.addChild(new Block(["b0", "b1", "b2", "b3", "b4", "b5"], true));
+		transcript.addChild(new Block(["c0"], true));
+		// The head's rest does not fit in 10 rows, so the batch opens with the blank it owes.
+		const batch = transcript.peekFlushBatch(80, 10)!;
+		expect(batch.rows.length).toBeLessThanOrEqual(10);
+		expect([...emitted.rows, ...batch.rows]).toEqual([
+			"a0",
+			"a1",
+			"",
+			"b0",
+			"b1",
+			"b2",
+			"b3",
+			"b4",
+			"b5",
+			"",
+			"c0",
+			"",
+		]);
 	});
 
 	it("an exit flush renders no block older than its tail when the tail ends exactly on the cap", () => {

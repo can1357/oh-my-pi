@@ -6623,10 +6623,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * How the transcript flushes when this session hands the terminal back at
 	 * exit: capped only when the session file keeps what the cap skips (the
 	 * resume hint's condition); otherwise native scrollback is the transcript's
-	 * only copy, so it gets the full flush.
+	 * only copy, so it gets the full flush. A failed teardown (the escape hatch
+	 * quits without writing the log) or a latched disk failure means the file
+	 * exists but lacks the newest entries, so both flush in full.
 	 */
 	#exitFlush(): HistoryFlushOptions {
-		return this.#resumableSessionId() === undefined ? {} : { maxRows: EXIT_FLUSH_MAX_ROWS };
+		if (
+			this.#teardownFailed ||
+			this.sessionManager.hasPersistenceFailure() ||
+			this.#resumableSessionId() === undefined
+		) {
+			return {};
+		}
+		return { maxRows: EXIT_FLUSH_MAX_ROWS };
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
