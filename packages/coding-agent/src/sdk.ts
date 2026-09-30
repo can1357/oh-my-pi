@@ -194,6 +194,7 @@ import {
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { getRestorableSessionModels } from "./session/session-context";
+import type { AdvisorScope } from "./session/session-advisors";
 import { SessionManager } from "./session/session-manager";
 import {
 	collectMountedMCPToolRoutes,
@@ -502,6 +503,8 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 
 // Types
 export interface CreateAgentSessionOptions {
+	/** Parent session's runtime advisor veto; never persisted in Settings. */
+	advisorScope?: AdvisorScope;
 	/** Working directory for project-local discovery. Default: getProjectDir() */
 	cwd?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute or cwd-relative. */
@@ -2215,6 +2218,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getAdvisorScope: () => session?.advisorScope,
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
@@ -4426,6 +4430,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorSharedMaxNotesPerUpdate: discoveredAdvisors.sharedMaxNotesPerUpdate,
 			advisorConfigs: discoveredAdvisors.advisors,
+			advisorScope: options.advisorScope,
 			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,

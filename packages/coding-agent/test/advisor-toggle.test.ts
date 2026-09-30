@@ -16,6 +16,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionProviderBoundary } from "../src/session/session-provider-boundary";
 import { __resetDirsFromEnvForTests, getProjectAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function restoreEnv(key: string, value: string | undefined): void {
@@ -29,6 +30,7 @@ import * as advisorModule from "../src/advisor";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 describe("AgentSession advisor toggle", () => {
@@ -464,6 +466,263 @@ describe("AgentSession advisor toggle", () => {
 		expect(sessionB.isAdvisorEnabled()).toBe(true);
 		expect(sessionB.isAdvisorActive()).toBe(true);
 	});
+	it("applies explicit parent off to live, new and restored opted-in descendants only", async () => {
+		const children: AgentSession[] = [];
+		const { promise: reviewStarted, resolve: signalReviewStarted } = Promise.withResolvers<AbortSignal>();
+		const advisorMock = createMockModel({
+			handler: (_context, options) => {
+				if (!options?.signal) throw new Error("Expected cancellable advisor request");
+				signalReviewStarted(options.signal);
+				return { delayMs: 60_000, content: ["late advice"] };
+			},
+		});
+		const makeChild = (parent?: AgentSession, enabled = true): AgentSession => {
+			const child = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"advisor.enabled": enabled,
+					modelRoles: { advisor: `${model.provider}/${model.id}` },
+				}),
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: advisorMock.stream,
+				advisorScope: parent?.advisorScope,
+			});
+			children.push(child);
+			return child;
+		};
+		try {
+			const live = makeChild(session);
+			const nested = makeChild(live);
+			const unrelated = makeChild();
+			expect(live.isAdvisorActive()).toBe(true);
+			const reviewing = live.getAdvisorAgent()!.prompt("review the current task");
+			const reviewSignal = await reviewStarted;
+			session.setAdvisorEnabled(false);
+			expect(reviewSignal.aborted).toBe(true);
+			await reviewing;
+			expect(live.isAdvisorActive()).toBe(false);
+			expect(nested.isAdvisorActive()).toBe(false);
+			expect(live.getAdvisorStatusOverview()).toMatchObject({
+				configured: false,
+				advisors: [{ status: "paused" }],
+			});
+			expect(live.formatAdvisorStatus()).toBe('Advisor "default" is paused.');
+			expect(unrelated.isAdvisorActive()).toBe(true);
+			expect(live.setAdvisorEnabled(true)).toBe(false);
+			expect(live.isAdvisorSuppressedByParent()).toBe(true);
+			expect(nested.isAdvisorSuppressedByParent()).toBe(true);
+			expect(unrelated.isAdvisorSuppressedByParent()).toBe(false);
+			const fresh = makeChild(session);
+			expect(fresh.isAdvisorActive()).toBe(false);
+			await live.dispose();
+			const restored = makeChild(session);
+			expect(restored.isAdvisorActive()).toBe(false);
+			const optedOut = makeChild(session, false);
+			const explicitlyOff = makeChild(session);
+			explicitlyOff.setAdvisorEnabled(false);
+			const toggledOff = makeChild(session);
+			expect(toggledOff.toggleAdvisorEnabled()).toBe(false);
+			session.setAdvisorEnabled(true);
+			expect(fresh.isAdvisorActive()).toBe(true);
+			expect(fresh.isAdvisorSuppressedByParent()).toBe(false);
+			expect(restored.isAdvisorActive()).toBe(true);
+			expect(nested.isAdvisorActive()).toBe(true);
+			expect(live.isAdvisorActive()).toBe(false);
+			expect(live.getAdvisorStatusOverview()).toMatchObject({
+				configured: true,
+				advisors: [{ status: "paused" }],
+			});
+			expect(live.formatAdvisorStatus()).toBe('Advisor "default" is paused.');
+			expect(optedOut.isAdvisorActive()).toBe(false);
+			expect(explicitlyOff.isAdvisorActive()).toBe(false);
+			expect(toggledOff.isAdvisorActive()).toBe(false);
+			expect(toggledOff.toggleAdvisorEnabled()).toBe(true);
+			expect(toggledOff.isAdvisorActive()).toBe(true);
+			expect(cfgAdvisorEnabled.get(session.settings)).toBe(false);
+		} finally {
+			await Promise.all(children.map(child => child.dispose()));
+		}
+	});
+	it.each([false, true])("cancels inherited advice awaiting normalization (streaming=%s)", async streaming => {
+		session.setAdvisorEnabled(true);
+		const child = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"advisor.enabled": true,
+				modelRoles: { advisor: `${model.provider}/${model.id}` },
+			}),
+			modelRegistry,
+			advisorTools: [],
+			advisorScope: session.advisorScope,
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const normalization = vi
+			.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages")
+			.mockImplementation(async message => {
+				entered.resolve();
+				await release.promise;
+				return message;
+			});
+		const send = child.sendCustomMessage.bind(child);
+		let delivery: Promise<boolean> | undefined;
+		const sendSpy = vi.spyOn(child, "sendCustomMessage").mockImplementation((message, options) => {
+			delivery = send(message, options);
+			return delivery;
+		});
+		try {
+			child.agent.state.isStreaming = streaming;
+			const tool = child.getAdvisorAgent()?.state.tools.find(tool => tool.name === "advise");
+			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Missing advise tool");
+			await tool.execute("scope-race", {
+				note: "The asynchronous delivery can resurrect cancelled work.",
+				severity: "blocker",
+			});
+			await entered.promise;
+			session.setAdvisorEnabled(false);
+			session.setAdvisorEnabled(true);
+			release.resolve();
+			await delivery;
+			expect(child.agent.peekSteeringQueue()).toEqual([]);
+			expect(child.agent.state.messages).toEqual([]);
+			expect(child.agent.state.isStreaming).toBe(streaming);
+		} finally {
+			release.resolve();
+			normalization.mockRestore();
+			sendSpy.mockRestore();
+			child.agent.state.isStreaming = false;
+			await child.dispose();
+		}
+	});
+	it("does not start an advisor turn when suppression lands during the usage preflight", async () => {
+		session.setAdvisorEnabled(true);
+		const child = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"advisor.enabled": true,
+				modelRoles: { advisor: `${model.provider}/${model.id}` },
+			}),
+			modelRegistry,
+			advisorTools: [],
+			advisorScope: session.advisorScope,
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const preflight = vi
+			.spyOn(TurnRecovery.prototype, "maybeApplyUsageAwareFallback")
+			.mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				return false;
+			});
+		const prompt = vi.spyOn(child.agent, "prompt");
+		const send = child.sendCustomMessage.bind(child);
+		let delivery: Promise<boolean> | undefined;
+		const sendSpy = vi.spyOn(child, "sendCustomMessage").mockImplementation((message, options) => {
+			delivery = send(message, options);
+			return delivery;
+		});
+		try {
+			const tool = child.getAdvisorAgent()?.state.tools.find(tool => tool.name === "advise");
+			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Missing advise tool");
+			await tool.execute("preflight-race", {
+				note: "A turn started after the preflight resurrects cancelled work.",
+				severity: "blocker",
+			});
+			await entered.promise;
+			session.setAdvisorEnabled(false);
+			session.setAdvisorEnabled(true);
+			release.resolve();
+			await delivery;
+			expect(prompt).not.toHaveBeenCalled();
+			expect(child.agent.state.messages).toEqual([]);
+		} finally {
+			release.resolve();
+			preflight.mockRestore();
+			prompt.mockRestore();
+			sendSpy.mockRestore();
+			await child.dispose();
+		}
+	});
+	it("removes inherited advisor queue entries while retaining user steering", async () => {
+		session.setAdvisorEnabled(true);
+		const child = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"advisor.enabled": true,
+				modelRoles: { advisor: `${model.provider}/${model.id}` },
+			}),
+			modelRegistry,
+			advisorTools: [],
+			advisorScope: session.advisorScope,
+		});
+		try {
+			const advice = {
+				role: "custom",
+				customType: "advisor",
+				content: "queued concern",
+				display: true,
+				timestamp: 1,
+			} as AgentMessage;
+			const userSteer: AgentMessage = { role: "user", content: "queued user request", timestamp: 2 };
+			const userFollowUp: AgentMessage = { role: "user", content: "next user request", timestamp: 3 };
+			child.agent.steer(advice);
+			child.agent.steer(userSteer);
+			child.agent.followUp(advice);
+			child.agent.followUp(userFollowUp);
+			expect(child.agent.peekSteeringQueue()).toEqual([advice, userSteer]);
+			expect(child.agent.peekFollowUpQueue()).toEqual([advice, userFollowUp]);
+			session.setAdvisorEnabled(false);
+			expect(child.agent.peekSteeringQueue()).toEqual([userSteer]);
+			expect(child.agent.peekFollowUpQueue()).toEqual([userFollowUp]);
+		} finally {
+			await child.dispose();
+		}
+	});
+	it("forwards an inherited advisor scope through SDK session construction", async () => {
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"advisor.enabled": true,
+			"compaction.enabled": false,
+		});
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings,
+			model,
+			advisorScope: session.advisorScope,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			workspaceTree: {
+				rootPath: tempDir.path(),
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			expect(result.session.isAdvisorActive()).toBe(true);
+			session.setAdvisorEnabled(false);
+			expect(result.session.isAdvisorActive()).toBe(false);
+		} finally {
+			await result.session.dispose();
+		}
+	});
 
 	it("exposes provider sessionId on live advisor stats", () => {
 		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
@@ -597,6 +856,127 @@ describe("AgentSession advisor toggle", () => {
 		const advisorPrompt = advisor.state.systemPrompt.join("\n");
 		expect(advisorPrompt).toContain("Keep advice concrete.");
 		expect(advisorPrompt).toContain("Review module boundaries.");
+	});
+	it("restarts only the advisor whose configuration changed", () => {
+		enableAdvisor();
+		const roster = [{ name: "Security" }, { name: "Testing", instructions: "Require regression coverage." }];
+		expect(session.applyAdvisorConfigs(roster, undefined)).toBe(2);
+		const before = session.getAdvisorAgentsByName();
+
+		expect(
+			session.applyAdvisorConfigs(
+				[roster[0]!, { name: "Testing", instructions: "Require regression coverage and a failing test first." }],
+				undefined,
+			),
+		).toBe(2);
+		const after = session.getAdvisorAgentsByName();
+
+		expect(after.get("Security")).toBe(before.get("Security"));
+		expect(after.get("Testing")).not.toBe(before.get("Testing"));
+		expect(after.get("Testing")?.state.systemPrompt.join("\n")).toContain("a failing test first");
+	});
+	it("keeps every advisor when the roster is applied unchanged or only reordered", () => {
+		enableAdvisor();
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+		const before = session.getAdvisorAgentsByName();
+
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+		expect(session.getAdvisorAgentsByName().get("Security")).toBe(before.get("Security"));
+		expect(session.getAdvisorAgentsByName().get("Testing")).toBe(before.get("Testing"));
+
+		expect(session.applyAdvisorConfigs([{ name: "Testing" }, { name: "Security" }], undefined)).toBe(2);
+		expect(session.getAdvisorAgentsByName().get("Security")).toBe(before.get("Security"));
+		expect(session.getAdvisorAgentsByName().get("Testing")).toBe(before.get("Testing"));
+	});
+	it("restarts every advisor when the shared instructions change, since they feed each prompt", () => {
+		enableAdvisor();
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], "Be brief.")).toBe(2);
+		const before = session.getAdvisorAgentsByName();
+
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], "Be thorough.")).toBe(2);
+		const after = session.getAdvisorAgentsByName();
+
+		expect(after.get("Security")).not.toBe(before.get("Security"));
+		expect(after.get("Testing")).not.toBe(before.get("Testing"));
+		expect(after.get("Security")?.state.systemPrompt.join("\n")).toContain("Be thorough.");
+	});
+	it("stops only the advisor removed from the roster and keeps the rest running", () => {
+		enableAdvisor();
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+		const before = session.getAdvisorAgentsByName();
+
+		expect(session.applyAdvisorConfigs([{ name: "Testing" }], undefined)).toBe(1);
+		const after = session.getAdvisorAgentsByName();
+
+		expect([...after.keys()]).toEqual(["Testing"]);
+		expect(after.get("Testing")).toBe(before.get("Testing"));
+	});
+	it("does not hand a surviving slug to a different advisor when names collide", () => {
+		enableAdvisor();
+		// "A B" and "A-B" both slugify to "a-b"; the second is suffixed, so the slug follows roster order.
+		expect(
+			session.applyAdvisorConfigs(
+				[
+					{ name: "A B", instructions: "first" },
+					{ name: "A-B", instructions: "second" },
+				],
+				undefined,
+			),
+		).toBe(2);
+		const before = session.getAdvisorAgentsByName();
+
+		// Dropping the first moves "A-B" onto the slug "a-b" that "A B" held. It is a different
+		// advisor, so it must not inherit the old runtime just because the slug matches.
+		expect(session.applyAdvisorConfigs([{ name: "A-B", instructions: "second" }], undefined)).toBe(1);
+		const after = session.getAdvisorAgentsByName();
+
+		expect([...after.keys()]).toEqual(["A-B"]);
+		expect(after.get("A-B")).not.toBe(before.get("A B"));
+		expect(after.get("A-B")?.state.systemPrompt.join("\n")).toContain("second");
+		expect(after.get("A-B")?.state.systemPrompt.join("\n")).not.toContain("first");
+	});
+	it("keeps a surviving advisor's queued note when another advisor restarts or is removed", async () => {
+		enableAdvisor();
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+
+		const tool = session
+			.getAdvisorAgentsByName()
+			.get("Security")
+			?.state.tools.find(candidate => candidate.name === "advise");
+		if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Missing advise tool");
+		// While the primary streams, a nit is queued on the shared yield queue as an aside.
+		session.agent.state.isStreaming = true;
+		try {
+			await tool.execute("kept-advisor", { note: "Check the retry budget before merging.", severity: "nit" });
+		} finally {
+			session.agent.state.isStreaming = false;
+		}
+
+		// Unsubscribing the shared consumer rejects and drops every queued advisor entry, so a partial
+		// stop that tears it down would lose the note this still-running advisor already raised.
+		expect(
+			session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing", instructions: "changed" }], undefined),
+		).toBe(2);
+		expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+
+		const cards = session.yieldQueue
+			.drainLazy()
+			.map(build => build())
+			.filter(message => message?.role === "custom" && message.customType === "advisor");
+		expect(cards.filter(card => JSON.stringify(card).includes("Check the retry budget"))).toHaveLength(1);
+	});
+	it("keeps a running advisor's own status through a roster apply that restarts another", () => {
+		enableAdvisor();
+		expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+		expect(
+			session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing", instructions: "changed" }], undefined),
+		).toBe(2);
+
+		const overview = session.getAdvisorStatusOverview();
+		expect(overview.advisors.map(advisor => [advisor.name, advisor.status])).toEqual([
+			["Security", "running"],
+			["Testing", "running"],
+		]);
 	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();

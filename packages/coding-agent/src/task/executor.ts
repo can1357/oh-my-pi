@@ -423,6 +423,8 @@ export interface ExecutorOptions {
 	credentialSourceSessionId?: string;
 	worktree?: string;
 	agent: AgentDefinition;
+	/** Live parent advisor veto, retained across parking and revival. */
+	advisorScope?: CreateAgentSessionOptions["advisorScope"];
 	task: string;
 	assignment?: string;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
@@ -3978,6 +3980,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// the launch-time pooled instructions against an ordinary runtime.
 				forRevive = false,
 			): CreateAgentSessionOptions => ({
+				advisorScope: forRevive
+					? (AgentRegistry.global().inheritedAdvisorScope(options.parentAgentId) ?? options.advisorScope)
+					: options.advisorScope,
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,

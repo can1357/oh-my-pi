@@ -323,6 +323,24 @@ export class AgentRegistry {
 		return this.#refs.get(id);
 	}
 
+	/**
+	 * The nearest live ancestor's advisor scope, starting at `fromId` and walking up `parentId`. A cycle in the
+	 * parent chain ends the walk instead of looping. Callers supply their own fallback when none is found.
+	 */
+	inheritedAdvisorScope(fromId: string | undefined): AgentSession["advisorScope"] | undefined {
+		const seen = new Set<string>();
+		let id = fromId;
+		while (id && !seen.has(id)) {
+			seen.add(id);
+			const ref = this.#refs.get(id);
+			if (!ref) return undefined;
+			const scope = ref.session?.advisorScope;
+			if (scope) return scope;
+			id = ref.parentId;
+		}
+		return undefined;
+	}
+
 	list(): AgentRef[] {
 		return [...this.#refs.values()];
 	}

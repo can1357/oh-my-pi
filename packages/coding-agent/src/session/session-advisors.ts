@@ -322,9 +322,42 @@ interface AdvisorRuntimeDescriptor {
 	signature: string;
 }
 
+/** Runtime-only veto inherited by descendants, independent of persisted advisor opt-ins. */
+export class AdvisorScope {
+	#suppressed = false;
+	readonly #listeners = new Set<() => void>();
+
+	constructor(readonly parent?: AdvisorScope) {}
+
+	get suppressed(): boolean {
+		return this.#suppressed || (this.parent?.suppressed ?? false);
+	}
+
+	get suppressedByParent(): boolean {
+		return !this.#suppressed && (this.parent?.suppressed ?? false);
+	}
+
+	setSuppressed(suppressed: boolean): boolean {
+		if (this.#suppressed === suppressed) return false;
+		this.#suppressed = suppressed;
+		for (const listener of this.#listeners) listener();
+		return true;
+	}
+
+	subscribe(listener: () => void): () => void {
+		this.#listeners.add(listener);
+		const unsubscribeParent = this.parent?.subscribe(listener);
+		return () => {
+			this.#listeners.delete(listener);
+			unsubscribeParent?.();
+		};
+	}
+}
+
 /** Inputs that configure the advisor roster owned by a session. */
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
+	parentScope?: AdvisorScope;
 	tools?: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
@@ -376,6 +409,7 @@ export interface AdvisorMessageDeliveryOptions {
 	deliverAs?: "steer" | "followUp" | "nextTurn";
 	queueChipText?: string;
 	acceptTerminalEmptyStop?: boolean;
+	signal?: AbortSignal;
 }
 
 /** Session capabilities borrowed by the advisor controller. */
@@ -451,8 +485,14 @@ export interface AdvisorStatusOverviewEntry {
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
-	#advisorEnabled: boolean;
-	#advisorTools: AgentTool[] | undefined;
+	#advisorRequested: boolean;
+	readonly scope: AdvisorScope;
+	get #advisorEnabled(): boolean {
+		return this.#advisorRequested && !this.scope.suppressed;
+	}
+	readonly #unsubscribeScope: () => void;
+	#deliveryAbort = new AbortController();
+	#advisorTools: SessionAdvisorsOptions["tools"];
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
 	#advisorCreateEditTool: SessionAdvisorsOptions["createEditTool"];
 	#advisorGetToolContext: SessionAdvisorsOptions["getToolContext"];
@@ -492,7 +532,8 @@ export class SessionAdvisors {
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
-		this.#advisorEnabled = options.enabled;
+		this.#advisorRequested = options.enabled;
+		this.scope = new AdvisorScope(options.parentScope);
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
 		this.#advisorCreateEditTool = options.createEditTool;
@@ -507,6 +548,7 @@ export class SessionAdvisors {
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
+		this.#unsubscribeScope = this.scope.subscribe(() => this.#applyAdvisorEnabled());
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -589,11 +631,6 @@ export class SessionAdvisors {
 		return this.#buildAdvisorRuntime(seedToCurrent);
 	}
 
-	/** Stops every advisor runtime and starts recorder shutdown. */
-	stopRuntime(): void {
-		this.#stopAdvisorRuntime();
-	}
-
 	/**
 	 * Pause advisor work while old-session recorder feeds remain attached, then
 	 * detach only after any active prompt has settled.
@@ -613,6 +650,10 @@ export class SessionAdvisors {
 			closes.push(advisor.recorderClosed);
 		}
 		await Promise.all(closes);
+	}
+	dispose(): void {
+		this.#unsubscribeScope();
+		if (this.#advisors.length > 0) this.#stopAdvisorRuntime();
 	}
 
 	/** Reattach recorder feeds and resume work after a rolled-back or preserving transition. */
@@ -1021,15 +1062,30 @@ export class SessionAdvisors {
 		return true;
 	}
 
-	#buildAdvisorRuntime(seedToCurrent = false, emitWarnings = true): boolean {
+	/**
+	 * Build advisor runtimes from the current roster. With `keep`, advisors already running whose slug
+	 * AND signature still match a descriptor are reused as they are (context, recorder, review state),
+	 * and only the missing ones are constructed; the roster order is preserved either way. Matching on
+	 * the slug alone would be wrong: a slug is derived from the name and suffixed on collision, so it can
+	 * move to a different advisor when the roster changes.
+	 */
+	#buildAdvisorRuntime(
+		seedToCurrent = false,
+		emitWarnings = true,
+		keep?: ReadonlyMap<string, ActiveAdvisor>,
+	): boolean {
 		if (this.#host.isDisposed()) return false;
-		if (this.#advisors.length > 0) return true;
+		if (this.#advisors.length > 0 && !keep) return true;
 		if (!this.#advisorEnabled) return false;
+		this.#advisors = [];
 
 		// Rebuild the status map from scratch so removed/renamed advisors don't
 		// leave stale entries. #resolveAdvisorRuntimeDescriptors populates every
 		// entry (`paused`/`no_model`/`running`) in roster order; the build loop
-		// below confirms `running` for successfully built advisors.
+		// below confirms `running` for successfully built advisors. A reused advisor keeps
+		// the status it has (`quota_exhausted`/`error` recover on their own), so capture
+		// it before the map is cleared.
+		const liveStatuses = new Map(this.#advisorStatuses);
 		this.#advisorStatuses.clear();
 		const descriptors = this.#resolveAdvisorRuntimeDescriptors(emitWarnings);
 
@@ -1049,6 +1105,15 @@ export class SessionAdvisors {
 				: resolveModelServiceTier(advisorTierMap, model);
 
 		for (const descriptor of descriptors) {
+			const kept = keep?.get(descriptor.slug);
+			if (kept && kept.signature === descriptor.signature) {
+				this.#advisorStatuses.set(
+					descriptor.slug,
+					liveStatuses.get(descriptor.slug) ?? { name: descriptor.name, status: "running" },
+				);
+				this.#advisors.push(kept);
+				continue;
+			}
 			const {
 				config,
 				slug,
@@ -1529,7 +1594,7 @@ export class SessionAdvisors {
 		void this.#host
 			.sendCustomMessage(
 				{ customType: "advisor", content, display: true, attribution: "agent", details },
-				{ deliverAs: "steer", triggerTurn: true },
+				{ deliverAs: "steer", triggerTurn: true, signal: this.#deliveryAbort.signal },
 			)
 			.catch(err => logger.debug("advisor delivery failed", { err: String(err) }));
 	}
@@ -1544,12 +1609,23 @@ export class SessionAdvisors {
 		}
 	}
 
-	#stopAdvisorRuntime(): void {
+	/**
+	 * Stop advisor runtimes. With no argument every advisor stops. With a set of slugs only those
+	 * stop and the rest keep running with their context: the shared yield-queue registration stays
+	 * while any advisor survives (a second registration would deliver every note twice), and the
+	 * close promise accumulates so an earlier close is still awaited.
+	 */
+	#stopAdvisorRuntime(only?: ReadonlySet<string>): void {
 		// Detach each recorder feed BEFORE aborting its advisor agent: dispose() aborts
 		// the loop, and an abort emits a final `message_end` we must not enqueue against
 		// a closing recorder (it would reopen and resurrect an already-released file).
 		const closes: Promise<void>[] = [];
+		const survivors: ActiveAdvisor[] = [];
 		for (const a of this.#advisors) {
+			if (only && !only.has(a.slug)) {
+				survivors.push(a);
+				continue;
+			}
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.dispose();
@@ -1558,10 +1634,13 @@ export class SessionAdvisors {
 			a.recorderClosed = a.recorder.close();
 			closes.push(a.recorderClosed);
 		}
-		this.#advisorRecorderClosed = Promise.all(closes).then(() => {});
-		this.#advisors = [];
-		this.#advisorYieldQueueUnsubscribe?.();
-		this.#advisorYieldQueueUnsubscribe = undefined;
+		const settled = Promise.all(closes).then(() => {});
+		this.#advisorRecorderClosed = only ? Promise.all([this.#advisorRecorderClosed, settled]).then(() => {}) : settled;
+		this.#advisors = survivors;
+		if (survivors.length === 0) {
+			this.#advisorYieldQueueUnsubscribe?.();
+			this.#advisorYieldQueueUnsubscribe = undefined;
+		}
 	}
 
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {
@@ -2303,18 +2382,30 @@ export class SessionAdvisors {
 		return true;
 	}
 	/**
-	 * Enable or disable the advisor for this session. The setting is overridden for the session,
-	 * and the runtime is started or stopped to match.
-	 *
-	 * @returns true when the advisor is actively running after the call.
+	 * Enable or disable the advisor for this session, subject to ancestor veto.
 	 */
 	setAdvisorEnabled(enabled: boolean): boolean {
-		this.#advisorEnabled = enabled;
-		if (enabled) {
+		this.#advisorRequested = enabled;
+		this.scope.setSuppressed(!enabled);
+		return this.#applyAdvisorEnabled();
+	}
+
+	#applyAdvisorEnabled(): boolean {
+		if (this.#host.isDisposed()) return false;
+		if (this.#advisorEnabled) {
 			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 			return this.#buildAdvisorRuntime(true);
 		}
-		this.#stopAdvisorRuntime();
+		this.#deliveryAbort.abort();
+		this.#deliveryAbort = new AbortController();
+		if (this.#advisors.length > 0) this.#stopAdvisorRuntime();
+		for (const [slug, entry] of this.#advisorStatuses) {
+			if (entry.status === "running" || entry.status === "error" || entry.status === "quota_exhausted") {
+				this.#advisorStatuses.set(slug, { ...entry, status: "paused" });
+			}
+		}
+		this.#host.extractQueuedAdvisorCards();
+		this.#host.dropPendingAdvisorCards();
 		return false;
 	}
 
@@ -2324,7 +2415,7 @@ export class SessionAdvisors {
 	 * @returns true when the advisor is actively running after the call.
 	 */
 	toggleAdvisorEnabled(): boolean {
-		return this.setAdvisorEnabled(!this.#advisorEnabled);
+		return this.setAdvisorEnabled(!this.#advisorRequested);
 	}
 
 	/**
@@ -2339,8 +2430,11 @@ export class SessionAdvisors {
 
 	/**
 	 * Replace the live advisor roster from an edited `WATCHDOG.yml` (the `/advisor
-	 * configure` save path). Swaps the configs + shared baseline, then rebuilds the
-	 * runtimes in place so the change applies without a restart. When the advisor is
+	 * configure` save path). Swaps the configs + shared baseline and applies them without a
+	 * restart: an advisor whose configuration is unchanged keeps running with its context and
+	 * review state, and only new, changed or removed advisors are restarted. The shared
+	 * instructions and note budget are baked into every advisor's prompt but are not part of
+	 * the per-advisor signature, so changing either restarts all of them. When the advisor is
 	 * disabled the new configs are simply stored for the next enable.
 	 *
 	 * @returns the number of advisors active after the rebuild.
@@ -2350,11 +2444,31 @@ export class SessionAdvisors {
 		sharedInstructions: string | undefined,
 		sharedMaxNotesPerUpdate?: number,
 	): number {
+		const sharedChanged =
+			sharedInstructions !== this.#advisorSharedInstructions ||
+			sharedMaxNotesPerUpdate !== this.#advisorSharedMaxNotesPerUpdate;
+		// Store first: a roster edited while advisors are off must be the one a
+		// later `/advisor on` builds, not the stale startup roster.
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
 		this.#advisorSharedMaxNotesPerUpdate = sharedMaxNotesPerUpdate;
-		this.#stopAdvisorRuntime();
-		this.#buildAdvisorRuntime(true);
+		if (!this.#advisorEnabled) return 0;
+		if (sharedChanged || this.#advisors.length === 0) {
+			this.#stopAdvisorRuntime();
+			this.#buildAdvisorRuntime(true);
+			return this.#advisors.length;
+		}
+		// Match on slug AND signature: a slug is derived from the name and suffixed on collision,
+		// so it can move to a different advisor when the roster changes.
+		const wanted = new Map(this.#resolveAdvisorRuntimeDescriptors(false).map(d => [d.slug, d.signature]));
+		const keep = new Map<string, ActiveAdvisor>();
+		const stop = new Set<string>();
+		for (const advisor of this.#advisors) {
+			if (wanted.get(advisor.slug) === advisor.signature) keep.set(advisor.slug, advisor);
+			else stop.add(advisor.slug);
+		}
+		if (stop.size > 0) this.#stopAdvisorRuntime(stop);
+		this.#buildAdvisorRuntime(true, true, keep);
 		return this.#advisors.length;
 	}
 
@@ -2391,6 +2505,11 @@ export class SessionAdvisors {
 		return this.#advisorEnabled;
 	}
 
+	/** Whether an ancestor scope vetoes advisor activation. */
+	isAdvisorSuppressedByParent(): boolean {
+		return this.scope.suppressedByParent;
+	}
+
 	/**
 	 * Whether a live advisor agent is attached to this session. True only when
 	 * `advisor.enabled` is set for this session (subagents opt in per agent via
@@ -2421,6 +2540,11 @@ export class SessionAdvisors {
 	 */
 	getAdvisorAgent(): Agent | undefined {
 		return this.#advisors[0]?.agent;
+	}
+
+	/** Live advisor `Agent`s by advisor name, for diagnostics and for verifying which advisors a roster change restarted. */
+	getAdvisorAgentsByName(): ReadonlyMap<string, Agent> {
+		return new Map(this.#advisors.map(advisor => [advisor.name, advisor.agent]));
 	}
 
 	/**
@@ -2620,7 +2744,7 @@ export class SessionAdvisors {
 			if (!s.model || s.status !== "running") return `Advisor "${s.name}" is ${s.status.replace("_", " ")}.`;
 			return `Advisor is enabled (${s.model.provider}/${s.model.id}). ${contextLine}. ${spendLine}.`;
 		}
-		const lines = [`Advisors enabled (${stats.advisors.length}):`];
+		const lines = [`Advisors ${stats.configured ? "enabled" : "disabled"} (${stats.advisors.length}):`];
 		for (const s of stats.advisors) {
 			const ctx =
 				s.contextWindow > 0

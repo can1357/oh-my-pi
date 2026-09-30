@@ -385,6 +385,7 @@ import {
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
+	type AdvisorScope,
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
 	SessionAdvisors,
@@ -2061,6 +2062,7 @@ export class AgentSession implements SettingsScope {
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: cfgAdvisorEnabled.get(this.settings),
+			parentScope: config.advisorScope,
 			tools: config.advisorTools,
 			createGrepTool: config.advisorCreateGrepTool,
 			createEditTool: config.advisorCreateEditTool,
@@ -5192,7 +5194,7 @@ export class AgentSession implements SettingsScope {
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
-		this.#advisors.stopRuntime();
+		this.#advisors.dispose();
 		this.#eval.beginDispose();
 	}
 
@@ -8195,11 +8197,13 @@ export class AgentSession implements SettingsScope {
 	 *  are expected) must not assume dispatch happened just because this was awaited. */
 	async #promptAgentInitiatedMessage(
 		message: CustomMessage,
-		options?: { acceptTerminalEmptyStop?: boolean },
+		options?: { acceptTerminalEmptyStop?: boolean; signal?: AbortSignal },
 	): Promise<boolean> {
 		this.#beginInFlight();
 		try {
-			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			if (!(await this.#runUsageAwarePreflightForNextModelCall(options?.signal))) return false;
+			// A suppression that landed during the provider/preflight await must still stop this turn.
+			if (options?.signal?.aborted) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
@@ -8315,6 +8319,7 @@ export class AgentSession implements SettingsScope {
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			signal?: AbortSignal;
 		},
 	): Promise<boolean> {
 		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
@@ -8327,6 +8332,7 @@ export class AgentSession implements SettingsScope {
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			signal?: AbortSignal;
 		},
 	): Promise<boolean> {
 		// An extension command parked on a manual compaction may fire this
@@ -8353,6 +8359,7 @@ export class AgentSession implements SettingsScope {
 					deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 					queueChipText?: string;
 					acceptTerminalEmptyStop?: boolean;
+					signal?: AbortSignal;
 			  }
 			| undefined,
 		outcome: PromptDispatchOutcome,
@@ -8380,6 +8387,7 @@ export class AgentSession implements SettingsScope {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (options?.signal?.aborted) return false;
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -8416,6 +8424,7 @@ export class AgentSession implements SettingsScope {
 				}
 				outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
+					signal: options.signal,
 				});
 				return outcome.sessionClaimed;
 			}
@@ -8456,6 +8465,7 @@ export class AgentSession implements SettingsScope {
 			}
 			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 				acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
+				signal: options.signal,
 			});
 			return outcome.sessionClaimed;
 		}
@@ -8465,7 +8475,9 @@ export class AgentSession implements SettingsScope {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
-			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage);
+			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
+				signal: options?.signal,
+			});
 			return outcome.sessionClaimed;
 		}
 
@@ -12550,12 +12562,22 @@ export class AgentSession implements SettingsScope {
 		return this.#advisors.isAdvisorEnabled();
 	}
 
+	/** Whether an ancestor session scope vetoes advisor activation. */
+	isAdvisorSuppressedByParent(): boolean {
+		return this.#advisors.isAdvisorSuppressedByParent();
+	}
+
+	/**
+	 * Runtime advisor veto inherited by newly spawned and revived descendants.
+	 */
+	get advisorScope(): AdvisorScope {
+		return this.#advisors.scope;
+	}
+
 	/**
 	 * Whether a live advisor agent is attached to this session. True only when
-	 * `advisor.enabled` is set for this session (subagents opt in per agent via
-	 * frontmatter `advisor` / `task.agentAdvisor`) AND a model resolved for the
-	 * `advisor` role — i.e. the actual runtime exists, not merely the setting.
-	 * Drives the status-line badge and `/dump advisor`.
+	 * advisor use is enabled for this session, no ancestor has vetoed it, and a
+	 * model resolved for the `advisor` role.
 	 */
 	isAdvisorActive(): boolean {
 		return this.#advisors.isAdvisorActive();
@@ -12580,6 +12602,11 @@ export class AgentSession implements SettingsScope {
 	 */
 	getAdvisorAgent(): Agent | undefined {
 		return this.#advisors.getAdvisorAgent();
+	}
+
+	/** Live advisor `Agent`s by advisor name; lets diagnostics and tests see which advisors a roster change restarted. */
+	getAdvisorAgentsByName(): ReadonlyMap<string, Agent> {
+		return this.#advisors.getAdvisorAgentsByName();
 	}
 
 	/** WATCHDOG.yml problems from startup discovery; shown by the UI once it is ready. */

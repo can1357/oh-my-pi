@@ -19,6 +19,7 @@ import type { Settings } from "../config/settings";
 import agentCreationArchitectPrompt from "../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../sdk";
+import type { AdvisorScope } from "../session/session-advisors";
 import { refreshAgentDiscovery } from "../task";
 import { discoverAgents } from "../task/discovery";
 import { resolveAgentPrewalkDefault } from "../task/prewalk";
@@ -59,6 +60,7 @@ export function createAgentsHubDeps(
 	extensionRoots: () => EffectiveExtensionRoots,
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
+	advisorScope?: AdvisorScope,
 ): AgentsHubDeps {
 	return {
 		browserSource: createModelBrowserSource(settings),
@@ -150,6 +152,7 @@ export function createAgentsHubDeps(
 				cwd,
 				authStorage: modelRegistry.authStorage,
 				modelRegistry,
+				advisorScope,
 				settings,
 				model: selectedModel,
 				systemPrompt: [prompt.render(agentCreationArchitectPrompt, {})],
