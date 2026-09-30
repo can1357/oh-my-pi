@@ -37,11 +37,9 @@ export async function editModelsConfig(
 	const doc = parseDocument(previous ?? "");
 	if (doc.errors.length > 0) throw doc.errors[0];
 
-	let providers = doc.get("providers");
-	if (!isMap(providers)) {
-		providers = new YAMLMap();
-		doc.set("providers", providers);
-	}
+	const existing = doc.get("providers");
+	const providers = isMap(existing) ? existing : new YAMLMap();
+	if (providers !== existing) doc.set("providers", providers);
 	mutate(providers);
 	const written = doc.toString({ lineWidth: 0 });
 
@@ -86,17 +84,11 @@ export interface CustomProviderContext {
 	readonly config?: ConfigFile<ModelsConfig>;
 }
 
-/** Register a discoverable provider without leaving unusable config or credentials behind. */
-export async function addCustomProvider(input: CustomProviderInput, context: CustomProviderContext): Promise<void> {
-	const { id, apiKey } = input;
-	if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) {
-		throw new Error(
-			"Provider ID must start with a letter or number and contain only lowercase letters, numbers, - or _.",
-		);
-	}
+/** Validate a provider endpoint and return it without trailing slashes. */
+function parseEndpoint(raw: string): string {
 	let endpoint: URL;
 	try {
-		endpoint = new URL(input.baseUrl);
+		endpoint = new URL(raw);
 	} catch {
 		throw new Error("Enter a valid provider endpoint URL.");
 	}
@@ -106,12 +98,24 @@ export async function addCustomProvider(input: CustomProviderInput, context: Cus
 	if (endpoint.username || endpoint.password || endpoint.href.includes("?") || endpoint.href.includes("#")) {
 		throw new Error("Provider endpoint cannot contain credentials, a query, or a fragment.");
 	}
+	return endpoint.toString().replace(/\/+$/, "");
+}
+
+/** Register a discoverable provider without leaving unusable config or credentials behind. */
+export async function addCustomProvider(input: CustomProviderInput, context: CustomProviderContext): Promise<void> {
+	const { id, apiKey } = input;
+	if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) {
+		throw new Error(
+			"Provider ID must start with a letter or number and contain only lowercase letters, numbers, - or _.",
+		);
+	}
+	const baseUrl = parseEndpoint(input.baseUrl);
 
 	const configFile = context.config ?? ModelsConfigFile;
 	if (context.authStorage.credentials.has(id)) throw new Error(`Provider "${id}" is already configured.`);
 
 	const provider = {
-		baseUrl: endpoint.toString().replace(/\/+$/, ""),
+		baseUrl,
 		api: "openai-completions" as const,
 		...(apiKey ? {} : { auth: "none" as const }),
 		discovery: { type: "openai-models-list" as const },
@@ -143,4 +147,137 @@ export async function addCustomProvider(input: CustomProviderInput, context: Cus
 		if (edit) await context.refreshProvider(id).catch(() => {});
 		throw error;
 	}
+}
+
+export interface CustomProviderUpdate {
+	baseUrl?: string;
+	/** Non-empty: store as the credential and drop any inline `apiKey`. */
+	apiKey?: string;
+	/** Remove the credential and mark the provider keyless. */
+	clearApiKey?: boolean;
+}
+
+export interface CustomProviderInfo {
+	id: string;
+	baseUrl: string | undefined;
+	hasKey: boolean;
+}
+
+function notDefined(id: string): Error {
+	return new Error(`Provider "${id}" is not defined in models.yml.`);
+}
+
+/** Read a provider declared in a successfully loaded `models.yml`. */
+export function getCustomProvider(
+	id: string,
+	configFile: ConfigFile<ModelsConfig> = ModelsConfigFile,
+	authStorage?: AuthStorage,
+): CustomProviderInfo | undefined {
+	const loaded = configFile.tryLoad();
+	const node = loaded.status === "ok" ? loaded.value.providers?.[id] : undefined;
+	if (!node) return undefined;
+	return { id, baseUrl: node.baseUrl, hasKey: Boolean(node.apiKey) || (authStorage?.credentials.has(id) ?? false) };
+}
+
+/** Fail before touching credentials when the ID is absent or the file is unloadable. */
+function requireProvider(id: string, configFile: ConfigFile<ModelsConfig>): void {
+	configFile.invalidate();
+	const loaded = configFile.tryLoad();
+	if (loaded.status === "error") throw loaded.error;
+	if (!loaded.value?.providers?.[id]) throw notDefined(id);
+}
+
+/** Run every rollback step even if earlier ones fail, then surface all failures together. */
+async function rollBack(what: string, steps: Array<() => Promise<void>>, cause: unknown): Promise<void> {
+	const failures: string[] = [];
+	for (const step of steps) {
+		try {
+			await step();
+		} catch (error) {
+			failures.push(toError(error).message);
+		}
+	}
+	if (failures.length > 0) throw new Error(`Could not undo ${what}: ${failures.join("; ")}`, { cause });
+}
+
+/** Edit a provider's endpoint and/or key without losing anything else in its `models.yml` node. */
+export async function updateCustomProvider(
+	id: string,
+	update: CustomProviderUpdate,
+	context: CustomProviderContext,
+): Promise<void> {
+	const { apiKey, clearApiKey } = update;
+	if (apiKey && clearApiKey) throw new Error("Cannot both set and clear the API key.");
+	const baseUrl = update.baseUrl === undefined ? undefined : parseEndpoint(update.baseUrl);
+	const configFile = context.config ?? ModelsConfigFile;
+	requireProvider(id, configFile);
+
+	const { credentials } = context.authStorage;
+	const previousCredential = credentials.get(id);
+	let credentialChanged = false;
+	let edit: { previous: string | undefined; written: string } | undefined;
+	try {
+		if (apiKey) {
+			await credentials.set(id, { type: "api_key", key: apiKey, source: "login" });
+			credentialChanged = true;
+		} else if (clearApiKey) {
+			await credentials.remove(id);
+			credentialChanged = true;
+		}
+		edit = await editModelsConfig(configFile, providers => {
+			const node = providers.get(id);
+			if (!isMap(node)) throw notDefined(id);
+			if (baseUrl !== undefined) node.set("baseUrl", baseUrl);
+			if (apiKey) {
+				node.delete("apiKey");
+				if (node.get("auth") === "none") node.delete("auth");
+			} else if (clearApiKey) {
+				node.delete("apiKey");
+				node.set("auth", "none");
+			}
+		});
+		await context.refreshProvider(id);
+		if (!context.discoverySucceeded(id) || !context.hasChatModels(id)) {
+			throw new Error("No chat models were discovered. Check the endpoint and API key, then try again.");
+		}
+	} catch (error) {
+		const steps: Array<() => Promise<void>> = [];
+		if (edit) {
+			const { written, previous } = edit;
+			steps.push(() => restoreModelsConfig(configFile, written, previous));
+		}
+		if (credentialChanged) {
+			steps.push(async () => {
+				if (previousCredential) await credentials.set(id, previousCredential);
+				else await credentials.remove(id);
+			});
+		}
+		try {
+			await rollBack("failed provider update", steps, error);
+		} finally {
+			configFile.invalidate();
+		}
+		if (edit) await context.refreshProvider(id).catch(() => {});
+		throw error;
+	}
+}
+
+/** Delete a provider from `models.yml`, then its stored credential. */
+export async function removeCustomProvider(
+	id: string,
+	context: Pick<CustomProviderContext, "authStorage" | "refreshProvider" | "config">,
+): Promise<void> {
+	const configFile = context.config ?? ModelsConfigFile;
+	requireProvider(id, configFile);
+	const edit = await editModelsConfig(configFile, providers => {
+		if (!providers.has(id)) throw notDefined(id);
+		providers.delete(id);
+	});
+	try {
+		await context.authStorage.credentials.remove(id);
+	} catch (error) {
+		await rollBack("provider removal", [() => restoreModelsConfig(configFile, edit.written, edit.previous)], error);
+		throw error;
+	}
+	await context.refreshProvider(id);
 }
