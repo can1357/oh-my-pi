@@ -89,7 +89,9 @@ describe("native task", () => {
 				progress("Alpha", {
 					task: "Complete assignment thoroughly:\n\n# Target\nFix the lexer",
 					currentTool: "read",
-					lastIntent: "Reading lexer",
+					// `lastIntent` is an earlier call's; the running call carries its own.
+					lastIntent: "Searching the lexer",
+					currentToolIntent: "Reading lexer",
 					currentToolStartMs: 1000,
 					contextTokens: 19_000,
 					contextWindow: 200_000,

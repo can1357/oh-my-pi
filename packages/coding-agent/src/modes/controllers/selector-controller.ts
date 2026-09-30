@@ -26,6 +26,7 @@ import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { acquireModelRoleMutation, modelPresetSavedMessage, saveModelPreset } from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -189,14 +190,12 @@ export class SelectorController {
 		return handle;
 	}
 
-	#defaultRoleMutationTail = Promise.resolve();
-
+	/**
+	 * Serialize default-role mutations with `/modelpreset switch`, which holds the
+	 * same shared tail in `config/model-presets.ts` for its whole apply.
+	 */
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
-		const previous = this.#defaultRoleMutationTail;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#defaultRoleMutationTail = previous.then(() => promise);
-		await previous;
-		return resolve;
+		return acquireModelRoleMutation();
 	}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
@@ -976,6 +975,14 @@ export class SelectorController {
 						this.ctx.showStatus(
 							order.length > 0 ? `Quick-switch cycle: ${order.join(" → ")}` : "Quick-switch cycle cleared",
 						);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onSavePreset: name => {
+					try {
+						saveModelPreset(this.ctx.settings, name);
+						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
