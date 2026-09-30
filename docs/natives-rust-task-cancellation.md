@@ -56,7 +56,7 @@ Use when work is CPU-heavy or fundamentally synchronous/blocking:
 Behavior:
 
 - Work closure receives a cloned `CancelToken`.
-- Cancellation is only observed where code checks `ct.heartbeat()?`.
+- Within the closure, cancellation is observed where code checks `ct.heartbeat()?`; an `AbortSignal` arriving outside the closure is also observed at `resolve()` (see failure path below).
 - Closure `Err(...)` rejects the JS promise.
 
 ### Use `task::future`
@@ -145,6 +145,8 @@ Error path:
 1. Closure returns `Err(napi::Error)` (including `heartbeat()` abort).
 2. `Task::compute()` returns `Err`.
 3. `AsyncTask` rejects JS promise.
+
+`resolve()` also rejects with `AbortError` when an `AbortSignal` (not an elapsed deadline) is set after `compute()` returned `Ok`, so a caller abort wins even if the closure never heartbeated.
 
 Typical error strings:
 
