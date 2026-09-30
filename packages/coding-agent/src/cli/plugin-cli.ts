@@ -187,7 +187,7 @@ export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
 			await handleDiscover(cmd.args, cmd.flags);
 			break;
 		case "upgrade":
-			await handleUpgrade(cmd.args, cmd.flags);
+			await handleUpgrade(manager, cmd.args, cmd.flags);
 			break;
 	}
 }
@@ -308,20 +308,37 @@ async function handleDiscover(args: string[], _flags: PluginCommandArgs["flags"]
 	}
 }
 
-async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]): Promise<void> {
-	const pluginId = args[0];
-	// `upgrade` targets marketplace plugins, whose IDs are `name@marketplace`.
-	// An npm-installed plugin (e.g. a scoped `@scope/pkg`) never parses as one,
-	// so steer the user to the force-reinstall that actually upgrades it instead
-	// of the bare "Expected name@marketplace" parse error (#11090).
-	if (pluginId && !parsePluginId(pluginId)) {
-		console.error(chalk.red(`Invalid plugin ID: "${pluginId}". Marketplace plugins upgrade as "name@marketplace".`));
-		console.error(
-			chalk.yellow(`For an npm-installed plugin, upgrade with: ${APP_NAME} plugin install ${pluginId} --force`),
-		);
-		process.exit(1);
-	}
+async function handleUpgrade(
+	pluginManager: PluginManager,
+	args: string[],
+	flags: PluginCommandArgs["flags"],
+): Promise<void> {
+	let pluginId = args[0];
 	const manager = await makeMarketplaceManager();
+	// Marketplace IDs are `name@marketplace`; anything else is either a bare
+	// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
+	// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
+	if (pluginId && !parsePluginId(pluginId)) {
+		const bareName = pluginId;
+		const candidates = (await manager.listInstalledPlugins())
+			.map(p => p.id)
+			.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
+		const uniqueCandidates = [...new Set(candidates)];
+		if (uniqueCandidates.length > 1) {
+			console.error(
+				chalk.red(
+					`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
+				),
+			);
+			process.exit(1);
+		}
+		if (uniqueCandidates.length === 1) {
+			pluginId = uniqueCandidates[0] as string;
+		} else {
+			await upgradePackagePlugin(pluginManager, bareName, flags);
+			return;
+		}
+	}
 	try {
 		if (pluginId) {
 			if (flags.scope) {
@@ -352,6 +369,38 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 		}
 	} catch (err) {
 		console.error(chalk.red(`Failed to upgrade: ${err}`));
+		process.exit(1);
+	}
+}
+
+/** Upgrade an npm/git-installed plugin in place from its recorded source. */
+async function upgradePackagePlugin(
+	manager: PluginManager,
+	name: string,
+	flags: PluginCommandArgs["flags"],
+): Promise<void> {
+	if (flags.scope === "project") {
+		console.error(
+			chalk.yellow(
+				`Warning: --scope is only supported for marketplace plugins (name@marketplace). Ignoring for ${name}.`,
+			),
+		);
+	}
+	try {
+		const { from, plugin, changed } = await manager.upgrade(name);
+		if (flags.json) {
+			console.log(
+				JSON.stringify({ upgraded: plugin.name, from: from ?? null, to: plugin.version, changed }, null, 2),
+			);
+		} else if (!changed) {
+			console.log(chalk.green(`${plugin.name} is up to date (${plugin.version})`));
+		} else if (from === plugin.version) {
+			console.log(chalk.green(`Upgraded ${plugin.name} to a new revision (${plugin.version})`));
+		} else {
+			console.log(chalk.green(`Upgraded ${plugin.name}${from ? ` from ${from}` : ""} to ${plugin.version}`));
+		}
+	} catch (err) {
+		console.error(chalk.red(`Failed to upgrade ${name}: ${err instanceof Error ? err.message : err}`));
 		process.exit(1);
 	}
 }

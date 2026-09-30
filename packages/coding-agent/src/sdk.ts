@@ -206,7 +206,6 @@ import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
-import { unmountAll } from "./ssh/sshfs-mount";
 import {
 	type BuildSystemPromptResult,
 	buildSystemPrompt as buildSystemPromptInternal,
@@ -268,9 +267,10 @@ import { resolveYieldReportText } from "./tools/yield";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
+import { createRatchetPrelude } from "./ratchet/prelude";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
-import { getImageGenTools } from "./tools/image-gen";
+import { imageGenTool } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
@@ -290,6 +290,7 @@ import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import {
 	cfgAsyncMaxJobs,
 	cfgComputerEnabled,
+	cfgRatchetEnabled,
 	cfgGenerateImageEnabled,
 	cfgSecurityEnabled,
 	cfgSpeechgenEnabled,
@@ -1287,11 +1288,10 @@ const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_no
 let sshCleanupRegistered = false;
 
 async function cleanupSshResources(): Promise<void> {
-	const results = await Promise.allSettled([closeAllConnections(), unmountAll()]);
-	for (const result of results) {
-		if (result.status === "rejected") {
-			logger.warn("SSH cleanup failed", { error: String(result.reason) });
-		}
+	try {
+		await closeAllConnections();
+	} catch (error) {
+		logger.warn("SSH cleanup failed", { error: String(error) });
 	}
 }
 
@@ -2310,6 +2310,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
+		let ratchetPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2320,6 +2321,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgComputerEnabled.get(settings)) {
 				computerPrelude ??= createComputerPrelude(toolSession);
 				builtins.push(computerPrelude);
+			}
+			if (cfgRatchetEnabled.get(settings)) {
+				ratchetPrelude ??= createRatchetPrelude(toolSession);
+				builtins.push(ratchetPrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -3368,10 +3373,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// keep it out (issue #5305).
 			const imageGenRequested = !options.toolNames || options.toolNames.includes("generate_image");
 			if (cfgGenerateImageEnabled.get(settings) && imageGenRequested) {
-				const imageGenTools = await logger.time("getImageGenTools", () =>
-					getImageGenTools(modelRegistry, toolSession.getActiveModel?.()),
-				);
-				wanted.push(...(imageGenTools as unknown as CustomTool[]));
+				wanted.push(imageGenTool as unknown as CustomTool);
 			}
 			if (cfgSpeechgenEnabled.get(settings)) wanted.push(ttsTool as unknown as CustomTool);
 			const wantedNames = new Set(wanted.map(tool => tool.name));
@@ -4298,17 +4300,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformToolCallArguments,
 			// A stray sloppy payload in plain text becomes a real edit tool call so
 			// the normal pipeline (validation, approval, rendering) executes it.
-			transformAssistantMessage: message => {
-				if (!cfgEditRecoverInlineEdits.get(settings)) return;
-				// The live tool is an ExtensionToolWrapper whose proxy forwards the
-				// EditTool `mode` getter; a bridge/custom edit tool without a sloppy
-				// mode (e.g. Cursor's replace-pinned pi_edit) never recovers.
-				const editTool = agent.state.tools.find(tool => tool.name === "edit") as { mode?: EditMode } | undefined;
-				if (editTool?.mode !== "sloppy") return;
-				const recovered = recoverInlineSloppyEdit(message);
-				if (recovered > 0) {
-					logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
+			transformAssistantMessage: async (message, signal) => {
+				if (cfgEditRecoverInlineEdits.get(settings)) {
+					// The live tool is an ExtensionToolWrapper whose proxy forwards the
+					// EditTool `mode` getter; a bridge/custom edit tool without a sloppy
+					// mode (e.g. Cursor's replace-pinned pi_edit) never recovers.
+					const editTool = agent.state.tools.find(tool => tool.name === "edit") as { mode?: EditMode } | undefined;
+					if (editTool?.mode === "sloppy") {
+						const recovered = recoverInlineSloppyEdit(message);
+						if (recovered > 0) {
+							logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
+						}
+					}
 				}
+				const content = await session?.extensionRunner?.emitAssistantMessage(message, signal);
+				if (content) message.content = content;
 			},
 			// Recovery only fires on turns without tool calls and appends a new one,
 			// so streamed calls (and their speculation sessions) are never rewritten.

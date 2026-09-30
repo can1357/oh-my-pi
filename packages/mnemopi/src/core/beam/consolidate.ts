@@ -1,10 +1,12 @@
 import type { SQLQueryBindings } from "bun:sqlite";
+import { logger } from "@oh-my-pi/pi-utils";
+import { polyphonicRecallEnabled } from "../../config";
 import { generateId, stableMemoryId } from "../../util/ids";
 import { aaakEncode } from "../aaak";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
-import { clampVeracity } from "../veracity-consolidation";
+import { clampVeracity, VERACITY_WEIGHTS, type Veracity, VeracityConsolidator } from "../veracity-consolidation";
 import { scheduleEmbedding } from "./helpers";
 import type { BeamMemoryState, BeamStats, JsonValue, MemoriaRetrieveResult, Metadata, SleepResult } from "./types";
 
@@ -325,6 +327,102 @@ function insertKg(
 		source: sourceMemoryId ?? "extraction",
 		confidence: 0.65,
 	});
+	consolidateKgFact(beam, subject, predicate, object, sourceMemoryId);
+}
+
+/** Veracity of the memory a fact was extracted from, restricted to the consolidator's vocabulary. */
+function sourceMemoryVeracity(beam: BeamMemoryState, sourceMemoryId: string | null): Veracity {
+	if (sourceMemoryId === null) return "unknown";
+	const row = (beam.db.query("SELECT veracity FROM working_memory WHERE id = ?").get(sourceMemoryId) ??
+		beam.db.query("SELECT veracity FROM episodic_memory WHERE id = ?").get(sourceMemoryId)) as {
+		veracity: string | null;
+	} | null;
+	const veracity = row?.veracity ?? "unknown";
+	return Object.hasOwn(VERACITY_WEIGHTS, veracity) ? (veracity as Veracity) : "unknown";
+}
+
+/**
+ * This beam's veracity consolidator, created on first use so `consolidated_facts` /
+ * `conflicts` DDL only runs once polyphonic recall needs them.
+ */
+export function ensureVeracityConsolidator(beam: BeamMemoryState): VeracityConsolidator {
+	const existing = beam.veracityConsolidator;
+	if (existing instanceof VeracityConsolidator && existing.conn === beam.db) return existing;
+	const consolidator = new VeracityConsolidator(beam.dbPath ?? ":memory:", beam.db);
+	beam.veracityConsolidator = consolidator;
+	return consolidator;
+}
+
+/**
+ * Feed an extracted subject/predicate/object fact into the veracity consolidator so
+ * repeated mentions gain confidence in `consolidated_facts`, which the polyphonic
+ * recall fact voice reads. Only runs while polyphonic recall is enabled for this beam;
+ * facts written with it off are picked up by {@link backfillConsolidatedFacts}.
+ * Best-effort: a failure never blocks the extraction write.
+ */
+function consolidateKgFact(
+	beam: BeamMemoryState,
+	subject: string,
+	predicate: string,
+	object: string,
+	sourceMemoryId: string | null,
+): void {
+	if (!polyphonicRecallEnabled(process.env, beam.config?.polyphonicRecall)) return;
+	const cleanSubject = subject.trim();
+	const cleanPredicate = predicate.trim();
+	const cleanObject = object.trim();
+	if (cleanSubject === "" || cleanPredicate === "" || cleanObject === "") return;
+	try {
+		ensureVeracityConsolidator(beam).consolidateFact(
+			cleanSubject,
+			cleanPredicate,
+			cleanObject,
+			sourceMemoryVeracity(beam, sourceMemoryId),
+			sourceMemoryId,
+		);
+	} catch (error) {
+		// Fact consolidation is an enrichment; the MEMORIA/KG rows above are already written,
+		// and the next polyphonic engine built on this bank backfills the fact.
+		logger.warn("mnemopi: fact consolidation failed", { subject: cleanSubject, error: String(error) });
+	}
+}
+
+/**
+ * Consolidate every extracted KG fact (`memoria_kg`) whose source memory is not yet
+ * among that fact's `consolidated_facts` sources, e.g. facts written while polyphonic
+ * recall was off. Idempotent: a (fact, source) pair is only ever counted once.
+ * Facts without a source memory are skipped; the fact voice could not return them.
+ */
+export function backfillConsolidatedFacts(beam: BeamMemoryState, consolidator: VeracityConsolidator): number {
+	const rows = beam.db
+		.query(`
+			SELECT trim(k.subject) AS subject, trim(k.predicate) AS predicate, trim(k.object) AS object,
+				k.source_memory_id AS source
+			FROM memoria_kg k
+			WHERE k.source_memory_id IS NOT NULL AND k.source_memory_id != ''
+				AND trim(k.subject) != '' AND trim(k.predicate) != '' AND trim(k.object) != ''
+				AND NOT EXISTS (
+					SELECT 1 FROM consolidated_facts cf, json_each(cf.sources_json) s
+					WHERE cf.subject = trim(k.subject) AND cf.predicate = trim(k.predicate)
+						AND cf.object = trim(k.object) AND s.value = k.source_memory_id
+				)
+			GROUP BY 1, 2, 3, 4
+			ORDER BY MIN(k.id)
+		`)
+		.all() as { subject: string; predicate: string; object: string; source: string }[];
+	if (rows.length === 0) return 0;
+	consolidator.serializedWrite(() => {
+		for (const row of rows) {
+			consolidator.consolidateFact(
+				row.subject,
+				row.predicate,
+				row.object,
+				sourceMemoryVeracity(beam, row.source),
+				row.source,
+			);
+		}
+	});
+	return rows.length;
 }
 
 function insertPreference(

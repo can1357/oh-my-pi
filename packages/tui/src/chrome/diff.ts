@@ -1,7 +1,10 @@
 import { diffWords } from "@oh-my-pi/pi-natives";
 import { DEFAULT_TAB_WIDTH, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { TspDiffHunk, TspProps } from "@oh-my-pi/pi-wire";
 import { theme as activeTheme, getLanguageFromPath, highlightCode, type Theme } from "../theme/index";
-import { type CodeFrameMarker, formatCodeFrameLine, replaceTabs } from "../render/render-utils";
+import { type CodeFrameMarker, formatCodeFrameLine, replaceTabs, shortenPath } from "../render/render-utils";
+import { node } from "../native/describe";
+import type { NativeNode } from "../native/node";
 /** SGR dim on / normal intensity — additive, preserves fg/bg colors. */
 const DIM = "\x1b[2m";
 const DIM_OFF = "\x1b[22m";
@@ -95,6 +98,62 @@ function renderIntraLineDiff(
 	}
 
 	return { removedLine, addedLine };
+}
+
+/**
+ * Native `diff` node for omp's compact diff text (`+12|added`, `-12|removed`,
+ * ` 12|context`, blank or `…` rows between regions). Each contiguous region
+ * becomes one hunk; the terminal draws gutters, word emphasis and highlighting.
+ * Removed rows carry old line numbers, added rows new ones and context rows
+ * old ones, so the other side is derived from the running line delta.
+ */
+export function nativeDiff(diffText: string, options: { filePath?: string } & TspProps<"diff"> = {}): NativeNode {
+	const { filePath, ...props } = options;
+	const hunks: TspDiffHunk[] = [];
+	let lines: string[] = [];
+	let oldStart = 0;
+	let newStart = 0;
+	// New-minus-old line offset accumulated over the regions already closed.
+	let delta = 0;
+	let regionDelta = 0;
+	let nextOld = 1;
+	const close = (): void => {
+		if (lines.length > 0) hunks.push({ oldStart, newStart, lines });
+		lines = [];
+		delta += regionDelta;
+		regionDelta = 0;
+	};
+	for (const raw of sanitizeText(diffText).split("\n")) {
+		const parsed = parseDiffLine(raw);
+		const trimmed = raw.trim();
+		if (!parsed || (parsed.prefix === " " && (parsed.content === "..." || parsed.content === "…"))) {
+			if (trimmed.length === 0 || trimmed === "..." || trimmed === "…") close();
+			continue;
+		}
+		const number = Number.parseInt(parsed.lineNum.trim(), 10);
+		if (lines.length === 0) {
+			if (Number.isFinite(number)) {
+				oldStart = parsed.prefix === "+" ? number - delta : number;
+				newStart = parsed.prefix === "+" ? number : number + delta;
+			} else {
+				oldStart = nextOld;
+				newStart = nextOld + delta;
+			}
+		}
+		if (parsed.prefix === "+") regionDelta++;
+		else {
+			if (parsed.prefix === "-") regionDelta--;
+			nextOld = (Number.isFinite(number) ? number : nextOld) + 1;
+		}
+		lines.push(`${parsed.prefix}${parsed.content}`);
+	}
+	close();
+	return node("diff", {
+		...props,
+		hunks,
+		path: props.path ?? (filePath ? shortenPath(filePath) : undefined),
+		lang: props.lang ?? (filePath ? getLanguageFromPath(filePath) : undefined),
+	});
 }
 
 export interface RenderDiffOptions {

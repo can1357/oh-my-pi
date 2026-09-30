@@ -1,5 +1,6 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { SessionState } from "@oh-my-pi/pi-wire";
+import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
 import type { ActiveRepoContext, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
@@ -203,9 +204,50 @@ export interface RenderedSegment {
 	visible: boolean; // Whether to render (e.g., git hidden when not in repo)
 }
 
+/**
+ * A segment described for a TSP terminal: styled spans (theme/semantic
+ * tokens, no ANSI), a named icon, a tone, and terminal-clocked nodes
+ * (`spinner`, `elapsed`, `rate`) laid out after the spans.
+ */
+export interface SegmentView {
+	readonly spans: readonly TspSpan[];
+	readonly icon?: string;
+	readonly tone?: TspTone;
+	readonly motion?: readonly NativeNode[];
+	/** Tooltip on the segment. */
+	readonly title?: string;
+}
+
+/**
+ * The status line's facts for the native composer. A TSP terminal shows no
+ * status strip: the tab title carries the session, the pane header the path
+ * and branch, and the composer the rest.
+ */
+export interface ComposerFacts {
+	/** `meter` (role `omp.composer.context`): context usage along the composer's top edge. */
+	readonly context: NativeNode;
+	/** The model chip's label: name plus the advisor, fast-mode and slow-mode marks. */
+	readonly model: SegmentView;
+	/**
+	 * `status` (role `omp.composer.extras`, `grow: 1`) of the other configured
+	 * segments as `seg`s; the bar's flexible space, so present even when empty.
+	 */
+	readonly extras: NativeNode;
+	/** `text` (role `omp.composer.usage`): the context share of the window and the session cost. */
+	readonly usage: NativeNode;
+}
+
+/** Supplies {@link ComposerFacts} and takes the clicks on them (`status.*` actions). */
+export interface ComposerFactsSource {
+	describeComposerFacts(): ComposerFacts;
+	handleNativeEvent(event: NativeUiEvent): void;
+}
+
 export interface StatusLineSegment {
 	id: StatusLineSegmentId;
 	render(ctx: SegmentContext): RenderedSegment;
+	/** Native description; null when the segment is hidden. */
+	describe(ctx: SegmentContext): SegmentView | null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

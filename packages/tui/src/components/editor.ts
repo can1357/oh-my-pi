@@ -14,6 +14,11 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
+import type { TspEditorDecoration, TspEditorProps, TspTone } from "@oh-my-pi/pi-wire";
+import { col, node } from "../native/describe";
+import { sameItems, sameProps } from "../native/memo";
+import { plainText } from "../native/spans";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import {
@@ -52,7 +57,36 @@ export type { EditorBorderStyle, EditorTopBorder };
 
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
 
+/** The TSP root an {@link Editor.describeLayout} hook builds around the `editor` node. */
+export interface NativeEditorLayout {
+	readonly role: string;
+	/** Tone of the root (`pending` while a turn runs). */
+	readonly tone?: TspTone;
+	readonly children: readonly NativeChild[];
+	/** Keypath of the `editor` node inside the root (the autocomplete's caret anchor). */
+	readonly caret: string;
+}
+
+/** Vim mode as the TSP `editor.mode` label. */
+const VIM_MODE_LABELS: Record<VimMode, string> = {
+	insert: "INSERT",
+	normal: "NORMAL",
+	visual: "VISUAL",
+	"visual-line": "VISUAL",
+};
+
 const PASSTHROUGH_COLOR = (text: string): string => text;
+
+/** Value equality of two decoration lists, so an unchanged set keeps its identity across text edits elsewhere. */
+function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEditorDecoration[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const x = a[i]!;
+		const y = b[i]!;
+		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx) return false;
+	}
+	return true;
+}
 const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
 const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 
@@ -568,7 +602,30 @@ export class Editor implements Component, Focusable {
 	 *  Width-changing output is allowed on lines without the cursor; it is truncated
 	 *  to the content width rather than reflowed. Cursor glyphs and inline hints are excluded. */
 	decorateText: ((text: string, context: EditorTextDecorationContext) => string) | undefined;
+	/**
+	 * TSP counterpart of {@link decorateText}: styled ranges over the buffer
+	 * (UTF-16 offsets into the lines joined by `\n`). Called only when the text
+	 * changed or the editor was invalidated since the last description.
+	 */
+	describeDecorations: ((lines: readonly string[]) => readonly TspEditorDecoration[]) | undefined;
+	/** TSP code language of the buffer (`python`, `bash`): the terminal highlights it in the mono face. */
+	describeLanguage: (() => string | undefined) | undefined;
+	/**
+	 * TSP chrome around the `editor` node (the prompt composer's chips, mode
+	 * chip, send/stop): the root role, the children with `input` placed where
+	 * the layout wants it, and the input's keypath for the caret-anchored
+	 * autocomplete. Unset: a plain `omp.editor` column over the input.
+	 */
+	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
+	/** TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints. */
+	nativePlaceholder: string | undefined;
 	#promptGutter: string | undefined;
+	/** Bumped by {@link invalidate}: host-side decoration inputs (spelling results, settings) changed. */
+	#nativeGeneration = 0;
+	#nativeDecor?: { text: string; generation: number; decor: readonly TspEditorDecoration[] | undefined };
+	#nativeEditor?: { props: TspEditorProps; node: NativeNode };
+	#nativeOverlay?: { list: SelectList; caret: string; node: NativeNode };
+	#nativeRoot?: { role: string; tone: TspTone | undefined; children: readonly NativeChild[]; node: NativeNode };
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -1032,7 +1089,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.#nativeGeneration++;
 	}
 
 	/** Active chrome style; a hidden border collapses every shape to borderless. */
@@ -1553,6 +1610,125 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
+	/**
+	 * An `editor` node (key `input`) carrying the buffer, caret, Vim selection
+	 * anchor and mode, decorations, ghost completion, placeholder, prompt and
+	 * height cap; the frame, wrapping, scrolling and caret are the terminal's,
+	 * so composer shapes play no part. An open autocomplete popup follows as an
+	 * `overlay` anchored to the caret around the completion list. Typing and
+	 * caret moves change only `text` and `cursor` on the same node.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		// Vertical caret motion walks visual rows; the terminal owns the real
+		// wrap, so the surface width is the closest available layout width.
+		this.#lastLayoutWidth = Math.max(1, cx.cols);
+		const { lines, cursorLine, cursorCol } = this.#state;
+		const text = lines.join("\n");
+		let offset = 0;
+		for (let i = 0; i < cursorLine; i++) offset += (lines[i]?.length ?? 0) + 1;
+		const cursor = offset + cursorCol;
+
+		let decor = this.#nativeDecor;
+		if (decor?.text !== text || decor.generation !== this.#nativeGeneration) {
+			const next = this.describeDecorations?.(lines);
+			decor = {
+				text,
+				generation: this.#nativeGeneration,
+				decor:
+					next && next.length > 0
+						? decor?.decor && sameDecorations(decor.decor, next)
+							? decor.decor
+							: next
+						: undefined,
+			};
+			this.#nativeDecor = decor;
+		}
+
+		const placeholder = this.#getPlaceholder();
+		const nativePlaceholder =
+			this.nativePlaceholder !== undefined && !this.#autocompleteState && this.#isEditorEmpty()
+				? this.nativePlaceholder
+				: placeholder && plainText(placeholder).trim();
+		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
+		const ghost = nativePlaceholder || !atLineEnd ? null : this.#getInlineHint();
+		const vim = this.#vim;
+		let anchor: number | null = null;
+		if (vim?.visual && vim.anchor !== null) {
+			let anchorOffset = 0;
+			for (let i = 0; i < vim.anchor.line; i++) anchorOffset += (lines[i]?.length ?? 0) + 1;
+			if (vim.mode === "visual-line") {
+				// Linewise: stretch the anchor to the far edge of its line.
+				const before =
+					vim.anchor.line < cursorLine || (vim.anchor.line === cursorLine && vim.anchor.col <= cursorCol);
+				anchor = before ? anchorOffset : anchorOffset + (lines[vim.anchor.line]?.length ?? 0);
+			} else {
+				anchor = anchorOffset + vim.anchor.col;
+			}
+		}
+		const prompt = this.#promptGutter === undefined ? "" : plainText(this.#promptGutter);
+		const props: TspEditorProps = {
+			text,
+			cursor,
+			anchor: anchor ?? undefined,
+			decor: decor.decor,
+			ghost: ghost ? plainText(ghost) : undefined,
+			placeholder: nativePlaceholder || undefined,
+			prompt: prompt || undefined,
+			mode: vim ? VIM_MODE_LABELS[vim.mode] : undefined,
+			lang: this.describeLanguage?.(),
+			maxLines: this.#maxHeight,
+		};
+		let editor = this.#nativeEditor;
+		if (!editor || !sameProps(editor.props, props)) {
+			editor = { props, node: node("editor", props, undefined, "input") };
+			this.#nativeEditor = editor;
+		}
+
+		const layout = this.describeLayout?.(editor.node, cx) ?? {
+			role: "omp.editor",
+			children: [editor.node],
+			caret: "input",
+		};
+		const children: NativeChild[] = [...layout.children];
+		const list = this.#visibleAutocompleteList();
+		if (list) {
+			list.setNativeMark(this.#autocompleteMark());
+			const overlay = this.#nativeOverlay;
+			if (overlay?.list !== list || overlay.caret !== layout.caret) {
+				this.#nativeOverlay = {
+					list,
+					caret: layout.caret,
+					node: node("overlay", { anchor: { caret: layout.caret }, role: "omp.autocomplete" }, [list], "complete"),
+				};
+			}
+			children.push(this.#nativeOverlay!.node);
+		} else {
+			this.#nativeOverlay = undefined;
+		}
+		const root = this.#nativeRoot;
+		if (root && root.role === layout.role && root.tone === layout.tone && sameItems(root.children, children)) {
+			return root.node;
+		}
+		const described = col(children, layout.tone ? { role: layout.role, tone: layout.tone } : { role: layout.role });
+		this.#nativeRoot = { role: layout.role, tone: layout.tone, children, node: described };
+		return described;
+	}
+
+	/**
+	 * The typed text the open popup matches item labels against, for the TSP
+	 * `mark`: the completion prefix (the live `@` token while a file list
+	 * narrows in place) without its sigil, from its last path segment on.
+	 */
+	#autocompleteMark(): string {
+		let typed = this.#autocompletePrefix;
+		if (typed.startsWith("@")) {
+			const line = this.#state.lines[this.#state.cursorLine] ?? "";
+			typed = AT_TOKEN_RE.exec(line.slice(0, this.#state.cursorCol))?.[1] ?? typed;
+		}
+		typed = typed.replace(/^[/@:#$^]"?/, "");
+		return typed.slice(typed.lastIndexOf("/") + 1);
+	}
+
 	handleInput(data: string): void {
 		// Iterative, not recursive: the bytes trailing a completed bracketed
 		// paste (which may themselves contain further pastes) loop back here,
@@ -1723,31 +1899,8 @@ export class Editor implements Component, Focusable {
 						// arrow at end of line moves the cursor.
 						this.#cancelAutocomplete();
 						this.onAutocompleteUpdate?.();
-					} else if (this.#autocompleteProvider) {
-						const shouldChainAutocomplete =
-							this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
-						const result = this.#autocompleteProvider.applyCompletion(
-							this.#state.lines,
-							this.#state.cursorLine,
-							this.#state.cursorCol,
-							selected,
-							this.#autocompletePrefix,
-						);
-
-						this.#state.lines = result.lines;
-						this.#state.cursorLine = result.cursorLine;
-						this.#setCursorCol(result.cursorCol);
-
-						this.#cancelAutocomplete();
-						this.onAutocompleteUpdate?.();
-
-						this.#notifyChange();
-
-						result.onApplied?.();
-
-						if (shouldChainAutocomplete) {
-							queueMicrotask(() => void this.#tryTriggerAutocomplete());
-						}
+					} else {
+						this.#acceptAutocompleteSelection(selected);
 					}
 					// Only an accepted candidate consumes the key; an empty list falls through.
 					if (selected) return;
@@ -4111,6 +4264,35 @@ export class Editor implements Component, Focusable {
 		}
 		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab });
 	}
+	/** Apply `selected` the way Tab does: complete it in place and chain into directories/commands. */
+	#acceptAutocompleteSelection(selected: SelectItem): void {
+		if (!this.#autocompleteProvider) return;
+		const shouldChainAutocomplete =
+			this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
+		const result = this.#autocompleteProvider.applyCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+			selected,
+			this.#autocompletePrefix,
+		);
+
+		this.#state.lines = result.lines;
+		this.#state.cursorLine = result.cursorLine;
+		this.#setCursorCol(result.cursorCol);
+
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+
+		this.#notifyChange();
+
+		result.onApplied?.();
+
+		if (shouldChainAutocomplete) {
+			queueMicrotask(() => void this.#tryTriggerAutocomplete());
+		}
+	}
+
 	#createAutocompleteList(
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
@@ -4120,7 +4302,14 @@ export class Editor implements Component, Focusable {
 			: prefix.startsWith("@")
 				? AT_FILE_SELECT_LIST_LAYOUT
 				: AUTOCOMPLETE_SELECT_LIST_LAYOUT;
-		return new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
+		const list = new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
+		// A pointer pick on the popup (TSP `select`/`activate`) accepts it like Tab.
+		list.onSelect = item => {
+			if (this.#autocompleteList !== list) return;
+			if (this.#autocompleteState === "assist") this.#applySpellingSuggestion();
+			else this.#acceptAutocompleteSelection(item);
+		};
+		return list;
 	}
 
 	async #handleTabCompletion(): Promise<void> {

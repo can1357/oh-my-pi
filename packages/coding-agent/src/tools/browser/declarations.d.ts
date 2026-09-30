@@ -9,6 +9,8 @@ interface BrowserAppOptions {
 	cdp_url?: string;
 	/** Drive the user's existing Chrome tabs through the omp Browser Relay. */
 	relay?: boolean;
+	/** Inside a Tern pane: `true` requires a Tern browser picture-in-picture, `false` opens Chromium instead. */
+	tern?: boolean;
 	/** Extra command-line arguments for a spawned executable. */
 	args?: string[];
 	/** URL/title substring used to select an attached tab. */
@@ -501,10 +503,10 @@ interface BrowserManagedTab {
 	url: string;
 	/** Last reported page title. */
 	title: string;
-	/** Browser target or cmux surface identifier. */
+	/** Browser target, cmux surface, or Tern browser block identifier. */
 	targetId: string;
 	/** Browser backend kind. */
-	kind: "headless" | "spawned" | "connected" | "relay" | "cmux";
+	kind: "headless" | "spawned" | "connected" | "relay" | "cmux" | "tern";
 	/** Whether settle and idle-close management are disabled. */
 	persist: boolean;
 }

@@ -1,15 +1,25 @@
 import { isReadableUrlPath, readSelectorRangeStart } from "./read";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { compact, span, text } from "../native/describe";
+import { plainText } from "../native/spans";
+import { errorText, noteText, resultText, statsText } from "./native-view";
 import { type Theme, theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
 import { truncate } from "@oh-my-pi/pi-utils";
 import { renderStatusLine, urlHyperlink } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { formatExpandHint, getDomain, sanitizeDisplayLines } from "../render/render-utils";
+import {
+	formatExpandHint,
+	formatMoreItems,
+	getDomain,
+	PREVIEW_LIMITS,
+	sanitizeDisplayLines,
+} from "../render/render-utils";
 import { applyListLimit } from "./list-limit";
-import { formatStyledArtifactReference } from "./output-meta";
+import { formatFullOutputReference, formatStyledArtifactReference } from "./output-meta";
 
 /** Display metadata for fetch tool results. */
 export interface ReadUrlToolDetails {
@@ -98,6 +108,15 @@ function formatReadUrlDescription(input: string): string {
 	return urlHyperlink(target, label);
 }
 
+/** Link span for a URL read target: `domain /path`, linked to the resolved target. */
+function readUrlLinkSpan(input: string): TspSpan {
+	const target = readUrlLinkTarget(input);
+	const displayUrl = target.match(/^www\./i) ? `https://${target}` : target;
+	const urlPath = displayUrl.replace(/^https?:\/\/[^/]+/, "");
+	const label = `${getDomain(displayUrl)}${urlPath ? ` ${urlPath}` : ""}`.trim() || target;
+	return span(plainText(label), "link", { href: target });
+}
+
 function formatReadUrlMetadataValue(url: string, uiTheme: Theme): string {
 	return urlHyperlink(url, uiTheme.fg("mdLinkUrl", url));
 }
@@ -114,6 +133,86 @@ export function renderReadUrlCall(
 	if (args.raw) meta.push("raw");
 	const text = renderStatusLine({ icon: "pending", title: "Read", description, meta }, uiTheme);
 	return new Text(text, 0, 0);
+}
+
+/** Native head of a URL read: `Read` plus the linked, one-line URL. */
+function readUrlHead(input: string, meta: readonly string[] = []): NativeToolHead {
+	const link = input ? readUrlLinkSpan(input) : undefined;
+	return {
+		title: "Read",
+		target: link?.t || undefined,
+		targetKind: "text",
+		href: link?.href,
+		meta: meta.length > 0 ? meta : undefined,
+	};
+}
+
+/** TSP call view of a URL read: the head only, inline while pending. */
+export function describeReadUrlCall(args: { path?: string; url?: string; raw?: boolean }): NativeToolView {
+	return { tool: readUrlHead(args.path ?? args.url ?? "", args.raw ? ["raw"] : []), inline: true };
+}
+
+/** TSP result view of a URL read: a bounded content preview over one quiet stats line. */
+export function describeReadUrlResult(result: {
+	content: Array<{ type: string; text?: string }>;
+	details?: ReadUrlToolDetails;
+	isError?: boolean;
+}): NativeToolView {
+	const details = result.details;
+	if (result.isError || !details) {
+		const urlText = details?.finalUrl ?? details?.url ?? "";
+		const message = plainText(resultText(result) || "No response data").replace(/^Error:\s*/, "");
+		return {
+			tool: readUrlHead(urlText),
+			tone: "error",
+			body: [errorText(message.trim() || "Read failed")],
+		};
+	}
+
+	const truncation = details.meta?.truncation;
+	const truncated = Boolean(details.truncated || truncation);
+	const contentText = result.content[0]?.text ?? "";
+	const contentBody = contentText.includes("---\n\n")
+		? contentText.split("---\n\n").slice(1).join("---\n\n")
+		: contentText;
+	const contentLines = contentBody.split("\n").filter(l => l.trim());
+	const shown = contentLines.slice(0, PREVIEW_LIMITS.EXPANDED_LINES);
+	const hidden = contentLines.length - shown.length;
+	const redirected = details.url !== details.finalUrl;
+
+	const stats = statsText(
+		[
+			plainText(details.contentType || "unknown"),
+			details.method ? plainText(details.method) : "",
+			`${contentLines.length} line${contentLines.length === 1 ? "" : "s"}`,
+			`${contentBody.trim().length} chars`,
+			hidden > 0 ? formatMoreItems(hidden, "line") : "",
+			...details.notes.map(note => plainText(note)),
+		].filter(Boolean),
+	);
+	return {
+		tool: readUrlHead(details.finalUrl, redirected ? [`from ${plainText(getDomain(details.url))}`] : []),
+		tone: truncated ? "warning" : undefined,
+		body: compact([
+			shown.length > 0
+				? text([span(plainText(shown.map(line => line.trimEnd()).join("\n")), "dim")], { wrap: "word" })
+				: noteText("(no content)"),
+			stats,
+			truncated
+				? text(
+						[
+							span(
+								truncation?.artifactId
+									? `Output truncated · ${formatFullOutputReference(truncation.artifactId)}`
+									: "Output truncated",
+								"warning",
+							),
+						],
+						{ wrap: "word", role: "omp.tool.notice" },
+					)
+				: undefined,
+		]),
+	};
 }
 
 /** Render URL read result with tree-based layout */

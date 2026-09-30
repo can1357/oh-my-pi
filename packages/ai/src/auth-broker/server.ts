@@ -41,6 +41,7 @@ import {
 	DEFAULT_SERVER_IDLE_TIMEOUT_S,
 	DEFAULT_STREAM_KEEPALIVE_MS,
 } from "./types";
+import { compareCredentialBlockSnapshots, parseGenerationTag } from "./protocol";
 import {
 	clientUsageReportRequestSchema,
 	credentialBlockDeleteRequestSchema,
@@ -163,18 +164,6 @@ function snapshotHeaders(generation: number): Record<string, string> {
 		"Cache-Control": "no-store",
 		Vary: AUTH_BROKER_CAPABILITIES_HEADER,
 	};
-}
-
-function parseGenerationTag(header: string | null): number | undefined {
-	if (!header) return undefined;
-	let value = header.trim();
-	if (value.startsWith("W/")) value = value.slice(2).trim();
-	if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-		value = value.slice(1, -1);
-	}
-	const generation = Number(value);
-	if (!Number.isInteger(generation) || generation < 0) return undefined;
-	return generation;
 }
 
 function parseWaitMs(url: URL): number {
@@ -314,14 +303,6 @@ function computeRotatesInMs(
 	const steps = Math.ceil((eligibleAt - nextSweepAt) / schedule.intervalMs);
 	const rotatesAt = nextSweepAt + steps * schedule.intervalMs;
 	return Math.max(0, rotatesAt - serverNowMs);
-}
-
-function compareCredentialBlockSnapshots(a: CredentialBlockSnapshot, b: CredentialBlockSnapshot): number {
-	const provider = a.providerKey.localeCompare(b.providerKey);
-	if (provider !== 0) return provider;
-	const scope = a.blockScope.localeCompare(b.blockScope);
-	if (scope !== 0) return scope;
-	return a.blockedUntilMs - b.blockedUntilMs;
 }
 
 const CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";

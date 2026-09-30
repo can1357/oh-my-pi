@@ -22,7 +22,7 @@ omp --mode rpc [regular CLI options]
 Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.
-- `--no-ui` (only with `--mode rpc`) runs extensions headless: `ctx.hasUI` is `false`, dialogs resolve to their defaults, and no `extension_ui_request` frames are emitted except for a host-issued `login`. Use it when the host has no interactive surface and must not be left owing dialog answers.
+- `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, dialogs resolve to their defaults, and extension presentation updates are dropped. With `rpc-ui`, tool UI such as `ask` remains enabled. With `rpc`, no UI requests are emitted except for a host-issued `login`. See [Extension UI Sub-Protocol](#extension-ui-sub-protocol) for the exact boundaries.
 - RPC mode disables automatic session title generation by default to avoid an extra model call.
 - RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
@@ -118,6 +118,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "remove_queued_message", message: string, queue: "steering" | "followUp" }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
@@ -138,7 +139,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
-- `{ id?, type: "set_event_filter", events: string[] | null }`
+- `{ id?, type: "set_event_filter", events: string[] | null, messageUpdates?: "full" | "delta" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
 
@@ -164,6 +165,23 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "compact", customInstructions?: string }`
 - `{ id?, type: "set_auto_compaction", enabled: boolean }`
+
+### Cache warming
+
+- `{ id?, type: "set_cache_warming", mode: "off" | "streaming" | "idle" }`
+
+Sets `providers.cacheWarming` for the current session without writing `config.yml`.
+`off` clears scheduled refreshes and aborts any refresh in flight; `streaming`
+warms during active agent runs; `idle` also warms between runs. Enabling warming
+does not replay an old, cancelled run: the next real provider request arms it.
+Invalid modes return the usual `success: false` response. Success reports the
+effective mode after applying the override:
+
+```json
+{"id":"warming-off","type":"response","command":"set_cache_warming","success":true,"data":{"mode":"off"}}
+```
+
+The TypeScript client exposes `setCacheWarming(mode): Promise<CacheWarmingMode>`.
 
 ### Retry
 
@@ -271,6 +289,27 @@ Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (o
 
 `resumed` is `false` when a fresh session was started. The command fails when the process runs without persistence (`--no-session`).
 
+### `remove_queued_message` payload
+
+Remove the first matching user-authored message from the selected pending queue:
+
+```json
+{"id":"req_2","type":"remove_queued_message","message":"Use the existing parser","queue":"steering"}
+{"id":"req_2","type":"response","command":"remove_queued_message","success":true,"data":{"removed":true}}
+```
+
+`message` matches the queue-chip text or its prompt-template expansion. Queued RPC skill commands retain their original `/skill:<name>` invocation as the chip text. Removal also drops that message's attachments and contiguous preceding hidden user companions (keyword notices, image descriptions, and video source paths), preserving other messages and the other queue.
+
+Companions and their prompt are enqueued and dequeued as a complete group, including in `one-at-a-time` mode. Once that group leaves the pending queue for delivery, a removal request cannot report success after only part of its context has been emitted.
+
+Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
+
+The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
+
+Clients must hide the chip or restore its draft only after `removed: true`. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
+
+The official Python client exposes `remove_queued_message(message, queue) -> RemoveQueuedMessageResult`; inspect its `.removed` boolean rather than the result object's truthiness.
+
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
@@ -304,6 +343,7 @@ is re-armed.
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
+  "queuedMessages": { "steering": [], "followUp": [] },
   "todoPhases": [
     {
       "id": "phase-1",
@@ -332,6 +372,13 @@ is re-armed.
   }
 }
 ```
+
+`queuedMessages` holds the same displayable queue-chip text as the `queue_update`
+event below — every entry is a `message` value that `remove_queued_message`
+will match against that queue. Clients should render the pending-message queue
+from these snapshots instead of tracking chips independently, and treat
+`remove_queued_message` responses as confirmation of the change rather than a
+second source of truth.
 
 ### `set_fast_mode` payload
 
@@ -522,11 +569,31 @@ Common event types:
 - `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
 - `auto_compaction_start`, `auto_compaction_end`
 - `auto_retry_start`, `auto_retry_end`
+- `cache_warming_start`, `cache_warming_end`
 - `retry_fallback_applied`, `retry_fallback_succeeded`
 - `model_changed`, `thinking_level_changed`
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
+- `queue_update`
+
+### `queue_update` event
+
+```json
+{ "type": "queue_update", "steering": ["Use the existing parser"], "followUp": [] }
+```
+
+Emitted whenever the displayable steering/follow-up queue changes: a `steer`,
+`follow_up`, or queued `prompt` adds to it; delivery at the start of the next
+turn, `remove_queued_message`, an abort that drops in-flight queued messages,
+or a session switch removes from or clears it. The server coalesces this
+against the last value sent — a mutation that leaves the snapshot unchanged
+(for example, an agent-authored aside that never renders as a chip) never
+re-emits. `steering`/`followUp` mirror `get_state`'s `queuedMessages` field and
+carry the exact `message` text `remove_queued_message` expects back. Render
+the queue from this event rather than tracking chips independently, and treat
+`remove_queued_message`/promotion replies as confirmation of a change this
+event will also report.
 
 Extension runner errors are emitted separately as:
 
@@ -543,7 +610,11 @@ Extension runner errors are emitted separately as:
 
 `message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
 
-`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events }`. The filter applies only to the session events listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is always written. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies only to the session events listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is always written. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+
+The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message. Block-ending events such as `text_end`, `thinking_end`, and `toolcall_end` retain their block content or tool call, so hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
+
+Each command replaces the whole filter state: omitting `messageUpdates` resets it to `"full"`, the default, which retains the original full snapshots. Invalid events or a mode other than `"full"` or `"delta"` return an error without changing either setting. Projection works in protocol v1 and v2, including with `events: null`. Detect support from the echoed `data.messageUpdates` field: older servers ignore the option and do not echo it. This opt-in is raw-protocol only; the TypeScript `RpcClient` and Python client keep their full-message listener contracts.
 
 `agent_end` has this session-level shape (in addition to optional telemetry fields):
 
@@ -562,6 +633,54 @@ Extension runner errors are emitted separately as:
 so the session will resume before its true final settle. Treat an `agent_end` as
 run completion only when `isTerminal !== false`; the field is optional so frames
 from older runtimes, where it is absent, remain terminal-compatible.
+
+### Cache warming events
+
+Each refresh handed to the provider stream emits one start and one matching end
+(a session disposed mid-refresh emits no end).
+Warm-or-stop decisions that do not send a request emit neither. These are
+session events, so **both types must be listed in `set_event_filter` when a filter
+is active** to observe complete refresh lifecycles:
+
+```ts
+{
+  type: "cache_warming_start";
+  phase: "streaming" | "idle";
+  provider: string;
+  model: string; // model id
+}
+{
+  type: "cache_warming_end";
+  phase: "streaming" | "idle"; // same phase as the matching start
+  provider: string;
+  model: string;
+  outcome: "hit" | "miss" | "error" | "aborted";
+  usage?: Usage;
+  warmingStopReason?: string;
+}
+```
+
+- `hit`: the refresh read cached tokens without writing a new cache entry.
+- `miss`: it read no cached tokens or wrote cache tokens; warming stops.
+- `error`: no response was available or the response reported an error; warming stops.
+- `aborted`: the run was cancelled or replaced while the refresh was in flight.
+
+`usage` is present only when the refresh was recorded as a `model_usage` entry
+(`purpose: "cache-warm"`, or `"cache-warm:extension-override"` when an extension
+forced it). This includes paid misses, errors, and `aborted` refreshes the
+provider had already accepted (usage reported before the cancellation); an
+abort before the provider responded has no usage. Summing `usage.cost.total`
+attributes the warming costs already included in `get_session_stats`, rather
+than adding another charge.
+
+These events are ordinary session events, so `--mode json` output includes them
+as well.
+
+`warmingStopReason` explains why warming stopped because of or during the
+refresh, for example `"refresh missed the cache"`, `"refresh failed"`,
+`"cache warming disabled"`, or `"conversation context changed"`. It is absent
+when warming continues: the refresh rescheduled, or a new request replaced the
+run.
 
 ### Available commands
 
@@ -668,7 +787,17 @@ From `packages/agent/src/agent.ts` defaults:
 
 ## Extension UI Sub-Protocol
 
-Extensions in RPC mode use request/response UI frames. A host that cannot answer them starts with `--no-ui`: extensions then see `ctx.hasUI === false`, dialogs resolve to their defaults without emitting frames, and presentation updates (`notify`, `setStatus`, `setWidget`, `set_editor_text`) are dropped. `--mode rpc-ui` additionally routes tool UI (e.g. the `ask` tool) through this sub-protocol.
+Extensions in RPC mode use request/response UI frames. `--no-ui` disables the extension runner's UI in both RPC modes: extensions see `ctx.hasUI === false`, dialogs resolve to their defaults without emitting frames, and presentation updates (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) are dropped.
+
+`--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
+
+- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`.
+- Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
+- Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
+- MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
+- A host-issued `login` is independent of both UI settings: it can emit `open_url`, progress `notify`, and non-secret `input` requests after the authorization URL. Secret input and prompts before an authorization URL remain unsupported.
+
+Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-ui --no-ui` to answer tool dialogs while keeping extensions headless. Plain `--mode rpc-ui` enables both extension and tool UI.
 
 ### Outbound request
 
