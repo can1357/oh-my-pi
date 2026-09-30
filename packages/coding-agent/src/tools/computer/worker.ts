@@ -34,6 +34,7 @@ import type {
 	RunErrorPayload,
 	ToolReply,
 } from "./protocol";
+import { describeWindowMiss } from "./window-miss";
 
 /** Native desktop operations consumed by the script runtime. */
 export interface NativeDesktopSession {
@@ -728,7 +729,13 @@ export class ComputerWorkerCore {
 					typeof selector === "string" || typeof selector === "number"
 						? windows.filter(window => window.id === String(selector))
 						: windows.filter(window => matchesFilter(window, selector));
-				if (matches.length === 0) throw new ToolError(`no window matches ${JSON.stringify(selector)}`);
+				if (matches.length === 0) {
+					// Scripts are untyped: `window(null)` reaches here when no window is open.
+					const app = typeof selector === "object" ? selector?.app : undefined;
+					throw new ToolError(
+						`no window matches ${JSON.stringify(selector)}\n${describeWindowMiss(windows, app)}`,
+					);
+				}
 				if (matches.length > 1) {
 					const candidates = matches
 						.map(window => `${window.id} ${window.app} ${JSON.stringify(window.title)}`)
