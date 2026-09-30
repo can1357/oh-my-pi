@@ -52,7 +52,13 @@ import type {
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
 import { sanitizeDisplayWarning, thinkingLevelGlyph } from "../render/render-utils";
 import { theme } from "../theme/theme";
-import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import {
+	matchesSelectCancel,
+	matchesSelectDown,
+	matchesSelectPageDown,
+	matchesSelectPageUp,
+	matchesSelectUp,
+} from "../keybinding-matchers";
 import {
 	buildBrowserItems,
 	MODEL_PICKER_COLUMNS,
@@ -152,7 +158,7 @@ export type ModelRoleSelectionScope = "global" | "project";
 /** Create, edit, and delete the custom OpenAI-compatible providers declared in models.yml. */
 export interface ModelHubProviderEditor {
 	/** The provider's current declaration; undefined when it is not in models.yml and so not editable. */
-	get(id: string): { baseUrl: string | undefined; hasKey: boolean } | undefined;
+	get(id: string): { baseUrl: string | undefined; hasKey: boolean; keepsKeyOnRemove: boolean } | undefined;
 	add(values: { id: string; baseUrl: string; apiKey: string }): Promise<void>;
 	update(id: string, update: { baseUrl?: string; apiKey?: string; clearApiKey?: boolean }): Promise<void>;
 	remove(id: string): Promise<void>;
@@ -277,9 +283,11 @@ type StripState =
 			preview?: { value: string; text: string | undefined };
 	  }
 	| {
-			/** Footer confirmation before removing a custom provider and its stored key. */
+			/** Footer confirmation before removing a custom provider (and its stored key, unless `keepsKey`). */
 			kind: "deleteProvider";
 			providerId: string;
+			/** The stored key survives the removal (it is a built-in provider's own login). */
+			keepsKey: boolean;
 			/** `remove` is in flight; input is ignored until it settles. */
 			pending: boolean;
 			/** Message of the last failed removal, shown in place of the prompt. */
@@ -1935,10 +1943,14 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	/** The focused provider's models.yml declaration, shaped for the edit form; undefined when it is not editable. */
-	#editableProvider(entry: SidebarEntry): { id: string; baseUrl: string; hasKey: boolean } | undefined {
+	#editableProvider(
+		entry: SidebarEntry,
+	): { id: string; baseUrl: string; hasKey: boolean; keepsKeyOnRemove: boolean } | undefined {
 		const id = entry.kind === "provider" ? entry.providerId : undefined;
 		const info = id ? this.#callbacks.providerEditor?.get(id) : undefined;
-		return id && info ? { id, baseUrl: info.baseUrl ?? "", hasKey: info.hasKey } : undefined;
+		return id && info
+			? { id, baseUrl: info.baseUrl ?? "", hasKey: info.hasKey, keepsKeyOnRemove: info.keepsKeyOnRemove }
+			: undefined;
 	}
 
 	/**
@@ -1961,12 +1973,19 @@ export class ModelHubComponent implements Component {
 		const form = new CustomProviderForm(
 			host,
 			async values => {
-				if (!edit) return editor.add(values);
-				return editor.update(edit.id, {
-					...(values.baseUrl !== edit.baseUrl ? { baseUrl: values.baseUrl } : {}),
-					...(values.apiKey ? { apiKey: values.apiKey } : {}),
-					...(values.clearApiKey ? { clearApiKey: true } : {}),
-				});
+				if (!edit) await editor.add(values);
+				else {
+					const update = {
+						...(values.baseUrl !== edit.baseUrl ? { baseUrl: values.baseUrl } : {}),
+						...(values.apiKey ? { apiKey: values.apiKey } : {}),
+						...(values.clearApiKey ? { clearApiKey: true } : {}),
+					};
+					// Nothing changed: skip the rewrite and the rediscovery, which could fail for an untouched provider.
+					if (Object.keys(update).length === 0) return;
+					await editor.update(edit.id, update);
+				}
+				// Esc during the save closed the form, so its `finish` no longer syncs; do it as the save settles.
+				if (this.#providerForm !== form && !this.#disposed) this.#refreshAfterMutation();
 			},
 			() => this.#closeProviderForm(),
 			edit ? { edit } : {},
@@ -1986,6 +2005,15 @@ export class ModelHubComponent implements Component {
 	/** Sidebar-focus keys: ^N adds a provider; ^E edits and ^D/Delete deletes the focused one when models.yml declares it. */
 	#handleProviderEditorKey(data: string, entry: SidebarEntry): boolean {
 		if (!this.#callbacks.providerEditor) return false;
+		// A rebound navigation key (e.g. `tui.select.down: ctrl+n`) keeps navigating.
+		if (
+			matchesSelectUp(data) ||
+			matchesSelectDown(data) ||
+			matchesSelectPageUp(data) ||
+			matchesSelectPageDown(data)
+		) {
+			return false;
+		}
 		if (matchesKey(data, "ctrl+n")) {
 			this.#openProviderForm();
 			return true;
@@ -1997,7 +2025,12 @@ export class ModelHubComponent implements Component {
 			return true;
 		}
 		if (matchesKey(data, "ctrl+d") || matchesKey(data, "delete")) {
-			this.#strip = { kind: "deleteProvider", providerId: provider.id, pending: false };
+			this.#strip = {
+				kind: "deleteProvider",
+				providerId: provider.id,
+				keepsKey: provider.keepsKeyOnRemove,
+				pending: false,
+			};
 			return true;
 		}
 		return false;
@@ -2947,15 +2980,19 @@ export class ModelHubComponent implements Component {
 		];
 	}
 
-	#deleteProviderPrompt(strip: { providerId: string; pending: boolean; error?: string }): string {
+	/** One-row prompt; the ID/reason is ellipsized to `width` so the confirm/cancel hint always stays visible. */
+	#deleteProviderPrompt(
+		strip: { providerId: string; keepsKey: boolean; pending: boolean; error?: string },
+		width: number,
+	): string {
 		// IDs and error messages come from models.yml and the filesystem; keep the one-row footer escape-free.
-		const id = stripTerminalSequences(strip.providerId).replace(/\s+/g, " ").trim();
-		if (strip.pending) return `Deleting provider "${id}"…`;
-		if (strip.error !== undefined) {
-			const reason = stripTerminalSequences(strip.error).replace(/\s+/g, " ").trim();
-			return `Delete failed: ${reason} · Enter retry · Esc cancel`;
-		}
-		return `Delete provider "${id}" and its stored key? Enter confirm · Esc cancel`;
+		const clean = (text: string) => stripTerminalSequences(text).replace(/\s+/g, " ").trim();
+		const fit = (before: string, text: string, after: string) =>
+			`${before}${truncateToWidth(text, Math.max(1, width - visibleWidth(before) - visibleWidth(after)))}${after}`;
+		if (strip.pending) return fit('Deleting provider "', clean(strip.providerId), '"…');
+		if (strip.error !== undefined) return fit("Delete failed: ", clean(strip.error), " · Enter retry · Esc cancel");
+		const subject = strip.keepsKey ? '"?' : '" and its stored key?';
+		return fit('Delete provider "', clean(strip.providerId), `${subject} Enter confirm · Esc cancel`);
 	}
 
 	/** Advertise the provider keys only where they act: on the sidebar, outside assignment. */
@@ -2964,7 +3001,7 @@ export class ModelHubComponent implements Component {
 		return this.#editableProvider(entry) ? "^E edit · ^D delete · ^N add provider · " : "^N add provider · ";
 	}
 
-	#footerHint(): string {
+	#footerHint(width: number): string {
 		const enter = formatKeyHint("enter");
 		const cancel = editorKey("tui.select.cancel");
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
@@ -2974,7 +3011,7 @@ export class ModelHubComponent implements Component {
 		const altLeftRight = formatKeyHints(["alt+left", "alt+right"]);
 		const strip = this.#strip;
 		if (strip) {
-			if (strip.kind === "deleteProvider") return this.#deleteProviderPrompt(strip);
+			if (strip.kind === "deleteProvider") return this.#deleteProviderPrompt(strip, width);
 			if (strip.kind === "name") {
 				if (strip.purpose === "compaction") {
 					return `${enter} ${compactionConfirmPending(strip) ? "accept" : "set"} compaction point · ${cancel} cancel`;
@@ -3062,7 +3099,7 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		return this.#frame.renderFooter(
 			width,
-			this.#footerHint(),
+			this.#footerHint(width),
 			strip ? () => this.#renderStrip(width, strip) : undefined,
 		);
 	}
@@ -3092,7 +3129,7 @@ export class ModelHubComponent implements Component {
 		}
 		if (strip.kind === "deleteProvider") {
 			return truncateToWidth(
-				theme.fg(strip.error === undefined ? "warning" : "error", this.#deleteProviderPrompt(strip)),
+				theme.fg(strip.error === undefined ? "warning" : "error", this.#deleteProviderPrompt(strip, width)),
 				width,
 			);
 		}
