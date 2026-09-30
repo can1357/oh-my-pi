@@ -320,11 +320,12 @@ export function formatBadge(label: string, color: ToolUIColor, theme: Theme): st
 
 /**
  * Build a "more items" suffix line for truncated lists.
- * Uses consistent wording pattern.
+ * Uses consistent wording pattern. `orMore` marks `remaining` as a minimum
+ * (`… 45+ more lines`) when the true count is unknown.
  */
-export function formatMoreItems(remaining: number, itemType: string): string {
+export function formatMoreItems(remaining: number, itemType: string, orMore = false): string {
 	const safeRemaining = Number.isFinite(remaining) ? remaining : 0;
-	return `… ${safeRemaining} more ${pluralize(itemType, safeRemaining)}`;
+	return `… ${safeRemaining}${orMore ? "+" : ""} more ${pluralize(itemType, safeRemaining)}`;
 }
 
 /**

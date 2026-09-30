@@ -14,12 +14,10 @@ describe("renderMarkdownHead", () => {
 		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
 		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
 
+		expect(head.truncated).toBe(true);
 		expect(head.lines.length).toBeGreaterThan(12);
 		expect(head.lines.length).toBeLessThan(full.length);
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
-		// Every source line renders as one row here, so the rendered rows and the
-		// source lines after them make up the whole render.
-		expect(head.lines.length + head.linesAfter).toBe(full.length);
 	});
 
 	it("cuts the text the renderer lexes after repairing an orphan closing fence", () => {
@@ -31,7 +29,7 @@ describe("renderMarkdownHead", () => {
 		const doc = `${items}\n\n\`\`\`\n- b\n\n# Heading\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n${paragraphs(200)}\n`;
 
 		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
-		expect(head.linesAfter).toBeGreaterThan(0);
+		expect(head.truncated).toBe(true);
 		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
 	});
@@ -42,7 +40,7 @@ describe("renderMarkdownHead", () => {
 	] as const) {
 		it(`renders the whole document for ${name}`, () => {
 			const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
-			expect(head.linesAfter).toBe(0);
+			expect(head.truncated).toBe(false);
 			expect(head.lines).toEqual(new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120));
 		});
 	}

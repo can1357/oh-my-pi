@@ -1325,22 +1325,18 @@ function lexDocument(text: string): TokensList {
 // Over-matching only costs the cut.
 const REF_DEF_ANYWHERE = /\[(?:\\.|[^\]\\\n])+\]:/;
 
-/** Lines of `text` from `start` on, not counting trailing blank lines. */
-function countLinesFrom(text: string, start: number): number {
-	let last = text.length - 1;
-	while (last >= start && /\s/.test(text[last])) last--;
-	if (last < start) return 0;
-	let lines = 1;
-	for (let nl = text.indexOf("\n", start); nl !== -1 && nl < last; nl = text.indexOf("\n", nl + 1)) lines++;
-	return lines;
+/** Whether `text` holds anything but whitespace from `start` on. */
+function hasContentFrom(text: string, start: number): boolean {
+	for (let last = text.length - 1; last >= start; last--) if (!/\s/.test(text[last])) return true;
+	return false;
 }
 
-/** The leading rendered rows of a Markdown document and the source lines past them. */
+/** The leading rendered rows of a Markdown document. */
 export interface MarkdownHead {
 	/** Leading rows; each equals the same row of a full render. */
 	lines: readonly string[];
-	/** Source lines after the rendered rows' source, trailing blank lines excluded; 0 when the whole document was rendered. */
-	linesAfter: number;
+	/** Whether the document goes on past the rows' source unrendered, so a full render may have more rows. */
+	truncated: boolean;
 }
 
 /**
@@ -1369,10 +1365,10 @@ export function renderMarkdownHead(text: string, width: number, theme: MarkdownT
 			// matches.
 			if (repairOrphanClosingFence(head) !== head) break;
 			const lines = new Markdown(head, 0, 0, theme).render(width);
-			if (lines.length > minRows) return { lines, linesAfter: countLinesFrom(normalized, end) };
+			if (lines.length > minRows) return { lines, truncated: hasContentFrom(normalized, end) };
 		}
 	}
-	return { lines: new Markdown(text, 0, 0, theme).render(width), linesAfter: 0 };
+	return { lines: new Markdown(text, 0, 0, theme).render(width), truncated: false };
 }
 
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */

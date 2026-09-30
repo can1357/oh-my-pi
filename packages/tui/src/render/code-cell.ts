@@ -323,27 +323,27 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 
 	// Markdown component manages its own wrapping at the same inner width as
 	// `renderOutputBlock`, so collapsed row caps are applied after final wrapping.
-	// A collapsed preview renders only a block-boundary prefix of the document;
-	// its footer then counts the prefix rows it hides plus the source lines
-	// after the cut, since the rows past the cut were never rendered.
+	// A collapsed preview renders only a block-boundary prefix of the document.
+	// When the document goes on past it, the rows after the cut were never
+	// rendered, so the footer's count of hidden rows is a minimum (`45+`).
 	const innerWidth = Math.max(20, outputBlockContentWidth(width));
 	let allLines: readonly string[] = [];
-	let linesAfterCut = 0;
+	let truncated = false;
 	if (content.trim()) {
 		if (expanded) {
 			allLines = new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth);
 		} else {
 			const head = renderMarkdownHead(content, innerWidth, getMarkdownTheme(), contentMaxLines);
 			allLines = head.lines;
-			linesAfterCut = head.linesAfter;
+			truncated = head.truncated;
 		}
 	}
 	const maxContentLines = expanded ? allLines.length : Math.min(allLines.length, contentMaxLines);
 	const contentLines = allLines.slice(0, maxContentLines);
-	const hiddenContentLines = allLines.length - maxContentLines + linesAfterCut;
+	const hiddenContentLines = allLines.length - maxContentLines;
 	if (hiddenContentLines > 0) {
 		const hint = formatExpandHint(theme, expanded, hiddenContentLines > 0);
-		const moreLine = `${formatMoreItems(hiddenContentLines, "line")}${hint ? ` ${hint}` : ""}`;
+		const moreLine = `${formatMoreItems(hiddenContentLines, "line", truncated)}${hint ? ` ${hint}` : ""}`;
 		contentLines.push(theme.fg("dim", moreLine));
 	}
 

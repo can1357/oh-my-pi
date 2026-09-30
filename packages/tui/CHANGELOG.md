@@ -6,7 +6,7 @@
 
 - Fixed long Markdown messages sometimes showing raw display math, a visible HTML comment, or a code block split in two ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed streamed Markdown keeping raw `$$` math or an unresolved reference link after the message finished, when a display-math block contained blank lines or a link definition sat inside a quote or list ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed long Markdown files and skills being slow to appear in read previews: a collapsed preview now renders only the start of the document, so its hidden-line count counts source lines past that start rather than rendered rows
+- Fixed long Markdown files and skills being slow to appear in read previews: a collapsed preview now renders only the start of the document, so its footer gives the rows it hides as a minimum (`… 45+ more lines`) ([#13840](https://github.com/can1357/oh-my-pi/pull/13840) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.4.4] - 2026-09-29
 

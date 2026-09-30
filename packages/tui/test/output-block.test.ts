@@ -128,7 +128,7 @@ describe("renderMarkdownCell collapsed previews", () => {
 		});
 	}
 
-	it("counts the prefix rows and source lines a cut preview hides", async () => {
+	it("marks a cut preview's count as the minimum number of rows it hides", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		// 400 paragraphs, each one 104-character source line that wraps to two
 		// rows at width 80 (76 inner columns), one blank line apart: 106 bytes each.
@@ -137,10 +137,23 @@ describe("renderMarkdownCell collapsed previews", () => {
 			stripVTControlCharacters(line),
 		);
 		// The last boundary before byte 2048 follows paragraph 19 (19 × 106 = 2014).
-		// The prefix renders 19 × (2 rows + 1 blank) = 57 rows, 45 of them hidden,
-		// and 381 paragraphs (761 source lines) follow the cut: 45 + 761 = 806.
+		// The prefix renders 19 × (2 rows + 1 blank) = 57 rows, 45 of them hidden;
+		// the rows after the cut were never rendered, so 45 is a minimum.
 		// The whole document's rows would give 400 × 2 + 399 - 12 = 1187.
-		expect(lines[13]).toStartWith("│ … 806 more lines");
+		expect(lines[13]).toStartWith("│ … 45+ more lines");
+	});
+
+	it("never counts more hidden rows than expanding shows when invisible source follows the cut", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		// An HTML comment renders no rows, however many source lines it spans.
+		const paragraphs = numbered(120, i => `Paragraph ${i} holds a single row of prose.`).join("\n\n");
+		const content = `${paragraphs}\n\n<!--\n${numbered(5000, i => `comment line ${i}`).join("\n")}\n-->\n`;
+		const options = { content, status: "complete" as const, title: "Read", width: 120 };
+		const expandedRows = renderMarkdownCell({ ...options, expanded: true }, theme).length - 2;
+		const footer = stripVTControlCharacters(renderMarkdownCell(options, theme)[13]);
+		const hidden = /^│ … (\d+)\+ more lines/.exec(footer);
+		expect(hidden).not.toBeNull();
+		expect(Number(hidden![1])).toBeLessThanOrEqual(expandedRows - 12);
 	});
 
 	it("keeps the whole-document count for a document that cannot be cut", async () => {
