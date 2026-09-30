@@ -6,6 +6,7 @@ import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
+import { ParallelProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
 import type { SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
@@ -44,7 +45,9 @@ describe("default web chain", () => {
 		attempted = [];
 		const recorder = new RecordingProvider(attempted);
 		vi.spyOn(provider, "getGroundedSearchProvider").mockResolvedValue(recorder);
-		vi.spyOn(provider, "getSearchProvider").mockResolvedValue(recorder);
+		vi.spyOn(provider, "getSearchProvider").mockImplementation(async id =>
+			id === "parallel" ? new ParallelProvider() : recorder,
+		);
 	});
 
 	afterEach(() => {
@@ -65,12 +68,10 @@ describe("default web chain", () => {
 			{ authStorage, modelRegistry, sessionModel: sessionModel("anthropic", "claude-sonnet-4-5") },
 		);
 
-		// The cheaper same-provider swap runs first; its failure falls back to the session model as-is.
-		expect(attempted.slice(0, 3)).toEqual([
-			"web/parallel",
-			"anthropic/claude-haiku-4-5",
-			"anthropic/claude-sonnet-4-5",
-		]);
+		// The key-gated Parallel provider is skipped without a credential; the cheaper same-provider
+		// swap then runs first, and its failure falls back to the session model as-is.
+		expect(attempted.slice(0, 2)).toEqual(["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-5"]);
+		expect(attempted).not.toContain("web/parallel");
 		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual([
 			"anthropic/claude-haiku-4-5",
 			"anthropic/claude-sonnet-4-5",
