@@ -904,9 +904,17 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 		"cursor-grok-4.6-medium-fast",
 		"cursor-grok-4.6-xhigh",
 		"cursor-grok-4.6-xhigh-fast",
+		"grok-4.7-high",
+		"grok-4.7-high-fast",
+		"grok-4.7-low",
+		"grok-4.7-low-fast",
+		"grok-4.7-medium",
+		"grok-4.7-medium-fast",
+		"grok-4.7-xhigh",
+		"grok-4.7-xhigh-fast",
 	];
 
-	it("collapses the 14 effort siblings into four logical models, split by the -fast lane", () => {
+	it("collapses the effort siblings into one logical model per lane", () => {
 		const collapsed = collapseVariants(
 			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
 			{ table: cursorTable },
@@ -916,6 +924,8 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 			"cursor-grok-4.5-fast",
 			"cursor-grok-4.6",
 			"cursor-grok-4.6-fast",
+			"grok-4.7",
+			"grok-4.7-fast",
 		]);
 
 		const g46 = collapsed.find(model => model.id === "cursor-grok-4.6");
@@ -943,8 +953,34 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.Low)).toBe("cursor-grok-4.6-low");
 		expect(resolveWireModelId(model("cursor-grok-4.6-fast"), Effort.High)).toBe("cursor-grok-4.6-high-fast");
 		expect(resolveWireModelId(model("cursor-grok-4.5"), Effort.Medium)).toBe("cursor-grok-4.5-medium");
+		expect(resolveWireModelId(model("grok-4.7"), Effort.XHigh)).toBe("grok-4.7-xhigh");
+		expect(resolveWireModelId(model("grok-4.7"), Effort.Low)).toBe("grok-4.7-low");
+		expect(resolveWireModelId(model("grok-4.7-fast"), Effort.High)).toBe("grok-4.7-high-fast");
 		// 4.5 has no xhigh sibling: the ceiling stays at high.
 		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(model("grok-4.7").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+	});
+
+	it("replaces the copied thinking ladder and routes the literal sibling id", () => {
+		const copied = {
+			reasoning: true,
+			thinking: { mode: "effort" as const, efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+		};
+		const tiers = ["low", "medium", "high", "xhigh"] as const;
+		const collapsed = collapseVariants(
+			tiers.flatMap(tier => [
+				cursorMemberSpec(`grok-4.7-${tier}`, copied),
+				cursorMemberSpec(`grok-4.7-${tier}-fast`, copied),
+			]),
+			{ table: cursorTable },
+		);
+		expect(collapsed.map(model => model.id).sort()).toEqual(["grok-4.7", "grok-4.7-fast"]);
+		const standard = collapsed.find(model => model.id === "grok-4.7");
+		if (!standard) throw new Error("grok-4.7 did not collapse");
+		const model = buildModel(standard as ModelSpec<"cursor-agent">);
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(resolveWireModelId(model, Effort.High)).toBe("grok-4.7-high");
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("grok-4.7-medium");
 	});
 
 	it("defaults the collapsed row to -medium and clamps effort-less to -medium (issue #9478)", () => {
@@ -957,6 +993,8 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 			["cursor-grok-4.5-fast", "cursor-grok-4.5-medium-fast"],
 			["cursor-grok-4.6", "cursor-grok-4.6-medium"],
 			["cursor-grok-4.6-fast", "cursor-grok-4.6-medium-fast"],
+			["grok-4.7", "grok-4.7-medium"],
+			["grok-4.7-fast", "grok-4.7-medium-fast"],
 		] as const;
 		for (const [id, requestModelId] of defaults) {
 			const spec = collapsed.find(model => model.id === id);
