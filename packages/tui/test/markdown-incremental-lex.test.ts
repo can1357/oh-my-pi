@@ -471,9 +471,7 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 
 	const paragraphs = (count: number) =>
 		Array.from({ length: count }, (_, i) => `Body paragraph ${i} keeps the stream going.`).join("\n\n");
-	// No `_`: an intraword `_{` at a partial line trips a separate, older
-	// same-line fast-path divergence at some chunk alignments.
-	const mathBody = Array.from({ length: 6 }, (_, i) => `a${i} + b${i} = c${i}`).join("\n\n");
+	const mathBody = Array.from({ length: 6 }, (_, i) => `a_{${i}} + b_{${i}} = c_{${i}}`).join("\n\n");
 
 	for (const step of [1, 7, 40]) {
 		it(`keeps a display-math block with blank lines whole, streamed in ${step}-character chunks`, () => {
@@ -530,6 +528,54 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 		const doc = `Intro paragraph.\n\n\`\`\`ts\ninterface Bag {\n    [key: string]: T;\n}\n\`\`\`\n\n${paragraphs(40)}\n`;
 		const frozen = streamAgainstOneShot(doc, 40);
 		expect(frozen).toBeGreaterThan(doc.indexOf("```\n\n") + 3);
+	});
+
+	it("keeps a no-break-space line after a blank line in the blank run", () => {
+		// The lexer's blank line is any whitespace-only line, so the line joins
+		// the blank run above it. A freeze in front of it gave it a blank row of
+		// its own, in every later frame and in the finalized render.
+		streamAgainstOneShot(`Intro.\n\nFirst paragraph.\n\n\u00a0\nAfter.\n\n${paragraphs(3)}\n`, 1);
+	});
+
+	it("finalizes as a one-shot render when the repair drops an orphan fence right after the frozen prefix", () => {
+		// At finalize the orphan `~~~` is deleted (a table and a heading follow
+		// it), so the text after the frozen prefix starts with blank lines that
+		// a one-shot lex joins to the blank line in front of the fence.
+		streamAgainstOneShot("Intro.\n\n~~~\n\n\n| a | b |\n|---|---|\n| 1 | 2 |\n### Heading\n", 7);
+	});
+
+	it("publishes no text past an own-line $$ that an append could still close", () => {
+		// The stable text feeds append-only transcript publication, so it must
+		// stop in front of the opener: the closer below turns everything from the
+		// opener on into one math block.
+		const open = `Intro.\n\n$$\nx = 1\n\n${paragraphs(40)}\n`;
+		const frozen = streamAgainstOneShot(open, 40);
+		expect(frozen).toBeGreaterThan(0);
+		expect(frozen).toBeLessThanOrEqual(open.indexOf("$$"));
+		streamAgainstOneShot(`${open}$$\n\nAfter the math.\n`, 40);
+	});
+
+	it("streams past an own-line $$ that never closes as fast as without it", () => {
+		// The opener stays open to the end, so a frozen prefix that stopped in
+		// front of it left every frame re-lexing the whole message.
+		const body = paragraphs(750);
+		const stream = (doc: string): number => {
+			const streaming = new Markdown("", 0, 0, THEME);
+			streaming.transientRenderCache = true;
+			const start = Bun.nanoseconds();
+			for (let len = 64; len < doc.length + 64; len += 64) {
+				streaming.setText(doc.slice(0, len));
+				streaming.render(100);
+			}
+			return Bun.nanoseconds() - start;
+		};
+		const withOpener = `Intro.\n\n$$\nx = 1\n\n${body}\n`;
+		const without = `Intro.\n\nx = 1\n\n${body}\n`;
+		clearRenderCache();
+		const baseline = Math.min(stream(without), stream(without));
+		let opened = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3 && opened >= 3 * baseline; run++) opened = Math.min(opened, stream(withOpener));
+		expect(opened).toBeLessThan(3 * baseline);
 	});
 });
 

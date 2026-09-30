@@ -8,7 +8,16 @@ import {
 	type Tokens,
 	type TokensList,
 } from "@oh-my-pi/pi-utils/marked";
-import { mathBlockAt, mathBlockMayCloseAt, mathSpanAt, mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
+import {
+	hasMathBlockCloserLine,
+	MathBlockScan,
+	type MathBlockOpener,
+	mathBlockAt,
+	mathBlockMayCloseAt,
+	mathBlockOpenerAt,
+	mathSpanAt,
+	mathStartIndex,
+} from "@oh-my-pi/pi-utils/math-delimiters";
 import { latexToBlock } from "../latex-block";
 import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import { plainText } from "../native/spans";
@@ -633,7 +642,9 @@ const BARE_ENV_BEGIN = /(?:^|\n)[ \t]{0,3}\\begin\{([A-Za-z]+\*?)\}/;
 function bareMathEnvBlock(src: string): readonly [number, number] | null {
 	const bm = BARE_ENV_BEGIN.exec(src);
 	if (!bm || !isBareMathEnvironment(bm[1])) return null;
-	const beginLineStart = bm.index === 0 ? 0 : bm.index + 1; // skip the matched leading `\n`
+	// Skip a matched leading `\n`, at offset 0 too: a blank line before the block
+	// is a space token of its own, not part of the block.
+	const beginLineStart = src[bm.index] === "\n" ? bm.index + 1 : bm.index;
 	const endToken = `\\end{${bm[1]}}`;
 	const endAt = src.indexOf(endToken, bm.index);
 	if (endAt === -1) return null;
@@ -943,12 +954,16 @@ function appendLines(dst: string[], src: readonly string[]): void {
 // delta-edge trailingDelimiterSeamHazard check).
 const FAST_DELTA_RE = /[\n\r\\[`<!*_~$#&@\x1b]/;
 
+// Emphasis delimiters, which can pair across the fast path's seam.
+const FAST_EMPHASIS_DELIMITERS = ["*", "_", "~"] as const;
+
 // Disarm when the captured row's RAW tail ends in trailing whitespace (wrap
-// trims it; appending a char moves the trim boundary), a trailing backslash
-// (it can become an escape once the delta supplies the next char — the `\\`
-// clause covers that escape-completion hazard), or a full/partial hex swatch
-// run (a `#` + 3-8 hex is a swatch glyph; the byte range may shift).
-const FAST_RUN_END_RE = /(?:[ \t\\]|#[0-9a-fA-F]{3,8}|#+)$/i;
+// trims it, a no-break space included; appending a char moves the trim
+// boundary), a trailing backslash (it can become an escape once the delta
+// supplies the next char — the `\\` clause covers that escape-completion
+// hazard), or a full/partial hex swatch run (a `#` + 3-8 hex is a swatch
+// glyph; the byte range may shift).
+const FAST_RUN_END_RE = /(?:[\s\\]|#[0-9a-fA-F]{3,8}|#+)$/i;
 
 // A partial `#` + 1-2 hex digits can grow into a 3-8 digit swatch glyph
 // across the seam (delta hex digits are inert).
@@ -1003,16 +1018,18 @@ const FAST_TABLE_DELIM_ROW_RE = /^\s*(?:\|[\s:]*-+\s*(?:\|[\s:]*-+\s*)*|[\s:]*-+
 
 // A paragraph's LAST line can complete into a different block kind under an
 // inert delta (ATX heading, blockquote, bullet marker, HR, ref-def) — disarm
-// when the grown line starts one (ref-def grammar: REF_DEF_LINE_RE).
+// when the grown line starts one (ref-def grammar: REF_DEF_LINE_RE). A line
+// holding `\end{` can also close a bare math environment the paragraph opened
+// lines above (`\end{al` + `ign}`), making those lines one display block.
 const FAST_LINE_START_HAZARD_RE =
 	// `-` is placed LAST so it is a literal, not a range bound. The other
 	// chars are in ASCENDING code-point order (no reversed ranges that
 	// rely on engine leniency): * + = – — ─ ━ ═ then the literal `-`.
 	/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|\d{1,9}[.)](?:[ \t]|$)|[*+=–—─━═-](?:[ \t]|$)|(?:[*+=–—─━═-][ \t]*){2,}[ \t]*$)/;
 
-/** @internal exported for tests — the grown-line-start block-kind gate. */
+/** @internal exported for tests — the grown-line block-kind gate. */
 export function fastLineStartHazard(grownLine: string): boolean {
-	return FAST_LINE_START_HAZARD_RE.test(grownLine) || REF_DEF_LINE_RE.test(grownLine);
+	return FAST_LINE_START_HAZARD_RE.test(grownLine) || REF_DEF_LINE_RE.test(grownLine) || grownLine.includes("\\end{");
 }
 
 /** Seam hazards between the captured raw row tail and the delta: the row must
@@ -1147,42 +1164,70 @@ function listMayContinueAt(text: string, tailStart: number, listRaw: string): bo
 	return after === 0x20 /* space */ || after === 0x09 /* tab */ || after === 0x0a; /* \n */
 }
 
-const NO_BLOCK_BOUNDARY = { end: 0, count: 0 } as const;
+/** A probe window: see {@link stableBlockBoundary}. */
+interface ProbeWindow {
+	/** Offset in `text` where the window, and so the lex of `tokens`, ends. */
+	end: number;
+	/** The display-math blocks of the whole of `text`. */
+	mathBlocks: MathBlockScan;
+}
+
+/** The last stable block boundary of a token run: see {@link stableBlockBoundary}. */
+interface BlockBoundary {
+	/** Offset just past the boundary token, or 0 when the run holds none. */
+	end: number;
+	/** Number of tokens up to and including the boundary token, or 0. */
+	count: number;
+	/** End of the display-math block a probe's scan stopped at, which a later window must reach past; 0 when it stopped at none. */
+	blockEnd: number;
+}
+
+// A whitespace-only line, capturing its terminator: "\n", or "" at the end of the text.
+const WHITESPACE_LINE_RE = /[^\S\n]*(\n|$)/y;
+
+const NO_OPENERS: readonly MathBlockOpener[] = [];
 
 /**
  * Offset just past the last token in `tokens` that closes a block on a hard
  * `"\n\n"` break, together with the number of tokens up to and including it.
  * `count === 0` means the run holds no usable boundary.
  *
- * `base` is where `tokens[0]` starts inside `text`, and `tokens` lex
- * `text.slice(base, windowEnd)`. A boundary qualifies only when splitting
- * there is invisible to the lexer, i.e. `lex(head) ++ lex(tail) ===
- * lex(text)`:
- *  - The token must end before `windowEnd` unless the window reaches the end
- *    of `text`. An unclosed fence, HTML block or comment runs to the end of
- *    its input, so a window that ends just after a blank line inside one
- *    hands back a truncated token whose raw ends in `"\n\n"`.
+ * `base` is where `tokens[0]` starts inside `text`. Without `window`, `tokens`
+ * lex the rest of `text`, which appends may still extend: the streaming
+ * freeze. With it, they lex `text.slice(base, window.end)` of a whole
+ * document: a probe. A boundary qualifies only when splitting there is
+ * invisible to the lexer, i.e. `lex(head) ++ lex(tail) === lex(text)`:
+ *  - In a probe, the token must end before `window.end`. An unclosed fence,
+ *    HTML block or comment runs to the end of its input, so a window that
+ *    ends just after a blank line inside one hands back a truncated token
+ *    whose raw ends in `"\n\n"`.
  *  - The break must sit inside `text`. At end-of-text the next character is
  *    unknown (and, while streaming, may still arrive), so the cut is deferred.
- *  - The next character must start real block content. Whitespace means the
- *    block separator straddles the cut — e.g. a fence followed by
- *    `"\n\n\n- list"` — and the two lexes desync.
+ *  - The next line must start real block content. A leading space or newline
+ *    means the block separator straddles the cut — e.g. a fence followed by
+ *    `"\n\n\n- list"` — and the two lexes desync. So does a line of any other
+ *    whitespace, such as a no-break space: the lexer's blank line is
+ *    `/^\s*\n$/`, so it joins the blank run in front of the cut. While
+ *    streaming, a whitespace-only last line may still become one.
  *  - A preceding `list` must be provably closed: CommonMark lets a same-marker
  *    item continue the list across the blank line, and marked merges both into
  *    one renumbered loose list (`listMayContinueAt`).
- *  - No earlier token in the window may open a display-math block that the
+ *  - In a probe, no earlier token may open a display-math block that the
  *    window cut short: a token other than `math` (which is the block itself)
- *    where `mathBlockAt` matches the rest of `text`. The one-pass lex makes
- *    that block one `math` token across its blank lines. An opener with no
- *    closer, or with a whitespace-only body, is no block in either lex, so it
- *    leaves later boundaries alone.
- *  - With `growing` (text that appends may still extend, i.e. the streaming
- *    freeze), the same holds for a block an append could still close, which
- *    `mathBlockMayCloseAt` must also reject for the rest of `text`. A pair
- *    that `mathBlockAt` rejects at a closer line that has already ended (a
- *    whitespace-only body, as in `$$`, ` `, `$$`) is no block whatever
- *    follows, so it leaves later boundaries alone; any later token that
- *    starts with an opener still gets its own check.
+ *    where `window.mathBlocks` finds a block in the whole document. The
+ *    one-pass lex makes that block one `math` token across its blank lines,
+ *    so the scan stops there and reports the block's end as `blockEnd`. An
+ *    opener with no closer, or with a whitespace-only body, is no block in
+ *    either lex, so it leaves later boundaries alone.
+ *  - While streaming, `tokens` are the one-pass lex of `text` as it stands,
+ *    so a block the lex already made is a `math` token, and one that an
+ *    append could still close becomes one only once a closer line arrives,
+ *    which Markdown#lexTokens watches for. With `settle`, the scan instead
+ *    stops at a token whose display-math block an append could still close
+ *    (`mathBlockMayCloseAt`), so no append changes the tokens before the
+ *    boundary it finds. A pair whose closer line has already ended around a
+ *    whitespace-only body (`$$`, ` `, `$$`) is no block whatever follows, so
+ *    that scan goes on past it.
  *
  * `startIndex` resumes the scan at `tokens[startIndex]` (positions still
  * accumulate from `base`). The streaming freeze passes the frozen-prefix
@@ -1193,20 +1238,28 @@ function stableBlockBoundary(
 	text: string,
 	base: number,
 	tokens: Token[],
-	{ startIndex = 0, windowEnd = text.length, growing = false } = {},
-): { end: number; count: number } {
-	const windowIsWhole = windowEnd === text.length;
+	{ startIndex = 0, window, settle = false }: { startIndex?: number; window?: ProbeWindow; settle?: boolean } = {},
+): BlockBoundary {
 	let pos = base;
 	let end = 0;
 	let count = 0;
+	let blockEnd = 0;
 	for (let i = startIndex; i < tokens.length; i++) {
 		const token = tokens[i];
 		const raw = token.raw;
 		const tokenEnd = pos + raw.length;
 		if (token.type !== "math") {
-			if (growing ? mathBlockMayCloseAt(text, pos) : mathBlockAt(text, pos) !== undefined) break;
+			if (window !== undefined) {
+				const block = window.mathBlocks.at(pos);
+				if (block !== undefined) {
+					blockEnd = pos + block.raw.length;
+					break;
+				}
+			} else if (settle && mathBlockMayCloseAt(text, pos)) {
+				break;
+			}
 		}
-		if (raw.endsWith("\n\n") && (windowIsWhole || tokenEnd < windowEnd)) {
+		if (raw.endsWith("\n\n") && (window === undefined || tokenEnd < window.end)) {
 			const prev = i > 0 ? tokens[i - 1] : undefined;
 			if (prev === undefined || prev.type !== "list" || !listMayContinueAt(text, tokenEnd, prev.raw)) {
 				end = tokenEnd;
@@ -1215,10 +1268,13 @@ function stableBlockBoundary(
 		}
 		pos = tokenEnd;
 	}
-	if (count === 0 || end >= text.length) return NO_BLOCK_BOUNDARY;
+	if (count === 0 || end >= text.length) return { end: 0, count: 0, blockEnd };
 	const next = text.charCodeAt(end);
-	if (next === 0x20 /* space */ || next === 0x0a /* \n */) return NO_BLOCK_BOUNDARY;
-	return { end, count };
+	if (next === 0x20 /* space */ || next === 0x0a /* \n */) return { end: 0, count: 0, blockEnd };
+	WHITESPACE_LINE_RE.lastIndex = end;
+	const blank = WHITESPACE_LINE_RE.exec(text);
+	if (blank !== null && (blank[1] === "\n" || window === undefined)) return { end: 0, count: 0, blockEnd };
+	return { end, count, blockEnd };
 }
 
 // Bun's regex engine skips the start-anchor optimization for several of marked's
@@ -1241,13 +1297,13 @@ const WINDOWED_LEX_MIN_BYTES = 16 * 1024;
  * Window cuts come from marked itself: a throwaway BLOCK-ONLY probe lex of the
  * window reports its last stable block boundary ({@link stableBlockBoundary})
  * and only that confirmed segment is handed to the real lexer; a window
- * holding no boundary doubles until it finds one or reaches the end. Probes
- * never run inline tokenization (their inlineQueue is discarded) — a boundary
- * is a property of block structure alone, and probe inline passes were the
- * dominant cost of an earlier revision. Block tokenization runs per window
- * while inline tokenization is deferred to the end — mirroring `Lexer.lex` —
- * so a `[label]: dest` definition anywhere in the document still resolves for
- * every inline span.
+ * holding no boundary grows ({@link nextProbeSize}) until it finds one or
+ * reaches the end. Probes never run inline tokenization (their inlineQueue is
+ * discarded) — a boundary is a property of block structure alone, and probe
+ * inline passes were the dominant cost of an earlier revision. Block
+ * tokenization runs per window while inline tokenization is deferred to the
+ * end — mirroring `Lexer.lex` — so a `[label]: dest` definition anywhere in
+ * the document still resolves for every inline span.
  *
  * Each round's first window reaches just past the next blank line
  * ({@link firstProbeSize}); a tail with no blank line left (e.g. one long
@@ -1255,15 +1311,17 @@ const WINDOWED_LEX_MIN_BYTES = 16 * 1024;
  */
 function lexWindowed(text: string): TokensList {
 	const lexer = new Lexer(markdownParser.defaults);
+	const mathBlocks = new MathBlockScan(text);
 	let offset = 0;
 	while (offset < text.length) {
 		let end = text.length;
-		for (let size = firstProbeSize(text, offset); offset + size < text.length; size *= 2) {
-			const boundary = probeBoundary(text, offset, size);
-			if (boundary > 0) {
-				end = boundary;
+		for (let size = firstProbeSize(text, offset); offset + size < text.length;) {
+			const boundary = probeBoundary(text, offset, size, mathBlocks);
+			if (boundary.end > 0) {
+				end = boundary.end;
 				break;
 			}
+			size = nextProbeSize(text, offset, size, boundary.blockEnd);
 		}
 		lexer.blockTokens(text.slice(offset, end), lexer.tokens);
 		offset = end;
@@ -1287,24 +1345,26 @@ function firstProbeSize(text: string, offset: number): number {
 /**
  * Size of the next probe window after the one of `size` at `offset` gave no
  * usable cut (no boundary, or a prefix with too few rows): at least double,
- * and at least one character past the next blank line that reaches the
- * window's edge or lies past it, since only such a blank line can end a later
- * boundary. With no blank line left, it is the rest of the text.
+ * and one character past the first blank line that reaches the window's edge,
+ * or `blockEnd` when the probe stopped at a display-math block ending there,
+ * since only such a blank line can end a later boundary. Doubling toward a
+ * far closer would re-lex the block once per window. With no blank line left,
+ * it is the rest of the text.
  */
-function nextProbeSize(text: string, offset: number, size: number): number {
-	const nextBlank = text.indexOf("\n\n", offset + size - 2);
+function nextProbeSize(text: string, offset: number, size: number, blockEnd: number): number {
+	const nextBlank = text.indexOf("\n\n", Math.max(offset + size, blockEnd) - 2);
 	return nextBlank === -1 ? text.length - offset : Math.max(2 * size, nextBlank + 3 - offset);
 }
 
 /**
- * End of the last stable block boundary ({@link stableBlockBoundary}) in the
- * window `text.slice(offset, offset + size)`, or 0 when it holds none, from a
- * throwaway block-only lex of the window.
+ * The last stable block boundary ({@link stableBlockBoundary}) in the window
+ * `text.slice(offset, offset + size)`, from a throwaway block-only lex of the
+ * window. `mathBlocks` holds the display-math blocks of all of `text`.
  */
-function probeBoundary(text: string, offset: number, size: number): number {
+function probeBoundary(text: string, offset: number, size: number, mathBlocks: MathBlockScan): BlockBoundary {
 	const probe = new Lexer(markdownParser.defaults);
 	probe.blockTokens(text.slice(offset, offset + size), probe.tokens);
-	return stableBlockBoundary(text, offset, probe.tokens, { windowEnd: offset + size }).end;
+	return stableBlockBoundary(text, offset, probe.tokens, { window: { end: offset + size, mathBlocks } });
 }
 
 /**
@@ -1387,12 +1447,13 @@ export function renderMarkdownHead(text: string, width: number, theme: MarkdownT
 	// terminators, then render expands tabs and repairs an orphan closing fence.
 	const normalized = repairOrphanClosingFence(expandTabs(normalizeOsc8Terminators(text)));
 	if (normalized.length >= 2 * LEX_WINDOW_BYTES && !normalized.includes("\r") && !hasRefDefAnywhere(normalized)) {
+		const mathBlocks = new MathBlockScan(normalized);
 		for (
 			let size = firstProbeSize(normalized, 0);
 			size < normalized.length;
-			size = nextProbeSize(normalized, 0, size)
+			size = nextProbeSize(normalized, 0, size, 0)
 		) {
-			const end = probeBoundary(normalized, 0, size);
+			const end = probeBoundary(normalized, 0, size, mathBlocks).end;
 			if (end === 0) continue;
 			const head = normalized.slice(0, end);
 			// Rendering `head` repairs it again on its own. That fires only when the
@@ -1927,6 +1988,15 @@ export class Markdown implements Component {
 	#streamPrefixText?: string;
 	#streamPrefixTokens?: Token[];
 	#streamPrefixLineCache?: StreamPrefixLineCache;
+	// Display-math openers in the frozen prefix whose blocks an append could
+	// still close. The prefix lexes them as the text stands, which stays right
+	// until a tail line could close one of them (hasMathBlockCloserLine); then
+	// the prefix falls back to its settled part and the rest is re-lexed.
+	#streamPrefixOpeners: readonly MathBlockOpener[] = NO_OPENERS;
+	// The frozen prefix's leading run in front of the first of those openers:
+	// no append can change its tokens, so getLastRenderStableText publishes it.
+	#streamSettledText?: string;
+	#streamSettledTokenCount = 0;
 	// Guard-scan memo (PoC C): the ref-def/CR verdict with the exact text
 	// length it was checked on. Reuse is sound only while setText has been
 	// append-only since (tracked via the startsWith that setText performs): a
@@ -2082,11 +2152,13 @@ export class Markdown implements Component {
 
 	/**
 	 * Width-independent source prefix of the last render ending at a frozen
-	 * Markdown block boundary. Only meaningful while streaming (transient
-	 * render cache on); grows monotonically under append-only `setText`.
+	 * Markdown block boundary that no append can move: it stops in front of a
+	 * display-math opener whose block an append could still close. Only
+	 * meaningful while streaming (transient render cache on); grows
+	 * monotonically under append-only `setText`.
 	 */
 	getLastRenderStableText(): string {
-		return this.#transientRenderCache ? (this.#streamPrefixText ?? "") : "";
+		return this.#transientRenderCache ? (this.#streamSettledText ?? "") : "";
 	}
 
 	get transientRenderCache(): boolean {
@@ -2133,10 +2205,19 @@ export class Markdown implements Component {
 		// so the tail starts at a fresh line. The scan below then catches a
 		// top-level definition or CR in the new text and the tail lex's links catch
 		// a nested one, so the grown prefix is never re-scanned (O(n²) → O(n)).
+		const frozenText = this.#streamPrefixText;
+		const grewPastPrefix = frozenText !== undefined && text.length > frozenText.length && text.startsWith(frozenText);
+		// A tail line that could close a display-math block the prefix holds open
+		// makes the text from that block's opener on one `math` token, so the
+		// prefix falls back to its settled part, which ends in front of the
+		// opener, and the rest is lexed again. The check reads only the tail,
+		// which is lexed anyway.
+		if (grewPastPrefix && hasMathBlockCloserLine(text, frozenText.length, this.#streamPrefixOpeners)) {
+			this.#rewindStreamPrefix();
+		}
 		const prefix = this.#streamPrefixText;
 		const prefixTokens = this.#streamPrefixTokens;
-		const hasPrefix =
-			prefix !== undefined && prefixTokens !== undefined && text.length > prefix.length && text.startsWith(prefix);
+		const hasPrefix = grewPastPrefix && prefix !== undefined && prefixTokens !== undefined;
 		const refDefText = hasPrefix ? text.slice(prefix.length) : text;
 		// Guard-scan memo (PoC C): while setText has been append-only and the
 		// grown delta introduces no "[", "]", ":", "\n" or "\r", the previous
@@ -2212,15 +2293,32 @@ export class Markdown implements Component {
 	#dropStreamPrefix(): void {
 		this.#streamPrefixText = undefined;
 		this.#streamPrefixTokens = undefined;
+		this.#streamPrefixOpeners = NO_OPENERS;
+		this.#streamSettledText = undefined;
+		this.#streamSettledTokenCount = 0;
+		this.#streamPrefixLineCache = undefined;
+		this.#tailRowCache = undefined;
+	}
+
+	/** Cut the frozen prefix back to its settled part, dropping the row caches keyed on the rest. */
+	#rewindStreamPrefix(): void {
+		if (this.#streamSettledTokenCount === 0) {
+			this.#dropStreamPrefix();
+			return;
+		}
+		this.#streamPrefixText = this.#streamSettledText;
+		this.#streamPrefixTokens = this.#streamPrefixTokens?.slice(0, this.#streamSettledTokenCount);
+		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
 	}
 
 	// Freeze the largest run of leading blocks that end on a hard "\n\n" boundary
-	// (complete and immutable under append-only growth) so the next streaming
-	// render re-lexes only the unfrozen tail. Caller guarantees no CR / no
-	// reference definitions, so each token's `raw` is a verbatim slice of `text`
-	// and the summed offsets address `text` exactly.
+	// (complete, and immutable under append-only growth until a tail line could
+	// close a display-math block it holds open) so the next streaming render
+	// re-lexes only the unfrozen tail. Caller guarantees no CR / no reference
+	// definitions, so each token's `raw` is a verbatim slice of `text` and the
+	// summed offsets address `text` exactly.
 	#freezeStablePrefix(text: string, tokens: Token[], opts: { preserveExisting: boolean }): void {
 		// On the streaming-concat path (preserveExisting), tokens[0..prefixCount)
 		// ARE the previously frozen prefix and the text above it is byte-
@@ -2231,17 +2329,41 @@ export class Markdown implements Component {
 		// path (preserveExisting: false) re-derives the whole stream, so it
 		// must keep walking from 0.
 		const skipPrefix = opts.preserveExisting ? (this.#streamPrefixTokens?.length ?? 0) : 0;
-		const frozen = stableBlockBoundary(text, skipPrefix > 0 ? (this.#streamPrefixText?.length ?? 0) : 0, tokens, {
-			startIndex: skipPrefix,
-			growing: true,
-		});
-		if (frozen.count > 0) {
-			this.#streamPrefixText = text.slice(0, frozen.end);
-			this.#streamPrefixTokens = tokens.slice(0, frozen.count);
+		const base = skipPrefix > 0 ? (this.#streamPrefixText?.length ?? 0) : 0;
+		const frozen = stableBlockBoundary(text, base, tokens, { startIndex: skipPrefix });
+		if (frozen.count === 0) {
+			if (!opts.preserveExisting) this.#dropStreamPrefix();
 			return;
 		}
-
-		if (!opts.preserveExisting) this.#dropStreamPrefix();
+		let openers = skipPrefix > 0 ? this.#streamPrefixOpeners : NO_OPENERS;
+		if (openers.length === 0) {
+			// The prefix so far is all settled, so the settled part grows up to the
+			// last boundary in front of the first opener an append could close.
+			const settled = stableBlockBoundary(text, base, tokens, { startIndex: skipPrefix, settle: true });
+			if (settled.count > 0) {
+				this.#streamSettledText = text.slice(0, settled.end);
+				this.#streamSettledTokenCount = settled.count;
+			} else if (skipPrefix === 0) {
+				this.#streamSettledText = undefined;
+				this.#streamSettledTokenCount = 0;
+			}
+		}
+		// Record each kind of opener in the newly frozen tokens that an append
+		// could still close; one open opener of a kind is enough to watch for.
+		let pos = base;
+		for (let i = skipPrefix; i < frozen.count && openers.length < 2; i++) {
+			const token = tokens[i];
+			if (token.type !== "math") {
+				const opener = mathBlockOpenerAt(text, pos);
+				if (opener !== undefined && !openers.includes(opener) && mathBlockMayCloseAt(text, pos)) {
+					openers = [...openers, opener];
+				}
+			}
+			pos += token.raw.length;
+		}
+		this.#streamPrefixText = text.slice(0, frozen.end);
+		this.#streamPrefixTokens = tokens.slice(0, frozen.count);
+		this.#streamPrefixOpeners = openers;
 	}
 
 	render(width: number): readonly string[] {
@@ -2323,11 +2445,16 @@ export class Markdown implements Component {
 					(!markerDelta && recipe.rowRaw.endsWith("$") && /^[0-9]/.test(deltaTabs));
 				// A delta opening a pairing char when the captured row ENDS with the
 				// same char can re-pair across the seam: cold lex of the joined run
-				// makes ONE token (x *a**b* → em("a**b")), the splice keeps two.
-				// An image marker (`x!` + `[a](u)`) re-pairs the same way.
+				// makes ONE token (x *a**b* → em("a**b")), the splice keeps two. So
+				// can an emphasis delimiter in the delta and the same char anywhere
+				// in the row, once the joined text makes the row's one flanking
+				// (`a_{3` + `} + b_{` renders `{3} + b` emphasized): the delta lexed
+				// alone has nothing to pair with. An image marker (`x!` + `[a](u)`)
+				// re-pairs the same way.
 				const pairSeamHazard =
 					markerDelta &&
 					((/^[*~`]/.test(deltaTabs) && /[*~`]$/.test(recipe.rowRaw)) ||
+						FAST_EMPHASIS_DELIMITERS.some(c => deltaTabs.includes(c) && recipe.rowRaw.includes(c)) ||
 						// "x!" + "[a](u)": cold lexes text("x") + image(alt); the splice would
 						// keep "x!" + a styled link byte-run.
 						(deltaTabs.startsWith("[") && recipe.rowRaw.endsWith("!")));
@@ -2407,8 +2534,12 @@ export class Markdown implements Component {
 			// removed): the guard-scan memo's checked region is no longer
 			// byte-identical, and a cached false verdict may have been based
 			// on the very CR/ref-def line that was deleted. Invalidate so the
-			// next #lexTokens re-derives on the repaired buffer.
+			// next #lexTokens re-derives on the repaired buffer. The text past
+			// the frozen prefix is no append of what was frozen against either
+			// (a fence line right after the prefix leaves the tail opening on
+			// blank lines a one-pass lex joins to the ones above), so drop it.
 			this.#lastScanValid = false;
+			this.#dropStreamPrefix();
 		}
 
 		// L2: module-level LRU — survives component disposal/recreation across

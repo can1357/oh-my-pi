@@ -8,6 +8,9 @@
 /** Opening delimiter. Each closer (`$`, `$$`, `\)`, `\]`) is as wide as its opener. */
 export type MathOpener = "$" | "$$" | "\\(" | "\\[";
 
+/** Opener of an own-line display block. */
+export type MathBlockOpener = "$$" | "\\[";
+
 /** A closed math span found in the source. */
 export interface MathSpan {
 	opener: MathOpener;
@@ -91,34 +94,108 @@ export function mathSpanAt(source: string, at: number, from = 0): MathSpan | und
 export function mathBlockAt(source: string, from = 0): MathBlock | undefined {
 	MATH_BLOCK_DOLLAR.lastIndex = from;
 	MATH_BLOCK_BRACKET.lastIndex = from;
-	const match = MATH_BLOCK_DOLLAR.exec(source) ?? MATH_BLOCK_BRACKET.exec(source);
-	if (!match || match[1].trim() === "") return undefined;
-	return { raw: match[0], body: match[1] };
+	return blockOf(MATH_BLOCK_DOLLAR.exec(source) ?? MATH_BLOCK_BRACKET.exec(source));
 }
 
-/** Closer of `opener`: dollar closers equal their openers; the bracket forms flip the bracket. */
-function closerOf(opener: MathOpener): string {
-	return opener === "\\(" ? "\\)" : opener === "\\[" ? "\\]" : opener;
+/** The block a match of the block grammar describes; a whitespace-only body is no block. */
+function blockOf(match: RegExpExecArray | null): MathBlock | undefined {
+	return match === null || match[1].trim() === "" ? undefined : { raw: match[0], body: match[1] };
 }
 
-// A display opener (`$$` or `\[` after up to 3 spaces), captured.
-const MATH_BLOCK_OPENER_RE = / {0,3}(\$\$|\\\[)/y;
+// An own-line display opener line (`$$` or `\[` after up to 3 spaces), capturing
+// the opener and the line's end: "" when it is the source's unterminated last line.
+const MATH_BLOCK_OPENER_LINE_RE = / {0,3}(\$\$|\\\[)[ \t]*(\r?\n|$)/y;
+
+/**
+ * {@link mathBlockAt} for many offsets of one `source`. An own-line opener
+ * whose closer line is missing means every later opener of the same kind
+ * misses one too, since its search covers a suffix of that search. The scan
+ * keeps that answer, so asking at every block start takes linear time instead
+ * of a scan to the end of `source` per unclosed opener.
+ */
+export class MathBlockScan {
+	readonly #source: string;
+	// Offset of the first `$$` / `\[` opener line found with no closer line after it.
+	#unclosedDollarFrom = Number.POSITIVE_INFINITY;
+	#unclosedBracketFrom = Number.POSITIVE_INFINITY;
+
+	constructor(source: string) {
+		this.#source = source;
+	}
+
+	/** The own-line display block starting at `from`, or `undefined`. */
+	at(from: number): MathBlock | undefined {
+		MATH_BLOCK_OPENER_LINE_RE.lastIndex = from;
+		const line = MATH_BLOCK_OPENER_LINE_RE.exec(this.#source);
+		// An unterminated opener line opens no block.
+		if (line === null || line[2] === "") return undefined;
+		const dollar = line[1] === "$$";
+		if (from >= (dollar ? this.#unclosedDollarFrom : this.#unclosedBracketFrom)) return undefined;
+		const grammar = dollar ? MATH_BLOCK_DOLLAR : MATH_BLOCK_BRACKET;
+		grammar.lastIndex = from;
+		const match = grammar.exec(this.#source);
+		if (match === null) {
+			if (dollar) this.#unclosedDollarFrom = from;
+			else this.#unclosedBracketFrom = from;
+		}
+		return blockOf(match);
+	}
+}
+
+/**
+ * The display opener alone on the line at `from` (up to 3 leading spaces,
+ * trailing spaces or tabs; the source's last line may be unterminated), or
+ * `undefined`.
+ */
+export function mathBlockOpenerAt(source: string, from = 0): MathBlockOpener | undefined {
+	MATH_BLOCK_OPENER_LINE_RE.lastIndex = from;
+	const line = MATH_BLOCK_OPENER_LINE_RE.exec(source);
+	return line === null ? undefined : line[1] === "$$" ? "$$" : "\\[";
+}
 
 /**
  * Whether the own-line display block opened at `from` in `source` is closed,
  * or could still close once more text is appended: the text from `from`
- * onward is a streaming prefix whose real closer may not have arrived. The
- * closer line is appended after a sentinel character (`x`), so the last line
- * of `source`, which the next append may still extend, is never read as a
- * finished closer line. With no display opener at `from` it returns false
- * before copying any text, so a caller can ask at every block start.
+ * onward is a streaming prefix whose real closer may not have arrived. A
+ * closer on the unterminated last line has not arrived either, since the next
+ * append may extend it into text (`$$ E = mc^2 $$`). With no opener line at
+ * `from` it returns false before scanning, so a caller can ask at every block
+ * start.
  */
 export function mathBlockMayCloseAt(source: string, from = 0): boolean {
-	MATH_BLOCK_OPENER_RE.lastIndex = from;
-	const m = MATH_BLOCK_OPENER_RE.exec(source);
-	if (!m) return false;
-	const opener = mathOpenerAt(source, from + m[0].length - m[1].length);
-	return opener !== undefined && mathBlockAt(`${source.slice(from)}x\n${closerOf(opener)}`) !== undefined;
+	MATH_BLOCK_OPENER_LINE_RE.lastIndex = from;
+	const line = MATH_BLOCK_OPENER_LINE_RE.exec(source);
+	if (line === null) return false;
+	// The opener's own line is still being written.
+	if (line[2] === "") return true;
+	const grammar = line[1] === "$$" ? MATH_BLOCK_DOLLAR : MATH_BLOCK_BRACKET;
+	grammar.lastIndex = from;
+	const match = grammar.exec(source);
+	// No closer line yet, or only on the last line, which is still being written.
+	if (match === null || (from + match[0].length === source.length && !match[0].endsWith("\n"))) return true;
+	return blockOf(match) !== undefined;
+}
+
+// A display closer alone on its line, captured; the last line counts unterminated.
+const MATH_BLOCK_CLOSER_LINE_RE = /(?<=^|\n) {0,3}(\$\$|\\\])[ \t]*(?=\r?\n|$)/g;
+
+/**
+ * Whether a line of `source` from the line start `from` on holds the closer of
+ * one of `openers` alone (up to 3 leading spaces, trailing spaces or tabs),
+ * the unterminated last line included: a line at which a block that one of
+ * them opened before `from` could close.
+ */
+export function hasMathBlockCloserLine(source: string, from: number, openers: readonly MathBlockOpener[]): boolean {
+	if (openers.length === 0) return false;
+	MATH_BLOCK_CLOSER_LINE_RE.lastIndex = from;
+	for (
+		let line = MATH_BLOCK_CLOSER_LINE_RE.exec(source);
+		line !== null;
+		line = MATH_BLOCK_CLOSER_LINE_RE.exec(source)
+	) {
+		if (openers.includes(line[1] === "$$" ? "$$" : "\\[")) return true;
+	}
+	return false;
 }
 
 /**
@@ -127,7 +204,8 @@ export function mathBlockMayCloseAt(source: string, from = 0): boolean {
  * the final `\)`.
  */
 function closerIndex(source: string, opener: MathOpener, from: number): number {
-	const closer = closerOf(opener);
+	// Dollar closers equal their openers; the bracket forms flip the bracket.
+	const closer = opener === "\\(" ? "\\)" : opener === "\\[" ? "\\]" : opener;
 	for (let at = source.indexOf(closer, from); at !== -1; at = source.indexOf(closer, at + 1)) {
 		if (!escapedAt(source, at, from)) return at;
 	}

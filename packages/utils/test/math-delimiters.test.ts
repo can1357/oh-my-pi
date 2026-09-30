@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mathBlockAt, mathBlockMayCloseAt, mathOpenerAt, mathSpanAt, mathStartIndex } from "../src/math-delimiters";
+import {
+	hasMathBlockCloserLine,
+	MathBlockScan,
+	mathBlockAt,
+	mathBlockMayCloseAt,
+	mathOpenerAt,
+	mathSpanAt,
+	mathStartIndex,
+} from "../src/math-delimiters";
 
 describe("math span grammar", () => {
 	test("reports opener, display mode, body and end offset for each delimiter form", () => {
@@ -109,6 +117,22 @@ describe("math block grammar", () => {
 	});
 });
 
+describe("MathBlockScan", () => {
+	test("finds the blocks mathBlockAt finds at every offset, past unclosed openers", () => {
+		// An unclosed `\[` says nothing about a later `$$`, and a `$$` line that
+		// opens no block (text after it) says nothing about a later `$$` block.
+		const source = "\\[\nno closer for this bracket\n\n$$ x $$ is inline\n\n$$\na = b\n$$\n\n\\[\nstill open\n";
+		const scan = new MathBlockScan(source);
+		const found: number[] = [];
+		for (let from = 0; from < source.length; from++) {
+			const block = scan.at(from);
+			expect(block).toEqual(mathBlockAt(source, from));
+			if (block !== undefined) found.push(from);
+		}
+		expect(found).toEqual([source.indexOf("$$\na")]);
+	});
+});
+
 describe("mathBlockMayCloseAt", () => {
 	test("reports a $$ opener that would close once its closer line arrives", () => {
 		expect(mathBlockMayCloseAt("$$\nx^2\n")).toBe(true);
@@ -125,7 +149,7 @@ describe("mathBlockMayCloseAt", () => {
 	});
 
 	test("reports a block already closed within `source`", () => {
-		// mathBlockAt matches the first closer line, so the appended one is unused.
+		// Its closer line has ended, so no append can move it.
 		expect(mathBlockMayCloseAt("$$\nx\n$$\n")).toBe(true);
 	});
 
@@ -133,5 +157,24 @@ describe("mathBlockMayCloseAt", () => {
 		// The trailing `$$` may yet become `$$ E = mc^2 $$`, which closes
 		// nothing, so the block can still close further down.
 		expect(mathBlockMayCloseAt("$$\n\n\n$$")).toBe(true);
+	});
+
+	test("treats an opener whose own line is still being written as open", () => {
+		expect(mathBlockMayCloseAt("Intro.\n\n$$", 8)).toBe(true);
+		// Text after the opener on its line makes it no opener line at all.
+		expect(mathBlockMayCloseAt("Intro.\n\n$$ E", 8)).toBe(false);
+	});
+});
+
+describe("hasMathBlockCloserLine", () => {
+	test("finds a line holding only the closer of a given opener, the last line unterminated", () => {
+		const source = "Intro with $$ inline $$ math.\n  $$  \nmore\n\\]";
+		expect(hasMathBlockCloserLine(source, 0, ["$$"])).toBe(true);
+		expect(hasMathBlockCloserLine(source, 0, ["\\["])).toBe(true);
+		// Past the `$$` line only the unterminated `\]` line is left.
+		const more = source.indexOf("more");
+		expect(hasMathBlockCloserLine(source, more, ["$$"])).toBe(false);
+		expect(hasMathBlockCloserLine(source, more, ["\\["])).toBe(true);
+		expect(hasMathBlockCloserLine(source, 0, [])).toBe(false);
 	});
 });

@@ -4,7 +4,12 @@
 
 ### Added
 
-- Added `mathBlockMayCloseAt` to `math-delimiters`, which tells whether an own-line display block in a streaming prefix could still close as the text grows ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
+- Added `mathBlockMayCloseAt`, `mathBlockOpenerAt` and `hasMathBlockCloserLine` to `math-delimiters`, which tell whether an own-line display block in a growing text could still close, which display opener a line starts, and whether a later line could close it ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
+- Added `MathBlockScan` to `math-delimiters`, which finds the own-line display blocks at many offsets of one text in linear time, and an optional `from` offset to `mathBlockAt` ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
+
+### Fixed
+
+- Fixed the in-house `marked` lexer dropping the text in front of a U+2028 or U+2029 separator on its line ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.4.4] - 2026-09-29
 
