@@ -430,6 +430,9 @@ export function emergencyTerminalRestore(): void {
 			// Keyboard enhancement state is screen-local: pop the alt-screen
 			// frame before leaving it, then let stop() pop omp's main-screen frame.
 			if (altScreenActive) {
+				// Settle first, as TUI.stop() does, so the exit heads the queue:
+				// stop()'s own settle would otherwise discard it with the backlog.
+				terminal.settleOutput();
 				const keyboardExit =
 					terminal.keyboardEnhancementExitSequence ?? (terminal.kittyEnableSequence ? "\x1b[<u" : "");
 				terminal.write(`${keyboardExit}\x1b[?1049l`);

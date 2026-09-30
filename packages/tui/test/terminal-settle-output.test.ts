@@ -440,6 +440,23 @@ describe("the exit-time restore on a terminal that stopped reading", () => {
 		expect(pump.pending()).toBe(0);
 		expect(positionsInOrder(pump.stream, [SETTLE_RESET, FIRST_RESTORE_WRITE, BLIND_RESTORE])).not.toContain(-1);
 	});
+
+	it("leaves the alternate screen when the TUI never stopped and its backlog cannot drain", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const pump = new FakePump({ flushes: [false], thenFlushes: true });
+		harness = createProcessTerminalRenderHarness(80, 24, { outputPump: () => pump });
+		harness.tui.addChild(new TallBlock(60));
+		harness.tui.requestRender();
+		await harness.settle();
+		harness.tui.showOverlay(new Text("MODAL", 0, 0), { fullscreen: true });
+		await harness.settle();
+
+		// TUI.stop() never ran (it threw, or an embedder's crash handler came first):
+		// the exit-time restore is what hands the terminal back.
+		emergencyTerminalRestore();
+
+		expect(positionsInOrder(pump.stream, [SETTLE_RESET, ALT_SCREEN_EXIT, FIRST_RESTORE_WRITE])).not.toContain(-1);
+	});
 });
 
 describe("ProcessTerminal output encoding", () => {
