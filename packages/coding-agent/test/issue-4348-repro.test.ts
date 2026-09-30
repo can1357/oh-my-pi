@@ -56,6 +56,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),

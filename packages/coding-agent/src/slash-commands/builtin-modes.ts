@@ -1,6 +1,8 @@
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -8,15 +10,32 @@ import {
 	type ResolveCliModelResult,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import {
+	applyModelPreset,
+	deleteModelPreset,
+	formatModelPresetSwitch,
+	getModelPresetNames,
+	isValidModelPresetName,
+	modelPresetSavedMessage,
+	type ModelPresetSession,
+	saveModelPreset,
+} from "../config/model-presets";
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
+import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
-import { cfgComputerDisplay, cfgComputerEnabled, cfgComputerMaxHeight, cfgComputerMaxWidth } from "../tools/settings";
+import {
+	cfgComputerDisplay,
+	cfgComputerEnabled,
+	cfgComputerMaxHeight,
+	cfgComputerMaxWidth,
+	cfgRatchetEnabled,
+} from "../tools/settings";
 import { cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
@@ -217,6 +236,27 @@ function applyComputerUseToggle(session: AgentSession, enable: boolean): string 
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
+}
+
+/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
+const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
+
+/**
+ * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
+ * render the kickoff prompt carrying the user's request as data.
+ */
+function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
+	const tools = session.getEnabledToolNames();
+	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
+	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
+	const previous = cfgRatchetEnabled.get(session.settings);
+	if (!previous) cfgRatchetEnabled.override(session.settings, true);
+	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
+		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
+		return { error: "The ratchet eval prelude is unavailable in this session." };
+	}
+	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
+	return { kickoff };
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -687,6 +727,40 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "ratchet",
+		icon: "loop",
+		description: "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended",
+		inlineHint: "[flow and goal]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			const armed = prepareRatchet(runtime.session, command.args);
+			if ("error" in armed) return usage(armed.error, runtime);
+			return { prompt: armed.kickoff };
+		},
+		handleTui: async (command, runtime) => {
+			const { session } = runtime.ctx;
+			const armed = prepareRatchet(session, command.args);
+			clearSubmittedText(runtime);
+			if ("error" in armed) {
+				runtime.ctx.showWarning(armed.error);
+				return;
+			}
+			// Same delivery as /guided-goal: the kickoff is a hidden developer message queued behind
+			// any in-flight run; the agent's batched `ask` is the first thing the user sees.
+			const images = runtime.input?.images?.length ? runtime.input.images : undefined;
+			if (session.isStreaming) {
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+				return;
+			}
+			try {
+				await session.prompt(armed.kickoff, images ? { synthetic: true, images } : { synthetic: true });
+			} catch (error) {
+				if (!(error instanceof AgentBusyError)) throw error;
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+			}
+		},
+	},
+	{
 		name: "prewalk",
 		icon: "prewalk",
 		description: "Arm or restart a one-shot model handoff",
@@ -736,4 +810,118 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 	},
+	{
+		name: "modelpreset",
+		icon: "model",
+		description: "Save and switch model presets (role models + thinking level)",
+		acpDescription: "Manage model presets",
+		acpInputHint: "[list|save|switch|delete] [name]",
+		inlineHint: "[save|switch|delete|list] [name]",
+		subcommands: [
+			{ name: "list", description: "List saved presets" },
+			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
+			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
+			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const count = getModelPresetNames(runtime.ctx.settings).length;
+			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
+		},
+		handle: async (command, runtime) => {
+			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
+			if (outcome.usage) return usage(outcome.message, runtime);
+			await runtime.output(outcome.message);
+			if (outcome.switched) await runtime.notifyTitleChanged?.();
+			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			let args = command.args;
+			if (!args.trim()) {
+				const names = getModelPresetNames(ctx.settings);
+				if (names.length === 0) {
+					ctx.showStatus(NO_PRESETS_MESSAGE);
+					return;
+				}
+				const picked = await ctx.showHookSelector("Switch to model preset", names);
+				if (picked === undefined) return;
+				args = `switch ${picked}`;
+			}
+			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
+			if (outcome.switched) {
+				ctx.statusLine.invalidate();
+				ctx.updateEditorBorderColor();
+			}
+			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
+			else ctx.showStatus(outcome.message);
+			ctx.ui.requestRender();
+		},
+	},
 ];
+
+const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
+const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
+
+interface PresetsCommandOutcome {
+	message: string;
+	usage?: boolean;
+	failed?: boolean;
+	switched?: boolean;
+	changedConfig?: boolean;
+}
+
+/** Shared by the ACP and TUI handlers of `/modelpreset`; `args` is everything after the command name. */
+async function runPresetsCommand(
+	args: string,
+	settings: Settings,
+	session: ModelPresetSession,
+): Promise<PresetsCommandOutcome> {
+	const [sub = "list", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+	const name = rest.join(" ");
+	switch (sub) {
+		case "list": {
+			const names = getModelPresetNames(settings);
+			return { message: names.length > 0 ? `Model presets: ${names.join(", ")}` : NO_PRESETS_MESSAGE };
+		}
+		case "save": {
+			if (!name) return { message: "Usage: /modelpreset save <name>", usage: true };
+			if (!isValidModelPresetName(name)) {
+				return {
+					message: `Invalid preset name "${name}": use a letter, then letters, digits, - or _`,
+					usage: true,
+				};
+			}
+			saveModelPreset(settings, name);
+			return { message: modelPresetSavedMessage(settings, name), changedConfig: true };
+		}
+		case "switch": {
+			if (!name) return { message: "Usage: /modelpreset switch <name>", usage: true };
+			const result = await applyModelPreset(settings, session, name);
+			const message = formatModelPresetSwitch(name, result);
+			const wroteRoles = result.kind === "switched" || result.kind === "failed";
+			return {
+				message,
+				failed: result.kind !== "switched" || result.shadowed.length > 0 || result.shadowedThinking !== undefined,
+				switched: result.kind === "switched",
+				changedConfig: wroteRoles,
+			};
+		}
+		case "delete": {
+			if (!name) return { message: "Usage: /modelpreset delete <name>", usage: true };
+			const result = deleteModelPreset(settings, name);
+			if (result === "deleted") return { message: `Deleted model preset "${name}"`, changedConfig: true };
+			if (result === "project") {
+				return {
+					message: `Preset "${name}" is defined by a project or --config file; remove it there`,
+					failed: true,
+				};
+			}
+			return { message: `Preset not found: ${name}`, failed: true };
+		}
+		default:
+			return { message: PRESETS_USAGE, usage: true };
+	}
+}
