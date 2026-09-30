@@ -4,11 +4,7 @@ import { TtyWriter } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
-import {
-	restoreTerminalStderr,
-	setTerminalHandoffWriter,
-	suppressTerminalStderr,
-} from "@oh-my-pi/pi-utils/stderr-guard";
+import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
 import { TSP_VERSION } from "@oh-my-pi/pi-wire";
 import {
 	encodeBundledGlyphRegistrations,
@@ -29,6 +25,13 @@ import {
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
+import {
+	drainTerminalHandoff,
+	holdTerminalHandoff,
+	releaseTerminalHandoff,
+	STOP_DRAIN_MS,
+	writeBehindTerminalHandoff,
+} from "./terminal-handoff";
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
@@ -189,9 +192,6 @@ const STDOUT_STALL_TIMEOUT_MS = 60_000;
 /** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
 const STDOUT_STALL_POLL_MS = 250;
 
-/** How long a handoff settle waits for the output backlog to drain before dropping it. */
-const STOP_DRAIN_MS = 1000;
-
 /**
  * Closes whatever a discard may have cut mid-frame: ST ends an open OSC/DCS/APC
  * string, then synchronized output ends, SGR resets, an open OSC 8 hyperlink
@@ -319,65 +319,6 @@ export function writeThroughActiveTerminal(data: string): boolean {
 	return true;
 }
 
-/**
- * The output pump a stopped terminal left holding bytes its reader has not
- * taken yet (a stalled PTY), and the terminal it belongs to. The pump keeps
- * running, and the writes routed here - the resume hint, restart errors, the
- * fatal report, the exit-time restore, the stopped terminal's own writes -
- * queue behind those bytes instead of reaching the terminal ahead of them,
- * where their late alternate-screen exit would erase them. Each waits up to
- * {@link STOP_DRAIN_MS}; the exit boundary ({@link drainTerminalHandoff})
- * waits until the terminal has taken everything.
- */
-let terminalHandoff: { pump: OutputPump; owner: ProcessTerminal } | undefined;
-
-function holdTerminalHandoff(pump: OutputPump, owner: ProcessTerminal): void {
-	releaseTerminalHandoff();
-	terminalHandoff = { pump, owner };
-	setTerminalHandoffWriter(writeBehindTerminalHandoff);
-}
-
-/** Stop the held pump: joined once drained, else left to exit when its queue drains. */
-function releaseTerminalHandoff(): void {
-	const held = terminalHandoff;
-	if (!held) return;
-	terminalHandoff = undefined;
-	setTerminalHandoffWriter(null);
-	held.pump.stop(0);
-}
-
-/**
- * Queue `text` behind the held pump's undelivered bytes, then wait up to
- * `waitMs` for the terminal to take them. Returns false when no such bytes are
- * pending; the caller then writes directly.
- */
-function writeBehindTerminalHandoff(text: string, waitMs = STOP_DRAIN_MS): boolean {
-	const pump = terminalHandoff?.pump;
-	if (!pump) return false;
-	if (pump.dead || pump.pending() === 0) {
-		releaseTerminalHandoff();
-		return false;
-	}
-	pump.write(text.isWellFormed() ? text : text.toWellFormed());
-	if (pump.flushSync(waitMs)) releaseTerminalHandoff();
-	return true;
-}
-
-/**
- * The exit boundary: wait, with no time bound, until the held pump has
- * delivered everything queued on it, so the process never exits with the
- * terminal-mode restore or the resume hint still undelivered. A terminal that
- * never reads again holds the exit, as a direct write to it always has.
- */
-function drainTerminalHandoff(): void {
-	const pump = terminalHandoff?.pump;
-	if (!pump) return;
-	while (!pump.flushSync(STOP_DRAIN_MS) && !pump.dead) {
-		// Still stalled: the next wait starts where this one ran out.
-	}
-	releaseTerminalHandoff();
-}
-
 const stdoutErrorHandlers = new Set<(err: Error) => void>();
 let stdoutErrorListenerInstalled = false;
 
@@ -477,7 +418,7 @@ function createConsoleCodepageGuard(): (() => void) | null {
  *
  * Postmortem runs it on every exit path, so it is also the exit boundary: it
  * returns only once the terminal has taken whatever a stalled stop left
- * queued (see terminalHandoff).
+ * queued (see terminal-handoff.ts).
  */
 export function emergencyTerminalRestore(): void {
 	try {
@@ -517,7 +458,7 @@ export function emergencyTerminalRestore(): void {
 				(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
 				"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
 				"\x1b[?25h"; // Show cursor
-			// Behind what a stopped terminal still holds (see terminalHandoff): a
+			// Behind what a stopped terminal still holds (see terminal-handoff.ts): a
 			// direct write would wait out a stalled reader and land ahead of it.
 			// No wait here; the drain in `finally` waits for all of it.
 			if (!writeBehindTerminalHandoff(restore, 0)) process.stdout.write(restore);
@@ -1126,7 +1067,7 @@ export class ProcessTerminal implements Terminal {
 		activeTerminal = this;
 		terminalEverStarted = true;
 		// This terminal owns the output from here on: a pump an earlier stop left
-		// holding output exits once it drains, as a detached writer always has.
+		// holding output exits once its queue drains.
 		releaseTerminalHandoff();
 		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
 		// prebuilt natives module without the export falls back to direct writes.
@@ -2380,7 +2321,7 @@ export class ProcessTerminal implements Terminal {
 		// Flush the restore sequences enqueued above (bounded — a stalled PTY
 		// must not wedge exit), then retire the pump. A pump still inside the
 		// write the settle found it blocked in is not waited on again. One that
-		// still holds bytes keeps running for the handoff (see terminalHandoff):
+		// still holds bytes keeps running for the handoff (see terminal-handoff.ts):
 		// later writes queue behind them instead of racing them to the terminal.
 		const pump = this.#outputPump;
 		if (pump) {
@@ -2504,8 +2445,8 @@ export class ProcessTerminal implements Terminal {
 			this.#trackStdoutBacklog(pending);
 			return;
 		}
-		// Stopped with output still undelivered: queue behind it (see terminalHandoff).
-		if (terminalHandoff?.owner === this && writeBehindTerminalHandoff(text)) return;
+		// Stopped with output still undelivered: queue behind it (see terminal-handoff.ts).
+		if (writeBehindTerminalHandoff(text, STOP_DRAIN_MS, this)) return;
 		// A console-sharing child process may have flipped the console codepage
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.

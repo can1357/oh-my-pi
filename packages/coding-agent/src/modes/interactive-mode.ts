@@ -41,6 +41,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
+import { writeStderrBehindTerminal } from "@oh-my-pi/pi-tui/terminal-handoff";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { col, kbd, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
@@ -60,7 +61,6 @@ import {
 	logger,
 	postmortem,
 	prompt,
-	queueStderrBehindTerminal,
 	sanitizeText,
 	stableStringifyJson,
 	setProjectDir,
@@ -1045,15 +1045,6 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
-
-/**
- * Write to stderr after the terminal output a stopped TUI still holds: a
- * stalled terminal may not have read the restore yet, and a direct write would
- * land ahead of it.
- */
-function writeStderrBehindTerminal(text: string): void {
-	if (!queueStderrBehindTerminal(text)) process.stderr.write(text);
-}
 
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
@@ -6546,6 +6537,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
 			// Command on its own line so triple-click selects just the command (#11001).
+			// A stalled terminal may not have read the restore yet; the hint queues behind it.
 			writeStderrBehindTerminal(
 				`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`,
 			);
@@ -6597,9 +6589,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			try {
 				execReplace(cmd); // never returns on success
 			} catch (err) {
-				writeStderrBehindTerminal(
-					`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`,
-				);
+				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			}
 		}
 		try {
@@ -6610,9 +6600,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			await postmortem.quit(await child.exited);
 		} catch (err) {
-			writeStderrBehindTerminal(
-				`${chalk.red(`Restart spawn failed: ${err instanceof Error ? err.message : err}`)}\n`,
-			);
+			process.stderr.write(`${chalk.red(`Restart spawn failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			await postmortem.quit(1);
 		}
 	}

@@ -62,7 +62,7 @@ function libcFdOps(): LibcFdOps | null {
  * the user already redirected (`2>file`, `2>/dev/null`, a different tty) must
  * keep flowing untouched.
  */
-function stderrSharesStdoutTerminal(): boolean {
+export function stderrSharesStdoutTerminal(): boolean {
 	if (!process.stdout.isTTY || !process.stderr.isTTY) return false;
 	try {
 		const stdoutStat = fs.fstatSync(STDOUT_FILENO);
@@ -184,30 +184,4 @@ export function restoreTerminalStderr(): void {
 /** Whether fd 2 is currently redirected away from the terminal. */
 export function isTerminalStderrSuppressed(): boolean {
 	return savedStderrFd !== null;
-}
-
-/**
- * Queues text behind output a stopped terminal could not deliver yet (its
- * reader stalled) and returns true, or returns false once nothing is pending.
- */
-let terminalHandoffWriter: ((text: string) => boolean) | null = null;
-
-/**
- * Set by the terminal while it holds output a stalled reader has not taken
- * yet; cleared (null) once that output drains or another terminal takes over.
- */
-export function setTerminalHandoffWriter(writer: ((text: string) => boolean) | null): void {
-	terminalHandoffWriter = writer;
-}
-
-/**
- * Queue `text` meant for stderr behind output a stopped terminal still holds,
- * when stderr is that terminal: the text then reaches the terminal after that
- * output instead of ahead of it.
- * Returns false when nothing is pending or stderr goes elsewhere; the caller
- * then writes to stderr itself.
- */
-export function queueStderrBehindTerminal(text: string): boolean {
-	if (!terminalHandoffWriter || !stderrSharesStdoutTerminal()) return false;
-	return terminalHandoffWriter(text);
 }
