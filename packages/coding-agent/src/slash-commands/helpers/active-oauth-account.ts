@@ -1,5 +1,41 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+
+/** Codex's orgName is the login-time plan, not a workspace name. */
+export function codexUsagePlan(report: UsageReport): string | undefined {
+	if (report.provider !== "openai-codex") return undefined;
+	const plan = report.metadata?.planType;
+	if (typeof plan !== "string" || !plan.trim()) return undefined;
+	return sanitizeText(plan.trim().replace(/[\r\n\t]+/g, " "));
+}
+
+/** Qualify Codex identities only when two reports have the same email. */
+export function formatCodexUsageReportLabel(
+	report: UsageReport,
+	peers: readonly UsageReport[],
+	base: string,
+	redaction?: Map<string, string>,
+	includePlan = true,
+	orgStyle: "inline" | "parenthesized" = "parenthesized",
+): string {
+	const email = report.metadata?.email;
+	const collision =
+		typeof email === "string" && !!email && peers.some(peer => peer !== report && peer.metadata?.email === email);
+	const rawOrg = collision
+		? (report.metadata?.orgId ?? report.metadata?.accountId ?? `account ${peers.indexOf(report) + 1}`)
+		: undefined;
+	const clean = (value: string): string => sanitizeText((redaction?.get(value) ?? value).replace(/[\r\n\t]+/g, " "));
+	const org =
+		typeof rawOrg === "string" && rawOrg && rawOrg !== base
+			? orgStyle === "inline"
+				? ` · ${clean(rawOrg)}`
+				: ` (${clean(rawOrg)})`
+			: "";
+	const identity = clean(base);
+	const plan = includePlan ? codexUsagePlan(report) : undefined;
+	return `${identity}${org}${plan ? ` · plan: ${plan}` : ""}`;
+}
 
 function normalizeIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
@@ -9,8 +45,8 @@ function normalizeIdentityValue(value: unknown): string | undefined {
  * Session marker label for an active OAuth identity: the base identifier
  * (email → accountId → projectId) suffixed with the organization when present
  * and distinct. Same-email Anthropic multi-org accounts share the base, so the
- * org suffix is the only field that tells the session's quota pool apart —
- * mirrors the account-list rows (`formatUsageReportAccount`) and login success.
+ * org suffix is the only field that tells the session's quota pool apart.
+ * Codex usage labels instead use live report metadata via formatCodexUsageReportLabel.
  * Returns `undefined` when no identifier is recoverable.
  */
 export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefined): string | undefined {

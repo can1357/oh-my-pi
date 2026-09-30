@@ -9,6 +9,7 @@ import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import {
 	collectToolCallsById,
+	getToolResultMessage,
 	isProtectedToolResult,
 	isSkillReadToolResult,
 	type ProtectedToolMatcher,
@@ -120,14 +121,7 @@ function createPrunedNotice(tokens: number): string {
  * own rules: useless already drops no-savings candidates, superseded prunes for
  * correctness regardless of size.
  */
-const MIN_PRUNE_TOKENS = 50;
-
-function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefined {
-	if (entry.type !== "message") return undefined;
-	const message = entry.message as AgentMessage;
-	if (message.role !== "toolResult") return undefined;
-	return message as ToolResultMessage;
-}
+export const MIN_PRUNE_TOKENS = 50;
 
 function estimatePrunedSavings(tokens: number, notice: string): number {
 	const noticeTokens = Math.ceil(notice.length / 4);

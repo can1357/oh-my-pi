@@ -9,6 +9,8 @@ interface BrowserAppOptions {
 	cdp_url?: string;
 	/** Drive the user's existing Chrome tabs through the omp Browser Relay. */
 	relay?: boolean;
+	/** Inside a Tern pane: `true` requires a Tern browser picture-in-picture, `false` opens Chromium instead. */
+	tern?: boolean;
 	/** Extra command-line arguments for a spawned executable. */
 	args?: string[];
 	/** URL/title substring used to select an attached tab. */
@@ -407,7 +409,7 @@ interface BrowserScreenshotChangeResult {
 	changed: boolean;
 	/** Monotonic revision for this page, full-page, or selector scope. */
 	revision: number;
-	/** Fraction of pixels that differ from the previous scope-local capture. */
+	/** Fraction of pixels that differ from the previous scope-local capture, ignoring ±2 per-channel rasterizer noise. */
 	pixelChangeRatio: number;
 }
 
@@ -421,7 +423,7 @@ interface BrowserDiffScreenshotOptions {
 
 /** Result of comparing the current viewport against a PNG baseline. */
 interface BrowserDiffScreenshotResult {
-	/** Fraction of pixels that differ from the baseline. */
+	/** Fraction of pixels that differ from the baseline, ignoring ±2 per-channel rasterizer noise. */
 	pixelChangeRatio: number;
 	/** Whether the changed-pixel ratio exceeded the threshold. */
 	changed: boolean;
@@ -501,10 +503,10 @@ interface BrowserManagedTab {
 	url: string;
 	/** Last reported page title. */
 	title: string;
-	/** Browser target or cmux surface identifier. */
+	/** Browser target, cmux surface, or Tern browser block identifier. */
 	targetId: string;
 	/** Browser backend kind. */
-	kind: "headless" | "spawned" | "connected" | "relay" | "cmux";
+	kind: "headless" | "spawned" | "connected" | "relay" | "cmux" | "tern";
 	/** Whether settle and idle-close management are disabled. */
 	persist: boolean;
 }

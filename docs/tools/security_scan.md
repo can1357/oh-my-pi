@@ -6,7 +6,7 @@
 
 - `security.enabled` defaults to `false`. When disabled, `security_scan` is omitted from the available tool set and `security://` reads fail with an enablement message. Enable it in **Settings → Tools → Security** or set `security.enabled = true`.
 - The tool is discoverable, strict-schema, and classified as `exec`.
-- Native `preflight` requires a Git repository, an active model, the session model and authentication registries, and a stored OAuth credential for the active model's provider. API-key-only authentication is not accepted.
+- Native `preflight` requires a Git repository, an active model, and the session model/authentication registries. It selects a stored OAuth credential when available. Without one, only provider-owned authentication APIs explicitly declared in provider metadata are accepted: currently Amazon Bedrock (`bedrock-converse-stream`) and Bedrock Mantle (`openai-responses`). Ordinary API-key-only providers are not accepted.
 - If several OAuth accounts exist and none is active, pass `credential_id`; a lone account is selected automatically. The immutable plan pins the credential row and recorded account/workspace identity. Execution and token refresh stay on that row rather than rotating to another account.
 - Cloud actions require an `openai-codex` ChatGPT OAuth credential. They call ChatGPT's Codex Security cloud control plane, not the public OpenAI API, and are never a fallback from a native scan.
 
@@ -15,6 +15,7 @@
 - Public tool and schema: `packages/coding-agent/src/tools/security-scan.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/security-scan.md`
 - Native planning and freshness: `packages/coding-agent/src/security/preflight.ts`
+- OAuth selection and provider-owned auth boundaries: `packages/coding-agent/src/security/auth.ts`
 - Background execution: `packages/coding-agent/src/security/coordinator.ts`
 - Scan-only publication tool: `packages/coding-agent/src/security/publication.ts`
 - Canonical store and output files: `packages/coding-agent/src/security/store.ts`
@@ -36,7 +37,7 @@
 | `knowledge_base_paths` | `string[]` | `preflight` | Files resolved relative to the repository root, canonicalized, and pinned by SHA-256 and size. |
 | `output_root` | `string` | `preflight` | Optional external result directory. It must be outside the repository, canonical, non-symlinked, and empty unless `archive_existing=true`. |
 | `archive_existing` | `boolean` | `preflight` | Defaults to `false`. Allows a nonempty output directory to be renamed to `<output_root>.archive-<scan-id>` when execution begins. |
-| `credential_id` | positive integer | Native `preflight`; every cloud action | Pins one OAuth credential. Native scans select it for the active model provider; cloud actions select it for `openai-codex`. |
+| `credential_id` | positive integer | Native `preflight`; every cloud action | Pins one stored OAuth credential. Native scans select it for the active model provider; cloud actions select it for `openai-codex`. An explicit unavailable id fails rather than using provider-owned auth. |
 | `scan_id` | `string` | `validate` | Stored scan containing the finding. |
 | `finding_id` | `string` | `validate` | Stored finding to update. |
 | `validation_status` | `"unvalidated" \| "validated" \| "rejected" \| "partial" \| "error"` | `validate` | New validation state. |
@@ -52,7 +53,7 @@ Unused optional fields are ignored by actions that do not read them.
 
 ## Outputs and execution model
 
-Every action returns one text content block plus structured `details` containing `action` and the action-specific object described below. The tool itself does not stream partial arguments or progress updates. `start` returns a queued operation immediately; its separately registered OMP job reports progress, and callers use `status` for durable operation state.
+Every action returns one text content block plus structured `details` containing `action` and the action-specific object described below. The tool itself does not stream partial arguments or progress updates. `start` returns an operation immediately; an OMP job reports progress when a job manager is available, otherwise the coordinator runs its local background promise. Use `status` for durable operation state.
 
 ## Action reference
 
@@ -71,8 +72,8 @@ The plan pins:
 - the canonical repository root and normalized include/exclude scope;
 - the target snapshot;
 - resolved ref-diff revisions and diff digest, when applicable;
-- the active provider/model and optional thinking level;
-- the exact OAuth credential and recorded account/workspace identity;
+- the active provider/model (the planning API also supports a thinking level, but the public tool does not pass one);
+- the exact OAuth credential and recorded account/workspace identity, or the supported provider-owned provider/API boundary;
 - knowledge-base file identities;
 - output policy;
 - the security setting snapshot and fingerprints of the coordinator prompts/workflow.
@@ -166,7 +167,7 @@ Import fails closed unless the current project has an `origin` remote whose norm
 - honest coverage completeness, reviewed surfaces, exclusions, deferred work, and open questions;
 - the final Markdown report.
 
-Publication rejects absolute, parent-traversing, or out-of-scope finding and evidence paths. Repeated findings with the same canonical fingerprint are deduplicated. A second successful publication call fails. If the scan session ends without publication, the scan is persisted as `partial`; a successful publication remains `completed` even if later metrics/output refresh fails.
+Publication checks cited finding and evidence locations against real files and line counts in the reviewed tree (the pinned head worktree for `ref_diff`). Findings with missing/unreadable paths or out-of-range lines are withheld and reported in `details.droppedFindings`. Grounded paths must be repository-relative and in scope. Repeated findings with the same canonical fingerprint are deduplicated. A second successful publication call fails. If the scan session ends without publication, the scan is persisted as `partial`; a successful publication remains `completed` even if later metrics/output refresh fails.
 
 Canonical state is private and project-keyed under OMP's security state root. A completed native output directory contains:
 
@@ -180,7 +181,7 @@ Directories are hardened to mode `0700` and files to `0600` on non-Windows platf
 
 ## Reading results
 
-The `security://` namespace is immutable and project-scoped:
+The `security://` namespace is read-only and project-scoped; reads reflect the current stored state:
 
 | URL | Result |
 | --- | --- |
@@ -256,8 +257,8 @@ Explicitly start and later import a cloud scan:
 ## Errors and constraints
 
 - Every action first rechecks `security.enabled`; direct execution while disabled throws `Security is disabled. Enable security.enabled before using security_scan.`
-- Required strings are trimmed and reject blank values. ArkType rejects invalid enum values, nonpositive credential/lookback IDs, and malformed validation evidence.
+- Action-specific required IDs, cloud repository fields, and validation summaries are trimmed and reject blank values. Ref revisions and path arrays are instead handled by planning validation. ArkType rejects invalid enum values, nonpositive credential/lookback IDs, and malformed validation evidence.
 - Native scans reject missing Git context, unknown refs, escaping/nonexistent scope paths, invalid knowledge-base files, unsafe output directories, unknown/stale plans, unavailable pinned models, OAuth identity changes, and unavailable pinned credentials.
 - Cloud requests retry once on HTTP 401 with a forced refresh, then fail. Other non-success responses report the status and endpoint.
 - `cloud_pull` verifies repository identity and configuration attribution before importing.
-- Cancellation is cooperative. The operation reaches terminal `cancelled` only after the background run handles the abort and persists its terminal bundle.
+- Cancellation is cooperative. An unpublished operation reaches terminal `cancelled` after the background run handles the abort and persists its terminal bundle; an already-published result stays `completed`.

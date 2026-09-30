@@ -69,8 +69,8 @@ export const coordinationFixtures: Record<string, GalleryFixture> = {
 	write_proc_cancel: {
 		label: "Cancel job",
 		renderer: "write",
-		streamingArgs: { path: "proc://build-42", content: "" },
-		args: { path: "proc://build-42", content: "" },
+		streamingArgs: { path: "proc://build-42/kill" },
+		args: { path: "proc://build-42/kill" },
 		result: {
 			content: [{ type: "text", text: "Cancelled background job build-42." }],
 			details: { proc: { op: "cancel", jobs: [job], cancelled: [{ id: "build-42", status: "cancelled" }] } },
@@ -91,8 +91,8 @@ export const coordinationFixtures: Record<string, GalleryFixture> = {
 	write_proc_stop: {
 		label: "Stop service",
 		renderer: "write",
-		streamingArgs: { path: "proc://web", content: "" },
-		args: { path: "proc://web", content: "" },
+		streamingArgs: { path: "proc://web/kill" },
+		args: { path: "proc://web/kill" },
 		result: {
 			content: [{ type: "text", text: "Stopped web" }],
 			details: { proc: { action: "stop", daemon: { ...service, state: "exited", exitedAt: Date.now() } } },

@@ -1,4 +1,13 @@
 import type { YieldItem } from "./task";
+
+/**
+ * Output-schema shape of each declared top-level property, keyed by incremental yield label.
+ * `array` sections accumulate into a list (even a lone yield); `scalar` sections keep the
+ * latest yield, since the schema admits exactly one value. Undeclared labels accumulate
+ * into a list only once repeated.
+ */
+export type YieldSectionShapes = ReadonlyMap<string, "array" | "scalar">;
+
 /** Outcome of folding a run's yield calls into one payload, with provenance flags. */
 interface AssembledYieldResult {
 	data: unknown;
@@ -52,12 +61,14 @@ function appendYieldSection(
 	sectionCounts: Map<string, number>,
 	label: string,
 	value: unknown,
-	forceArray: boolean,
+	shape: "array" | "scalar" | undefined,
 ): void {
 	const count = sectionCounts.get(label) ?? 0;
 	const existing = sections[label];
-	if (count === 0) {
-		sections[label] = forceArray ? [value] : value;
+	if (shape === "scalar") {
+		sections[label] = value;
+	} else if (count === 0) {
+		sections[label] = shape === "array" ? [value] : value;
 	} else if (Array.isArray(existing)) {
 		existing.push(value);
 	} else {
@@ -74,12 +85,13 @@ function appendYieldSection(
  * assistant turn the raw terminal result. Other string-typed yields contribute
  * the terminal labelled section. Untyped terminal yields keep the historical
  * "last yield wins" behavior unless no terminal yield exists, in which case
- * accumulated typed sections finalize on idle.
+ * accumulated typed sections finalize on idle. Repeated sections merge per
+ * `sectionShapes` (see {@link YieldSectionShapes}).
  */
 export function assembleYieldResult(
 	yieldItems: YieldItem[],
 	lastAssistantText?: string,
-	arrayLabels?: ReadonlySet<string>,
+	sectionShapes?: YieldSectionShapes,
 ): AssembledYieldResult | undefined {
 	if (yieldItems.length === 0) return undefined;
 
@@ -101,18 +113,27 @@ export function assembleYieldResult(
 	// level deep and made output-schema validation report every field missing.
 	const sections: Record<string, unknown> = {};
 	const sectionCounts = new Map<string, number>();
+	const overriddenScalars = new Set<string>();
 	let schemaOverridden = false;
 	let missingData = false;
 	let hasSections = false;
 	for (const item of yieldItems) {
 		if (item.status === "aborted") continue;
 		if (!isIncrementalYieldType(item.type)) continue;
-		schemaOverridden ||= item.schemaOverridden === true;
+		const overridden = item.schemaOverridden === true;
 		const labels = getYieldLabels(item.type);
 		const resolved = resolveYieldPayload(item, lastAssistantText, labels);
 		missingData ||= resolved.missingData;
+		if (labels.length === 0) schemaOverridden ||= overridden;
 		for (const label of labels) {
-			appendYieldSection(sections, sectionCounts, label, resolved.value, arrayLabels?.has(label) ?? false);
+			const shape = sectionShapes?.get(label);
+			appendYieldSection(sections, sectionCounts, label, resolved.value, shape);
+			if (shape === "scalar") {
+				if (overridden) overriddenScalars.add(label);
+				else overriddenScalars.delete(label);
+			} else {
+				schemaOverridden ||= overridden;
+			}
 			hasSections = true;
 		}
 	}
@@ -133,7 +154,12 @@ export function assembleYieldResult(
 	// A data-less terminal finalize keeps accumulated sections; only when none
 	// exist does the last assistant turn become the raw result.
 	if (hasSections) {
-		return { data: sections, schemaOverridden, rawText: false, missingData };
+		return {
+			data: sections,
+			schemaOverridden: schemaOverridden || overriddenScalars.size > 0,
+			rawText: false,
+			missingData,
+		};
 	}
 
 	if (!terminalItem) return undefined;

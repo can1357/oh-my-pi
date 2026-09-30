@@ -168,10 +168,6 @@ function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
 	return tracked;
 }
 
-function delay(ms: number): Promise<void> {
-	return Bun.sleep(ms);
-}
-
 /**
  * Stable, total ordering on MCP tools by name.
  *
@@ -291,6 +287,8 @@ export class MCPManager {
 	#serverConfigs = new Map<string, MCPServerConfig>();
 	#discoverOptions: MCPDiscoverOptions | undefined;
 	#browserFilterMutationTail: Promise<void> = Promise.resolve();
+	/** Settles when the latest {@link MCPManager.discoverAndConnect} call does; reconciles wait on it. */
+	#discoveryInFlight: Promise<unknown> = Promise.resolve();
 	/**
 	 * Timestamps of recent reconnectServer invocations per server, used by the
 	 * crash-storm circuit breaker (see {@link RECONNECT_BURST_LIMIT}).
@@ -528,7 +526,13 @@ export class MCPManager {
 	 * Discover and connect to all MCP servers from .mcp.json files.
 	 * Returns tools and any connection errors.
 	 */
-	async discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+	discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		const discovery = this.#discoverAndConnect(options);
+		this.#discoveryInFlight = discovery.catch(() => undefined);
+		return discovery;
+	}
+
+	async #discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
 		this.#discoverOptions = options ? { ...options } : undefined;
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
@@ -560,6 +564,55 @@ export class MCPManager {
 		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyBrowserFilter(enabled));
 		this.#browserFilterMutationTail = reconcile.catch(() => undefined);
 		return reconcile;
+	}
+
+	/**
+	 * Apply a live `mcp.enableProjectConfig` change: disconnect project-level
+	 * servers when disabled (restoring any user-level server they shadowed), or
+	 * connect them when enabled. Serialized with the browser-filter reconcile; a
+	 * no-op before the first discovery, which reads the flag itself.
+	 */
+	reconcileProjectConfig(enabled: boolean): Promise<void> {
+		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyProjectConfig(enabled));
+		this.#browserFilterMutationTail = reconcile.catch(() => undefined);
+		return reconcile;
+	}
+
+	async #applyProjectConfig(enabled: boolean): Promise<void> {
+		await this.#discoveryInFlight;
+		const options = this.#discoverOptions;
+		if (!options || (options.enableProjectConfig ?? true) === enabled) return;
+		this.#discoverOptions = { ...options, enableProjectConfig: enabled };
+		const loaded = await this.loadConfigs(this.cwd, {
+			enableProjectConfig: enabled,
+			filterExa: options.filterExa,
+			filterBrowser: options.filterBrowser,
+			extensionRoots: options.extensionRoots,
+		});
+		// Every server whose resolution depends on the flag: project-level ones
+		// known now, plus project-level ones the enabled load resolves.
+		const affected = new Set<string>();
+		for (const name of this.getAllServerNames()) {
+			if (this.getSource(name)?.level === "project") affected.add(name);
+		}
+		for (const name in loaded.sources) {
+			if (loaded.sources[name]?.level === "project") affected.add(name);
+		}
+		if (affected.size === 0) return;
+		await Promise.all([...affected].map(name => this.disconnectServer(name)));
+		const configs: Record<string, MCPServerConfig> = {};
+		const sources: Record<string, SourceMeta> = {};
+		let reconnect = false;
+		for (const name of affected) {
+			const config = loaded.configs[name];
+			if (!config) continue;
+			configs[name] = config;
+			reconnect = true;
+			const source = loaded.sources[name];
+			if (source) sources[name] = source;
+		}
+		if (!reconnect) return;
+		await this.connectServers(configs, sources, options.onStatus, options.startupTimeoutMs);
 	}
 
 	async #applyBrowserFilter(enabled: boolean): Promise<void> {
@@ -814,7 +867,7 @@ export class MCPManager {
 			const initialLoads = Promise.allSettled(connectionTasks.map(task => task.tracked.promise));
 			const windowMs = resolveMCPStartupTimeoutMs(startupTimeoutMs);
 			if (windowMs === 0) await initialLoads;
-			else await Promise.race([initialLoads, delay(windowMs)]);
+			else await Promise.race([initialLoads, Bun.sleep(windowMs)]);
 
 			const cachedTools = new Map<string, MCPToolDefinition[]>();
 			const pendingTasks = connectionTasks.filter(task => task.tracked.status === "pending");
@@ -1750,12 +1803,12 @@ export class MCPManager {
 	}
 
 	/**
-	 * Get all server instructions (for system prompt injection).
+	 * Get server instructions allowed by config (for prompt injection and rebuild signatures).
 	 */
 	getServerInstructions(): Map<string, string> {
 		const instructions = new Map<string, string>();
 		for (const [name, connection] of this.#connections) {
-			if (connection.instructions) {
+			if (connection.config.instructions !== false && connection.instructions) {
 				instructions.set(name, connection.instructions);
 			}
 		}

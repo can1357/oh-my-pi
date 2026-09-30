@@ -1,8 +1,9 @@
-import { deflateSync, inflateSync } from "node:zlib";
+import { inflateSync } from "node:zlib";
 
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
+import { encodeRawPng } from "../../utils/png-encode";
 
 /** Options accepted by tab.screenshot(). */
 export interface ScreenshotOptions {
@@ -175,6 +176,36 @@ export async function captureScreenshotBuffer(
 	);
 }
 
+/** Page function (self-contained): draw numbered outlines for `payload.targets` under a root tagged with `payload.token`. */
+export function installAnnotationOverlayInPage(payload: {
+	token: string;
+	targets: ScreenshotAnnotationTarget[];
+}): void {
+	const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
+	const doc = pageGlobal.document;
+	const root = doc.createElement("div");
+	root.setAttribute("data-omp-screenshot-annotations", payload.token);
+	root.style.cssText = "position:absolute;left:0;top:0;z-index:2147483647;pointer-events:none";
+	for (const target of payload.targets) {
+		const outline = doc.createElement("div");
+		outline.style.cssText = `position:absolute;left:${target.x}px;top:${target.y}px;width:${target.width}px;height:${target.height}px;box-sizing:border-box;border:2px solid #ff2bd6;background:rgba(255,43,214,.08)`;
+		const label = doc.createElement("span");
+		label.textContent = `[${target.id}]`;
+		label.style.cssText =
+			"position:absolute;left:-2px;top:-20px;padding:1px 4px;border:1px solid #111;border-radius:3px;background:#ffeb3b;color:#111;font:700 13px/16px ui-monospace,monospace;white-space:nowrap";
+		outline.appendChild(label);
+		root.appendChild(outline);
+	}
+	doc.documentElement.appendChild(root);
+}
+
+/** Page function (self-contained): remove the overlay installed with `token`. */
+export function removeAnnotationOverlayInPage(token: string): void {
+	const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
+	const doc = pageGlobal.document;
+	doc.querySelector(`[data-omp-screenshot-annotations="${token}"]`)?.remove();
+}
+
 /** Install numbered annotation overlays and return an abort-aware cleanup function. */
 export async function installScreenshotAnnotations(
 	page: Page,
@@ -182,37 +213,9 @@ export async function installScreenshotAnnotations(
 	signal: AbortSignal | undefined,
 ): Promise<() => Promise<void>> {
 	const token = `omp-screenshot-${crypto.randomUUID()}`;
-	await untilAborted(signal, () =>
-		page.evaluate(
-			(payload: { token: string; targets: ScreenshotAnnotationTarget[] }) => {
-				const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
-				const doc = pageGlobal.document;
-				const root = doc.createElement("div");
-				root.setAttribute("data-omp-screenshot-annotations", payload.token);
-				root.style.cssText = "position:absolute;left:0;top:0;z-index:2147483647;pointer-events:none";
-				for (const target of payload.targets) {
-					const outline = doc.createElement("div");
-					outline.style.cssText = `position:absolute;left:${target.x}px;top:${target.y}px;width:${target.width}px;height:${target.height}px;box-sizing:border-box;border:2px solid #ff2bd6;background:rgba(255,43,214,.08)`;
-					const label = doc.createElement("span");
-					label.textContent = `[${target.id}]`;
-					label.style.cssText =
-						"position:absolute;left:-2px;top:-20px;padding:1px 4px;border:1px solid #111;border-radius:3px;background:#ffeb3b;color:#111;font:700 13px/16px ui-monospace,monospace;white-space:nowrap";
-					outline.appendChild(label);
-					root.appendChild(outline);
-				}
-				doc.documentElement.appendChild(root);
-			},
-			{ token, targets: [...targets] },
-		),
-	);
+	await untilAborted(signal, () => page.evaluate(installAnnotationOverlayInPage, { token, targets: [...targets] }));
 	return async () => {
-		await page
-			.evaluate((marker: string) => {
-				const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
-				const doc = pageGlobal.document;
-				doc.querySelector(`[data-omp-screenshot-annotations="${marker}"]`)?.remove();
-			}, token)
-			.catch(() => undefined);
+		await page.evaluate(removeAnnotationOverlayInPage, token).catch(() => undefined);
 	};
 }
 
@@ -323,48 +326,10 @@ export function decodePng(buffer: Uint8Array): DecodedPng {
 	return { width, height, pixels };
 }
 
-function crc32(bytes: Uint8Array): number {
-	let crc = 0xffffffff;
-	for (const byte of bytes) {
-		crc ^= byte;
-		for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-	}
-	return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type: string, data: Uint8Array): Buffer {
-	const typeBytes = Buffer.from(type, "ascii");
-	const chunk = Buffer.alloc(12 + data.length);
-	chunk.writeUInt32BE(data.length, 0);
-	typeBytes.copy(chunk, 4);
-	Buffer.from(data).copy(chunk, 8);
-	chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, Buffer.from(data)])), 8 + data.length);
-	return chunk;
-}
-
 /** Encode RGBA pixels as a non-interlaced 8-bit PNG. */
 export function encodePng(image: DecodedPng): Buffer {
 	if (image.pixels.length !== image.width * image.height * 4) throw new ToolError("RGBA pixel buffer size mismatch");
-	const header = Buffer.alloc(13);
-	header.writeUInt32BE(image.width, 0);
-	header.writeUInt32BE(image.height, 4);
-	header[8] = 8;
-	header[9] = 6;
-	const raw = Buffer.alloc((image.width * 4 + 1) * image.height);
-	for (let y = 0; y < image.height; y++) {
-		const rowStart = y * (image.width * 4 + 1);
-		raw[rowStart] = 0;
-		Buffer.from(image.pixels.buffer, image.pixels.byteOffset + y * image.width * 4, image.width * 4).copy(
-			raw,
-			rowStart + 1,
-		);
-	}
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		pngChunk("IHDR", header),
-		pngChunk("IDAT", deflateSync(raw)),
-		pngChunk("IEND", Buffer.alloc(0)),
-	]);
+	return encodeRawPng(image.pixels, image.width, image.height, 4);
 }
 
 function rgbaAt(image: DecodedPng, x: number, y: number): readonly [number, number, number, number] {
@@ -373,7 +338,25 @@ function rgbaAt(image: DecodedPng, x: number, y: number): readonly [number, numb
 	return [image.pixels[index]!, image.pixels[index + 1]!, image.pixels[index + 2]!, image.pixels[index + 3]!];
 }
 
-/** Calculate the fraction of pixels that differ between two PNG images. */
+/**
+ * Largest per-channel delta treated as unchanged. Chromium re-rasterizes
+ * anti-aliased edges of a static page with ±1 channel jitter between captures
+ * (observed at the default 1.25 device scale), which exact comparison reports
+ * as a change.
+ */
+const PIXEL_CHANNEL_TOLERANCE = 2;
+
+/** Whether the pixel at (x, y) differs beyond rasterizer noise; out-of-bounds pixels read as transparent. */
+function pixelChanged(before: DecodedPng, after: DecodedPng, x: number, y: number): boolean {
+	const a = rgbaAt(before, x, y);
+	const b = rgbaAt(after, x, y);
+	for (let channel = 0; channel < 4; channel++) {
+		if (Math.abs(a[channel]! - b[channel]!) > PIXEL_CHANNEL_TOLERANCE) return true;
+	}
+	return false;
+}
+
+/** Calculate the fraction of pixels that differ beyond rasterizer noise between two PNG images. */
 export function pngPixelChangeRatio(previous: Uint8Array, current: Uint8Array): number {
 	const before = decodePng(previous);
 	const after = decodePng(current);
@@ -382,9 +365,7 @@ export function pngPixelChangeRatio(previous: Uint8Array, current: Uint8Array): 
 	let changed = 0;
 	for (let y = 0; y < height; y++) {
 		for (let x = 0; x < width; x++) {
-			const a = rgbaAt(before, x, y);
-			const b = rgbaAt(after, x, y);
-			if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2] || a[3] !== b[3]) changed++;
+			if (pixelChanged(before, after, x, y)) changed++;
 		}
 	}
 	return width * height === 0 ? 0 : changed / (width * height);
@@ -400,14 +381,12 @@ export function createPngDiff(baseline: Uint8Array, current: Uint8Array): { png:
 	let changed = 0;
 	for (let y = 0; y < height; y++) {
 		for (let x = 0; x < width; x++) {
-			const a = rgbaAt(before, x, y);
-			const b = rgbaAt(after, x, y);
-			const different = a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2] || a[3] !== b[3];
 			const index = (y * width + x) * 4;
-			if (different) {
+			if (pixelChanged(before, after, x, y)) {
 				changed++;
 				pixels.set([255, 0, 180, 255], index);
 			} else {
+				const b = rgbaAt(after, x, y);
 				const gray = Math.round((b[0] + b[1] + b[2]) / 3);
 				pixels.set([gray, gray, gray, 128], index);
 			}

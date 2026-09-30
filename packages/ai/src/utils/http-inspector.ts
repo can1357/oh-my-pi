@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isBunTestRuntime, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
@@ -59,6 +59,25 @@ export function shouldDumpRejectedRequest(error: unknown): boolean {
 	return status === 400 || status === 413;
 }
 
+const RAW_HTTP_REQUEST_LINE = "raw-http-request=";
+const RAW_HTTP_REQUEST_SAVE_FAILED_LINE = "raw-http-request-save-failed=";
+
+/**
+ * Remove the local request-dump lines {@link appendRawHttpRequestDumpFor400} appends,
+ * leaving only the provider-facing error text. Hosts that relay provider errors
+ * (RPC `prompt_result`) must not leak OMP-local file paths.
+ */
+export function stripRawHttpRequestDiagnostics(message: string): string {
+	const lines = message.split("\n");
+	let end = lines.length;
+	while (
+		end > 0 &&
+		(lines[end - 1].startsWith(RAW_HTTP_REQUEST_LINE) || lines[end - 1].startsWith(RAW_HTTP_REQUEST_SAVE_FAILED_LINE))
+	)
+		end--;
+	return end === lines.length ? message : lines.slice(0, end).join("\n");
+}
+
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
 	error: unknown,
@@ -75,10 +94,10 @@ export async function appendRawHttpRequestDumpFor400(
 
 	try {
 		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
-		return `${message}\nraw-http-request=${filePath}`;
+		return `${message}\n${RAW_HTTP_REQUEST_LINE}${filePath}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
-		return `${message}\nraw-http-request-save-failed=${writeMessage}`;
+		return `${message}\n${RAW_HTTP_REQUEST_SAVE_FAILED_LINE}${writeMessage}`;
 	}
 }
 
@@ -233,13 +252,13 @@ function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined
 }
 
 function parseCapturedErrorPayload(captured: CapturedHttpErrorResponse): Record<string, unknown> | undefined {
-	if (isObject(captured.bodyJson)) {
+	if (isRecord(captured.bodyJson)) {
 		return captured.bodyJson;
 	}
 	if (!captured.bodyText) return undefined;
 	try {
 		const parsed = JSON.parse(captured.bodyText);
-		return isObject(parsed) ? parsed : undefined;
+		return isRecord(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}
@@ -247,14 +266,10 @@ function parseCapturedErrorPayload(captured: CapturedHttpErrorResponse): Record<
 
 function getObjectProperty(value: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
 	const property = value[key];
-	return isObject(property) ? property : undefined;
+	return isRecord(property) ? property : undefined;
 }
 
 function getStringProperty(value: Record<string, unknown>, key: string): string | undefined {
 	const property = value[key];
 	return typeof property === "string" && property.trim().length > 0 ? property : undefined;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

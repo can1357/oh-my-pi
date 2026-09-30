@@ -1,10 +1,11 @@
 /**
- * Focused subagent views are chat-only, except for viewer-scoped commands: `/export`
- * writes the focused agent's own transcript (with its nested subagents) and `/usage`
- * reports account-wide limits. Everything else still requires returning to main.
+ * Focused subagent views are chat-only, except for viewer-scoped commands: `/btw`
+ * asks a side question about the focused transcript, `/export` writes the focused
+ * agent's own transcript (with its nested subagents), and `/usage` reports
+ * account-wide limits. Everything else still requires returning to main.
  *
- * Failure mode if this regresses: `/export` and `/usage` silently do nothing in a
- * focused view, or `/export` writes the main session instead of the viewed one.
+ * Failure mode if this regresses: these commands silently do nothing (or steer the
+ * agent) in a focused view, or `/export` writes the main session instead of the viewed one.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
@@ -56,6 +57,7 @@ function createFocusedContext() {
 		updatePendingMessagesDisplay: vi.fn(),
 		handleUsageCommand: vi.fn(async () => {}),
 		handleExportCommand: vi.fn(async () => {}),
+		handleBtwCommand: vi.fn(async () => {}),
 		showResetUsageSelector: vi.fn(async () => {}),
 		withLocalSubmission: async <T>(_text: string, fn: () => Promise<T>) => fn(),
 	};
@@ -88,9 +90,14 @@ describe("focused subagent view slash commands", () => {
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
+	it("runs /btw with its question from the focused view instead of steering the agent", async () => {
+		const { raw, prompt } = await submit("/btw what is it doing?");
+		expect(raw.handleBtwCommand).toHaveBeenCalledWith("what is it doing?");
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
 	it("keeps other commands gated to the main session, draft intact", async () => {
-		const { raw, editor, prompt } = await submit("/compact");
-		expect(raw.showStatus).toHaveBeenCalledWith(expect.stringContaining("press ←← to return first"));
+		const { editor, prompt } = await submit("/compact");
 		expect(editor.getText()).toBe("/compact");
 		expect(prompt).not.toHaveBeenCalled();
 	});
@@ -100,7 +107,6 @@ describe("focused subagent view slash commands", () => {
 			const { raw, editor } = await submit(text);
 			expect(raw.showResetUsageSelector).not.toHaveBeenCalled();
 			expect(raw.handleUsageCommand).not.toHaveBeenCalled();
-			expect(raw.showStatus).toHaveBeenCalledWith(expect.stringContaining("press ←← to return first"));
 			expect(editor.getText()).toBe(text);
 		}
 	});

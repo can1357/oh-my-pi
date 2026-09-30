@@ -17,7 +17,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -279,6 +279,63 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(finalThinking?.thinkingSignature).toBe("sig_after_rewind");
 	});
 
+	it("retains a sibling task result after rewinding the same assistant turn", async () => {
+		const report = "investigation complete";
+		const taskSchema = type({ goal: type("string") });
+		const taskTool: AgentTool<typeof taskSchema, unknown> = {
+			name: "task",
+			label: "Task",
+			description: "Run a subagent",
+			parameters: taskSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "<task-result>completed work</task-result>" }] };
+			},
+		};
+		const { session, mock } = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "inspect" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [
+						{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report } },
+						{ type: "toolCall", id: "task", name: "task", arguments: { goal: "complete work" } },
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			[checkpointTool as AgentTool, rewindTool as AgentTool, taskTool as AgentTool],
+		);
+
+		await session.prompt("investigate with a subagent");
+
+		const nextTurn = mock.calls[2]?.context.messages;
+		expect(nextTurn).toBeDefined();
+		expect(
+			nextTurn?.some(
+				message =>
+					message.role === "toolResult" &&
+					message.toolCallId === "task" &&
+					messageText(message).includes("<task-result>completed work</task-result>"),
+			),
+		).toBe(true);
+		expect(
+			nextTurn?.some(
+				message =>
+					message.role === "assistant" &&
+					message.content.some(block => block.type === "toolCall" && block.id === "task"),
+			),
+		).toBe(true);
+		expect(nextTurn?.some(message => message.role === "toolResult" && message.toolCallId === "rewind")).toBe(false);
+		expect(
+			session.sessionManager
+				.buildSessionContext()
+				.messages.some(message => message.role === "toolResult" && message.toolCallId === "task"),
+		).toBe(true);
+	});
+
 	it("shows a transient checkpoint-active reminder that is branch-cut away on rewind", async () => {
 		const report = "findings: transient reminder";
 		const proceed = Promise.withResolvers<void>();
@@ -352,19 +409,6 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(reportMessages).toHaveLength(1);
 		expect(messageText(reportMessages[0]!)).toContain("Need explore again → new `checkpoint`.");
 		expect(messageText(reportMessages[0]!)).toContain(report);
-	});
-
-	it("checkpoint tool result carries only the goal and a forward-looking line", async () => {
-		const tool = new CheckpointTool(
-			createToolSession({
-				getCheckpointState: () => undefined,
-			}),
-		);
-		const result = await tool.execute("call_checkpoint", { goal: "inspect" });
-		const text = result.content.find(part => part.type === "text")?.text;
-		expect(text).toBe("Checkpoint: inspect\nFinish exploration and formulate findings.");
-		expect(text).not.toContain("Run your investigation");
-		expect(text).not.toContain("call rewind");
 	});
 
 	it("ignores a completed cycle's rewind result after rebuilding context", async () => {

@@ -12,30 +12,34 @@ import {
 	stopService,
 } from "../launch/services";
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
+import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type {
 	InternalResource,
 	InternalUrl,
 	InternalWriteResult,
+	LocateOptions,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeSpec,
 	WriteContext,
 } from "./types";
 
-function target(url: InternalUrl): { id: string; mode: boolean } {
+import { cfgLaunchEnabled } from "../tools/settings";
+
+function target(url: InternalUrl): { id: string; action: "stdin" | "mode" | "kill" } {
 	const path = url.rawPathname ?? url.pathname;
-	if (url.search || url.hash || (path !== "" && path !== "/" && path !== "/mode"))
+	if (url.search || url.hash || (path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
 		throw new Error(
-			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, or proc://<id>/mode.`,
+			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/kill, or proc://<id>/mode.`,
 		);
 	const id = url.rawHost;
 	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
-	return { id, mode: path === "/mode" };
+	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
 }
 
 function ownerJobs(session: ToolSession): AsyncJob[] {
-	const ownerId = session.getAgentId?.() ?? undefined;
-	return session.asyncJobManager?.getAllJobs(ownerId ? { ownerId } : undefined) ?? [];
+	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
 }
 
 function textResource(
@@ -59,22 +63,55 @@ function textResource(
 /** Caller-visible background jobs and project services. Reads never acknowledge delivery. */
 export class ProcProtocolHandler implements ProtocolHandler {
 	readonly scheme = "proc";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = {
+		backing: "device",
+		selectors: "lines",
+		immutable: true,
+		write: {
+			via: "handler",
+			payload: "verbatim",
+			scope: "workspace",
+			tier: () => "exec",
+			contentOptional: url => (url.rawPathname ?? url.pathname).endsWith("/kill"),
+		},
+	};
+
+	promptDoc(): string {
+		return procPromptDoc.trim();
+	}
+
+	/**
+	 * A project service's output log. Jobs and running agents have no log file,
+	 * so their URLs (and the listing) locate to null. Never contacts the daemon broker.
+	 */
+	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
+		const session = context?.session;
+		if (!session) throw new Error("proc:// requires a tool session");
+		const { id, action } = target(url);
+		if (!id || action !== "stdin" || !cfgLaunchEnabled.get(session.settings)) return null;
+		if (ownerJobs(session).some(job => job.id === id)) return null;
+		if (runningAgentsOutsideJobs(session).some(agent => agent.id === id)) return null;
+		const logPath = await serviceLogPath(session, id);
+		return options?.create || (await Bun.file(logPath).exists()) ? logPath : null;
+	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
-		const { id, mode } = target(url);
-		if (mode) throw new Error("proc://<id>/mode is writable only");
+		const { id, action } = target(url);
+		if (action !== "stdin") throw new Error(`proc://<id>/${action} is writable only`);
 		const jobs = ownerJobs(session);
-		const services = session.settings.get("launch.enabled") ? await listServices(session, context?.signal) : [];
+		const services = cfgLaunchEnabled.get(session.settings) ? await listServices(session, context?.signal) : [];
 		if (!id) {
 			const now = Date.now();
 			const rows = [
-				...jobs.map(
-					job =>
-						`${job.id} [${job.type}] ${job.status} up ${formatDuration(now - job.startTime)} — ${job.label.replace(/\s+/g, " ")}`,
-				),
+				...jobs.map(job => {
+					const duration =
+						job.endTime === undefined
+							? `up ${formatDuration(now - job.startTime)}`
+							: `in ${formatDuration(job.endTime - job.startTime)}`;
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}`;
+				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent => `${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}`,
 				),
@@ -92,7 +129,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (service) {
 			const header = `${serviceStatus(service)}\nready=${service.readyAt !== undefined || service.state === "ready" || service.state === "running"} persist=${service.persist} detached=${service.detached}${service.exitCode === undefined ? "" : ` exit=${service.exitCode}`}`;
 			const sourcePath = await serviceLogPath(session, id);
-			const logs = context?.pathOnly ? { text: "" } : await serviceLogsWithRows(session, id, context?.signal);
+			const logs = await serviceLogsWithRows(session, id, context?.signal);
 			return textResource(
 				url,
 				`${header}${logs.text ? `\n${logs.text}` : ""}`,
@@ -132,56 +169,52 @@ export class ProcProtocolHandler implements ProtocolHandler {
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
-		const { id, mode } = target(url);
-		if (!id) throw new Error("Write requires proc://<id> or proc://<id>/mode");
+		const { id, action } = target(url);
+		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
 		const ownerId = session.getAgentId?.() ?? undefined;
 		const job = ownerJobs(session).find(item => item.id === id);
 		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
-		const service = session.settings.get("launch.enabled")
+		const service = cfgLaunchEnabled.get(session.settings)
 			? await findService(session, id, context?.signal)
 			: undefined;
 		if ((job || agent) && service)
 			throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
-		if (mode) {
+		if (action === "mode") {
 			if (!service) throw new Error(`Service not found: ${id}`);
 			if (content !== "persist" && content !== "session" && content !== "detached")
 				throw new Error("Service mode must be persist, session, or detached");
 			const updated = await modeService(session, id, content, context?.signal);
 			return {
-				text: `${serviceStatus(updated)}; mode=${content}`,
+				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
 				details: { proc: { action: "mode", daemon: updated, mode: content } },
 			};
 		}
-		if (service) {
-			const updated =
-				content === ""
-					? await stopService(session, id, context?.signal)
-					: await sendService(session, id, content, context?.signal);
+		if (action === "stdin") {
+			if (!service)
+				throw new Error(
+					`stdin is only available for services. To cancel, call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed).`,
+				);
+			const updated = await sendService(session, id, content, context?.signal);
 			return {
-				text: `${content === "" ? "Stopped" : "Sent input to"} ${serviceStatus(updated)}`,
-				details: {
-					proc:
-						content === ""
-							? { action: "stop", daemon: updated }
-							: { action: "stdin", daemon: updated, input: content },
-				},
+				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],
+				details: { proc: { action: "stdin", daemon: updated, input: content } },
 			};
 		}
-		if (content !== "") throw new Error("stdin is only available for services");
+		if (service) {
+			const updated = await stopService(session, id, context?.signal);
+			return {
+				content: [{ type: "text", text: `Stopped ${serviceStatus(updated)}` }],
+				details: { proc: { action: "stop", daemon: updated } },
+			};
+		}
 		if ((job || agent) && session.asyncJobManager) {
 			const result = await executeCancel(session, session.asyncJobManager, ownerId, [id]);
-			return {
-				text: result.content
-					.filter(item => item.type === "text")
-					.map(item => item.text)
-					.join("\n"),
-				details: { proc: result.details },
-			};
+			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {
 			const outcome = await cancelAgentRegistration(session, ownerId, id);
 			return {
-				text: outcome.message,
+				content: [{ type: "text", text: outcome.message }],
 				details: { proc: { op: "cancel", jobs: [], cancelled: [{ id, status: outcome.status }] } },
 			};
 		}

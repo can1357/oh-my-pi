@@ -8,9 +8,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 /**
  * Fixture mirrors the live `https://yolo-auto.com/v1/models` surface: an
- * OpenAI-style `data` array of public model ids. The docs only advertise
- * `deepseek-flash-v4`; the extra id proves discovery surfaces whatever the wire
- * returns, not just bundled ids.
+ * OpenAI-style `data` array of public model ids.
  */
 function yoloAutoModelsFetch(): { calls: string[]; authorizations: (string | null)[]; fetch: FetchImpl } {
 	const calls: string[] = [];
@@ -20,10 +18,7 @@ function yoloAutoModelsFetch(): { calls: string[]; authorizations: (string | nul
 		authorizations.push(new Headers(init?.headers).get("authorization"));
 		return new Response(
 			JSON.stringify({
-				data: [
-					{ id: "deepseek-flash-v4", object: "model", created: 0, owned_by: "yolo-auto" },
-					{ id: "future-model", object: "model", created: 0, owned_by: "yolo-auto" },
-				],
+				data: [{ id: "deepseek-flash-v4", object: "model", created: 0, owned_by: "yolo-auto" }],
 			}),
 			{ status: 200, headers: { "content-type": "application/json" } },
 		);
@@ -73,12 +68,6 @@ describe("Yolo-Auto provider discovery", () => {
 				max: "max",
 			},
 		});
-	});
-
-	test("surfaces wire ids that have no bundled reference", async () => {
-		const { fetch } = yoloAutoModelsFetch();
-		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
-		expect(models?.some(model => model.id === "future-model")).toBe(true);
 	});
 
 	test("inherits reasoning and context for models other providers already bundle", async () => {
@@ -137,13 +126,6 @@ describe("Yolo-Auto provider discovery", () => {
 
 	test("serves no dynamic models without an API key", () => {
 		expect(yoloAutoModelManagerOptions().fetchDynamicModels).toBeUndefined();
-	});
-
-	test("marks live discovery authoritative so retired bundled ids cannot linger", () => {
-		// The runtime merge path reads this flag from the manager options, not
-		// the catalog descriptor — without it a successful /v1/models response
-		// merges over the bundled seed instead of replacing it.
-		expect(yoloAutoModelManagerOptions({ apiKey: "yolo-test-key" }).dynamicModelsAuthoritative).toBe(true);
 	});
 
 	test("prunes the bundled id when a live catalog omits it", async () => {
@@ -234,5 +216,40 @@ describe("Yolo-Auto provider discovery", () => {
 			// explicit Flash row or context accounting falls back to estimates.
 			expect(model.tokenizer).toBe("qwen3");
 		}
+	});
+
+	test("takes each model's effort ladder from the live `thinking` field", async () => {
+		// Live /v1/models advertises minimal..xhigh for the Qwen3.8 rows; the
+		// seed ladder previously stopped at high, hiding xhigh from the picker.
+		const ladder = ["minimal", "low", "medium", "high", "xhigh"];
+		const fetch: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					object: "list",
+					data: [
+						{ id: "qwen3.8-flash", context_length: 262144, thinking: ladder },
+						{ id: "yolo", context_length: 262144, thinking: ladder },
+						{ id: "qwen3.8-27b", context_length: 262144, thinking: [...ladder, "turbo"] },
+						{ id: "deepseek-flash-v4" },
+					],
+				}),
+				{ status: 200 },
+			);
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+		const built = (id: string) => {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			return buildModel(spec);
+		};
+
+		const expected = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+		for (const id of ["qwen3.8-flash", "yolo", "qwen3.8-27b"]) {
+			const model = built(id);
+			expect(model.reasoning).toBe(true);
+			// Unknown wire values ("turbo") are dropped, not surfaced as levels.
+			expect(model.thinking?.efforts).toEqual(expected);
+		}
+		// A row without `thinking` keeps its reference ladder and wire remap.
+		expect(built("deepseek-flash-v4").thinking?.effortMap).toMatchObject({ xhigh: "max" });
 	});
 });

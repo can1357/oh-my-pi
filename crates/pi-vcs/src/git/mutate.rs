@@ -1,6 +1,7 @@
 //! In-process local Git mutations.
 
 use std::{
+	borrow::Cow,
 	collections::{BTreeMap, BTreeSet},
 	ffi::OsStr,
 	fs,
@@ -68,11 +69,7 @@ pub(crate) fn update_reference(
 				.duration_since(std::time::UNIX_EPOCH)
 				.map_or(0, |elapsed| elapsed.as_secs())
 		);
-		gix::actor::SignatureRef {
-			name:  "oh-my-pi".into(),
-			email: "omp@localhost".into(),
-			time:  &now,
-		}
+		gix::actor::SignatureRef { name: "omp".into(), email: "omp@localhost".into(), time: &now }
 	};
 	repo
 		.edit_references_as(Some(edit), Some(committer))
@@ -152,7 +149,7 @@ impl GitRepo {
 	/// Create a commit and return its object id.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
 		let repo = self.gix()?;
-		run_commit_hook(self, &repo, "pre-commit", &[])?;
+		run_commit_hook(self, "pre-commit", &[])?;
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit", err))?;
@@ -231,7 +228,7 @@ impl GitRepo {
 		};
 		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
 		fs::write(&message_path, message)?;
-		run_commit_hook(self, &repo, "commit-msg", &[message_path.as_os_str()])?;
+		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()])?;
 		let message = fs::read_to_string(&message_path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let commit = repo
@@ -264,7 +261,7 @@ impl GitRepo {
 				deref:  true,
 			})
 			.map_err(|err| Error::backend("git commit", err))?;
-		let _ = run_commit_hook(self, &repo, "post-commit", &[]);
+		let _ = run_commit_hook(self, "post-commit", &[]);
 		Ok(id.to_hex().to_string())
 	}
 
@@ -296,15 +293,18 @@ impl GitRepo {
 		} else {
 			gix::refs::transaction::PreviousValue::MustNotExist
 		};
-		update_reference(
-			&repo,
-			"git branch",
-			&full,
-			id,
-			constraint,
-			&format!("branch: Created from {start}"),
-			false,
-		)?;
+		// git's reflog tells a `-f` move apart from a creation.
+		let exists = force
+			&& repo
+				.try_find_reference(&full)
+				.map_err(|e| Error::backend("git branch", e))?
+				.is_some();
+		let message = if exists {
+			format!("branch: Reset to {start}")
+		} else {
+			format!("branch: Created from {start}")
+		};
+		update_reference(&repo, "git branch", &full, id, constraint, &message, false)?;
 		Ok(())
 	}
 
@@ -801,6 +801,23 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git worktree add", err))
 	}
 
+	/// Resolve the executable hook `name` as git's `find_hook` does: under
+	/// `core.hooksPath` (a relative value resolves against the checkout root)
+	/// or else the shared `hooks` directory, which linked worktrees read from
+	/// the common dir. `None` when the hook is missing or not executable.
+	pub fn hook_path(&self, name: &str) -> Result<Option<PathBuf>> {
+		let dir = self
+			.gix()?
+			.config_snapshot()
+			.string("core.hooksPath")
+			.map_or_else(
+				|| self.info().common_dir.join("hooks"),
+				|value| self.root().join(value.to_str_lossy().as_ref()),
+			);
+		let hook = dir.join(name);
+		Ok(hook_is_executable(&hook).then_some(hook))
+	}
+
 	/// Remove a linked worktree, returning false when dirty and not forced.
 	pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<bool> {
 		let Some(linked) = Self::discover(path)? else {
@@ -835,31 +852,22 @@ impl GitRepo {
 	}
 }
 
-fn run_commit_hook(
-	repository: &GitRepo,
-	repo: &gix::Repository,
-	name: &str,
-	args: &[&OsStr],
-) -> Result<()> {
-	let hooks_dir = repo
-		.config_snapshot()
-		.string("core.hooksPath")
-		.map(|value| PathBuf::from(value.to_str_lossy().into_owned()))
-		.map_or_else(
-			|| repository.info().git_dir.join("hooks"),
-			|path| {
-				if path.is_absolute() {
-					path
-				} else {
-					repository.root().join(path)
-				}
-			},
-		);
-	let hook = hooks_dir.join(name);
-	if !hook_is_executable(&hook) {
+fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<()> {
+	let Some(hook) = repository.hook_path(name)? else {
 		return Ok(());
-	}
-	let output = Command::new(&hook)
+	};
+	// Windows CreateProcess cannot execute a shebang script directly. Let Git
+	// invoke the hook through its own shell, as `git commit` does.
+	#[cfg(windows)]
+	let mut command = {
+		let _ = hook;
+		let mut command = Command::new("git");
+		command.args(["hook", "run", "--ignore-missing", name, "--"]);
+		command
+	};
+	#[cfg(not(windows))]
+	let mut command = Command::new(&hook);
+	let output = command
 		.args(args)
 		.current_dir(repository.root())
 		.env("GIT_DIR", &repository.info().git_dir)
@@ -1570,13 +1578,22 @@ fn collect_clone_reconciliation_paths(
 	Ok((dirty_tracked, untracked))
 }
 
+fn git_metadata_path(path: &Path) -> Cow<'_, str> {
+	let display = path.to_string_lossy();
+	if cfg!(windows) {
+		Cow::Owned(display.replace('\\', "/"))
+	} else {
+		display
+	}
+}
+
 fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> {
 	fs::create_dir_all(path)?;
 	let name = worktree_admin_name(common, path);
 	let admin = common.join("worktrees").join(name);
 	fs::create_dir_all(&admin)?;
-	fs::write(path.join(".git"), format!("gitdir: {}\n", admin.display()))?;
-	fs::write(admin.join("gitdir"), format!("{}\n", path.join(".git").display()))?;
+	fs::write(path.join(".git"), format!("gitdir: {}\n", git_metadata_path(&admin)))?;
+	fs::write(admin.join("gitdir"), format!("{}\n", git_metadata_path(&path.join(".git"))))?;
 	fs::write(admin.join("commondir"), "../..\n")?;
 	fs::write(admin.join("HEAD"), format!("{head}\n"))?;
 	Ok(admin)
@@ -1786,6 +1803,9 @@ mod tests {
 		git(temp.path(), &["init", "-q", "-b", "main"]);
 		git(temp.path(), &["config", "user.name", "Test"]);
 		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		// gix reads the developer's `~/.gitconfig`, where a global
+		// `core.hooksPath` would redirect hook lookup away from this fixture.
+		git(temp.path(), &["config", "core.hooksPath", ".git/hooks"]);
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -2034,6 +2054,11 @@ mod tests {
 		fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 	}
 
+	#[cfg(windows)]
+	fn write_hook(path: &Path, body: &str, _executable: bool) {
+		fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+	}
+
 	#[test]
 	fn stage_commit_survives_unadvanced_index_mtime() {
 		// Regression: a commit right after staging on the same cached handle used
@@ -2059,7 +2084,6 @@ mod tests {
 		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
 	}
 
-	#[cfg(unix)]
 	#[test]
 	fn commit_hooks_match_git_commit_behavior() {
 		let (temp, repo) = fixture();
@@ -2099,12 +2123,16 @@ mod tests {
 			.commit_create("missing hook is skipped", &CommitOptions::default())
 			.unwrap();
 
-		fs::write(temp.path().join("b"), "one more\n").unwrap();
-		repo.stage_files(&["b".into()]).unwrap();
-		write_hook(&pre_commit, "echo should-not-run >&2\nexit 1", false);
-		repo
-			.commit_create("non-executable hook is skipped", &CommitOptions::default())
-			.unwrap();
+		#[cfg(unix)]
+		{
+			fs::write(temp.path().join("b"), "one more\n").unwrap();
+			repo.stage_files(&["b".into()]).unwrap();
+			write_hook(&pre_commit, "echo should-not-run >&2\nexit 1", false);
+			repo
+				.commit_create("non-executable hook is skipped", &CommitOptions::default())
+				.unwrap();
+		}
+		#[cfg(unix)]
 		fs::remove_file(&pre_commit).unwrap();
 		repo
 			.commit_create("subject\n\nbody\n\n", &CommitOptions {
@@ -2405,6 +2433,35 @@ mod tests {
 		assert_eq!(fs::read(linked.join(".git")).unwrap(), pointer_before);
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), git(&linked, &["rev-parse", "HEAD"]));
 		let _ = fs::remove_dir_all(linked);
+	}
+
+	#[test]
+	fn worktree_registration_paths_are_accepted_by_git() {
+		let (temp, repo) = fixture();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().to_path_buf();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+		assert_eq!(
+			fs::read_to_string(linked.join(".git")).unwrap(),
+			format!("gitdir: {}\n", git_metadata_path(&admin))
+		);
+		assert_eq!(
+			fs::read_to_string(admin.join("gitdir")).unwrap(),
+			format!("{}\n", git_metadata_path(&linked.join(".git")))
+		);
+
+		let listed = git(temp.path(), &["worktree", "list", "--porcelain"]);
+		let expected = format!("worktree {}", git_metadata_path(&linked));
+		assert!(listed.lines().any(|line| line == expected), "{listed}");
+		git(temp.path(), &["worktree", "repair", linked.to_str().unwrap()]);
 	}
 
 	#[test]

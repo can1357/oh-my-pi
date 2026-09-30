@@ -243,11 +243,14 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		let factoryCalls = 0;
-		lifecycle.setPersistedSubagentReviverFactory(async ref => {
-			factoryCalls++;
-			expect(ref).toBe(cold);
-			return async () => revived.session;
-		}, 0);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async ref => {
+				factoryCalls++;
+				expect(ref).toBe(cold);
+				return async () => revived.session;
+			},
+			() => 0,
+		);
 
 		expect(await lifecycle.reclaimDeadCorpse("Cold-Sub", cold)).toBe(false);
 		expect(registry.get("Cold-Sub")).toBe(cold);
@@ -346,10 +349,13 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		let factoryCalls = 0;
-		lifecycle.setPersistedSubagentReviverFactory(async () => {
-			factoryCalls++;
-			return async () => revived.session;
-		}, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				factoryCalls++;
+				return async () => revived.session;
+			},
+			() => TTL,
+		);
 
 		const session = await lifecycle.ensureLive("6-Sub");
 
@@ -374,7 +380,10 @@ describe("AgentLifecycleManager", () => {
 			sessionFile: "/tmp/7-Sub.jsonl",
 			status: "parked",
 		});
-		lifecycle.setPersistedSubagentReviverFactory(async () => undefined, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => undefined,
+			() => TTL,
+		);
 
 		await expect(lifecycle.ensureLive("7-Sub")).rejects.toThrow(/cannot be revived.*no reviver registered/);
 	});
@@ -390,14 +399,17 @@ describe("AgentLifecycleManager", () => {
 			status: "parked",
 		});
 		let factoryCalls = 0;
-		lifecycle.setPersistedSubagentReviverFactory(async () => {
-			factoryCalls++;
-			const failFirst = factoryCalls === 1;
-			return async () => {
-				if (failFirst) throw new Error("stale context");
-				return revived.session;
-			};
-		}, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				factoryCalls++;
+				const failFirst = factoryCalls === 1;
+				return async () => {
+					if (failFirst) throw new Error("stale context");
+					return revived.session;
+				};
+			},
+			() => TTL,
+		);
 
 		await expect(lifecycle.ensureLive("8-Sub")).rejects.toThrow(/stale context/);
 		expect(registry.get("8-Sub")?.status).toBe("parked");
@@ -863,13 +875,16 @@ describe("AgentLifecycleManager", () => {
 			sessionFile: "/tmp/Cold-DisposeRace.jsonl",
 			status: "parked",
 		});
-		lifecycle.setPersistedSubagentReviverFactory(async () => {
-			await gate.promise;
-			return async () => {
-				reviverRuns++;
-				return revived.session;
-			};
-		}, TTL);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				await gate.promise;
+				return async () => {
+					reviverRuns++;
+					return revived.session;
+				};
+			},
+			() => TTL,
+		);
 
 		const revival = lifecycle.ensureLive("Cold-DisposeRace");
 		await flushAsync(); // reach the factory await
@@ -907,7 +922,7 @@ describe("AgentLifecycleManager", () => {
 				await gate.promise;
 				return revived.session;
 			},
-			TTL,
+			() => TTL,
 		);
 
 		const revival = lifecycle.ensureLive("Cold-SessionRace");
@@ -934,7 +949,10 @@ describe("AgentLifecycleManager", () => {
 		});
 
 		const nextLifecycle = AgentLifecycleManager.global();
-		nextLifecycle.setPersistedSubagentReviverFactory(async () => async () => revived.session, 0);
+		nextLifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => revived.session,
+			() => 0,
+		);
 
 		await expect(nextLifecycle.ensureLive("Next-Owner")).resolves.toBe(revived.session);
 		expect(registry.get("Next-Owner")).toMatchObject({ status: "idle", session: revived.session });

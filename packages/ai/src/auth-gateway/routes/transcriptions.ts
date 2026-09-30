@@ -51,7 +51,7 @@ export async function handleTranscriptions(
 	const sessionId = deterministicUuid(`transcriptions\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") {
+	if ("status" in apiKey) {
 		return transcriptions.formatError(apiKey.status, apiKey.type, apiKey.message);
 	}
 

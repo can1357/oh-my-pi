@@ -3,6 +3,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
+	atCompletionMatches,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
 	isDirectoryCompletionValue,
@@ -13,6 +14,11 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
+import type { TspEditorDecoration, TspEditorProps, TspTone } from "@oh-my-pi/pi-wire";
+import { col, node } from "../native/describe";
+import { sameItems, sameProps } from "../native/memo";
+import { plainText } from "../native/spans";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import {
@@ -51,11 +57,52 @@ export type { EditorBorderStyle, EditorTopBorder };
 
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
 
+/** The TSP root an {@link Editor.describeLayout} hook builds around the `editor` node. */
+export interface NativeEditorLayout {
+	readonly role: string;
+	/** Tone of the root (`pending` while a turn runs). */
+	readonly tone?: TspTone;
+	readonly children: readonly NativeChild[];
+	/** Keypath of the `editor` node inside the root (the autocomplete's caret anchor). */
+	readonly caret: string;
+}
+
+/** Vim mode as the TSP `editor.mode` label. */
+const VIM_MODE_LABELS: Record<VimMode, string> = {
+	insert: "INSERT",
+	normal: "NORMAL",
+	visual: "VISUAL",
+	"visual-line": "VISUAL",
+};
+
 const PASSTHROUGH_COLOR = (text: string): string => text;
+
+/** Value equality of two decoration lists, so an unchanged set keeps its identity across text edits elsewhere. */
+function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEditorDecoration[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const x = a[i]!;
+		const y = b[i]!;
+		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx) return false;
+	}
+	return true;
+}
 const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
+const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
+};
+
+/**
+ * `@` file lists are narrowed in place (`setFilter(liveToken)`) while a fresh
+ * search runs, so a slow walk never leaves entries that contradict the typed
+ * token on screen. An emptied list means the refresh is still pending; the
+ * popup stays open but renders nothing until results arrive.
+ */
+const AT_FILE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
+	...AUTOCOMPLETE_SELECT_LIST_LAYOUT,
+	filterItems: (items, token) => items.filter(item => atCompletionMatches(token, item.value)),
 };
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -395,9 +442,20 @@ const VIM_NAV_KEYS: Record<string, string | undefined> = {
 	space: "l",
 };
 
+/** Minimum free cells between an end-of-line cursor and a right-aligned placeholder. */
+const PLACEHOLDER_MIN_GAP = 2;
+
 const DEFAULT_PAGE_SCROLL_LINES = 10;
 
 const MAX_UNDO_STACK = 100;
+
+/**
+ * Typed characters that replace the provisional space a Tab word accept adds, so
+ * they attach to the accepted word: closing punctuation, and `-` for compounds
+ * (`cross-platform`; a spaced dash is still space, then `-`). Quotes are
+ * excluded: they may open a quote.
+ */
+const PROVISIONAL_SPACE_ABSORBERS = /^[-.,;:!?)\]}]/;
 
 interface EditorState {
 	lines: string[];
@@ -490,6 +548,18 @@ export interface EditorTextDecorationContext {
 export interface EditorTextAssistProvider {
 	/** Return ghost-text suffix for the partial word at the cursor, or `null`. */
 	getWordCompletion?(lines: string[], cursorLine: number, cursorCol: number): string | null;
+	/**
+	 * Report the fate of the ghost-text `suggestion` shown at the cursor:
+	 * `accepted` (Tab/→) or typed past (a typed character diverged from it).
+	 * Called with the editor state the suggestion was shown for.
+	 */
+	wordCompletionFeedback?(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		suggestion: string,
+		accepted: boolean,
+	): void;
 	/** Return a correction after one single-character insertion, or `null`. */
 	tryAutocorrect?(
 		lines: string[],
@@ -528,13 +598,34 @@ export class Editor implements Component, Focusable {
 
 	/** When set, replaces the normal cursor glyph at end-of-text with this ANSI-styled string. */
 	cursorOverride: string | undefined;
-	/** Display width of the cursorOverride glyph (needed because override may contain ANSI escapes). */
-	cursorOverrideWidth: number | undefined;
 	/** Optional hook that decorates displayed user text after source-text layout.
 	 *  Width-changing output is allowed on lines without the cursor; it is truncated
 	 *  to the content width rather than reflowed. Cursor glyphs and inline hints are excluded. */
 	decorateText: ((text: string, context: EditorTextDecorationContext) => string) | undefined;
+	/**
+	 * TSP counterpart of {@link decorateText}: styled ranges over the buffer
+	 * (UTF-16 offsets into the lines joined by `\n`). Called only when the text
+	 * changed or the editor was invalidated since the last description.
+	 */
+	describeDecorations: ((lines: readonly string[]) => readonly TspEditorDecoration[]) | undefined;
+	/** TSP code language of the buffer (`python`, `bash`): the terminal highlights it in the mono face. */
+	describeLanguage: (() => string | undefined) | undefined;
+	/**
+	 * TSP chrome around the `editor` node (the prompt composer's chips, mode
+	 * chip, send/stop): the root role, the children with `input` placed where
+	 * the layout wants it, and the input's keypath for the caret-anchored
+	 * autocomplete. Unset: a plain `omp.editor` column over the input.
+	 */
+	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
+	/** TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints. */
+	nativePlaceholder: string | undefined;
 	#promptGutter: string | undefined;
+	/** Bumped by {@link invalidate}: host-side decoration inputs (spelling results, settings) changed. */
+	#nativeGeneration = 0;
+	#nativeDecor?: { text: string; generation: number; decor: readonly TspEditorDecoration[] | undefined };
+	#nativeEditor?: { props: TspEditorProps; node: NativeNode };
+	#nativeOverlay?: { list: SelectList; caret: string; node: NativeNode };
+	#nativeRoot?: { role: string; tone: TspTone | undefined; children: readonly NativeChild[]; node: NativeNode };
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -546,6 +637,8 @@ export class Editor implements Component, Focusable {
 	#wrapCache = new Map<string, WrapEntry>();
 	#wrapCacheWidth = -1;
 	#wrapCacheEpoch = -1;
+	/** Last `#getPromptGutter` result, keyed by (gutter string, clamped gutter width). */
+	#promptGutterCache: { source: string; firstLine: string; continuation: string; width: number } | undefined;
 	#paddingXOverride: number | undefined;
 	#maxHeight?: number;
 	#scrollOffset: number = 0;
@@ -556,7 +649,8 @@ export class Editor implements Component, Focusable {
 
 	// Emacs-style kill ring
 	#killRing = new KillRing();
-	#lastAction: "kill" | "yank" | "type-word" | null = null;
+	/** Previous edit, for kill/yank chaining, undo coalescing, and the provisional space after a Tab word accept. */
+	#lastAction: "kill" | "yank" | "type-word" | "accept-word" | null = null;
 
 	// Character jump mode
 	#jumpMode: "forward" | "backward" | null = null;
@@ -644,6 +738,11 @@ export class Editor implements Component, Focusable {
 	onLargePaste?: (text: string, lineCount: number, options: PasteOptions) => boolean;
 	onAutocompleteCancel?: () => void;
 	disableSubmit: boolean = false;
+	/** Placeholder painted right-aligned on the cursor row while the editor is empty and no
+	 *  autocomplete is open; hidden when it can't keep {@link PLACEHOLDER_MIN_GAP} cells from the
+	 *  cursor. The host styles it (ANSI allowed). Re-evaluated on every render, so hosts can derive
+	 *  it from live state. */
+	placeholder?: () => string | undefined;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -677,7 +776,7 @@ export class Editor implements Component, Focusable {
 			cursorCol: this.#state.cursorCol,
 			lineCount: lines.length,
 			selection: null,
-			placeholderActive: false,
+			placeholderActive: this.#getPlaceholder() !== undefined,
 		};
 	}
 
@@ -990,7 +1089,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.#nativeGeneration++;
 	}
 
 	/** Active chrome style; a hidden border collapses every shape to borderless. */
@@ -1035,11 +1134,16 @@ export class Editor implements Component, Focusable {
 		if (!gutter) return undefined;
 		const gutterWidth = this.#getPromptGutterWidth(width, paddingX);
 		if (gutterWidth === 0) return undefined;
-		return {
+		const cached = this.#promptGutterCache;
+		if (cached !== undefined && cached.source === gutter && cached.width === gutterWidth) return cached;
+		const next = {
+			source: gutter,
 			firstLine: sliceByColumn(gutter, 0, gutterWidth, true),
 			continuation: padding(gutterWidth),
 			width: gutterWidth,
 		};
+		this.#promptGutterCache = next;
+		return next;
 	}
 
 	#getContentWidth(width: number, paddingX: number): number {
@@ -1267,9 +1371,22 @@ export class Editor implements Component, Focusable {
 		const emitCursorMarker = this.focused;
 		const lineContentWidth = contentAreaWidth;
 
-		// Compute inline hint text (dim ghost text after cursor)
-		const inlineHint = this.#getInlineHint();
+		// Text painted after an end-of-line cursor with `avail` free cells: dim ghost text
+		// against the cursor, or the placeholder flush right.
+		const placeholder = this.#getPlaceholder();
+		const inlineHint = placeholder ? null : this.#getInlineHint();
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
+		const hintTail = (avail: number): { text: string; width: number } | undefined => {
+			if (placeholder) {
+				const gap = avail - visibleWidth(placeholder);
+				return gap >= PLACEHOLDER_MIN_GAP ? { text: padding(gap) + placeholder, width: avail } : undefined;
+			}
+			if (!inlineHint) return undefined;
+			return {
+				text: hintStyle(truncateToWidth(inlineHint, avail)),
+				width: Math.min(visibleWidth(inlineHint), avail),
+			};
+		};
 
 		// Active Vim visual selection, if any. The cursor always sits inside it, so selected rows
 		// skip the normal cursor-glyph branches: the reverse-video span already marks the spot.
@@ -1304,7 +1421,7 @@ export class Editor implements Component, Focusable {
 				if (hasCursor && !this.#useTerminalCursor) {
 					const zeroWidthCursorBudget = visibleWidth(gutterText);
 					const zeroWidthCursorReplacement = this.cursorOverride
-						? { text: this.cursorOverride, width: this.cursorOverrideWidth ?? 1 }
+						? { text: this.cursorOverride, width: visibleWidth(this.cursorOverride) }
 						: this.#getStyledInputCursor();
 					if (showPromptGutter && zeroWidthCursorBudget > 0) {
 						// Keep the leading prompt glyph visible when the gutter consumes the whole row.
@@ -1362,17 +1479,16 @@ export class Editor implements Component, Focusable {
 				if (marker) {
 					const before = displayText.slice(0, layoutLine.cursorPos);
 					const after = displayText.slice(layoutLine.cursorPos);
+					const tail = after.length === 0 ? hintTail(Math.max(0, lineContentWidth - displayWidth)) : undefined;
 					if (this.#imeSafeCursorLayout && after.length === 0 && isSideBordered) {
 						// Terminal frontends render IME marked text locally before committed bytes
 						// reach the application. Keep the end-of-input cursor row empty to its
 						// right so that insertion cannot shift box chrome onto the next row.
 						displayText = before + marker;
 						imeSafeCursorTail = true;
-					} else if (after.length === 0 && inlineHint) {
-						const availWidth = Math.max(0, lineContentWidth - displayWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + hintText;
-						displayWidth += Math.min(visibleWidth(inlineHint), availWidth);
+					} else if (tail) {
+						displayText = before + marker + tail.text;
+						displayWidth += tail.width;
 					} else if (after.length === 0 && !isSideBordered && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
@@ -1405,7 +1521,7 @@ export class Editor implements Component, Focusable {
 					// displayWidth stays the same - we're replacing, not adding
 				} else if (this.cursorOverride) {
 					// Cursor override replaces the normal end-of-text cursor glyph
-					const overrideWidth = this.cursorOverrideWidth ?? 1;
+					const overrideWidth = visibleWidth(this.cursorOverride);
 					if (!isSideBordered && displayWidth + overrideWidth > lineContentWidth) {
 						// Borderless editors have no spare padding cell for an end-of-line cursor glyph.
 						// Preserve cursorOverride by replacing the tail of the line with it.
@@ -1415,14 +1531,10 @@ export class Editor implements Component, Focusable {
 						});
 						displayText = widthLimitedCursor.text;
 						displayWidth = widthLimitedCursor.width;
-					} else if (inlineHint) {
-						const availWidth = Math.max(0, lineContentWidth - displayWidth - overrideWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + this.cursorOverride + hintText;
-						displayWidth += overrideWidth + Math.min(visibleWidth(inlineHint), availWidth);
 					} else {
-						displayText = before + marker + this.cursorOverride;
-						displayWidth += overrideWidth;
+						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - overrideWidth));
+						displayText = before + marker + this.cursorOverride + (tail?.text ?? "");
+						displayWidth += overrideWidth + (tail?.width ?? 0);
 					}
 				} else {
 					// Cursor is at the end - add thin cursor glyph
@@ -1433,14 +1545,10 @@ export class Editor implements Component, Focusable {
 						const widthLimitedCursor = this.#renderEndOfLineCursorAtWidthLimit(before, marker, lineContentWidth);
 						displayText = widthLimitedCursor.text;
 						displayWidth = widthLimitedCursor.width;
-					} else if (inlineHint) {
-						const availWidth = Math.max(0, lineContentWidth - displayWidth - cursorWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + cursor + hintText;
-						displayWidth += cursorWidth + Math.min(visibleWidth(inlineHint), availWidth);
 					} else {
-						displayText = before + marker + cursor;
-						displayWidth += cursorWidth;
+						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - cursorWidth));
+						displayText = before + marker + cursor + (tail?.text ?? "");
+						displayWidth += cursorWidth + (tail?.width ?? 0);
 					}
 					if (displayWidth > lineContentWidth && paddingX > 0) {
 						cursorPaddingOverflow = displayWidth - lineContentWidth;
@@ -1488,18 +1596,137 @@ export class Editor implements Component, Focusable {
 		if (bottomRow !== undefined) result.push(bottomRow);
 
 		// Add autocomplete list if active
-		if (this.#autocompleteState && this.#autocompleteList) {
+		const autocompleteList = this.#visibleAutocompleteList();
+		if (autocompleteList) {
 			// Clamp the dropdown to the terminal viewport: the editor rows already
 			// rendered above plus a small reserve must stay visible.
 			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
-			this.#autocompleteList.setMaxVisible(
+			autocompleteList.setMaxVisible(
 				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
 			);
-			const autocompleteResult = this.#autocompleteList.render(width);
-			result.push(...autocompleteResult);
+			result.push(...autocompleteList.render(width));
 		}
 
 		return result;
+	}
+
+	/**
+	 * An `editor` node (key `input`) carrying the buffer, caret, Vim selection
+	 * anchor and mode, decorations, ghost completion, placeholder, prompt and
+	 * height cap; the frame, wrapping, scrolling and caret are the terminal's,
+	 * so composer shapes play no part. An open autocomplete popup follows as an
+	 * `overlay` anchored to the caret around the completion list. Typing and
+	 * caret moves change only `text` and `cursor` on the same node.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		// Vertical caret motion walks visual rows; the terminal owns the real
+		// wrap, so the surface width is the closest available layout width.
+		this.#lastLayoutWidth = Math.max(1, cx.cols);
+		const { lines, cursorLine, cursorCol } = this.#state;
+		const text = lines.join("\n");
+		let offset = 0;
+		for (let i = 0; i < cursorLine; i++) offset += (lines[i]?.length ?? 0) + 1;
+		const cursor = offset + cursorCol;
+
+		let decor = this.#nativeDecor;
+		if (decor?.text !== text || decor.generation !== this.#nativeGeneration) {
+			const next = this.describeDecorations?.(lines);
+			decor = {
+				text,
+				generation: this.#nativeGeneration,
+				decor:
+					next && next.length > 0
+						? decor?.decor && sameDecorations(decor.decor, next)
+							? decor.decor
+							: next
+						: undefined,
+			};
+			this.#nativeDecor = decor;
+		}
+
+		const placeholder = this.#getPlaceholder();
+		const nativePlaceholder =
+			this.nativePlaceholder !== undefined && !this.#autocompleteState && this.#isEditorEmpty()
+				? this.nativePlaceholder
+				: placeholder && plainText(placeholder).trim();
+		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
+		const ghost = nativePlaceholder || !atLineEnd ? null : this.#getInlineHint();
+		const vim = this.#vim;
+		let anchor: number | null = null;
+		if (vim?.visual && vim.anchor !== null) {
+			let anchorOffset = 0;
+			for (let i = 0; i < vim.anchor.line; i++) anchorOffset += (lines[i]?.length ?? 0) + 1;
+			if (vim.mode === "visual-line") {
+				// Linewise: stretch the anchor to the far edge of its line.
+				const before =
+					vim.anchor.line < cursorLine || (vim.anchor.line === cursorLine && vim.anchor.col <= cursorCol);
+				anchor = before ? anchorOffset : anchorOffset + (lines[vim.anchor.line]?.length ?? 0);
+			} else {
+				anchor = anchorOffset + vim.anchor.col;
+			}
+		}
+		const prompt = this.#promptGutter === undefined ? "" : plainText(this.#promptGutter);
+		const props: TspEditorProps = {
+			text,
+			cursor,
+			anchor: anchor ?? undefined,
+			decor: decor.decor,
+			ghost: ghost ? plainText(ghost) : undefined,
+			placeholder: nativePlaceholder || undefined,
+			prompt: prompt || undefined,
+			mode: vim ? VIM_MODE_LABELS[vim.mode] : undefined,
+			lang: this.describeLanguage?.(),
+			maxLines: this.#maxHeight,
+		};
+		let editor = this.#nativeEditor;
+		if (!editor || !sameProps(editor.props, props)) {
+			editor = { props, node: node("editor", props, undefined, "input") };
+			this.#nativeEditor = editor;
+		}
+
+		const layout = this.describeLayout?.(editor.node, cx) ?? {
+			role: "omp.editor",
+			children: [editor.node],
+			caret: "input",
+		};
+		const children: NativeChild[] = [...layout.children];
+		const list = this.#visibleAutocompleteList();
+		if (list) {
+			list.setNativeMark(this.#autocompleteMark());
+			const overlay = this.#nativeOverlay;
+			if (overlay?.list !== list || overlay.caret !== layout.caret) {
+				this.#nativeOverlay = {
+					list,
+					caret: layout.caret,
+					node: node("overlay", { anchor: { caret: layout.caret }, role: "omp.autocomplete" }, [list], "complete"),
+				};
+			}
+			children.push(this.#nativeOverlay!.node);
+		} else {
+			this.#nativeOverlay = undefined;
+		}
+		const root = this.#nativeRoot;
+		if (root && root.role === layout.role && root.tone === layout.tone && sameItems(root.children, children)) {
+			return root.node;
+		}
+		const described = col(children, layout.tone ? { role: layout.role, tone: layout.tone } : { role: layout.role });
+		this.#nativeRoot = { role: layout.role, tone: layout.tone, children, node: described };
+		return described;
+	}
+
+	/**
+	 * The typed text the open popup matches item labels against, for the TSP
+	 * `mark`: the completion prefix (the live `@` token while a file list
+	 * narrows in place) without its sigil, from its last path segment on.
+	 */
+	#autocompleteMark(): string {
+		let typed = this.#autocompletePrefix;
+		if (typed.startsWith("@")) {
+			const line = this.#state.lines[this.#state.cursorLine] ?? "";
+			typed = AT_TOKEN_RE.exec(line.slice(0, this.#state.cursorCol))?.[1] ?? typed;
+		}
+		typed = typed.replace(/^[/@:#$^]"?/, "");
+		return typed.slice(typed.lastIndexOf("/") + 1);
 	}
 
 	handleInput(data: string): void {
@@ -1600,10 +1827,13 @@ export class Editor implements Component, Focusable {
 
 		// Handle autocomplete special keys first (but don't block other input)
 		if (this.#autocompleteState && this.#autocompleteList) {
-			// Escape - cancel autocomplete
+			// Escape - cancel autocomplete. A hidden popup (empty narrowed `@` list) is
+			// dropped too, so its pending refresh cannot pop up afterward, but the key
+			// falls through: the user never saw anything to dismiss.
 			if (kb.matchesCanonical(canonical, "tui.select.cancel")) {
+				const visible = this.isShowingAutocomplete();
 				this.#cancelAutocomplete(true);
-				return;
+				if (visible) return;
 			}
 			// Right arrow at end of line accepts the selection like Tab (fish-style).
 			// Mid-line, right arrow keeps its cursor-movement role and falls through.
@@ -1638,9 +1868,16 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.select.pageUp") ||
 					kb.matchesCanonical(canonical, "tui.select.pageDown")
 				) {
-					this.#autocompleteList.handleInput(data);
-					this.onAutocompleteUpdate?.();
-					return;
+					// An `@` popup whose narrowing filter matched nothing holds no candidate;
+					// let the key fall through instead of swallowing it.
+					if (!this.#autocompleteList.getSelectedItem()) {
+						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
+					} else {
+						this.#autocompleteList.handleInput(data);
+						this.onAutocompleteUpdate?.();
+						return;
+					}
 				}
 
 				// If Tab was pressed, always apply the selection
@@ -1655,33 +1892,18 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 						return;
 					}
-					if (selected && this.#autocompleteProvider) {
-						const shouldChainAutocomplete =
-							this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
-						const result = this.#autocompleteProvider.applyCompletion(
-							this.#state.lines,
-							this.#state.cursorLine,
-							this.#state.cursorCol,
-							selected,
-							this.#autocompletePrefix,
-						);
-
-						this.#state.lines = result.lines;
-						this.#state.cursorLine = result.cursorLine;
-						this.#setCursorCol(result.cursorCol);
-
+					if (!selected) {
+						// An `@` popup whose narrowing filter matched nothing stays open with no
+						// candidate (see #debouncedUpdateAutocomplete). Nothing to accept: cancel the
+						// popup and fall through so Tab keeps its normal completion role and a right
+						// arrow at end of line moves the cursor.
 						this.#cancelAutocomplete();
 						this.onAutocompleteUpdate?.();
-
-						this.#notifyChange();
-
-						result.onApplied?.();
-
-						if (shouldChainAutocomplete) {
-							queueMicrotask(() => void this.#tryTriggerAutocomplete());
-						}
+					} else {
+						this.#acceptAutocompleteSelection(selected);
 					}
-					return;
+					// Only an accepted candidate consumes the key; an empty list falls through.
+					if (selected) return;
 				}
 
 				// If Enter was pressed on a submitted slash command (not an absolute-path
@@ -1725,8 +1947,16 @@ export class Editor implements Component, Focusable {
 					// Check for stale autocomplete state due to buffer edits since last refresh.
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
-						// Autocomplete is stale - cancel and fall through to normal submission
+					// A narrowed `@` list can be empty while its refresh is pending; Enter
+					// then submits instead of waiting on the search.
+					if (
+						!selected ||
+						!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected) ||
+						this.#selectedSlashArgumentIsAlreadyTyped(selected)
+					) {
+						// Stale, or accepting would only append whitespace to an already fully
+						// typed slash-command argument (`/mcp list` + Enter): cancel and fall
+						// through to normal submission instead of swallowing the keypress.
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
@@ -1946,14 +2176,8 @@ export class Editor implements Component, Focusable {
 				this.#moveCursor(1, 0); // Cursor movement (within text or history entry)
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
-			// Right
-			// At end of line, accept the inline ghost word completion (IME-style) like Tab.
-			if (
-				this.#state.cursorCol >= (this.#state.lines[this.#state.cursorLine] ?? "").length &&
-				this.#acceptWordCompletion()
-			) {
-				return;
-			}
+			// Right walks over the ghost word completion as if it were typed: no trailing space.
+			if (this.#acceptWordCompletion({ space: false })) return;
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left
@@ -2742,12 +2966,25 @@ export class Editor implements Component, Focusable {
 		// Undo coalescing: consecutive word typing collapses into one undo unit
 		// (mirrors Input); any other action resets the run via #lastAction.
 		const isWordChunk = [...segmenter.segment(char)].every(seg => getWordNavKind(seg.segment) !== "whitespace");
+		let line = this.#state.lines[this.#state.cursorLine] || "";
+		// The space a Tab word accept added is provisional until the next keystroke:
+		// a typed space is swallowed, closing punctuation or a hyphen replaces it,
+		// anything else keeps it (a newline drops it too, see #addNewLine).
+		const provisionalSpace = this.#hasProvisionalSpace();
+		if (provisionalSpace && char === " ") {
+			this.#lastAction = null;
+			return;
+		}
 		if (!isWordChunk || this.#lastAction !== "type-word") {
 			this.#recordUndoState();
 		}
 		this.#lastAction = isWordChunk ? "type-word" : null;
-
-		const line = this.#state.lines[this.#state.cursorLine] || "";
+		this.#reportTypedPastWordCompletion(char);
+		if (provisionalSpace && PROVISIONAL_SPACE_ABSORBERS.test(char)) {
+			line = line.slice(0, this.#state.cursorCol - 1) + line.slice(this.#state.cursorCol);
+			this.#state.lines[this.#state.cursorLine] = line;
+			this.#setCursorCol(this.#state.cursorCol - 1);
+		}
 
 		const before = line.slice(0, this.#state.cursorCol);
 		const after = line.slice(this.#state.cursorCol);
@@ -2967,13 +3204,17 @@ export class Editor implements Component, Focusable {
 	}
 
 	#addNewLine(): void {
+		// A provisional space from a Tab word accept would become trailing whitespace.
+		// Read before #resetKillSequence clears the accept marker.
+		const dropSpace = this.#hasProvisionalSpace();
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
 		this.#recordUndoState();
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		const splitCol = dropSpace ? this.#state.cursorCol - 1 : this.#state.cursorCol;
 
-		const before = currentLine.slice(0, this.#state.cursorCol);
+		const before = currentLine.slice(0, splitCol);
 		const after = currentLine.slice(this.#state.cursorCol);
 
 		// Split current line
@@ -2985,6 +3226,12 @@ export class Editor implements Component, Focusable {
 		this.#setCursorCol(0);
 
 		this.#notifyChange();
+	}
+
+	/** Whether the character before the cursor is the still-provisional space a Tab word accept inserted. */
+	#hasProvisionalSpace(): boolean {
+		const line = this.#state.lines[this.#state.cursorLine] ?? "";
+		return this.#lastAction === "accept-word" && line[this.#state.cursorCol - 1] === " ";
 	}
 
 	#shouldSubmitOnBackslashEnter(data: string, kb: KeybindingsManager): boolean {
@@ -3971,6 +4218,25 @@ export class Editor implements Component, Focusable {
 		return this.#autocompleteList?.getSelectedItem()?.value === SKILL_NAMESPACE;
 	}
 
+	/**
+	 * Whether the selected completion for a submitted slash command's argument
+	 * only restates what the user already typed (e.g. `list ` for `/mcp list`).
+	 * Accepting it would change nothing visible, so Enter should submit.
+	 *
+	 * A selection whose usage hint still names a required `<arg>` outside any
+	 * optional `[...]` group (e.g. `test` with `<name>`) keeps Enter's accept
+	 * role, so the user continues into the argument instead of submitting a
+	 * command the handler can only reject.
+	 */
+	#selectedSlashArgumentIsAlreadyTyped(selected: AutocompleteItem): boolean {
+		if (!this.#isInSubmittedSlashCommandContext()) return false;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		if (this.#state.cursorCol !== currentLine.length) return false;
+		if (selected.hint?.replace(/\[[^\]]*\]/g, "").includes("<")) return false;
+		const typed = this.#autocompletePrefix.trimEnd();
+		return typed.length > 0 && selected.value.trimEnd() === typed;
+	}
+
 	#isSlashCommandNameAutocompleteSelection(): boolean {
 		if (this.#autocompleteState !== "regular") {
 			return false;
@@ -4023,16 +4289,56 @@ export class Editor implements Component, Focusable {
 		}
 		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab });
 	}
+	/** Apply `selected` the way Tab does: complete it in place and chain into directories/commands. */
+	#acceptAutocompleteSelection(selected: SelectItem): void {
+		if (!this.#autocompleteProvider) return;
+		const shouldChainAutocomplete =
+			this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
+		const result = this.#autocompleteProvider.applyCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+			selected,
+			this.#autocompletePrefix,
+		);
+
+		this.#state.lines = result.lines;
+		this.#state.cursorLine = result.cursorLine;
+		this.#setCursorCol(result.cursorCol);
+
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+
+		this.#notifyChange();
+
+		result.onApplied?.();
+
+		if (shouldChainAutocomplete) {
+			queueMicrotask(() => void this.#tryTriggerAutocomplete());
+		}
+	}
+
 	#createAutocompleteList(
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : AUTOCOMPLETE_SELECT_LIST_LAYOUT;
-		return new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
+		const layout = prefix.startsWith("/")
+			? SLASH_COMMAND_SELECT_LIST_LAYOUT
+			: prefix.startsWith("@")
+				? AT_FILE_SELECT_LIST_LAYOUT
+				: AUTOCOMPLETE_SELECT_LIST_LAYOUT;
+		const list = new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
+		// A pointer pick on the popup (TSP `select`/`activate`) accepts it like Tab.
+		list.onSelect = item => {
+			if (this.#autocompleteList !== list) return;
+			if (this.#autocompleteState === "assist") this.#applySpellingSuggestion();
+			else this.#acceptAutocompleteSelection(item);
+		};
+		return list;
 	}
 
 	async #handleTabCompletion(): Promise<void> {
-		if (this.#acceptWordCompletion()) return;
+		if (this.#acceptWordCompletion({ space: true })) return;
 		if (!this.#autocompleteProvider) return;
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
@@ -4049,13 +4355,24 @@ export class Editor implements Component, Focusable {
 			await this.#forceFileAutocomplete();
 		}
 	}
-	/** Insert the inline ghost word completion at the cursor, if any. Shared by Tab and right-arrow accept. */
-	#acceptWordCompletion(): boolean {
-		const wordCompletion = this.#getWordCompletion();
+	/**
+	 * Insert the shown ghost word completion at the cursor, if any. Tab passes
+	 * `space: true` for a trailing space that stays provisional until the next
+	 * keystroke (see `#insertCharacter`); right arrow passes `false` so a suffix
+	 * can follow the word directly.
+	 */
+	#acceptWordCompletion({ space }: { space: boolean }): boolean {
+		const wordCompletion = this.#getShownWordCompletion();
 		if (!wordCompletion) return false;
-		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-		const after = currentLine.slice(this.#state.cursorCol);
-		this.#insertTextAtCursor(wordCompletion + (/^[\s.,;:!?"\])}]/.test(after) ? "" : " "));
+		this.#textAssistProvider?.wordCompletionFeedback?.(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+			wordCompletion,
+			true,
+		);
+		this.#insertTextAtCursor(space ? `${wordCompletion} ` : wordCompletion);
+		if (space) this.#lastAction = "accept-word";
 		return true;
 	}
 
@@ -4146,8 +4463,19 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/**
+	 * Whether an autocomplete popup is on screen. An `@` list narrowed to no match
+	 * while its refresh is pending stays open internally but is hidden, so it does
+	 * not claim keys (Escape, Vim mode switches) meant for the editor or app.
+	 */
 	isShowingAutocomplete(): boolean {
-		return this.#autocompleteState !== null;
+		return this.#visibleAutocompleteList() !== undefined;
+	}
+
+	/** The open autocomplete list, unless it has no candidate to show. */
+	#visibleAutocompleteList(): SelectList | undefined {
+		if (this.#autocompleteState === null) return undefined;
+		return this.#autocompleteList?.getSelectedItem() ? this.#autocompleteList : undefined;
 	}
 
 	async #updateAutocomplete(): Promise<void> {
@@ -4197,6 +4525,13 @@ export class Editor implements Component, Focusable {
 		const lines = [...this.#state.lines];
 		const cursorLine = this.#state.cursorLine;
 		const cursorCol = this.#state.cursorCol;
+		const isCurrent = () =>
+			!signal.aborted &&
+			requestId === this.#autocompleteRequestId &&
+			cursorLine === this.#state.cursorLine &&
+			cursorCol === this.#state.cursorCol &&
+			lines.length === this.#state.lines.length &&
+			lines.every((line, index) => line === this.#state.lines[index]);
 		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
 		try {
 			if (request.kind === "force") {
@@ -4204,7 +4539,9 @@ export class Editor implements Component, Focusable {
 				if (!getForceFileSuggestions) return;
 				suggestions = await getForceFileSuggestions.call(provider, lines, cursorLine, cursorCol, signal);
 			} else {
-				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal);
+				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal, partial => {
+					if (partial.items.length > 0 && isCurrent()) this.#showAutocompleteSuggestions(partial, "regular");
+				});
 			}
 		} catch (error) {
 			if (!signal.aborted && requestId === this.#autocompleteRequestId) {
@@ -4214,26 +4551,32 @@ export class Editor implements Component, Focusable {
 			}
 			return;
 		}
-		if (
-			signal.aborted ||
-			requestId !== this.#autocompleteRequestId ||
-			cursorLine !== this.#state.cursorLine ||
-			cursorCol !== this.#state.cursorCol ||
-			lines.length !== this.#state.lines.length ||
-			lines.some((line, index) => line !== this.#state.lines[index])
-		) {
-			return;
-		}
+		if (!isCurrent()) return;
 
 		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = request.kind === "force" ? "force" : "regular";
-			this.onAutocompleteUpdate?.();
+			this.#showAutocompleteSuggestions(suggestions, request.kind === "force" ? "force" : "regular");
 			return;
 		}
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
+	}
+
+	#showAutocompleteSuggestions(
+		suggestions: { items: AutocompleteItem[]; prefix: string },
+		state: "regular" | "force",
+	): void {
+		this.#autocompletePrefix = suggestions.prefix;
+		this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
+		this.#autocompleteState = state;
+		this.onAutocompleteUpdate?.();
+	}
+
+	/** Filter a shown `@` file list to the live `@` token until the debounced refresh replaces it. */
+	#narrowAtFileList(): void {
+		if (!this.#autocompleteList || !this.#autocompletePrefix.startsWith("@")) return;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const token = AT_TOKEN_RE.exec(currentLine.slice(0, this.#state.cursorCol))?.[1];
+		if (token !== undefined) this.#autocompleteList.setFilter(token);
 	}
 
 	#invalidateAutocompleteRequests(): void {
@@ -4245,6 +4588,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	#debouncedUpdateAutocomplete(): void {
+		if (this.#autocompleteState !== "assist") this.#narrowAtFileList();
 		if (this.#autocompleteTimeout) {
 			clearTimeout(this.#autocompleteTimeout);
 		}
@@ -4284,7 +4628,28 @@ export class Editor implements Component, Focusable {
 
 		return this.#getWordCompletion();
 	}
+	#getPlaceholder(): string | undefined {
+		if (this.#autocompleteState || !this.#isEditorEmpty()) return undefined;
+		return this.placeholder?.() || undefined;
+	}
+	/** Typing `typed` where it diverges from the shown ghost completion rejects that ghost. */
+	#reportTypedPastWordCompletion(typed: string): void {
+		if (!this.#textAssistProvider?.wordCompletionFeedback) return;
+		const ghost = this.#getShownWordCompletion();
+		if (!ghost) return;
+		const overlap = Math.min(ghost.length, typed.length);
+		if (ghost.slice(0, overlap).toLocaleLowerCase() === typed.slice(0, overlap).toLocaleLowerCase()) return;
+		this.#textAssistProvider.wordCompletionFeedback(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+			ghost,
+			false,
+		);
+	}
+	/** Word completion for the cursor; only offered at end of line, the only place ghost text renders. */
 	#getWordCompletion(): string | null {
+		if (this.#state.cursorCol < (this.#state.lines[this.#state.cursorLine] ?? "").length) return null;
 		return (
 			this.#textAssistProvider?.getWordCompletion?.(
 				this.#state.lines,
@@ -4292,5 +4657,10 @@ export class Editor implements Component, Focusable {
 				this.#state.cursorCol,
 			) ?? null
 		);
+	}
+	/** Word completion currently painted as ghost text: none while an autocomplete hint holds the slot. */
+	#getShownWordCompletion(): string | null {
+		const ghost = this.#getWordCompletion();
+		return ghost && this.#getInlineHint() === ghost ? ghost : null;
 	}
 }

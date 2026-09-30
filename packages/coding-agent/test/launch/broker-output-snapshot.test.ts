@@ -205,4 +205,91 @@ process.stdout.write("READY\\x1b[6n");
 			setProcessName(previousTitle);
 		}
 	}, 20_000);
+
+	it("starts a replacement daemon under the same name with an empty log", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-replace-log-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const echoScript = path.join(projectDir, "echo.ts");
+		await Bun.write(
+			echoScript,
+			`process.stdout.write("first ready\\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => process.stdout.write("got: " + chunk));
+`,
+		);
+		const secondScript = path.join(projectDir, "second.ts");
+		await Bun.write(secondScript, `process.stdout.write("second ready\\n");\nprocess.stdin.resume();\n`);
+		const silentScript = path.join(projectDir, "silent.ts");
+		await Bun.write(silentScript, `process.stdin.resume();\n`);
+		const start = (scriptPath: string, readyLog?: string) =>
+			client.request({
+				op: "start",
+				spec: {
+					name: "svc",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					ready: readyLog ? { log: readyLog, timeoutMs: 5_000 } : undefined,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+				replace: true,
+			});
+		const logs = async () => {
+			const result = await client.request({
+				op: "logs",
+				name: "svc",
+				lines: 100,
+				head: false,
+				follow: false,
+				timeoutMs: 1_000,
+			});
+			if (result.op !== "logs") throw new Error("unexpected logs result");
+			return result;
+		};
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			const first = await start(echoScript, "first ready");
+			if (first.op !== "start") throw new Error("unexpected start result");
+			expect(first.readyTimedOut).toBeFalse();
+			await client.request({ op: "send", name: "svc", data: "hello\n" });
+			const echoed = await client.request({
+				op: "wait",
+				name: "svc",
+				for: "exit",
+				pattern: "got: hello",
+				timeoutMs: 5_000,
+			});
+			if (echoed.op !== "wait") throw new Error("unexpected wait result");
+			expect(echoed.timedOut).toBeFalse();
+
+			const second = await start(secondScript, "second ready");
+			if (second.op !== "start") throw new Error("unexpected start result");
+			expect(second.readyTimedOut).toBeFalse();
+			expect(second.daemon.pid).not.toBe(first.daemon.pid);
+			const secondLogs = await logs();
+			expect(secondLogs.text).toBe("second ready\n");
+			expect(secondLogs.cursor).toBe(Buffer.byteLength("second ready\n", "utf8"));
+
+			const third = await start(silentScript);
+			if (third.op !== "start") throw new Error("unexpected start result");
+			const thirdLogs = await logs();
+			expect(thirdLogs.text).toBe("");
+			expect(thirdLogs.cursor).toBe(0);
+		} finally {
+			await client.request({ op: "stop", name: "svc", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
 });

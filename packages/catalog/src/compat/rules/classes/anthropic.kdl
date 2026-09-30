@@ -7,28 +7,73 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
-	// Server-side compaction (compact-2026-01-12) is a lineage capability: the
-	// documented model list is the adaptive-thinking generation onward (Opus
-	// 4.6+, Sonnet 4.6+, Fable/Mythos 5+). Whether a host delivers the beta is
-	// decided at request time from the effective endpoint, not here.
-	family "fable" {
-		revision ">=5" {
+	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
+	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
+	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
+	// effective URLs are checked at request time.
+	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
+		family "fable" {
+			revision ">=5" {
+				supports-server-compaction #true
+			}
+		}
+		family "mythos" {
+			revision ">=5" {
+				supports-server-compaction #true
+			}
+		}
+		family "opus" {
+			revision ">=4.6" {
+				supports-server-compaction #true
+			}
+		}
+		family "sonnet" {
+			revision ">=4.6" {
+				supports-server-compaction #true
+			}
+		}
+		models "claude-mythos-preview" {
 			supports-server-compaction #true
 		}
 	}
-	family "mythos" {
-		revision ">=5" {
-			supports-server-compaction #true
+	// Sonnet 4.5 and newer end generation with `model_context_window_exceeded`
+	// when prompt + max_tokens overruns the window, instead of a 400, so the
+	// full output cap can be requested without sizing the prompt. Verified for
+	// the Claude API only:
+	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#model-context-window-exceeded
+	on "anthropic" {
+		revision ">=4.5" {
+			stops-output-at-context-window #true
 		}
 	}
+	// Opus 5.5 rejects forced tool selection the way Fable/Mythos do — a
+	// `tool_choice` of `tool` or `any` fails the request with 400
+	// `invalid_request_error`: `tool_choice: type "tool" and "any" are not
+	// supported for this model`. The transport downgrades the selector to
+	// `auto` so the tool stays offered instead of the turn dying.
+	//
+	// Upper-bounded on purpose: separator-collapsed ids parse their revision
+	// as a whole number (`claude-opus-45` is Opus 4.5, revision 45), so an
+	// open `>=5.5` would silently catch them, and a later Opus generation has
+	// to be re-verified against the API before it inherits the restriction.
 	family "opus" {
-		revision ">=4.6" {
-			supports-server-compaction #true
+		revision ">=5.5 <6" {
+			supports-forced-tool-choice #false
 		}
 	}
+	// Sonnet 5.5 rejects forced tool selection like Opus 5.5 (400 `tool_choice:
+	// type "tool" and "any" are not supported for this model`); upper-bounded
+	// for the same reason as the Opus rule above.
+	// https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
 	family "sonnet" {
-		revision ">=4.6" {
-			supports-server-compaction #true
+		revision ">=5.5 <6" {
+			supports-forced-tool-choice #false
+			// `thinking: {type: "disabled"}` is a 400; `between_tools` is the
+			// lowest thinking setting.
+			// https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#turn-off-up-front-thinking
+			supports-between-tools-thinking #true
+			// Signed thinking is bound to the exact preceding conversation.
+			thinking-prefix-binding #true
 		}
 	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
@@ -57,6 +102,14 @@ class "anthropic" {
 				supports-thinking-binding-controls #true
 			}
 		}
+		family "sonnet" {
+			revision ">=5.5" {
+				supports-mid-conversation-system #true
+				supports-mid-conversation-tool-changes #true
+				supports-turn-scoped-system #true
+				supports-per-message-effort #true
+			}
+		}
 		family "opus" {
 			revision ">=4.8" {
 				supports-mid-conversation-system #true
@@ -65,6 +118,15 @@ class "anthropic" {
 			}
 			revision ">=5" {
 				supports-per-message-effort #true
+			}
+		}
+	}
+	// Vertex rejects `thinking.block_binding` on Sonnet 5.5 with 400
+	// `thinking.adaptive.block_binding: Extra inputs are not permitted`.
+	on "anthropic" "cloudflare-ai-gateway" {
+		family "sonnet" {
+			revision ">=5.5" {
+				supports-thinking-binding-controls #true
 			}
 		}
 	}
@@ -337,5 +399,15 @@ class "anthropic" {
 		claude-thinking-beta-header #true
 		antigravity-claude-tool-mode #true
 		antigravity-usage-label "true"
+	}
+}
+
+// Claude 4+ ships the server-side `web_search` tool on any Messages-compatible host.
+class "anthropic" {
+	on-api "anthropic-messages" {
+		revision ">=4" {
+			web-search "anthropic"
+			web-search-model "claude-haiku-4-5"
+		}
 	}
 }

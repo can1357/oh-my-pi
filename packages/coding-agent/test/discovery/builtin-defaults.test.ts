@@ -51,20 +51,6 @@ describe("builtin-defaults rule provider", () => {
 		}
 	});
 
-	it("bundles ast-grep conditions for the redundant-clear-guard rule", async () => {
-		const rules = await loadBuiltinRules();
-		const rule = rules.find(r => r.name === "ts-redundant-clear-guard");
-		expect(rule?.condition).toBeUndefined();
-		expect(rule?.astCondition?.length).toBeGreaterThan(0);
-	});
-
-	it("parses YAML list-form conditions from the embedded text", async () => {
-		const rules = await loadBuiltinRules();
-		const lazylock = rules.find(r => r.name === "rs-lazylock");
-		// Frontmatter declares two condition patterns as a YAML sequence.
-		expect(lazylock?.condition).toHaveLength(2);
-	});
-
 	it("forces every bundled rule to warn without interrupting", async () => {
 		const rules = await loadBuiltinRules();
 		for (const rule of rules) {

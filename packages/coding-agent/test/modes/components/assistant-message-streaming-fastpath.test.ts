@@ -156,17 +156,6 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		expect(rendered).not.toContain(". . .");
 	});
 
-	it("matches teardown for a single growing text block", () => {
-		const reused = new AssistantMessageComponent();
-		let text = "";
-		for (const chunk of ["The ", "quick ", "brown ", "**fox** ", "jumps."]) {
-			text += chunk;
-			const m = msg([{ type: "text", text }]);
-			reused.updateContent(m);
-			expect(reused.render(W).join("\n")).toBe(teardownRender(m));
-		}
-	});
-
 	it("repairs Gemini's lone closing fence when the streamed turn becomes final", () => {
 		const text = `=== PACED IP ROTATION SOAK RESULTS ===
 Average Latency: 1,240 ms

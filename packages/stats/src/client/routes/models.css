@@ -1,0 +1,43 @@
+/* Models page: expandable model rows. */
+
+.models-chevron {
+	display: inline-flex;
+	color: var(--ink-3);
+	transition: transform var(--dur-2) var(--ease);
+}
+
+.models-chevron[data-open="true"] {
+	transform: rotate(90deg);
+	color: var(--ink-1);
+}
+
+.models-detail {
+	display: grid;
+	grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+	gap: 24px;
+	padding: 16px 16px 18px 44px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line-1);
+	animation: rise var(--dur-3) var(--ease-out) both;
+}
+
+.models-detail-facts {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	min-width: 0;
+}
+
+.models-detail-chart {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-width: 0;
+}
+
+@media (max-width: 1100px) {
+	.models-detail {
+		grid-template-columns: minmax(0, 1fr);
+		padding-left: 16px;
+	}
+}

@@ -18,6 +18,8 @@ import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 
+import { cfgTtsLocalVoice } from "../tts/settings";
+
 // Built-in voices per xAI Tier-1 docs (2026-05-16). xAI also accepts custom voice IDs,
 // so the schema does NOT enum-restrict voice_id; this constant only drives the description.
 const XAI_BUILTIN_VOICES = ["ara", "eve", "leo", "rex", "sal"] as const;
@@ -84,7 +86,7 @@ export function resolveLocalWavPath(outputPath: string): { wavPath: string; subs
 
 function readLocalVoice(settingsInstance: Settings): string {
 	try {
-		const value = settingsInstance.get("tts.localVoice");
+		const value = cfgTtsLocalVoice.get(settingsInstance);
 		return typeof value === "string" && value ? value : DEFAULT_TTS_VOICE;
 	} catch {
 		return DEFAULT_TTS_VOICE;

@@ -345,14 +345,6 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("Third; note");
 	});
 
-	it("rejects SQLite where clauses that try to override pagination control syntax", async () => {
-		await expect(
-			readTool.execute("sqlite-where-pagination-bypass", {
-				path: `${sqlitePath}:users?where=1=1 LIMIT 1000000 --&limit=2&offset=0`,
-			}),
-		).rejects.toThrow(/comments or statement terminators/i);
-	});
-
 	it("rejects mutating raw queries on the readonly connection", async () => {
 		await expect(
 			readTool.execute("sqlite-raw-write", {

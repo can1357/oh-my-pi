@@ -137,26 +137,6 @@ describe("convertToLlm custom message mapping", () => {
 		expect(inferCopilotInitiator(converted)).toBe("agent");
 	});
 
-	it("uses explicit agent attribution for custom messages", () => {
-		const messages: AgentMessage[] = [
-			{
-				role: "custom",
-				customType: "agent-reminder",
-				content: "Read file",
-				display: false,
-				attribution: "agent",
-				timestamp: Date.now(),
-			},
-		];
-
-		const converted = convertToLlm(messages);
-
-		expect(converted).toHaveLength(1);
-		expect(converted[0]?.role).toBe("developer");
-		expectAttribution(converted[0], "agent");
-		expect(inferCopilotInitiator(converted)).toBe("agent");
-	});
-
 	it("maps file mention reminders to developer role", () => {
 		const messages: AgentMessage[] = [
 			{

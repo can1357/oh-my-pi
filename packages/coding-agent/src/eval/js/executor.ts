@@ -8,6 +8,8 @@ import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
 
+import { cfgEvalAutoProvision } from "../settings";
+
 export interface JsExecutorOptions {
 	cwd?: string;
 	timeoutMs?: number;
@@ -22,7 +24,7 @@ export interface JsExecutorOptions {
 	onStatus?: (event: JsStatusEvent) => void;
 	signal?: AbortSignal;
 	sessionId: string;
-	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
+	/** Logical owner identifier; scopes retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
 	sessionFile?: string;
@@ -127,7 +129,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cwd,
 			packages,
 			environment: options.environment,
-			autoProvision: options.session.settings.get("eval.autoProvision") ?? true,
+			autoProvision: cfgEvalAutoProvision.get(options.session.settings),
 			signal: packageSignal,
 		};
 		const install =

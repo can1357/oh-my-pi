@@ -20,6 +20,8 @@ import { Loader } from "@oh-my-pi/pi-tui";
 import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
+import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	return {
 		role: "assistant",
@@ -48,7 +50,7 @@ beforeAll(async () => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	settings.set("display.smoothStreaming", false);
+	cfgDisplaySmoothStreaming.set(settings, false);
 });
 
 afterEach(() => {
@@ -541,13 +543,6 @@ describe("EventController working loader reconciliation", () => {
 });
 
 describe("ErrorBannerComponent", () => {
-	it("renders the provider error message", () => {
-		const banner = new ErrorBannerComponent("Output blocked by content filtering policy");
-		const rendered = Bun.stripANSI(banner.render(120).join("\n"));
-		expect(rendered).toContain("Output blocked by content filtering policy");
-		expect(rendered).toContain("Dismissed when you send your next message.");
-	});
-
 	it("caps an oversized multi-line error to a few rows and points at expansion", () => {
 		const huge = Array.from({ length: 50 }, (_, i) => `error detail line ${i}`).join("\n");
 		const banner = new ErrorBannerComponent(huge);

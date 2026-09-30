@@ -14,10 +14,12 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { Container } from "@oh-my-pi/pi-tui";
 
+import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	Settings.instance.set("tui.hyperlinks", "always");
+	cfgTuiHyperlinks.set(Settings.instance, "always");
 	await initTheme(false);
 	// The host registers keywords at startup; without this nothing glows.
 	setMagicKeywords(MAGIC_KEYWORDS);

@@ -44,6 +44,20 @@ export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
 	providers: { label: "Providers", icon: "tab.providers" },
 };
 
+/** One-sentence lead per tab, under the page title of the native settings page. */
+export const TAB_LEADS: Record<SettingTab, string> = {
+	appearance: "Theme, composer, status line and how the transcript renders.",
+	model: "Thinking, sampling, the system prompt, retries and the helper models.",
+	interaction: "Input, approvals, notifications, speech and what happens at startup.",
+	context: "What the model sees, and when and how the conversation compacts.",
+	memory: "What omp remembers across sessions and where it keeps it.",
+	files: "How files are read, summarized and edited, and the language servers.",
+	shell: "The bash tool and the eval runtimes.",
+	tools: "Which tools the model has, their limits and the external integrations.",
+	tasks: "Modes, subagents, isolation and custom commands.",
+	providers: "Services, provider protocols, timeouts and privacy.",
+};
+
 /**
  * Ordered section groups per tab. Settings declare their section via `ui.group`;
  * the settings UI renders groups in this order with a heading row between them.
@@ -75,6 +89,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Todos",
 		"Grep & Browser",
 		"Computer",
+		"IDA Pro",
 		"GitHub",
 		"Output Limits",
 		"Execution",
@@ -131,6 +146,11 @@ export interface SettingsHost {
 	entries: readonly SettingsDisplayEntry[];
 	get(path: string): unknown;
 	set(path: string, value: unknown): void;
+	/**
+	 * Removes the value from the global config: a project or other layer, or an environment
+	 * variable, that configures the setting still applies; otherwise the default does.
+	 */
+	unset(path: string): void;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }
@@ -305,6 +325,33 @@ export function getSettingsForTab(entries: readonly SettingsDisplayEntry[], tab:
 /** Find the display definition for a host setting path. */
 export function getSettingDef(entries: readonly SettingsDisplayEntry[], path: string): SettingDef | undefined {
 	return getAllSettingDefs(entries).find(def => def.path === path);
+}
+
+/**
+ * The numeric value a number-like choice option stands for: its number, or
+ * -1 for `default` (the stored sentinel, see the selector's value mapping);
+ * `undefined` when the option is not numeric.
+ */
+export function numericOption(value: string): number | undefined {
+	if (value === "default") return -1;
+	const n = Number(value);
+	return value.trim() !== "" && Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Number hint: a numeric setting whose choices are all numbers (or the
+ * `default` sentinel) edits as a stepper through those values on a native
+ * settings page. Returns the steps (number → label), else `undefined`.
+ */
+export function numberSteps(def: SettingDef): Record<string, string> | undefined {
+	if (def.schemaType !== "number" || def.type !== "submenu" || def.options.length < 2) return undefined;
+	const labels: Record<string, string> = {};
+	for (const option of def.options) {
+		const n = numericOption(option.value);
+		if (n === undefined) return undefined;
+		labels[String(n)] = option.label;
+	}
+	return labels;
 }
 
 /** Format a setting's declared default for display. */

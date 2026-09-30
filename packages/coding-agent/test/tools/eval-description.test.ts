@@ -8,6 +8,9 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool, getEvalDocTopics, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
+import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 function makeSession(opts: {
 	spawns?: string | null;
 	backends?: Record<string, boolean>;
@@ -16,9 +19,8 @@ function makeSession(opts: {
 	maxRecursionDepth?: number;
 	readActive?: boolean;
 }): ToolSession {
-	const settings = Settings.isolated();
-	for (const [key, value] of Object.entries(opts.backends ?? {})) settings.set(key as never, value);
-	if (opts.maxRecursionDepth !== undefined) settings.set("task.maxRecursionDepth", opts.maxRecursionDepth);
+	const settings = Settings.isolated(opts.backends);
+	if (opts.maxRecursionDepth !== undefined) cfgTaskMaxRecursionDepth.set(settings, opts.maxRecursionDepth);
 	return {
 		cwd: "/tmp/eval-test",
 		hasUI: false,
@@ -58,31 +60,6 @@ function wireCellFields(tool: EvalTool): {
 }
 
 describe("eval tool description", () => {
-	it("links the agents topic and documents agent() there when spawns are allowed", () => {
-		expect(getEvalToolDescription({ py: true, js: true, spawns: true })).toContain("xd://eval/agents");
-		expect(getEvalDocTopics({ py: true, js: true, spawns: true }).agents).toContain("agent(prompt");
-	});
-
-	it("routes model calls, setup, budget, and defined tools to discoverable topics", () => {
-		const linked = getEvalToolDescription({ py: true, js: true, evalTools: true });
-		const topics = getEvalDocTopics({ py: true, js: true, evalTools: true });
-		expect(linked).toContain("`completion`");
-		expect(linked).toContain("xd://eval/judge");
-		expect(linked).toContain("`budget`");
-		expect(linked).toContain("`@tool`");
-		expect(linked).toContain("xd://eval/helpers");
-		for (const moved of ["completion(prompt", "budget.total", "tool(fn, name=", "%pip install"]) {
-			expect(linked).not.toContain(moved);
-		}
-		expect(topics.judge).toContain("completion(prompt");
-		expect(topics.judge).toContain("judge(state, questions)");
-		expect(topics.helpers).toContain("budget.total");
-		expect(topics.helpers).toContain("tool(fn");
-		expect(topics.helpers).toContain("%load <path>");
-		expect(topics.helpers).toContain("%pip install");
-		expect(topics.helpers).toContain("%bun add");
-	});
-
 	it("drops the agents topic but keeps wait() when the session forbids spawning", () => {
 		// Subagents with spawns: undefined (resolved to "") cannot launch tasks.
 		// wait() remains usable with completion() handles.
@@ -215,11 +192,14 @@ describe("eval tool dynamic schema", () => {
 		}
 	});
 
-	it("advertises enabled runtimes and excludes disabled runtime examples", () => {
-		const both = new EvalTool(makeSession({}));
-		expect(wireCellFields(both).languages).toEqual(["js", "py"]);
-		const jsOnly = new EvalTool(makeSession({ backends: { "eval.py": false, "eval.js": true } }));
-		expect(wireCellFields(jsOnly).languages).toEqual(["js"]);
-		expect(jsOnly.examples.every(example => "call" in example && example.call.language === "js")).toBe(true);
+	it("follows eval.py changes made after construction on the next schema read", () => {
+		const session = makeSession({});
+		const tool = new EvalTool(session);
+		expect(wireCellFields(tool).languages).toEqual(["js", "py"]);
+		cfgEvalPy.set(session.settings, false);
+		expect(wireCellFields(tool).languages).toEqual(["js"]);
+		expect(tool.examples.some(example => "call" in example && example.call.language === "py")).toBe(false);
+		cfgEvalPy.set(session.settings, true);
+		expect(wireCellFields(tool).languages).toEqual(["js", "py"]);
 	});
 });

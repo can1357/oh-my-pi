@@ -12,7 +12,9 @@ provides:
 - automatic protocol v2 negotiation, lossless chunk reassembly, and stable message pagination
 - a process-backed client that manages request correlation over stdio
 - typed per-event listeners plus a typed catch-all notification hook
-- helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
+- helpers for collecting prompt runs (correlated by each prompt's `prompt_result`)
+  and handling extension UI requests in manual or headless mode
+- session binding (`open_session`) and server-side event filtering (`set_event_filter`)
 - typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
 
 ## Basic Usage
@@ -42,9 +44,13 @@ with RpcClient(
     no_rules=True,
     tools=("read", "edit", "write"),
     append_system_prompt="Focus on reproducible benchmark behavior.",
+    no_ui=True,
 ) as client:
     print(client.get_state().thinking_level)
 ```
+
+`no_ui=True` passes `--no-ui`: extensions run headless and never send dialog
+`extension_ui_request` frames to the host.
 
 For orchestration hosts, the wrapper also exposes typed event hooks and a simple
 way to seed todos before the first prompt:
@@ -98,6 +104,105 @@ with RpcClient(
 ) as client:
     print(client.get_state().session_id)
 ```
+
+## Prompt Results
+
+Every accepted `prompt` / `abort_and_prompt` ends with exactly one
+`prompt_result` frame carrying the prompt's request id, emitted when the agent
+yields after the prompt. `prompt()` and `abort_and_prompt()` return that
+request id, and `on_prompt_result()` delivers each typed `PromptResultEvent`:
+
+```python
+from omp_rpc import PromptResultEvent, RpcClient
+
+def on_result(result: PromptResultEvent) -> None:
+    if result.status == "error" and result.error is not None:
+        print(result.id, result.error.message, result.error.http_status, result.error.retryable)
+
+with RpcClient(no_session=True) as client:
+    client.on_prompt_result(on_result)
+    request_id = client.prompt("Summarize the repo")
+    client.wait_for_idle()
+```
+
+`prompt_and_wait()` waits for its own `prompt_result` rather than the first
+terminal `agent_end`, so a late `agent_end` from an earlier run cannot end it
+early. The returned `PromptTurn.result` holds that `PromptResultEvent`
+(`status` is `"completed"`, `"aborted"`, or `"error"`); it is `None` when the
+server handled the prompt locally (e.g. a slash command) and answered with
+`agentInvoked: false`. `wait_for_idle()` returns once every prompt this client
+submitted has received its `prompt_result`.
+
+### Yielded vs. settled
+
+A yield is not the end of the session: async bash/task/eval jobs or queued
+messages can wake it for follow-up runs. `PromptResultEvent.session_settled` is
+`True` when nothing will wake the session again. When it is `False`, the server
+sends a `session_settled` frame once that background work has drained, after
+any follow-up runs it triggers. `get_state()` reports the same condition as
+`is_settled`, plus `has_pending_async_work`.
+
+`prompt_and_wait()` returns at the agent's yield. `wait_for_settled()` waits
+until the session is done: it returns at once when `get_state().is_settled`,
+otherwise it blocks until the next `session_settled` frame.
+`on_session_settled()` subscribes to those frames.
+
+```python
+turn = client.prompt_and_wait("Kick off the long build in the background")
+if turn.result is not None and not turn.result.session_settled:
+    client.wait_for_settled(timeout=600)
+```
+
+Each `AgentEndEvent` also reports `yielded`: `True` when the agent finished its
+turn (it resumes only for queued input or background-job results), `False`
+while it continues its own work (retry, compaction, stop-time reminders).
+Older servers omit it (`None`); fall back to `is_terminal is not False`.
+
+`message_start`, `message_update`, and `message_end` events expose
+`message_id`, shared across one message's lifecycle and unique per process.
+
+## Session Binding and Event Filtering
+
+A pre-spawned process can bind to a host-keyed conversation directory, and a
+host that only needs a few event kinds can have the server drop the rest:
+
+```python
+with RpcClient() as client:
+    opened = client.open_session("/var/lib/bot/sessions/thread-42")
+    print(opened.resumed, opened.session_id, opened.session_file)
+
+    client.set_event_filter(["message_end", "tool_execution_end"])
+    turn = client.prompt_and_wait("Continue where we left off")
+    client.set_event_filter(None)  # forward every session event again
+```
+
+`open_session()` continues the newest non-empty session in the directory or
+starts a fresh one there (`resumed=False`). The event filter applies only to
+session events; responses, `prompt_result`, and UI/host frames always arrive,
+so `prompt_and_wait()` still completes when `agent_end` is filtered out.
+
+## Removing Queued Messages
+
+`remove_queued_message(message, queue)` removes one matching prompt from the
+`"steering"` or `"followUp"` queue. `QueuedMessageQueue` and
+`RemoveQueuedMessageResult` are exported for typed callers:
+
+```python
+from omp_rpc import QueuedMessageQueue, RpcClient
+
+with RpcClient() as client:
+    client.follow_up("Review the diff")
+    queue: QueuedMessageQueue = "followUp"
+    result = client.remove_queued_message("Review the diff", queue)
+    print(result.removed)
+```
+
+Check `result.removed`, not the truthiness of the result object. `True` means the
+server removed the queued prompt; `False` means it did not, for example because
+the prompt was already claimed or no longer queued. This does not abort a running
+prompt. Native rejection, including an older server that does not support the
+command, raises `RpcCommandError`. Missing or non-boolean `removed` values raise
+`ValueError` rather than being treated as successful cancellation.
 
 ## Host-Owned Custom Tools
 
@@ -217,6 +322,9 @@ with RpcClient(model="anthropic/claude-sonnet-4-5") as client:
 That helper ignores passive UI notifications (`notify`, `setStatus`, `setWidget`,
 `setTitle`, `set_editor_text`), answers `confirm` with `False`, and cancels
 `select`/`input`/`editor` requests unless you provide explicit values.
+
+To keep extensions from issuing dialogs at all, start the client with
+`no_ui=True` (`--no-ui`).
 
 ## Error Handling and Retained History
 

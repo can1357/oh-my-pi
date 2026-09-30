@@ -38,6 +38,7 @@ export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
+export const TextPredictor = nativeBindings.TextPredictor;
 export const TtyWriter = nativeBindings.TtyWriter;
 export const VcsGitRepo = nativeBindings.VcsGitRepo;
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace;
@@ -45,7 +46,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
-export const __piNativesV18_2_11 = nativeBindings.__piNativesV18_2_11;
+export const __piNativesBuildVersion = nativeBindings.__piNativesBuildVersion;
 export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
 export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
 export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");
@@ -71,10 +72,12 @@ export const enclosingBlockBoundaries = nativeBindings.enclosingBlockBoundaries 
 export const encodeSixel = nativeBindings.encodeSixel ?? missingNativeExport("encodeSixel");
 export const execReplace = nativeBindings.execReplace ?? missingNativeExport("execReplace");
 export const executeShell = nativeBindings.executeShell ?? missingNativeExport("executeShell");
+export const expandWindowsLongPath = nativeBindings.expandWindowsLongPath ?? missingNativeExport("expandWindowsLongPath");
 export const extractInlineSloppyRegions = nativeBindings.extractInlineSloppyRegions ?? missingNativeExport("extractInlineSloppyRegions");
 export const extractSegments = nativeBindings.extractSegments ?? missingNativeExport("extractSegments");
 export const fuzzyFind = nativeBindings.fuzzyFind ?? missingNativeExport("fuzzyFind");
 export const getSupportedLanguages = nativeBindings.getSupportedLanguages ?? missingNativeExport("getSupportedLanguages");
+export const getWindowsShortPath = nativeBindings.getWindowsShortPath ?? missingNativeExport("getWindowsShortPath");
 export const getWorkProfile = nativeBindings.getWorkProfile ?? missingNativeExport("getWorkProfile");
 export const glob = nativeBindings.glob ?? missingNativeExport("glob");
 export const grep = nativeBindings.grep ?? missingNativeExport("grep");
@@ -98,7 +101,6 @@ export const isoStop = nativeBindings.isoStop ?? missingNativeExport("isoStop");
 export const listWorkspace = nativeBindings.listWorkspace ?? missingNativeExport("listWorkspace");
 export const macOSAutocorrectWord = nativeBindings.macOSAutocorrectWord ?? missingNativeExport("macOSAutocorrectWord");
 export const macOSCheckSpelling = nativeBindings.macOSCheckSpelling ?? missingNativeExport("macOSCheckSpelling");
-export const macOSCompleteWord = nativeBindings.macOSCompleteWord ?? missingNativeExport("macOSCompleteWord");
 export const macOSSpellCheckerAvailable = nativeBindings.macOSSpellCheckerAvailable ?? missingNativeExport("macOSSpellCheckerAvailable");
 export const macOSSpellingGuesses = nativeBindings.macOSSpellingGuesses ?? missingNativeExport("macOSSpellingGuesses");
 export const matchesKey = nativeBindings.matchesKey ?? missingNativeExport("matchesKey");
@@ -120,6 +122,7 @@ export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExpo
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars ?? missingNativeExport("snapcompactSupportedChars");
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missingNativeExport("structuredPatchHunks");
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");
+export const summarizeCodeAsync = nativeBindings.summarizeCodeAsync ?? missingNativeExport("summarizeCodeAsync");
 export const supportsLanguage = nativeBindings.supportsLanguage ?? missingNativeExport("supportsLanguage");
 export const truncateToWidth = nativeBindings.truncateToWidth ?? missingNativeExport("truncateToWidth");
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeExport("vcsDetachGitDir");
@@ -205,5 +208,60 @@ export const MacOSAppearance = {
 export const ProcessStatus = {
 	Running: "running",
 	Exited: "exited",
+};
+export const ShellFsFileType = {
+	File: "file",
+	Dir: "dir",
+	Symlink: "symlink",
+	Fifo: "fifo",
+	Socket: "socket",
+	Char: "char",
+	Block: "block",
+};
+export const ShellFsMissing = {
+	Existing: "existing",
+	Normal: "normal",
+	Missing: "missing",
+};
+export const ShellFsOp = {
+	Metadata: "metadata",
+	SymlinkMetadata: "symlinkMetadata",
+	ReadDir: "readDir",
+	Canonicalize: "canonicalize",
+	BackingPath: "backingPath",
+	ReadLink: "readLink",
+	Access: "access",
+	Open: "open",
+	Read: "read",
+	Write: "write",
+	Flush: "flush",
+	Close: "close",
+	FileMetadata: "fileMetadata",
+	IsLocked: "isLocked",
+	SetLen: "setLen",
+	FileSetTimes: "fileSetTimes",
+	FileSetPermissions: "fileSetPermissions",
+	Sync: "sync",
+	CreateDir: "createDir",
+	RemoveFile: "removeFile",
+	RemoveDir: "removeDir",
+	RemoveDirAll: "removeDirAll",
+	Rename: "rename",
+	HardLink: "hardLink",
+	Symlink: "symlink",
+	SetPermissions: "setPermissions",
+	SetTimes: "setTimes",
+	Chown: "chown",
+	StatFs: "statFs",
+	GetXattr: "getXattr",
+	SetXattr: "setXattr",
+	ListXattr: "listXattr",
+	RemoveXattr: "removeXattr",
+	Mknod: "mknod",
+};
+export const ShellFsResolve = {
+	Physical: "physical",
+	Logical: "logical",
+	None: "none",
 };
 // --- end generated native exports ---

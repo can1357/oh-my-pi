@@ -15,6 +15,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
+import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 function createUserMessage(content: string): UserMessage {
 	return { role: "user", content, timestamp: Date.now() };
 }
@@ -99,7 +101,7 @@ describe("skillful setting and /skillful session toggle", () => {
 		expect(s.agent.state.systemPrompt.join("\n")).not.toContain("- test-skill:");
 
 		expect(await s.toggleSkillful()).toBe(true);
-		expect(s.settings.get("skillful")).toBe(true);
+		expect(cfgSkillful.get(s.settings)).toBe(true);
 		expect(s.agent.state.systemPrompt.join("\n")).toContain("- test-skill:");
 
 		expect(await s.toggleSkillful()).toBe(false);
@@ -131,23 +133,6 @@ describe("skillful setting and /skillful session toggle", () => {
 			s.agent.state.messages.filter(message => message.role === "custom" && message.customType === "skillful-notice")
 				.length,
 		).toBe(1);
-	});
-
-	it("keeps the provider-side skill hint frozen across a mid-session disable toggle", async () => {
-		const s = await createSession();
-		s.agent.appendMessage(createUserMessage("earlier work"));
-
-		const bashTool = s.agent.state.tools.find(tool => tool.name === "bash");
-		expect(bashTool).toBeDefined();
-		const describedBefore = bashTool?.description ?? "";
-		expect(describedBefore).toContain("skill://");
-
-		expect(await s.toggleSkillful()).toBe(false);
-
-		// The wire prefix is byte-stable mid-session: the toggle rides the next
-		// turn (a notice on enable, a no-op on disable) rather than mutating the
-		// provider tool definitions.
-		expect(bashTool?.description ?? "").toBe(describedBefore);
 	});
 
 	it("announces URI syntax without catalog rows for hidden-only skills mid-session", async () => {
@@ -207,14 +192,14 @@ describe("skillful setting and /skillful session toggle", () => {
 		} as unknown as SlashCommandRuntime;
 
 		await cmd!.handle!({ name: "skillful", args: "off", text: "/skillful off" }, runtime);
-		expect(s.settings.get("skillful")).toBe(false);
+		expect(cfgSkillful.get(s.settings)).toBe(false);
 		expect(outputs.pop()).toContain("disabled");
 
 		await cmd!.handle!({ name: "skillful", args: "status", text: "/skillful status" }, runtime);
 		expect(outputs.pop()).toContain("off");
 
 		await cmd!.handle!({ name: "skillful", args: "toggle", text: "/skillful toggle" }, runtime);
-		expect(s.settings.get("skillful")).toBe(true);
+		expect(cfgSkillful.get(s.settings)).toBe(true);
 		expect(outputs.pop()).toContain("enabled");
 	});
 });

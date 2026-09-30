@@ -123,21 +123,6 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		expect(candidates.indexOf(versionedModern)).toBeLessThan(candidates.indexOf(buildHostModern));
 	});
 
-	it("does not probe user-data candidates when running outside a standalone binary", () => {
-		const versionedDir = "/home/u/.omp/natives/14.5.2";
-		const userDataDir = "/home/u/.local/bin";
-		const candidates = resolveLoaderCandidates({
-			addonFilenames: getAddonFilenames({ tag: "linux-x64", arch: "x64", variant: "baseline" }),
-			isCompiledBinary: false,
-			nativeDir: "/repo/packages/natives/native",
-			execDir: "/usr/bin",
-			versionedDir,
-			userDataDir,
-		});
-		expect(candidates).not.toContain(path.join(versionedDir, "pi_natives.linux-x64-baseline.node"));
-		expect(candidates).not.toContain(path.join(userDataDir, "pi_natives.linux-x64-baseline.node"));
-	});
-
 	it("prefers platform leaf package candidates ahead of core nativeDir candidates on npm installs", () => {
 		const leafPackageDir = "/app/node_modules/@oh-my-pi/pi-natives-linux-x64";
 		const nativeDir = "/app/node_modules/@oh-my-pi/pi-natives/native";

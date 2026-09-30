@@ -64,6 +64,17 @@ describe("bashToolRenderer", () => {
 		expect(rendered).toContain("printf '%s' \"$MERMAID\"");
 	});
 
+	it("reads streamed env assignments only from inside the env object", async () => {
+		const component = bashToolRenderer.renderCall(
+			{ command: "ls", __partialJson: '{"env":{"A":"1","B":"two"},"command":"ls' },
+			{ expanded: false, isPartial: true },
+			uiTheme,
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain('A="1" B="two"');
+		expect(rendered).not.toContain("command=");
+	});
+
 	it("sanitizes command tabs and shortens home cwd in previews", async () => {
 		const component = bashToolRenderer.renderCall(
 			{
@@ -280,7 +291,6 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
-		expect(lines.some(line => line.includes("ctrl+o to expand"))).toBe(false);
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

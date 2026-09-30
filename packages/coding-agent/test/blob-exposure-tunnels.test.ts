@@ -52,8 +52,13 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	fs.writeFileSync(
 		target,
 		`#!/bin/sh\n` +
-			`: > ${shellLiteral(argsFile)}\n` +
-			`for arg do printf '%s\\n' "$arg" >> ${shellLiteral(argsFile)}; done\n` +
+			// Publish argv atomically: adapters with a configured publicBaseUrl
+			// resolve before the tunnel prints anything, so tests may read the
+			// file while a (re)started process is still writing it.
+			`tmp=${shellLiteral(argsFile)}.$$\n` +
+			`: > "$tmp"\n` +
+			`for arg do printf '%s\\n' "$arg" >> "$tmp"; done\n` +
+			`/bin/mv "$tmp" ${shellLiteral(argsFile)}\n` +
 			`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
 			`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
 			`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
@@ -101,7 +106,8 @@ async function waitForRestart(marker: string): Promise<void> {
 	await waitForFileContent(marker, text => text.includes("restarted"));
 }
 
-function recordedArgs(invocation: FakeInvocation): string[] {
+async function recordedArgs(invocation: FakeInvocation): Promise<string[]> {
+	await waitForFileContent(invocation.argsFile, () => true);
 	const text = fs.readFileSync(invocation.argsFile, "utf8");
 	return text === "" ? [] : text.replace(/\n$/, "").split("\n");
 }
@@ -174,7 +180,7 @@ describe("startExposure tunnel adapters", () => {
 		const active = await startExposure(exposure("localhost-run"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://quiet-owl.lhr.life");
-		expect(recordedArgs(invocation)).toEqual([
+		expect(await recordedArgs(invocation)).toEqual([
 			"-o",
 			"BatchMode=yes",
 			"-o",
@@ -200,7 +206,7 @@ describe("startExposure tunnel adapters", () => {
 		const active = await startExposure(exposure("pinggy"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://random-one.a.pinggy.link");
-		expect(recordedArgs(invocation)).toEqual([
+		expect(await recordedArgs(invocation)).toEqual([
 			"-p",
 			"443",
 			"-o",
@@ -234,7 +240,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://stable.example.test");
-		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
+		expect(await recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
 		await waitForRestart(invocation.restartMarker!);
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
 		expect(active.baseUrl).toBe("https://stable.example.test");
@@ -246,7 +252,7 @@ describe("startExposure tunnel adapters", () => {
 		const dev = await startExposure(exposure("devtunnel"), PORT);
 		activeExposures.push(dev);
 		expect(dev.baseUrl).toBe(`https://blue-${PORT}.use2.devtunnels.ms`);
-		expect(recordedArgs(devInvocation)).toEqual([
+		expect(await recordedArgs(devInvocation)).toEqual([
 			"host",
 			"-p",
 			String(PORT),
@@ -260,7 +266,7 @@ describe("startExposure tunnel adapters", () => {
 		const zrok = await startExposure(exposure("zrok"), PORT);
 		activeExposures.push(zrok);
 		expect(zrok.baseUrl).toBe("https://violet.share.zrok.io");
-		expect(recordedArgs(zrokInvocation)).toEqual([
+		expect(await recordedArgs(zrokInvocation)).toEqual([
 			"share",
 			"public",
 			`http://127.0.0.1:${PORT}`,
@@ -282,7 +288,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("http://tunnel.example.test:38912");
-		expect(recordedArgs(invocation)).toEqual([
+		expect(await recordedArgs(invocation)).toEqual([
 			"local",
 			String(PORT),
 			"--to",
@@ -304,7 +310,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(token);
 		expect(token.baseUrl).toBe("https://blobs.example.test");
-		expect(recordedArgs(tokenInvocation)).toEqual([
+		expect(await recordedArgs(tokenInvocation)).toEqual([
 			"tunnel",
 			"--no-autoupdate",
 			"run",
@@ -323,7 +329,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(configured);
 		expect(configured.baseUrl).toBe("https://config.example.test");
-		expect(recordedArgs(configInvocation)).toEqual([
+		expect(await recordedArgs(configInvocation)).toEqual([
 			"tunnel",
 			"--no-autoupdate",
 			"--config",
@@ -368,7 +374,7 @@ describe("startExposure tunnel adapters", () => {
 		}
 		expect(failure).toContain("exited with code 19");
 		expect(failure).not.toContain(secret);
-		expect(recordedArgs(invocation)).toContain(secret);
+		expect(await recordedArgs(invocation)).toContain(secret);
 	});
 
 	it("reports absent adapter binaries without invoking the network", async () => {

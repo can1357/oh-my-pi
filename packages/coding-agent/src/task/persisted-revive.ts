@@ -11,10 +11,17 @@ import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycl
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
+import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import {
+	attachIrcWakeTurnMonitor,
+	compactionThresholdSettings,
+	createMCPProxyTools,
+	createSubagentSettings,
+	subagentRetryFallbackRole,
+} from "./executor";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -126,7 +133,14 @@ export function createPersistedSubagentReviverFactory(
 								: undefined),
 						}
 					: undefined),
+				...compactionThresholdSettings(init.compactionThreshold),
 			});
+			// Restore the `subagent:<id>` fallback chain the spawn installed; the
+			// transcript alone cannot rebuild it (multi-model agent patterns and
+			// inherited role chains are resolved only at spawn).
+			if (init.retryFallback) {
+				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
+			}
 			const persistedModelPattern =
 				init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]

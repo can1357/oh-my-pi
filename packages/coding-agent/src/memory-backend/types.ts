@@ -176,4 +176,12 @@ export interface MemoryBackend {
 		settings: Settings,
 		session?: AgentSession,
 	): Promise<string | undefined>;
+
+	/**
+	 * Optional hook to apply live edits to this backend's own `<id>.*` settings
+	 * (`changed` lists them) in a running top-level session. When omitted, the
+	 * session re-applies the whole backend (`applyMemoryBackend`), which rebuilds
+	 * its runtime state, memory tools, and prompt from the current settings.
+	 */
+	applySettings?(session: AgentSession, changed: readonly string[]): Promise<void>;
 }

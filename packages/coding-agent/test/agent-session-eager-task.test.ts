@@ -15,6 +15,8 @@ import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgTodoEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 type ObservedPromptCall = {
 	toolChoice: string | undefined;
 	toolNames: string[];
@@ -117,7 +119,7 @@ describe("AgentSession eager task prelude", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
-		const todoEnabled = settings.get("todo.enabled") === true;
+		const todoEnabled = cfgTodoEnabled.get(settings) === true;
 		const toolSession: ToolSession = {
 			cwd: tempDir.path(),
 			hasUI: false,

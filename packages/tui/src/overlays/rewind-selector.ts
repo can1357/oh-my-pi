@@ -19,26 +19,34 @@
  *
  * Keys: Up/Down step through rendered items in transcript order (within the
  * active column when a strip is open), Left/Right slide between branch
- * variants at a fork and jump between user turns elsewhere, Enter rewinds to
- * the outlined item, Esc cancels.
+ * variants at a fork and jump between user turns elsewhere, `f` opens a
+ * filter (typing narrows the current path to matching items; Esc leaves the
+ * filter with the selection kept), Enter rewinds to the outlined item, A loads
+ * earlier turns without changing selection (stepping above the oldest replayed
+ * turn loads them too), Esc cancels.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
+	Input,
 	matchesKey,
 	padding,
 	routeSgrMouseInput,
 	sliceByColumn,
 	type TUI,
 	truncateToWidth,
+	visibleWidth,
 } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
-import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
 import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
 import { padToWidth } from "../render/utils";
+import { expandKeyHint } from "../render/render-utils";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import {
 	appendOutlineEntries,
 	type ComposedColumn,
@@ -49,6 +57,23 @@ import {
 	positionRail,
 	userTurnLabel,
 } from "../chat/transcript-outline";
+import type { TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import { compact, node, span, text } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import { isNativeRendering } from "../native/state";
+import {
+	collectBlocks,
+	EARLIER_TURNS_KEY,
+	earlierTurnsItem,
+	TIMELINE_COLUMNS,
+	TimelineItems,
+	targetCopy,
+	timelineItem,
+	turnItem,
+	turnPreview,
+} from "./copy-selector";
 
 /** One alternate branch at a divergence: its root and message path root → most-recent leaf. */
 export interface BranchVariantPath {
@@ -81,6 +106,10 @@ interface SiblingColumn {
 	targets: OutlineTarget[];
 	/** Short label for the column header: the branch's first user prompt. */
 	label: string;
+	/** Native list items for this column, built on first describe. */
+	nativeItems?: NativeNode[];
+	/** Picker catalogue while this column's tab is open: the main items, then this branch's. */
+	pickerItems?: { main: readonly TspPickerItem[]; items: TspPickerItem[] };
 }
 
 /** Blank columns between branch-strip columns. */
@@ -110,12 +139,39 @@ export class RewindSelectorComponent implements Component {
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
 
+	/** Whole branch; the selector may currently replay only its tail. */
+	#entries: TranscriptEntry[];
+	/** True while older history is still unreplayed. */
+	#truncated = false;
+	/** Filter field while the filter prompt is open; undefined shows the full transcript. */
+	#filterInput: Input | undefined;
+	/** Filter query while the filter prompt is open; undefined shows the full transcript. */
+	get #filter(): string | undefined {
+		return this.#filterInput?.getValue();
+	}
+	/** Main transcript rows from the last frame; the filter matches what is on screen. */
+	#mainRows: readonly (readonly string[])[] = [];
+	/** Lowercased plain text per rendered child row array (row arrays are cached, so identity is stable). */
+	#rowText = new WeakMap<readonly string[], string>();
+	/** Native filter haystack: lowercased turn text per main target (no rendered rows under TSP). */
+	#nativeTexts: { targets: OutlineTarget[]; texts: string[] } | undefined;
+	/** Last described root and the state it was built from. */
+	#native: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
+	/** Main-path list items, rebuilt only when the replayed targets change. */
+	#nativeItems: { targets: OutlineTarget[]; truncated: boolean; items: NativeNode[] } | undefined;
+	/** Timeline picker items of the replayed main path. */
+	#pickerItems = new TimelineItems();
+	/** Last described picker and the state it was built from. */
+	#picker: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
+
 	constructor(
 		entries: TranscriptEntry[],
 		private readonly deps: RewindSelectorDeps,
 	) {
-		this.#builder = this.#newBuilder();
-		this.#targets = appendOutlineEntries(this.#builder, entries);
+		this.#entries = entries;
+		const tail = recentTranscriptEntries(entries);
+		this.#truncated = tail.length < entries.length;
+		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
 		this.#browser = new TranscriptBrowser({
 			getHeight: () => this.deps.ui.terminal?.rows || process.stdout.rows || 40,
@@ -129,7 +185,7 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#newBuilder(): ChatTranscriptBuilder {
-		return new ChatTranscriptBuilder({
+		const builder = new ChatTranscriptBuilder({
 			ui: this.deps.ui,
 			getTool: this.deps.getTool,
 			isBuiltInTool: this.deps.isBuiltInTool,
@@ -140,6 +196,30 @@ export class RewindSelectorComponent implements Component {
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
+		builder.setExpanded(this.#expanded);
+		return builder;
+	}
+
+	/** Build a transcript for `entries` and adopt its targets. */
+	#replay(entries: TranscriptEntry[]): ChatTranscriptBuilder {
+		const builder = this.#newBuilder();
+		this.#targets = appendOutlineEntries(builder, entries);
+		return builder;
+	}
+
+	/** Replay the whole branch, keeping the main outline on the same turn. */
+	#loadFullHistory(): void {
+		if (!this.#truncated) return;
+		const selectedId = this.#targets[this.#selected]?.turnId;
+		const previous = this.#builder;
+		this.#builder = this.#replay(this.#entries);
+		previous.dispose();
+		this.#truncated = false;
+		this.#mainVisible = undefined;
+		this.#mainRows = [];
+		const restored = selectedId ? this.#targets.findIndex(target => target.turnId === selectedId) : -1;
+		this.#selected = restored >= 0 ? restored : Math.max(0, this.#targets.length - 1);
+		this.deps.requestRender();
 	}
 
 	invalidate(): void {
@@ -173,7 +253,6 @@ export class RewindSelectorComponent implements Component {
 		for (const sibling of this.deps.siblingPaths(target.turnId)) {
 			if (sibling.entries.length === 0) continue;
 			const builder = this.#newBuilder();
-			builder.setExpanded(this.#expanded);
 			const targets = appendOutlineEntries(builder, sibling.entries);
 			const firstUser = sibling.entries.find(isUserTurnEntry);
 			const label = (firstUser && userTurnLabel(firstUser)) || sibling.rootId;
@@ -196,6 +275,11 @@ export class RewindSelectorComponent implements Component {
 		const from = this.#slidePosition(now);
 		this.#slide = { from, to: variant, startedAt: now };
 		this.#activeVariant = variant;
+		// The camera slide is repaint-only; a native surface has no camera to move.
+		if (isNativeRendering()) {
+			this.deps.requestRender();
+			return;
+		}
 		this.#slideTimer ??= setInterval(() => {
 			if (!this.#slide || Date.now() - this.#slide.startedAt >= SLIDE_MS) this.#stopSlide();
 			this.deps.requestRender();
@@ -235,17 +319,20 @@ export class RewindSelectorComponent implements Component {
 			});
 			return;
 		}
+		if (this.#filter !== undefined) {
+			this.#handleFilterInput(data);
+			return;
+		}
 		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
 			this.deps.onCancel();
 			return;
 		}
+		if (matchesKey(data, "f")) {
+			this.#openFilter();
+			return;
+		}
 		if (matchesAppToolsExpand(data)) {
-			this.#expanded = !this.#expanded;
-			this.#builder.setExpanded(this.#expanded);
-			for (const columns of this.#variantCache.values()) {
-				for (const column of columns) column.builder.setExpanded(this.#expanded);
-			}
-			this.deps.requestRender();
+			this.#toggleExpanded();
 			return;
 		}
 		if (matchesSelectUp(data)) {
@@ -257,29 +344,190 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "left")) {
-			if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
-			else this.#move(-1, target => target.isUserTurn);
+			this.#left();
 			return;
 		}
 		if (matchesKey(data, "right")) {
-			const columns = this.#stripColumns();
-			if (this.#activeVariant < columns.length) {
-				this.#siblingSelected = 0;
-				this.#slideTo(this.#activeVariant + 1);
-			} else if (this.#activeVariant === 0) {
-				this.#move(1, target => target.isUserTurn);
-			}
+			this.#right();
+			return;
+		}
+		if (data === "a" || data === "A") {
+			this.#loadFullHistory();
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			const target = this.#outlinedTarget();
-			if (target) this.deps.onSelect(target.entryId);
+			this.#selectOutlined();
 			return;
 		}
 		// Page/home/end/shift+arrow scrolling without moving the selection.
 		if (this.#browser.handleScrollKey(data)) {
 			this.deps.requestRender();
 		}
+	}
+
+	/** `f`: open the filter over the whole branch. */
+	#openFilter(): void {
+		// The filter must search the whole branch, not just the startup tail.
+		this.#loadFullHistory();
+		const input = new Input();
+		input.prompt = `${theme.fg("accent", "filter:")} `;
+		input.placeholder = "words…";
+		this.#filterInput = input;
+		this.#activeVariant = 0;
+		this.#siblingSelected = 0;
+		this.#stopSlide();
+		this.deps.requestRender();
+	}
+
+	/** Left: the previous branch at a fork, else the previous user turn. */
+	#left(): void {
+		if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
+		else this.#move(-1, target => target.isUserTurn);
+	}
+
+	/** Right: the next branch at a fork, else the next user turn. */
+	#right(): void {
+		const columns = this.#stripColumns();
+		if (this.#activeVariant < columns.length) {
+			this.#siblingSelected = 0;
+			this.#slideTo(this.#activeVariant + 1);
+		} else if (this.#activeVariant === 0) {
+			this.#move(1, target => target.isUserTurn);
+		}
+	}
+
+	/** Enter while filtering: rewind to the selection when it matches. */
+	#selectFiltered(): void {
+		const target = this.#filterMatches().includes(this.#selected) ? this.#targets[this.#selected] : undefined;
+		if (target) this.deps.onSelect(target.entryId);
+	}
+
+	/** Enter: rewind to the outlined turn (main path or the active branch column). */
+	#selectOutlined(): void {
+		const target = this.#outlinedTarget();
+		if (target) this.deps.onSelect(target.entryId);
+	}
+
+	#toggleExpanded(): void {
+		this.#expanded = !this.#expanded;
+		this.#builder.setExpanded(this.#expanded);
+		for (const columns of this.#variantCache.values()) {
+			for (const column of columns) column.builder.setExpanded(this.#expanded);
+		}
+		this.deps.requestRender();
+	}
+
+	// ========================================================================
+	// Filter
+	// ========================================================================
+
+	#handleFilterInput(data: string): void {
+		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
+			this.#closeFilter();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#selectFiltered();
+			return;
+		}
+		if (matchesAppToolsExpand(data)) {
+			this.#toggleExpanded();
+			return;
+		}
+		if (matchesSelectUp(data) || matchesKey(data, "left")) {
+			const userTurnsOnly = !matchesSelectUp(data);
+			this.#stepFiltered(-1, userTurnsOnly);
+			return;
+		}
+		if (matchesSelectDown(data) || matchesKey(data, "right")) {
+			const userTurnsOnly = !matchesSelectDown(data);
+			this.#stepFiltered(1, userTurnsOnly);
+			return;
+		}
+		const input = this.#filterInput!;
+		const before = input.getValue();
+		if (matchesKey(data, "backspace") && before.length === 0) {
+			this.#closeFilter();
+			return;
+		}
+		if (input.handleInput(data)) {
+			if (input.getValue() !== before) this.#filterChanged();
+			else this.deps.requestRender();
+			return;
+		}
+		if (this.#browser.handleScrollKey(data)) {
+			this.deps.requestRender();
+		}
+	}
+
+	/** Leave the filter, keeping the selected item outlined in the full transcript. */
+	#closeFilter(): void {
+		this.#filterInput = undefined;
+		this.deps.requestRender();
+	}
+
+	/** The query changed; keep the selection when it still matches, else rest on the newest match above it. */
+	#filterChanged(): void {
+		const matches = this.#filterMatches();
+		if (!matches.includes(this.#selected)) {
+			this.#selected = matches.findLast(index => index < this.#selected) ?? matches.at(-1) ?? this.#selected;
+		}
+		this.deps.requestRender();
+	}
+
+	#stepFiltered(delta: -1 | 1, userTurnsOnly: boolean): void {
+		const matches = this.#filterMatches().filter(index => !userTurnsOnly || this.#targets[index]!.isUserTurn);
+		const next =
+			delta < 0 ? matches.findLast(index => index < this.#selected) : matches.find(index => index > this.#selected);
+		if (next === undefined) return;
+		this.#selected = next;
+		this.deps.requestRender();
+	}
+
+	/**
+	 * Visible main-path target indices whose rendered text contains every
+	 * whitespace-separated Latin query word as a whole word (case-insensitive:
+	 * `ls` matches `ls -la` but not `tools`). Other scripts match substrings so
+	 * a Chinese query can find text inside a sentence without spaces.
+	 * All visible targets match an empty query.
+	 * Matching the rendered rows keeps results honest: collapsed tool output
+	 * only matches once Ctrl+O expands it.
+	 */
+	#filterMatches(): number[] {
+		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+		const patterns = words.map(word =>
+			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
+				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
+				: new RegExp(RegExp.escape(word), "u"),
+		);
+		if (isNativeRendering() && this.#nativeTexts?.targets !== this.#targets) {
+			this.#nativeTexts = {
+				targets: this.#targets,
+				// Turn text plus its commands and tool output, like the expanded rendered rows.
+				texts: this.#targets.map(target => {
+					const blocks = collectBlocks(target.entries);
+					const parts = [targetCopy(target, blocks).content, ...blocks.map(block => block.content)];
+					return parts.join("\n").toLowerCase();
+				}),
+			};
+		}
+		const matches: number[] = [];
+		for (let index = 0; index < this.#targets.length; index++) {
+			if (!this.#isMainSelectable(index)) continue;
+			const target = this.#targets[index]!;
+			const texts = isNativeRendering()
+				? [this.#nativeTexts?.texts[index] ?? ""]
+				: this.#mainRows.slice(target.start, target.end).map(rows => {
+						let text = this.#rowText.get(rows);
+						if (text === undefined) {
+							text = Bun.stripANSI(rows.join("\n")).toLowerCase();
+							this.#rowText.set(rows, text);
+						}
+						return text;
+					});
+			if (patterns.every(pattern => texts.some(text => pattern.test(text)))) matches.push(index);
+		}
+		return matches;
 	}
 
 	/** Up/Down: step within the active column; leaving a sibling column's top exits the strip. */
@@ -303,7 +551,10 @@ export class RewindSelectorComponent implements Component {
 		this.#move(delta, () => true);
 	}
 
-	/** Step the main selection by `delta` to the nearest visible target passing `accept`. */
+	/**
+	 * Step the main selection by `delta` to the nearest visible target passing
+	 * `accept`; stepping above the replayed tail loads the earlier history first.
+	 */
 	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
 		let index = this.#selected + delta;
 		while (index >= 0 && index < this.#targets.length) {
@@ -317,10 +568,349 @@ export class RewindSelectorComponent implements Component {
 			}
 			index += delta;
 		}
+		if (delta < 0 && this.#truncated) {
+			this.#loadFullHistory();
+			this.#move(delta, accept);
+		}
 	}
 
 	#isMainSelectable(index: number): boolean {
 		return this.#mainVisible?.[index] ?? true;
+	}
+
+	// ========================================================================
+	// Native
+	// ========================================================================
+
+	/** A `picker` is its own sheet: the backend mounts it in `layer`, over the transcript. */
+	nativeSheet(cx: DescribeContext): boolean {
+		return cx.supports("picker");
+	}
+
+	/** A branch tab click moves between the current path and its alternates, as Left/Right do. */
+	#showVariant(value: string | undefined): void {
+		const variant = Number(value);
+		if (!Number.isInteger(variant) || variant === this.#activeVariant) return;
+		if (variant < 0 || variant > this.#stripColumns().length) return;
+		this.#siblingSelected = 0;
+		if (variant === 0) {
+			this.#activeVariant = 0;
+			this.#stopSlide();
+			this.deps.requestRender();
+		} else {
+			this.#slideTo(variant);
+		}
+	}
+
+	/**
+	 * Picker pointer events: a row click outlines that turn, a second click
+	 * rewinds there (Enter); the action bar and tabs run their keys' paths.
+	 */
+	#handlePickerEvent(event: PickerEvent): void {
+		if (event.kind === "action") {
+			switch (event.act) {
+				case "tab":
+					this.#showVariant(event.value);
+					return;
+				case "rewind":
+					if (this.#filter === undefined) this.#selectOutlined();
+					else this.#selectFiltered();
+					return;
+				case "lateral":
+					// A click steps back a user turn, or on to the next branch (wrapping to the current path).
+					if (this.#filter !== undefined || this.#stripColumns().length === 0) this.#left();
+					else if (this.#activeVariant < this.#stripColumns().length) this.#right();
+					else this.#showVariant("0");
+					return;
+				case "filter":
+					this.#openFilter();
+					return;
+				case "earlier":
+					this.#loadFullHistory();
+					return;
+				case "close":
+					if (this.#filter === undefined) this.deps.onCancel();
+					else this.#closeFilter();
+					return;
+				case "clear":
+					this.#closeFilter();
+					return;
+				default:
+					return;
+			}
+		}
+		if (!this.#outline(event.item)) return;
+		this.deps.requestRender();
+		if (event.kind === "activate") {
+			if (this.#filter === undefined) this.#selectOutlined();
+			else this.#selectFiltered();
+		}
+	}
+
+	/** Outline the turn `id`: on the active branch tab, or on the main path (leaving the tab). */
+	#outline(id: string): boolean {
+		if (this.#activeVariant > 0) {
+			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
+			const index = targets.findIndex(target => target.turnId === id);
+			if (index >= 0) {
+				this.#siblingSelected = index;
+				return true;
+			}
+		}
+		const index = this.#targets.findIndex(target => target.turnId === id);
+		if (index < 0) return false;
+		if (this.#filter !== undefined && !this.#filterMatches().includes(index)) return false;
+		this.#selected = index;
+		this.#activeVariant = 0;
+		this.#siblingSelected = 0;
+		this.#stopSlide();
+		return true;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const picked = pickerEvent(event);
+		if (picked) {
+			this.#handlePickerEvent(picked);
+			return;
+		}
+		if (event.type !== "select" && event.type !== "activate") return;
+		if (event.key === "branches") {
+			this.#showVariant(event.item);
+			return;
+		}
+		// A click on an item outlines it and rewinds there, as Enter would.
+		if (event.key === "list") {
+			if (event.item === EARLIER_TURNS_KEY) {
+				this.#loadFullHistory();
+				return;
+			}
+			const index = this.#targets.findIndex(target => target.turnId === event.item);
+			if (index < 0) return;
+			this.#selected = index;
+			this.#activeVariant = 0;
+			this.#siblingSelected = 0;
+			this.#stopSlide();
+		} else if (event.key === "branch" && this.#activeVariant > 0) {
+			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
+			const index = targets.findIndex(target => target.turnId === event.item);
+			if (index < 0) return;
+			this.#siblingSelected = index;
+		} else {
+			return;
+		}
+		this.deps.requestRender();
+		this.#selectOutlined();
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		return cx.supports("picker") ? this.#describePicker() : this.#describeCard();
+	}
+
+	/**
+	 * The `timeline` picker: one row per turn, the branch tabs at a fork, the
+	 * filter as the query, and the outlined turn's own transcript components
+	 * as the preview under the drop warning.
+	 */
+	#describePicker(): NativeNode {
+		const filter = this.#filter;
+		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
+		const cached = this.#picker;
+		if (cached?.memo === memo && cached.targets === this.#targets) return cached.node;
+
+		const main = this.#pickerItems.of(this.#targets);
+		const columns = filter === undefined ? this.#stripColumns() : [];
+		const column = columns[this.#activeVariant - 1];
+		const matches = filter === undefined ? undefined : this.#filterMatches();
+		const props: TspPickerProps = {
+			title: "Rewind",
+			subtitle: "Pick the point to continue from",
+			icon: "rewind",
+			noun: "turns",
+			size: "lg",
+			layout: "timeline",
+			preview: "side",
+			...pickerQuery(this.#filterInput ?? null),
+			placeholder: "Filter turns…",
+			columns: TIMELINE_COLUMNS,
+			items: main,
+			selected: this.#targets[this.#selected]?.turnId ?? null,
+			total: this.#targets.length,
+			empty: "Nothing to rewind to",
+		};
+		if (matches) {
+			props.order = matches.map(index => this.#targets[index]!.turnId);
+			if (!matches.includes(this.#selected)) props.selected = null;
+		}
+		if (columns.length > 0) {
+			props.tabs = [
+				{ id: "0", label: "Current" },
+				...columns.map((strip, index) => ({
+					id: String(index + 1),
+					label: strip.label.length > 32 ? `${strip.label.slice(0, 31)}…` : strip.label,
+				})),
+			];
+			props.tab = String(this.#activeVariant);
+		}
+		if (column) {
+			// The shared history above the fork, then the alternate branch.
+			if (column.pickerItems?.main !== main) {
+				column.pickerItems = { main, items: [...main, ...column.targets.map(timelineItem)] };
+			}
+			props.items = column.pickerItems.items;
+			props.order = [
+				...this.#targets.slice(0, this.#selected).map(target => target.turnId),
+				...column.targets.map(target => target.turnId),
+			];
+			props.selected = column.targets[this.#siblingSelected]?.turnId ?? null;
+		}
+		props.actions = compact([
+			pickerAction("rewind", "Rewind here", "enter", { primary: true }),
+			pickerAction("lateral", columns.length > 0 ? "Branches" : "User turns", ["left", "right"]),
+			filter === undefined ? pickerAction("filter", "Filter", "f") : undefined,
+			filter === undefined && this.#truncated ? pickerAction("earlier", "Earlier turns", "a") : undefined,
+			filter === undefined ? CLOSE_ACTION : { ...CLOSE_ACTION, label: "Show all" },
+		]);
+
+		const preview: NativeChild[] = [];
+		const outlined = column ? column.targets[this.#siblingSelected] : this.#targets[this.#selected];
+		if (outlined && props.selected !== null) {
+			// A user turn rewinds past itself (its text returns to the editor); anything else keeps itself.
+			const kept = column || this.#targets[this.#selected]!.isUserTurn ? this.#selected : this.#selected + 1;
+			const dropped = this.#targets.length - kept;
+			preview.push(
+				text(
+					dropped > 0
+						? [
+								span("Continue from here: everything below is dropped", "warning"),
+								span(`${theme.sep.dot}${dropped} turn${dropped === 1 ? "" : "s"}`, "dim"),
+							]
+						: [span("Continue from here: nothing below to drop", "warning")],
+					{ role: "omp.rewind.drop" },
+				),
+				...(column?.builder ?? this.#builder).container.children.slice(outlined.start, outlined.end),
+			);
+		}
+		const root = picker(props, preview);
+		this.#picker = { memo, targets: this.#targets, node: root };
+		return root;
+	}
+
+	#describeCard(): NativeNode {
+		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${this.#filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
+		const cached = this.#native;
+		if (cached?.memo === memo && cached.targets === this.#targets) return cached.node;
+
+		const filter = this.#filter;
+		const children: NativeChild[] = [];
+		const allItems = this.#mainItems();
+		const columns = filter === undefined ? this.#stripColumns() : [];
+		const matches = filter === undefined ? undefined : this.#filterMatches();
+		if (filter !== undefined && matches) {
+			children.push(
+				this.#filterInput!,
+				node(
+					"list",
+					{
+						selected: matches.includes(this.#selected) ? (this.#targets[this.#selected]?.turnId ?? null) : null,
+						filter,
+						empty: `No items match "${filter}"`,
+						virtual: true,
+						max: 0.5,
+					},
+					matches.map(index => allItems[index + (this.#truncated ? 1 : 0)]!),
+					"list",
+				),
+			);
+		} else {
+			children.push(
+				node(
+					"list",
+					{
+						selected: this.#targets[this.#selected]?.turnId ?? null,
+						empty: "Nothing to rewind to",
+						virtual: true,
+						max: 0.5,
+					},
+					allItems,
+					"list",
+				),
+			);
+		}
+		if (columns.length > 0) {
+			children.push(
+				node(
+					"tabs",
+					{
+						items: [
+							{ id: "0", label: "current" },
+							...columns.map((column, index) => ({ id: String(index + 1), label: column.label })),
+						],
+						active: String(this.#activeVariant),
+					},
+					undefined,
+					"branches",
+				),
+			);
+			const column = columns[this.#activeVariant - 1];
+			if (column) {
+				column.nativeItems ??= column.targets.map(target => turnItem(target));
+				children.push(
+					node(
+						"list",
+						{ selected: column.targets[this.#siblingSelected]?.turnId ?? null, virtual: true, max: 0.4 },
+						column.nativeItems,
+						"branch",
+					),
+				);
+			}
+		}
+		const outlined = filter === undefined ? this.#outlinedTarget() : this.#targets[this.#selected];
+		if (outlined && (!matches || matches.includes(this.#selected))) {
+			const item = targetCopy(outlined, collectBlocks(outlined.entries));
+			children.push(
+				node("section", { head: [span(item.label, "strong")] }, [turnPreview(outlined, item.content)], "preview"),
+			);
+		}
+		const upDown = actionHint(["tui.select.up", "tui.select.down"], "step");
+		children.push(
+			hintsRow(
+				filter === undefined
+					? [
+							upDown,
+							{ keys: ["left", "right"], label: columns.length > 0 ? "branches" : "user turns" },
+							{ keys: ["f"], label: "filter" },
+							{ keys: ["enter"], label: "rewind" },
+							this.#truncated ? { keys: ["a"], label: "earlier turns" } : undefined,
+							actionHint("tui.select.cancel", "cancel"),
+						]
+					: [
+							upDown,
+							{ keys: ["left", "right"], label: "user turns" },
+							{ keys: ["enter"], label: "rewind" },
+							actionHint("tui.select.cancel", "show all"),
+						],
+			),
+		);
+		const root = overlayCard(
+			"omp.overlay.rewind",
+			[
+				span(`${theme.icon.rewind} `),
+				span("Rewind", "strong"),
+				span(`${theme.sep.dot}pick the point to continue from`, "dim"),
+			],
+			children,
+		);
+		this.#native = { memo, targets: this.#targets, node: root };
+		return root;
+	}
+
+	#mainItems(): NativeNode[] {
+		const cached = this.#nativeItems;
+		if (cached?.targets === this.#targets && cached.truncated === this.#truncated) return cached.items;
+		const items = this.#targets.map(target => turnItem(target));
+		if (this.#truncated) items.unshift(earlierTurnsItem);
+		this.#nativeItems = { targets: this.#targets, truncated: this.#truncated, items };
+		return items;
 	}
 
 	// ========================================================================
@@ -337,6 +927,7 @@ export class RewindSelectorComponent implements Component {
 		const children = this.#builder.container.children;
 		const prepared = this.#browser.prepareOutline(children, this.#targets, this.#selected, contentWidth);
 		this.#mainVisible = prepared.visible;
+		this.#mainRows = prepared.childRows;
 		if (prepared.selected !== this.#selected) {
 			// The current target collapsed (e.g. expansion toggle): rest on the
 			// nearest visible one and leave the strip.
@@ -344,6 +935,8 @@ export class RewindSelectorComponent implements Component {
 			this.#activeVariant = 0;
 			this.#siblingSelected = 0;
 		}
+
+		if (this.#filter !== undefined) return this.#filterFrame(this.#filter, prepared.childRows, contentWidth);
 
 		const columns = this.#stripColumns();
 		const composed =
@@ -357,16 +950,64 @@ export class RewindSelectorComponent implements Component {
 						prepared,
 					}).column;
 		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const lateral = columns.length > 0 ? "←/→ branches" : "←/→ user turns";
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const leftRight = formatKeyHints(["left", "right"]);
+		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
+		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
 		return {
-			header: [
-				`${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
-			],
+			header: [this.#header()],
 			body: {
 				lines: composed.lines,
 				anchor: this.#outlineAnchor(composed),
 			},
-			footer: [theme.fg("dim", `${position}↑/↓ step  ${lateral}  enter rewind  ctrl+o expand  esc cancel`)],
+			footer: [theme.fg("dim", `${position}${keys}`)],
+		};
+	}
+
+	#header(): string {
+		return `${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`;
+	}
+
+	/** Only the matching items of the current path, concatenated; no branch strip. */
+	#filterFrame(
+		query: string,
+		childRows: readonly (readonly string[])[],
+		contentWidth: number,
+	): TranscriptBrowserFrame {
+		const matches = this.#filterMatches();
+		const rows: (readonly string[])[] = [];
+		const targets: OutlineTarget[] = [];
+		for (const index of matches) {
+			const target = this.#targets[index]!;
+			const start = rows.length;
+			rows.push(...childRows.slice(target.start, target.end));
+			targets.push({ ...target, start, end: rows.length });
+		}
+		const selected = matches.indexOf(this.#selected);
+		const composed = composeOutlineColumn(rows, 0, rows.length, targets, selected, contentWidth, undefined);
+		const lines = matches.length > 0 ? composed.lines : [theme.fg("muted", `  No items match "${query}"`)];
+		const count =
+			matches.length === 0
+				? theme.fg("error", "no matches")
+				: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const keys = `${upDown} step  ${formatKeyHints(["left", "right"])} user turns  ${formatKeyHint("enter")} rewind  ${editorKey("tui.select.cancel")} show all`;
+		return {
+			header: [this.#header()],
+			body: {
+				lines,
+				anchor:
+					composed.selStart >= 0
+						? {
+								id: `rewind:filter:${query}:${this.#targets[this.#selected]?.turnId ?? this.#selected}`,
+								start: composed.selStart,
+								end: composed.selEnd,
+							}
+						: undefined,
+			},
+			footer: [
+				`${this.#filterInput!.render(visibleWidth(`filter: ${query}`) + 1)[0]}  ${count}  ${theme.fg("dim", keys)}`,
+			],
 		};
 	}
 

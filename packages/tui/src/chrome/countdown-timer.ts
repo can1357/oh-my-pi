@@ -1,12 +1,16 @@
 /**
  * Reusable countdown timer for dialog components.
  */
+import { node } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { isNativeRendering } from "../native/state";
 import type { TUI } from "../tui";
 export class CountdownTimer {
 	#intervalId: NodeJS.Timeout | undefined;
 	#expireTimeoutId: NodeJS.Timeout | undefined;
 	#remainingSeconds: number;
 	#deadlineMs = 0;
+	#node: NativeNode | undefined;
 	readonly #initialMs: number;
 
 	constructor(
@@ -28,6 +32,7 @@ export class CountdownTimer {
 	#start(): void {
 		const now = Date.now();
 		this.#deadlineMs = now + this.#initialMs;
+		this.#node = undefined;
 		this.#remainingSeconds = this.#calculateRemainingSeconds(now);
 		this.onTick(this.#remainingSeconds);
 		this.tui?.requestRender();
@@ -37,7 +42,25 @@ export class CountdownTimer {
 			this.onExpire();
 		}, this.#initialMs);
 
-		this.#startInterval();
+		// The per-second tick only repaints the remaining time; a TSP terminal
+		// counts down the described `elapsed` node itself.
+		if (!isNativeRendering()) this.#startInterval();
+	}
+
+	/**
+	 * The remaining time as a terminal-clocked `elapsed` node: its age is the
+	 * negative remaining time (the start lies in the future), so it counts up
+	 * toward zero and freezes there at expiry. The age is taken on the first
+	 * call after a (re)start, when the node is first written, and the node is
+	 * reused until {@link reset}.
+	 */
+	describe(): NativeNode {
+		this.#node ??= node("elapsed", {
+			age: Math.min(0, Date.now() - this.#deadlineMs),
+			stopped: 0,
+			format: "short",
+		});
+		return this.#node;
 	}
 
 	#startInterval(): void {

@@ -11,6 +11,7 @@ import {
 	type SkillInstallHooks,
 	updateSkillPackages,
 } from "../skillshare/installer";
+import { clearSubmittedText } from "./helpers/draft";
 import { errorMessage, parseSubcommand } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
@@ -78,7 +79,7 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const { ctx } = runtime;
-			ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const { verb, rest } = parseSubcommand(command.args);
 			const cwd = ctx.sessionManager.getCwd();
 			try {

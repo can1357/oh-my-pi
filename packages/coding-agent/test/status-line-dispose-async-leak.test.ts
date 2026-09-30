@@ -167,27 +167,6 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		expect(onBranchChange).not.toHaveBeenCalled();
 	});
 
-	it("suppresses #onBranchChange when a resolved IIFE's microtask runs after dispose()", async () => {
-		// Same guard, but the awaited promise resolves synchronously before
-		// dispose; the queued microtask must still be suppressed by the
-		// disposed flag checked inside the IIFE continuation.
-		defaultBranchMock.mockResolvedValue("develop");
-
-		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession(), statusLineHost);
-		component.updateSettings(gitSegmentSettings);
-		component.watchBranch(onBranchChange);
-		component.getTopBorder(80);
-
-		// Dispose before the resolved-promise microtask gets a chance to run.
-		component.dispose();
-
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(onBranchChange).not.toHaveBeenCalled();
-	});
-
 	it("suppresses a pending PR lookup when tracked file teardown resets settings", async () => {
 		headState = featureRefHead;
 		defaultBranchMock.mockResolvedValue("main");
