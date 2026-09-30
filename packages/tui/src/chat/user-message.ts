@@ -196,7 +196,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		if (shape === "box") {
 			const box = new Box(1, 0, undefined, {
 				chars: theme.boxRound,
-				color: (s: string) => theme.fg("border", s),
+				color: (s: string) => theme.fg("borderAccent", s),
 			});
 			box.setIgnoreTight(true);
 			box.addChild(markdown);
@@ -317,7 +317,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		const marker = this.#liveSteered ? theme.fg("accent", "*") : "";
 		const markerLen = this.#liveSteered ? 1 : 0;
 		const emoji = this.#reaction;
-		const color = (s: string) => theme.fg("border", s);
+		const color = (s: string) => theme.fg("borderAccent", s);
 
 		if (!emoji) {
 			if (!this.#liveSteered) return topBorderRow;
