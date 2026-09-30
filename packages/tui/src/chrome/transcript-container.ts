@@ -92,21 +92,9 @@ interface TranscriptEntry {
 
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
-	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number; lead: boolean }
-	| ({ batch: HistoryBatch; kind: "commit"; end: number } & FlushTail)
+	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
+	| { batch: HistoryBatch; kind: "commit"; start: number; end: number }
 	| { batch: HistoryBatch; kind: "replay" };
-
-/**
- * Where a commit batch starts, the older block a capped flush measured and
- * left out, if any, and whether the batch opens with a blank: the separator
- * owed by a fully emitted head that already retired, or by a partly emitted
- * frontier head whose rest the cap leaves out.
- */
-interface FlushTail {
-	start: number;
-	dropped: number | undefined;
-	lead: boolean;
-}
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
 interface AppendBatch {
@@ -187,11 +175,11 @@ export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
 	/**
-	 * A head that progressive append emitted in full retired without the blank
-	 * that follows a block, so the next append or commit batch that writes a row
-	 * opens with it.
+	 * The entry whose rows end native scrollback without the blank that follows
+	 * a block: a head progressive append emitted into it. A batch that writes a
+	 * row from any other entry opens with that blank.
 	 */
-	#separatorOwed = false;
+	#openEntry: TranscriptEntry | undefined;
 	#nextBatchId = 1;
 	#offered: Offered | undefined;
 	#replayPending = false;
@@ -258,7 +246,7 @@ export class TranscriptContainer extends Container {
 		super.clear();
 		this.#entries = [];
 		this.#frontier = 0;
-		this.#separatorOwed = false;
+		this.#openEntry = undefined;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
 		this.#pinnedFrontier = undefined;
@@ -291,6 +279,7 @@ export class TranscriptContainer extends Container {
 	resetStableEmission(): void {
 		this.#syncEntries();
 		if (this.#offered?.kind === "append") this.#offered = undefined;
+		this.#openEntry = undefined;
 		for (const entry of this.#entries) {
 			entry.emitted = 0;
 			entry.stableRows = EMPTY_STABLE_ROWS;
@@ -615,14 +604,19 @@ export class TranscriptContainer extends Container {
 			if (entry === undefined) return undefined;
 			const before = this.#renderStablePrefix(entry, entry.emitted, width);
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
-			rows = withLeadingBlank(after.slice(before.length), offered.lead);
+			rows = withLeadingBlank(after.slice(before.length), this.#opensWithBlank(offered.entry));
 		} else if (offered.kind === "commit") {
 			// A capped #peekBatch measured the frontier head and the block the cap
 			// left out, neither of them in the batch; measure them again so an
 			// image-budget retry counts the images the first pass did.
-			if (offered.start > this.#frontier) this.#measuredRows(this.#entries[this.#frontier]!, width);
-			if (offered.dropped !== undefined) this.#measuredRows(this.#entries[offered.dropped]!, width);
-			rows = withLeadingBlank(this.#renderRange(offered.start, offered.end, width, true).rows, offered.lead);
+			if (offered.start > this.#frontier) {
+				this.#measuredRows(this.#entries[this.#frontier]!, width);
+				this.#measuredRows(this.#entries[offered.start - 1]!, width);
+			}
+			rows = withLeadingBlank(
+				this.#renderRange(offered.start, offered.end, width, true).rows,
+				this.#opensWithBlank(offered.start),
+			);
 		} else {
 			rows = this.#renderReplay(width);
 		}
@@ -700,16 +694,10 @@ export class TranscriptContainer extends Container {
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
-					rows: withLeadingBlank(rows, this.#separatorOwed),
+					rows: withLeadingBlank(rows, this.#opensWithBlank(this.#frontier)),
 					kind: "append",
 				};
-				this.#offered = {
-					batch,
-					kind: "append",
-					entry: this.#frontier,
-					emittedEnd,
-					lead: this.#separatorOwed,
-				};
+				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
 				this.#pinnedFrontier = undefined;
 				return batch;
 			}
@@ -730,35 +718,26 @@ export class TranscriptContainer extends Container {
 		}
 		this.#pinnedFrontier = undefined;
 		pushLoopPhase("ui.transcript-retire");
-		let tail: FlushTail;
+		let start: number;
 		let retirement: { rows: readonly string[]; end: number };
 		try {
 			// Shutdown hands over the whole eligible prefix, or under a cap its
 			// newest whole blocks; a live frame stops at the budget and offers the
 			// rest on the next frames.
-			tail =
-				maxRows === undefined
-					? { start: this.#frontier, dropped: undefined, lead: this.#separatorOwed }
-					: this.#flushTail(end, width, maxRows);
-			retirement = this.#renderRange(
-				tail.start,
-				end,
-				width,
-				true,
-				policy === "flush" ? undefined : RETIREMENT_BUDGET_MS,
-			);
+			start = maxRows === undefined ? this.#frontier : this.#flushTail(end, width, maxRows);
+			retirement = this.#renderRange(start, end, width, true, policy === "flush" ? undefined : RETIREMENT_BUDGET_MS);
 		} finally {
 			popLoopPhase();
 		}
-		if (tail.start > this.#frontier) {
-			logger.debug("Capped history flush skipped older blocks", { skippedBlocks: tail.start - this.#frontier });
+		if (start > this.#frontier) {
+			logger.debug("Capped history flush skipped older blocks", { skippedBlocks: start - this.#frontier });
 		}
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: withLeadingBlank(retirement.rows, tail.lead),
+			rows: withLeadingBlank(retirement.rows, this.#opensWithBlank(start)),
 			kind: "append",
 		};
-		this.#offered = { batch, kind: "commit", end: retirement.end, ...tail };
+		this.#offered = { batch, kind: "commit", start, end: retirement.end };
 		return batch;
 	}
 
@@ -773,15 +752,20 @@ export class TranscriptContainer extends Container {
 			// zero with the offer still live) must not move it backwards.
 			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd <= entry.emitted) return;
 			entry.emitted = offered.emittedEnd;
+			this.#openEntry = entry;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {
 				this.#retireEntry(this.#entries[index]!);
 			}
 			this.#frontier = offered.end;
+			// A batch that wrote a row ends with the blank after its last block.
+			if (offered.batch.rows.length > 0) this.#openEntry = undefined;
+		} else {
+			// A replay rewrites the committed ledger with every separator, then
+			// the head's emitted rows.
+			const head = this.#entries[this.#frontier];
+			this.#openEntry = head !== undefined && head.emitted > 0 ? head : undefined;
 		}
-		// An append or commit that wrote a row opened with the owed blank and paid
-		// it; a replay rewrites the committed ledger with every separator.
-		if (offered.kind === "replay" || (offered.lead && offered.batch.rows.length > 0)) this.#separatorOwed = false;
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
 	}
@@ -1024,34 +1008,28 @@ export class TranscriptContainer extends Container {
 	 * its last row, moving the cursor up over the rows it reserved, and cut off
 	 * from them it would paint over whatever precedes the batch. The newest
 	 * non-empty block stays whole even when it alone passes `maxRows`: dropping
-	 * it would leave scrollback without the last message. A frontier head that
-	 * progressive append has partly emitted already sits in scrollback without
-	 * its trailing separator; a batch that leaves its rest out opens with that
-	 * blank, and it counts against `maxRows`. The walk measures newest-first and
-	 * stops at the first block that does not fit (`dropped`), or before it once
-	 * no block could, so older blocks never render, apart from the frontier head
-	 * #peekBatch has already measured.
+	 * it would leave scrollback without the last message. The blank the batch
+	 * opens with (see #opensWithBlank) counts against `maxRows`. The walk
+	 * measures newest-first and stops at the first block that does not fit, so
+	 * the only older block it renders is that one.
 	 */
-	#flushTail(end: number, width: number, maxRows: number): FlushTail {
-		const head = this.#entries[this.#frontier]!;
-		const headEmitted = head.mode === "appendOnly" && head.emitted > 0;
-		const owed = this.#separatorOwed;
-		const skipsHead = owed || headEmitted;
+	#flushTail(end: number, width: number, maxRows: number): number {
 		let rows = 0;
 		for (let index = end - 1; index >= this.#frontier; index--) {
-			// A non-empty block adds its rows and one blank: the separator after
-			// it, or the trailing blank. The oldest block also brings any blank
-			// owed: always after a retired fully emitted head, and below the
-			// head when a partly emitted head is left out.
-			const lead = owed || (headEmitted && index > this.#frontier) ? 1 : 0;
-			if (rows > 0 && rows + 2 + lead > maxRows) return { start: index + 1, dropped: undefined, lead: skipsHead };
 			const height = this.#liveBlockRows(this.#entries[index]!, index, width).length;
 			if (height === 0) continue;
-			if (rows > 0 && rows + height + 1 + lead > maxRows)
-				return { start: index + 1, dropped: index, lead: skipsHead };
+			// A block adds its rows and the blank after it; as the oldest block of
+			// the batch it also brings the blank the batch opens with.
+			const lead = this.#opensWithBlank(index) ? 1 : 0;
+			if (rows > 0 && rows + height + 1 + lead > maxRows) return index + 1;
 			rows += height + 1;
 		}
-		return { start: this.#frontier, dropped: undefined, lead: owed };
+		return this.#frontier;
+	}
+
+	/** Whether a batch starting at `index` opens with a blank: native scrollback ends inside another entry. */
+	#opensWithBlank(index: number): boolean {
+		return this.#openEntry !== undefined && this.#openEntry !== this.#entries[index];
 	}
 
 	/**
@@ -1115,8 +1093,6 @@ export class TranscriptContainer extends Container {
 			if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			this.#retireEntry(entry);
 			this.#frontier++;
-			// Its rows are in scrollback without the blank that follows a block.
-			if (rendered.length > 0) this.#separatorOwed = true;
 		}
 	}
 

@@ -826,14 +826,31 @@ describe("TranscriptContainer", () => {
 		]);
 	});
 
-	it("an exit flush renders no block older than its tail when the tail ends exactly on the cap", () => {
+	it("an exit flush renders only the one older block it leaves out when the tail ends exactly on the cap", () => {
 		const transcript = new TranscriptContainer();
 		const blocks = Array.from({ length: 4 }, (_, i) => new CountingBlock([`b${i}r0`, `b${i}r1`, `b${i}r2`]));
 		for (const block of blocks) transcript.addChild(block);
 		// The newest block plus the trailing blank is exactly four rows.
 		expect(transcript.peekFlushBatch(40, 4)!.rows).toEqual(["b3r0", "b3r1", "b3r2", ""]);
-		// Block 0, the frontier head, is measured before any policy; blocks 1-2 never render.
-		expect(blocks.slice(1, 3).map(block => block.renders)).toEqual([0, 0]);
+		// Block 0, the frontier head, is measured before any policy; block 2 is measured
+		// to find it does not fit, and block 1 never renders.
+		expect(blocks.slice(1, 3).map(block => block.renders)).toEqual([0, 1]);
+	});
+
+	it("an exit flush keeps a partly emitted head's rest that fits, across an empty block", () => {
+		const transcript = new TranscriptContainer();
+		const head = new AppendBlock(["a0", "a1", "a2", "a3"], ["a0", "a1"]);
+		transcript.addChild(head);
+		transcript.renderViewport(80, 2, frame);
+		const emitted = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+		head.finalize(["a0", "a1", "a2"]);
+		transcript.addChild(new Block([], true));
+		const newest = Array.from({ length: 7 }, (_, i) => `c${i}`);
+		transcript.addChild(new Block(newest, true));
+		// The head's rest, the newest block and their blanks are exactly 10 rows.
+		const batch = transcript.peekFlushBatch(80, 10)!;
+		expect([...emitted.rows, ...batch.rows]).toEqual(["a0", "a1", "a2", "", ...newest, ""]);
 	});
 
 	it("an exit flush still stops at the first block that is not settled", () => {
