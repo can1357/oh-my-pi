@@ -29,10 +29,11 @@ describe("renderMarkdownHead", () => {
 	});
 
 	it("renders the head of a bracket-heavy document faster than the whole document", () => {
-		// 30,000 `[` on one line inside a fence, with no `]:` anywhere, past the
-		// first probe window: the reference-definition check has to rule out a
-		// `[label]:` starting at every one of them before the head can be cut.
-		const doc = `${paragraphs(200)}\n\n\`\`\`\n${"[".repeat(30_000)}\n\`\`\`\n\n${paragraphs(2000)}\n`;
+		// 30,000 `[` on one line inside a fence, past the first probe window, then
+		// a `]:` on a line that opens no bracket: the reference-definition check
+		// has to scan past the whole run before the head can be cut, so a scan
+		// that restarts at every `[` costs quadratic time here.
+		const doc = `${paragraphs(200)}\n\n\`\`\`\n${"[".repeat(30_000)}\n\`\`\`\n\nA note]: no bracket opens it.\n\n${paragraphs(2000)}\n`;
 		const head = bestOf3(() => renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12));
 		const full = elapsed(() => new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120));
 		expect(head).toBeLessThan(full);
