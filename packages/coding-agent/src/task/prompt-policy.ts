@@ -9,3 +9,11 @@ export function sessionDelegationBias(session: ToolSession): DelegationBias {
 	const model = session.getActiveModel?.();
 	return model ? resolveDelegationBias(model) : "eager";
 }
+
+/**
+ * Whether tool descriptions should steer the model toward `task` subagents:
+ * the bias is `eager` and the session can actually call `task`.
+ */
+export function sessionPrefersTaskDelegation(session: ToolSession): boolean {
+	return sessionDelegationBias(session) === "eager" && (session.isToolActive?.("task") ?? true);
+}

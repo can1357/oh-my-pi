@@ -10,7 +10,7 @@ import { getEditStore } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
-import { sessionDelegationBias } from "../task/prompt-policy";
+import { sessionPrefersTaskDelegation } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -135,7 +135,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 	readonly summary = "Search code with AST patterns (structural grep)";
 	get description(): string {
 		return prompt.render(astGrepDescription, {
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
+			eagerDelegation: sessionPrefersTaskDelegation(this.session),
 			scoutAvailable: isScoutSpawnable(
 				cfgTaskDisabledAgents.get(this.session.settings),
 				this.session.getSessionSpawns?.() ?? "*",

@@ -676,6 +676,27 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("use `eval` cells");
 	});
 
+	it("steers search tools toward Task only when the task tool is active", async () => {
+		const searchToolNames = ["grep", "glob", "ast_grep"];
+		const describeSearchTools = async (settings: Settings) => {
+			const tools = await createTools(makeToolSession(settings), [...searchToolNames, "task"]);
+			return {
+				hasTask: tools.some(tool => tool.name === "task"),
+				descriptions: searchToolNames.map(name => tools.find(tool => tool.name === name)?.description ?? ""),
+			};
+		};
+
+		const withTask = await describeSearchTools(Settings.isolated({ "astGrep.enabled": true }));
+		const withoutTask = await describeSearchTools(
+			Settings.isolated({ "astGrep.enabled": true, "task.maxRecursionDepth": 0 }),
+		);
+
+		expect(withTask.hasTask).toBe(true);
+		for (const description of withTask.descriptions) expect(description).toMatch(/\bTask\b/);
+		expect(withoutTask.hasTask).toBe(false);
+		for (const description of withoutTask.descriptions) expect(description).not.toMatch(/\bTask\b/);
+	});
+
 	it("SDK wrapper renders provided tools instead of the fallback inventory", async () => {
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,

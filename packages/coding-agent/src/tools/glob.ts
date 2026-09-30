@@ -8,7 +8,7 @@ import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { sessionDelegationBias } from "../task/prompt-policy";
+import { sessionPrefersTaskDelegation } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
@@ -91,7 +91,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	get description(): string {
 		return prompt.render(globDescription, {
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
+			eagerDelegation: sessionPrefersTaskDelegation(this.session),
 			scoutAvailable: isScoutSpawnable(
 				cfgTaskDisabledAgents.get(this.session.settings),
 				this.session.getSessionSpawns?.() ?? "*",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `grep`, `glob` and `ast_grep` telling the model to delegate to Task when subagents are unavailable (e.g. `task.maxRecursionDepth: 0`) ([#13924](https://github.com/can1357/oh-my-pi/pull/13924) by [@jakvbs](https://github.com/jakvbs))
+
 ## [18.4.5] - 2026-09-30
 
 ### Added
