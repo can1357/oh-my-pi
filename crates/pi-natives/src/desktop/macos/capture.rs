@@ -1,11 +1,16 @@
 use std::{
 	collections::HashSet,
+	ffi::c_void,
+	mem,
 	process::{Command, Stdio},
+	ptr::NonNull,
+	sync::LazyLock,
 	thread,
 	time::{Duration, Instant},
 };
 
 use image::{DynamicImage, Rgba, RgbaImage, imageops::FilterType};
+use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CFType};
 use xcap::{Monitor, Window};
 
 use super::{
@@ -31,6 +36,58 @@ pub(super) fn capture_permission() -> bool {
 	unsafe { CGPreflightScreenCaptureAccess() }
 }
 
+type CreateDisplayInfoFn = unsafe extern "C" fn(display_id: u32) -> *const CFDictionary;
+
+/// `CoreDisplay_DisplayCreateInfoDictionary`, resolved once per process.
+static CREATE_DISPLAY_INFO: LazyLock<Option<CreateDisplayInfoFn>> = LazyLock::new(|| {
+	let path = c"/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay";
+	// SAFETY: `path` is a static NUL-terminated framework path; the handle is
+	// intentionally process-lived.
+	let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) };
+	if handle.is_null() {
+		return None;
+	}
+	// SAFETY: `handle` is a live dlopen handle and the name is NUL-terminated.
+	let raw = unsafe { libc::dlsym(handle, c"CoreDisplay_DisplayCreateInfoDictionary".as_ptr()) };
+	if raw.is_null() {
+		return None;
+	}
+	// SAFETY: CoreDisplay exports this symbol as
+	// `CFDictionaryRef (*)(CGDirectDisplayID)`, which `CreateDisplayInfoFn` spells.
+	Some(unsafe { mem::transmute::<*mut c_void, CreateDisplayInfoFn>(raw) })
+});
+
+/// The product name the system records for a display, such as "Color LCD".
+///
+/// xcap's `Monitor::friendly_name` reads `NSScreen.localizedName` instead. The
+/// first `NSScreen` call initializes `AppKit`, and `AppKit` registers an
+/// unbundled process like omp as a regular application, so every session
+/// that listed displays gained a Dock icon until it exited. `CoreDisplay`
+/// reads the same display records without `AppKit`.
+fn display_product_name(display_id: u32) -> Option<String> {
+	let create = (*CREATE_DISPLAY_INFO)?;
+	// SAFETY: `create` has the exported signature and accepts any display ID;
+	// unknown IDs return NULL.
+	let info = NonNull::new(unsafe { create(display_id) }.cast_mut())?;
+	// SAFETY: A `Create` function returns a +1 reference, adopted exactly once.
+	let info = unsafe { CFRetained::from_raw(info) };
+	// SAFETY: The info dictionary is keyed by CFString; values are checked below.
+	let info = unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(info) };
+	let names = info
+		.get(&CFString::from_str("DisplayProductName"))?
+		.downcast::<CFDictionary>()
+		.ok()?;
+	// SAFETY: `DisplayProductName` maps locale identifiers to localized names.
+	let names = unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFString>>(names) };
+	// Agents read these names; keep them in one language instead of the
+	// session user's locale.
+	if let Some(name) = names.get(&CFString::from_str("en_US")) {
+		return Some(name.to_string());
+	}
+	let (_, localized) = names.to_vecs();
+	localized.first().map(ToString::to_string)
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct MacCapture {
 	selector: DisplaySelector,
@@ -52,7 +109,8 @@ impl MacCapture {
 		})?;
 		let mut displays = Vec::with_capacity(monitors.len());
 		for monitor in monitors {
-			let id = monitor.id().map_err(metadata_error)?.to_string();
+			let display_id = monitor.id().map_err(metadata_error)?;
+			let id = display_id.to_string();
 			if matches!(&self.selector, DisplaySelector::Id(selected) if selected != &id) {
 				continue;
 			}
@@ -61,13 +119,9 @@ impl MacCapture {
 			let width = monitor.width().map_err(metadata_error)?;
 			let height = monitor.height().map_err(metadata_error)?;
 			let scale = f64::from(monitor.scale_factor().map_err(metadata_error)?);
-			// xcap's macOS friendly_name path matches CGDirectDisplayID to
-			// NSScreenNumber, then returns NSScreen.localizedName(). Keep the
-			// model-number name as fallback.
-			let name = monitor
-				.friendly_name()
-				.or_else(|_| monitor.name())
-				.unwrap_or_else(|_| format!("Display {id}"));
+			let name = display_product_name(display_id)
+				.or_else(|| monitor.name().ok())
+				.unwrap_or_else(|| format!("Display {id}"));
 			displays.push(DesktopDisplay {
 				id,
 				name,
