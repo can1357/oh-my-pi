@@ -3,7 +3,7 @@ import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
-import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseModelString, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
@@ -1071,6 +1071,34 @@ describe("resolveModelRoleValue", () => {
 		expect(result.thinkingLevel).toBe("auto");
 		expect(result.explicitThinkingLevel).toBe(true);
 		expect(result.warning).toBeUndefined();
+	});
+
+	test("preserves an explicit :auto:<floor> suffix as an explicit thinking selector", () => {
+		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:auto:medium", allModels);
+
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.thinkingLevel).toBe("auto:medium");
+		expect(result.explicitThinkingLevel).toBe(true);
+		expect(result.warning).toBeUndefined();
+	});
+
+	test("correctly splits auto thinking with floor suffix via splitThinkingSuffix", () => {
+		const splitWithFloor = splitThinkingSuffix("anthropic/claude-sonnet-4-5:auto:high", -1, { allowAutoAlias: true });
+		expect(splitWithFloor.base).toBe("anthropic/claude-sonnet-4-5");
+		expect(splitWithFloor.level).toBe("auto:high");
+
+		const splitPlainAuto = splitThinkingSuffix("anthropic/claude-sonnet-4-5:auto", -1, { allowAutoAlias: true });
+		expect(splitPlainAuto.base).toBe("anthropic/claude-sonnet-4-5");
+		expect(splitPlainAuto.level).toBe("auto");
+
+		const splitMaxFloor = splitThinkingSuffix("anthropic/claude-sonnet-4-5:auto:max", -1, { allowAutoAlias: true });
+		expect(splitMaxFloor.level).not.toBe("auto:max");
+
+		const splitInvalidFloor = splitThinkingSuffix("anthropic/claude-sonnet-4-5:auto:invalid", -1, {
+			allowAutoAlias: true,
+		});
+		expect(splitInvalidFloor.level).not.toBe("auto:invalid");
 	});
 });
 describe("resolveAgentPrewalkPattern", () => {

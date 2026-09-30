@@ -25,7 +25,7 @@ import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 import { prompt } from "@oh-my-pi/pi-utils";
 
-import { cfgProvidersAutoThinkingMaxEffort } from "../session/settings";
+import { cfgProvidersAutoThinkingMaxEffort, cfgProvidersAutoThinkingMinEffort } from "../session/settings";
 
 type Level = "low" | "medium" | "high" | "xhigh" | "max";
 type Bucket = "trivial" | "moderate" | "hard";
@@ -112,6 +112,15 @@ export interface ClassifyDifficultyDeps {
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	onUsage?: (usage: JudgmentUsage) => void;
 	telemetry?: AgentTelemetryConfig;
+	minEffort?: Effort;
+}
+
+/**
+ * Lowest effort this turn's classification may resolve to: an explicit floor
+ * (e.g. from an `auto:medium` selector) or the configured minimum effort setting.
+ */
+function autoEffortFloor(deps: ClassifyDifficultyDeps): Effort {
+	return deps.minEffort ?? cfgProvidersAutoThinkingMinEffort.get(deps.settings);
 }
 
 /**
@@ -165,8 +174,9 @@ export async function classifyDifficulty(
 		const { answers } = await candidate.judge({ state, questions: { level } }, options);
 		return { effort: LEVEL_EFFORT[answers.level.choice], ceiling };
 	}, options);
-	// The successful branch's ceiling goes into the clamp itself: capping the
+	// The successful branch's ceiling and floor go into the clamp itself: capping the
 	// request alone is not enough, because a sparse ladder snaps an excluded
 	// request back up.
-	return clampAutoThinkingEffort(deps.model, classified.effort, classified.ceiling);
+	const floor = autoEffortFloor(deps);
+	return clampAutoThinkingEffort(deps.model, classified.effort, classified.ceiling, floor);
 }

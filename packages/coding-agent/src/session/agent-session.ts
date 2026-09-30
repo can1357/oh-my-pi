@@ -210,8 +210,9 @@ import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
 import { toolReadsSkillUris } from "../system-prompt";
 import {
-	AUTO_THINKING,
+	type AutoThinkingLevel,
 	type ConfiguredThinkingLevel,
+	isAutoThinking,
 	parseConfiguredThinkingLevel,
 	shouldDisableReasoning,
 	toReasoningEffort,
@@ -10657,7 +10658,10 @@ export class AgentSession implements SettingsScope {
 		const previousUsagePreflightReadyModel = this.#usagePreflightReadyModel;
 		const previousModel = this.model;
 		const previousThinkingLevel = this.thinkingLevel;
-		const previousAutoThinking = this.isAutoThinking;
+		const previousConfiguredThinking = this.configuredThinkingLevel();
+		const previousAutoThinking: boolean | AutoThinkingLevel = isAutoThinking(previousConfiguredThinking)
+			? previousConfiguredThinking
+			: this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
@@ -10821,9 +10825,9 @@ export class AgentSession implements SettingsScope {
 			// still classify their first turn.
 			const restoredConfigured = sessionContext.configuredThinkingLevel;
 			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? restoredConfigured === AUTO_THINKING
-						? AUTO_THINKING
+				hasThinkingEntry || (isAutoThinking(defaultThinkingLevel) && sessionContext.thinkingLevel !== "off")
+					? isAutoThinking(restoredConfigured)
+						? parseConfiguredThinkingLevel(restoredConfigured)
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);

@@ -142,6 +142,46 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
+	it("activates auto thinking with floor when cycling into a role whose value carries an explicit :auto:<floor> suffix", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}`,
+				smol: `${smolModel.provider}/${smolModel.id}:auto:medium`,
+			},
+		});
+
+		const toSmol = await session.cycleRoleModels(["default", "smol"]);
+		expect(toSmol?.role).toBe("smol");
+		expect(toSmol?.model.id).toBe(smolModel.id);
+		expect(session.configuredThinkingLevel()).toBe("auto:medium");
+	});
+
+	it("respects auto:<floor> when set explicitly and clamps classifier result to floor", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		// Classifier returns Low, but floor is Medium
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+
+		session.setThinkingLevel("auto:medium");
+		expect(session.configuredThinkingLevel()).toBe("auto:medium");
+
+		await session.prompt("Implement a focused parser fix");
+
+		expect(session.configuredThinkingLevel()).toBe("auto:medium");
+		expect(session.thinkingLevel).toBe(Effort.Medium);
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+	});
+
 	it("preserves current thinking when switching into default/no-suffix role", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -514,6 +554,81 @@ describe("AgentSession role model thinking behavior", () => {
 		// Resumes in auto and pending — not frozen to the last resolved level, and
 		// not pre-seeded; the next user turn reclassifies.
 		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("resumes in auto mode with configured floor (auto:medium) without pinning to concrete effort", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(model, Effort.Medium),
+			},
+		});
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionSettings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: "auto:medium",
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+
+		await session.prompt("Implement a simple fix");
+
+		// Clamped to floor Medium despite classifier resolving to Low
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe("auto:medium");
+		expect(session.thinkingLevel).toBe(Effort.Medium);
+		session.sessionManager.appendMessage(createAssistantMessage("done"));
+
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await session.sessionManager.flush();
+
+		expect(await session.switchSession(sessionFile!)).toBe(true);
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe("auto:medium");
+		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("preserves auto:<floor> selector on failed session switch rollback", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(model, Effort.High),
+			},
+		});
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionSettings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: "auto:high",
+		});
+		expect(session.configuredThinkingLevel()).toBe("auto:high");
+		expect(session.isAutoThinking).toBe(true);
+
+		const failure = new Error("switch failure");
+		vi.spyOn(sessionManager, "setSessionFile").mockRejectedValueOnce(failure);
+
+		await expect(session.switchSession(path.join(tempDir.path(), "non-existent.jsonl"))).rejects.toBe(failure);
+
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe("auto:high");
 	});
 
 	it("keeps a manual concrete pin (not auto) on resume even when the global default is auto", async () => {

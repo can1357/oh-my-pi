@@ -222,9 +222,10 @@ import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
-	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	isAutoThinking,
+	parseAutoThinkingFloor,
 	parseConfiguredThinkingLevel,
 	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
@@ -314,6 +315,7 @@ import {
 	cfgInlineToolDescriptors,
 	cfgPersonality,
 	cfgProviderAppendOnlyContext,
+	cfgProvidersAutoThinkingMinEffort,
 	cfgProvidersCacheWarming,
 	cfgProvidersKimiApiFormat,
 	cfgRetryFallbackChains,
@@ -1974,8 +1976,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		return level;
 	};
+
+	const resolveInitialEffectiveThinkingLevel = (
+		selectedModel: Model,
+		configuredLevel: ConfiguredThinkingLevel | undefined,
+	): ThinkingLevel | undefined => {
+		if (isAutoThinking(configuredLevel)) {
+			const floor = parseAutoThinkingFloor(configuredLevel) ?? cfgProvidersAutoThinkingMinEffort.get(settings);
+			return resolveProvisionalAutoLevel(selectedModel, floor);
+		}
+		return resolveThinkingLevelForModel(selectedModel, concreteThinkingLevel(configuredLevel));
+	};
+
 	let thinkingLevel = pickInitialThinkingLevel(model);
-	let autoThinking = thinkingLevel === AUTO_THINKING;
+	let autoThinking = isAutoThinking(thinkingLevel);
 	// Concrete level the agent/session start with. With `auto` this is the
 	// provisional level shown until the first per-turn classification resolves;
 	// `auto` itself stays a session-only concept handled by AgentSession.
@@ -1983,9 +1997,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	if (model) {
 		const resolvedModel = model;
 		effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-			autoThinking
-				? resolveProvisionalAutoLevel(resolvedModel)
-				: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
+			resolveInitialEffectiveThinkingLevel(resolvedModel, thinkingLevel),
 		);
 		// Fire-and-forget TLS+H2 handshake to the model's host so it overlaps
 		// with the rest of session setup (extension/skill load, tool registry,
@@ -2682,12 +2694,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
 						thinkingLevel = pickInitialThinkingLevel(restoredModel);
-						autoThinking = thinkingLevel === AUTO_THINKING;
+						autoThinking = isAutoThinking(thinkingLevel);
 						effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
 						effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-							autoThinking
-								? resolveProvisionalAutoLevel(restoredModel)
-								: resolveThinkingLevelForModel(restoredModel, effectiveThinkingLevel),
+							resolveInitialEffectiveThinkingLevel(restoredModel, thinkingLevel),
 						);
 						preconnectModelHost(restoredModel.baseUrl);
 						return true;
@@ -3016,12 +3026,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoredSessionThinkingLevel = selectedThinkingLevel;
 				}
 				thinkingLevel = pickInitialThinkingLevel(selectedModel);
-				autoThinking = thinkingLevel === AUTO_THINKING;
+				autoThinking = isAutoThinking(thinkingLevel);
 				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
 				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-					autoThinking
-						? resolveProvisionalAutoLevel(selectedModel)
-						: resolveThinkingLevelForModel(selectedModel, effectiveThinkingLevel),
+					resolveInitialEffectiveThinkingLevel(selectedModel, thinkingLevel),
 				);
 				if (usageFallbackReason) {
 					const target = formatModelSelectorValue(
@@ -3075,12 +3083,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
 				// so the role's explicit selector (e.g. `:max`) now applies.
 				thinkingLevel = pickInitialThinkingLevel(resolvedDefaultModel);
-				autoThinking = thinkingLevel === AUTO_THINKING;
+				autoThinking = isAutoThinking(thinkingLevel);
 				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
 				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-					autoThinking
-						? resolveProvisionalAutoLevel(resolvedDefaultModel)
-						: resolveThinkingLevelForModel(resolvedDefaultModel, effectiveThinkingLevel),
+					resolveInitialEffectiveThinkingLevel(resolvedDefaultModel, thinkingLevel),
 				);
 				preconnectModelHost(resolvedDefaultModel.baseUrl);
 				return true;
@@ -3170,12 +3176,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (refreshedModel !== selectedModel) {
 				model = refreshedModel;
 				thinkingLevel = pickInitialThinkingLevel(refreshedModel);
-				autoThinking = thinkingLevel === AUTO_THINKING;
+				autoThinking = isAutoThinking(thinkingLevel);
 				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
 				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
-					autoThinking
-						? resolveProvisionalAutoLevel(refreshedModel)
-						: resolveThinkingLevelForModel(refreshedModel, effectiveThinkingLevel),
+					resolveInitialEffectiveThinkingLevel(refreshedModel, thinkingLevel),
 				);
 			}
 		}
@@ -4430,7 +4434,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigs: discoveredAdvisors.advisors,
 			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
-			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+			thinkingLevel: isAutoThinking(thinkingLevel) ? thinkingLevel : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
