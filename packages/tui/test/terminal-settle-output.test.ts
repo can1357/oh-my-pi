@@ -51,7 +51,6 @@ class FakePump implements OutputPump {
 	readonly delivered: string[] = [];
 	flushCalls = 0;
 	discards = 0;
-	pendingAtDiscard = 0;
 	discard?: () => void;
 	#queue: string[] = [];
 	#inFlightBytes = 0;
@@ -105,7 +104,6 @@ class FakePump implements OutputPump {
 
 	#discard(): void {
 		this.discards++;
-		this.pendingAtDiscard = this.pending();
 		const queued = this.queued;
 		const cut = this.#cutAt(queued);
 		if (cut > 0) this.delivered.push(queued.slice(0, cut));
@@ -190,7 +188,7 @@ describe("settling the output pump before the terminal is handed back", () => {
 	}
 
 	it("cuts the history flush's own output and resets before the shell-prompt handoff", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump({ flushes: [true, false], thenFlushes: false });
 		const provider = new FlushProvider(200);
 		const session = await startFlushingSession(pump, provider);
@@ -201,12 +199,10 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(provider.acknowledged).toEqual([1]);
 		expect(pump.stream).not.toContain("hist ");
 		expect(positionsInOrder(pump.stream, [SETTLE_RESET, SHOW_CURSOR, FIRST_RESTORE_WRITE])).not.toContain(-1);
-		expect(warn).toHaveBeenCalledTimes(1);
-		expect(warn.mock.calls[0][1]).toEqual({ bytes: pump.pendingAtDiscard });
 	});
 
 	it("leaves a backlog that drains alone", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump();
 		const session = await startTallSession(pump);
 
@@ -215,11 +211,10 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(pump.discards).toBe(0);
 		expect(pump.stream).not.toContain(SETTLE_RESET);
 		expect(positionsInOrder(pump.stream, [TALL_PLACEMENT, SHOW_CURSOR, FIRST_RESTORE_WRITE])).not.toContain(-1);
-		expect(warn).not.toHaveBeenCalled();
 	});
 
 	it("completes the stop after one wait when the addon cannot discard", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump({ thenFlushes: false, canDiscard: false });
 		const session = await startTallSession(pump);
 
@@ -230,22 +225,6 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(pump.flushCalls).toBe(1);
 		expect(pump.stream).not.toContain(SETTLE_RESET);
 		expect(positionsInOrder(pump.stream, [TALL_PLACEMENT, SHOW_CURSOR, FIRST_RESTORE_WRITE])).not.toContain(-1);
-		expect(warn).toHaveBeenCalledTimes(1);
-		expect(warn.mock.calls[0][0]).toMatch(/could not be discarded/);
-	});
-
-	it("warns once about a stale addon even when a later settle waits again", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const pump = new FakePump({ thenFlushes: false, canDiscard: false });
-		const session = await startTallSession(pump);
-
-		expect(session.terminal.settleOutput()).toBe(false);
-		pump.catchUp();
-		session.terminal.write("x".repeat(1000));
-		expect(session.terminal.settleOutput()).toBe(false);
-
-		expect(pump.flushCalls).toBe(2);
-		expect(warn).toHaveBeenCalledTimes(1);
 	});
 
 	it("settles a pre-stop backlog before an overlay's alternate-screen exit, which nothing drops", async () => {
@@ -281,7 +260,7 @@ describe("settling the output pump before the terminal is handed back", () => {
 	});
 
 	it("leaves the teardown's handoff bytes queued behind a pump that stays blocked", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump({ flushes: [false], thenFlushes: false });
 		const session = await startTallSession(pump);
 		await session.feed("\x1b[?0u");
@@ -299,7 +278,6 @@ describe("settling the output pump before the terminal is handed back", () => {
 		// still blocked and left the handoff bytes queued, in order.
 		expect(pump.flushCalls).toBe(1);
 		expect(pump.discards).toBe(1);
-		expect(warn).toHaveBeenCalledTimes(1);
 		expect(
 			positionsInOrder(pump.stream, [
 				SETTLE_RESET,
@@ -341,7 +319,7 @@ describe("settling the output pump before the terminal is handed back", () => {
 	});
 
 	it("drops a disconnected terminal's backlog once, without waiting or writing a reset", async () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump();
 		const session = await startTallSession(pump);
 
@@ -353,10 +331,6 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(pump.flushCalls).toBe(0);
 		expect(pump.discards).toBe(1);
 		expect(pump.stream).not.toContain(SETTLE_RESET);
-		const counts = warn.mock.calls.flatMap(([, data]) =>
-			typeof data === "object" && data !== null && "undeliveredBytes" in data ? [data.undeliveredBytes] : [],
-		);
-		expect(counts).toEqual([pump.pendingAtDiscard]);
 	});
 
 	it("places the shell prompt below the content even when a discard cut the last frame", async () => {

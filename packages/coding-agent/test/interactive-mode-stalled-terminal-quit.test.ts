@@ -12,19 +12,16 @@ const SETTLE_RESET = "\x1b\\\x1b[?2026l\x1b[0m\x1b]8;;\x07\x1b[?25h";
 const STOP_RESTORE = "\x1b[?2004l\x1b[?5522l";
 const HINT = "Resume this session with";
 
-function loadPtyLibc() {
-	return dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
-		grantpt: { args: [FFIType.i32], returns: FFIType.i32 },
-		unlockpt: { args: [FFIType.i32], returns: FFIType.i32 },
-		ptsname_r: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
-	});
-}
-
-/** No PTY helpers (Windows, or a libc under another name such as musl's): skip. */
+/**
+ * No pseudo-terminal here (Windows, a libc under another name such as musl's,
+ * or no /dev/ptmx or devpts): skip.
+ */
 function canOpenPty(): boolean {
 	if (process.platform === "win32") return false;
 	try {
-		loadPtyLibc().close();
+		const { master, slave } = openPty();
+		fs.closeSync(slave);
+		fs.closeSync(master);
 		return true;
 	} catch {
 		return false;
@@ -37,7 +34,11 @@ function canOpenPty(): boolean {
  * does on a terminal that stopped reading.
  */
 function openPty(): { master: number; slave: number } {
-	const libc = loadPtyLibc();
+	const libc = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
+		grantpt: { args: [FFIType.i32], returns: FFIType.i32 },
+		unlockpt: { args: [FFIType.i32], returns: FFIType.i32 },
+		ptsname_r: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+	});
 	try {
 		const { O_RDWR, O_NOCTTY } = fs.constants;
 		const master = fs.openSync("/dev/ptmx", O_RDWR | O_NOCTTY);
