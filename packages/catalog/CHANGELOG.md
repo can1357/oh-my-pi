@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Cursor Grok 4.7 staying one row per effort id, so the effort selector now switches the request between `grok-4.7-low`, `medium`, `high`, and `xhigh` (and the `-fast` lane) instead of leaving the wire id unchanged.
+- Fixed Cursor Grok 4.7 staying one row per effort id, so the effort selector now switches the request between `grok-4.7-low`, `medium`, `high`, and `xhigh` (and the `-fast` lane) instead of leaving the wire id unchanged ([#13899](https://github.com/can1357/oh-my-pi/pull/13899) by [@tkossak](https://github.com/tkossak)).
 
 ## [18.4.4] - 2026-09-29
 
