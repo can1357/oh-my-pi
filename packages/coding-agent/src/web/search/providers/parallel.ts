@@ -16,7 +16,7 @@ import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, toSearchSources, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, siteHosts, toSearchSources, withHardTimeout } from "./utils";
 
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 40;
@@ -58,16 +58,6 @@ const RECENCY_DAYS: Record<NonNullable<SearchParams["recency"]>, number> = {
 	year: 365,
 };
 
-/** Site values may carry paths (`github.com/anthropics`); Parallel takes bare hosts. */
-function toHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
-}
-
 /**
  * Map parsed `site:`/`-site:`/`after:` directives and the relative recency
  * option onto Parallel's `source_policy`. An explicit `after:` bound wins.
@@ -77,8 +67,8 @@ function toHosts(sites: readonly string[]): string[] {
  */
 function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency"]): ParallelSourcePolicy | undefined {
 	const policy: ParallelSourcePolicy = {};
-	const include = toHosts(parsed.sites);
-	const exclude = toHosts(parsed.excludedSites);
+	const include = siteHosts(parsed.sites);
+	const exclude = siteHosts(parsed.excludedSites);
 	if (include.length) policy.include_domains = include;
 	else if (exclude.length) policy.exclude_domains = exclude;
 	if (parsed.after) policy.after_date = parsed.after;

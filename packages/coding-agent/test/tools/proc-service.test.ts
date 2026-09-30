@@ -357,7 +357,6 @@ describe("bash services via proc://", () => {
 				ready: { log: "REPLACED", host: "", timeout: 5 },
 				pty: false,
 				async: false,
-				env: {},
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
 			const write = new WriteTool(session);
@@ -430,7 +429,6 @@ describe("bash services via proc://", () => {
 				async: false,
 				name: "",
 				ready: { log: "", port: 1, host: "", timeout: 1 },
-				env: {},
 			});
 			expect(materialized.details?.service).toBeUndefined();
 			expect(textOf(materialized)).toContain("PLAIN");
@@ -440,19 +438,11 @@ describe("bash services via proc://", () => {
 				command: "printf 'BLANK\\n'",
 				name: "   ",
 				ready: { log: "", host: "" },
-				env: {},
 			});
 			expect(blank.details?.service).toBeUndefined();
 			expect(textOf(blank)).not.toContain("Ignored");
 
-			const orphanEnv = await bash.execute("orphan-env", {
-				command: "printf 'ENV\\n'",
-				env: { SERVICE_ONLY: "1" },
-			});
-			expect(orphanEnv.details?.service).toBeUndefined();
-			expect(textOf(orphanEnv)).toContain("Ignored env");
-
-			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'", "printf 'ENV\\n'"]);
+			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'"]);
 		} finally {
 			spy.mockRestore();
 		}

@@ -1,5 +1,7 @@
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme";
+
+export { normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 
 /** Inputs whose differences are intentionally preserved between current status segments and the legacy footer. */
 export interface BillingSummaryOptions {
@@ -12,11 +14,6 @@ export interface BillingSummaryOptions {
 		readonly cost: number;
 		readonly usingSubscription: boolean;
 	};
-}
-
-/** Round premium-request counters without losing legitimate fractional requests. */
-export function normalizePremiumRequests(value: number): number {
-	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 function formatSpend(amount: number, usingSubscription: boolean, fractionDigits: number, uiTheme: Theme): string {

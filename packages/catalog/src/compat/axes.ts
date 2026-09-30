@@ -190,6 +190,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"zai-reasoning-effort-dialect": wire("zaiReasoningEffortDialect", ["openai"]),
 
 	// ── wire: anthropic-messages ──
+	"bedrock-messages-api": wire("bedrockMessagesApi", ["anthropic"]),
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
@@ -209,6 +210,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic"]),
+	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 

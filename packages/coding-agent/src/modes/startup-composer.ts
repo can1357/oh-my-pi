@@ -194,5 +194,5 @@ async function loadRecentSessions(cwd: string): Promise<RecentSession[]> {
 	const storage = new FileSessionStorage();
 	const dir = computeDefaultSessionDir(cwd, storage);
 	const list = await getRecentSessions(dir, 4, storage);
-	return list.map(session => ({ name: session.name, timeAgo: session.timeAgo }));
+	return list.map(session => ({ name: session.name, timeAgo: session.timeAgo, path: session.path }));
 }

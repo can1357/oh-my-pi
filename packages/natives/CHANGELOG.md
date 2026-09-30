@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [18.4.4] - 2026-09-29
+
+### Fixed
+
+- Fixed `computer.window(id).ax()` and `find()` failing with `AxFailed` on macOS sheets, popovers and open menus that `computer.windows()` lists, such as TextEdit's Save sheet or a Calendar event popover ([#13659](https://github.com/can1357/oh-my-pi/pull/13659) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed macOS 26 background scrolls moving twice the requested distance; background hovers, scrolls and right or middle clicks are now delivered once ([#13739](https://github.com/can1357/oh-my-pi/pull/13739) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed macOS `takeover` clicks and scrolls failing with `AX action 'AXRaise' failed (AXError(-25205))` on covered windows that do not support `AXRaise`, such as iPhone Mirroring, even when activation brings them forward; a window that stays covered still refuses before any input is sent ([#13737](https://github.com/can1357/oh-my-pi/pull/13737) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed `ps -r` in the in-process `ps` builtin: it now sorts by CPU usage, highest first, as on macOS/BSD, instead of filtering to running processes. Also added `ps -m`, which sorts by memory usage.
+- Fixed process states on macOS in the `ps`, `top`, and `pgrep`/`pkill -r` builtins: idle processes showed as running (`R`), which made `ps r` list nearly every process. States now come from each process's threads, as Apple `ps` does.
+- Removed the procps-only `l` (multithreaded) STAT flag from `ps` on macOS; Apple `ps` doesn't print it.
+
 ## [18.4.3] - 2026-09-28
 
 ### Changed

@@ -1,8 +1,9 @@
-import { deflateSync, inflateSync } from "node:zlib";
+import { inflateSync } from "node:zlib";
 
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
+import { encodeRawPng } from "../../utils/png-encode";
 
 /** Options accepted by tab.screenshot(). */
 export interface ScreenshotOptions {
@@ -175,6 +176,36 @@ export async function captureScreenshotBuffer(
 	);
 }
 
+/** Page function (self-contained): draw numbered outlines for `payload.targets` under a root tagged with `payload.token`. */
+export function installAnnotationOverlayInPage(payload: {
+	token: string;
+	targets: ScreenshotAnnotationTarget[];
+}): void {
+	const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
+	const doc = pageGlobal.document;
+	const root = doc.createElement("div");
+	root.setAttribute("data-omp-screenshot-annotations", payload.token);
+	root.style.cssText = "position:absolute;left:0;top:0;z-index:2147483647;pointer-events:none";
+	for (const target of payload.targets) {
+		const outline = doc.createElement("div");
+		outline.style.cssText = `position:absolute;left:${target.x}px;top:${target.y}px;width:${target.width}px;height:${target.height}px;box-sizing:border-box;border:2px solid #ff2bd6;background:rgba(255,43,214,.08)`;
+		const label = doc.createElement("span");
+		label.textContent = `[${target.id}]`;
+		label.style.cssText =
+			"position:absolute;left:-2px;top:-20px;padding:1px 4px;border:1px solid #111;border-radius:3px;background:#ffeb3b;color:#111;font:700 13px/16px ui-monospace,monospace;white-space:nowrap";
+		outline.appendChild(label);
+		root.appendChild(outline);
+	}
+	doc.documentElement.appendChild(root);
+}
+
+/** Page function (self-contained): remove the overlay installed with `token`. */
+export function removeAnnotationOverlayInPage(token: string): void {
+	const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
+	const doc = pageGlobal.document;
+	doc.querySelector(`[data-omp-screenshot-annotations="${token}"]`)?.remove();
+}
+
 /** Install numbered annotation overlays and return an abort-aware cleanup function. */
 export async function installScreenshotAnnotations(
 	page: Page,
@@ -182,37 +213,9 @@ export async function installScreenshotAnnotations(
 	signal: AbortSignal | undefined,
 ): Promise<() => Promise<void>> {
 	const token = `omp-screenshot-${crypto.randomUUID()}`;
-	await untilAborted(signal, () =>
-		page.evaluate(
-			(payload: { token: string; targets: ScreenshotAnnotationTarget[] }) => {
-				const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
-				const doc = pageGlobal.document;
-				const root = doc.createElement("div");
-				root.setAttribute("data-omp-screenshot-annotations", payload.token);
-				root.style.cssText = "position:absolute;left:0;top:0;z-index:2147483647;pointer-events:none";
-				for (const target of payload.targets) {
-					const outline = doc.createElement("div");
-					outline.style.cssText = `position:absolute;left:${target.x}px;top:${target.y}px;width:${target.width}px;height:${target.height}px;box-sizing:border-box;border:2px solid #ff2bd6;background:rgba(255,43,214,.08)`;
-					const label = doc.createElement("span");
-					label.textContent = `[${target.id}]`;
-					label.style.cssText =
-						"position:absolute;left:-2px;top:-20px;padding:1px 4px;border:1px solid #111;border-radius:3px;background:#ffeb3b;color:#111;font:700 13px/16px ui-monospace,monospace;white-space:nowrap";
-					outline.appendChild(label);
-					root.appendChild(outline);
-				}
-				doc.documentElement.appendChild(root);
-			},
-			{ token, targets: [...targets] },
-		),
-	);
+	await untilAborted(signal, () => page.evaluate(installAnnotationOverlayInPage, { token, targets: [...targets] }));
 	return async () => {
-		await page
-			.evaluate((marker: string) => {
-				const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
-				const doc = pageGlobal.document;
-				doc.querySelector(`[data-omp-screenshot-annotations="${marker}"]`)?.remove();
-			}, token)
-			.catch(() => undefined);
+		await page.evaluate(removeAnnotationOverlayInPage, token).catch(() => undefined);
 	};
 }
 
@@ -323,48 +326,10 @@ export function decodePng(buffer: Uint8Array): DecodedPng {
 	return { width, height, pixels };
 }
 
-function crc32(bytes: Uint8Array): number {
-	let crc = 0xffffffff;
-	for (const byte of bytes) {
-		crc ^= byte;
-		for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-	}
-	return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type: string, data: Uint8Array): Buffer {
-	const typeBytes = Buffer.from(type, "ascii");
-	const chunk = Buffer.alloc(12 + data.length);
-	chunk.writeUInt32BE(data.length, 0);
-	typeBytes.copy(chunk, 4);
-	Buffer.from(data).copy(chunk, 8);
-	chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, Buffer.from(data)])), 8 + data.length);
-	return chunk;
-}
-
 /** Encode RGBA pixels as a non-interlaced 8-bit PNG. */
 export function encodePng(image: DecodedPng): Buffer {
 	if (image.pixels.length !== image.width * image.height * 4) throw new ToolError("RGBA pixel buffer size mismatch");
-	const header = Buffer.alloc(13);
-	header.writeUInt32BE(image.width, 0);
-	header.writeUInt32BE(image.height, 4);
-	header[8] = 8;
-	header[9] = 6;
-	const raw = Buffer.alloc((image.width * 4 + 1) * image.height);
-	for (let y = 0; y < image.height; y++) {
-		const rowStart = y * (image.width * 4 + 1);
-		raw[rowStart] = 0;
-		Buffer.from(image.pixels.buffer, image.pixels.byteOffset + y * image.width * 4, image.width * 4).copy(
-			raw,
-			rowStart + 1,
-		);
-	}
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		pngChunk("IHDR", header),
-		pngChunk("IDAT", deflateSync(raw)),
-		pngChunk("IEND", Buffer.alloc(0)),
-	]);
+	return encodeRawPng(image.pixels, image.width, image.height, 4);
 }
 
 function rgbaAt(image: DecodedPng, x: number, y: number): readonly [number, number, number, number] {

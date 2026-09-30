@@ -109,11 +109,11 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Local text files
 
-- No selector: if summarization is enabled and the file is eligible, `#trySummarize()` calls `summarizeCode()`.
+- No selector: if summarization is enabled and the file is eligible, `trySummarize()` (`packages/coding-agent/src/tools/read-summary.ts`) calls `summarizeCodeAsync()`.
    - Defaults: `read.summarize.enabled = true`; prose (`.md` variants and `.txt`) stays unsummarized unless `read.summarize.prose = true`; files below `read.summarize.minTotalLines = 100` stay verbatim.
    - Hard guards: file size `<= 2 MiB` (`MAX_SUMMARY_BYTES`), line count `<= 20_000` (`MAX_SUMMARY_LINES`).
    - Summary output keeps selected declarations and replaces elided spans with `…` or merged brace-pair lines containing `{ … }`. When at least one span is elided, the text content ends with a footer like `[…NNln elided; re-read needed ranges, e.g. <path>:5-16,40-80]` using concrete ranges from the actual elisions.
-   - When an elided block sits between matching brace lines, `#renderSummary()` may merge them into one anchored line rather than emitting separate opener/closer lines.
+   - When an elided block sits between matching brace lines, `renderSummary()` may merge them into one anchored line rather than emitting separate opener/closer lines.
 - Explicit selector or summarization miss: streamed text read.
    - Default open-ended limit is `read.defaultLimit = 300`, clamped to `[1, DEFAULT_MAX_LINES]`.
    - Single bounded non-raw text ranges add `RANGE_LEADING_CONTEXT_LINES = 1` / `RANGE_TRAILING_CONTEXT_LINES = 3` on constrained sides. Raw and multi-range reads are exact; directory listing selectors slice rendered entries without context.

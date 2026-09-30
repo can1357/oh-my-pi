@@ -57,6 +57,12 @@ export * from "./latex-block";
 export * from "./latex-to-unicode";
 // SGR mouse report parsing
 export * from "./mouse";
+// Tern Surface Protocol: describe contract, builders, blobs, settling, render state
+export * from "./native/blobs";
+export * from "./native/describe";
+export type * from "./native/node";
+export * from "./native/settle";
+export * from "./native/state";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";

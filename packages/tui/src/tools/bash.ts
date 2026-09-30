@@ -18,7 +18,16 @@ import {
 	stripRawOutputArtifactNotice,
 	stripTrailingNotice,
 } from "./output-meta";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
+import { ansi, compact, keyed } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { footnoteText, resultText } from "./native-view";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -261,6 +270,122 @@ export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): st
 	return highlightedLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
 }
 
+/**
+ * Plain (unstyled) command line for native views: `cd <dir> && NAME="…" <command>`,
+ * built from the same decoded display args (incl. streamed `__partialJson` env) as the ANSI path.
+ */
+export function formatBashCommandText(args: BashRenderArgs): string {
+	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
+	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
+	const parts: string[] = [];
+	if (displayWorkdir) parts.push(`cd ${displayWorkdir} &&`);
+	if (envAssignments) parts.push(envAssignments);
+	parts.push(args.command || "…");
+	return parts.join(" ");
+}
+
+/** Bash output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
+function stripBashNotices(
+	rawOutput: string,
+	details: BashToolDetails | undefined,
+): { text: string; artifactId?: string } {
+	const withoutBackground =
+		details?.async?.state === "running"
+			? stripTrailingNotice(rawOutput, formatBackgroundNotice(details.async.jobId))
+			: rawOutput;
+	const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
+	const withoutExit =
+		details?.exitCode === undefined
+			? strippedOutput
+			: stripTrailingNotice(strippedOutput, formatExitCodeNotice(details.exitCode));
+	const withoutWall =
+		details?.wallTimeMs === undefined
+			? withoutExit
+			: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
+	return stripRawOutputArtifactNotice(withoutWall);
+}
+/** `Wall: 1.20s`, `Timeout: 30s`, … metadata parts shown under bash output. */
+function bashStatsParts(
+	details: BashToolDetails | undefined,
+	contextTimeout: number | undefined,
+	artifactId: string | undefined,
+	isError: boolean,
+): string[] {
+	const timeoutDisabled = details?.timeoutDisabled === true || contextTimeout === 0;
+	const timeoutSeconds = timeoutDisabled ? undefined : (details?.timeoutSeconds ?? contextTimeout);
+	const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
+	const wallTimeMs = details?.wallTimeMs;
+	const statsParts: string[] = [];
+	if (details?.async?.state === "running") {
+		statsParts.push(`Backgrounded: ${details.async.jobId}`);
+	}
+	if (details?.service) {
+		const service = details.service;
+		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
+		statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
+		if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+	}
+	if (wallTimeMs !== undefined) {
+		statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
+	}
+	if (timeoutDisabled) {
+		statsParts.push("Timeout: disabled");
+	}
+	if (typeof timeoutSeconds === "number") {
+		statsParts.push(
+			requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds
+				? `Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)`
+				: `Timeout: ${timeoutSeconds}s`,
+		);
+	}
+	if (artifactId) {
+		statsParts.push(`Artifact: ${artifactId}`);
+	}
+	if (isError && typeof details?.exitCode === "number") {
+		statsParts.push(`Exit: ${details.exitCode}`);
+	}
+	return statsParts;
+}
+
+/**
+ * Native head facts of a shell call: title, the command once (`cd`/env
+ * prefix included), a `background` badge for a backgrounded job, the
+ * `exit N` chip and a `timed out` note only when the deadline hit.
+ */
+function shellToolHead(
+	title: string,
+	command: string,
+	details: BashToolDetails | undefined,
+	settled: boolean,
+): NativeToolHead {
+	const exit = settled && details?.exitCode !== undefined && details.exitCode !== 0 ? details.exitCode : undefined;
+	return {
+		title,
+		target: command,
+		targetKind: "command",
+		lang: "bash",
+		badges:
+			details?.async?.state === "running"
+				? [{ text: "background", title: `Backgrounded as job ${details.async.jobId}` }]
+				: undefined,
+		exit,
+		note: settled && details?.timedOut === true ? "timed out" : undefined,
+	};
+}
+
+/** The quiet final line's facts under shell output: service state and the full-output artifact. */
+function shellFootParts(details: BashToolDetails | undefined, artifactId: string | undefined): string[] {
+	const parts: string[] = [];
+	const service = details?.service;
+	if (service) {
+		parts.push(`Service ${service.name}`, service.state);
+		parts.push(service.ready ? "ready" : service.timedOut ? "ready timed out" : "not ready");
+		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
+	}
+	if (artifactId) parts.push(`Artifact ${artifactId}`);
+	return parts;
+}
+
 function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererConfig<TArgs>): BashRenderArgs {
 	return {
 		command: config.resolveCommand?.(args),
@@ -378,58 +503,17 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					) {
 						return cachedSnapshot;
 					}
-					const withoutBackground =
-						details?.async?.state === "running"
-							? stripTrailingNotice(rawOutput, formatBackgroundNotice(details.async.jobId))
-							: rawOutput;
-					const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
-					const withoutExit =
-						details?.exitCode === undefined
-							? strippedOutput
-							: stripTrailingNotice(strippedOutput, formatExitCodeNotice(details.exitCode));
-					const withoutWall =
-						details?.wallTimeMs === undefined
-							? withoutExit
-							: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
-					const rawOutputArtifact = stripRawOutputArtifactNotice(withoutWall);
+					const rawOutputArtifact = stripBashNotices(rawOutput, details);
 					const output = rawOutputArtifact.text;
 					const displayOutput = output.trimEnd();
 					const showingFullOutput = expanded && renderContext?.isFullOutput === true;
 
-					// Build truncation warning
-					const timeoutDisabled = details?.timeoutDisabled === true || renderContext?.timeout === 0;
-					const timeoutSeconds = timeoutDisabled ? undefined : (details?.timeoutSeconds ?? renderContext?.timeout);
-					const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
-					const wallTimeMs = details?.wallTimeMs;
-					const statsParts: string[] = [];
-					if (details?.async?.state === "running") {
-						statsParts.push(`Backgrounded: ${details.async.jobId}`);
-					}
-					if (details?.service) {
-						const service = details.service;
-						statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
-						statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
-						if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
-					}
-					if (wallTimeMs !== undefined) {
-						statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
-					}
-					if (timeoutDisabled) {
-						statsParts.push("Timeout: disabled");
-					}
-					if (typeof timeoutSeconds === "number") {
-						statsParts.push(
-							requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds
-								? `Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)`
-								: `Timeout: ${timeoutSeconds}s`,
-						);
-					}
-					if (rawOutputArtifact.artifactId) {
-						statsParts.push(`Artifact: ${rawOutputArtifact.artifactId}`);
-					}
-					if (isError && typeof details?.exitCode === "number") {
-						statsParts.push(`Exit: ${details.exitCode}`);
-					}
+					const statsParts = bashStatsParts(
+						details,
+						renderContext?.timeout,
+						rawOutputArtifact.artifactId,
+						isError,
+					);
 					const timeoutLine =
 						statsParts.length > 0
 							? uiTheme.fg(
@@ -505,6 +589,53 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					},
 				},
 			);
+		},
+		describeCall(args: TArgs, options: RenderResultOptions): NativeToolView {
+			const command = formatBashCommandText(toBashRenderArgs(args, config));
+			// The command shows once, in the head; the body is only the output.
+			return {
+				tool: shellToolHead(config.resolveTitle(args, options), command, undefined, false),
+				preview: { tail: BASH_DEFAULT_PREVIEW_LINES },
+			};
+		},
+
+		describeResult(
+			result: {
+				content: Array<{ type: string; text?: string }>;
+				details?: BashToolDetails;
+				isError?: boolean;
+			},
+			options: RenderResultContextOptions & { renderContext?: BashRenderContext },
+			args?: TArgs,
+		): NativeToolView {
+			const details = result.details;
+			const renderContext = options.renderContext;
+			const isError = result.isError === true;
+			const isPartial = options.isPartial === true;
+			const rawOutput = renderContext?.output ?? resultText(result);
+			const stripped = stripBashNotices(rawOutput, details);
+			const output = stripped.text.trimEnd();
+			const expanded = renderContext?.expanded ?? options.expanded;
+			const showingFullOutput = expanded && renderContext?.isFullOutput === true;
+			const command = formatBashCommandText(toBashRenderArgs(args, config));
+			const previewLines = renderContext?.previewLines ?? BASH_DEFAULT_PREVIEW_LINES;
+			// Wall time is the head timer, the timeout a note only when hit, the exit a head chip:
+			// what is left (service state, artifact, truncation) is one quiet final line.
+			const meta = details?.meta;
+			const body: NativeChild[] = compact([
+				output.trim().length > 0 &&
+					keyed(ansi(output, { follow: isPartial, role: "omp.tool.bash.output" }), "output"),
+				footnoteText(shellFootParts(details, stripped.artifactId), {
+					...meta,
+					truncation: showingFullOutput ? undefined : meta?.truncation,
+				}),
+			]);
+			return {
+				tool: shellToolHead(config.resolveTitle(args, options), command, details, !isPartial),
+				body,
+				tone: !isPartial && isError && details?.timedOut === true ? "warning" : undefined,
+				preview: { tail: previewLines },
+			};
 		},
 		mergeCallAndResult: true,
 		inline: true,

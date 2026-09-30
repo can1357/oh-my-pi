@@ -10,7 +10,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 - Direct-helper call renderer and approval policy: `packages/coding-agent/src/tools/computer/call.ts`
 - Eval facades: `packages/coding-agent/src/tools/computer/{prelude.js,prelude.py,declarations.d.ts}`
 - Model-facing prelude documentation: `packages/coding-agent/src/prompts/tools/computer.md`
-- Safety prompt: `packages/coding-agent/src/prompts/system/computer-safety.md`
+- Computer-use prompt: `packages/coding-agent/src/prompts/system/computer-use.md`
 - Prelude registration/gate: `packages/coding-agent/src/tools/index.ts`
 - Exposure policy: `packages/coding-agent/src/tools/computer/exposure.ts`
 - Persistent worker: `packages/coding-agent/src/tools/computer/{supervisor,protocol,worker,worker-entry}.ts`
@@ -75,7 +75,7 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 ### Discovery
 
 - `desktop.windows({ app?, title? })` returns matching `DesktopWindow[]`; app/title matching is case-insensitive substring matching.
-- `desktop.window(id | { app?, title? })` returns one persistent window facade. Zero matches throw; multiple matches throw with the candidates.
+- `desktop.window(id | { id?, app?, title? })` returns one persistent window facade. An id may be a string or a number (`74` is the id `"74"`, never matched against app or title). Zero matches throw; multiple matches throw with the candidates.
 - `desktop.focusedWindow()` returns a window facade or `null`.
 - `desktop.displays()` returns `DesktopDisplay[]`.
 - `desktop.capabilities()` returns capture/input/AX availability, permission states, delivery modes, display server, backend, and display count.

@@ -511,6 +511,34 @@ const ANSI_RESET = "\x1b[0m";
 const ANSI_QR_ROW_PREFIX = "\x1b[47m\x1b[30m"; // white background, black foreground
 
 /**
+ * Render a QR symbol as plain half-block rows (no escapes) for a terminal that
+ * draws text in its own foreground color. `inkLight` draws the *light*
+ * modules (quiet zone included) as ink: on a dark background with a light
+ * foreground that yields the dark-on-light symbol cameras expect.
+ */
+export function renderQrText(qr: QrCode, inkLight: boolean, options?: QrRenderOptions): string[] {
+	const margin = Math.max(0, options?.margin ?? 4);
+	const dim = qr.size + margin * 2;
+	const ink = (gx: number, gy: number): boolean => {
+		const x = gx - margin;
+		const y = gy - margin;
+		const dark = x >= 0 && x < qr.size && y >= 0 && y < qr.size && qr.module(x, y);
+		return gy < dim && dark !== inkLight;
+	};
+	const lines: string[] = [];
+	for (let gy = 0; gy < dim; gy += 2) {
+		let row = "";
+		for (let gx = 0; gx < dim; gx++) {
+			const top = ink(gx, gy);
+			const bottom = ink(gx, gy + 1);
+			row += top ? (bottom ? "█" : "▀") : bottom ? "▄" : " ";
+		}
+		lines.push(row);
+	}
+	return lines;
+}
+
+/**
  * Render a QR symbol as ANSI half-block rows: each text row packs two module
  * rows via `▀`/`▄`/`█`, drawn black-on-white so a phone camera reads dark
  * modules as data and the quiet zone as the light margin. The leading margin

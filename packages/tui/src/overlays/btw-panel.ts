@@ -4,8 +4,11 @@ import { getMarkdownTheme, theme } from "../theme/theme";
 import { sanitizeErrorLine } from "../chrome/error-block";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { StreamingPanelContent } from "../chrome/streaming-panel";
-import { interruptKey } from "../chrome/keybinding-hints";
+import { boundKeys, interruptKey } from "../chrome/keybinding-hints";
 import { formatKeyHint } from "../app-keybindings";
+import type { NativeNode } from "../native/node";
+import { col, md, node, span, text } from "../native/describe";
+import { hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
 
 type BtwPanelState = "running" | "complete" | "branching" | "aborted" | "error";
 
@@ -27,12 +30,15 @@ export class BtwPanelComponent extends OverlayPanel {
 	#closed = false;
 	#copied = false;
 	#baseTitle: string;
+	readonly #question: string;
 	readonly #content: StreamingPanelContent;
+	#native: { node: NativeNode; canFollowUp: boolean; canBranch: boolean } | undefined;
 
 	constructor(options: BtwPanelComponentOptions) {
 		const baseTitle = `/btw ${replaceTabs(options.question)}`;
-		super(baseTitle);
+		super(baseTitle, "omp.overlay.btw");
 		this.#baseTitle = baseTitle;
+		this.#question = replaceTabs(options.question);
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
 		this.#canFollowUp = options.canFollowUp;
@@ -121,7 +127,67 @@ export class BtwPanelComponent extends OverlayPanel {
 		this.#closed = true;
 	}
 
+	override invalidate(): void {
+		this.#native = undefined;
+		super.invalidate();
+	}
+
+	override describe(): NativeNode {
+		const canFollowUp = this.#canFollowUp?.() ?? false;
+		const canBranch = this.#canBranch?.() ?? this.isBranchable();
+		const memo = this.#native;
+		if (memo && memo.canFollowUp === canFollowUp && memo.canBranch === canBranch) return memo.node;
+		// Inline in the dock, styled as a sheet by role: a borderless column headed by the question.
+		const title = text([span("/btw", "accent"), span(` ${this.#question}`)], { truncate: "end", lines: 1 });
+		const live = this.#state === "running" || this.#state === "branching";
+		const head = node("row", { role: "omp.sheet.head", gap: "sm", align: "center" }, [
+			...(live ? [node("spinner", {})] : []),
+			title,
+		]);
+		const described = col([head, this.#describeBody(), this.#describeFooter(canFollowUp, canBranch)], {
+			role: this.nativeRole,
+			gap: "sm",
+			tone: this.#state === "error" ? "error" : this.#state === "aborted" ? "warning" : undefined,
+		});
+		this.#native = { node: described, canFollowUp, canBranch };
+		return described;
+	}
+
+	#describeBody(): NativeNode {
+		if (this.#state === "error") {
+			return text([span(sanitizeErrorLine(this.#errorMessage ?? "Unknown error"), "error")], { wrap: "word" });
+		}
+		const answer = this.#visibleAnswer;
+		if (answer) return md(answer, { stream: this.#state === "running" });
+		const waiting = this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
+		return text([span(waiting, "dim")]);
+	}
+
+	#describeFooter(canFollowUp: boolean, canBranch: boolean): NativeNode {
+		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "to close" };
+		switch (this.#state) {
+			case "running":
+				return hintsRow([{ ...esc, label: "to cancel" }]);
+			case "complete": {
+				const hints: NativeHint[] = [];
+				if (this.isCopyable()) hints.push({ keys: ["c"], label: this.#copied ? "to copy again" : "to copy" });
+				if (canFollowUp) hints.push({ keys: ["f"], label: "to follow up" });
+				if (canBranch) hints.push({ keys: ["b"], label: "to branch" });
+				hints.push(esc);
+				if (!this.#copied) return hintsRow(hints);
+				return statusHintsRow([span("✓ Copied to clipboard", "success")], hints);
+			}
+			case "branching":
+				return text([span(`${theme.status.pending} Branching to chat…`, "muted")]);
+			case "aborted":
+				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [esc]);
+			case "error":
+				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [esc]);
+		}
+	}
+
 	#rebuild(): void {
+		this.#native = undefined;
 		this.#content.refresh();
 		// Component-scoped: a rebuild replaces only this panel's own children
 		// (streaming deltas arrive per token, and a full compose would re-walk
