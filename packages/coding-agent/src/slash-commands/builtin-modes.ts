@@ -1,6 +1,7 @@
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
@@ -111,10 +112,13 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
+/** /fast status for the active model, including provider refusal. */
 function formatFastModeStatus(session: AgentSession): string {
 	if (session.isUltrafastModeEnabled()) return "ultra";
-	return session.isFastModeEnabled() ? "on" : "off";
+	const model = session.model;
+	if (!model || !serviceTierFamily(model)) return "off";
+	const state = session.fastModeState();
+	return state === "active" ? "on" : state;
 }
 
 const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";

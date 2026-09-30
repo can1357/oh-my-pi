@@ -384,8 +384,19 @@ class FakeAgentSession {
 		return false;
 	}
 
+	// The fake has no service-tier machinery; the flag tracks the realized tier.
+	isFastModeActive(): boolean {
+		return this.fastMode;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
+	}
+
+	// `/fast status` reads the realized priority state, not the family toggle. The fake has no
+	// service-tier machinery, so it collapses onto the same `fastMode` flag and never blocks.
+	fastModeState(): "off" | "active" | "blocked" {
+		return this.fastMode ? "active" : "off";
 	}
 
 	async sendCustomMessage(_message: string, _options?: unknown): Promise<void> {}
@@ -1890,6 +1901,7 @@ describe("ACP agent", () => {
 					{ name: "model:foo", description: "Colon-shadowed by /model", handler: async () => {} },
 				].filter(cmd => !reserved?.has(cmd.name));
 			},
+			reloadExtensions: async () => {},
 		};
 
 		// Drive a deterministic re-advertisement instead of sleeping through
