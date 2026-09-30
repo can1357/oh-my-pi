@@ -681,6 +681,52 @@ describe("runGcCommand cold-session archive", () => {
 		expect(await Bun.file(interrupted).exists()).toBe(true);
 	});
 
+	test("removes empty bucket directories but keeps buckets that hold sessions", async () => {
+		// omp creates a per-cwd bucket on every spawn, even when no transcript
+		// is ever written; pickers then list long-gone working directories.
+		const emptyBucket = path.join(getSessionsDir(root), "-tmp-gone-project-1");
+		const nestedEmpty = path.join(getSessionsDir(root), "-tmp-gone-project-2", "nested");
+		await fs.mkdir(emptyBucket, { recursive: true });
+		await fs.mkdir(nestedEmpty, { recursive: true });
+		// A bucket with a still-live session (recent, active status) must survive
+		// both the archive pass and the vacuum.
+		const liveBucket = path.join(getSessionsDir(root), "project");
+		await writeSession(root, "project", "vacuum-keep", "pending", { ageDays: 5 });
+
+		const dry = await runGcCommand({
+			flags: { agentDir: root, archive: true, coldArchiveAfterDays: 30, apply: false },
+		});
+		expect(dry.archive?.emptyDirsRemoved).toBe(3);
+		expect(
+			await fs.stat(emptyBucket).then(
+				() => true,
+				() => false,
+			),
+		).toBe(true);
+
+		await runGcCommand({
+			flags: { agentDir: root, archive: true, coldArchiveAfterDays: 30, apply: true },
+		});
+		expect(
+			await fs.stat(emptyBucket).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.stat(path.dirname(nestedEmpty)).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+		expect(
+			await fs.stat(liveBucket).then(
+				() => true,
+				() => false,
+			),
+		).toBe(true);
+	});
+
 	test("keeps the source journal when compression encounters a read error", async () => {
 		const session = await writeSession(root, "project", "compression-error", "complete", { ageDays: 90 });
 		const original = await Bun.file(session).bytes();
