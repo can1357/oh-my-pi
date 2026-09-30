@@ -221,6 +221,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		pendingMessagesContainer: new Container(),
 		todoContainer: new Container(),
 		editor: { getText: () => "", setText: vi.fn(), onEscape: undefined },
+		isGuidedGoalInterviewActive: vi.fn(() => false),
 		statusLine: {
 			invalidate: vi.fn(),
 			markActivityStart: vi.fn(),
