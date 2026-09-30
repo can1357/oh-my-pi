@@ -2156,9 +2156,9 @@ export class TurnRecovery {
 				// The failed assistant is excluded only when retry removes it; a
 				// preserved unexecuted-tool turn remains in the request (#8065).
 				const excludedMessage = options?.preserveFailedTurn ? undefined : failedMessage;
-				let fits = this.#host.contextFitsModel(candidate, excludedMessage);
+				const fitsBeforeCompact = this.#host.contextFitsModel(candidate, excludedMessage);
 				if (
-					!fits &&
+					!fitsBeforeCompact &&
 					(this.#retrySagaCompactedForFallback || !this.#canCompactBeforeFallback(candidate, this.#host.model()))
 				) {
 					continue;
@@ -2167,11 +2167,10 @@ export class TurnRecovery {
 				if (!apiKey) continue;
 				// Compact once, still on the current model. Later candidates are
 				// judged against that same result; the first one that fits is used.
-				if (!fits) {
+				if (!fitsBeforeCompact) {
 					this.#retrySagaCompactedForFallback = true;
-					await this.#host.compactForTargetModel(candidate, excludedMessage);
+					const fits = await this.#host.compactForTargetModel(candidate, excludedMessage);
 					if (this.#host.isDisposed()) return false;
-					fits = this.#host.contextFitsModel(candidate, excludedMessage);
 					if (!fits) continue;
 				}
 				const previousEditMode = this.#host.resolveActiveEditMode();

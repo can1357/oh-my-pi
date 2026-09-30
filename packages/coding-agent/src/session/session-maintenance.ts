@@ -4855,6 +4855,7 @@ export class SessionMaintenance {
 						}
 						return true;
 					},
+					// Pre-fallback: no preferred summarizer, so the failing live model is not tried first.
 					options.targetModel ? null : undefined,
 				);
 				const retrySettings = cfgRetry.get(this.#host.settings);
