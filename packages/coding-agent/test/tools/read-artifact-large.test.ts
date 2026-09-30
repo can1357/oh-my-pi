@@ -70,6 +70,32 @@ describe("read tool large artifact handling", () => {
 		await fs.rm(testDir, { recursive: true, force: true });
 	});
 
+	it("preserves a single-line JSON artifact within the byte budget in default and raw reads", async () => {
+		const json = JSON.stringify({ payload: "x".repeat(15_000), tail: "complete-json" });
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), json);
+
+		const defaultResult = await tool.execute("call-json-default", { path: "artifact://0" });
+		const defaultOutput = getTextOutput(defaultResult);
+		expect(defaultOutput).toContain(json);
+		expect(defaultResult.details?.meta?.truncation).toBeUndefined();
+
+		const rawResult = await tool.execute("call-json-raw", { path: "artifact://0:raw" });
+		expect(getTextOutput(rawResult)).toBe(json);
+		expect(rawResult.details?.meta?.truncation).toBeUndefined();
+	});
+
+	it("preserves distinct long JSON lines in a multi-range artifact read", async () => {
+		const first = JSON.stringify({ payload: "a".repeat(15_000), tail: "first-json-tail" });
+		const last = JSON.stringify({ payload: "z".repeat(15_000), tail: "last-json-tail" });
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), `${first}\nmiddle\n${last}`);
+
+		const result = await tool.execute("call-json-multi-range", { path: "artifact://0:1-1,3-3" });
+		const output = getTextOutput(result);
+		expect(output).toContain(first);
+		expect(output).toContain(last);
+		expect(result.details?.meta?.truncation).toBeUndefined();
+	});
+
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
 		const output = getTextOutput(result);
