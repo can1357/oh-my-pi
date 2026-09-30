@@ -352,7 +352,7 @@ import {
 import { cfgTtsr } from "./export/ttsr-settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRoles } from "./config/model-settings";
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
-import { cfgGoalEnabled } from "./goals/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "./goals/settings";
 import { cfgImagesBlockImages, cfgStartupQuiet, cfgTuiReactions, cfgTuiRenderMermaid } from "./modes/settings";
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
 import {
@@ -2209,6 +2209,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			},
 			restrictToolNames,
+			goalToolRequested:
+				!restrictToolNames && (options.toolNames ? normalizeToolNames(options.toolNames).includes("goal") : false),
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
@@ -3934,7 +3936,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return tool?.defaultInactive === true || tool?.hidden === true;
 			}),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		const exposeGoalInitially =
+			!restrictToolNames &&
+			cfgGoalEnabled.get(settings) &&
+			(cfgGoalToolDefault.get(settings) || explicitlyRequestedToolNames?.includes("goal") === true);
+		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal" || exposeGoalInitially);
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
@@ -3948,7 +3954,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.deviceOnlyWrite === true);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
-			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
+			: requestedActiveToolNames.filter(
+					name => !defaultInactiveToolNames.has(name) || (name === "goal" && exposeGoalInitially),
+				);
 		let initialToolNames = [...initialRequestedActiveToolNames];
 
 		// Custom tools and extension-registered tools are always included

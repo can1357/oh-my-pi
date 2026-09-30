@@ -99,7 +99,7 @@ import { cfgBashEnabled } from "../exec/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgPythonInterpreter } from "../eval/settings";
 import { cfgExternalThinking } from "../session/settings";
-import { cfgGoalEnabled } from "../goals/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "../goals/settings";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
@@ -320,6 +320,8 @@ export interface ToolSession {
 	 * required yield tool). Suppresses automatic tool-set expansion.
 	 */
 	restrictToolNames?: boolean;
+	/** Goal explicitly requested at session creation, independently of goal-mode activation. */
+	goalToolRequested?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
@@ -738,13 +740,11 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		}
 	}
 	const isToolAllowed = (name: string) => {
-		// Never in the default set. Explicitly activatable while goal.enabled and
-		// no goal record exists yet — /guided-goal enables it so the agent can
-		// finish the interview with `goal create`, which turns goal mode on. Once
-		// a goal record exists, only an enabled goal keeps the tool: a completed
-		// (exiting) or paused goal must stop advertising it on the next rebuild.
+		// Without opt-in, a completed or paused goal stops advertising the tool.
+		// Explicit requests and the default-on setting keep it available.
 		if (name === "goal") {
 			if (!goalEnabled || restrictToolNames) return false;
+			if (cfgGoalToolDefault.get(session.settings) || session.goalToolRequested === true) return true;
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
@@ -810,7 +810,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
 		...(externalThinkingActive ? ["think"] : []),
 		...(includeYield ? ["yield"] : []),
-		...(goalModeActive ? ["goal"] : []),
+		...(goalModeActive || (!restrictToolNames && goalEnabled && cfgGoalToolDefault.get(session.settings))
+			? ["goal"]
+			: []),
 	];
 	return { requestedTools, names, isAllowed: isToolAllowed };
 }

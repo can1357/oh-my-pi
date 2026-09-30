@@ -12,6 +12,18 @@ export const cfgGoalEnabled = register({
 	},
 });
 
+export const cfgGoalToolDefault = register({
+	id: "goal.toolDefault",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Goal Tool by Default",
+		description: "Expose the goal tool in every session so the agent can start goal mode itself",
+	},
+});
+
 export const cfgGoalStatusInFooter = register({
 	id: "goal.statusInFooter",
 	type: "boolean",

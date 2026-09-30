@@ -9,7 +9,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgAsyncEnabled, cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { cfgGoalEnabled } from "@oh-my-pi/pi-coding-agent/goals/settings";
+import { cfgGoalEnabled, cfgGoalToolDefault } from "@oh-my-pi/pi-coding-agent/goals/settings";
 
 describe("goal tool registration when goal mode is enabled at runtime", () => {
 	let tempDir: TempDir;
@@ -28,7 +28,10 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 		resetSettingsForTest();
 	});
 
-	async function makeSession(goalEnabledAtStartup: boolean): Promise<AgentSession> {
+	async function makeSession(
+		goalEnabledAtStartup: boolean,
+		options?: { toolNames?: string[]; toolDefault?: boolean; restrictToolNames?: boolean },
+	): Promise<AgentSession> {
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -37,7 +40,10 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 		cfgAsyncEnabled.set(settings, false);
 		cfgToolsXdev.set(settings, true);
 		cfgGoalEnabled.set(settings, goalEnabledAtStartup);
+		cfgGoalToolDefault.set(settings, options?.toolDefault ?? false);
 		const { session: created } = await createAgentSession({
+			toolNames: options?.toolNames,
+			restrictToolNames: options?.restrictToolNames,
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
 			sessionManager,
@@ -99,5 +105,44 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 		expect(result.isError ?? false).toBe(false);
 		const text = result.content?.map(c => ("text" in c && typeof c.text === "string" ? c.text : "")).join("\n");
 		expect(text).toContain("test goal");
+	});
+
+	it("does not advertise goal by default or when goal mode is disabled", async () => {
+		session = await makeSession(true);
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		await session.dispose();
+		session = await makeSession(false, { toolNames: ["read", "goal"], toolDefault: true });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+	});
+
+	it("exposes an explicitly requested goal tool without exposing it to restricted sessions", async () => {
+		session = await makeSession(true, { toolNames: ["read", "goal"] });
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await session.dispose();
+		session = await makeSession(true, { toolNames: ["read", "goal"], restrictToolNames: true });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+	});
+
+	it("exposes goal by default only when opted in", async () => {
+		session = await makeSession(true, { toolDefault: true });
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	it.each([
+		["complete", "complete"],
+		["drop", "dropped"],
+	] as const)("keeps an opted-in goal tool available after %s", async (op, status) => {
+		session = await makeSession(true, op === "complete" ? { toolNames: ["read", "goal"] } : { toolDefault: true });
+		const goalTool = session.agent.state.tools.find(t => t.name === "goal");
+		expect(goalTool).toBeDefined();
+		await goalTool!.execute("create", { op: "create", objective: "small goal" });
+		const result = await goalTool!.execute("finish", { op });
+		expect(result.details?.goal?.status).toBe(status);
+		if (op === "complete") session.setGoalModeState(undefined);
+		await session.setActiveToolsByName(session.getEnabledToolNames());
+		const activeGoalTool = session.agent.state.tools.find(t => t.name === "goal");
+		expect(activeGoalTool).toBeDefined();
+		const next = await activeGoalTool!.execute("new_goal", { op: "create", objective: "next goal" });
+		expect(next.details?.goal?.objective).toBe("next goal");
 	});
 });

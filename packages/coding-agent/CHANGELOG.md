@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the default-off `goal.toolDefault` setting, which lets agents start goal mode themselves in ordinary sessions; an explicit `--tools=...,goal` now also exposes the tool while the default stays hidden ([#13877](https://github.com/can1357/oh-my-pi/pull/13877) by [@shawnkoh](https://github.com/shawnkoh))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

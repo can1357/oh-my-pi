@@ -61,6 +61,11 @@ omp config set startup.showSplash true
 
 This only controls the startup splash animation. It does not rerun setup or change setup state, and `startup.quiet: true` still suppresses all startup chrome including the splash.
 
+To let an agent start goal mode from an ordinary conversation, set `goal.toolDefault: true`
+(off by default). `goal.enabled` must also be on. Alternatively, request the tool
+for one launch with `--tools=read,goal`; after a goal is completed or dropped,
+the opted-in tool remains available for another goal.
+
 ### Subcommands
 
 | Command                        | Effect                                                                                                                                                                                                                                                                                            |
