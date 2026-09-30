@@ -1977,3 +1977,30 @@ describe("isOfficialAnthropicApiUrl", () => {
 		expect(isOfficialAnthropicApiUrl("https://api.anthropic.com.evil.com")).toBe(false);
 	});
 });
+
+describe("explicit thinking ladders", () => {
+	it("inherit rule effort budgets without replacing explicit budgets", () => {
+		const spec: ModelSpec<"google-generative-ai"> = {
+			id: "gemini-2.5-pro",
+			name: "Gemini 2.5 Pro",
+			provider: "google",
+			api: "google-generative-ai",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			reasoning: true,
+			input: ["text"],
+			contextWindow: 1000000,
+			maxTokens: 65536,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
+		};
+		const inherited = resolveModelPolicy(spec).thinking?.effortBudgets;
+		expect(inherited?.low).toBeNumber();
+		expect(inherited?.high).toBeNumber();
+		expect(
+			resolveModelPolicy({
+				...spec,
+				thinking: { mode: "budget", efforts: [Effort.Low, Effort.High], effortBudgets: { high: 1234 } },
+			}).thinking?.effortBudgets,
+		).toEqual({ high: 1234 });
+	});
+});

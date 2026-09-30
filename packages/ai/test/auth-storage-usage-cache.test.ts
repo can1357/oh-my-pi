@@ -18,6 +18,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
@@ -1430,5 +1431,25 @@ describe("AuthStorage usage cache: org-only identity stability", () => {
 			storage.close();
 			vi.restoreAllMocks();
 		}
+	});
+});
+
+describe("AuthStorage usage cache: organization scope identity", () => {
+	it("isolates usage caches across organizations, WorkOS selections and residency", () => {
+		const credential = {
+			type: "oauth" as const,
+			accessToken: "token",
+			accountId: "user",
+			orgId: "org-a",
+			activeOrganizationId: "workos-a",
+			region: "global",
+			inferenceRegion: "us" as const,
+		};
+		const key = usageCacheIdentity(credential);
+		expect(key).toBe(usageCacheIdentity({ ...credential, accessToken: "refreshed" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, orgId: "org-b" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, activeOrganizationId: "workos-b" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, region: "eu" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, inferenceRegion: "global" }));
 	});
 });

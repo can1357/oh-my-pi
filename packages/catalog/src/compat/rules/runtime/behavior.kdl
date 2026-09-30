@@ -89,6 +89,23 @@ behavior {
 		fallback "spark" substring="-spark"
 		fallback "chat" substring="gpt-"
 	}
+	// Factory Droid bills each model from one subscription pool: Droid Core
+	// (flat rate) or Standard Credits. Unknown ids have no inferred entitlement.
+	quota-tiers provider="factory-droid" {
+		tier "core" "inkling" "mistral-medium-3.5" "glm-5.3-flash" "glm-5.3" "glm-5.2" "glm-5.2-fast" \
+			"kimi-k3" "qwen3.8-max" "nemotron-3-ultra" "deepseek-v4.1-flash" "deepseek-v4-flash-0731" \
+			"deepseek-v4-pro" "minimax-m3" "minimax-m2.7"
+		tier "standard" "claude-fable-5.1" "claude-fable-5" "claude-opus-5-5" "claude-opus-5-5-fast" \
+			"claude-opus-5" "claude-opus-5-fast" "claude-opus-4-8" "claude-opus-4-8-fast" "claude-opus-4-7" \
+			"claude-opus-4-6" "claude-opus-4-5-20251101" "claude-sonnet-5-5" "claude-sonnet-5" \
+			"claude-sonnet-4-6" "claude-sonnet-4-5-20250929" "claude-haiku-4-5-20251001" "gpt-6-astra" \
+			"gpt-6.1-sol" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-sol-fast" "gpt-5.6-terra" \
+			"gpt-5.6-luna" "gpt-5.5" "gpt-5.5-fast" "gpt-5.5-pro" "gpt-5.4" "gpt-5.4-fast" "gpt-5.4-mini" \
+			"gpt-5.4-mini-fast" "gpt-5.3-codex" "gpt-5.3-codex-fast" "gpt-5.2" "garnet-07-15" \
+			"gemini-3.1-pro-preview" "gemini-3.8-flash" "gemini-3.7-flash" "gemini-3.6-flash" \
+			"gemini-3.5-flash" "gemini-3-flash-preview" "grok-4.7" "grok-4.6" "grok-4.5" "atlas-07-21" \
+			"aster-07-15"
+	}
 	// Subscription eligibility for model-aware Codex credential routing.
 	plan-requirement provider="openai-codex" {
 		tier "pro" substring="-spark"
@@ -234,6 +251,30 @@ behavior {
 			exact="muse-spark-1.2-contributor" exact="muse-spark-1.3" exact="muse-spark-1.3-contributor"
 		route "openai-completions" exact="minimax-m2.7" exact="minimax-m3" exact="minimax-m3-free" \
 			exact="qwen3.5-plus" exact="qwen3.6-plus"
+	}
+	// Factory Droid's proxy multiplexes four wires behind one client identity
+	// (packages/ai/src/providers/factory-droid.ts); `google-generate` is its
+	// native Gemini client. The registry names each model's wire, so every
+	// roster id routes exactly; unknown ids fall back to chat completions.
+	api-routes provider="factory-droid" default="openai-completions" {
+		route "anthropic-messages" exact="claude-fable-5.1" exact="claude-fable-5" exact="claude-opus-5-5" \
+			exact="claude-opus-5-5-fast" exact="claude-opus-5" exact="claude-opus-5-fast" \
+			exact="claude-opus-4-8" exact="claude-opus-4-8-fast" exact="claude-opus-4-7" \
+			exact="claude-opus-4-6" exact="claude-opus-4-5-20251101" exact="claude-sonnet-5-5" \
+			exact="claude-sonnet-5" exact="claude-sonnet-4-6" exact="claude-sonnet-4-5-20250929" \
+			exact="claude-haiku-4-5-20251001" exact="atlas-07-21" exact="aster-07-15" exact="minimax-m2.7"
+		route "openai-responses" exact="gpt-6-astra" exact="gpt-6.1-sol" exact="gpt-6-sol" exact="gpt-6-luna" \
+			exact="gpt-5.6-sol" exact="gpt-5.6-sol-fast" exact="gpt-5.6-terra" exact="gpt-5.6-luna" \
+			exact="gpt-5.5" exact="gpt-5.5-fast" exact="gpt-5.5-pro" exact="gpt-5.4" exact="gpt-5.4-fast" \
+			exact="gpt-5.4-mini" exact="gpt-5.4-mini-fast" exact="gpt-5.3-codex" exact="gpt-5.3-codex-fast" \
+			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5"
+		route "google-generate" exact="garnet-07-15" exact="gemini-3.1-pro-preview" exact="gemini-3.8-flash" \
+			exact="gemini-3.7-flash" exact="gemini-3.6-flash" exact="gemini-3.5-flash" \
+			exact="gemini-3-flash-preview"
+		route "openai-completions" exact="inkling" exact="mistral-medium-3.5" exact="glm-5.3-flash" \
+			exact="glm-5.3" exact="glm-5.2" exact="glm-5.2-fast" exact="kimi-k3" exact="qwen3.8-max" \
+			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4-flash-0731" \
+			exact="deepseek-v4-pro" exact="minimax-m3"
 	}
 
 	// Copilot serves these models with tighter effective limits than its

@@ -347,7 +347,7 @@ async function handleFormatEndpoint(
 	// broker override on AuthStorage when needed).
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	if (typeof apiKey !== "string") return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
@@ -361,7 +361,7 @@ async function handleFormatEndpoint(
 		clientKey,
 		model,
 		context: parsed.context,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey),
+		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
 	});
 	streamOpts.providerSessionState = lease.states;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
@@ -540,7 +540,7 @@ async function handlePiNative(
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	// Per-session provider learning, owned by this gateway instance. The map is
 	// non-serializable, so `parseRequest` cannot accept one from the wire and
@@ -551,7 +551,7 @@ async function handlePiNative(
 		clientKey,
 		model,
 		context: parsed.context,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey),
+		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
 	});
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
 	// trust the client's options (already allow-listed by `parseRequest`) and
@@ -559,7 +559,6 @@ async function handlePiNative(
 	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
-		apiKey,
 		signal: controller.signal,
 		cursorExternalToolExecutor: true,
 		providerSessionState: lease.states,

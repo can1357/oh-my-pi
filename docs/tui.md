@@ -17,7 +17,7 @@ The runtime has two layers:
 | Background/headless | Not interactive                   | UI context is no-op (`hasUI === false`).                                                                                       |
 | RPC mode            | Not mounted                       | `custom()` is implemented as unsupported UI and returns `undefined as never`; do not depend on interactive UI in RPC handlers. |
 
-If your extension/tool can run in non-interactive mode, guard with `ctx.hasUI` / `pi.hasUI`.
+If your extension/tool can run headless, guard with `ctx.hasUI` / `pi.hasUI`. RPC can expose `hasUI === true` for protocol-backed dialogs while still not supporting `custom()`; `hasUI` alone does not guarantee a component can be mounted.
 
 ## Core component contract (`@oh-my-pi/pi-tui`)
 
@@ -97,7 +97,7 @@ Then use `isKeyRelease()` / `isKeyRepeat()` if needed.
 
 - `TUI.setFocus(component)` routes input to that component.
 - Overlay APIs exist in `TUI` (`showOverlay`, `OverlayHandle`). In interactive extension/custom UI, `custom(..., { overlay: true })` mounts your component through `TUI.showOverlay(...)`; without `overlay`, it replaces the editor component area directly.
-- Overlay custom UI is anchored at `bottom-center` with full terminal width/max height and is removed through the returned overlay handle when `done(...)` closes the flow.
+- By default, overlay custom UI is anchored at `bottom-center` with full terminal width/max height. `overlayOptions` can override positioning and sizing; `onHandle` receives the `OverlayHandle`. The overlay is removed when `done(...)` closes the flow.
 
 ### Built-in full-screen surfaces
 
@@ -117,7 +117,7 @@ custom<T>(
     keybindings: KeybindingsManager,
     done: (result: T) => void,
   ) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-  options?: { overlay?: boolean },
+  options?: ExtensionCustomOptions,
 ): Promise<T>
 ```
 
@@ -125,10 +125,12 @@ Behavior in interactive mode (`extension-ui-controller.ts`):
 
 - Saves editor text.
 - Without `options.overlay`, replaces the editor component with your component.
-- With `options.overlay`, mounts your component as a bottom-centered overlay instead of replacing the editor.
+- With `options.overlay`, mounts your component as an overlay instead of replacing the editor; `overlayOptions` accepts static options or a function evaluated when mounting.
+- `options.onHandle` receives the mounted overlay handle.
+- `options.signal` aborts the flow and rejects its promise with the signal's reason (or `AbortError`); a component returned after cancellation is disposed rather than mounted.
 - Focuses your component.
 - On `done(result)`: calls `component.dispose?.()`, hides the overlay if present, restores editor + text for non-overlay flows, focuses editor, resolves promise.
-  So `done(...)` is mandatory for completion.
+  Call `done(...)` to complete successfully; factory failures and signal cancellation reject the promise.
 
 ## 2) Hook/custom-tool UI context (`HookUIContext`)
 
@@ -169,6 +171,8 @@ For `renderCall`, the `options` argument also answers the `Theme` API (`fg`,
 
 These renderers are mounted by `ToolExecutionComponent`.
 
+On Tern Surface Protocol terminals, tools may additionally supply `describeCall(args, options)` and `describeResult(result, options, args?)`, returning a semantic `NativeToolView` or `undefined`. Custom components can implement `describe(cx)` and `handleNativeEvent(event)`; otherwise the native backend falls back to their rendered rows. See [the core renderer contract](./tui-core-renderer.md#native-rendering-tern-surface-protocol).
+
 ## Lifecycle and cancellation
 
 - `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays. It must be idempotent: containers propagate disposal, and reset/removal paths may converge.
@@ -180,12 +184,14 @@ Example cancellation pattern:
 ```ts
 const loader = new CancellableLoader(
   tui,
-  theme.fg("accent"),
-  theme.fg("muted"),
+  text => theme.fg("accent", text),
+  text => theme.fg("muted", text),
   "Working...",
 );
 loader.onAbort = () => done(undefined);
-void doWork(loader.signal).then((result) => done(result));
+void doWork(loader.signal).then(result => {
+  if (!loader.aborted) done(result);
+});
 return loader;
 ```
 
@@ -267,10 +273,10 @@ export default function extension(pi: ExtensionAPI): void {
 
 - `packages/tui/src/tui.ts` — `Component`, `Focusable`, cursor marker, focus, overlay, input dispatch.
 - `packages/tui/src/utils.ts` — width/truncation/sanitization primitives.
-- `packages/tui/src/keys.ts` / `keybindings.ts` — key parsing and configurable action mapping.
+- `packages/tui/src/keys.ts` / `keybindings.ts` — key parsing and base TUI action mapping; `app-keybindings.ts` adds coding-agent actions and disk loading.
 - `packages/coding-agent/src/modes/controllers/extension-ui-controller.ts` — interactive mounting/unmounting for extension/hook/custom-tool UI.
 - `packages/coding-agent/src/extensibility/extensions/types.ts` — extension UI and renderer contracts.
-- `packages/coding-agent/src/extensibility/hooks/types.ts` — hook UI contract (legacy custom signature).
+- `packages/coding-agent/src/extensibility/hooks/types.ts` — hook UI contract.
 - `packages/coding-agent/src/extensibility/custom-tools/types.ts` — custom tool execute/render contracts.
 - `packages/tui/src/chat/tool-execution.ts` — mounting `renderCall`/`renderResult` components and partial-state options.
 - `packages/coding-agent/src/tools/context.ts` — tool UI context propagation (`hasUI`, `ui`).

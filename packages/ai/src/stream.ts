@@ -18,6 +18,7 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import type { OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
@@ -26,6 +27,7 @@ import type { AnthropicOptions } from "./providers/anthropic";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
+import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -1025,6 +1027,9 @@ function streamDispatch<TApi extends Api>(
 	if (model.api === "bedrock-converse-stream") {
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
+	if (model.api === "factory-droid-agent") {
+		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, requestOptions as FactoryDroidOptions);
+	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
 	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
@@ -1316,7 +1321,11 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (apiKey?: string, credentialId?: number): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (
+			apiKey?: string,
+			credentialId?: number,
+			oauthIdentity?: OAuthRequestIdentity,
+		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1325,7 +1334,7 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -1393,10 +1402,12 @@ function streamSimpleRequest<TApi extends Api>(
 		void (async () => {
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
+			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1418,13 +1429,14 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
+				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1432,10 +1444,11 @@ function streamSimpleRequest<TApi extends Api>(
 					signal,
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
@@ -1841,6 +1854,7 @@ function mapOptionsForApi<TApi extends Api>(
 		signal: options?.signal,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
+		oauthIdentity: options?.oauthIdentity,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
@@ -2306,6 +2320,26 @@ function mapOptionsForApi<TApi extends Api>(
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
 				wireModelId: resolveWireModelId(cursorModel, effort),
+			});
+		}
+
+		case "factory-droid-agent": {
+			const factoryModel = model as Model<"factory-droid-agent">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff
+					? requireSupportedEffort(factoryModel, options.reasoning)
+					: undefined;
+			return castApi<"factory-droid-agent">({
+				...base,
+				// The wrapper resolves native defaults for the selected OAuth
+				// account; do not turn the discovery scope's cap into a caller cap.
+				maxTokens: options?.maxTokens,
+				reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
+				textVerbosity: options?.textVerbosity,
+				serviceTier: options?.serviceTier,
+				toolChoice: options?.toolChoice,
 			});
 		}
 
