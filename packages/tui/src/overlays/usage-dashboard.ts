@@ -126,7 +126,7 @@ function statusWithUnavailableAccounts(windows: readonly { status?: UsageLimit["
 	return aggregateStatus(windows) === "exhausted" ? "exhausted" : "warning";
 }
 
-/** Fraction below which a window counts as untouched (renders as 100% free). */
+/** Fraction below which a window counts as untouched (renders as 0% used). */
 const IDLE_FRACTION = 0.005;
 /**
  * Compact duration tag for a window (`7d`, `1d`, `5h`, `mo`), preferring the
@@ -415,6 +415,10 @@ function usageMeter(fraction: number, status: UsageLimit["status"], meter: boole
 	return meter ? node("meter", { value, style: "bar", size: "md", tone }) : node("progress", { value, tone, grow: 1 });
 }
 
+/** Used percentage; preserve overage above 100%. */
+function usedText(fraction: number): string {
+	return `${Math.max(0, Math.round(fraction * 100))}% used`;
+}
 /** `Mon 28 Sep` for a local date. */
 function shortDate(date: Date): string {
 	return `${WEEKDAY_NAMES[date.getDay()]} ${date.getDate()} ${MONTH_NAMES[date.getMonth()]}`;
@@ -837,8 +841,8 @@ export class UsageDashboardComponent implements Component {
 				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
-			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
+			const usedPct = Math.max(0, Math.round(window.fraction * 100));
+			const pctText = theme.fg(this.#statusColor(window.status), `${usedPct}%`.padStart(5));
 			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
 			for (const line of wrapTextWithAnsi(
@@ -927,7 +931,7 @@ export class UsageDashboardComponent implements Component {
 			if (start + columns < active.length) lines.push("");
 		}
 		// Untouched providers collapse into a single tick line: their windows
-		// are all at 100% free (or have no limits), so per-window bars are noise.
+		// are all at 0% used (or have no limits), so per-window bars are noise.
 		if (idle.length > 0) {
 			if (active.length > 0) lines.push("");
 			const names = idle.map(card => card.name).join(" · ");
@@ -1688,7 +1692,7 @@ export class UsageDashboardComponent implements Component {
 					const resetsAt = limit.window?.resetsAt;
 					bucket.rows.push({
 						account: [span(reportAccountLabel(report, limit, index), "muted")],
-						left:
+						used:
 							fraction === undefined
 								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
 								: leftSpans(fraction, limit.status),
@@ -1719,7 +1723,7 @@ export class UsageDashboardComponent implements Component {
 				const cols: TspTableColumn[] = [
 					{ id: "limit", head: "Limit", grow: 1, priority: 4 },
 					{ id: "account", head: "Account", truncate: "middle", priority: 1 },
-					{ id: "left", head: "Left", align: "end", priority: 3 },
+					{ id: "used", head: "Used", align: "end", priority: 3 },
 					{ id: "reset", head: "Resets", align: "end", priority: 2 },
 				];
 				children.push(node("table", { cols, rows, role: "omp.usage.limits" }, undefined, "limits"));
