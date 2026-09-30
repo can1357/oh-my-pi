@@ -27,38 +27,42 @@ every currently eligible finalized prefix before terminal handoff. A capped stop
 scrollback only the newest whole blocks that fit in `maxRows` rows, never part
 of a block, since a direct-placement image's last row draws over the rows its
 block reserved above it; a newest block taller than the cap is written whole.
-The older eligible blocks retire without being written anywhere. Interactive
-quit and restart cap only a saved session, whose file `omp --resume` restores;
-an unsaved session (`--no-session`, or one not yet written to disk) keeps the
-full flush, because scrollback is its only copy. A terminal disconnect is
-always capped, because the terminal is usually gone. Postmortem's
-`tui-restore` runs synchronously on any exit that finds the TUI still running.
-On a signal it is capped: after SIGHUP the terminal is gone, and SIGTERM or
-SIGINT must end the process before postmortem's deadline or a kill, so an
-unsaved session, or a saved one whose file stopped being written (a latched
-persistence failure), loses the skipped rows there. For every other reason (a fatal
-error, `postmortem.quit()` without a prior stop, as in the escape hatch after a
-failed teardown or the stdout-EPIPE route, or a bare `process.exit()`) it
-flushes as the owner's `TUI.setExitFlushProvider()` says, and in full without
-one. InteractiveMode's provider applies quit's saved-session condition, and
-also flushes in full after a failed teardown or while the session manager has
-a disk failure latched, since the file then lacks the newest entries.
-A head that progressive append emitted in full retires without its
-separator, so the next batch on any path that writes a row opens with a blank;
-so does a capped batch that leaves out the rest of a partly emitted frontier
-head. The frame that writes a fresh flush
-batch comes from a second, display-order pass whenever the first one saw
-images, so the image budget demotes the oldest images rather than the newest.
-A handoff stop that resumes with
-`start()` (`TUI.stop({ resuming: true })`: suspend, external editors) keeps the
-full flush, except while a fullscreen overlay holds the screen: it resumes into
-that overlay, so it flushes nothing, commits nothing, and pressure retires the
-rows once the overlay closes. A clearing repaint queued under that overlay stays
-queued across the handoff and runs when the overlay closes. A process killed
-while suspended or while the external editor is open never writes the rows the
-overlay held; a saved session keeps them in its file. A stop with no options
-still flushes in full, overlay or not. Either way the flush ends with
-`endHistoryFlush()`, so frames after `start()` resumes retire by pressure again.
+The older eligible blocks retire without being written anywhere.
+
+Interactive quit and restart cap only a saved session, whose file
+`omp --resume` restores; an unsaved session (`--no-session`, or one not yet
+written to disk) keeps the full flush, because scrollback is its only copy. A
+terminal disconnect is always capped, because the terminal is usually gone.
+Postmortem's `tui-restore` runs synchronously on any exit that finds the TUI
+still running. On a signal it is capped: after SIGHUP the terminal is gone, and
+SIGTERM or SIGINT must end the process before postmortem's deadline or a kill,
+so an unsaved session, or a saved one whose file stopped being written (a
+latched persistence failure), loses the skipped rows there. For every other
+reason (a fatal error, `postmortem.quit()` without a prior stop, as in the
+escape hatch after a failed teardown or the stdout-EPIPE route, or a bare
+`process.exit()`) it flushes as the owner's `TUI.setExitFlushProvider()` says,
+and in full without one. InteractiveMode's provider applies quit's
+saved-session condition, and also flushes in full after a failed teardown or
+while the session manager has a disk failure latched, since the file then lacks
+the newest entries.
+
+A head that progressive append emitted in full retires without its separator,
+so the next batch on any path that writes a row opens with a blank; so does a
+capped batch that leaves out the rest of a partly emitted frontier head. The
+frame that writes a fresh flush batch comes from a second, display-order pass
+whenever the first one saw images, so the image budget demotes the oldest images
+rather than the newest.
+
+A handoff stop that resumes with `start()` (`TUI.stop({ resuming: true })`:
+suspend, external editors) keeps the full flush, except while a fullscreen
+overlay holds the screen: it resumes into that overlay, so it flushes nothing,
+commits nothing, and pressure retires the rows once the overlay closes. A
+clearing repaint queued under that overlay stays queued across the handoff and
+runs when the overlay closes. A process killed while suspended or while the
+external editor is open never writes the rows the overlay held; a saved session
+keeps them in its file. A stop with no options still flushes in full, overlay or
+not. Either way the flush ends with `endHistoryFlush()`, so frames after
+`start()` resumes retire by pressure again.
 
 The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows.
 
