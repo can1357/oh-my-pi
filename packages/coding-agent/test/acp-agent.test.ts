@@ -2,8 +2,14 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, type AgentTool, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { Type } from "@oh-my-pi/omptype/typebox";
+import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -117,7 +123,8 @@ function makeAssistantMessage(text: string, thinking?: string) {
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
-	agent: { sessionId: string; waitForIdle: () => Promise<void> };
+	agent: { sessionId: string; waitForIdle: () => Promise<void>; state: { tools: AgentTool[] } };
+	tools: AgentTool[] = [];
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
@@ -157,6 +164,7 @@ class FakeAgentSession {
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent = {
 			sessionId: this.sessionId,
+			state: { tools: this.tools },
 			waitForIdle: async () => {
 				await this.waitForIdle();
 			},
@@ -362,8 +370,8 @@ class FakeAgentSession {
 		this.planReferencePath = path;
 	}
 
-	getToolByName(_name: string): undefined {
-		return undefined;
+	getToolByName(name: string): AgentTool | undefined {
+		return this.tools.find(tool => tool.name === name);
 	}
 
 	toggleFastMode(): boolean {
@@ -483,6 +491,7 @@ async function createHarness(
 	options: {
 		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
 		clientCapabilities?: ClientCapabilities;
+		sessionSetup?: (session: FakeAgentSession) => void | Promise<void>;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 	} = {},
@@ -521,6 +530,7 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		await options.sessionSetup?.(session);
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -555,6 +565,195 @@ async function createHarness(
 async function advanceBootstrapGuard(): Promise<void> {
 	vi.advanceTimersByTime(ACP_BOOTSTRAP_RACE_GUARD_MS);
 	await Promise.resolve();
+}
+
+for (const [dispatch, decision] of [
+	["scheduled", "allow"],
+	["scheduled", "deny"],
+	["wire-alias", "allow"],
+	["cursor", "allow"],
+	["cursor", "deny"],
+	["cursor", "preflight-error"],
+	["unwrapped", "allow"],
+] as const) {
+	it("ACP tool disclosure and live progress: " + dispatch + ": " + decision, async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const progress = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		let executions = 0;
+		const harness = await createHarness({
+			sessionSetup: async session => {
+				const runtime = new ExtensionRuntime();
+				const extension = await loadExtensionFromFactory(
+					pi => {
+						pi.on("tool_call", async () => {
+							if (decision === "preflight-error") {
+								entered.resolve();
+								await release.promise;
+								throw new Error("preflight failed");
+							}
+							return { input: { command: "private-rewritten-input" } };
+						});
+						pi.on("tool_authorization", async () => {
+							entered.resolve();
+							await release.promise;
+							return { decision: decision === "deny" ? "deny" : "allow", reason: "policy decision" };
+						});
+					},
+					session.sessionManager.getCwd(),
+					new EventBus(),
+					runtime,
+					"acp-disclosure-policy",
+				);
+				const runner = new ExtensionRunner(
+					[extension],
+					runtime,
+					session.sessionManager.getCwd(),
+					session.sessionManager,
+					session.modelRegistry as never,
+					undefined,
+					session.settings,
+				);
+				(session as unknown as { extensionRunner: ExtensionRunner }).extensionRunner = runner;
+				const tool: AgentTool = {
+					name: "bash",
+					...(dispatch === "wire-alias" ? { customWireName: "shell_alias" } : {}),
+					label: "Bash",
+					description: "disclosure probe",
+					parameters: Type.Object({ command: Type.String() }),
+					execute: async (_id, _args, _signal, onUpdate) => {
+						executions++;
+						onUpdate?.({ content: [{ type: "text", text: "live progress" }] });
+						progress.resolve();
+						await finish.promise;
+						return { content: [{ type: "text", text: "executed" }] };
+					},
+				};
+				const executable = dispatch === "unwrapped" ? tool : new ExtensionToolWrapper(tool, runner);
+				session.tools.push(executable);
+				session.prompt = async () => {
+					session.isStreaming = true;
+					const emit = (event: AgentSessionEvent) => {
+						// A caller may recover a pre-execution error into a successful result.
+						// Success alone must never authorize disclosure of its input.
+						if (decision === "preflight-error" && event.type === "tool_execution_end") {
+							event = { ...event, isError: false, result: { content: [{ type: "text", text: "handled" }] } };
+						}
+						for (const listener of session.listeners()) listener(event);
+					};
+					const args = { command: "private-original-input" };
+					emit({ type: "agent_start" });
+					if (dispatch === "cursor" || dispatch === "unwrapped") {
+						const handlers = new CursorExecHandlers({
+							cwd: session.sessionManager.getCwd(),
+							tools: new Map([["bash", executable]]),
+							getToolContext: () => ({ settings: session.settings }) as never,
+							emitEvent: emit,
+						});
+						await handlers.mcp({
+							name: "bash",
+							providerIdentifier: "pi-agent",
+							toolName: "bash",
+							toolCallId: "disclosure-call",
+							args,
+							rawArgs: {},
+						});
+					} else {
+						const toolName = dispatch === "wire-alias" ? "shell_alias" : "bash";
+						emit({ type: "tool_execution_start", toolCallId: "disclosure-call", toolName, args });
+						let result: AgentToolResult;
+						let isError = false;
+						try {
+							result = await executable.execute(
+								"disclosure-call",
+								args,
+								undefined,
+								partialResult =>
+									emit({
+										type: "tool_execution_update",
+										toolCallId: "disclosure-call",
+										toolName,
+										args,
+										partialResult,
+									}),
+								{
+									settings: session.settings,
+									toolCall: {
+										batchId: "disclosure-batch",
+										index: 0,
+										toolCalls: [{ id: "disclosure-call", name: toolName, arguments: args, type: "toolCall" }],
+									},
+								} as never,
+							);
+						} catch (error) {
+							isError = true;
+							result = {
+								content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+							};
+						}
+						emit({ type: "tool_execution_end", toolCallId: "disclosure-call", toolName, result, isError });
+					}
+					session.isStreaming = false;
+					emit({ type: "agent_end", messages: [makeAssistantMessage("finished")] });
+					return true;
+				};
+			},
+		});
+		try {
+			const session = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			const pending = harness.agent.prompt({
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "run" }],
+			});
+			if (dispatch !== "unwrapped") {
+				await entered.promise;
+				const beforeDecision = JSON.stringify(harness.updates);
+				expect(beforeDecision).not.toContain("private-original-input");
+				expect(beforeDecision).not.toContain("private-rewritten-input");
+			}
+			release.resolve();
+			if (decision === "allow") {
+				await progress.promise;
+				const liveUpdates = harness.updates.map(notification => notification.update);
+				expect(liveUpdates).toContainEqual(
+					expect.objectContaining({
+						sessionUpdate: "tool_call",
+						toolCallId: "disclosure-call",
+						rawInput: {
+							command: dispatch === "unwrapped" ? "private-original-input" : "private-rewritten-input",
+						},
+					}),
+				);
+				expect(liveUpdates).toContainEqual(
+					expect.objectContaining({
+						sessionUpdate: "tool_call_update",
+						toolCallId: "disclosure-call",
+						status: "in_progress",
+						rawOutput: expect.objectContaining({ content: [{ type: "text", text: "live progress" }] }),
+					}),
+				);
+				expect(liveUpdates).not.toContainEqual(
+					expect.objectContaining({ toolCallId: "disclosure-call", status: "completed" }),
+				);
+				finish.resolve();
+			}
+			await pending;
+			const wire = JSON.stringify(harness.updates);
+			if (dispatch !== "unwrapped") expect(wire).not.toContain("private-original-input");
+			if (decision !== "allow") {
+				expect(wire).not.toContain("private-rewritten-input");
+				expect(executions).toBe(0);
+			} else {
+				expect(executions).toBe(1);
+			}
+			expectAcpNotifications(harness.updates);
+		} finally {
+			release.resolve();
+			finish.resolve();
+			await harness.agent.dispose();
+		}
+	});
 }
 
 describe("ACP agent", () => {
@@ -2792,6 +2991,33 @@ describe("ACP agent", () => {
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).not.toHaveBeenCalled();
 
+		await harness.agent.dispose();
+	});
+
+	it("initializes extensions as headless without form elicitation", async () => {
+		let extensionUiContext: ExtensionUIContext | undefined;
+		const harness = await createHarness({
+			clientCapabilities: {},
+			sessionSetup: session => {
+				(session as unknown as { extensionRunner: unknown }).extensionRunner = {
+					initialize(
+						_actions: unknown,
+						_contextActions: unknown,
+						_commandContextActions: unknown,
+						uiContext: ExtensionUIContext | undefined,
+					) {
+						extensionUiContext = uiContext;
+					},
+					setAuthorizedToolInputHandler: () => {},
+					emit: async () => {},
+					getRegisteredCommands: () => [],
+				};
+			},
+		});
+
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		expect(extensionUiContext).toBeUndefined();
 		await harness.agent.dispose();
 	});
 

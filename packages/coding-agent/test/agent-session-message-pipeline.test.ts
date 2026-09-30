@@ -2264,11 +2264,18 @@ describe("AgentSession message pipeline", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		let handlerCalls = 0;
+		let finalAuthorization: true | undefined;
+		const authorizedInputs: unknown[] = [];
 		const reviseBash: ExtensionFactory = pi => {
 			pi.on("tool_call", async event => {
 				if (event.toolName !== "bash") return undefined;
 				handlerCalls++;
+				finalAuthorization = event.finalAuthorization;
 				return { input: { command: "echo revised" } };
+			});
+			pi.on("tool_authorization", async event => {
+				authorizedInputs.push(event.input);
+				return { decision: "allow" };
 			});
 		};
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
@@ -2305,6 +2312,8 @@ describe("AgentSession message pipeline", () => {
 			await session.sendUserMessage("run it");
 
 			expect(handlerCalls).toBe(1);
+			expect(finalAuthorization).toBe(true);
+			expect(authorizedInputs).toEqual([{ command: "echo revised" }]);
 			expect(startArgs).toEqual([{ command: "echo revised" }]);
 			const messages = session.agent.state.messages;
 			const toolCallBlock = messages

@@ -48,6 +48,7 @@ import { disableProvider, enableProvider } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
+	ExtensionToolWrapper,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	getExtensionUISelectOptionLabel,
@@ -174,6 +175,8 @@ type ManagedSessionRecord = {
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
+	pendingToolStarts: Map<string, Extract<AgentSessionEvent, { type: "tool_execution_start" }>>;
+	authorizedToolInputs: Map<string, { toolName: string; args: unknown }>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
@@ -1357,6 +1360,8 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			pendingToolStarts: new Map(),
+			authorizedToolInputs: new Map(),
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
@@ -1417,10 +1422,53 @@ export class AcpAgent implements Agent {
 		return storedSession.path;
 	}
 
-	async #handlePromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
+	async #handlePromptEvent(
+		record: ManagedSessionRecord,
+		event: AgentSessionEvent,
+		inputAuthorized = false,
+	): Promise<void> {
 		const promptTurn = record.promptTurn;
 		if (!promptTurn || promptTurn.settled || promptTurn.cancelRequested) {
 			return;
+		}
+		if (
+			event.type === "tool_execution_start" &&
+			!inputAuthorized &&
+			record.session.extensionRunner?.hasHandlers("tool_authorization")
+		) {
+			const toolName = event.toolName;
+			const tool =
+				record.session.getToolByName(toolName) ??
+				record.session.agent.state.tools.find(candidate => candidate.customWireName === toolName);
+			// Only wrapped calls have a final gate that can release a deferred preview.
+			// Low-level SDK tools and provider-owned operations may execute without one.
+			if (tool instanceof ExtensionToolWrapper) {
+				const authorized = record.authorizedToolInputs.get(event.toolCallId);
+				if (authorized?.toolName === toolName) {
+					event = { ...event, args: authorized.args };
+				} else {
+					// The loop/bridge announces execution before the wrapper's final gate.
+					// Do not disclose args, derived titles, content, or locations yet.
+					record.pendingToolStarts.set(event.toolCallId, event);
+					return;
+				}
+			}
+		}
+		if (event.type === "tool_execution_update") {
+			if (record.pendingToolStarts.has(event.toolCallId)) return;
+			const authorized = record.authorizedToolInputs.get(event.toolCallId);
+			if (authorized?.toolName === event.toolName) {
+				// Direct bridges retain pre-rewrite args in their progress callbacks.
+				event = { ...event, args: authorized.args };
+			}
+		}
+		if (event.type === "tool_execution_end") {
+			const pending = record.pendingToolStarts.get(event.toolCallId);
+			if (pending) {
+				record.pendingToolStarts.delete(event.toolCallId);
+				await this.#handlePromptEvent(record, { ...pending, args: {}, intent: undefined }, true);
+			}
+			record.authorizedToolInputs.delete(event.toolCallId);
 		}
 
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
@@ -1629,6 +1677,8 @@ export class AcpAgent implements Agent {
 		}
 		promptTurn.settled = true;
 		promptTurn.unsubscribe?.();
+		record.pendingToolStarts.clear();
+		record.authorizedToolInputs.clear();
 		// Keep the slot occupied until cancel cleanup finishes — `#runCancelCleanup`
 		// evicts the slot in its finally block once both flags say it's safe.
 		if (!promptTurn.cleanup && record.promptTurn === promptTurn) {
@@ -2539,12 +2589,13 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
 		const uiContext = createAcpExtensionUiContext(
 			this.#connection,
 			() => record.session.sessionId,
 			this.#clientCapabilities,
 		);
-		if (this.#clientCapabilities?.elicitation?.form != null) {
+		if (supportsForm) {
 			record.setToolUIContext?.(uiContext, true);
 			record.session.setUsageFallbackConfirmer((confirmation, signal) => {
 				const reserve =
@@ -2642,9 +2693,17 @@ export class AcpAgent implements Agent {
 				},
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
-			uiContext,
+			supportsForm ? uiContext : undefined,
 			"rpc",
 		);
+		extensionRunner.setAuthorizedToolInputHandler(async (toolCallId, toolName, args) => {
+			if (!isPromptTurnInFlight(record.promptTurn) || record.promptTurn.cancelRequested) return;
+			record.authorizedToolInputs.set(toolCallId, { toolName, args });
+			const pending = record.pendingToolStarts.get(toolCallId);
+			if (pending?.toolName !== toolName) return;
+			record.pendingToolStarts.delete(toolCallId);
+			await this.#handlePromptEvent(record, { ...pending, args }, true);
+		});
 		await extensionRunner.emit({ type: "session_start" });
 		record.extensionsConfigured = true;
 	}

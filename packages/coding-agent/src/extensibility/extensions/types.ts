@@ -128,6 +128,7 @@ import type {
 	SessionSwitchEvent,
 	SessionTreeEvent,
 	TodoReminderEvent,
+	ToolAuthorizationEventResult,
 	ToolCallEventResult,
 	ToolResultEventResult,
 	TtsrTriggeredEvent,
@@ -1035,9 +1036,27 @@ export interface ToolApprovalResolvedEvent {
 	reason?: string;
 }
 
+/** Fired after every `tool_call` rewrite and immediately before native approval. */
+export interface ToolAuthorizationEvent {
+	type: "tool_authorization";
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	/** Detached authorization view of the final input. Computer calls expose provider-native actions and safety checks. */
+	input: Record<string, unknown>;
+	approvalMode: ApprovalMode;
+	/** Native decision before extension authorization is combined with it. */
+	nativeDecision: "allow" | "ask";
+	/** True when tool policy, an explicit user rule, or a provider safety check requires a human. */
+	manualApprovalRequired: boolean;
+	reason?: string;
+}
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
+	/** True when a final `tool_authorization` event will gate the rewritten input. */
+	finalAuthorization?: true;
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1210,6 +1229,7 @@ export type ExtensionEvent =
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent
+	| ToolAuthorizationEvent
 	| ToolApprovalRequestedEvent
 	| ToolApprovalResolvedEvent;
 
@@ -1238,7 +1258,7 @@ export interface AssistantMessageRewriteResult {
 
 export type BeforeProviderRequestEventResult = unknown;
 
-export type { ToolCallEventResult } from "../shared-events";
+export type { ToolAuthorizationEventResult, ToolCallEventResult } from "../shared-events";
 
 /** Result from input event handler */
 export interface InputEventResult {
@@ -1414,6 +1434,10 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
+	on(
+		event: "tool_authorization",
+		handler: ExtensionHandler<ToolAuthorizationEvent, ToolAuthorizationEventResult>,
+	): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;

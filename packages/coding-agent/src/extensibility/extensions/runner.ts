@@ -26,7 +26,7 @@ import {
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
@@ -37,6 +37,7 @@ import type { AsyncJobSnapshot } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
@@ -90,6 +91,8 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	ToolAuthorizationEvent,
+	ToolAuthorizationEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -141,6 +144,21 @@ function normalizeHandlerTimeout(timeoutMs: number): number {
 	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : EXTENSION_HANDLER_TIMEOUT_MS;
 }
 
+function authorizationReason(value: string): string {
+	const sanitized = shortenPath(
+		sanitizeText(value)
+			.replace(/[\r\n\t]+/g, " ")
+			.trim(),
+	);
+	return truncateToWidth(sanitized, TRUNCATE_LENGTHS.CONTENT);
+}
+
+function authorizationExtensionDiagnostic(extensionPath: string, detail: string): string {
+	const prefix = "Extension ";
+	const pathWidth = Math.max(1, TRUNCATE_LENGTHS.CONTENT - Bun.stringWidth(prefix) - Bun.stringWidth(detail));
+	return `${prefix}${truncateToWidth(extensionPath, pathWidth)}${detail}`;
+}
+
 /**
  * Dedicated cap for `session_shutdown` handlers. The generic 30s budget is
  * appropriate for events extensions can observe (e.g. `session_start`,
@@ -185,13 +203,28 @@ function createHandlerUIContext(
 	ui: ExtensionUIContext,
 	handlerSignal: AbortSignal,
 	timeoutBudget?: HandlerTimeoutBudget,
+	dialogAttention?: (active: boolean) => void,
 ): ExtensionUIContext {
 	const askDialog = ui.askDialog;
+	let dialogDepth = 0;
+	const setDialogAttention = (active: boolean): void => {
+		if (!dialogAttention) return;
+		if (active) {
+			dialogDepth++;
+			if (dialogDepth === 1) dialogAttention(true);
+			return;
+		}
+		if (dialogDepth === 0) return;
+		dialogDepth--;
+		if (dialogDepth === 0) dialogAttention(false);
+	};
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
+		setDialogAttention(true);
 		try {
 			return await dialog();
 		} finally {
+			setDialogAttention(false);
 			timeoutBudget?.resume();
 		}
 	};
@@ -215,6 +248,7 @@ function createHandlerUIContext(
 						const component = await factory(...args);
 						if (!customSettled) {
 							timeoutBudget?.pause();
+							setDialogAttention(true);
 							componentReady = true;
 						}
 						return component;
@@ -226,7 +260,10 @@ function createHandlerUIContext(
 				);
 			} finally {
 				customSettled = true;
-				if (componentReady) timeoutBudget?.resume();
+				if (componentReady) {
+					setDialogAttention(false);
+					timeoutBudget?.resume();
+				}
 			}
 		},
 		editor: (title, prefill, dialogOptions, editorOptions) =>
@@ -260,10 +297,11 @@ function createHandlerContext(
 	ctx: ExtensionContext,
 	handlerSignal: AbortSignal,
 	timeoutBudget?: HandlerTimeoutBudget,
+	dialogAttention?: (active: boolean) => void,
 ): ExtensionContext {
 	const scoped: ExtensionContext = Object.create(ctx);
 	Object.defineProperty(scoped, "ui", {
-		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget, dialogAttention),
 		enumerable: true,
 		configurable: true,
 	});
@@ -375,6 +413,7 @@ const MAX_PENDING_MCP_NOTIFICATIONS = 100;
  */
 type RunnerEmitEvent = Exclude<
 	ExtensionEvent,
+	| ToolAuthorizationEvent
 	| ToolCallEvent
 	| ToolResultEvent
 	| UserBashEvent
@@ -484,11 +523,14 @@ export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	name: MAIN_AGENT_RULE_NAME,
 	depth: 0,
 });
+export type ToolApprovalAttentionSource = "native" | "extension";
 
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
+	#toolApprovalAttentionHandler?: (toolCallId: string, active: boolean, source: ToolApprovalAttentionSource) => void;
+	#authorizedToolInputHandler?: (toolCallId: string, toolName: string, args: unknown) => Promise<void>;
 	#errorListeners: Set<ExtensionErrorListener> = new Set();
 	#getModel: () => Model | undefined = () => undefined;
 	#isIdleFn: () => boolean = () => true;
@@ -1017,6 +1059,29 @@ export class ExtensionRunner {
 		await this.#toolApprovalPreviewWaiter?.(toolCallId);
 	}
 
+	setToolApprovalAttentionHandler(
+		handler: (toolCallId: string, active: boolean, source: ToolApprovalAttentionSource) => void,
+	): () => void {
+		this.#toolApprovalAttentionHandler = handler;
+		return () => {
+			if (this.#toolApprovalAttentionHandler === handler) this.#toolApprovalAttentionHandler = undefined;
+		};
+	}
+
+	reportToolApprovalAttention(toolCallId: string, active: boolean, source: ToolApprovalAttentionSource): void {
+		this.#toolApprovalAttentionHandler?.(toolCallId, active, source);
+	}
+	/** ACP withholds loop previews until the final extension gate accepts the execution input. */
+	setAuthorizedToolInputHandler(
+		handler: (toolCallId: string, toolName: string, args: unknown) => Promise<void>,
+	): void {
+		this.#authorizedToolInputHandler = handler;
+	}
+
+	async reportAuthorizedToolInput(toolCallId: string, toolName: string, args: unknown): Promise<void> {
+		await this.#authorizedToolInputHandler?.(toolCallId, toolName, args);
+	}
+
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
 	}
@@ -1482,7 +1547,7 @@ export class ExtensionRunner {
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
-		// `session_stop` carries its own signal on the event; `tool_call` receives
+		// `session_stop` carries its own signal on the event; tool gates receive
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
 		// gate without executing the underlying tool. Compose whichever apply.
@@ -1494,6 +1559,10 @@ export class ExtensionRunner {
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
+		const authorizationToolCallId =
+			event.type === "tool_authorization" && "toolCallId" in event && typeof event.toolCallId === "string"
+				? event.toolCallId
+				: undefined;
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
@@ -1506,7 +1575,10 @@ export class ExtensionRunner {
 							const handlerContext = createHandlerContext(
 								ctx,
 								handlerSignal,
-								event.type === "tool_call" ? budget : undefined,
+								event.type === "tool_call" || event.type === "tool_authorization" ? budget : undefined,
+								authorizationToolCallId
+									? active => this.reportToolApprovalAttention(authorizationToolCallId, active, "extension")
+									: undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(event, handlerContext),
@@ -1825,6 +1897,78 @@ export class ExtensionRunner {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
 		return buildAggregatedToolCallResult(result, aggregated);
+	}
+
+	/**
+	 * Emit final authorization after all `tool_call` rewrites have settled.
+	 * Every handler sees the exact execution input and decisions combine by strictness.
+	 */
+	async emitToolAuthorization(
+		event: ToolAuthorizationEvent,
+		signal?: AbortSignal,
+	): Promise<ToolAuthorizationEventResult | undefined> {
+		const ctx = this.createContext();
+		const timeoutMs = normalizeHandlerTimeout(
+			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
+				extensionHandlerTimeoutMs,
+		);
+		let result: ToolAuthorizationEventResult | undefined;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("tool_authorization");
+			if (!handlers || handlers.length === 0) continue;
+			const extensionPath = authorizationReason(ext.path);
+
+			for (const handler of handlers) {
+				const handlerEvent = { ...event, input: structuredClone(event.input) };
+				let handlerFailed = false;
+				const handlerResult = (await this.#runHandlerWithTimeout(
+					handler,
+					handlerEvent,
+					ctx,
+					ext,
+					timeoutMs,
+					(kind, message) => {
+						handlerFailed = true;
+						return {
+							decision: "deny" as const,
+							reason:
+								kind === "timeout"
+									? authorizationExtensionDiagnostic(extensionPath, ` timed out after ${timeoutMs}ms`)
+									: authorizationReason(`Extension ${extensionPath} failed: ${authorizationReason(message)}`),
+						};
+					},
+					signal,
+				)) as ToolAuthorizationEventResult | undefined;
+
+				if (!handlerResult) continue;
+				if (!(["allow", "ask", "deny"] as const).includes(handlerResult.decision)) {
+					return {
+						decision: "deny",
+						reason: authorizationExtensionDiagnostic(
+							extensionPath,
+							" returned an unsupported tool authorization decision",
+						),
+					};
+				}
+				if (handlerResult.decision === "deny") {
+					if (handlerFailed || !handlerResult.reason) return handlerResult;
+					return { ...handlerResult, reason: authorizationReason(handlerResult.reason) };
+				}
+				if (handlerResult.decision === "ask") {
+					const previousReason = result?.decision === "ask" ? result.reason : undefined;
+					const reason = handlerResult.reason || previousReason;
+					result = { decision: "ask", ...(reason ? { reason } : {}) };
+				} else if (result === undefined) {
+					result = handlerResult;
+				}
+			}
+		}
+
+		if (signal?.aborted) {
+			return { decision: "deny", reason: "Tool authorization was canceled while an extension handler was pending" };
+		}
+		return result;
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
