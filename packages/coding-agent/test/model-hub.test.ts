@@ -116,6 +116,7 @@ function createHub(options: {
 	registry?: RegistryOverrides;
 	hub?: ModelHubOptions;
 	callbacks?: Partial<ModelHubCallbacks>;
+	providerEditor?: ModelHubCallbacks["providerEditor"];
 	terminalRows?: number;
 }): HubHarness {
 	installTestTheme();
@@ -151,6 +152,7 @@ function createHub(options: {
 			onSwitchPreset: options.callbacks?.onSwitchPreset,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
+			providerEditor: options.providerEditor,
 		},
 		options.hub,
 	);
@@ -167,6 +169,41 @@ const OPTION_RIGHT_MAC = "\x1bf";
 const CTRL_LEFT = "\x1b[1;5D";
 const CTRL_RIGHT = "\x1b[1;5C";
 const ESC = "\x1b";
+const CTRL_D = "\x04";
+const CTRL_E = "\x05";
+const CTRL_N = "\x0e";
+const CTRL_X = "\x18";
+const DELETE = "\x1b[3~";
+
+type ProviderEditor = NonNullable<ModelHubCallbacks["providerEditor"]>;
+
+interface ProviderEditorHarness {
+	editor: ProviderEditor;
+	add: Mock<ProviderEditor["add"]>;
+	update: Mock<ProviderEditor["update"]>;
+	remove: Mock<ProviderEditor["remove"]>;
+}
+
+/** Only `custom-gw` is declared in models.yml; every other provider is not editable. */
+function makeProviderEditor(
+	overrides: { add?: ProviderEditor["add"]; remove?: ProviderEditor["remove"] } = {},
+): ProviderEditorHarness {
+	const add = vi.fn(overrides.add ?? (async () => {}));
+	const update = vi.fn<ProviderEditor["update"]>(async () => {});
+	const remove = vi.fn(overrides.remove ?? (async () => {}));
+	const editor: ProviderEditor = {
+		get: id => (id === "custom-gw" ? { baseUrl: "https://gw.example/v1", hasKey: true } : undefined),
+		add,
+		update,
+		remove,
+	};
+	return { editor, add, update, remove };
+}
+
+/** Let already-settled promise continuations run, without waiting on the wall clock. */
+async function settle(): Promise<void> {
+	for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+}
 
 describe("ModelHub", () => {
 	beforeAll(async () => {
@@ -1859,5 +1896,248 @@ describe("ModelHub", () => {
 			hub.handleInput("\n");
 			expect(onLoginRequest).toHaveBeenCalledWith("anthropic");
 		});
+	});
+});
+
+describe("ModelHub custom provider editor", () => {
+	beforeAll(async () => {
+		testTheme = await getThemeByName("dark");
+		if (!testTheme) {
+			throw new Error("Failed to load dark theme for ModelHub tests");
+		}
+	});
+
+	afterEach(() => {
+		resetProviderAutoRefreshGuard();
+		for (const hub of openHubs.splice(0)) {
+			hub.dispose();
+		}
+	});
+
+	test("ctrl+e and ctrl+d act on editable providers only", () => {
+		const models = [makeModel("custom-gw", "m1"), makeModel("openai", "gpt-x")];
+		const { editor, add, update, remove } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(DOWN); // custom-gw → openai
+		const before = normalize(hub.render(220));
+		hub.handleInput(CTRL_E);
+		hub.handleInput(CTRL_D);
+		hub.handleInput(DELETE);
+		expect(normalize(hub.render(220))).toBe(before);
+		expect(add).not.toHaveBeenCalled();
+		expect(update).not.toHaveBeenCalled();
+		expect(remove).not.toHaveBeenCalled();
+
+		hub.handleInput(UP); // openai → custom-gw
+		hub.handleInput(CTRL_E);
+		expect(normalize(hub.render(220))).toContain("Edit provider custom-gw");
+		hub.handleInput(ESC);
+		expect(normalize(hub.render(220))).not.toContain("Edit provider custom-gw");
+		expect(update).not.toHaveBeenCalled();
+
+		hub.handleInput(CTRL_D);
+		expect(footerLine(hub.render(220))).toContain(
+			'Delete provider "custom-gw" and its stored key? Enter confirm · Esc cancel',
+		);
+		expect(remove).not.toHaveBeenCalled();
+	});
+
+	test("Enter on the delete prompt removes the provider once, even if pressed twice", async () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const gate = Promise.withResolvers<void>();
+		const { editor, remove } = makeProviderEditor({ remove: () => gate.promise });
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(DELETE);
+		hub.handleInput("\n");
+		hub.handleInput("\n");
+		expect(remove).toHaveBeenCalledTimes(1);
+		expect(remove).toHaveBeenCalledWith("custom-gw");
+
+		gate.resolve();
+		await settle();
+		expect(footerLine(hub.render(220))).not.toContain("Delete provider");
+	});
+
+	test("Esc on the delete prompt cancels without removing", () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { editor, remove } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(CTRL_D);
+		hub.handleInput(ESC);
+		expect(remove).not.toHaveBeenCalled();
+		const footer = footerLine(hub.render(220));
+		expect(footer).not.toContain("Delete provider");
+		expect(footer).toContain("^E edit · ^D delete · ^N add provider · ");
+	});
+
+	test("a failed delete reports the error in the footer and Esc dismisses it", async () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { editor, remove } = makeProviderEditor({
+			remove: async () => {
+				throw new Error("models.yml changed on disk; retry");
+			},
+		});
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(CTRL_D);
+		hub.handleInput("\n");
+		await settle();
+		expect(remove).toHaveBeenCalledTimes(1);
+		expect(footerLine(hub.render(220))).toContain("Delete failed: models.yml changed on disk; retry");
+
+		hub.handleInput(ESC);
+		expect(footerLine(hub.render(220))).not.toContain("Delete failed");
+	});
+
+	test("ctrl+n opens the add form and a saved provider appears in the sidebar", async () => {
+		const models = [makeModel("openai", "gpt-x")];
+		const { editor, add } = makeProviderEditor({
+			add: async values => {
+				models.push(makeModel(values.id, "m1"));
+			},
+		});
+		const { hub } = createHub({ models: () => models, providerEditor: editor });
+
+		hub.handleInput(CTRL_N);
+		expect(normalize(hub.render(220))).toContain("Provider ID");
+		for (const ch of "newgw") hub.handleInput(ch);
+		hub.handleInput("\n");
+		for (const ch of "https://new.example/v1") hub.handleInput(ch);
+		hub.handleInput("\n");
+		for (const ch of "sk-1") hub.handleInput(ch);
+		hub.handleInput("\n");
+		await settle();
+
+		expect(add).toHaveBeenCalledWith({ id: "newgw", baseUrl: "https://new.example/v1", apiKey: "sk-1" });
+		const sidebarRow = hub
+			.render(220)
+			.map(line => stripVTControlCharacters(line))
+			.find(line => line.includes("newgw"));
+		expect(sidebarRow).toBeDefined();
+		expect(normalize(hub.render(220))).not.toContain("Provider ID");
+	});
+
+	test("the + Add provider sidebar row opens the add form from the keyboard and the mouse", () => {
+		const models = [makeModel("openai", "gpt-x")];
+		const { editor } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		expect(normalize(hub.render(220))).toContain("+ Add provider…");
+		hub.handleInput(DOWN); // All models → openai
+		hub.handleInput(DOWN); // openai → + Add provider…
+		expect(normalize(hub.render(220))).toContain("Press Enter to add");
+		hub.handleInput("\n");
+		expect(normalize(hub.render(220))).toContain("Provider ID");
+		hub.handleInput(ESC);
+		expect(normalize(hub.render(220))).not.toContain("Provider ID");
+
+		hub.handleInput(UP); // + Add provider… → openai, so the click below must open the form itself
+		const frame = hub.render(220).map(line => stripVTControlCharacters(line));
+		const screenRow = frame.findIndex(line => line.includes("+ Add provider…"));
+		expect(screenRow).toBeGreaterThan(0);
+		hub.handleInput(`\x1b[<0;4;${screenRow + 1}M`); // SGR reports are 1-based
+		expect(normalize(hub.render(220))).toContain("Provider ID");
+	});
+
+	test("the search hop skips the + Add provider row", () => {
+		const models = [makeModel("alpha", "m1"), makeModel("beta", "m2")];
+		const { editor } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		for (const ch of "m1") hub.handleInput(ch);
+		hub.handleInput(LEFT); // back to sidebar focus with the query still active
+		for (let hop = 0; hop < 6; hop++) {
+			hub.handleInput(DOWN);
+			expect(normalize(hub.render(220))).not.toContain("Press Enter to add");
+		}
+	});
+
+	test("without providerEditor the hub has no add row and ignores the editor keys", () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { hub } = createHub({ models });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		const before = normalize(hub.render(220));
+		expect(before).not.toContain("Add provider");
+		hub.handleInput(CTRL_N);
+		hub.handleInput(CTRL_E);
+		hub.handleInput(CTRL_D);
+		expect(normalize(hub.render(220))).toBe(before);
+	});
+
+	test("edit sends only the changed URL and key", async () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { editor, update } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(CTRL_E); // opens on the prefilled endpoint URL
+		for (const ch of "/beta") hub.handleInput(ch);
+		hub.handleInput("\n");
+		for (const ch of "sk-new") hub.handleInput(ch);
+		hub.handleInput("\n");
+		await settle();
+
+		expect(update).toHaveBeenCalledTimes(1);
+		expect(update).toHaveBeenCalledWith("custom-gw", { baseUrl: "https://gw.example/v1/beta", apiKey: "sk-new" });
+		expect(normalize(hub.render(220))).not.toContain("Edit provider");
+	});
+
+	test("clearing the stored key in the edit form passes clearApiKey through", async () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { editor, update } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(CTRL_E);
+		hub.handleInput("\n"); // keep the URL, move to the key step
+		hub.handleInput(CTRL_X);
+		hub.handleInput("\n");
+		await settle();
+
+		expect(update).toHaveBeenCalledWith("custom-gw", { clearApiKey: true });
+	});
+
+	test("deleting the provider a role uses keeps focus on a surviving entry", async () => {
+		const models = [makeModel("alpha", "m"), makeModel("custom-gw", "m1")];
+		const settings = Settings.isolated({ modelRoles: { default: "custom-gw/m1" } });
+		const { editor } = makeProviderEditor({
+			remove: async id => {
+				models.splice(0, models.length, ...models.filter(model => model.provider !== id));
+			},
+		});
+		const { hub } = createHub({ models: () => models, settings, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → alpha
+		hub.handleInput(DOWN); // alpha → custom-gw, the last provider before + Add provider…
+		hub.handleInput(CTRL_D);
+		hub.handleInput("\n");
+		await settle();
+
+		const rendered = normalize(hub.render(220));
+		expect(rendered).not.toContain("custom-gw");
+		expect(rendered).toContain("alpha · 1 models");
+	});
+
+	test("Delete in the roles view still unassigns", () => {
+		const model = makeModel("test", "worker-model");
+		const settings = Settings.isolated({ modelRoles: { smol: "test/worker-model" } });
+		const { editor, remove } = makeProviderEditor();
+		const { hub, onUnassign } = createHub({ models: [model], scoped: true, settings, providerEditor: editor });
+
+		hub.handleInput(UP); // All models → Roles
+		hub.handleInput("\n"); // dive into the role rows
+		hub.handleInput(DOWN); // default → smol row
+		hub.handleInput(DELETE);
+
+		expect(onUnassign).toHaveBeenCalledWith("smol");
+		expect(remove).not.toHaveBeenCalled();
 	});
 });
