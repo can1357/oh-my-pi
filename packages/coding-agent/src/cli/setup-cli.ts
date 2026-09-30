@@ -9,7 +9,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { Settings } from "../config/settings";
 import { ModelRegistry } from "../config/model-registry";
-import { resolveRoleChain } from "../config/model-resolver";
+import { resolveLocalRoleModelId } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { discoverAuthStorage } from "../sdk";
@@ -166,14 +166,6 @@ interface SpeechComponent {
 	ensure(onProgress: (progress: { stage: string; percent?: number }) => void): Promise<void>;
 }
 
-function resolveLocalSpeechModelId(role: "speech" | "dictation", settings: Settings, registry: ModelRegistry): string {
-	const candidate = resolveRoleChain(role, settings, roleCandidatePool(role, settings, registry)).find(
-		entry => entry.model.provider === "local",
-	);
-	if (!candidate) throw new Error(`No local model is available for the ${role} role.`);
-	return candidate.model.id;
-}
-
 function buildSpeechComponents(settings: Settings, registry: ModelRegistry): SpeechComponent[] {
 	const localRoleModelIds = (role: "speech" | "dictation") =>
 		new Set(
@@ -189,13 +181,13 @@ function buildSpeechComponents(settings: Settings, registry: ModelRegistry): Spe
 	return [
 		{
 			name: "Speech-to-Text model",
-			isReady: () => isSttModelCached(resolveLocalSpeechModelId("dictation", settings, registry)),
+			isReady: () => isSttModelCached(resolveLocalRoleModelId("dictation", settings, registry)),
 			status: async () => {
-				const key = resolveLocalSpeechModelId("dictation", settings, registry);
+				const key = resolveLocalRoleModelId("dictation", settings, registry);
 				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
 			},
 			pick: async () => {
-				const current = resolveLocalSpeechModelId("dictation", settings, registry);
+				const current = resolveLocalRoleModelId("dictation", settings, registry);
 				const chosen = await selectSetupModel("Speech-to-Text model", sttOptions, current);
 				if (chosen === null) return false;
 				if (isSttModelKey(chosen)) {
@@ -205,19 +197,19 @@ function buildSpeechComponents(settings: Settings, registry: ModelRegistry): Spe
 				return true;
 			},
 			ensure: onProgress =>
-				downloadSttModel(resolveLocalSpeechModelId("dictation", settings, registry), progress =>
+				downloadSttModel(resolveLocalRoleModelId("dictation", settings, registry), progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
 				),
 		},
 		{
 			name: "Text-to-Speech model",
-			isReady: () => isTtsModelCached(resolveLocalSpeechModelId("speech", settings, registry)),
+			isReady: () => isTtsModelCached(resolveLocalRoleModelId("speech", settings, registry)),
 			status: async () => {
-				const key = resolveLocalSpeechModelId("speech", settings, registry);
+				const key = resolveLocalRoleModelId("speech", settings, registry);
 				return (await isTtsModelCached(key)) ? key : `${key} — model/runtime not installed`;
 			},
 			pick: async () => {
-				const current = resolveLocalSpeechModelId("speech", settings, registry);
+				const current = resolveLocalRoleModelId("speech", settings, registry);
 				const chosen = await selectSetupModel("Text-to-Speech model", ttsOptions, current);
 				if (chosen === null) return false;
 				if (isTtsLocalModelKey(chosen)) {
@@ -227,7 +219,7 @@ function buildSpeechComponents(settings: Settings, registry: ModelRegistry): Spe
 				return true;
 			},
 			ensure: async onProgress => {
-				const ok = await downloadTtsModel(resolveLocalSpeechModelId("speech", settings, registry), progress =>
+				const ok = await downloadTtsModel(resolveLocalRoleModelId("speech", settings, registry), progress =>
 					onProgress({ stage: progress.stage, percent: progress.percent }),
 				);
 				if (!ok) throw new Error("Failed to download the local text-to-speech model.");
