@@ -84,6 +84,7 @@ import {
 	isAnthropicFastModeFallbackDisabled,
 	realizesPriorityServiceTier,
 	serviceTierFamily,
+	shouldSendServiceTier,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -10110,10 +10111,13 @@ export class AgentSession implements SettingsScope {
 		return this.#models.isFastModeEnabled();
 	}
 
-	/** Reports whether priority service is realized by the active model. */
+	/** Reports whether a fast service tier is realized by the active model. */
 	isFastModeActive(): boolean {
 		const model = this.agent.state.model;
-		if (!model || !realizesPriorityServiceTier(this.#resolveMainServiceTier(model), model)) return false;
+		if (!model) return false;
+		const tier = this.#resolveMainServiceTier(model);
+		if (tier === "ultrafast") return shouldSendServiceTier(tier, model);
+		if (!realizesPriorityServiceTier(tier, model)) return false;
 		return model.provider !== "anthropic" || !isAnthropicFastModeFallbackDisabled(this.providerSessionState, model);
 	}
 
