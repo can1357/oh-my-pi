@@ -8,16 +8,15 @@
  * name so it never parses ids.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
 	composeRemoteId,
-	IrcBus,
 	isValidRemoteName,
 	isValidRemoteNamespace,
-	type RemoteTransport,
 	remoteNameOf,
 	remoteNamespaceOf,
-} from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+} from "@oh-my-pi/pi-coding-agent/registry/remote-id";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 

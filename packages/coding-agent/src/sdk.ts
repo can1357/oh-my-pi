@@ -183,8 +183,8 @@ import {
 	AgentRegistry,
 	type AgentRegistryApi,
 	MAIN_AGENT_ID,
-	REMOTE_ID_PREFIX,
 } from "./registry/agent-registry";
+import { REMOTE_ID_PREFIX } from "./registry/remote-id";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,

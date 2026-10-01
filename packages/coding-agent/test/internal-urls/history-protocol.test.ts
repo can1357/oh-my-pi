@@ -180,7 +180,7 @@ describe("history:// protocol", () => {
 		expect(resource.content).toContain("| HubAgent | idle | sub |");
 	});
 
-	it("excludes remote proxies from the index and rejects direct resolve (murmur-q00p — no local transcript)", async () => {
+	it("lists remote proxies (@ns/name, kind remote) in the index but has no transcript for them (murmur-q00p)", async () => {
 		AgentRegistry.global().register({
 			id: "HubAgent",
 			displayName: "task",
@@ -189,18 +189,29 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 		AgentRegistry.global().register({
-			id: "remote-peer",
-			displayName: "remote-peer",
+			id: "@cluster-a/leia",
+			displayName: "leia",
 			kind: "remote",
 			session: null,
-			status: "idle",
+			status: "running",
 		});
 
 		const index = await InternalUrlRouter.instance().resolve("history://");
 		expect(index.content).toContain("| HubAgent | idle | sub |");
-		expect(index.content).not.toContain("remote-peer");
+		// The model learns the full spellable id and that the row is a cross-process peer.
+		expect(index.content).toContain("| @cluster-a/leia | running | remote |");
+		expect(index.content).toContain("`remote` rows are peers in other processes");
 
-		await expect(InternalUrlRouter.instance().resolve("history://remote-peer")).rejects.toThrow(/Unknown agent/);
+		// Through the real router: the `/leia` segment is part of the id, not a route, and the read is
+		// refused with a pointer to messaging rather than an unknown-agent lookup error.
+		await expect(InternalUrlRouter.instance().resolve("history://@cluster-a/leia")).rejects.toThrow(
+			/@cluster-a\/leia is a remote peer[\s\S]*write agent:\/\/@cluster-a\/leia/,
+		);
+		// A remote id is refused even when no proxy is registered (prefix-authoritative, like the bus).
+		await expect(InternalUrlRouter.instance().resolve("history://@cluster-b/han")).rejects.toThrow(
+			/@cluster-b\/han is a remote peer/,
+		);
+		expect(await InternalUrlRouter.instance().locate("history://@cluster-a/leia")).toBeNull();
 	});
 
 	it("history://<id> renders a live ref's in-memory transcript", async () => {
