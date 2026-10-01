@@ -9,6 +9,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 
 const tutorialsDir = path.resolve(import.meta.dir, "../src/tutorials");
 const generatedFile = path.join(tutorialsDir, "fixtures.generated.txt");
@@ -25,7 +26,7 @@ export async function collectTutorialTrees(): Promise<Record<string, Uint8Array>
 			try {
 				files = await fs.readdir(root, { recursive: true });
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+				if (isEnoent(error)) continue;
 				throw error;
 			}
 			for (const file of files.sort()) {

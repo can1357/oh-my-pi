@@ -8,6 +8,7 @@
  * `/tutorial exit` returns there exactly; progress lives in `tutorials.json`.
  */
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
 import { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
@@ -21,13 +22,20 @@ import { getLesson, getLessons } from "./catalog";
 import { emptyObservation, findFailingCheck, recordSessionEvent, type StepObservation } from "./checks";
 import type { Lesson, LessonStep, StepCheck } from "./lesson";
 import { TutorialProgressStore } from "./progress";
-import { createSandbox } from "./sandbox";
+import { createSandbox, getTutorialSandboxRoot } from "./sandbox";
 
 const CARD_WIDGET_KEY = "tutorial";
 const SESSION_TAG = "tutorial";
 
 const sessionTagSchema = type({ lessonId: "string", returnCwd: "string", "returnSession?": "string" });
 type SessionTag = typeof sessionTagSchema.infer;
+
+export interface TutorialControllerOptions {
+	/** Progress file; defaults to `tutorials.json` under the agent dir. */
+	progressFile?: string;
+	/** Parent of lesson sandboxes; defaults to `getTutorialSandboxRoot()`. */
+	sandboxRoot?: string;
+}
 
 interface ActiveLesson {
 	lesson: Lesson;
@@ -65,12 +73,15 @@ export class TutorialController {
 	#observation: StepObservation = emptyObservation();
 	#evaluation: Promise<void> = Promise.resolve();
 
-	constructor(ctx: InteractiveModeContext) {
+	readonly #options: TutorialControllerOptions;
+
+	constructor(ctx: InteractiveModeContext, options: TutorialControllerOptions = {}) {
 		this.#ctx = ctx;
+		this.#options = options;
 	}
 
 	#getStore(): Promise<TutorialProgressStore> {
-		this.#store ??= TutorialProgressStore.load().then(store => {
+		this.#store ??= TutorialProgressStore.load(this.#options.progressFile).then(store => {
 			this.#loadedStore = store;
 			return store;
 		});
@@ -108,7 +119,16 @@ export class TutorialController {
 	noteCommand(name: string): void {
 		if (!this.#active || name === "tutorial") return;
 		this.#observation.commands.push(name);
-		if (!this.#ctx.session.isStreaming) this.#queueEvaluation(true);
+		if (this.#ctx.session.isStreaming) return;
+		// Unrelated commands (/model, /copy, …) mid-step must not nag with a hint;
+		// only a step waiting on a command reports why it has not passed yet.
+		const step = this.#loadedStore?.nextStep(this.#active.lesson);
+		this.#queueEvaluation(step?.checks.some(check => check.kind === "command") ?? false);
+	}
+
+	/** Resolves once every queued step evaluation has run. */
+	settled(): Promise<void> {
+		return this.#evaluation;
 	}
 
 	/** Show the card for the current session's lesson, or remove it when the session is not a tutorial session. */
@@ -185,7 +205,7 @@ export class TutorialController {
 			let note = "";
 			if (missing.length > 0) {
 				note = `needs ${missing.join(", ")} (disabled)`;
-			} else if (progress && !progress.finished && progress.sessionFile) {
+			} else if (progress?.sessionFile && store.nextStep(lesson)) {
 				const done = progress.completed.length;
 				note = `step ${Math.min(done + 1, lesson.steps.length)}/${lesson.steps.length} — /tutorial ${lesson.id} resumes`;
 			}
@@ -313,10 +333,11 @@ export class TutorialController {
 			returnSession: currentFile,
 		};
 
+		// Resume while the latest run has steps left; `finished` is the lasting ✓
+		// and stays true across replays, so it cannot gate this.
 		if (
-			progress &&
-			!progress.finished &&
-			progress.sessionFile &&
+			progress?.sessionFile &&
+			store.nextStep(lesson) &&
 			progress.sandbox &&
 			(await this.#exists(progress.sessionFile)) &&
 			(await this.#exists(progress.sandbox))
@@ -329,19 +350,37 @@ export class TutorialController {
 			return;
 		}
 
-		const sandbox = await createSandbox(lesson);
+		const sandboxRoot = this.#options.sandboxRoot ?? getTutorialSandboxRoot();
+		const sandbox = await createSandbox(lesson, { root: sandboxRoot });
 		await this.#ctx.handleClearCommand();
-		if (sessionManager.getSessionFile() === currentFile) return;
+		if (sessionManager.getSessionFile() === currentFile) {
+			await this.#removeSandbox(sandboxRoot, sandbox);
+			return;
+		}
 		await this.#ctx.handleMoveCommand(sandbox);
 		const sessionFile = sessionManager.getSessionFile();
 		if (sessionManager.getCwd() !== sandbox || !sessionFile) {
+			await this.#removeSandbox(sandboxRoot, sandbox);
 			this.#ctx.showError(`Could not open a session in ${shortenPath(sandbox)}.`);
 			return;
 		}
 		sessionManager.appendCustomEntry(SESSION_TAG, { ...tag, lessonId: id });
+		const previous = progress?.sandbox;
 		await store.begin(id, sandbox, sessionFile);
+		if (previous && previous !== sandbox) await this.#removeSandbox(sandboxRoot, previous);
 		this.#ctx.presentCommandOutput(new Markdown(this.#render(lesson.intro, sandbox), 1, 1, getMarkdownTheme()));
 		this.syncCard();
+	}
+
+	/** Delete a lesson sandbox; refuses anything outside `root` so a stale progress entry can't reach user files. */
+	async #removeSandbox(root: string, sandbox: string): Promise<void> {
+		const relative = path.relative(path.resolve(root), path.resolve(sandbox));
+		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return;
+		try {
+			await fs.rm(sandbox, { recursive: true, force: true });
+		} catch (error) {
+			logger.warn("Could not remove tutorial sandbox", { sandbox, error: String(error) });
+		}
 	}
 
 	async #exists(target: string): Promise<boolean> {

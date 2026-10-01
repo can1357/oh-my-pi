@@ -71,7 +71,7 @@ export class TutorialProgressStore {
 		return lesson.steps.find(step => !completed.includes(step.id));
 	}
 
-	/** Record a fresh run: new sandbox and session, no steps done. Earlier completion (✓) survives. */
+	/** Record a fresh run: new sandbox and session, no steps done. `finished` is the lasting ✓ and survives; per-run completion is `nextStep() === undefined`. */
 	begin(lessonId: string, sandbox: string, sessionFile: string): Promise<void> {
 		const finished = this.get(lessonId)?.finished ?? false;
 		this.#data.lessons[lessonId] = { completed: [], finished, sandbox, sessionFile };
