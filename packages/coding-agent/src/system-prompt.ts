@@ -567,6 +567,8 @@ export interface BuildSystemPromptOptions {
 	evalPreludes?: readonly Pick<EvalPreludeDefinition, "name" | "guidance">[];
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced in the workstation block. */
 	model?: string;
+	/** Own session id surfaced in the workstation block; omitted when not passed. */
+	sessionId?: string;
 	/** Whether to surface `model` in the workstation block. Default: true. */
 	includeModelInPrompt?: boolean;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
@@ -660,6 +662,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		settingsApproval = false,
 		evalPreludes = [],
 		model,
+		sessionId: providedSessionId,
 		includeModelInPrompt = true,
 		personality = "default",
 		includeWorkspaceTree = false,
@@ -974,6 +977,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
+		sessionId: providedSessionId ?? "",
 		delegationBias,
 		personality: personalityBlock,
 		intentTracing: !!intentField,

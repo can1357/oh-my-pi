@@ -236,8 +236,9 @@ describe("AgentSession bash session ownership", () => {
 		await session.executeBash("true", undefined, { useUserShell: true });
 
 		expect(executeBashSpy).toHaveBeenCalledTimes(2);
-		expect(executeBashSpy.mock.calls[0]?.[1]?.env).toEqual({ OMP_INJECTED_TOKEN: "injected-value" });
-		expect(executeBashSpy.mock.calls[1]?.[1]?.env).toEqual({ OMP_INJECTED_TOKEN: "injected-value" });
+		// Superset, not exact: the harness adds the session's own `OMP_SESSION_ID`.
+		expect(executeBashSpy.mock.calls[0]?.[1]?.env).toMatchObject({ OMP_INJECTED_TOKEN: "injected-value" });
+		expect(executeBashSpy.mock.calls[1]?.[1]?.env).toMatchObject({ OMP_INJECTED_TOKEN: "injected-value" });
 		expect(cachedShellConfig.env).not.toHaveProperty("OMP_INJECTED_TOKEN");
 	});
 

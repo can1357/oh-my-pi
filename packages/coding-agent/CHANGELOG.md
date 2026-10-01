@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The model now always knows which session it is in: every session advertises its own id in its system prompt and exports it to the commands it runs as `OMP_SESSION_ID`, so scripts and hooks can attribute output to the session that spawned them ([#13954](https://github.com/can1357/oh-my-pi/pull/13954) by [@kallewoof](https://github.com/kallewoof))
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

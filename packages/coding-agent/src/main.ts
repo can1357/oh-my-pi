@@ -518,7 +518,17 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
+	// A host opens one session per `session/new`, all in this process. Only the
+	// first may own the process-wide `OMP_SESSION_ID`: a later session repointing
+	// it would hand hooks, MCP servers and LSP servers spawned afterwards some
+	// sibling's id. Every session still advertises its own id and passes it to the
+	// processes it spawns.
+	let processSessionIdUnclaimed = true;
+
 	return async (cwd, factoryOptions) => {
+		const publishSessionIdEnv = processSessionIdUnclaimed;
+		processSessionIdUnclaimed = false;
+
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
@@ -546,6 +556,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
+			publishSessionIdEnv,
 			settings: nextSettings,
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,
@@ -1286,6 +1297,12 @@ export async function buildSessionOptions(
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
+		// A CLI-created session is a top-level session of this process, so it owns the
+		// process-wide `OMP_SESSION_ID` its child processes inherit (and repoints it
+		// when `/clear`/fork/switch mints its id). SDK-built helpers and subagents
+		// leave this unset: they share the process and only pass their own id to the
+		// processes they spawn.
+		publishSessionIdEnv: true,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
