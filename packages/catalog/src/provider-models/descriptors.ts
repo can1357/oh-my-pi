@@ -14,6 +14,7 @@ import type { Api } from "../types";
 import type { ModelManagerOptions } from "../model-manager";
 import type { ModelManagerConfig, ProviderDescriptor } from "./descriptor-types";
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
+import { kenariModelManagerOptions } from "./kenari";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	abliterationModelManagerOptions,
@@ -121,6 +122,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	groq: config => groqModelManagerOptions(config),
 	helmcode: config => helmcodeModelManagerOptions(config),
 	huggingface: config => huggingfaceModelManagerOptions(config),
+	kenari: config => kenariModelManagerOptions(config),
 	kilo: config => kiloModelManagerOptions(config),
 	"kimi-code": config => kimiCodeModelManagerOptions(config),
 	litellm: config => litellmModelManagerOptions(config),

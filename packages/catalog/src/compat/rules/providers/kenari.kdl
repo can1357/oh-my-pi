@@ -1,0 +1,12 @@
+// Live list from https://kenari.id/v1/models. Those prices are micro-rupiah
+// per 1M tokens, so discovery leaves cost at 0 instead of copying them into
+// the USD cost fields. skip-cross-provider-reference-fills stops a later
+// catalog regen from borrowing another provider's dollar price for the same id.
+
+provider "kenari" {
+	default-model "claude-sonnet-5-5"
+	env "KENARI_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Kenari" allow-unauthenticated=#true
+}
