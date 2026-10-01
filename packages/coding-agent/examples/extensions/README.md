@@ -66,6 +66,12 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `with-deps/`      | Extension with its own package.json and dependencies                      |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
 
+### Cross-Process Messaging
+
+| Extension            | Description                                                                                                                    |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `remote-irc-bridge/` | Reference bridge to agents in other processes (`pi.irc` seams) plus a terminal client that plays them; see its README to run it |
+
 ## Writing Extensions
 
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
