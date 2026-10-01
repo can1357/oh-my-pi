@@ -70,6 +70,10 @@ Newline-delimited JSON; the peer listens, the bridge connects (one connection pe
 | peer → bridge | `{type:"inbound", id, from, to, body, expectsReply}`                  | `from` is a bare rostered name; delivered as `@ns/<from>` → `to`.       |
 | bridge → peer | `{type:"receipt", id, receipt, ompId}`                                | Delivery outcome of that inbound plus omp's native message id.          |
 
+Trust model: the socket is a user-owned local path and both ends are the same user's processes, so peer
+lines are parsed as JSON and used without shape validation (only the roster file is validated). A bridge
+that crosses a trust boundary must validate every line and authenticate the peer before `deliverInbound`.
+
 ## What it deliberately does not do
 
 - Authentication, multiple namespaces per process, or more than one connected session. A real bridge
