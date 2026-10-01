@@ -114,6 +114,17 @@ describe("ExtensionRunner", () => {
 		expect(runner.cwd).toBe(dirB);
 		expect(runner.createContext().cwd).toBe(dirB);
 	});
+	it("rejects initial MCP readiness when no manager is available", async () => {
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		await expect(runner.createContext().waitForInitialMCPConnections()).rejects.toThrow("unsupported");
+	});
 
 	it("exposes the initialized host mode to extension contexts", async () => {
 		const result = await loadTestExtensions();

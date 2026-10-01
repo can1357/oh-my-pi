@@ -7743,6 +7743,8 @@ export class AgentSession implements SettingsScope {
 			},
 			getContextUsage: () => this.getContextUsage(),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			waitForInitialMCPConnections: () =>
+				Promise.reject(new Error("Initial MCP readiness is unsupported without an MCP manager")),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });

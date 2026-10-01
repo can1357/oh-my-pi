@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can await `ctx.waitForInitialMCPConnections()` for an MCP startup-status snapshot ([#13828](https://github.com/can1357/oh-my-pi/pull/13828) by [@tahsinrahman](https://github.com/tahsinrahman))
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
