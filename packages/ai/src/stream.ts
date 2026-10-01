@@ -1317,6 +1317,12 @@ function streamSimpleRequest<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
 
+	if (model.resolveHeaders) {
+		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
+			streamSimpleRequest(resolvedModel, context, requestOptions),
+		);
+	}
+
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
@@ -1471,12 +1477,6 @@ function streamSimpleRequest<TApi extends Api>(
 			emitFailure(failure);
 		})();
 		return outer;
-	}
-
-	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
-			streamSimpleRequest(resolvedModel, context, requestOptions),
-		);
 	}
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:

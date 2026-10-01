@@ -745,15 +745,20 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBe("stale-bearer");
-		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
-		fs.writeFileSync(bearerFile, "fresh-bearer");
-		fs.writeFileSync(tenantFile, "");
 		const seen: Array<{ auth?: string; tenant?: string }> = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			const headers = (init?.headers ?? {}) as Record<string, string>;
+			seen.push({ auth: headers.Authorization, tenant: headers["x-tenant-token"] });
+			if (seen.length === 1) {
+				fs.writeFileSync(bearerFile, "fresh-bearer");
+				fs.writeFileSync(tenantFile, "");
+			}
+			return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+		};
 		const streamHandle = streamSimple(
 			model,
 			{ systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{ apiKey: registry.resolver(model), fetch: refreshGateFetch(seen), maxTokens: 16 },
+			{ apiKey: registry.resolver(model), fetch, maxTokens: 16 },
 		);
 		for await (const _event of streamHandle) {
 			// drain
