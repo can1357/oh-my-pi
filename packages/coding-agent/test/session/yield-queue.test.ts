@@ -286,4 +286,63 @@ describe("YieldQueue", () => {
 
 		expect(thunks[0]!()).toBeNull();
 	});
+	test("drainKind builds one message from every queued entry without injecting", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.queue.register<Entry>("completion", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+
+		harness.queue.enqueue("advisor", { id: "first" });
+		harness.queue.enqueue("advisor", { id: "second" });
+		harness.queue.enqueue("completion", { id: "done" });
+
+		const message = harness.queue.drainKind("advisor");
+
+		expect(message && messageText(message)).toBe("first,second");
+		expect(harness.queue.has("advisor")).toBe(false);
+		expect(harness.queue.has("completion")).toBe(true);
+		expect(messageText(harness.queue.drainKind("completion")!)).toBe("done");
+		expect(harness.streamingMessages).toHaveLength(0);
+		expect(harness.idleBatches).toHaveLength(0);
+	});
+
+	test("drainKind resolves the drained kind's receipts immediately", async () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+
+		const receipt = harness.queue.enqueueWithReceipt("advisor", { id: "aside" });
+		const message = harness.queue.drainKind("advisor");
+
+		expect(message && messageText(message)).toBe("aside");
+		await receipt;
+	});
+
+	test("drainKind returns null for unregistered kinds and kinds with nothing queued", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+
+		expect(harness.queue.drainKind("unregistered")).toBeNull();
+		expect(harness.queue.drainKind("items")).toBeNull();
+	});
+
+	test("drainKind rejects receipts when the dispatcher skips the batch", async () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: () => null,
+		});
+
+		const receipt = harness.queue.enqueueWithReceipt("advisor", { id: "aside" });
+		expect(harness.queue.drainKind("advisor")).toBeNull();
+		expect(harness.queue.has("advisor")).toBe(false);
+		expect(harness.streamingMessages).toHaveLength(0);
+		expect(harness.idleBatches).toHaveLength(0);
+		await expect(receipt).rejects.toThrow("Yield queue dispatcher skipped entry: advisor");
+	});
 });
