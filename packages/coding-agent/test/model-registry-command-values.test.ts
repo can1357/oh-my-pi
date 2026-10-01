@@ -449,6 +449,113 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBeUndefined();
 	});
 
+	test("a replacement mint that repeats a 401-rejected key is never sent on the next turn", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "bad-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("bad-key");
+		const sent: string[] = [];
+		const reject = async (key: string) => {
+			sent.push(key);
+			throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+		};
+
+		await expect(withAuth(registry.resolver(model), reject)).rejects.toMatchObject({ status: 401 });
+		await expect(withAuth(registry.resolver(model), reject)).rejects.toThrow(command);
+		expect(sent).toEqual(["bad-key"]);
+	});
+
+	test("concurrent 401 recoveries share one replacement command run", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		fs.writeFileSync(tokenFile, "fresh-key");
+		const requests = await Promise.all(
+			Array.from({ length: 5 }, () =>
+				withAuth(registry.resolver(model), async key => {
+					if (key === "stale-key") throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+					return key;
+				}),
+			),
+		);
+		expect(requests).toEqual(["fresh-key", "fresh-key", "fresh-key", "fresh-key", "fresh-key"]);
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+
+	test("a 401 only rejects command headers on the requested model", async () => {
+		const tokenB = path.join(tempDir, "model-b-token.txt");
+		const counterB = path.join(tempDir, "model-b-counter.txt");
+		fs.writeFileSync(tokenB, "b-good");
+		fs.writeFileSync(counterB, "");
+		const commandB = trackedTokenCommand(tokenB, counterB);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: "provider-key",
+						models: [
+							{ id: "model-a", name: "Model A" },
+							{ id: "model-b", name: "Model B", headers: { "x-b-token": `!${commandB}` } },
+						],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const modelA = registry.find("custom-proxy", "model-a");
+		const modelB = registry.find("custom-proxy", "model-b");
+		if (!modelA || !modelB) throw new Error("Expected custom models");
+		expect((await registry.resolveModelHeaders(modelB))?.["x-b-token"]).toBe("b-good");
+		fs.writeFileSync(tokenB, "FAIL");
+
+		await registry.resolver(modelA)({
+			lastChance: false,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+		});
+		expect((await registry.resolveModelHeaders(modelB))?.["x-b-token"]).toBe("b-good");
+		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
+	});
+
 	test("401 refreshes a command-backed provider header and retries with the fresh value", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");
 		const tenantFile = path.join(tempDir, "tenant.txt");

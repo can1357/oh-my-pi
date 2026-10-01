@@ -8,7 +8,15 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import {
+	classify,
+	CommandConfigResolutionError,
+	Flag,
+	is,
+	MissingApiKeyError,
+	OAuthError,
+	ProviderHttpError,
+} from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -148,6 +156,22 @@ describe("withAuth", () => {
 				async () => "never",
 			),
 		).rejects.toBeInstanceOf(MissingApiKeyError);
+	});
+
+	it("classifies a rethrown command-resolution failure as auth-failed", async () => {
+		let failure: unknown;
+		try {
+			await withAuth(
+				() => {
+					throw new CommandConfigResolutionError("API key command `synthetic` exited with status 1");
+				},
+				async () => "never",
+			);
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(CommandConfigResolutionError);
+		expect(is(classify(failure), Flag.AuthFailed)).toBe(true);
 	});
 
 	it("refreshes the same account, then switches, in order", async () => {

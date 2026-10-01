@@ -260,11 +260,11 @@ export class ModelRegistry {
 	#fullKindSnapshotSource: Model<Api>[] | undefined;
 	#fullKindSnapshots: Partial<Record<ModelKind, Model<Api>[]>> = {};
 	#customProviderApiKeys: Map<string, string> = new Map();
-	// Every command-backed (`!cmd`) config value a provider carries — apiKey plus
-	// provider/model-override header values — keyed by provider. The 401 auth
-	// retry invalidates these command caches so the request-boundary resolver
-	// re-materializes refreshed headers, not just the apiKey (#9760).
+	// Provider-level command-backed values (apiKey and provider headers).
 	#commandConfigsByProvider: Map<string, Set<string>> = new Map();
+	// Model/modelOverride header commands, rejected only when that model's request
+	// receives the 401 that proves the materialized value is bad.
+	#commandConfigsByProviderModel: Map<string, Map<string, Set<string>>> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
@@ -295,10 +295,10 @@ export class ModelRegistry {
 	// `fallback` ranks the key below stored login credentials (see registerProvider).
 	#runtimeProviderApiKeys: Map<string, { keyConfig: string; fallback: boolean }> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
-	// Command-backed values from registerProvider (apiKey + provider/model
-	// headers). Separate from #commandConfigsByProvider because static reload
-	// rebuilds that map from models.yml only; runtime entries must survive.
+	// Runtime provider-level commands and model header commands mirror the
+	// static indexes above so one model's 401 cannot reject another's header.
 	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
+	#runtimeCommandConfigsByProviderModel: Map<string, Map<string, Set<string>>> = new Map();
 	// Credential-aware model projections registered via
 	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
 	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
@@ -347,43 +347,69 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Refresh every command-backed config value a provider carries (apiKey plus
-	 * provider/model-override header commands). A 401 rejects their prior stdout:
-	 * it remains history but must never become a bearer on a later turn.
+	 * Refresh command-backed values for a provider. A 401 rejects provider-level
+	 * credentials plus only the model headers that were materialized for the
+	 * failed request; unrelated model headers keep their last-good value.
 	 */
-	#invalidateProviderCommandConfigs(provider: string, rejected = false): void {
+	#invalidateProviderCommandConfigs(provider: string, rejected = false, modelId?: string): void {
 		const invalidate = rejected ? rejectCommandConfig : invalidateCommandConfig;
 		invalidate(this.#customProviderApiKeys.get(provider));
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
 			for (const config of configs) invalidate(config);
 		}
+		const modelCommandSets =
+			rejected && modelId !== undefined
+				? [this.#commandConfigsByProviderModel.get(provider)?.get(modelId)]
+				: [...(this.#commandConfigsByProviderModel.get(provider)?.values() ?? [])];
+		for (const modelConfigs of modelCommandSets) {
+			if (!modelConfigs) continue;
+			for (const config of modelConfigs) invalidate(config);
+		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
-		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidate(config);
+		if (runtimeConfigs) {
+			for (const config of runtimeConfigs) invalidate(config);
+		}
+		const runtimeModelCommandSets =
+			rejected && modelId !== undefined
+				? [this.#runtimeCommandConfigsByProviderModel.get(provider)?.get(modelId)]
+				: [...(this.#runtimeCommandConfigsByProviderModel.get(provider)?.values() ?? [])];
+		for (const runtimeModelConfigs of runtimeModelCommandSets) {
+			if (!runtimeModelConfigs) continue;
+			for (const config of runtimeModelConfigs) invalidate(config);
+		}
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
 		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
+		const modelTargets =
+			this.#runtimeCommandConfigsByProviderModel.get(providerName) ?? new Map<string, Set<string>>();
 		this.#collectCommandConfigValues(target, config.apiKey, config.headers);
 		for (const modelDef of config.models ?? []) {
-			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+			const modelTarget = new Set<string>();
+			this.#collectCommandConfigValues(modelTarget, undefined, modelDef.headers);
+			if (modelTarget.size > 0) modelTargets.set(modelDef.id, modelTarget);
 		}
 		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
 		else this.#runtimeCommandConfigsByProvider.delete(providerName);
+		if (modelTargets.size > 0) this.#runtimeCommandConfigsByProviderModel.set(providerName, modelTargets);
+		else this.#runtimeCommandConfigsByProviderModel.delete(providerName);
 	}
 
 	/** Fold `!command` headers from a live `fetchDynamicModels` payload into the runtime tracker. */
 	#recordRuntimeModelHeaderCommands(
 		providerName: string,
-		models: readonly { headers?: Record<string, string> }[],
+		models: readonly { id?: string; headers?: Record<string, string> }[],
 	): void {
 		if (models.length === 0) return;
-		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
+		const targets = this.#runtimeCommandConfigsByProviderModel.get(providerName) ?? new Map<string, Set<string>>();
 		for (const modelDef of models) {
+			if (modelDef.id === undefined) continue;
+			const target = targets.get(modelDef.id) ?? new Set<string>();
 			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+			if (target.size > 0) targets.set(modelDef.id, target);
 		}
-		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
+		if (targets.size > 0) this.#runtimeCommandConfigsByProviderModel.set(providerName, targets);
 	}
 
 	#reloadStaticModelsForRefresh(options?: ModelRegistryRefreshOptions, providerId?: string): void {
@@ -920,6 +946,7 @@ export class ModelRegistry {
 		this.#internedStaticModels.clear();
 		this.#providerLookupSnapshots.clear();
 		this.#commandConfigsByProvider.clear();
+		this.#commandConfigsByProviderModel.clear();
 	}
 
 	#knownStaticProviders(): string[] {
@@ -1550,9 +1577,12 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
 			const commandConfigs = new Set<string>();
+			const modelCommandConfigs = new Map<string, Set<string>>();
 			this.#collectCommandConfigValues(commandConfigs, providerConfig.apiKey, providerConfig.headers);
 			for (const modelDef of providerConfig.models ?? []) {
-				this.#collectCommandConfigValues(commandConfigs, undefined, modelDef.headers);
+				const configs = new Set<string>();
+				this.#collectCommandConfigValues(configs, undefined, modelDef.headers);
+				if (configs.size > 0) modelCommandConfigs.set(modelDef.id, configs);
 			}
 			// Scope: effective APIs of models inheriting the provider URL; a
 			// provider-level api covers the override-only case; none is wide.
@@ -1638,12 +1668,15 @@ export class ModelRegistry {
 			if (providerConfig.modelOverrides) {
 				const perModel = new Map<string, ModelOverride>();
 				for (const [modelId, override] of Object.entries(providerConfig.modelOverrides)) {
-					this.#collectCommandConfigValues(commandConfigs, undefined, override.headers);
+					const configs = modelCommandConfigs.get(modelId) ?? new Set<string>();
+					this.#collectCommandConfigValues(configs, undefined, override.headers);
+					if (configs.size > 0) modelCommandConfigs.set(modelId, configs);
 					perModel.set(modelId, override);
 				}
 				allModelOverrides.set(providerName, perModel);
 			}
 			if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
+			if (modelCommandConfigs.size > 0) this.#commandConfigsByProviderModel.set(providerName, modelCommandConfigs);
 		}
 
 		return {
@@ -2904,7 +2937,7 @@ export class ModelRegistry {
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		if (options?.forceRefresh) {
-			this.#invalidateProviderCommandConfigs(provider, options.refreshReason === "auth-recovery");
+			this.#invalidateProviderCommandConfigs(provider, options.refreshReason === "auth-recovery", options.modelId);
 		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
@@ -2969,6 +3002,7 @@ export class ModelRegistry {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeCommandConfigsByProvider.delete(providerName);
+		this.#runtimeCommandConfigsByProviderModel.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);

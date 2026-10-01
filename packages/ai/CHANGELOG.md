@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `withAuth` now surfaces a typed `CommandConfigResolutionError` when an initial `!command` credential mint fails, preserving the command diagnostic while leaving other resolver failures as missing-key errors
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

@@ -24,6 +24,7 @@ export class CommandConfigResolutionError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "CommandConfigResolutionError";
+		attach(this, create(Flag.AuthFailed));
 	}
 }
 
