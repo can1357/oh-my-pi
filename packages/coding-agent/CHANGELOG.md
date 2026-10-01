@@ -2,46 +2,35 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
 ### Added
 
-- Added an opt-in `omp gc --stale` phase (or setting `gc.stale`) that prunes custom-session markers and terminal breadcrumbs whose session file is gone, and expires old debug reports and collab replicas beyond `gc.staleRetainNewest` (20) and `gc.staleRetainDays` (30) ([#14006](https://github.com/can1357/oh-my-pi/pull/14006) by [@H4vC](https://github.com/H4vC))
-- Added the RPC `cancel_subagent` command (and `RpcClient.cancelSubagent()`) to hard-kill one running subagent, foreground or background, without aborting the session ([#13481](https://github.com/can1357/oh-my-pi/pull/13481) by [@andrebrait](https://github.com/andrebrait)); supersedes [#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)
-- Added the RPC `steer_subagent` command (and `RpcClient.steerSubagent()`) to message a running subagent as its user, like Agent Hub chat ([#13482](https://github.com/can1357/oh-my-pi/pull/13482) by [@andrebrait](https://github.com/andrebrait)); ported from [#10427](https://github.com/can1357/oh-my-pi/pull/10427) by [@agenticfreedom](https://github.com/agenticfreedom)
-- Added `predict_word` and `predict_word_feedback` RPC commands so hosts with their own composer (web and IDE clients) can show the same ghost-text word completion as the terminal editor, using the `spelling.autocomplete` engine and its prose gates ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
-- Added an opt-in RPC ask dialog: after `set_ask_dialog` enables it, the `ask` tool sends all its questions in one `ask` extension UI request and takes the answers back in one `answers` response, so hosts can render every question with checkboxes or radio buttons and submit them together; hosts that don't opt in keep the one-`select`-per-choice prompts ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
-- Added `SessionManager.onPersistenceNotice()` for SDK hosts: it reports a session moving to a new file (with the old and new paths) without going through the `onPersistenceError` failure channel ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
-- Added `AgentSession.inspectAsyncJob()` (command, cwd, live pids, exit code, output tail, full-output artifact of one async job) and `AgentSession.cancelAsyncJob()`; the Background jobs sheet uses them to inspect and cancel jobs
+- Added opt-in stale-session garbage collection with `omp gc --stale` or `gc.stale`, removing orphaned session markers and terminal breadcrumbs and expiring old debug reports and collaboration replicas according to configurable retention limits.
+- Added RPC controls to cancel or steer individual foreground and background subagents without aborting the session.
+- Added RPC word-completion commands so web and IDE hosts can provide the same ghost-text completion available in the terminal editor.
+- Added an opt-in RPC ask-dialog mode that lets hosts render all questions together with checkbox or radio-button controls and submit their answers in one response.
+- Added SDK notifications when a session moves to a new persistence file, including the previous and new paths.
+- Added SDK APIs to inspect and cancel background jobs, including their command, working directory, process IDs, exit status, and captured output.
 
 ### Changed
 
-- Migrated `omp predict` compare view to a native UI component featuring interactive table rows, an action bar, and improved status visualization
-- Enhanced MCP authorization prompts with clickable links, native context menus for copying/opening, and improved URL layout
-- `/debug` report bundles and the `/debug` log view write this process's batched log records to disk before reading the log files, so the latest lines are included; the per-rule TTSR registration debug line was removed ([#14011](https://github.com/can1357/oh-my-pi/pull/14011) by [@H4vC](https://github.com/H4vC))
-- RPC mode now sends a `cancel` extension UI request (with `targetId`) when omp's own dialog timeout elapses, for `select`, `confirm`, `input`, and `ask` dialogs, so hosts can close stale dialogs ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
-- Saved output of bash, python, and js eval tool calls is now capped at 16 MB per artifact file (the beginning and the most recent output around a truncation notice) instead of growing without limit, and the output notice for a capped file says it holds a head/tail sample instead of offering it as full output; set `tools.artifactMaxBytes` (MB) to raise the cap, or `0` for unlimited ([#14012](https://github.com/can1357/oh-my-pi/pull/14012) by [@H4vC](https://github.com/H4vC))
+- Improved the `omp predict` comparison view with an interactive native interface, table rows, action controls, and clearer status information.
+- Improved MCP authorization prompts with clickable links, native copy/open context menus, and a clearer URL layout.
+- RPC hosts are now notified when omp cancels an expired `select`, `confirm`, `input`, or `ask` dialog, allowing stale UI prompts to be closed.
+- Limited saved bash, Python, and JavaScript evaluation output artifacts to 16 MB by default while preserving both the beginning and latest output; configure the limit with `tools.artifactMaxBytes`, or set it to `0` for unlimited output.
 
 ### Fixed
 
-- Fixed session transcript appends creating and deleting a `.jsonl.lock` file beside the session for every recorded entry, cutting disk writes during long sessions ([#14003](https://github.com/can1357/oh-my-pi/pull/14003) by [@H4vC](https://github.com/H4vC))
-- Fixed an interrupted image blob write leaving a partial image under its final name, image copies being rewritten on every save on filesystems without hardlinks, and `omp gc` possibly deleting a long-stored image that a session had just started referencing again ([#14004](https://github.com/can1357/oh-my-pi/pull/14004) by [@H4vC](https://github.com/H4vC))
-- Fixed terminal breadcrumbs and custom-session markers being rewritten when unchanged, and sessions on a non-file session store leaving dangling markers in `~/.omp/agent/custom-session-files` ([#14005](https://github.com/can1357/oh-my-pi/pull/14005) by [@H4vC](https://github.com/H4vC))
-- Reduced disk writes from ghost-text word completion: the prediction daemon now saves its learned model after 5 quiet minutes (at most every 15 minutes while typing, and on exit) instead of rewriting the ~1 MB snapshot within 30 seconds of every keystroke burst ([#14009](https://github.com/can1357/oh-my-pi/pull/14009) by [@H4vC](https://github.com/H4vC))
-- Fixed agent.db write churn: model performance samples are batched once a minute (and flushed on exit or when `/models` reads them), session account stickiness is persisted only when it changes or drifts, the schema version and file permissions are no longer rewritten on every start, and resuming a session advances a stale same-account sticky to the session's last turn ([#14001](https://github.com/can1357/oh-my-pi/pull/14001) by [@H4vC](https://github.com/H4vC))
-- Fixed setting an option, record entry, or model role to the value it already has rewriting `config.yml`; saves that would reproduce the file byte-for-byte now leave it untouched ([#14002](https://github.com/can1357/oh-my-pi/pull/14002) by [@H4vC](https://github.com/H4vC))
-- Reduced disk writes from model discovery: refreshes whose provider catalogs are unchanged no longer rewrite `models.db`, and a refresh that does rewrite more than five provider rows is noted in the debug log ([#14007](https://github.com/can1357/oh-my-pi/pull/14007) by [@H4vC](https://github.com/H4vC))
-- Reduced startup disk churn: the skill description cache keeps one database handle per process instead of reopening (and recreating its WAL files) on every prompt render and write, and the startup status-bar cache is written once after startup settles instead of on every early change ([#14008](https://github.com/can1357/oh-my-pi/pull/14008) by [@H4vC](https://github.com/H4vC))
-- Reduced disk writes from background daemons: the launch spec (including its full environment) is saved once to `spec.json` instead of being rewritten into `meta.json` on every start, ready, and exit transition, unchanged metadata is no longer rewritten, and Windows skips a pointless `chmod` per session; existing `meta.json` files are migrated on recovery, and `omp ps` reads both layouts ([#14010](https://github.com/can1357/oh-my-pi/pull/14010) by [@H4vC](https://github.com/H4vC))
-- Fixed `/wt` on filesystems without copy-on-write cloning (e.g. NTFS): the new worktree no longer lists unchanged files as modified under `core.autocrlf`, and staged-only edits, additions, and deletions now carry over with the right file contents instead of reverting to `HEAD` ([#13987](https://github.com/can1357/oh-my-pi/pull/13987) by [@H4vC](https://github.com/H4vC))
-- Fixed Ctrl+V on Windows taking about a second to paste text: omp no longer starts PowerShell to check for an image or read the text, and only uses it when the built-in clipboard read fails ([#13991](https://github.com/can1357/oh-my-pi/pull/13991) by [@H4vC](https://github.com/H4vC))
-- Fixed `local://` paths written with the working directory in front (`/repo/local://notes.md`) creating a literal `local:` directory in the project; `read`, `write`, and search tools now treat them as the `local://` URL ([#13977](https://github.com/can1357/oh-my-pi/pull/13977) by [@radkawar](https://github.com/radkawar))
-- Fixed `read` with a `;` list that mixes URLs and local paths (`https://…;src/a.ts:1-20`, `omp://;Makefile:1-3`) or starts with an extensionless file and a selector (`Makefile:1-3;docs/x.md`): it was fetched as one URL or sent to MCP; each entry is now read separately ([#13979](https://github.com/can1357/oh-my-pi/pull/13979) by [@radkawar](https://github.com/radkawar))
-- Fixed session saves rewriting every already-stored image blob on each save, which multiplied disk writes on sessions with many images ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
-- Fixed omp freezing for seconds at a time and silently no longer saving the session after another process wrote to the same session file; omp now keeps that process's entries and saves normally, and if that process keeps writing through every retry, omp leaves the file to it and continues in a new file next to it ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
-- Fixed two omp processes writing the same session (for example after resuming it while an orphaned omp still had it open) mixing their turns into one file; the process that wrote it first keeps it, and the other continues in a new file next to it and shows you the new path ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
-### Fixed
-
-- Fixed the native composer's effort chip showing the main session's thinking level while viewing a subagent
-- Fixed `omp predict`'s compare view and the MCP authorization link prompt drawing as pre-rendered `rows` fallback grids in Tern; both now describe themselves natively (the link opens or copies on click)
+- Fixed `/wt` on filesystems without copy-on-write cloning, including NTFS, so unchanged files are not incorrectly marked modified and staged edits, additions, and deletions retain the correct contents.
+- Fixed Windows Ctrl+V taking about a second to paste by avoiding unnecessary PowerShell clipboard checks.
+- Fixed `local://` paths being misinterpreted as local filesystem paths by the `read`, `write`, and search tools.
+- Fixed `read` handling of semicolon-separated URLs, local paths, and line selectors so each entry is processed independently.
+- Fixed session persistence conflicts between multiple omp processes, preventing lost or interleaved turns and continuing in a new session file when necessary.
+- Fixed session image handling to avoid unnecessary rewrites, preserve images after interrupted writes, and prevent garbage collection from removing images that are referenced again.
+- Reduced unnecessary disk writes and improved persistence efficiency across sessions, model data, configuration, and background jobs.
+- Fixed the native composer showing the main session's effort level instead of the selected subagent's level.
+- Fixed the `omp predict` comparison view and MCP authorization prompt rendering with their full native interfaces, including clickable link actions.
 
 ## [18.4.6] - 2026-10-01
 
@@ -1593,90 +1582,4 @@
 - Fixed MCP tools discovered during startup disappearing after plan-mode approval or when leaving default-on plan mode.
 - Fixed ACP clients receiving invalid file locations or updates for released terminals, preventing invalid worktree scans and terminal errors on Windows.
 
-## [18.1.6] - 2026-09-03
-
-### Breaking Changes
-
-- Replaced the local session-title model choices with LFM2.5 230M, LFM2.5 350M, and Falcon H1 Tiny 90M.
-- Reserved main and sub as built-in subagent definition names; custom agents can no longer use these names.
-
-### Added
-
-- Added agent reactions: a reply that opens with a lone emoji line shows the emoji as a badge on your message bubble instead of in the text; toggle the prompt invitation with the tui.reactions setting.
-- Added video attachment and reading support through ffmpeg, including preview grids with metadata and timestamp/frame selectors such as :412 and :1h5m42s.
-- Enhanced the model picker with intelligence indicators, catalog TPS estimates, provider-aware ranking, and provider-supplied badges and descriptions.
-- Added detailed, non-summarized findings for scout agents through the report definition field, and subagent result relay so read-only agents can return data to their originating agent.
-- Added agent-scoped rules using an agents frontmatter field with glob matching, including support for inspecting applicable rules with omp ttsr list and omp ttsr test --agent.
-- Added non-interrupting extension messages through deliverAs: "aside" for pi.sendMessage and pi.sendUserMessage.
-- Added copy and open controls for rendered blocks and links, including /copy link and the /open command.
-- Added option-click cursor positioning in the prompt entry box.
-- Added the configurable opencode display layout, with a corresponding first-run and upgrade setup option.
-- Added the skillful prompt setting and /skillful command to control whether available skills are listed in the system prompt.
-- Added Firecrawl as an optional providers.fetch backend for URL reading, configurable with FIRECRAWL_API_KEY and FIRECRAWL_BASE_URL.
-- Added provider request metadata configuration for usage and cost attribution, including Amazon Bedrock request headers and User-Agent customization.
-- Added the :-N read selector for reading the last N lines from files, directories, archives, artifacts, internal URLs, and web URLs, including combinations such as :raw:-60.
-- Added an opt-in extension status-line segment for displaying custom statuses inline.
-- Added injectV1: false to openai-models-list discovery for OpenAI-compatible gateways whose model endpoint is rooted at a versioned URL.
-- Added provider-reported credits and routed-model counts to /session statistics.
-- Added CLINE_API_KEY to the CLI environment help for native ClinePass subscription inference.
-- Expanded Devin model selectors to support native CLI aliases, dotted upstream names, and dynamic effort-route identifiers.
-- Standalone CLAUDE.md files in the project root and ancestor directories are now loaded as project context alongside AGENTS.md files.
-
-### Changed
-
-- Session history is now sorted by modification time, then creation time, then file path.
-- Increased the maximum file snapshot size to 4 MB.
-- Edit tools now provide streamed diff previews while applying changes.
-- Approved plan content is included directly in agent history, reducing redundant reads.
-- power.sleepPrevention now works on Linux and Windows. Its idle default keeps long-running sessions awake on those platforms; set it to off to restore the previous behavior.
-- Unsupported-model errors no longer include incorrect retry instructions.
-
-### Fixed
-
-- Fixed local title models receiving unsupported online examples and failing with certain tokenizer templates.
-- Fixed model picker search selection so it moves to the best matching result after results change.
-- Fixed /new sometimes reviving the previous conversation in the current process or after a restart.
-- Fixed raw text escaping in agent responses.
-- Fixed structured subagent result previews being truncated incorrectly.
-- Fixed /usage taking several seconds to become responsive on large statistics databases.
-- Fixed the status line not appearing correctly in the first startup frame.
-- Fixed shell builtins reporting broken-pipe errors when downstream commands exit early.
-- Fixed provider-qualified model roles with dotted revisions resolving to the wrong provider or model.
-- Fixed agent-scoped rules being lost when subagents are restored, and fixed rule:// URLs and rule inspection to consistently use the calling agent's applicable rules.
-- Fixed extension and user asides being stranded, delivered to the wrong session, or incorrectly interrupting or restarting turns during session changes and image processing.
-- Fixed parent steering messages arriving during a subagent's final result from preventing that result from being committed.
-- Fixed messages typed while an edit or write tool was streaming from discarding the completed tool call and triggering unnecessary regeneration.
-- Fixed self-hosted Firecrawl URLs with origin-only base URLs from gaining an extra slash.
-- Fixed omp commit auto-staging from including macOS Unicode-normalization duplicates or files ignored by nested .gitignore rules.
-
-## [18.1.5] - 2026-09-03
-
-### Added
-
-- Added Abliteration provider support to `/login`, including `ABLITERATION_API_KEY` configuration and help text.
-- Added clone-first Git worktree support that carries over ignored build artifacts when creating worktrees, with a configurable `worktree.clone` setting and fallback to a standard checkout. This is supported by `github pr_checkout`, `omp worktree add`, and `git worktree add` commands entered through the Bash tool.
-- Added the `omp worktree add` command with Git-compatible branch, detach, path, and commit options.
-- Added `/wt` (alias `/worktree`) to create a linked worktree with uncommitted changes and move the current session into it while leaving the original checkout untouched.
-
-### Changed
-
-- Foreign user-level configuration sources (`~/.cursor`, `~/.codex`, `~/.claude`, `~/.gemini`, `~/.config/opencode`, `~/.codeium/windsurf`) are now opt-in via `enabledProviders`, while project-level configurations in CWD and `.agents` continue to load by default.
-- Split subagent isolation configuration into `task.isolation.enabled` and `isolation.backend`; existing `task.isolation.mode` settings are migrated automatically.
-- Updated the built-in `smol` and `slow` model priority chains to favor newer recommended models and remove older model generations.
-- Improved unsupported-model error messages by removing retry guidance that does not apply.
-
-### Fixed
-
-- Fixed automatic title generation so `--no-title` also prevents todo-initialization title refreshes, while automatic titles retain the selected OAuth account without sharing foreground request identity.
-- Fixed provider errors so they wrap to the terminal width and remain readable in the transcript and pinned error banner, with long messages available through the expansion hint.
-- Fixed Gemini malformed function-call turns so textual tool-call output is rejected conversationally and the session can continue instead of stopping with a pinned error.
-- Fixed auto-compaction recovery getting stuck in repeated retries when models return empty length-limited responses; it now stops with an actionable error.
-- Fixed MCP servers failing to reconnect after transient startup handshake timeouts.
-- Fixed programs supervised by `hub start` hanging when querying terminal capabilities.
-- Fixed large pastes followed immediately by Enter so the input is submitted with the pasted content instead of being left in the large-paste menu.
-
-### Removed
-
-- Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@ddf916838520](https://github.com/can1357/oh-my-pi/blob/ddf916838520312aeee0448e398e108934a8b02a/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@06ca9883f7fd](https://github.com/can1357/oh-my-pi/blob/06ca9883f7fd9704932363a259eb2ed5f311bcbb/packages/coding-agent/CHANGELOG.md).

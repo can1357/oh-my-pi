@@ -2,14 +2,16 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
 ### Added
 
-- Added `tryAcquireFileLock`, a non-blocking `acquireFileLock` that returns `null` while another holder owns the lock ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
-- Added an `unref` option to `AsyncDrain` so long batch windows do not keep the process alive ([#14001](https://github.com/can1357/oh-my-pi/pull/14001) by [@H4vC](https://github.com/H4vC))
+- Added `tryAcquireFileLock`, a non-blocking file-lock helper that returns `null` when the lock is already held.
+- Added an `unref` option to `AsyncDrain`, allowing applications to use long batch windows without keeping the process alive.
 
 ### Changed
 
-- Reduced log disk writes: the log file still records every level, but records are now written in batches (at most one write per second or per 64 KiB) instead of one write per line, while `warn` and `error` records are written immediately and exit, signal, and fatal-error paths flush the rest; `logger.flush()` writes pending records on demand and `OMP_LOG_LEVEL` optionally limits the levels written to the file. A process creates its log file only when it first logs, no longer writes a `.omp.<pid>-audit.json`, and legacy `omp.<date>.log[.gz]` files and hash-named audits older than five days are pruned ([#14011](https://github.com/can1357/oh-my-pi/pull/14011) by [@H4vC](https://github.com/H4vC))
+- Improved logging efficiency and configurability by batching routine file writes, flushing urgent records promptly, adding on-demand `logger.flush()` support, and allowing file log levels to be limited with `OMP_LOG_LEVEL`. Log files are created only when needed, and obsolete log and audit files are cleaned up automatically.
 
 ## [18.4.4] - 2026-09-29
 
