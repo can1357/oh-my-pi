@@ -206,6 +206,11 @@ describe("write agent:// messaging", () => {
 		await expect(tool.execute("suffix", { path: "agent://@cluster-a/leia/result", content: "oops" })).rejects.toThrow(
 			"JSON-path suffix",
 		);
+		// A bare namespace is in the reserved `@` space but names no peer: explain, never a local miss.
+		await expect(tool.execute("bare-ns", { path: "agent://@cluster-a", content: "oops" })).rejects.toThrow(
+			/@cluster-a is not a valid remote agent id/,
+		);
+		expect(seen).toHaveLength(1);
 		// Reading a remote peer explains what it is instead of a not-found scan.
 		await expect(
 			InternalUrlRouter.instance().resolve("agent://@cluster-a/leia", { sessionFile: undefined }),

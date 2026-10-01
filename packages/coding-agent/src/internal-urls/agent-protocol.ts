@@ -25,7 +25,7 @@ import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry, isMessageablePeer } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { remoteNamespaceOf } from "../registry/remote-id";
+import { malformedRemoteIdError, REMOTE_ID_PREFIX, remoteNamespaceOf } from "../registry/remote-id";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
@@ -164,7 +164,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		if (outputId === "all" || remoteNamespaceOf(outputId) !== undefined || hasPathExtraction(url)) return null;
+		if (outputId === "all" || outputId.startsWith(REMOTE_ID_PREFIX) || hasPathExtraction(url)) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
@@ -186,6 +186,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const to = url.rawHost || url.hostname;
 		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const malformedTo = malformedRemoteIdError(to);
+		if (malformedTo) throw malformedTo;
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
@@ -213,6 +215,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
 		// A remote peer (`@ns/name`) runs in another process: it is a message target, never an output.
+		const malformedId = malformedRemoteIdError(outputId);
+		if (malformedId) throw malformedId;
 		if (remoteNamespaceOf(outputId) !== undefined) {
 			throw new Error(
 				`${outputId} is a remote peer and has no local output to read. Message it with \`write agent://${outputId}\`; list peers with \`read history://\`.`,

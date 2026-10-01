@@ -13,7 +13,7 @@ import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
-import { isValidRemoteId, isValidRemoteName, remoteNameOf, remoteNamespaceOf } from "../registry/remote-id";
+import { isValidRemoteId, malformedRemoteIdError, remoteNameOf, remoteNamespaceOf } from "../registry/remote-id";
 import type { CustomMessage } from "../session/messages";
 
 /**
@@ -228,19 +228,14 @@ export class IrcBus {
 		message: IrcMessage,
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
+		// Reach-by-name still must honor the @ns/name contract: an id in the reserved `@` space that is
+		// not `@<namespace>/<name>` (`@ns`, `@ns/`, `@/x`, bad alphabet) fails locally, so a mistyped id
+		// never reaches a transport as a bogus opts.toName and never masquerades as a local miss.
+		const malformed = malformedRemoteIdError(message.to);
+		if (malformed) return { to: message.to, outcome: "failed", error: malformed.message };
 		const namespace = remoteNamespaceOf(message.to);
 		if (namespace !== undefined) {
-			// Reach-by-name still must honor the @ns/name contract: reject a malformed name (empty,
-			// whitespace, or an extra "/") locally so a mistyped id never reaches the transport as a
-			// bogus opts.toName.
 			const toName = remoteNameOf(message.to);
-			if (toName === undefined || !isValidRemoteName(toName)) {
-				return {
-					to: message.to,
-					outcome: "failed",
-					error: `Invalid remote recipient "${message.to}" — the name after "@${namespace}/" must match the @ns/name contract (letters, digits, ".", "_", "-").`,
-				};
-			}
 			// Prefix-authoritative: an `@<namespace>/<name>` recipient is unambiguously remote and routes
 			// to its namespace's transport — a registered proxy ref is optional (reach-by-name). A ref is
 			// consulted ONLY to honor an `aborted` tombstone, matching a local hard-aborted agent.

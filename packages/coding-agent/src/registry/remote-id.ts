@@ -66,3 +66,16 @@ export function isValidRemoteId(id: string): boolean {
 	const name = remoteNameOf(id);
 	return name !== undefined && isValidRemoteName(name);
 }
+
+/**
+ * Reject an id that sits in the reserved remote space but is not a well-formed `@<namespace>/<name>`
+ * (`@ns`, `@ns/`, `@/x`, bad alphabet). Such an id can never be local either, so every surface that
+ * resolves agent ids (bus send, agent://, history://) throws the same explanation instead of a
+ * misleading unknown-agent miss. Returns undefined for a local id or a valid remote id.
+ */
+export function malformedRemoteIdError(id: string): Error | undefined {
+	if (!id.startsWith(REMOTE_ID_PREFIX) || isValidRemoteId(id)) return undefined;
+	return new Error(
+		`${id} is not a valid remote agent id: expected @<namespace>/<name> (letters, digits, ".", "_", "-"). List peers with \`read history://\`.`,
+	);
+}
