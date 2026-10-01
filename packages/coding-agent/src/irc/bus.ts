@@ -12,7 +12,9 @@
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { AgentSession } from "../session/agent-session";
+import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
 
 interface IrcWaiter {
@@ -103,6 +105,43 @@ export class IrcBus {
 				error: `Unknown agent "${message.to}" — check the subagent roster or read history:// for known peers.`,
 			};
 		}
+		return this.#deliverToLocalRef(ref, message, opts);
+	}
+
+	/**
+	 * Local-only inbound delivery for the murmur bridge (murmur-4e7n). Shares `send`'s
+	 * in-process delivery core (revive / waiter / aside / wake, full
+	 * `injected|woken|revived|failed` outcome), but a local-registry MISS returns `failed` and
+	 * NEVER consults the remote transport — a message that arrived FROM murmur must not bounce
+	 * back onto the bus (contract omp-bridge.md §8). Returns omp's freshly-minted native id so
+	 * the bridge can correlate it with the murmur msgId without conflating id namespaces.
+	 */
+	async deliverInbound(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<{ receipt: IrcDeliveryReceipt; id: string }> {
+		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const ref = this.#registry.get(message.to);
+		if (!ref) {
+			return {
+				receipt: { to: message.to, outcome: "failed", error: `Unknown agent "${message.to}" — not on this node.` },
+				id: message.id,
+			};
+		}
+		const receipt = await this.#deliverToLocalRef(ref, message, opts);
+		return { receipt, id: message.id };
+	}
+
+	/**
+	 * In-process delivery core shared by `send` and `deliverInbound`: the recipient `ref` is
+	 * present in this process's registry; resolve the aborted / advisor / parked-revive / waiter
+	 * / live-session paths and return the outcome. Never touches the remote transport.
+	 */
+	async #deliverToLocalRef(
+		ref: AgentRef,
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		if (ref.status === "aborted") {
 			return {
 				to: message.to,

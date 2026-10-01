@@ -78,6 +78,7 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -1350,6 +1351,25 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * Scoped inbound-IRC surface exposed to extensions (the murmur bridge, murmur-4e7n).
+ * A narrow door onto the process-global IrcBus so extensions never touch the bus class
+ * directly. Always injected into the ExtensionAPI (like the sibling module surfaces); an
+ * extension that also targets older omp builds may runtime-detect `pi.irc` before use.
+ */
+export interface IrcApi {
+	/**
+	 * Deliver a message that arrived from a remote transport (e.g. the murmur bridge)
+	 * into a local agent's session on the process-global bus. Local-only: a registry
+	 * miss returns `failed` and never bounces back onto the bus (contract §8). Returns
+	 * omp's freshly-minted native id so the caller can correlate it with its own msgId.
+	 */
+	deliverInbound(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<{ receipt: IrcDeliveryReceipt; id: string }>;
+}
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1373,6 +1393,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Scoped inbound-IRC surface for the murmur bridge (murmur-4e7n) — always injected (see IrcApi). */
+	irc: IrcApi;
 
 	// =========================================================================
 	// Event Subscription

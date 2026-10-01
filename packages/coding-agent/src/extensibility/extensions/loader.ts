@@ -27,6 +27,7 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
+import { IrcBus } from "../../irc/bus";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -46,6 +47,7 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
+	IrcApi,
 	LoadExtensionsResult,
 	MessageRenderer,
 	PreparedExtension,
@@ -181,6 +183,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly typebox = TypeBox;
 	readonly arktype = type;
 	readonly zod = zod;
+	readonly irc: IrcApi = {
+		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
+	};
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
 		name: string;
