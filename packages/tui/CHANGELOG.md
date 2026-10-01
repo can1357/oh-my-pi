@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Markdown links render as their clickable text alone, with no appended destination, when the host turns off link URLs (`MarkdownTheme.showLinkUrls`, `setMarkdownShowLinkUrls`).
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

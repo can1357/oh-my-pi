@@ -1453,6 +1453,44 @@ bar`,
 			expect(urlCount, "URL should appear exactly once").toBe(1);
 		});
 
+		it("should hide the URL suffix for a clickable link when the theme disables link URLs", () => {
+			const theme = { ...defaultMarkdownTheme, showLinkUrls: false };
+			const markdown = new Markdown("See [docs](https://example.com/docs) now", 0, 0, theme);
+
+			const lines = markdown.render(80);
+			expect(lines.map(stripTerminalSequences).join(" ").trim()).toBe("See docs now");
+			expect(lines.join("\n").includes("\x1b]8;;https://example.com/docs\x07")).toBeTruthy();
+		});
+
+		it("should keep the URL suffix when the terminal cannot make the link clickable", () => {
+			const theme = { ...defaultMarkdownTheme, showLinkUrls: false };
+			terminalState.hyperlinks = false;
+			try {
+				const markdown = new Markdown("See [docs](https://example.com/docs) now", 0, 0, theme);
+
+				expect(markdown.render(80).map(stripTerminalSequences).join(" ")).toContain(
+					"docs (https://example.com/docs)",
+				);
+			} finally {
+				terminalState.hyperlinks = true;
+			}
+		});
+
+		it("should keep the URL suffix when the link text has nothing to click", () => {
+			const theme = { ...defaultMarkdownTheme, showLinkUrls: false };
+			const sources = [
+				"See [](https://example.com/docs) now",
+				"See [   ](https://example.com/docs) now",
+				"See [![](https://img.test/a.png)](https://example.com/docs) now",
+			];
+
+			for (const source of sources) {
+				const markdown = new Markdown(source, 0, 0, theme);
+
+				expect(markdown.render(80).map(stripTerminalSequences).join(" ")).toContain("(https://example.com/docs)");
+			}
+		});
+
 		it("should emit OSC 8 hyperlink sequences for bare URLs", () => {
 			const markdown = new Markdown("Visit https://example.com for more", 0, 0, defaultMarkdownTheme);
 
