@@ -2747,8 +2747,8 @@ export class ModelRegistry {
 
 	/**
 	 * Whether a missing key for the provider means its `!command` apiKey produced
-	 * nothing, which the request reports retryably. False for a provider whose
-	 * catalog dispatches without a key instead.
+	 * nothing, which a turn's request reports retryably ({@link turnResolver}).
+	 * False for a provider whose catalog dispatches without a key instead.
 	 */
 	retriesFailedCommandKey(provider: string): boolean {
 		return this.hasCommandBackedApiKey(provider) && !getProviderDefinition(provider)?.allowsMissingApiKey;
@@ -2956,31 +2956,38 @@ export class ModelRegistry {
 	 * from the model. Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`.
 	 *
-	 * When the provider's configured apiKey is a `!command` that produced no key,
-	 * the initial resolve throws {@link ApiKeyCommandError} instead of returning
-	 * no key, so the request fails retryably rather than as a missing key. The
-	 * initial resolve settles as soon as the request's signal aborts.
+	 * The initial resolve settles as soon as the request's signal aborts.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
-		const provider = typeof target === "string" ? target : target.provider;
 		const resolve =
 			typeof target === "string"
 				? createApiKeyResolver(this, target, options)
 				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
+		return async ctx => (ctx.error === undefined ? untilAborted(ctx.signal, async () => resolve(ctx)) : resolve(ctx));
+	}
+
+	/**
+	 * The {@link resolver} for an agent turn's requests. When the provider's
+	 * configured apiKey is a `!command` that produced no key, the initial resolve
+	 * throws {@link ApiKeyCommandError} instead of returning no key, so the turn
+	 * fails retryably and turn recovery runs the command again. Other callers
+	 * keep {@link resolver}, where such a request fails at once as a missing key.
+	 */
+	turnResolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver {
+		const resolve = this.resolver(model, sessionId);
 		return async ctx => {
-			const resolved =
-				ctx.error === undefined ? await untilAborted(ctx.signal, async () => resolve(ctx)) : await resolve(ctx);
+			const resolved = await resolve(ctx);
 			if (
 				ctx.error === undefined &&
 				resolvedApiKeyBearer(resolved) === undefined &&
-				this.retriesFailedCommandKey(provider)
+				this.retriesFailedCommandKey(model.provider)
 			) {
 				throw new ApiKeyCommandError(
-					provider,
-					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(provider)),
+					model.provider,
+					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(model.provider)),
 				);
 			}
 			return resolved;

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { streamSimple } from "@oh-my-pi/pi-ai";
+import { completeSimple, type OneshotRetryInfo, retryTransientCompletion, streamSimple } from "@oh-my-pi/pi-ai";
 import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -353,7 +353,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
 	});
 
-	test("a failing apiKey command fails the request as retryable without naming the command", async () => {
+	test("a failing apiKey command fails a turn's request as retryable without naming the command", async () => {
 		const secret = "sk-synthetic-command-secret";
 		fs.writeFileSync(
 			modelsPath,
@@ -373,7 +373,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		if (!model) throw new Error("Expected custom model");
 
 		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
-		const error = await streamSimple(model, context, { apiKey: registry.resolver(model) })
+		const error = await streamSimple(model, context, { apiKey: registry.turnResolver(model) })
 			.result()
 			.then(
 				() => undefined,
@@ -387,6 +387,47 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(message).toContain("custom-proxy");
 		expect(message).not.toContain(secret);
 		expect(message).not.toContain("--token");
+	});
+
+	test("a oneshot completion whose apiKey command failed fails fast instead of waiting out the failure backoff", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: "!false",
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		// Title, commit-message, memory and auto-repair oneshots resolve keys through
+		// `registry.resolver()`; a retry here would sleep out the 30 s backoff.
+		const retries: OneshotRetryInfo[] = [];
+		const stopRetrying = new AbortController();
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const outcome = await retryTransientCompletion(
+			() => completeSimple(model, context, { apiKey: registry.resolver(model) }),
+			{
+				signal: stopRetrying.signal,
+				onRetry: info => {
+					retries.push(info);
+					stopRetrying.abort();
+				},
+			},
+		).then(
+			message => message.errorMessage,
+			(failure: unknown) => (failure instanceof Error ? failure.message : String(failure)),
+		);
+
+		expect(retries).toEqual([]);
+		expect(outcome).toContain("No API key");
 	});
 
 	test("a provider with no apiKey configured still fails with the non-retryable missing-key error", async () => {
@@ -437,7 +478,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const mock = createMockModel({ responses: [{ content: ["answered with the command key"], stopReason: "stop" }] });
 		const sentKeys: Array<string | undefined> = [];
 		const agent = new Agent({
-			getApiKey: requestModel => registry.resolver(requestModel, agent.sessionId),
+			getApiKey: requestModel => registry.turnResolver(requestModel, agent.sessionId),
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestModel, streamContext, options) => {
 				const seeded =
@@ -553,7 +594,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		]);
 	});
 
-	test("a provider that runs without a key still dispatches keyless when its apiKey command fails", async () => {
+	test("a provider that runs without a key still dispatches a turn keyless when its apiKey command fails", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(
@@ -578,7 +619,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		);
 
 		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
-		await streamSimple(model, context, { apiKey: registry.resolver(model), fetch: captureFetch, maxTokens: 16 })
+		await streamSimple(model, context, { apiKey: registry.turnResolver(model), fetch: captureFetch, maxTokens: 16 })
 			.result()
 			.catch(() => undefined)
 			.finally(() => credentials.mockRestore());
