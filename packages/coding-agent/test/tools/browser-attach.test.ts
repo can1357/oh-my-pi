@@ -426,9 +426,11 @@ describe("pickElectronTarget", () => {
 			const targetPage = (await launched.browser.pages())[0];
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
+			// Count navigations only: after the abort Chrome renders its error page,
+			// whose inline data: icons also surface as intercepted requests.
 			let requestCount = 0;
 			const onRequest = (request: HTTPRequest) => {
-				requestCount++;
+				if (request.isNavigationRequest()) requestCount++;
 				void request.abort("failed");
 			};
 			await targetPage.setRequestInterception(true);

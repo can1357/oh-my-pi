@@ -11,7 +11,16 @@ import { parseModelString, splitUpstreamRouting, formatModelSelectorValue } from
  * in the compact alt+p picker ({@link ./model-picker}).
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type {
+	TspPickerAction,
+	TspPickerColumn,
+	TspPickerGroup,
+	TspPickerItem,
+	TspPickerProps,
+	TspPickerScope,
+	TspSpan,
+} from "@oh-my-pi/pi-wire";
+import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
@@ -19,7 +28,15 @@ import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/typ
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
 import { fuzzyFilter } from "../fuzzy";
-import { getKeybindings } from "../keybindings";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
+import type { KeyName } from "../key-hint-format";
+import { col, compact, kbd, md, node, span, text } from "../native/describe";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../native/picker";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, hintsRow, type NativeHint } from "../native/overlay";
+import { plainText } from "../native/spans";
+import { isNativeRendering } from "../native/state";
 import { Input } from "../components/input";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { truncateToWidth, visibleWidth } from "../utils";
@@ -35,14 +52,18 @@ import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import {
 	buildBrowserItems,
+	MODEL_PICKER_COLUMNS,
 	ModelBrowser,
 	type ModelBrowserItem,
 	modelSearchText,
+	thinkingDotToken,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
 } from "./model-browser";
 import {
+	describeHubFrame,
+	describeHubSidebar,
 	HubFrame,
 	moveStripSelection,
 	type SidebarEntry as HubSidebarEntry,
@@ -89,7 +110,7 @@ export interface ModelHubSource extends ModelBrowserSource {
 
 /** Catalog capabilities required by the model hub. */
 export interface ModelHubRegistry extends ModelBrowserRegistry {
-	readonly authStorage: { hasAuth(provider: string): boolean };
+	readonly authStorage: { readonly keys: Pick<KeysApi, "source"> };
 	getDiscoverableProviders(): string[];
 	getProviderDiscoveryState(provider: string):
 		| {
@@ -131,6 +152,8 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
+	/** Save the current role assignments and default thinking level as a named model preset. */
+	onSavePreset?: (name: string) => void;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
 	onCancel: () => void;
@@ -139,6 +162,8 @@ export interface ModelHubCallbacks {
 export interface ModelHubOptions {
 	/** Preselect this provider's sidebar entry (e.g. when reopening after /login). */
 	initialProviderId?: string;
+	/** `provider/id` of the session's model, marked current in the native picker. */
+	currentSelector?: string;
 }
 
 interface SidebarEntry extends HubSidebarEntry<"recent" | "roles" | "all" | "separator" | "provider"> {
@@ -181,16 +206,78 @@ type StripState =
 			initialThinkingLevel?: ConfiguredThinkingLevel;
 	  })
 	| {
-			/** Footer text input naming a new custom role. */
-			kind: "roleName";
+			/** Footer text input naming a new role, or saving a model preset. */
+			kind: "name";
+			purpose: "role" | "preset";
 			input: Input;
 	  };
+
+/** A Roles-view command; keys and the picker's action bar both run {@link ModelHubComponent}'s `#runRolesAction`. */
+type RolesAction = "pick" | "clear" | "fallback" | "cycle" | "earlier" | "later" | "new" | "thinking" | "save";
+
+/** Printable keys of the Roles view and the command each runs. */
+const ROLES_ACTION_KEYS: Record<string, RolesAction> = {
+	x: "clear",
+	f: "fallback",
+	c: "cycle",
+	"[": "earlier",
+	"]": "later",
+	n: "new",
+	t: "thinking",
+	s: "save",
+};
+
+/** Picker fact columns of the Roles view. */
+const ROLE_PICKER_COLUMNS: readonly TspPickerColumn[] = [
+	{ id: "model", head: "Model", format: "text", priority: 2 },
+	{ id: "thinking", head: "Thinking", format: "dim", priority: 1 },
+];
+
+/** Kind tab labels (sentence case; acronyms stay upper). */
+const MODEL_KIND_LABELS: Record<"all" | ModelKind, string> = {
+	all: "All",
+	chat: "Chat",
+	tiny: "Tiny",
+	image: "Image",
+	tts: "TTS",
+	stt: "STT",
+	search: "Search",
+	judge: "Judge",
+	embedding: "Embedding",
+	rerank: "Rerank",
+	video: "Video",
+};
+
+/** A provider mark's initials: `amazon-bedrock` → `AB`, `anthropic` → `An`. */
+function providerInitials(providerId: string): string {
+	const words = providerId.split(/[-_\s.]+/).filter(word => word.length > 0);
+	if (words.length >= 2) return `${words[0]!.charAt(0)}${words[1]!.charAt(0)}`.toUpperCase();
+	const word = words[0] ?? providerId;
+	return `${word.charAt(0).toUpperCase()}${word.charAt(1)}`;
+}
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
 const MODEL_KIND_TABS: ReadonlyArray<"all" | ModelKind> = ["all", ...MODEL_KINDS];
 const ROLE_TABS = ["all", "chat", "kind"] as const;
 type RoleTab = (typeof ROLE_TABS)[number];
+
+/** Stable native list-item key of a Roles-view row. */
+function rolesRowKey(row: RolesRow, index: number): string {
+	switch (row.kind) {
+		case "role":
+			return `role:${row.role}`;
+		case "chainKey":
+			return `chain:${row.role}`;
+		case "fallback":
+			return `fallback:${row.role}:${row.chainIndex}`;
+		case "separator":
+			return `sep:${index}`;
+		case "newRole":
+		case "newFallback":
+			return row.kind;
+	}
+}
 
 /**
  * Providers already auto-refreshed this process. Selecting a provider fetches
@@ -291,6 +378,24 @@ export class ModelHubComponent implements Component {
 	);
 	#lockedLoginLine: number | null = null;
 	#rolesRowStart = 1;
+	/** Bumped on every visible-state change; the described node is rebuilt when it moves. */
+	#nativeVersion = 0;
+	#nativeCache: { version: number; picker: boolean; node: NativeNode } | undefined;
+	#currentSelector: string | undefined;
+	/** The opening online catalog refresh is still in flight (an empty scope then shows as loading). */
+	#catalogRefreshing = false;
+	#kindTabsMemo: { candidates: readonly ModelBrowserItem[]; tabs: TspPickerProps["tabs"] } | undefined;
+	#pickerRoleItems:
+		| { rows: readonly RolesRow[]; roles: RoleAssignments; cycle: string; items: readonly TspPickerItem[] }
+		| undefined;
+	#pickerRolePreview:
+		| {
+				row: RolesRow | undefined;
+				roles: RoleAssignments;
+				rows: readonly RolesRow[];
+				children: readonly NativeChild[];
+		  }
+		| undefined;
 
 	constructor(
 		tui: TUI,
@@ -305,6 +410,7 @@ export class ModelHubComponent implements Component {
 		this.#registry = registry;
 		this.#scopedModels = scopedModels;
 		this.#callbacks = callbacks;
+		this.#currentSelector = options.currentSelector;
 
 		this.#browser = new ModelBrowser(settings, {
 			emptyText: () => this.#emptyStateMessage(),
@@ -331,13 +437,17 @@ export class ModelHubComponent implements Component {
 		// registry-independent, so the reload would only repeat the hydration
 		// above.
 		if (this.#scopedModels.length === 0) {
+			this.#catalogRefreshing = true;
 			this.#registry
 				.refresh("online")
 				.then(() => this.#syncFromRegistryState())
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
 				})
-				.finally(() => this.#tui.requestRender());
+				.finally(() => {
+					this.#catalogRefreshing = false;
+					this.#requestRender();
+				});
 		}
 	}
 
@@ -355,7 +465,14 @@ export class ModelHubComponent implements Component {
 	}
 
 	invalidate(): void {
+		this.#nativeVersion++;
 		this.#frame.invalidate();
+	}
+
+	/** Request a repaint after a state change, invalidating the described node. */
+	#requestRender(): void {
+		this.#nativeVersion++;
+		this.#tui.requestRender();
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -374,6 +491,7 @@ export class ModelHubComponent implements Component {
 
 	/** Rebuild items, roles, and the sidebar from the registry's in-memory state. */
 	#syncFromRegistryState(): void {
+		this.#nativeVersion++;
 		// A background rebuild (provider refresh, mutation) must not yank the
 		// sidebar viewport: remember the focused entry's screen row so it — or
 		// its nearest survivor — stays put after #buildSidebar reshuffles entries.
@@ -451,7 +569,8 @@ export class ModelHubComponent implements Component {
 				// Discoverable without stored auth: catalog-backed providers stay
 				// locked; keyless/custom endpoints (ollama, vllm, …) surface as
 				// selectable so discovery can populate them.
-				if (authStorage.hasAuth(provider) || !locked.has(provider)) {
+				const authenticated = authStorage.keys.source(provider) !== undefined;
+				if (authenticated || !locked.has(provider)) {
 					// #2761: implicit local endpoints (optional: true) stay hidden
 					// until discovery actually reaches a server. "idle" means never
 					// probed; "unavailable" means the endpoint is unreachable; both
@@ -459,7 +578,7 @@ export class ModelHubComponent implements Component {
 					// configured. models.yml discovery providers (optional: false)
 					// and providers with stored auth keep their entry so
 					// misconfigurations stay visible and diagnosable.
-					if (!authStorage.hasAuth(provider)) {
+					if (!authenticated) {
 						const discovery = this.#registry.getProviderDiscoveryState(provider);
 						if (discovery?.optional && (discovery.status === "idle" || discovery.status === "unavailable")) {
 							continue;
@@ -712,10 +831,23 @@ export class ModelHubComponent implements Component {
 		this.#rolesRows = rows;
 	}
 
+	/**
+	 * Rows the Roles view lists on the All tab, separators aside: the picker's
+	 * unfiltered `total`, counted in the same rows Tern counts as shown.
+	 */
+	#allRolesRowCount(): number {
+		const chains = this.#fallbackChains();
+		// "New role…" and "New fallback chain…", then each role and model chain with its fallback entries.
+		let count = 2;
+		for (const role of this.#visibleRoleIds()) count += 1 + (chains[role]?.length ?? 0);
+		for (const key in chains) if (key.includes("/")) count += 1 + chains[key].length;
+		return count;
+	}
+
 	/** Refresh roles + dependent state after a settings mutation (assign/unassign). */
 	#refreshAfterMutation(): void {
 		this.#syncFromRegistryState();
-		this.#tui.requestRender();
+		this.#requestRender();
 	}
 
 	/** Re-sync after an asynchronous callback finishes mutating settings. */
@@ -730,6 +862,7 @@ export class ModelHubComponent implements Component {
 	 * never silently vanish.
 	 */
 	#onQueryChanged(query: string): void {
+		this.#nativeVersion++;
 		if (!query.trim()) {
 			this.#searchCounts = null;
 			this.#composeEntries();
@@ -780,13 +913,14 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#startRefreshSpinner(): void {
-		if (this.#refreshSpinnerInterval) return;
+		// Native surfaces clock the refresh spinner themselves.
+		if (this.#refreshSpinnerInterval || isNativeRendering()) return;
 		this.#refreshSpinnerInterval = setInterval(() => {
 			const frameCount = theme.spinnerFrames.length;
 			if (frameCount > 0) {
 				this.#refreshSpinnerFrame = (this.#refreshSpinnerFrame + 1) % frameCount;
 			}
-			this.#tui.requestRender();
+			this.#requestRender();
 		}, 80);
 	}
 
@@ -875,7 +1009,7 @@ export class ModelHubComponent implements Component {
 				autoRefreshedProviders.add(providerId);
 				void this.#refreshProviderInBackground(providerId, true);
 			}
-			this.#tui.requestRender();
+			this.#requestRender();
 		}
 	}
 
@@ -927,6 +1061,8 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#activateItem(item: ModelBrowserItem): void {
+		// Also reached from the browser's own native list events, which bypass handleInput.
+		this.#nativeVersion++;
 		if (this.#assigning) {
 			const target = this.#assigning;
 			this.#assigning = null;
@@ -963,26 +1099,30 @@ export class ModelHubComponent implements Component {
 	#finishAssignment(result: void | boolean | Promise<void | boolean>, onSuccess: () => void): void {
 		if (!(result instanceof Promise)) {
 			if (result !== false) onSuccess();
-			else this.#tui.requestRender();
+			else this.#requestRender();
 			return;
 		}
 		this.#assignmentPending = true;
-		this.#tui.requestRender();
+		this.#requestRender();
 		void result.then(
 			applied => {
 				this.#assignmentPending = false;
 				if (this.#disposed) return;
 				if (applied !== false) onSuccess();
-				else this.#tui.requestRender();
+				else this.#requestRender();
 			},
 			() => {
 				this.#assignmentPending = false;
-				if (!this.#disposed) this.#tui.requestRender();
+				if (!this.#disposed) this.#requestRender();
 			},
 		);
 	}
 
-	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
+	/**
+	 * Persist `role → item`, preserving a still-supported thinking level, then
+	 * open the thinking strip — skipped for models with no reasoning surface,
+	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
+	 */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
 			this.#openScopeStrip(item, role, returnToRoles);
@@ -1001,6 +1141,13 @@ export class ModelHubComponent implements Component {
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
+			if (supported.length === 0) {
+				if (returnToRoles) {
+					this.#setActiveEntry("roles");
+					this.#focus = "list";
+				}
+				return;
+			}
 			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
 		});
 	}
@@ -1017,8 +1164,37 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
+	/**
+	 * Thinking levels a role assignment can actually apply. A model that does
+	 * not reason gets none: no request path sends reasoning for it, and
+	 * `applyAutoThinkingLevel` early-returns on `!model.reasoning`, so
+	 * `inherit`/`off`/`auto` would all be no-ops. Reasoners without an effort
+	 * dial (`thinking: undefined`, e.g. `xai/grok-code-fast-1`) keep the three
+	 * always-on levels — their thinking is real, only the ladder is absent.
+	 */
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
+		if (!model.reasoning) return [];
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+	}
+
+	/**
+	 * Resolve what `t` on a role row would edit: the role's model in its
+	 * persisted scope. Undefined when the role is unassigned or its model has
+	 * no thinking levels to offer, which makes both `t` and its footer hint
+	 * inert — the same rule wildcard fallback rows follow.
+	 */
+	#roleThinkingTarget(role: string): { item: ModelBrowserItem; scope?: ModelRoleSelectionScope } | undefined {
+		const assignment = this.#roles[role];
+		if (!assignment) return undefined;
+		const source =
+			this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
+		const scope = source === "project" || source === "global" ? source : undefined;
+		const model = scope ? this.#roleForScope(role, scope).model : assignment.model;
+		if (!model || this.#thinkingOptionsFor(model).length === 0) return undefined;
+		return {
+			item: { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` },
+			scope,
+		};
 	}
 
 	/** Offer only the roles this model can actually fill (chat roles for chat models, `web` for search runners, …). */
@@ -1257,7 +1433,7 @@ export class ModelHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (!strip || strip.kind === "roleName") return;
+		if (!strip || strip.kind === "name") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
 		switch (chip.action) {
@@ -1482,21 +1658,44 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
-	/** Open the footer name input that creates a new custom role. */
-	#openRoleNameStrip(): void {
-		this.#strip = { kind: "roleName", input: new Input() };
+	/** Open the footer name input: a new custom role, or saving the current setup as a model preset. */
+	#openNameStrip(purpose: "role" | "preset"): void {
+		this.#strip = { kind: "name", purpose, input: new Input() };
+	}
+
+	/** Validate and commit the name strip: a new role jumps into assigning it, a preset name saves it. */
+	#submitNameStrip(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "name") return;
+		if (strip.purpose === "preset") {
+			this.#submitPresetName();
+			return;
+		}
+		this.#submitRoleName();
 	}
 
 	/** Validate and commit the new-role name: jump straight into assigning it. */
 	#submitRoleName(): void {
 		const strip = this.#strip;
-		if (strip?.kind !== "roleName") return;
+		if (strip?.kind !== "name" || strip.purpose !== "role") return;
 		const name = strip.input.getValue().trim();
 		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
 		if (this.#visibleRoleIds().includes(name)) return;
 		this.#strip = null;
 		this.#frame.chipRanges = [];
 		this.#startAssign(name);
+	}
+
+	/** Validate and commit the preset name: save the current setup under it (overwrites). */
+	#submitPresetName(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "name" || strip.purpose !== "preset") return;
+		const name = strip.input.getValue().trim();
+		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
+		this.#strip = null;
+		this.#frame.chipRanges = [];
+		this.#callbacks.onSavePreset?.(name);
+		this.#refreshAfterMutation();
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -1520,6 +1719,7 @@ export class ModelHubComponent implements Component {
 	}
 
 	handleInput(data: string): void {
+		this.#nativeVersion++;
 		if (this.#assignmentPending) {
 			if (matchesSelectCancel(data)) this.#callbacks.onCancel();
 			return;
@@ -1535,16 +1735,7 @@ export class ModelHubComponent implements Component {
 		}
 
 		if (matchesSelectCancel(data)) {
-			if (this.#assigning !== null) {
-				this.#cancelAssign();
-				return;
-			}
-			const entry = this.#activeEntry();
-			if (this.#isBrowserView(entry) && this.#browser.query.length > 0) {
-				this.#browser.handleCancel();
-				return;
-			}
-			this.#callbacks.onCancel();
+			this.#cancel();
 			return;
 		}
 
@@ -1629,12 +1820,40 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 
+		// Enter on the sidebar is a pane switch, like →: it lands on the model
+		// rows instead of acting on a row the user cannot see is selected.
+		if (this.#focus === "scope" && (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n")) {
+			this.#focus = "list";
+			return;
+		}
+
 		const beforeQuery = this.#browser.query;
 		const isPrintable = extractPrintableText(data) !== undefined;
 		this.#browser.handleInput(data);
 		if (isPrintable || this.#browser.query !== beforeQuery) {
 			this.#focus = "list";
 		}
+	}
+
+	/** The cancel key's ladder: close a strip, leave assign mode, clear the query, then close the hub. */
+	#cancel(): void {
+		if (this.#assignmentPending) {
+			this.#callbacks.onCancel();
+			return;
+		}
+		if (this.#strip) {
+			this.#closeStrip();
+			return;
+		}
+		if (this.#assigning !== null) {
+			this.#cancelAssign();
+			return;
+		}
+		if (this.#isBrowserView(this.#activeEntry()) && this.#browser.query.length > 0) {
+			this.#browser.handleCancel();
+			return;
+		}
+		this.#callbacks.onCancel();
 	}
 
 	#isBrowserView(entry: SidebarEntry): boolean {
@@ -1649,9 +1868,9 @@ export class ModelHubComponent implements Component {
 			this.#closeStrip();
 			return;
 		}
-		if (strip.kind === "roleName") {
+		if (strip.kind === "name") {
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-				this.#submitRoleName();
+				this.#submitNameStrip();
 				return;
 			}
 			strip.input.handleInput(data);
@@ -1703,7 +1922,7 @@ export class ModelHubComponent implements Component {
 				this.#startAssignFallbackKey();
 				return;
 			case "newRole":
-				this.#openRoleNameStrip();
+				this.#openNameStrip("role");
 				return;
 			case "separator":
 				return;
@@ -1755,81 +1974,73 @@ export class ModelHubComponent implements Component {
 			this.#roleIndex = this.#stepRoleIndex(this.#roleIndex, 1);
 			return;
 		}
-		const row = this.#rolesRows[this.#roleIndex];
-		const role = row?.kind === "role" ? row.role : undefined;
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			if (row) this.#activateRolesRow(row);
+			this.#runRolesAction("pick");
 			return;
 		}
 		if (matchesKey(data, "backspace") || matchesKey(data, "delete")) {
-			if (role) this.#unassignRole(role);
-			else if (row?.kind === "fallback") this.#removeFallback(row);
-			else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
+			this.#runRolesAction("clear");
 			return;
 		}
 		// Reordering: [ / shift+↑ moves the row earlier, ] / shift+↓ later —
 		// cycle order on a role row, chain order on a fallback row.
 		if (matchesKey(data, "shift+up")) {
-			if (role) this.#moveCycleMembership(role, -1);
-			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
+			this.#runRolesAction("earlier");
 			return;
 		}
 		if (matchesKey(data, "shift+down")) {
-			if (role) this.#moveCycleMembership(role, 1);
-			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
+			this.#runRolesAction("later");
 			return;
 		}
 		const printable = extractPrintableText(data);
-		if (printable === "x") {
-			if (role) this.#unassignRole(role);
-			else if (row?.kind === "fallback") this.#removeFallback(row);
-			else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
-			return;
+		if (printable !== undefined && Object.hasOwn(ROLES_ACTION_KEYS, printable)) {
+			this.#runRolesAction(ROLES_ACTION_KEYS[printable]!);
 		}
-		if (printable === "f") {
-			if (row?.kind === "newFallback") this.#startAssignFallbackKey();
-			else if (row && row.kind !== "newRole" && row.kind !== "separator") {
-				this.#startAssignFallback(row.role, null);
+	}
+
+	/** One Roles-view command on the selected row (keys and action-bar buttons share it). */
+	#runRolesAction(action: RolesAction): void {
+		const row = this.#rolesRows[this.#roleIndex];
+		const role = row?.kind === "role" ? row.role : undefined;
+		switch (action) {
+			case "pick":
+				if (row) this.#activateRolesRow(row);
+				return;
+			case "clear":
+				if (role) this.#unassignRole(role);
+				else if (row?.kind === "fallback") this.#removeFallback(row);
+				else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
+				return;
+			case "fallback":
+				if (row?.kind === "newFallback") this.#startAssignFallbackKey();
+				else if (row && row.kind !== "newRole" && row.kind !== "separator") {
+					this.#startAssignFallback(row.role, null);
+				}
+				return;
+			case "cycle":
+				if (role) this.#toggleCycleMembership(role);
+				return;
+			case "earlier":
+			case "later": {
+				const delta = action === "earlier" ? -1 : 1;
+				if (role) this.#moveCycleMembership(role, delta);
+				else if (row?.kind === "fallback") this.#moveFallback(row, delta);
+				return;
 			}
-			return;
-		}
-		if (printable === "c") {
-			if (role) this.#toggleCycleMembership(role);
-			return;
-		}
-		if (printable === "[") {
-			if (role) this.#moveCycleMembership(role, -1);
-			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
-			return;
-		}
-		if (printable === "]") {
-			if (role) this.#moveCycleMembership(role, 1);
-			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
-			return;
-		}
-		if (printable === "n") {
-			this.#openRoleNameStrip();
-			return;
-		}
-		if (printable === "t") {
-			const assignment = role ? this.#roles[role] : undefined;
-			if (role && assignment) {
-				const source =
-					this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
-				const scope = source === "project" || source === "global" ? source : undefined;
-				const scopedModel = scope ? this.#roleForScope(role, scope).model : assignment.model;
-				if (!scopedModel) return;
-				const item: ModelBrowserItem = {
-					provider: scopedModel.provider,
-					id: scopedModel.id,
-					model: scopedModel,
-					selector: `${scopedModel.provider}/${scopedModel.id}`,
-				};
-				this.#openThinkingStrip(item, role, true, scope);
-			} else if (row?.kind === "fallback") {
-				this.#openFallbackThinkingStrip(row);
-			}
-			return;
+			case "new":
+				this.#openNameStrip("role");
+				return;
+			case "save":
+				if (this.#callbacks.onSavePreset) this.#openNameStrip("preset");
+				return;
+			case "thinking":
+				if (role) {
+					const target = this.#roleThinkingTarget(role);
+					if (target) this.#openThinkingStrip(target.item, role, true, target.scope);
+				} else if (row?.kind === "fallback") {
+					this.#openFallbackThinkingStrip(row);
+				}
+				return;
 		}
 	}
 
@@ -1855,7 +2066,7 @@ export class ModelHubComponent implements Component {
 		// Footer strip chips (columns stay in frame coordinates).
 		if (footerColumn !== undefined && this.#strip) {
 			const strip = this.#strip;
-			if (event.leftClick && strip.kind !== "roleName" && this.#frame.selectChipAt(strip, footerColumn)) {
+			if (event.leftClick && strip.kind !== "name" && this.#frame.selectChipAt(strip, footerColumn)) {
 				this.#activateStripChip();
 			}
 			return true;
@@ -1899,17 +2110,7 @@ export class ModelHubComponent implements Component {
 
 		if (overSidebar) {
 			const index = this.#sidebarEntryIndexAt(contentLine);
-			const clicked = index !== null ? this.#entries[index] : undefined;
-			if (clicked && clicked.kind !== "separator") {
-				const already = clicked.id === this.#activeEntryId;
-				if (clicked.kind === "roles") this.#assigning = null;
-				this.#setActiveEntry(clicked.id);
-				// A click on Roles is a deliberate dive into the rows.
-				if (clicked.kind === "roles") this.#focus = "list";
-				if (already && clicked.kind === "provider" && clicked.locked) {
-					this.#requestLogin(clicked);
-				}
-			}
+			this.#clickSidebarEntry(index !== null ? this.#entries[index] : undefined);
 			return true;
 		}
 
@@ -1937,6 +2138,19 @@ export class ModelHubComponent implements Component {
 			}
 		}
 		return true;
+	}
+
+	/** Pointer activation of a sidebar entry: pick the scope; a second click on a locked provider logs in. */
+	#clickSidebarEntry(clicked: SidebarEntry | undefined): void {
+		if (!clicked || clicked.kind === "separator") return;
+		const already = clicked.id === this.#activeEntryId;
+		if (clicked.kind === "roles") this.#assigning = null;
+		this.#setActiveEntry(clicked.id);
+		// A click on Roles is a deliberate dive into the rows.
+		if (clicked.kind === "roles") this.#focus = "list";
+		if (already && clicked.kind === "provider" && clicked.locked) {
+			this.#requestLogin(clicked);
+		}
 	}
 
 	/** Map a content-line index to a sidebar entry index (accounting for scroll). */
@@ -2005,7 +2219,10 @@ export class ModelHubComponent implements Component {
 			MODEL_KIND_TABS.map(kind => ({ label: kind })),
 			Math.max(0, active),
 		);
-		return truncateToWidth(` ${theme.fg("dim", "Kind:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
+		return truncateToWidth(
+			` ${theme.fg("dim", "Kind:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}`,
+			width,
+		);
 	}
 
 	#renderRoleTabs(width: number): string {
@@ -2014,7 +2231,10 @@ export class ModelHubComponent implements Component {
 			ROLE_TABS.map(tab => ({ label: tab === "kind" ? "kinds" : tab })),
 			Math.max(0, active),
 		);
-		return truncateToWidth(` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
+		return truncateToWidth(
+			` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}`,
+			width,
+		);
 	}
 
 	#statusRow(width: number): string {
@@ -2022,9 +2242,11 @@ export class ModelHubComponent implements Component {
 			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
 		}
 		if (this.#assigning !== null) {
+			const enter = formatKeyHint("enter");
+			const cancel = editorKey("tui.select.cancel");
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(
-					theme.fg("accent", " New fallback chain — Enter picks the model it protects, Esc cancels"),
+					theme.fg("accent", ` New fallback chain — ${enter} picks the model it protects, ${cancel} cancels`),
 					width,
 				);
 			}
@@ -2033,12 +2255,15 @@ export class ModelHubComponent implements Component {
 			if (this.#assigning.kind === "fallback") {
 				const verb = this.#assigning.index === null ? "Adding fallback for" : "Replacing fallback of";
 				return truncateToWidth(
-					theme.fg("accent", ` ${verb} ${theme.bold(label)} — Enter picks the fallback model, Esc cancels`),
+					theme.fg(
+						"accent",
+						` ${verb} ${theme.bold(label)} — ${enter} picks the fallback model, ${cancel} cancels`,
+					),
 					width,
 				);
 			}
 			return truncateToWidth(
-				theme.fg("accent", ` Assigning ${theme.bold(label)} — Enter assigns, Esc cancels`),
+				theme.fg("accent", ` Assigning ${theme.bold(label)} — ${enter} assigns, ${cancel} cancels`),
 				width,
 			);
 		}
@@ -2050,7 +2275,7 @@ export class ModelHubComponent implements Component {
 				text = `Recently used models${scopedSuffix}`;
 				break;
 			case "roles":
-				text = "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
+				text = `Model roles — ${formatKeyHint("f")} adds a retry fallback, cleared roles fall back to auto-selection`;
 				break;
 			case "provider":
 				if (entry.locked) {
@@ -2205,7 +2430,7 @@ export class ModelHubComponent implements Component {
 		// segment track the ctrl+p status uses; the selected role's chip fills.
 		while (lines.length < rows - 1) lines.push("");
 		if (rows >= 2) {
-			const cycleKey = getKeybindings().getKeys("app.model.cycleForward")[0] ?? "ctrl+p";
+			const cycleKey = editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p");
 			if (cycleOrder.length > 0) {
 				const selectedRow = this.#rolesRows[this.#roleIndex];
 				const selectedRole =
@@ -2218,7 +2443,7 @@ export class ModelHubComponent implements Component {
 				lines[rows - 1] = truncateToWidth(`  ${theme.fg("dim", `${cycleKey} cycle:`)} ${track}`, width);
 			} else {
 				lines[rows - 1] = truncateToWidth(
-					theme.fg("dim", `  ${cycleKey} cycle is empty — press c on a role to add it`),
+					theme.fg("dim", `  ${cycleKey} cycle is empty — press ${formatKeyHint("c")} on a role to add it`),
 					width,
 				);
 			}
@@ -2245,7 +2470,12 @@ export class ModelHubComponent implements Component {
 		}
 		if (entry.oauth) {
 			this.#lockedLoginLine = lines.length + 1; // +1 for the status row offset handled by caller
-			lines.push(truncateToWidth(theme.fg("accent", `  ${theme.nav.cursor} Log in with OAuth (Enter)`), width));
+			lines.push(
+				truncateToWidth(
+					theme.fg("accent", `  ${theme.nav.cursor} Log in with OAuth (${formatKeyHint("enter")})`),
+					width,
+				),
+			);
 		}
 		lines.push("");
 		const catalogCount = entry.catalogCount ?? 0;
@@ -2263,29 +2493,43 @@ export class ModelHubComponent implements Component {
 	}
 
 	#footerHint(): string {
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const left = formatKeyHint("left");
+		const leftRight = formatKeyHints(["left", "right"]);
+		const enterRight = formatKeyHints(["enter", "right"]);
+		const altLeftRight = formatKeyHints(["alt+left", "alt+right"]);
 		const strip = this.#strip;
 		if (strip) {
-			if (strip.kind === "roleName") {
-				return "Enter create + pick model · Esc cancel";
+			if (strip.kind === "name") {
+				if (strip.purpose === "preset") {
+					return `${enter} save preset · ${cancel} cancel`;
+				}
+				return `${enter} create + pick model · ${cancel} cancel`;
 			}
-			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
-			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
-			return "←/→ thinking level · Enter apply · Esc keep";
+			if (strip.kind === "role") return `${leftRight} choose · ${enter} assign/clear · ${cancel} cancel`;
+			if (strip.kind === "scope") return `${leftRight} save scope · ${enter} choose · ${cancel} cancel`;
+			return `${leftRight} thinking level · ${enter} apply · ${cancel} keep`;
 		}
 		if (this.#assigning !== null) {
+			if (this.#focus === "scope") {
+				return `${enterRight} models · ${upDown} providers · type to search · ${altLeftRight} kind · ${cancel} cancel`;
+			}
+			const browse = `${upDown} models · ${left} providers · type to search · ${altLeftRight} kind · ${cancel} cancel`;
 			switch (this.#assigning.kind) {
 				case "fallback":
-					return "Enter pick fallback · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return `${enter} pick fallback · ${browse}`;
 				case "fallbackKey":
-					return "Enter pick the protected model · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return `${enter} pick the protected model · ${browse}`;
 				default:
-					return "Enter assign · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return `${enter} assign · ${browse}`;
 			}
 		}
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
-				return "↑/↓ providers · → roles · Alt+←/→ tabs · Esc close";
+				return `${upDown} providers · ${enterRight} roles · ${altLeftRight} tabs · ${cancel} close`;
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
@@ -2293,23 +2537,32 @@ export class ModelHubComponent implements Component {
 				// inherit and unknown models have no ladder to offer, so the
 				// action would be inert there.
 				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
-				const thinking = editable ? " · t thinking" : "";
-				return `↑/↓ rows · Enter replace · f add another · x remove${thinking} · [/] reorder · ← providers`;
+				const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
+				return `${upDown} rows · ${enter} replace · ${formatKeyHint("f")} add another · ${formatKeyHint("x")} remove${thinking} · [/] reorder · ${left} providers`;
 			}
 			if (row?.kind === "chainKey") {
-				return "↑/↓ rows · Enter/f add fallback · x clear chain · ← providers";
+				return `${upDown} rows · ${formatKeyHints(["enter", "f"])} add fallback · ${formatKeyHint("x")} clear chain · ${left} providers`;
 			}
 			if (row?.kind === "newFallback") {
-				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
+				return `${upDown} rows · ${enter} new model/provider fallback chain · ${left} providers`;
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			// Same rule as fallback rows: advertise `t` only where a strip would
+			// open — an assigned role whose model has thinking levels to offer.
+			const editable = row?.kind === "role" && this.#roleThinkingTarget(row.role) !== undefined;
+			const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
+			const savePreset = this.#callbacks.onSavePreset ? ` · ${formatKeyHint("s")} save preset` : "";
+			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new${savePreset}`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
-			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
+			return entry.oauth
+				? `${enter} log in · ${upDown} providers · ${cancel} close`
+				: `${upDown} providers · ${cancel} close`;
 		}
-		const arrows = this.#focus === "scope" ? "↑/↓ providers · → models" : "↑/↓ models · ← providers";
-		const refresh = entry.kind === "provider" ? " · F5 refresh" : "";
-		return `Enter assign roles · ${arrows} · type to search · Alt+←/→ kind${refresh} · Esc close`;
+		const refresh = entry.kind === "provider" ? ` · ${formatKeyHint("f5")} refresh` : "";
+		if (this.#focus === "scope") {
+			return `${enterRight} models · ${upDown} providers · type to search · ${altLeftRight} kind${refresh} · ${cancel} close`;
+		}
+		return `${enter} assign roles · ${upDown} models · ${left} providers · type to search · ${altLeftRight} kind${refresh} · ${cancel} close`;
 	}
 
 	#renderFooter(width: number): string {
@@ -2322,9 +2575,11 @@ export class ModelHubComponent implements Component {
 	}
 
 	#renderStrip(width: number, strip: StripState): string {
-		if (strip.kind === "roleName") {
-			const label = theme.fg("accent", "New role name:");
-			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
+		if (strip.kind === "name") {
+			const preset = strip.purpose === "preset";
+			const labelText = preset ? "Preset name:" : "New role name:";
+			const label = theme.fg("accent", labelText);
+			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth(labelText) - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
 			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
 		}
@@ -2364,5 +2619,1200 @@ export class ModelHubComponent implements Component {
 	render(width: number): readonly string[] {
 		const height = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
 		return this.#frame.render(width, height, this.#entries, this.#renderFooter(width - 4));
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Native (TSP) description
+	// ═══════════════════════════════════════════════════════════════════════
+
+	/** A `picker` is its own sheet: the backend mounts it in `layer` without an `overlay` wrapper. */
+	nativeSheet(cx: DescribeContext): boolean {
+		return cx.supports("picker");
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		const usePicker = cx.supports("picker");
+		const cached = this.#nativeCache;
+		if (cached?.version === this.#nativeVersion && cached.picker === usePicker) return cached.node;
+		if (usePicker) {
+			const described = this.#describePicker();
+			this.#nativeCache = { version: this.#nativeVersion, picker: true, node: described };
+			return described;
+		}
+		const footer: NativeChild[] = [];
+		const strip = this.#describeStrip();
+		if (strip) footer.push(strip);
+		footer.push(hintsRow(this.#footerHints()));
+		const described = describeHubFrame(
+			"omp.overlay.model-hub",
+			"Models",
+			describeHubSidebar(this.#entries, this.#activeEntryId, this.#nativeSidebarStyle, "scopes"),
+			this.#describeBody(),
+			node("col", { gap: "xs" }, footer, "footer"),
+		);
+		this.#nativeCache = { version: this.#nativeVersion, picker: false, node: described };
+		return described;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const picked = pickerEvent(event);
+		if (picked) {
+			this.#handlePickerEvent(picked);
+			this.#requestRender();
+			return;
+		}
+		// Same gate as the mouse router: nothing is interactive while an assignment applies.
+		if (this.#assignmentPending) return;
+		const target = event.key.slice(event.key.lastIndexOf("/") + 1);
+		if (event.type === "action") {
+			const entry = this.#activeEntry();
+			if (target !== "login" || event.act !== "login") return;
+			if (entry.kind !== "provider" || !entry.locked || this.#assigning !== null) return;
+			this.#requestLogin(entry);
+		} else if (event.type === "select" || event.type === "activate") {
+			switch (target) {
+				case "scopes":
+					this.#clickSidebarEntry(this.#entries.find(entry => entry.id === event.item));
+					break;
+				case "roles": {
+					if (this.#activeEntry().kind !== "roles" || this.#assigning !== null) return;
+					const index = this.#rolesRows.findIndex((rowDef, i) => rolesRowKey(rowDef, i) === event.item);
+					const rowDef = this.#rolesRows[index];
+					if (!rowDef || rowDef.kind === "separator") return;
+					this.#focus = "list";
+					this.#roleIndex = index;
+					this.#activateRolesRow(rowDef);
+					break;
+				}
+				case "roleTabs": {
+					const tab = ROLE_TABS.find(candidate => candidate === event.item);
+					if (!tab) return;
+					this.#roleTab = tab;
+					this.#roleIndex = 0;
+					this.#roleScrollStart = 0;
+					this.#buildRolesRows();
+					break;
+				}
+				case "kinds": {
+					const kind = MODEL_KIND_TABS.find(candidate => candidate === event.item);
+					if (!kind) return;
+					this.#modelKindTab = kind;
+					this.#applyModelKind();
+					break;
+				}
+				case "strip": {
+					// A chip click picks and applies it, like the footer mouse path.
+					const strip = this.#strip;
+					const index = Number(event.item);
+					if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
+					strip.index = index;
+					this.#activateStripChip();
+					break;
+				}
+				default:
+					return;
+			}
+		} else {
+			return;
+		}
+		this.#requestRender();
+	}
+
+	/** Sidebar decoration for the native list: refreshing providers show an ellipsis, the status row spins. */
+	#nativeSidebarStyle = (entry: SidebarEntry, index: number): Pick<SidebarStyle, "icon" | "annotation" | "muted"> => {
+		const style = this.#sidebarStyle(entry, index);
+		const refreshing = entry.providerId !== undefined && this.#refreshingProviders.has(entry.providerId);
+		return { ...style, annotation: refreshing ? "…" : plainText(style.annotation) };
+	};
+
+	#describeBody(): NativeNode {
+		const children: NativeChild[] = [this.#describeStatus()];
+		const entry = this.#activeEntry();
+		if (entry.kind === "roles" && this.#assigning === null) {
+			children.push(...this.#describeRolesView());
+		} else if (entry.kind === "provider" && entry.locked && this.#assigning === null) {
+			children.push(this.#describeLockedView(entry));
+		} else {
+			children.push(
+				node(
+					"row",
+					{ gap: "sm", align: "center" },
+					[
+						text([span("Kind:", "dim")]),
+						node(
+							"tabs",
+							{ items: MODEL_KIND_TABS.map(kind => ({ id: kind, label: kind })), active: this.#modelKindTab },
+							undefined,
+							"kinds",
+						),
+					],
+					"kindTabs",
+				),
+				this.#browser,
+			);
+		}
+		return node("col", { gap: "sm", grow: 1 }, children, "body");
+	}
+
+	#describeStatus(): NativeNode {
+		if (this.#assignmentPending) {
+			return node("spinner", { label: [span("Applying model…", "accent")] }, undefined, "status");
+		}
+		let spans: TspSpan[];
+		const assigning = this.#assigning;
+		if (assigning !== null) {
+			if (assigning.kind === "fallbackKey") {
+				spans = [span("New fallback chain — pick the model it protects", "accent")];
+			} else {
+				const info = this.#settings.getRoleInfo(assigning.role);
+				const label = info.tag ?? info.name ?? assigning.role;
+				const verb =
+					assigning.kind === "role"
+						? "Assigning"
+						: assigning.index === null
+							? "Adding fallback for"
+							: "Replacing fallback of";
+				spans = [span(`${verb} `, "accent"), span(label, "accent strong")];
+			}
+			return node("text", { spans, truncate: "end" }, undefined, "status");
+		}
+		const entry = this.#activeEntry();
+		if (this.#configError && entry.kind !== "provider") {
+			return node("text", { spans: [span(this.#configError, "error")], wrap: "word" }, undefined, "status");
+		}
+		const scopedSuffix = this.#scopedModels.length > 0 ? " · --models scope" : "";
+		switch (entry.kind) {
+			case "recent":
+				spans = [span(`Recently used models${scopedSuffix}`, "muted")];
+				break;
+			case "roles":
+				spans = [
+					span("Model roles — ", "muted"),
+					span("f", "key"),
+					span(" adds a retry fallback, cleared roles fall back to auto-selection", "muted"),
+				];
+				break;
+			case "provider":
+				if (entry.locked) {
+					spans = [span(`${entry.label} · not configured`, "muted")];
+				} else if (entry.providerId && this.#refreshingProviders.has(entry.providerId)) {
+					return node(
+						"spinner",
+						{ label: [span(`${entry.label} · refreshing model list…`, "muted")] },
+						undefined,
+						"status",
+					);
+				} else {
+					spans = [span(`${entry.label} · ${entry.annotation ?? "0"} models${scopedSuffix}`, "muted")];
+				}
+				break;
+			default:
+				spans = [span(`All available models${scopedSuffix}`, "muted")];
+				break;
+		}
+		return node("text", { spans, truncate: "end" }, undefined, "status");
+	}
+
+	#describeRolesView(): NativeNode[] {
+		const tabs = node(
+			"row",
+			{ gap: "sm", align: "center" },
+			[
+				text([span("Roles:", "dim")]),
+				node(
+					"tabs",
+					{
+						items: ROLE_TABS.map(tab => ({ id: tab, label: tab === "kind" ? "kinds" : tab })),
+						active: this.#roleTab,
+					},
+					undefined,
+					"roleTabs",
+				),
+			],
+			"roleTabsRow",
+		);
+		const cycleOrder = this.#cycleOrder();
+		const items = this.#rolesRows.map((rowDef, index) => this.#describeRolesRow(rowDef, index, cycleOrder));
+		const selectedRow = this.#rolesRows[this.#roleIndex];
+		const list = node(
+			"list",
+			{
+				selected: selectedRow ? rolesRowKey(selectedRow, this.#roleIndex) : null,
+				virtual: true,
+				grow: 1,
+				tone: this.#focus === "list" ? "accent" : undefined,
+				aria: "Roles",
+			},
+			items,
+			"roles",
+		);
+		return [tabs, list, this.#describeCycle(cycleOrder)];
+	}
+
+	#describeRolesRow(rowDef: RolesRow, index: number, cycleOrder: readonly string[]): NativeNode {
+		const key = rolesRowKey(rowDef, index);
+		switch (rowDef.kind) {
+			case "separator":
+				return node("rule", undefined, undefined, key);
+			case "newRole":
+				return node("item", { label: [span("+ New role…", "dim")] }, undefined, key);
+			case "newFallback":
+				return node("item", { label: [span("+ New fallback…", "dim")] }, undefined, key);
+			case "chainKey": {
+				const slash = rowDef.role.lastIndexOf("/");
+				return node(
+					"item",
+					{
+						label: [
+							span(`${theme.status.shadowed} `, "dim"),
+							span(rowDef.role.slice(0, slash + 1), "dim"),
+							span(rowDef.role.slice(slash + 1)),
+						],
+					},
+					undefined,
+					key,
+				);
+			}
+			case "fallback":
+				return node("item", { label: [span("  ↳ ", "dim"), span(rowDef.selector, "muted")] }, undefined, key);
+			case "role":
+				break;
+		}
+		const role = rowDef.role;
+		const info = this.#settings.getRoleInfo(role);
+		const assignment = this.#roles[role];
+		const tag = info.tag ?? info.name ?? role;
+		let label: TspSpan[];
+		let detail: TspSpan[];
+		const value: TspSpan[] = [];
+		if (assignment && !assignment.autoSelected) {
+			const color = info.color ?? "muted";
+			label = [span(`${theme.status.enabled} `, color), span(tag, color)];
+			detail = [span(`${assignment.model.provider}/`, "dim"), span(assignment.model.id)];
+			if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
+				const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
+				const levelLabel = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
+				value.push(span(glyph ? `${glyph} ${levelLabel}` : levelLabel, "dim"));
+			}
+		} else {
+			label = [span(`${theme.status.shadowed} `, "dim"), span(tag, "dim")];
+			detail = assignment
+				? [span(`auto → ${assignment.model.provider}/${assignment.model.id}`, "dim")]
+				: [span("—", "dim")];
+		}
+		// Quick-cycle membership badge (`⟳ 2` = second stop of the ctrl+p cycle).
+		const cycleIndex = cycleOrder.indexOf(role);
+		if (cycleIndex >= 0) {
+			if (value.length > 0) value.push(span("  "));
+			value.push(span(`${theme.icon.loop} ${cycleIndex + 1}`, "accent"));
+		}
+		return node("item", { label, detail, value: value.length > 0 ? value : undefined }, undefined, key);
+	}
+
+	/** Live preview of the quick-switch cycle; the selected row's role is emphasized. */
+	#describeCycle(cycleOrder: readonly string[]): NativeNode {
+		const [cycleKey] = boundKeys("app.model.cycleForward", ["ctrl+p"]);
+		const keycap: NativeChild[] = cycleKey ? [kbd(cycleKey)] : [];
+		if (cycleOrder.length === 0) {
+			return node(
+				"row",
+				{ gap: "xs", align: "center", wrap: true },
+				[
+					...keycap,
+					text([span("cycle is empty — press ", "dim"), span("c", "key"), span(" on a role to add it", "dim")]),
+				],
+				"cycle",
+			);
+		}
+		const selectedRow = this.#rolesRows[this.#roleIndex];
+		const selectedRole =
+			selectedRow && (selectedRow.kind === "role" || selectedRow.kind === "fallback") ? selectedRow.role : "";
+		const track: TspSpan[] = [];
+		for (const role of cycleOrder) {
+			if (track.length > 0) track.push(span(" › ", "dim"));
+			track.push(span(role, role === selectedRole ? "accent strong" : "muted"));
+		}
+		return node(
+			"row",
+			{ gap: "xs", align: "center", wrap: true },
+			[...keycap, text([span("cycle:", "dim")]), text(track, { wrap: "word" })],
+			"cycle",
+		);
+	}
+
+	#describeLockedView(entry: SidebarEntry): NativeNode {
+		const children: NativeChild[] = [
+			text([span(`${entry.label} has no credentials configured`, "warning")], { wrap: "word" }),
+		];
+		const envVars = entry.providerId ? (providerEntry(entry.providerId)?.envVars ?? []) : [];
+		children.push(
+			text(
+				[
+					span(
+						envVars.length > 0
+							? `Set ${envVars.join(" or ")} in your environment, or add a key in config.`
+							: "Add an API key for this provider in config.",
+						"muted",
+					),
+				],
+				{ wrap: "word" },
+			),
+		);
+		if (entry.oauth) {
+			children.push(
+				node(
+					"row",
+					{ gap: "sm", align: "center", actions: { click: "login" } },
+					[text([span("Log in with OAuth", "accent")]), node("kbd", { keys: ["enter"] })],
+					"login",
+				),
+			);
+		}
+		const catalogCount = entry.catalogCount ?? 0;
+		if (catalogCount > 0) {
+			const models = this.#scopedModels.length > 0 ? [] : this.#registry.getAll("all");
+			const items: NativeNode[] = [];
+			for (const model of models) {
+				if (model.provider !== entry.providerId) continue;
+				items.push(node("item", { label: model.id, disabled: true }, undefined, model.id));
+			}
+			children.push(
+				node(
+					"section",
+					{ head: [span(`${catalogCount} models in catalog`, "dim")] },
+					[node("list", { selected: null, virtual: true }, items, "catalog")],
+					"catalog",
+				),
+			);
+		}
+		return node("col", { gap: "sm", grow: 1 }, children, "locked");
+	}
+
+	// ─── Picker (data-first `picker` kind, NATIVE_REDESIGN.md §4.7) ─────────
+
+	#describePicker(): NativeNode {
+		const entry = this.#activeEntry();
+		const rolesView = entry.kind === "roles" && this.#assigning === null;
+		const lockedView = entry.kind === "provider" && entry.locked === true && this.#assigning === null;
+		const strip = this.#strip;
+		const props: TspPickerProps = {
+			title: "Models",
+			subtitle: this.#pickerSubtitle(entry, rolesView),
+			icon: "cpu",
+			noun: rolesView ? "roles" : "models",
+			size: "lg",
+			layout: "rows",
+			preview: "side",
+			query: this.#browser.query,
+			cursor: this.#browser.cursor,
+			placeholder: "Search models…",
+			scopes: this.#pickerScopes(),
+			scope: entry.id,
+			actions: this.#pickerActions(entry, rolesView, lockedView),
+			strip: strip ? this.#pickerStrip(strip) : null,
+			focus: strip ? "strip" : this.#focus === "scope" ? "scopes" : "list",
+		};
+		if (rolesView) {
+			const row = this.#rolesRows[this.#roleIndex];
+			return picker(
+				{
+					...props,
+					tabs: ROLE_TABS.map(tab => ({
+						id: tab,
+						label: tab === "all" ? "All" : tab === "chat" ? "Chat" : "Kinds",
+						count: this.#visibleRoleIds().filter(
+							role => tab === "all" || this.#settings.getRoleInfo(role).section === tab,
+						).length,
+					})),
+					tab: this.#roleTab,
+					columns: ROLE_PICKER_COLUMNS,
+					items: this.#rolePickerItems(),
+					order: this.#rolePickerOrder(),
+					selected: row && row.kind !== "separator" ? rolesRowKey(row, this.#roleIndex) : null,
+					total: this.#allRolesRowCount(),
+				},
+				this.#rolePreview(row),
+			);
+		}
+		const catalogue = this.#browser.pickerItems(this.#availableItems);
+		const current = this.#currentSelector ? [this.#currentSelector] : undefined;
+		if (lockedView) {
+			return picker(
+				{
+					...props,
+					columns: MODEL_PICKER_COLUMNS,
+					...catalogue,
+					order: [],
+					selected: null,
+					total: entry.catalogCount ?? 0,
+					empty: this.#lockedMessage(entry),
+					...(current ? { current } : {}),
+				},
+				this.#lockedPreview(entry),
+			);
+		}
+		const query = this.#browser.query.trim();
+		const view = this.#browser.pickerOrder({
+			providers: entry.kind === "all" && query.length === 0,
+			rest: entry.kind === "provider" ? entry.label : query ? "Matches" : "All models",
+		});
+		const refreshing =
+			this.#catalogRefreshing ||
+			(entry.kind === "provider" && this.#refreshingProviders.has(entry.providerId ?? ""));
+		const state =
+			view.count > 0 || query
+				? "ready"
+				: refreshing
+					? "loading"
+					: this.#configError && !this.#assigning
+						? "error"
+						: "ready";
+		return picker(
+			{
+				...props,
+				tabs: this.#pickerKindTabs(),
+				tab: this.#modelKindTab,
+				columns: MODEL_PICKER_COLUMNS,
+				...catalogue,
+				order: view.order,
+				...(view.hits ? { hits: view.hits } : {}),
+				selected: this.#browser.pickerSelected,
+				...(current ? { current } : {}),
+				total: this.#browser.baseCount,
+				state,
+				...(state === "error" && this.#configError ? { message: this.#configError } : {}),
+				empty:
+					this.#emptyStateMessage()?.trim() ??
+					(entry.kind === "provider" ? `No models from ${entry.label} yet` : "No models available in this scope"),
+			},
+			this.#browser.pickerPreview("full", this.#currentSelector),
+		);
+	}
+
+	/** What the hub is doing when it is more than browsing: applying, assigning, refreshing, a config error. */
+	#pickerSubtitle(entry: SidebarEntry, rolesView: boolean): TspPickerProps["subtitle"] {
+		if (this.#assignmentPending) return "Applying model…";
+		const assigning = this.#assigning;
+		if (assigning !== null) {
+			if (assigning.kind === "fallbackKey") return "New fallback chain — pick the model it protects";
+			const info = this.#settings.getRoleInfo(assigning.role);
+			const label = info.tag ?? info.name ?? assigning.role;
+			const verb =
+				assigning.kind === "role"
+					? "Assigning"
+					: assigning.index === null
+						? "Adding fallback for"
+						: "Replacing fallback of";
+			return [span(`${verb} `), span(label, "strong")];
+		}
+		if (this.#configError && entry.kind !== "provider") return [span(this.#configError, "error")];
+		if (entry.kind === "provider" && entry.providerId && this.#refreshingProviders.has(entry.providerId)) {
+			return `${entry.label} · refreshing model list…`;
+		}
+		if (this.#scopedModels.length > 0) return "--models scope";
+		if (rolesView) return "Cleared roles fall back to auto-selection";
+		return undefined;
+	}
+
+	/** The sidebar as picker scopes: Roles, All models, then signed-in and signed-out providers. */
+	#pickerScopes(): TspPickerScope[] {
+		const counts = this.#searchCounts;
+		const oauthIds = new Set(getOAuthProviders().map(provider => provider.id));
+		const scopes: TspPickerScope[] = [];
+		for (const entry of this.#entries) {
+			switch (entry.kind) {
+				case "separator":
+					break;
+				case "roles":
+					scopes.push({ id: entry.id, label: "Roles", icon: "sparkles", count: this.#visibleRoleIds().length });
+					break;
+				case "all":
+					scopes.push({
+						id: entry.id,
+						label: "All models",
+						icon: "list",
+						count: counts ? this.#searchTotal : this.#availableItems.length,
+					});
+					break;
+				case "recent":
+					scopes.push({
+						id: entry.id,
+						label: "Recent",
+						icon: "clock",
+						count: counts ? this.#recentSearchCount : this.#recentItems.length,
+					});
+					break;
+				case "provider": {
+					const providerId = entry.providerId ?? entry.label;
+					const mark = { text: providerInitials(providerId), seed: providerId };
+					if (entry.locked) {
+						const envVars = providerEntry(providerId)?.envVars ?? [];
+						scopes.push({
+							id: entry.id,
+							label: entry.label,
+							mark,
+							group: "Not signed in",
+							disabled: oauthIds.has(providerId)
+								? "Sign in with /login"
+								: envVars.length > 0
+									? `Set ${envVars.join(" or ")} to sign in`
+									: "Add an API key in config to sign in",
+							dot: "muted",
+						});
+						break;
+					}
+					const dot = this.#providerDot(providerId);
+					scopes.push({
+						id: entry.id,
+						label: entry.label,
+						mark,
+						group: "Providers",
+						count: counts ? (counts.get(providerId) ?? 0) : Number(entry.annotation ?? 0),
+						...(dot ? { dot } : {}),
+					});
+					break;
+				}
+			}
+		}
+		return scopes;
+	}
+
+	/** Discovery state as a scope dot: refreshing, ok, cached/empty, unavailable, signed out. */
+	#providerDot(providerId: string): TspPickerScope["dot"] {
+		if (this.#refreshingProviders.has(providerId)) return "pending";
+		switch (this.#registry.getProviderDiscoveryState(providerId)?.status) {
+			case "ok":
+				return "success";
+			case "cached":
+			case "empty":
+				return "warning";
+			case "unavailable":
+				return "error";
+			case "unauthenticated":
+				return "muted";
+			default:
+				return undefined;
+		}
+	}
+
+	/** Kind tabs with their counts in the active scope; the same array while the scope's models are unchanged. */
+	#pickerKindTabs(): TspPickerProps["tabs"] {
+		const candidates = this.#candidateItems;
+		if (this.#kindTabsMemo?.candidates === candidates) return this.#kindTabsMemo.tabs;
+		const counts = new Map<string, number>();
+		for (const item of candidates) {
+			const kind = modelKind(item.model);
+			counts.set(kind, (counts.get(kind) ?? 0) + 1);
+		}
+		const tabs = MODEL_KIND_TABS.map(kind => ({
+			id: kind,
+			label: MODEL_KIND_LABELS[kind],
+			count: kind === "all" ? candidates.length : (counts.get(kind) ?? 0),
+		}));
+		this.#kindTabsMemo = { candidates, tabs };
+		return tabs;
+	}
+
+	/** The action bar for the current view; every button runs the path of the key it shows. */
+	#pickerActions(entry: SidebarEntry, rolesView: boolean, lockedView: boolean): TspPickerAction[] {
+		const strip = this.#strip;
+		const cancel = (label: string): TspPickerAction => ({ ...CLOSE_ACTION, label });
+		if (this.#assignmentPending) return [CLOSE_ACTION];
+		if (strip) {
+			const apply =
+				strip.kind === "name"
+					? pickerAction(
+							strip.purpose === "preset" ? "presetName" : "roleName",
+							strip.purpose === "preset" ? "Save preset" : "Create role",
+							"enter",
+							{ primary: true },
+						)
+					: pickerAction(
+							"stripApply",
+							strip.kind === "thinking" ? "Apply" : strip.kind === "scope" ? "Save to scope" : "Assign / clear",
+							"enter",
+							{ primary: true },
+						);
+			return [apply, cancel(strip.kind === "thinking" ? "Keep" : "Cancel")];
+		}
+		const refresh =
+			entry.kind === "provider" && !entry.locked ? pickerAction("refresh", "Refresh provider", "f5") : undefined;
+		if (this.#assigning !== null) {
+			const label =
+				this.#assigning.kind === "fallback"
+					? "Pick fallback"
+					: this.#assigning.kind === "fallbackKey"
+						? "Pick protected model"
+						: "Assign";
+			return compact([pickerAction("assign", label, "enter", { primary: true }), refresh, cancel("Cancel")]);
+		}
+		if (rolesView) {
+			const row = this.#rolesRows[this.#roleIndex];
+			const roleAction = (action: RolesAction, label: string, key: string, primary = false) =>
+				pickerAction(`roles:${action}`, label, key, primary ? { primary: true } : undefined);
+			const actions: (TspPickerAction | undefined)[] = [];
+			switch (row?.kind) {
+				case "role": {
+					const assigned = this.#roles[row.role];
+					actions.push(
+						roleAction("pick", "Pick model", "enter", true),
+						roleAction("fallback", "Add fallback", "f"),
+						assigned && !assigned.autoSelected ? roleAction("clear", "Clear", "x") : undefined,
+						this.#roleThinkingTarget(row.role) ? roleAction("thinking", "Thinking", "t") : undefined,
+						roleAction("cycle", this.#cycleOrder().includes(row.role) ? "Leave cycle" : "Add to cycle", "c"),
+						roleAction("new", "New role", "n"),
+						this.#callbacks.onSavePreset ? roleAction("save", "Save preset", "s") : undefined,
+					);
+					break;
+				}
+				case "fallback":
+					actions.push(
+						roleAction("pick", "Replace", "enter", true),
+						roleAction("fallback", "Add another", "f"),
+						roleAction("clear", "Remove", "x"),
+						this.#resolveFallbackEntry(row.role, row.chainIndex)
+							? roleAction("thinking", "Thinking", "t")
+							: undefined,
+						roleAction("earlier", "Earlier", "["),
+						roleAction("later", "Later", "]"),
+					);
+					break;
+				case "chainKey":
+					actions.push(roleAction("pick", "Add fallback", "enter", true), roleAction("clear", "Clear chain", "x"));
+					break;
+				case "newFallback":
+					actions.push(roleAction("pick", "New fallback chain", "enter", true));
+					break;
+				case "newRole":
+					actions.push(roleAction("pick", "New role", "enter", true));
+					break;
+			}
+			return compact([...actions, CLOSE_ACTION]);
+		}
+		if (lockedView) {
+			return entry.oauth
+				? [pickerAction("login", "Log in", "enter", { primary: true }), CLOSE_ACTION]
+				: [CLOSE_ACTION];
+		}
+		return compact([
+			pickerAction(
+				"assign",
+				"Assign role",
+				"enter",
+				this.#browser.pickerSelected ? { primary: true } : { primary: true, disabled: "No model selected" },
+			),
+			refresh,
+			this.#browser.query.length > 0 ? cancel("Clear search") : CLOSE_ACTION,
+		]);
+	}
+
+	/** The open strip as the picker's chip strip (role assignment, save scope, thinking level, new role name). */
+	#pickerStrip(strip: StripState): NonNullable<TspPickerProps["strip"]> {
+		if (strip.kind === "name") {
+			return {
+				label: [
+					span(strip.purpose === "preset" ? "Preset name " : "New role name ", "muted"),
+					span(strip.input.getValue(), "mono"),
+					span("▏", "accent"),
+				],
+				items: [],
+			};
+		}
+		let label: TspSpan[];
+		if (strip.kind === "role") {
+			// The second step of "New fallback chain…" reuses the role strip with key chips only.
+			const keyStrip = strip.chips.every(chip => chip.label.startsWith("for "));
+			label = keyStrip
+				? [span("New fallback chain", "muted")]
+				: [span("Assign ", "muted"), span(strip.item.id, "mono"), span(" to", "muted")];
+		} else {
+			const info = this.#settings.getRoleInfo(strip.role ?? "");
+			const roleLabel = (info.tag ?? strip.role ?? "").toLowerCase();
+			label = [
+				span(strip.kind === "thinking" ? "Thinking for " : "Save ", "muted"),
+				span(roleLabel, "strong"),
+				span(" · ", "muted"),
+				span(strip.item.id, "mono"),
+				...(strip.kind === "scope" ? [span(" to", "muted")] : []),
+			];
+		}
+		return {
+			label,
+			items: strip.chips.map((chip, index) => {
+				const assigned = chip.role ? this.#roles[chip.role] : undefined;
+				const level =
+					chip.action === "thinking"
+						? chip.thinkingLevel
+						: chip.action === "unassign" && assigned && !assigned.autoSelected
+							? assigned.thinkingLevel
+							: undefined;
+				const dot = level !== undefined ? thinkingDotToken(level) : undefined;
+				const on =
+					chip.action === "unassign" ||
+					(strip.kind === "thinking" &&
+						chip.thinkingLevel !== undefined &&
+						chip.thinkingLevel === strip.initialThinkingLevel);
+				return { id: String(index), label: chip.label, ...(on ? { on: true } : {}), ...(dot ? { dot } : {}) };
+			}),
+			selected: String(strip.index),
+		};
+	}
+
+	/** Roles-view rows as picker items; rebuilt only when the rows, roles or cycle change. */
+	#rolePickerItems(): readonly TspPickerItem[] {
+		const cycleOrder = this.#cycleOrder();
+		const cycle = cycleOrder.join("\0");
+		const memo = this.#pickerRoleItems;
+		if (memo?.rows === this.#rolesRows && memo.roles === this.#roles && memo.cycle === cycle) return memo.items;
+		const items: TspPickerItem[] = [];
+		this.#rolesRows.forEach((row, index) => {
+			const id = rolesRowKey(row, index);
+			switch (row.kind) {
+				case "separator":
+					return;
+				case "newRole":
+					items.push({ id, label: "New role…", icon: "plus", tone: "muted" });
+					return;
+				case "newFallback":
+					items.push({ id, label: "New fallback chain…", icon: "plus", tone: "muted" });
+					return;
+				case "chainKey":
+					items.push({ id, label: row.role, mono: true, icon: "git-branch", detail: "fallback chain" });
+					return;
+				case "fallback":
+					items.push({ id, label: row.selector, mono: true, depth: 1, detail: `fallback ${row.chainIndex + 1}` });
+					return;
+				case "role":
+					break;
+			}
+			const info = this.#settings.getRoleInfo(row.role);
+			const tag = info.tag ?? info.name ?? row.role;
+			const assignment = this.#roles[row.role];
+			const facts: Record<string, string> = {};
+			if (assignment) {
+				const selector = `${assignment.model.provider}/${assignment.model.id}`;
+				facts.model = assignment.autoSelected ? `auto → ${selector}` : selector;
+				if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
+					facts.thinking = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
+				}
+			} else {
+				facts.model = "—";
+			}
+			const cycleIndex = cycleOrder.indexOf(row.role);
+			items.push({
+				id,
+				label: tag,
+				...(info.name && info.name !== tag ? { detail: info.name } : {}),
+				facts,
+				...(assignment && !assignment.autoSelected ? {} : { tone: "muted" as const }),
+				...(cycleIndex >= 0
+					? {
+							badges: [
+								{
+									text: `cycle ${cycleIndex + 1}`,
+									tone: "accent" as const,
+									title: `Stop ${cycleIndex + 1} of the quick-switch cycle`,
+								},
+							],
+						}
+					: {}),
+			});
+		});
+		this.#pickerRoleItems = { rows: this.#rolesRows, roles: this.#roles, cycle, items };
+		return items;
+	}
+
+	/** Roles-view order: the separators become group heads (chat roles, kind roles, model fallback chains). */
+	#rolePickerOrder(): (string | TspPickerGroup)[] {
+		const order: (string | TspPickerGroup)[] = [];
+		let head: { group: string; label: string; count: number } | undefined;
+		const open = (group: string, label: string) => {
+			head = { group, label, count: 0 };
+			order.push(head);
+		};
+		open(this.#roleTab === "kind" ? "kind" : "chat", this.#roleTab === "kind" ? "Kind roles" : "Chat roles");
+		this.#rolesRows.forEach((row, index) => {
+			if (row.kind === "separator") {
+				const previous = this.#rolesRows[index - 1];
+				if (previous?.kind === "newRole") open("chains", "Model fallback chains");
+				else open("kind", "Kind roles");
+				return;
+			}
+			order.push(rolesRowKey(row, index));
+			// Heads count roles and chains, not their fallback entries or the "new" rows.
+			if (head && (row.kind === "role" || row.kind === "chainKey")) head.count++;
+		});
+		return order;
+	}
+
+	/** The selected Roles-view row's preview: its model's facts and its fallback chain. */
+	#rolePreview(row: RolesRow | undefined): readonly NativeChild[] {
+		const memo = this.#pickerRolePreview;
+		if (memo !== undefined && memo.row === row && memo.roles === this.#roles && memo.rows === this.#rolesRows) {
+			return memo.children;
+		}
+		const children: NativeChild[] = [];
+		const chainList = (key: string): NativeChild | undefined => {
+			const chain = this.#fallbackChains()[key] ?? [];
+			if (chain.length === 0) return undefined;
+			return node("section", { head: "Fallback chain" }, [
+				md(chain.map((selector, index) => `${index + 1}. \`${selector}\``).join("\n")),
+			]);
+		};
+		const modelItem = (model: Model): ModelBrowserItem => ({
+			provider: model.provider,
+			id: model.id,
+			model,
+			selector: `${model.provider}/${model.id}`,
+		});
+		switch (row?.kind) {
+			case "role": {
+				const info = this.#settings.getRoleInfo(row.role);
+				const assignment = this.#roles[row.role];
+				if (assignment) {
+					children.push(...this.#browser.modelPreview(modelItem(assignment.model), "full", this.#currentSelector));
+					children.push(
+						node("kv", {
+							items: [
+								{ k: [span("Role", "muted")], v: info.name },
+								{
+									k: [span("Thinking", "muted")],
+									v: getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label,
+								},
+								{ k: [span("Source", "muted")], v: assignment.autoSelected ? "auto-selected" : "configured" },
+							],
+						}),
+					);
+				} else {
+					children.push(
+						text(info.name, { role: "omp.picker.title" }),
+						text([span("Not assigned; no available model fits this role.", "muted")], { wrap: "word" }),
+					);
+				}
+				const chain = chainList(row.role);
+				if (chain) children.push(chain);
+				break;
+			}
+			case "fallback": {
+				const resolved = this.#resolveFallbackEntry(row.role, row.chainIndex);
+				if (resolved) children.push(...this.#browser.modelPreview(resolved.item, "full", this.#currentSelector));
+				else children.push(text([span(row.selector, "mono")], { role: "omp.picker.title" }));
+				const chain = chainList(row.role);
+				if (chain) children.push(chain);
+				break;
+			}
+			case "chainKey": {
+				children.push(text([span(row.role, "mono")], { role: "omp.picker.title" }));
+				const chain = chainList(row.role);
+				if (chain) children.push(chain);
+				break;
+			}
+			case "newRole":
+				children.push(
+					text("New role", { role: "omp.picker.title" }),
+					text([span("Name a custom role, then pick the model it runs on.", "muted")], { wrap: "word" }),
+				);
+				break;
+			case "newFallback":
+				children.push(
+					text("New fallback chain", { role: "omp.picker.title" }),
+					text([span("Pick the model (or provider) a new retry fallback chain protects.", "muted")], {
+						wrap: "word",
+					}),
+				);
+				break;
+		}
+		this.#pickerRolePreview = { row, roles: this.#roles, rows: this.#rolesRows, children };
+		return children;
+	}
+
+	#lockedMessage(entry: SidebarEntry): string {
+		const envVars = entry.providerId ? (providerEntry(entry.providerId)?.envVars ?? []) : [];
+		const how =
+			envVars.length > 0
+				? `Set ${envVars.join(" or ")} in your environment, or add a key in config.`
+				: "Add an API key for this provider in config.";
+		return `${entry.label} has no credentials configured. ${how}`;
+	}
+
+	/** A signed-out provider's preview: how to sign in and what its catalog holds. */
+	#lockedPreview(entry: SidebarEntry): readonly NativeChild[] {
+		const children: NativeChild[] = [
+			text(entry.label, { role: "omp.picker.title" }),
+			text([span(this.#lockedMessage(entry), "muted")], { wrap: "word" }),
+		];
+		const catalogCount = entry.catalogCount ?? 0;
+		if (catalogCount > 0 && this.#scopedModels.length === 0) {
+			const ids: string[] = [];
+			for (const model of this.#registry.getAll("all")) {
+				if (model.provider === entry.providerId) ids.push(`- \`${model.id}\``);
+			}
+			children.push(node("section", { head: `${catalogCount} models in catalog` }, [md(ids.join("\n"))]));
+		}
+		return children;
+	}
+
+	/** Picker pointer events, each on the path of the key it stands for. */
+	#handlePickerEvent(event: PickerEvent): void {
+		if (event.kind === "action" && event.act === CLOSE_ACTION.id) {
+			this.#cancel();
+			return;
+		}
+		// Same gate as the keys: only cancel works while an assignment applies.
+		if (this.#assignmentPending) return;
+		const entry = this.#activeEntry();
+		const rolesView = entry.kind === "roles" && this.#assigning === null;
+		if (event.kind !== "action") {
+			if (this.#strip) return;
+			if (rolesView) {
+				const index = this.#rolesRows.findIndex((row, i) => rolesRowKey(row, i) === event.item);
+				const row = this.#rolesRows[index];
+				if (!row || row.kind === "separator") return;
+				this.#focus = "list";
+				this.#roleIndex = index;
+				if (event.kind === "activate") this.#activateRolesRow(row);
+				return;
+			}
+			if (this.#isBrowserView(entry) && this.#browser.routePickerItem(event.item, event.kind === "activate")) {
+				this.#focus = "list";
+			}
+			return;
+		}
+		const { act, value } = event;
+		if (act.startsWith("roles:")) {
+			const action = act.slice("roles:".length) as RolesAction;
+			if (!rolesView || this.#strip) return;
+			this.#focus = "list";
+			this.#runRolesAction(action);
+			return;
+		}
+		switch (act) {
+			case "scope":
+				this.#clickSidebarEntry(this.#entries.find(candidate => candidate.id === value));
+				return;
+			case "tab":
+				if (rolesView) {
+					const tab = ROLE_TABS.find(candidate => candidate === value);
+					if (!tab) return;
+					this.#roleTab = tab;
+					this.#roleIndex = 0;
+					this.#roleScrollStart = 0;
+					this.#buildRolesRows();
+				} else {
+					const kind = MODEL_KIND_TABS.find(candidate => candidate === value);
+					if (!kind) return;
+					this.#modelKindTab = kind;
+					this.#applyModelKind();
+				}
+				return;
+			case "strip": {
+				const strip = this.#strip;
+				const index = Number(value);
+				if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
+				strip.index = index;
+				this.#activateStripChip();
+				return;
+			}
+			case "stripApply":
+				this.#activateStripChip();
+				return;
+			case "roleName":
+				this.#submitRoleName();
+				return;
+			case "presetName":
+				this.#submitPresetName();
+				return;
+			case "cancel":
+				if (this.#strip) this.#closeStrip();
+				return;
+			case "clear":
+				if (this.#browser.query.length > 0) this.#browser.handleCancel();
+				return;
+			case "assign": {
+				if (this.#strip || !this.#isBrowserView(entry)) return;
+				const selected = this.#browser.pickerSelected;
+				if (!selected) return;
+				this.#focus = "list";
+				this.#browser.routePickerItem(selected, true);
+				return;
+			}
+			case "refresh":
+				if (entry.kind === "provider" && !entry.locked) {
+					this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
+				}
+				return;
+			case "login":
+				if (entry.kind === "provider" && entry.locked && this.#assigning === null) this.#requestLogin(entry);
+				return;
+		}
+	}
+
+	/** Footer chip labels, built from each chip's action instead of its ANSI rendering. */
+	#chipSpans(chip: StripChip): TspSpan[] {
+		switch (chip.action) {
+			case "assign":
+			case "unassign": {
+				const color = this.#settings.getRoleInfo(chip.role ?? "").color ?? "muted";
+				return chip.action === "unassign"
+					? [span(`${theme.status.enabled} ${chip.label}`, color), span(` ${theme.status.success}`, "dim")]
+					: [span(chip.label, color)];
+			}
+			case "scope":
+				return [span(chip.label, chip.scope === "project" ? "accent" : "muted")];
+			case "thinking": {
+				const glyph = chip.thinkingLevel === undefined ? "" : thinkingLevelGlyph(chip.thinkingLevel, theme);
+				return glyph ? [span(glyph, "accent"), span(` ${chip.label}`)] : [span(chip.label)];
+			}
+			default:
+				return [span(plainText(chip.styled), "muted")];
+		}
+	}
+
+	#describeStrip(): NativeNode | undefined {
+		const strip = this.#strip;
+		if (!strip) return undefined;
+		if (strip.kind === "name") {
+			const preset = strip.purpose === "preset";
+			return node(
+				"row",
+				{ gap: "sm", align: "center" },
+				[
+					text([span(preset ? "Preset name:" : "New role name:", "accent")]),
+					col([strip.input], { grow: 1 }),
+					text([span("(letters, digits, - and _)", "dim")]),
+				],
+				preset ? "presetName" : "roleName",
+			);
+		}
+		let prefix: TspSpan[];
+		if (strip.kind === "role") {
+			prefix = [span(strip.item.id, "accent"), span(" →", "dim")];
+		} else {
+			const info = this.#settings.getRoleInfo(strip.role ?? "");
+			prefix = [
+				span((info.tag ?? strip.role ?? "").toLowerCase(), info.color ?? "muted"),
+				span(` · ${strip.item.id} →`, "dim"),
+			];
+		}
+		return node(
+			"row",
+			{ gap: "sm", align: "center" },
+			[
+				text(prefix),
+				node(
+					"tabs",
+					{
+						items: strip.chips.map((chip, index) => ({ id: String(index), label: this.#chipSpans(chip) })),
+						active: String(strip.index),
+						actions: { click: "activate" },
+					},
+					undefined,
+					"strip",
+				),
+			],
+			"chips",
+		);
+	}
+
+	#footerHints(): (NativeHint | undefined)[] {
+		const keys = (label: string, ...ids: KeyName[]): NativeHint => ({ keys: ids, label });
+		const cancel = (label: string) => actionHint("tui.select.cancel", label);
+		const upDown = (label: string) => actionHint(["tui.select.up", "tui.select.down"], label);
+		const search = keys("type to search");
+		const kind = keys("kind", "alt+left", "alt+right");
+		const reorder = keys("reorder", "[", "]");
+		const strip = this.#strip;
+		if (strip) {
+			switch (strip.kind) {
+				case "name":
+					return strip.purpose === "preset"
+						? [keys("save preset", "enter"), cancel("cancel")]
+						: [keys("create + pick model", "enter"), cancel("cancel")];
+				case "role":
+					return [keys("choose", "left", "right"), keys("assign/clear", "enter"), cancel("cancel")];
+				case "scope":
+					return [keys("save scope", "left", "right"), keys("choose", "enter"), cancel("cancel")];
+				case "thinking":
+					return [keys("thinking level", "left", "right"), keys("apply", "enter"), cancel("keep")];
+			}
+		}
+		if (this.#assigning !== null) {
+			if (this.#focus === "scope") {
+				return [keys("models", "enter", "right"), upDown("providers"), search, kind, cancel("cancel")];
+			}
+			const pick =
+				this.#assigning.kind === "fallback"
+					? "pick fallback"
+					: this.#assigning.kind === "fallbackKey"
+						? "pick the protected model"
+						: "assign";
+			return [keys(pick, "enter"), upDown("models"), keys("providers", "left"), search, kind, cancel("cancel")];
+		}
+		const entry = this.#activeEntry();
+		if (entry.kind === "roles") {
+			if (this.#focus !== "list") {
+				return [
+					upDown("providers"),
+					keys("roles", "enter", "right"),
+					keys("tabs", "alt+left", "alt+right"),
+					cancel("close"),
+				];
+			}
+			const row = this.#rolesRows[this.#roleIndex];
+			if (row?.kind === "fallback") {
+				// Advertise `t` only where a strip would open, as the ANSI footer does.
+				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
+				return [
+					upDown("rows"),
+					keys("replace", "enter"),
+					keys("add another", "f"),
+					keys("remove", "x"),
+					editable ? keys("thinking", "t") : undefined,
+					reorder,
+					keys("providers", "left"),
+				];
+			}
+			if (row?.kind === "chainKey") {
+				return [
+					upDown("rows"),
+					keys("add fallback", "enter", "f"),
+					keys("clear chain", "x"),
+					keys("providers", "left"),
+				];
+			}
+			if (row?.kind === "newFallback") {
+				return [upDown("rows"), keys("new model/provider fallback chain", "enter"), keys("providers", "left")];
+			}
+			const editable = row?.kind === "role" && this.#roleThinkingTarget(row.role) !== undefined;
+			return [
+				upDown("rows"),
+				keys("pick", "enter"),
+				keys("fallback", "f"),
+				keys("clear", "x"),
+				editable ? keys("thinking", "t") : undefined,
+				keys("cycle", "c"),
+				reorder,
+				keys("new", "n"),
+				this.#callbacks.onSavePreset ? keys("save preset", "s") : undefined,
+			];
+		}
+		if (entry.kind === "provider" && entry.locked) {
+			return entry.oauth
+				? [keys("log in", "enter"), upDown("providers"), cancel("close")]
+				: [upDown("providers"), cancel("close")];
+		}
+		const refresh = entry.kind === "provider" ? keys("refresh", "f5") : undefined;
+		if (this.#focus === "scope") {
+			return [keys("models", "enter", "right"), upDown("providers"), search, kind, refresh, cancel("close")];
+		}
+		return [
+			keys("assign roles", "enter"),
+			upDown("models"),
+			keys("providers", "left"),
+			search,
+			kind,
+			refresh,
+			cancel("close"),
+		];
 	}
 }

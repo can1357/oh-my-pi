@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { Api, AssistantMessage, ChoiceQuestion, Model } from "@oh-my-pi/pi-ai";
+import { Database } from "bun:sqlite";
+import * as path from "node:path";
+import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessage, ChoiceQuestion, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChainJudge, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
+import { ChainJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
@@ -30,6 +34,14 @@ if (!LOCAL || !ONLINE) throw new Error("Expected bundled local and online judge 
 
 const ONLINE_BACKUP = { ...ONLINE, id: "claude-sonnet-judge-backup", name: "Judge Backup" } as Model<Api>;
 
+const DECISIONS = {
+	...JEV_PREVIEW,
+	id: "~typesafe/jev-latest",
+	api: "openrouter-decisions",
+	provider: "openrouter",
+	baseUrl: "https://decisions.example.test",
+} as Model<Api>;
+
 const BUCKET_QUESTION: ChoiceQuestion<"trivial" | "moderate" | "hard"> = {
 	type: "choice",
 	instructions: "Choose a coarse task bucket.",
@@ -44,7 +56,7 @@ const TIER_QUESTION: ChoiceQuestion<"low" | "high"> = {
 
 function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): ModelRegistry {
 	const authStorage = createInMemoryAuthStorage();
-	for (const provider in keys) authStorage.setRuntimeApiKey(provider, keys[provider]!);
+	for (const provider in keys) authStorage.keys.setRuntime(provider, keys[provider]!);
 	const registry = new ModelRegistry(authStorage, "/nonexistent/judgment-chain-models.yml");
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	return registry;
@@ -75,28 +87,15 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
-	it("falls from TypeSafe to a coarse local question, then to a tiered online question", async () => {
+	it("falls from a coarse local question to a tiered online question", async () => {
 		const settings = Settings.isolated({
-			modelRoles: { judge: "typesafe/jev-preview" },
-			"retry.fallbackChains": {
-				judge: [`${LOCAL.provider}/${LOCAL.id}`, `${ONLINE.provider}/${ONLINE.id}`],
-			},
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
 		});
-		const registry = makeRegistry([JEV_PREVIEW, LOCAL, ONLINE], {
-			typesafe: "ts-key",
-			[ONLINE.provider]: "online-key",
-		});
+		const registry = makeRegistry([LOCAL, ONLINE], { [ONLINE.provider]: "online-key" });
 		const kinds: string[] = [];
 		let localPrompt = "";
 		let onlinePrompt = "";
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(async (url, init) => {
-				expect(String(url)).toBe("https://judge.example.test/v1/systemone");
-				const body = JSON.parse(String(init?.body)) as { model: string };
-				expect(body.model).toBe("jev-preview");
-				return new Response("rejected", { status: 400 });
-			}),
-		);
 		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_model, promptText) => {
 			localPrompt = promptText;
 			return "not a bucket";
@@ -108,7 +107,7 @@ describe("ChainJudge", () => {
 			return response;
 		});
 		const onUsage = vi.fn();
-		const judge = new ChainJudge({ settings, registry, onUsage });
+		const judge = new ChainJudge({ settings, registry, purpose: "test", onUsage });
 
 		const answer = await judge.withCandidate(async (candidate, kind) => {
 			kinds.push(kind);
@@ -127,7 +126,7 @@ describe("ChainJudge", () => {
 		});
 
 		expect(answer).toBe("high");
-		expect(kinds).toEqual(["native", "local", "online"]);
+		expect(kinds).toEqual(["local", "online"]);
 		expect(localPrompt).toContain("trivial");
 		expect(localPrompt).toContain("moderate");
 		expect(localPrompt).toContain("hard");
@@ -157,7 +156,7 @@ describe("ChainJudge", () => {
 		);
 		const onUsage = vi.fn();
 
-		const result = await new ChainJudge({ settings, registry, onUsage }).judge({
+		const result = await new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge({
 			state: "redesign the scheduler",
 			questions: { level: TIER_QUESTION },
 		});
@@ -186,7 +185,7 @@ describe("ChainJudge", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendMessage({ role: "user", content: "locate the scheduler", timestamp: 1 });
 		const leafBefore = manager.getLeafId();
-		const judge = new ChainJudge({ settings, registry, onUsage: journalJudgmentUsage(manager, "find") });
+		const judge = new ChainJudge({ settings, registry, purpose: "find", onUsage: journalJudgmentUsage(manager) });
 		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
 
 		await judge.judge(request);
@@ -206,7 +205,49 @@ describe("ChainJudge", () => {
 		expect(manager.getBranch().filter(entry => entry.type === "model_usage")).toHaveLength(0);
 	});
 
-	it("skips a candidate whose account rejected the previous judgment instead of re-paying it every call", async () => {
+	it("falls back from a failed native judge only to another native judge", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": {
+				judge: [
+					`${LOCAL.provider}/${LOCAL.id}`,
+					`${DECISIONS.provider}/${DECISIONS.id}`,
+					`${ONLINE.provider}/${ONLINE.id}`,
+				],
+			},
+		});
+		const registry = makeRegistry([JEV_PREVIEW, LOCAL, DECISIONS, ONLINE], {
+			typesafe: "ts-key",
+			openrouter: "or-key",
+			[ONLINE.provider]: "online-key",
+		});
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) return new Response("rejected", { status: 400 });
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const local = vi.spyOn(tinyModelClient, "complete");
+		const online = vi.spyOn(ai, "completeSimple");
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE_BACKUP }).judge({
+			state: "redesign the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(urls).toEqual(["https://judge.example.test/v1/systemone", "https://decisions.example.test/decisions"]);
+		expect(local).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+	});
+
+	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
@@ -217,15 +258,23 @@ describe("ChainJudge", () => {
 			.mockImplementation(
 				asGlobalFetch(async () => Response.json({ detail: { error_type: "billing_error" } }, { status: 402 })),
 			);
-		vi.spyOn(ai, "completeSimple").mockImplementation(async model => reply(model, "level: low"));
+		const online = vi.spyOn(ai, "completeSimple");
+		const onUsage = vi.fn();
 		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
 
-		const first = await new ChainJudge({ settings, registry }).judge(request);
-		const second = await new ChainJudge({ settings, registry }).judge(request);
+		await expect(
+			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge(request),
+		).rejects.toThrow("402");
+		await expect(new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request)).rejects.toThrow(
+			"rejected the account recently",
+		);
 
-		expect(first.answers.level.choice).toBe("low");
-		expect(second.answers.level.choice).toBe("low");
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
+		expect(online).not.toHaveBeenCalled();
+		expect(onUsage).toHaveBeenCalledTimes(1);
+		expect(onUsage).toHaveBeenCalledWith(
+			expect.objectContaining({ provider: "typesafe", model: "jev-preview", stopReason: "error" }),
+		);
 	});
 
 	it("propagates caller abort without attempting a fallback", async () => {
@@ -242,7 +291,7 @@ describe("ChainJudge", () => {
 		const local = vi.spyOn(tinyModelClient, "complete");
 
 		await expect(
-			new ChainJudge({ settings, registry }).judge(
+			new ChainJudge({ settings, registry, purpose: "test" }).judge(
 				{ state: "x", questions: { level: TIER_QUESTION } },
 				{ signal: controller.signal },
 			),
@@ -263,7 +312,7 @@ describe("ChainJudge", () => {
 			return reply(model, "level: low");
 		});
 
-		const result = await new ChainJudge({ settings, registry, sessionModel: ONLINE }).judge({
+		const result = await new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE }).judge({
 			state: "rename a local",
 			questions: { level: TIER_QUESTION },
 		});
@@ -272,5 +321,143 @@ describe("ChainJudge", () => {
 		// The primary's three entries are its initial completion plus two format
 		// corrections. A duplicated session fallback would add another three.
 		expect(attempted).toEqual([ONLINE.id, ONLINE.id, ONLINE.id, ONLINE_BACKUP.id]);
+	});
+
+	it("resolves and forwards configured headers to native judgment models", async () => {
+		const recordedHeaders: Record<string, string>[] = [];
+		const nativeModel = {
+			...JEV_PREVIEW,
+			id: "jev-custom-headers",
+			api: "openrouter-decisions" as const,
+			provider: "custom-judge",
+			baseUrl: "https://custom.example/v1",
+			resolveHeaders: async () => ({
+				"x-custom-routing": "router-1",
+				"x-custom-tenant": "tenant-abc",
+			}),
+		} as Model<Api>;
+
+		const settings = Settings.isolated({
+			modelRoles: { judge: "custom-judge/jev-custom-headers" },
+		});
+		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch((_url, init) => {
+				const h = new Headers(init?.headers);
+				recordedHeaders.push({
+					auth: h.get("authorization") ?? "",
+					customRouting: h.get("x-custom-routing") ?? "",
+					customTenant: h.get("x-custom-tenant") ?? "",
+				});
+				return Response.json({
+					model: "typesafe/jev-1.13",
+					answers: { level: { type: "choice", choice: "low" } },
+					usage: { input_tokens: 10, output_tokens: 2 },
+				});
+			}),
+		);
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "mechanical task",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("low");
+		expect(recordedHeaders).toEqual([
+			{
+				auth: "Bearer test-key",
+				customRouting: "router-1",
+				customTenant: "tenant-abc",
+			},
+		]);
+	});
+
+	it("answers repeated questions from the cache and sends only the unanswered ones", async () => {
+		using tempDir = TempDir.createSync("@omp-judgment-cache-");
+		const dbPath = path.join(tempDir.path(), "judgment-cache.db");
+		const cache = JudgmentCache.open(dbPath);
+		// $1000/M input tokens: 10 tokens per question bill $0.01 each.
+		const priced = { ...JEV_PREVIEW, cost: { input: 1000, output: 0, cacheRead: 0, cacheWrite: 0 } } as Model<Api>;
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([priced], { typesafe: "ts-key" });
+		const sent: string[][] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const body = JSON.parse(String(init?.body)) as { questions: Record<string, NoulQuestion> };
+				const ids = Object.keys(body.questions);
+				sent.push(ids);
+				const answers: Record<string, { type: "noul"; noul: number }> = {};
+				for (const id of ids) answers[id] = { type: "noul", noul: id === "a" ? 0.9 : 0.2 };
+				return Response.json({ model: "jev-1.13.0", answers, usage: { input_tokens: 10 * ids.length } });
+			}),
+		);
+		const onUsage = vi.fn();
+		const judge = new ChainJudge({ settings, registry, purpose: "test", onUsage, cache });
+		const question = (instructions: string): NoulQuestion => ({ type: "noul", instructions });
+
+		await judge.judge({ state: { file: "a.ts", body: "x" }, questions: { a: question("A?"), b: question("B?") } });
+		// Same state with reordered keys: only the new question reaches the provider.
+		const second = await judge.judge({
+			state: { body: "x", file: "a.ts" },
+			questions: { b: question("B?"), c: question("C?") },
+		});
+		const third = await judge.judge({ state: { file: "a.ts", body: "x" }, questions: { a: question("A?") } });
+		// A changed instruction is a different question.
+		await judge.judge({ state: { file: "a.ts", body: "x" }, questions: { a: question("A, really?") } });
+
+		expect(sent).toEqual([["a", "b"], ["c"], ["a"]]);
+		expect(second.answers.b.noul).toBe(0.2);
+		expect(second.usage.input).toBe(10);
+		expect(third.answers.a.noul).toBe(0.9);
+		expect(third.usage.cost.total).toBe(0);
+		// The fully cached request never reaches the ledger.
+		expect(onUsage.mock.calls.map(([usage]) => usage.usage.cost.total)).toEqual([0.02, 0.01, 0.01]);
+
+		cache.close();
+		using db = new Database(dbPath, { readonly: true });
+		const rows = db
+			.query<{ names: string; price: number }, []>(
+				"SELECT (SELECT group_concat(o.name) FROM oracle o, json_each(u.results) r WHERE o.id = r.value) AS names, u.price FROM usage u ORDER BY u.id",
+			)
+			.all();
+		expect(rows).toEqual([
+			{ names: "a,b", price: 0.02 },
+			{ names: "c", price: 0.01 },
+			{ names: "a", price: 0.01 },
+		]);
+		expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM states").get()?.n).toBe(1);
+	});
+
+	it("bills a chat-backed judgment once per completion attempt on the ledger and in telemetry", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` } });
+		const registry = makeRegistry([ONLINE], { [ONLINE.provider]: "online-key" });
+		const replies = ["no idea", "level: high"];
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
+			const response = reply(model, replies.shift() ?? "");
+			response.usage.cost = { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 };
+			options?.onAttempt?.(response);
+			return response;
+		});
+		const onUsage = vi.fn();
+		const events: ChatUsageEvent[] = [];
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "test",
+			onUsage,
+			telemetry: { onChatUsage: event => void events.push(event) },
+		});
+
+		// Telemetry hooks fire synchronously inside the attempt report.
+		const result = await judge.judge({ state: "redesign the scheduler", questions: { level: TIER_QUESTION } });
+
+		expect(result.answers.level.choice).toBe("high");
+		// Two attempts (initial + format correction): each billed once, never re-billed from the aggregate result.
+		expect(onUsage.mock.calls.map(([usage]) => usage.usage.cost.total)).toEqual([0.01, 0.01]);
+		expect(events.map(event => [event.operation, event.cost])).toEqual([
+			["judgment", { usd: 0.01, inputUsd: 0.01, outputUsd: 0 }],
+			["judgment", { usd: 0.01, inputUsd: 0.01, outputUsd: 0 }],
+		]);
 	});
 });

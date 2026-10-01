@@ -24,14 +24,14 @@ each render the provider receives the current `ViewportSize` and returns a
 
 ```ts
 interface HistoryBatch {
-  id: number;
-  rows: string[];
-  kind?: "append" | "replay";
+  readonly id: number;
+  readonly rows: readonly string[];
+  readonly kind?: "append" | "replay";
 }
 
 interface TerminalFramePlan {
-  history?: HistoryBatch;
-  viewport: string[];
+  readonly history?: HistoryBatch;
+  readonly viewport: readonly string[];
 }
 ```
 
@@ -48,12 +48,12 @@ batch until acknowledgement and does not reuse or reorder ids. This handshake
 makes retries and coalesced renders safe without requiring the renderer to
 compare a new transcript with terminal scrollback.
 
-The coding agent's `TranscriptContainer` owns the active, pending, and committed
-block lifecycle. Blocks are mutable by default. Assistant/thinking producers
+`packages/tui/src/chrome/transcript-container.ts` owns the active, settled, and
+committed block lifecycle for the coding agent. Blocks are mutable by default. Assistant/thinking producers
 explicitly opt into append-only presentation and publish only a monotonically
 extending prefix of complete stable semantic rows. Each row re-renders at the
 current width; open Markdown and the current partial suffix remain mutable. Under pressure,
-only the current logical head can emit one such row without finalizing. Final
+only the current logical head can emit enough stable rows to relieve overflow without finalizing. Final
 retirement writes only its un-emitted suffix.
 
 ## 2. Rendering a frame
@@ -94,7 +94,8 @@ how retained history is handled (including cleanup of live rows a height
 shrink may have pushed before the resize callback ran):
 
 - `rebuild` clears native history and replays one current-width transcript;
-- `append` retains native history and appends a current-width transcript copy;
+- `append` retains native history and appends a current-width transcript copy
+  on width changes (height-only resizes do not append a duplicate);
 - `preserve` repaints only the viewport and leaves old-width history unchanged.
 
 The raw TUI defaults to `preserve` and accepts
@@ -103,6 +104,11 @@ rebuild resize policies each prepare one complete bottom-first replay
 transaction; preserve prepares none. Replay consumes one fresh monotonic history
 id without rewinding logical retirement state, and acknowledgement happens only
 after the synchronous write returns.
+
+In-place resize (Warp by default outside multiplexers/ConPTY, or forced with
+`PI_TUI_RESIZE_IN_PLACE=1`) skips resize replay entirely and repaints once the
+drag settles. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrowed-buffer path.
+See [runtime resize details](./tui-runtime-internals.md#resize).
 
 The renderer never probes the user's scroll position. This keeps updates safe
 while the user is reading older terminal history and avoids terminal- or
@@ -116,7 +122,8 @@ must route through these helpers so escape sequences remain zero-width and
 column boundaries agree.
 
 - Printable ASCII uses the fast one-cell-per-code-unit path.
-- Non-ASCII text uses the shared narrow-ambiguous width model.
+- Non-ASCII text uses the shared narrow-ambiguous width model, with a shared
+  terminal/platform-aware Hangul Compatibility Jamo correction.
 - Tabs use `DEFAULT_TAB_WIDTH`.
 - OSC 66 sized spans contribute their declared cell width.
 - Over-wide rows are truncated to the viewport width; the render hot path must
@@ -131,11 +138,38 @@ second visible frame.
 Terminal detection selects optimizations such as synchronized output, DECCARA,
 and image protocols; it does not change history semantics.
 
+Inside tmux, the pane environment identifies tmux rather than the attached
+emulator. At startup, terminal detection asks the local tmux server for
+`#{client_termtype}` and maps recognized client names through the normal
+capability table; an unavailable `tmux` command or missing terminal-type reply
+keeps the environment fallback. Modified keys still require tmux
+`extended-keys`, while OSC notifications require `allow-passthrough`.
+
 `ProcessTerminal` pairs capability queries with typed DA1 sentinel owners.
 Private CSI replies may be split across stdin flushes, so reassembly must retain
 partial replies until their terminator and must not leak probe bytes as user
 input. New probes need a typed sentinel owner and byte-by-byte split-reply
 coverage.
+
+### Native rendering (Tern Surface Protocol)
+
+`ProcessTerminal` also sends the TSP `hello` query (APC `tsp`) behind a `tsp`
+DA1 sentinel owner. `PI_TUI_NATIVE=0` disables it; multiplexers and Bun tests
+skip it by default, while `PI_TUI_NATIVE=1` forces the probe. A supported-version
+reply switches `TUI` to `native/backend.ts`: components
+are described (`describe()`, or `rows` fallback from `render()`), reconciled
+into document ops (`native/reconcile.ts`) and sent as frames, paced by the
+terminal's acknowledgements instead of the render cadence. None of this
+document's history, viewport, resize-replay or CPR machinery runs on that path;
+SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
+is live the nerd symbol preset is forced process-locally, and icon glyphs are
+sent as `icon` spans. Each surface receives omp's resolved theme (`t`: every
+theme token as hex, dark and light variants) after `o` and before its first
+frame, and again when the resolved palette changes. The first row paint waits
+up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
+immediately and fall back to rows if the terminal does not confirm it. The
+debug socket's `doc` op returns the reference document
+(every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
 
 ## 6. Inline images and memory
 
@@ -151,8 +185,8 @@ image environment settings.
 
 ## 7. Core invariants
 
-1. Products decide finality and submit finalized rows only through ordered
-   `HistoryBatch` values.
+1. Products decide finality and submit finalized or declared append-only stable
+   rows only through ordered `HistoryBatch` values.
 2. The TUI writes a history batch exactly once and acknowledges its monotonic
    id; it never derives history from viewport row position.
 3. Ordinary frames diff and repaint the viewport only. They never rewrite,
@@ -164,5 +198,6 @@ image environment settings.
 6. Overlays and image-budget changes remain viewport-local.
 7. Width handling uses the shared ANSI-aware helpers and clamps rather than
    throwing in the render hot path.
-8. The renderer never probes terminal scroll position or forks history policy
-   by terminal, multiplexer, or platform.
+8. The renderer never probes terminal scroll position. Terminal/multiplexer
+   geometry controls resize mechanics (including the in-place no-replay path),
+   not block finality.

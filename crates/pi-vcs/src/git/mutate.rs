@@ -1,6 +1,7 @@
 //! In-process local Git mutations.
 
 use std::{
+	borrow::Cow,
 	collections::{BTreeMap, BTreeSet},
 	ffi::OsStr,
 	fs,
@@ -68,11 +69,7 @@ pub(crate) fn update_reference(
 				.duration_since(std::time::UNIX_EPOCH)
 				.map_or(0, |elapsed| elapsed.as_secs())
 		);
-		gix::actor::SignatureRef {
-			name:  "oh-my-pi".into(),
-			email: "omp@localhost".into(),
-			time:  &now,
-		}
+		gix::actor::SignatureRef { name: "omp".into(), email: "omp@localhost".into(), time: &now }
 	};
 	repo
 		.edit_references_as(Some(edit), Some(committer))
@@ -152,7 +149,7 @@ impl GitRepo {
 	/// Create a commit and return its object id.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
 		let repo = self.gix()?;
-		run_commit_hook(self, &repo, "pre-commit", &[])?;
+		run_commit_hook(self, "pre-commit", &[])?;
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit", err))?;
@@ -231,7 +228,7 @@ impl GitRepo {
 		};
 		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
 		fs::write(&message_path, message)?;
-		run_commit_hook(self, &repo, "commit-msg", &[message_path.as_os_str()])?;
+		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()])?;
 		let message = fs::read_to_string(&message_path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let commit = repo
@@ -264,7 +261,7 @@ impl GitRepo {
 				deref:  true,
 			})
 			.map_err(|err| Error::backend("git commit", err))?;
-		let _ = run_commit_hook(self, &repo, "post-commit", &[]);
+		let _ = run_commit_hook(self, "post-commit", &[]);
 		Ok(id.to_hex().to_string())
 	}
 
@@ -296,15 +293,18 @@ impl GitRepo {
 		} else {
 			gix::refs::transaction::PreviousValue::MustNotExist
 		};
-		update_reference(
-			&repo,
-			"git branch",
-			&full,
-			id,
-			constraint,
-			&format!("branch: Created from {start}"),
-			false,
-		)?;
+		// git's reflog tells a `-f` move apart from a creation.
+		let exists = force
+			&& repo
+				.try_find_reference(&full)
+				.map_err(|e| Error::backend("git branch", e))?
+				.is_some();
+		let message = if exists {
+			format!("branch: Reset to {start}")
+		} else {
+			format!("branch: Created from {start}")
+		};
+		update_reference(&repo, "git branch", &full, id, constraint, &message, false)?;
 		Ok(())
 	}
 
@@ -601,19 +601,46 @@ impl GitRepo {
 		let linked_repo = linked.gix()?;
 		checkout_tree(&linked, &linked_repo, id, true)?;
 		if options.keep_changes {
-			self.seed_worktree_changes(path, &admin)?;
+			self.seed_worktree_changes(path, &admin, id)?;
 		}
 		Ok(WorktreeAddResult { cloned_with: None, clone_error })
 	}
 
-	/// Replicate the source checkout's uncommitted state onto a freshly
-	/// materialized worktree at `path`: copy every dirty tracked and
-	/// untracked file (deleting what the source deleted), then install the
-	/// source index so staged hunks stay staged.
-	fn seed_worktree_changes(&self, path: &Path, admin: &Path) -> Result<()> {
+	/// Replicate the source checkout's uncommitted state onto a worktree at
+	/// `path` freshly checked out at the source `HEAD` (`head_commit`): copy
+	/// every staged, dirty tracked, and untracked file (deleting what the
+	/// source deleted), then install the source index so staged hunks stay
+	/// staged, with its stat cache rebased onto the files now on disk.
+	fn seed_worktree_changes(
+		&self,
+		path: &Path,
+		admin: &Path,
+		head_commit: gix::hash::ObjectId,
+	) -> Result<()> {
 		let repo = self.gix()?;
 		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
-		for relative in dirty_tracked.iter().chain(untracked.iter()) {
+		// One snapshot of the source index decides which paths to copy and is
+		// what gets installed, so a concurrent `git add` in the source cannot
+		// split the two.
+		let source_index = if self.info().git_dir.join("index").is_file() {
+			Some(load_index_or_empty(&repo, "git worktree add")?)
+		} else {
+			None
+		};
+		// The checkout wrote `HEAD` content, so paths whose index entry differs
+		// from `HEAD` (staged edits, additions, and deletions) need the source
+		// bytes too, even when the source worktree matches its index.
+		let staged = match &source_index {
+			Some(source_index) => {
+				let head_index = repo
+					.index_from_tree(&commit_tree(&repo, &head_commit)?)
+					.map_err(|err| Error::backend("git worktree add", err))?;
+				index_diff_paths(source_index, &head_index)
+			},
+			None => BTreeSet::new(),
+		};
+
+		for relative in dirty_tracked.iter().chain(&untracked).chain(&staged) {
 			let relative = relative.to_path_lossy();
 			let src = self.root().join(&relative);
 			let dst = path.join(&relative);
@@ -640,11 +667,17 @@ impl GitRepo {
 				Err(err) => return Err(err.into()),
 			}
 		}
-		let source_index = self.info().git_dir.join("index");
-		if source_index.is_file() {
-			fs::copy(source_index, admin.join("index"))?;
-		}
-		Ok(())
+		let Some(mut index) = source_index else {
+			return Ok(());
+		};
+		// The source stat cache describes the source files. Checkout filters
+		// (e.g. `core.autocrlf`) can write clean files at a different size, and
+		// git reports a size mismatch as modified without hashing the content.
+		refresh_clean_index_stats(&mut index, path, &dirty_tracked)?;
+		index.set_path(admin.join("index"));
+		index
+			.write(INDEX_WRITE)
+			.map_err(|err| Error::backend("git worktree add", err))
 	}
 
 	fn worktree_add_cloned(
@@ -683,18 +716,7 @@ impl GitRepo {
 			// index carries its staged state. Only the stat cache is stale
 			// (new inodes); refresh it for entries the source reports clean so
 			// dirty files still hash on the next status.
-			for (entry, entry_path) in current.entries_mut_with_paths() {
-				if dirty_tracked.contains(entry_path) {
-					continue;
-				}
-				let Ok(metadata) = gix::index::fs::Metadata::from_path_no_follow(
-					&path.join(entry_path.to_path_lossy()),
-				) else {
-					continue;
-				};
-				entry.stat = gix::index::entry::Stat::from_fs(&metadata)
-					.map_err(|err| Error::backend("git worktree add", err))?;
-			}
+			refresh_clean_index_stats(&mut current, path, &dirty_tracked)?;
 			return current
 				.write(INDEX_WRITE)
 				.map_err(|err| Error::backend("git worktree add", err));
@@ -704,34 +726,26 @@ impl GitRepo {
 			.index_from_tree(&tree)
 			.map_err(|err| Error::backend("git worktree add", err))?;
 
-		let current_paths: BTreeSet<BString> = current
-			.entries()
-			.iter()
-			.map(|entry| entry.path(&current).to_owned())
-			.collect();
-		let target_paths: BTreeSet<BString> = target
-			.entries()
-			.iter()
-			.map(|entry| entry.path(&target).to_owned())
-			.collect();
-		let mut delete = current_paths
-			.difference(&target_paths)
-			.cloned()
-			.collect::<BTreeSet<_>>();
+		let differing = index_diff_paths(&current, &target);
+		let (write_paths, removed): (BTreeSet<BString>, BTreeSet<BString>) = differing
+			.into_iter()
+			.partition(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_some());
+		let mut delete = removed;
 		delete.extend(untracked);
-		delete.extend(dirty_tracked.difference(&target_paths).cloned());
+		delete.extend(
+			dirty_tracked
+				.iter()
+				.filter(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_none())
+				.cloned(),
+		);
 
-		let mut write = BTreeSet::new();
-		for entry in target.entries() {
-			let path = entry.path(&target);
-			if current
-				.entry_by_path(path)
-				.is_none_or(|old| old.id != entry.id || old.mode != entry.mode)
-				|| dirty_tracked.contains(path)
-			{
-				write.insert(path.to_owned());
-			}
-		}
+		let mut write = write_paths;
+		write.extend(
+			dirty_tracked
+				.iter()
+				.filter(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_some())
+				.cloned(),
+		);
 
 		for relative in &delete {
 			let full = path.join(relative.to_path_lossy());
@@ -801,6 +815,23 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git worktree add", err))
 	}
 
+	/// Resolve the executable hook `name` as git's `find_hook` does: under
+	/// `core.hooksPath` (a relative value resolves against the checkout root)
+	/// or else the shared `hooks` directory, which linked worktrees read from
+	/// the common dir. `None` when the hook is missing or not executable.
+	pub fn hook_path(&self, name: &str) -> Result<Option<PathBuf>> {
+		let dir = self
+			.gix()?
+			.config_snapshot()
+			.string("core.hooksPath")
+			.map_or_else(
+				|| self.info().common_dir.join("hooks"),
+				|value| self.root().join(value.to_str_lossy().as_ref()),
+			);
+		let hook = dir.join(name);
+		Ok(hook_is_executable(&hook).then_some(hook))
+	}
+
 	/// Remove a linked worktree, returning false when dirty and not forced.
 	pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<bool> {
 		let Some(linked) = Self::discover(path)? else {
@@ -835,31 +866,22 @@ impl GitRepo {
 	}
 }
 
-fn run_commit_hook(
-	repository: &GitRepo,
-	repo: &gix::Repository,
-	name: &str,
-	args: &[&OsStr],
-) -> Result<()> {
-	let hooks_dir = repo
-		.config_snapshot()
-		.string("core.hooksPath")
-		.map(|value| PathBuf::from(value.to_str_lossy().into_owned()))
-		.map_or_else(
-			|| repository.info().git_dir.join("hooks"),
-			|path| {
-				if path.is_absolute() {
-					path
-				} else {
-					repository.root().join(path)
-				}
-			},
-		);
-	let hook = hooks_dir.join(name);
-	if !hook_is_executable(&hook) {
+fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<()> {
+	let Some(hook) = repository.hook_path(name)? else {
 		return Ok(());
-	}
-	let output = Command::new(&hook)
+	};
+	// Windows CreateProcess cannot execute a shebang script directly. Let Git
+	// invoke the hook through its own shell, as `git commit` does.
+	#[cfg(windows)]
+	let mut command = {
+		let _ = hook;
+		let mut command = Command::new("git");
+		command.args(["hook", "run", "--ignore-missing", name, "--"]);
+		command
+	};
+	#[cfg(not(windows))]
+	let mut command = Command::new(&hook);
+	let output = command
 		.args(args)
 		.current_dir(repository.root())
 		.env("GIT_DIR", &repository.info().git_dir)
@@ -1520,6 +1542,50 @@ fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 	Ok(())
 }
 
+/// Paths whose entry differs between `left` and `right` (blob id or mode), or
+/// that exist on only one side.
+fn index_diff_paths(left: &gix::index::File, right: &gix::index::File) -> BTreeSet<BString> {
+	let mut paths = BTreeSet::new();
+	for entry in left.entries() {
+		let entry_path = entry.path(left);
+		if right
+			.entry_by_path(entry_path)
+			.is_none_or(|other| other.id != entry.id || other.mode != entry.mode)
+		{
+			paths.insert(entry_path.to_owned());
+		}
+	}
+	for entry in right.entries() {
+		let entry_path = entry.path(right);
+		if left.entry_by_path(entry_path).is_none() {
+			paths.insert(entry_path.to_owned());
+		}
+	}
+	paths
+}
+
+/// Point the stat cache of every index entry outside `dirty` at the file now
+/// under `root`, so entries whose content matches the index read as clean.
+fn refresh_clean_index_stats(
+	index: &mut gix::index::File,
+	root: &Path,
+	dirty: &BTreeSet<BString>,
+) -> Result<()> {
+	for (entry, entry_path) in index.entries_mut_with_paths() {
+		if dirty.contains(entry_path) {
+			continue;
+		}
+		let Ok(metadata) =
+			gix::index::fs::Metadata::from_path_no_follow(&root.join(entry_path.to_path_lossy()))
+		else {
+			continue;
+		};
+		entry.stat = gix::index::entry::Stat::from_fs(&metadata)
+			.map_err(|err| Error::backend("git worktree add", err))?;
+	}
+	Ok(())
+}
+
 fn collect_clone_reconciliation_paths(
 	repo: &gix::Repository,
 ) -> Result<(BTreeSet<BString>, BTreeSet<BString>)> {
@@ -1570,13 +1636,22 @@ fn collect_clone_reconciliation_paths(
 	Ok((dirty_tracked, untracked))
 }
 
+fn git_metadata_path(path: &Path) -> Cow<'_, str> {
+	let display = path.to_string_lossy();
+	if cfg!(windows) {
+		Cow::Owned(display.replace('\\', "/"))
+	} else {
+		display
+	}
+}
+
 fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> {
 	fs::create_dir_all(path)?;
 	let name = worktree_admin_name(common, path);
 	let admin = common.join("worktrees").join(name);
 	fs::create_dir_all(&admin)?;
-	fs::write(path.join(".git"), format!("gitdir: {}\n", admin.display()))?;
-	fs::write(admin.join("gitdir"), format!("{}\n", path.join(".git").display()))?;
+	fs::write(path.join(".git"), format!("gitdir: {}\n", git_metadata_path(&admin)))?;
+	fs::write(admin.join("gitdir"), format!("{}\n", git_metadata_path(&path.join(".git"))))?;
 	fs::write(admin.join("commondir"), "../..\n")?;
 	fs::write(admin.join("HEAD"), format!("{head}\n"))?;
 	Ok(admin)
@@ -1786,6 +1861,9 @@ mod tests {
 		git(temp.path(), &["init", "-q", "-b", "main"]);
 		git(temp.path(), &["config", "user.name", "Test"]);
 		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		// gix reads the developer's `~/.gitconfig`, where a global
+		// `core.hooksPath` would redirect hook lookup away from this fixture.
+		git(temp.path(), &["config", "core.hooksPath", ".git/hooks"]);
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -2034,6 +2112,11 @@ mod tests {
 		fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 	}
 
+	#[cfg(windows)]
+	fn write_hook(path: &Path, body: &str, _executable: bool) {
+		fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+	}
+
 	#[test]
 	fn stage_commit_survives_unadvanced_index_mtime() {
 		// Regression: a commit right after staging on the same cached handle used
@@ -2059,7 +2142,6 @@ mod tests {
 		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
 	}
 
-	#[cfg(unix)]
 	#[test]
 	fn commit_hooks_match_git_commit_behavior() {
 		let (temp, repo) = fixture();
@@ -2099,12 +2181,16 @@ mod tests {
 			.commit_create("missing hook is skipped", &CommitOptions::default())
 			.unwrap();
 
-		fs::write(temp.path().join("b"), "one more\n").unwrap();
-		repo.stage_files(&["b".into()]).unwrap();
-		write_hook(&pre_commit, "echo should-not-run >&2\nexit 1", false);
-		repo
-			.commit_create("non-executable hook is skipped", &CommitOptions::default())
-			.unwrap();
+		#[cfg(unix)]
+		{
+			fs::write(temp.path().join("b"), "one more\n").unwrap();
+			repo.stage_files(&["b".into()]).unwrap();
+			write_hook(&pre_commit, "echo should-not-run >&2\nexit 1", false);
+			repo
+				.commit_create("non-executable hook is skipped", &CommitOptions::default())
+				.unwrap();
+		}
+		#[cfg(unix)]
 		fs::remove_file(&pre_commit).unwrap();
 		repo
 			.commit_create("subject\n\nbody\n\n", &CommitOptions {
@@ -2408,6 +2494,35 @@ mod tests {
 	}
 
 	#[test]
+	fn worktree_registration_paths_are_accepted_by_git() {
+		let (temp, repo) = fixture();
+		let linked_dir = tempfile::tempdir().unwrap();
+		let linked = linked_dir.path().to_path_buf();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+		assert_eq!(
+			fs::read_to_string(linked.join(".git")).unwrap(),
+			format!("gitdir: {}\n", git_metadata_path(&admin))
+		);
+		assert_eq!(
+			fs::read_to_string(admin.join("gitdir")).unwrap(),
+			format!("{}\n", git_metadata_path(&linked.join(".git")))
+		);
+
+		let listed = git(temp.path(), &["worktree", "list", "--porcelain"]);
+		let expected = format!("worktree {}", git_metadata_path(&linked));
+		assert!(listed.lines().any(|line| line == expected), "{listed}");
+		git(temp.path(), &["worktree", "repair", linked.to_str().unwrap()]);
+	}
+
+	#[test]
 	fn clone_first_worktree_reconciles_source_state_to_target_tree() {
 		let (temp, repo) = fixture();
 		fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
@@ -2574,6 +2689,50 @@ mod tests {
 				WorktreeAddOptions { detach: true, clone, keep_changes: true },
 			);
 			assert!(rejected.is_err(), "keep_changes must require the source HEAD as target");
+			let _ = repo.worktree_remove(&linked, true);
+		}
+	}
+
+	#[test]
+	fn worktree_add_keep_changes_carries_staged_only_state_without_phantom_edits() {
+		for clone in [WorktreeClone::Auto, WorktreeClone::Off] {
+			let (temp, repo) = fixture();
+			fs::write(temp.path().join("c"), "three\n").unwrap();
+			git(temp.path(), &["add", "c"]);
+			git(temp.path(), &["commit", "-qm", "add c"]);
+			// The source keeps its LF files; a plain checkout under autocrlf
+			// writes CRLF, so clean files land at a different size.
+			git(temp.path(), &["config", "core.autocrlf", "true"]);
+			fs::write(temp.path().join("a"), "staged only\n").unwrap();
+			git(temp.path(), &["add", "a"]);
+			git(temp.path(), &["rm", "-q", "b"]);
+			fs::write(temp.path().join("added"), "staged add\n").unwrap();
+			git(temp.path(), &["add", "added"]);
+			let source_status = git(temp.path(), &["status", "--porcelain"]);
+			assert_eq!(source_status, "M  a\nA  added\nD  b");
+			git(temp.path(), &["branch", "kept-staged"]);
+
+			let linked = temp.path().join(format!("../linked-keep-staged-{clone:?}"));
+			let _ = fs::remove_dir_all(&linked);
+			let result = repo
+				.worktree_add(&linked, "kept-staged", WorktreeAddOptions {
+					detach: false,
+					clone,
+					keep_changes: true,
+				})
+				.unwrap();
+			if clone == WorktreeClone::Off {
+				assert!(result.cloned_with.is_none());
+			}
+
+			assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "staged only\n");
+			assert_eq!(fs::read_to_string(linked.join("added")).unwrap(), "staged add\n");
+			assert!(!linked.join("b").exists());
+			assert_eq!(
+				git(&linked, &["status", "--porcelain"]),
+				source_status,
+				"clean and staged-only files must not read as unstaged edits"
+			);
 			let _ = repo.worktree_remove(&linked, true);
 		}
 	}

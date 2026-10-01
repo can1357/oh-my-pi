@@ -13,6 +13,8 @@ import {
 import { isValidThemeColor } from "@oh-my-pi/pi-tui/theme";
 import type { Settings } from "./settings";
 
+import { cfgCycleOrder, cfgModelTags } from "./model-settings";
+
 /** Canonical prefix for a configured model role selector. */
 export const MODEL_ROLE_ALIAS_PREFIX = "@";
 
@@ -119,9 +121,9 @@ export function getKnownRoleIds(settings: Settings): string[] {
 		roles.push(role);
 	};
 
-	for (const role of settings.get("cycleOrder")) addRole(role);
+	for (const role of cfgCycleOrder.get(settings)) addRole(role);
 	for (const role in settings.getModelRoles()) addRole(role);
-	for (const role in settings.get("modelTags")) addRole(role);
+	for (const role in cfgModelTags.get(settings)) addRole(role);
 
 	return roles;
 }
@@ -132,7 +134,7 @@ export function getKnownRoleIds(settings: Settings): string[] {
  */
 export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 	const builtIn = isModelRole(role) ? MODEL_ROLES[role] : undefined;
-	const configuredTags = settings.get("modelTags");
+	const configuredTags = cfgModelTags.get(settings);
 	const configured = Object.hasOwn(configuredTags, role) ? configuredTags[role] : undefined;
 
 	if (configured) {

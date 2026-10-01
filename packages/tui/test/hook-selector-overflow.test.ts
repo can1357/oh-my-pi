@@ -77,7 +77,7 @@ describe("HookSelectorComponent", () => {
 					"Authenticate via the provider keys and OAuth state already configured under ~/.omp without opening a new browser-based setup flow.",
 			},
 			{
-				label: "Set up Oh My Pi in terminal",
+				label: "Set up omp in terminal",
 				description:
 					"Launch the local terminal UI to add provider keys, select models, and keep the current editor session waiting for the configured credentials.",
 			},
@@ -339,7 +339,7 @@ describe("HookSelectorComponent", () => {
 		component.handleInput("1");
 
 		expect(selected).toBeUndefined();
-		expect(component.render(80).join("\n")).toContain("Search: 1");
+		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("Search: 1");
 	});
 
 	it("renders disabled options dimmed", () => {

@@ -103,5 +103,15 @@
 		"pageBg": "#FAFBFC",
 		"cardBg": "#FFFFFF",
 		"infoBg": "#F0F4F8"
+	},
+	"terminal": {
+		"background": "#fafbfc",
+		"foreground": "polar1",
+		"chrome": "snow2",
+		"widget": "snow0",
+		"ansi": [
+			"polar1", "aurora0", "#718a5a", "#9e7f3f", "frost3", "#9c7896", "#548b9a", "#a5abb6",
+			"polar3", "#d3737c", "#7f9868", "#aa8c4d", "#7493b3", "#ab85a4", "#6c9897", "snow2"
+		]
 	}
 }

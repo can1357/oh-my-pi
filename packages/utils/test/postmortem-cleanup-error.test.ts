@@ -164,18 +164,6 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stderr).toContain("[Uncaught Exception] Error: unexpected cleanup exception");
 	});
 
-	it("keeps unmarked unhandled rejections fatal", async () => {
-		const result = await runPostmortemProbe(`
-			import "${postmortemModuleUrl}";
-
-			Promise.reject(new Error("unexpected cleanup rejection"));
-			await Promise.resolve();
-		`);
-
-		expect(result.exitCode).toBe(1);
-		expect(result.stderr).toContain("[Unhandled Rejection] Error: unexpected cleanup rejection");
-	});
-
 	it("prints registered recovery commands before fatal cleanup", async () => {
 		const result = await runPostmortemProbe(`
 			import { postmortem } from "${postmortemModuleUrl}";

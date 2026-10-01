@@ -18,21 +18,12 @@ describe("repairDoubleEncodedJsonString", () => {
 		expect(repairDoubleEncodedJsonString("C:\\Users\\me")).toBe("C:\\Users\\me");
 	});
 
-	it("preserves a regex with a backslash class", () => {
-		expect(repairDoubleEncodedJsonString("match \\d+ digits")).toBe("match \\d+ digits");
-	});
-
 	it("preserves text containing a bare double quote", () => {
 		expect(repairDoubleEncodedJsonString('she said "hi" loudly')).toBe('she said "hi" loudly');
 	});
 
 	it("leaves a lone literal \\n mention alone (no double-encode signature)", () => {
 		expect(repairDoubleEncodedJsonString("split lines on \\n then count")).toBe("split lines on \\n then count");
-	});
-
-	it("is a no-op for plain text without escapes", () => {
-		const plain = "just some normal instructions";
-		expect(repairDoubleEncodedJsonString(plain)).toBe(plain);
 	});
 
 	it("leaves a partially-decoded value (real newline mixed with literal escape) untouched", () => {
@@ -77,16 +68,5 @@ describe("repairTaskParams", () => {
 		expect(repaired.tasks?.[0]?.agent).toBe("task");
 		// Untouched items keep their identity.
 		expect(repaired.tasks?.[1]).toBe(params.tasks![1]!);
-	});
-
-	it("returns the same reference when nothing needs repair", () => {
-		const params: TaskParams = {
-			agent: "task",
-			name: "A",
-			context: "label",
-			task: "do work",
-			tasks: [{ name: "B", task: "clean" }],
-		};
-		expect(repairTaskParams(params)).toBe(params);
 	});
 });

@@ -9,12 +9,13 @@
 
 use std::{
 	ffi::OsString,
-	fs::{File, OpenOptions},
 	io::{self, Error, ErrorKind, Read, Write},
+	path::Path,
 };
 
 use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValue};
+use pi_vfs::{BlockingFs, File, OpenOptions};
 use uucore::display::Quotable;
 
 use crate::host::{Host, Utility, matches_parser, util};
@@ -106,7 +107,7 @@ fn tee(options: &Options, host: &mut Host) -> io::Result<()> {
 			});
 			continue;
 		}
-		match open(name, &host.resolve(name), options.append) {
+		match open(host.fs(), name, &host.resolve(name), options.append) {
 			Ok(writer) => writers.push(writer),
 			Err(err) => {
 				let _ = writeln!(host.stderr, "tee: {}: {err}", name.maybe_quote());
@@ -124,11 +125,18 @@ fn tee(options: &Options, host: &mut Host) -> io::Result<()> {
 	let mut output = MultiWriter::new(writers, options.output_error.clone(), host.stderr_clone());
 	let copy_result = copy(&mut host.stdin, &mut output, &mut host.stderr);
 	let flush_result = output.flush();
-	if had_open_errors || copy_result.is_err() || flush_result.is_err() || output.error_occurred() {
+	let close_result = output.close();
+	if had_open_errors
+		|| copy_result.is_err()
+		|| flush_result.is_err()
+		|| close_result.is_err()
+		|| output.error_occurred()
+	{
 		Err(
 			copy_result
 				.err()
 				.or_else(|| flush_result.err())
+				.or_else(|| close_result.err())
 				.unwrap_or_else(|| Error::other("output error")),
 		)
 	} else {
@@ -157,14 +165,15 @@ fn copy(mut input: impl Read, mut output: impl Write, stderr: &mut impl Write) -
 	}
 }
 
-fn open(name: &OsString, path: &std::path::Path, append: bool) -> io::Result<NamedWriter> {
+fn open(fs: &BlockingFs, name: &OsString, path: &Path, append: bool) -> io::Result<NamedWriter> {
 	let mut options = OpenOptions::new();
 	if append {
 		options.append(true);
 	} else {
 		options.truncate(true);
 	}
-	let file = options.write(true).create(true).open(path)?;
+	options.write(true).create(true);
+	let file = fs.open_with(path, &options)?;
 	Ok(NamedWriter { inner: Writer::File(file), name: name.clone() })
 }
 
@@ -188,6 +197,29 @@ impl MultiWriter {
 		self.ignored_errors != 0
 	}
 
+	/// Closes every file output. Providers may only commit data on close, so
+	/// close failures follow the same report/exit policy as write failures.
+	fn close(&mut self) -> io::Result<()> {
+		let mode = self.output_error_mode.clone();
+		let mut aborted = None;
+		for writer in std::mem::take(&mut self.writers) {
+			let Writer::File(file) = writer.inner else {
+				continue;
+			};
+			if let Err(err) = file.close() {
+				let (report, exit) = error_policy(mode.as_ref(), &err);
+				if report {
+					let _ = writeln!(self.stderr, "tee: {}: {err}", writer.name.maybe_quote());
+					self.ignored_errors += 1;
+				}
+				if exit && aborted.is_none() {
+					aborted = Some(err);
+				}
+			}
+		}
+		aborted.map_or(Ok(()), Err)
+	}
+
 	fn process(&mut self, flush: bool, buf: &[u8]) -> io::Result<()> {
 		let mode = self.output_error_mode.clone();
 		let mut aborted = None;
@@ -198,17 +230,11 @@ impl MultiWriter {
 			match result {
 				Ok(()) => true,
 				Err(err) => {
-					let is_pipe = err.kind() == ErrorKind::BrokenPipe;
-					let report = matches!(
-						mode.as_ref(),
-						Some(OutputErrorMode::Warn | OutputErrorMode::Exit)
-					) || !is_pipe;
+					let (report, exit) = error_policy(mode.as_ref(), &err);
 					if report {
 						let _ = writeln!(stderr, "tee: {}: {err}", writer.name.maybe_quote());
 						errors += 1;
 					}
-					let exit = matches!(mode.as_ref(), Some(OutputErrorMode::Exit))
-						|| (matches!(mode.as_ref(), Some(OutputErrorMode::ExitNoPipe)) && !is_pipe);
 					if exit && aborted.is_none() {
 						aborted = Some(err);
 					}
@@ -225,6 +251,17 @@ impl MultiWriter {
 			Ok(())
 		}
 	}
+}
+
+/// Whether an output error is diagnosed, and whether it aborts `tee`, under
+/// the `--output-error` mode. Broken pipes are exempt in the `nopipe` modes
+/// and in the default mode, where `SIGPIPE` handling covers them.
+fn error_policy(mode: Option<&OutputErrorMode>, err: &Error) -> (bool, bool) {
+	let is_pipe = err.kind() == ErrorKind::BrokenPipe;
+	let report = matches!(mode, Some(OutputErrorMode::Warn | OutputErrorMode::Exit)) || !is_pipe;
+	let exit = matches!(mode, Some(OutputErrorMode::Exit))
+		|| (matches!(mode, Some(OutputErrorMode::ExitNoPipe)) && !is_pipe);
+	(report, exit)
 }
 
 impl Write for MultiWriter {
@@ -353,6 +390,7 @@ mod tests {
 
 	#[cfg(unix)]
 	use brush_core::openfiles::OpenFile;
+	use pi_vfs::OpenOptions;
 
 	use super::{MultiWriter, NamedWriter, OutputErrorMode, Tee, Writer};
 	#[cfg(unix)]
@@ -442,8 +480,11 @@ mod tests {
 	#[test]
 	fn warn_nopipe_silences_broken_stdout_and_keeps_file_output() {
 		let destination = tempfile::NamedTempFile::new().unwrap();
-		let file = destination.reopen().unwrap();
 		let (host, capture) = Host::for_test("tee", Vec::new(), "/");
+		let file = host
+			.fs()
+			.open_with(destination.path(), OpenOptions::new().write(true))
+			.unwrap();
 		let mut output = MultiWriter::new(
 			vec![
 				NamedWriter {
@@ -468,8 +509,11 @@ mod tests {
 	#[test]
 	fn warn_reports_broken_stdout_but_keeps_file_output() {
 		let destination = tempfile::NamedTempFile::new().unwrap();
-		let file = destination.reopen().unwrap();
 		let (host, capture) = Host::for_test("tee", Vec::new(), "/");
+		let file = host
+			.fs()
+			.open_with(destination.path(), OpenOptions::new().write(true))
+			.unwrap();
 		let mut output = MultiWriter::new(
 			vec![
 				NamedWriter {

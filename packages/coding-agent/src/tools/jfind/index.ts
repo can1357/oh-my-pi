@@ -4,34 +4,50 @@
  * passage verification) lives in {@link runCascade}; this file is the tool
  * contract and the model-facing report.
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
-import { journalJudgmentUsage, resolveJudge } from "../../judgment";
+import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { sessionResolveContext } from "../../internal-urls/context";
+import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
 import type { ToolSession } from "..";
-import { formatPathRelativeToCwd, normalizePathLikeInput, resolveToCwd } from "../path-utils";
+import { formatPathRelativeToCwd, normalizePathLikeInput, resolveSearchResultPath } from "../path-utils";
 import { toolResult } from "../tool-result";
-import { runCascade } from "./cascade";
+import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
+import { resolveSearchRoot } from "./tree";
+
+import { cfgFindEnabled } from "../settings";
 
 const findSchema = type({
-	query: type("string").describe("what to find, in plain language (concept or behavior, not a regex)"),
-	grep_keywords: type("string[]").describe(
-		"identifiers or terms likely to appear verbatim in matching source; steer lexical pre-ranking. [] when unsure",
-	),
-	"path?": type("string").describe('directory to search. Omitted -> the workspace root (".")'),
+	query: "string",
+	grep_keywords: "string[]",
+	"path?": "string",
 });
 
 export type FindToolInput = typeof findSchema.infer;
 
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
+
+/** Wall-clock budget for one `find` call; a stalled judge fails instead of blocking the turn. */
+const FIND_TIMEOUT_MS = 20_000;
+
+/**
+ * Resolve `find.enabled` for a session: `auto` enables `find` only when the
+ * judge role is backed by a native System One model ({@link hasNativeJudge})
+ * rather than a prompted small model. Gates tool creation and the `find` hints
+ * in sibling tool prompts.
+ */
+export function isFindEnabled(session: ToolSession): boolean {
+	const mode = cfgFindEnabled.get(session.settings);
+	if (mode !== "auto") return mode === "on";
+	return session.modelRegistry !== undefined && hasNativeJudge(session.settings, session.modelRegistry);
+}
 
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
 export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
@@ -44,21 +60,6 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly parameters = findSchema;
 	readonly strict = true;
 
-	readonly examples: readonly ToolExample<typeof findSchema.inferIn>[] = [
-		{
-			caption: "Find a behavior by description",
-			call: { query: "where are request retries counted and reported?", grep_keywords: ["retry", "attempt"] },
-		},
-		{
-			caption: "Locate an implementation without known symbol names",
-			call: { query: "how is the database connection pooled?", grep_keywords: [] },
-		},
-		{
-			caption: "Scope the search to one directory",
-			call: { query: "where are tool renderers registered?", grep_keywords: ["renderer"], path: "packages/tui" },
-		},
-	];
-
 	constructor(private readonly session: ToolSession) {}
 
 	async execute(
@@ -70,34 +71,59 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		const query = params.query.trim();
 		if (query.length === 0) throw new ToolError("`query` must be a non-empty description");
 		const cwd = this.session.cwd;
-		const root = await this.#resolveRoot(params.path, cwd);
+		const rawScopeInput = params.path === undefined ? "" : normalizePathLikeInput(params.path);
+		// Host paths stay native; internal URLs (`local://`, `omp://`, …) are
+		// listed, scanned, and read in place through the URL filesystem.
+		const filesystem = new InternalUrlFilesystem({
+			context: sessionResolveContext(this.session, { signal }),
+			tier: this.approval,
+		});
+		const root = await resolveSearchRoot(filesystem, rawScopeInput, cwd);
 		const scopePath =
-			root === path.resolve(cwd) ? undefined : formatPathRelativeToCwd(root, cwd, { trailingSlash: true });
+			root.path === path.resolve(cwd)
+				? undefined
+				: formatPathRelativeToCwd(root.path, cwd, { trailingSlash: root.type === "directory" });
 		const registry = this.session.modelRegistry;
 		if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
 		const judge = resolveJudge({
 			settings: this.session.settings,
 			registry,
 			sessionId: this.session.getSessionId?.() ?? undefined,
-			onUsage: journalJudgmentUsage(this.session.sessionManager, "find"),
+			purpose: "find",
+			onUsage: journalJudgmentUsage(this.session.sessionManager),
+			telemetry: this.session.getTelemetry?.(),
+			cache: sharedJudgmentCache(),
 		});
 		const started = performance.now();
-		const result = await runCascade({
-			root,
-			query,
-			extraKeywords: params.grep_keywords,
-			judge,
-			includeHidden: false,
-			signal,
-			onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
-		});
+		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);
+		let result: CascadeResult;
+		try {
+			result = await runCascade({
+				root,
+				filesystem,
+				query,
+				extraKeywords: params.grep_keywords,
+				judge,
+				includeHidden: false,
+				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+				onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
+			});
+		} catch (error) {
+			if (timeout.aborted && !signal?.aborted) {
+				throw new ToolError(`find timed out after ${formatDuration(FIND_TIMEOUT_MS)}`);
+			}
+			throw error;
+		}
 		const elapsedMs = performance.now() - started;
 		const { stats, threshold, keywords } = result;
-		// Cascade paths are root-relative; the model and renderer want cwd-relative
-		// so `read` and hyperlinks resolve without knowing the scope.
-		const hits = result.hits.map(hit => ({ ...hit, rel: formatPathRelativeToCwd(path.join(root, hit.rel), cwd) }));
+		// Cascade paths are root-relative; the model and renderer want paths
+		// `read` resolves (cwd-relative files, URLs under URL scopes, including
+		// with `:start-end` selectors) without knowing the scope.
+		const hits = result.hits.map(hit => ({
+			...hit,
+			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
+		}));
 		const details: FindToolDetails = { query, keywords, threshold, hits, stats, elapsedMs, cwd, scopePath };
-
 		const where = scopePath === undefined ? "" : ` in ${scopePath}`;
 		const out: string[] = [];
 		if (hits.length === 0) {
@@ -127,19 +153,5 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		if (stats.requests > 0 && stats.errors === stats.requests) builder.error();
 		else if (hits.length === 0) builder.useless();
 		return builder.done();
-	}
-
-	/** Absolute search root: `path` under cwd, which must be an existing directory. */
-	async #resolveRoot(rawPath: string | undefined, cwd: string): Promise<string> {
-		const input = rawPath === undefined ? "" : normalizePathLikeInput(rawPath);
-		if (input.length === 0) return path.resolve(cwd);
-		const root = resolveToCwd(input, cwd);
-		try {
-			if (!(await fs.stat(root)).isDirectory()) throw new ToolError(`Path is not a directory: ${input}`);
-		} catch (error) {
-			if (isEnoent(error)) throw new ToolError(`Path not found: ${input}`);
-			throw error;
-		}
-		return root;
 	}
 }

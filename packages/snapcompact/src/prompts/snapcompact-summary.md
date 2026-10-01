@@ -1,7 +1,9 @@
 Resume prior conversation. Earlier turns archived under HISTORY below, oldest→newest. Read HISTORY fully; continue the live conversation following it.
 
 Archived transcript scopes:
-- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.
+{{#if includeThinking}}- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.
+{{else}}- `¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.
+{{/if}}
 - Unprefixed following lines: current scope. Consecutive same-kind blocks omit repeated prefix.
 - Tool call: `¶call:name(args)//intent`; trailing `//intent` optional. `<out>…</out>`: tool output.
 

@@ -1,4 +1,5 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import type { XAIHttpTransport } from "../../../lib/xai-http";
 import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -8,7 +9,6 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
 // xAI web search is latency-sensitive, so keep reasoning effort low regardless
 // of the selected model's configured timeout.
 const XAI_WEB_SEARCH_REASONING_EFFORT = "low";
@@ -413,14 +413,13 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 		headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
 	};
 	const customEndpoint = transport.baseURL.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
-	const credentialOrigin = params.authStorage.getCredentialOrigin(params.model.provider);
+	const credentialOrigin = params.authStorage.keys.source(params.model.provider);
 	const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
-	if (
-		customEndpoint &&
+	const officialOAuthCredential =
 		params.model.provider === "xai-oauth" &&
 		!hasCommandBackedKey &&
-		(credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")
-	) {
+		(credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env");
+	if (customEndpoint && officialOAuthCredential) {
 		throw new SearchProviderError(
 			"xai",
 			`Refusing to send official xAI OAuth credentials to custom endpoint ${transport.baseURL}. Configure an API key for provider "xai-oauth".`,
@@ -432,7 +431,11 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 		keyOrResolver,
 		async key => {
 			const requestTransport: XAIHttpTransport = {
-				baseURL: params.model.baseUrl,
+				// XAI_BASE_URL never receives official OAuth credentials: neither an OAuth-origin
+				// credential nor an OAuth access-token bearer leaves the bundled endpoint.
+				baseURL: officialOAuthCredential
+					? params.model.baseUrl
+					: (resolveXaiBaseUrl(params.model.provider, params.model.baseUrl, key) ?? params.model.baseUrl),
 				headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
 			};
 			return callXAIResponses(key, params, requestTransport);
@@ -459,7 +462,7 @@ export class XAIProvider extends SearchProvider {
 	readonly label = "xAI";
 
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
-		return authStorage.hasAuth(model?.provider ?? "xai");
+		return authStorage.keys.source(model?.provider ?? "xai") !== undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

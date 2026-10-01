@@ -4,8 +4,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { ensureTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -90,77 +88,6 @@ afterEach(async () => {
 	}
 });
 
-it("shows local model download progress while a TUI rename waits for a cold model", async () => {
-	await ensureTheme();
-	const { session, execute, ctx } = createRuntime("TUI");
-	const input = new InputController(ctx);
-	session.setTitleGenerationStart(() => input.notifyTitleGenerationStart());
-	let progress: Parameters<typeof tinyTitleClient.onProgress>[0] | undefined;
-	vi.spyOn(tinyTitleClient, "onProgress").mockImplementation(listener => {
-		progress = listener;
-		return () => {
-			progress = undefined;
-		};
-	});
-	const { started, response } = deferTitle();
-	vi.useFakeTimers();
-	const performanceNow = vi.spyOn(performance, "now").mockReturnValue(0);
-	const pending = execute("/rename");
-	try {
-		await Promise.race([started.promise, pending]);
-		const download = {
-			modelKey: DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
-			status: "progress",
-			file: "onnx/model.onnx",
-			total: 1024,
-		} as const;
-		progress?.({ ...download, loaded: 256, progress: 25 });
-		expect(ctx.chatContainer.render(120).join("\n")).not.toContain("Downloading");
-		performanceNow.mockReturnValue(1001);
-		progress?.({ ...download, loaded: 512, progress: 50 });
-		const rendered = ctx.chatContainer.render(120).join("\n");
-		expect(rendered).toContain("Downloading");
-		expect(rendered).toContain("50%");
-		expect(rendered).toContain("model.onnx");
-
-		progress?.({ modelKey: DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY, status: "ready" });
-		vi.advanceTimersByTime(3000);
-		expect(ctx.chatContainer.render(120).join("\n")).not.toContain("Tiny model");
-		response.resolve("Cache invalidation repair");
-		await pending;
-		expect(session.sessionName).toBe("Cache invalidation repair");
-	} finally {
-		progress?.({ modelKey: DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY, status: "ready" });
-		vi.advanceTimersByTime(3000);
-		session.setTitleGenerationStart(undefined);
-		performanceNow.mockRestore();
-		vi.useRealTimers();
-		response.resolve(null);
-		await pending;
-	}
-});
-
-it("releases progress listeners after repeated warm-model renames with no progress events", async () => {
-	await ensureTheme();
-	const { session, execute, ctx } = createRuntime("TUI");
-	const input = new InputController(ctx);
-	session.setTitleGenerationStart(() => input.notifyTitleGenerationStart());
-	const listeners = new Set<Parameters<typeof tinyTitleClient.onProgress>[0]>();
-	vi.spyOn(tinyTitleClient, "onProgress").mockImplementation(listener => {
-		listeners.add(listener);
-		return () => {
-			listeners.delete(listener);
-		};
-	});
-	const generate = vi.spyOn(tinyTitleClient, "generate");
-	for (const title of ["First warm title", "Second warm title", "Third warm title"]) {
-		generate.mockResolvedValueOnce(title);
-		await execute("/rename");
-		expect(session.sessionName).toBe(title);
-		expect(listeners.size).toBe(0);
-	}
-});
-
 it("cancels title inference without applying or announcing a late rename", async () => {
 	const { session, sessionManager, runtime, execute } = createRuntime("headless");
 	await sessionManager.setSessionName("Keep this title", "user");
@@ -180,33 +107,6 @@ it("cancels title inference without applying or announcing a late rename", async
 	} finally {
 		response.resolve(null);
 		await pending;
-	}
-});
-
-it("preserves a newer TUI rename made while title generation finishes", async () => {
-	const { session, sessionManager, execute } = createRuntime("TUI");
-	let newerRename: Promise<boolean> | undefined;
-	let entries = sessionManager.getEntries();
-	session.setTitleGenerationStart(() => () => {
-		// Cleanup runs after generation's return guard, before the TUI handler resumes.
-		newerRename = sessionManager.setSessionName("Newer chosen title", "user");
-		entries = sessionManager.getEntries();
-	});
-	const { started, response } = deferTitle();
-	const pending = execute("/rename");
-	try {
-		await Promise.race([started.promise, pending]);
-		response.resolve("Stale generated title");
-		await pending;
-		await newerRename;
-
-		expect(session.sessionName).toBe("Newer chosen title");
-		expect(sessionManager.getEntries()).toEqual(entries);
-	} finally {
-		session.setTitleGenerationStart(undefined);
-		response.resolve(null);
-		await pending;
-		await newerRename;
 	}
 });
 

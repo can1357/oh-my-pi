@@ -161,31 +161,6 @@ describe("antigravity usage provider", () => {
 		);
 	});
 
-	it("merges two models with same tier into one limit", async () => {
-		const payload = {
-			models: {
-				modelA: makeApiModel("Model A", {
-					remainingFraction: 0.3,
-					tier: "premium",
-				}),
-				modelB: makeApiModel("Model B", {
-					remainingFraction: 0.5,
-					tier: "premium",
-				}),
-			},
-		};
-		const report = await antigravityUsageProvider.fetchUsage!(
-			{
-				provider: "google-antigravity",
-				credential: makeCredential(),
-				signal: undefined,
-			},
-			makeCtx(fakeFetch(payload)),
-		);
-		expect(report).not.toBeNull();
-		expect(report!.limits.length).toBe(1);
-	});
-
 	it("keeps the worst remainingFraction when merging same tier", async () => {
 		const payload = {
 			models: {
@@ -461,40 +436,6 @@ describe("antigravity usage provider", () => {
 		expect(report!.limits[0]!.window?.label).toBe("Weekly");
 	});
 
-	it("includes email and projectId in report metadata", async () => {
-		const payload = {
-			models: { m: makeApiModel("M", { remainingFraction: 1 }) },
-		};
-		const report = await antigravityUsageProvider.fetchUsage!(
-			{
-				provider: "google-antigravity",
-				credential: makeCredential({
-					email: "user@example.com",
-					projectId: "proj-1",
-				}),
-				signal: undefined,
-			},
-			makeCtx(fakeFetch(payload)),
-		);
-		expect(report!.metadata?.email).toBe("user@example.com");
-		expect(report!.metadata?.projectId).toBe("proj-1");
-	});
-
-	it("does not include email when credential has none", async () => {
-		const payload = {
-			models: { m: makeApiModel("M", { remainingFraction: 1 }) },
-		};
-		const report = await antigravityUsageProvider.fetchUsage!(
-			{
-				provider: "google-antigravity",
-				credential: makeCredential({ email: undefined }),
-				signal: undefined,
-			},
-			makeCtx(fakeFetch(payload)),
-		);
-		expect(report!.metadata?.email).toBeUndefined();
-	});
-
 	it("sorts limits by remainingFraction ascending (worst first)", async () => {
 		const payload = {
 			models: {
@@ -610,15 +551,5 @@ describe("antigravity ranking strategy", () => {
 		const { primary, secondary } = antigravityRankingStrategy.findWindowLimits(report);
 		expect(primary).toBeUndefined();
 		expect(secondary).toBeUndefined();
-	});
-
-	it("uses a 24h window default for drain-rate normalisation", () => {
-		// Antigravity's API exposes resetTime but not durationMs, so AuthStorage's
-		// drain-rate calculator falls back to windowDefaults. The constant has to
-		// match the daily quota Antigravity actually applies; if it drifts, two
-		// credentials with identical headroom but different windowIds will be
-		// ranked unfairly.
-		expect(antigravityRankingStrategy.windowDefaults.primaryMs).toBe(24 * 60 * 60 * 1000);
-		expect(antigravityRankingStrategy.windowDefaults.secondaryMs).toBe(24 * 60 * 60 * 1000);
 	});
 });

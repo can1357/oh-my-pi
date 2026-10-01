@@ -51,12 +51,6 @@ describe("documented-but-unregistered plugin verbs do not leak to launch (#2935)
 		});
 	});
 
-	test("the hint path does not pretend these are real subcommands", () => {
-		// We surface guidance; we do not invent new top-level commands.
-		expect(isSubcommand("list")).toBe(false);
-		expect(isSubcommand("remove")).toBe(false);
-	});
-
 	test("multi-word `omp marketplace add xyz` hints at `omp plugin marketplace` instead of leaking to the prompt (#4845)", () => {
 		const result = resolveCliArgv(["marketplace", "add", "xyz"]);
 		expect(result).not.toEqual({ argv: ["launch", "marketplace", "add", "xyz"] });

@@ -4,19 +4,19 @@
  * Owns the shared viewport/selection state so all pieces stay in sync.
  */
 
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSessionTrace } from "../api";
-import { useResource } from "../data/useResource";
-import type { TraceSpan, TraceTrack } from "../types";
-import { AsyncBoundary } from "../ui/AsyncBoundary";
-import { SegmentedControl } from "../ui/SegmentedControl";
+import { useQuery } from "../data/query";
+import type { TraceSpan, TraceSpanKind, TraceTrack } from "../types";
+import { Card, ChartSkeleton, PageHeader, QueryView, SearchInput, Segmented } from "../ui";
 import { AggregatesPanel } from "./AggregatesPanel";
 import { Minimap } from "./Minimap";
 import { SpanDrawer } from "./SpanDrawer";
 import { SummaryStrip } from "./SummaryStrip";
 import { TimelineCanvas, type TimelineViewport } from "./TimelineCanvas";
 import { TranscriptList } from "./TranscriptList";
+import { CATEGORY_VARS } from "./trace-colors";
 import { type AxisMode, buildScale } from "./time-scale";
 
 export interface TraceViewProps {
@@ -31,17 +31,18 @@ const MODE_OPTIONS: Array<{ value: AxisMode; label: string; title?: string }> = 
 	{ value: "calls", label: "Calls", title: "Equal width per model/tool call boundary" },
 ];
 
+const LEGEND: Array<{ kind: TraceSpanKind; label: string }> = [
+	{ kind: "turn", label: "Input" },
+	{ kind: "model", label: "Model" },
+	{ kind: "tool", label: "Tool" },
+	{ kind: "subagent", label: "Agent" },
+	{ kind: "background", label: "Background" },
+];
+
 export function TraceView({ file, active, onBack }: TraceViewProps) {
-	const {
-		data: trace,
-		error,
-		loading,
-		refetch,
-		refreshing,
-	} = useResource(["trace", file], signal => getSessionTrace(file, signal), {
-		pollMs: 15000,
-		enabled: active,
-	});
+	const query = useQuery(["trace", file], () => getSessionTrace(file), { pollMs: 15000, enabled: active });
+	// A previous session's trace must never render under this file's header.
+	const trace = query.stale ? null : query.data;
 
 	const [mode, setMode] = useState<AxisMode>("time");
 	const [compressIdle, setCompressIdle] = useState(true);
@@ -199,139 +200,183 @@ export function TraceView({ file, active, onBack }: TraceViewProps) {
 
 	const traceStart = trace?.startedAt ?? 0;
 
+	const traceQuery = { ...query, data: trace };
+
 	return (
-		<div className="stats-trace-view">
-			<div className="stats-trace-header">
-				<button type="button" onClick={onBack} className="stats-trace-back">
-					<ArrowLeft size={13} aria-hidden="true" />
+		<div className="stack traces-view">
+			<div>
+				<button type="button" className="btn" data-variant="ghost" data-size="sm" onClick={onBack}>
+					<ArrowLeft size={14} aria-hidden="true" />
 					Sessions
 				</button>
-				<h2 className="stats-trace-title" style={{ maxWidth: 480, margin: 0 }}>
-					{trace?.title ?? file.split("/").pop()}
-				</h2>
-				{trace?.cwd && <span className="stats-trace-cwd">{trace.cwd}</span>}
-				<button
-					type="button"
-					onClick={() => void refetch()}
-					className="stats-trace-icon-btn"
-					aria-label="Refresh trace"
-					title="Refresh trace"
-					style={{ marginLeft: "auto" }}
-				>
-					<RefreshCw size={14} className={refreshing ? "stats-spin" : undefined} />
-				</button>
 			</div>
+			<PageHeader
+				title={<span className="traces-title truncate">{trace?.title ?? file.split("/").pop()}</span>}
+				description={trace?.cwd ? <span className="mono">{trace.cwd}</span> : undefined}
+				actions={
+					<button
+						type="button"
+						className="btn"
+						data-variant="ghost"
+						data-icon="true"
+						onClick={query.refetch}
+						aria-label="Refresh trace"
+						title="Refresh trace"
+					>
+						<RefreshCw size={14} className={query.refreshing ? "traces-spin" : undefined} />
+					</button>
+				}
+			/>
 
-			<AsyncBoundary loading={loading} error={error} data={trace}>
-				{trace && (
+			<QueryView query={traceQuery} skeleton={<ChartSkeleton height={420} />}>
+				{loaded => (
 					<>
-						<SummaryStrip summary={trace.summary} />
+						<SummaryStrip summary={loaded.summary} />
 
-						<div className="stats-trace-toolbar">
-							<SegmentedControl options={MODE_OPTIONS} value={mode} onChange={setMode} />
-							{mode === "time" && (
-								<label className="stats-trace-check">
-									<input
-										type="checkbox"
-										checked={compressIdle}
-										onChange={event => setCompressIdle(event.target.checked)}
+						<Card
+							index={1}
+							title="Timeline"
+							description="W/S zoom · A/D pan · drag pan · wheel zoom · 0 fit · F focus selection · dbl-click focus · Esc deselect"
+							actions={
+								<>
+									<button
+										type="button"
+										className="btn"
+										data-variant="ghost"
+										data-size="sm"
+										onClick={() => collapseAll(false)}
+									>
+										Expand all
+									</button>
+									<button
+										type="button"
+										className="btn"
+										data-variant="ghost"
+										data-size="sm"
+										onClick={() => collapseAll(true)}
+									>
+										Collapse all
+									</button>
+								</>
+							}
+						>
+							<div className="stack">
+								<div className="traces-toolbar">
+									<Segmented
+										options={MODE_OPTIONS}
+										value={mode}
+										onChange={setMode}
+										size="sm"
+										aria-label="Axis mode"
 									/>
-									Compress idle
-								</label>
-							)}
-							<div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-								<input
-									type="search"
-									value={search}
-									onChange={event => {
-										setSearch(event.target.value);
-										setMatchIndex(0);
-									}}
-									placeholder="Search spans…"
-									aria-label="Search spans"
-									spellCheck={false}
-									className="stats-trace-input"
-									style={{ width: 190 }}
+									{mode === "time" && (
+										<label className="traces-check">
+											<input
+												type="checkbox"
+												checked={compressIdle}
+												onChange={event => setCompressIdle(event.target.checked)}
+											/>
+											Compress idle
+										</label>
+									)}
+									<div className="traces-search">
+										<SearchInput
+											value={search}
+											onChange={value => {
+												setSearch(value);
+												setMatchIndex(0);
+											}}
+											placeholder="Search spans…"
+											width={200}
+										/>
+										{search.trim() && (
+											<>
+												<span className="num muted traces-match-count">
+													{matches.length === 0
+														? "0"
+														: `${(matchIndex % Math.max(matches.length, 1)) + 1}/${matches.length}`}
+												</span>
+												<button
+													type="button"
+													className="btn"
+													data-variant="ghost"
+													data-size="sm"
+													data-icon="true"
+													onClick={() => cycleMatch(-1)}
+													aria-label="Previous match"
+													disabled={matches.length === 0}
+												>
+													<ChevronLeft size={14} />
+												</button>
+												<button
+													type="button"
+													className="btn"
+													data-variant="ghost"
+													data-size="sm"
+													data-icon="true"
+													onClick={() => cycleMatch(1)}
+													aria-label="Next match"
+													disabled={matches.length === 0}
+												>
+													<ChevronRight size={14} />
+												</button>
+											</>
+										)}
+									</div>
+									<div className="traces-legend">
+										{LEGEND.map(item => (
+											<span key={item.kind} className="traces-legend-item">
+												<span
+													className="swatch"
+													style={{ background: `var(${CATEGORY_VARS[item.kind]})` }}
+												/>
+												{item.label}
+											</span>
+										))}
+									</div>
+								</div>
+								<Minimap
+									tracks={tracks}
+									scale={scale}
+									viewport={effectiveViewport}
+									onViewportChange={setViewport}
 								/>
-								{search.trim() && (
-									<>
-										<span
-											className="stats-text-muted"
-											style={{ fontSize: 11, fontVariantNumeric: "tabular-nums" }}
-										>
-											{matches.length === 0
-												? "0"
-												: `${(matchIndex % Math.max(matches.length, 1)) + 1}/${matches.length}`}
-										</span>
-										<button
-											type="button"
-											onClick={() => cycleMatch(-1)}
-											className="stats-trace-icon-btn"
-											aria-label="Previous match"
-											disabled={matches.length === 0}
-										>
-											‹
-										</button>
-										<button
-											type="button"
-											onClick={() => cycleMatch(1)}
-											className="stats-trace-icon-btn"
-											aria-label="Next match"
-											disabled={matches.length === 0}
-										>
-											›
-										</button>
-									</>
-								)}
+								<TimelineCanvas
+									tracks={tracks}
+									scale={scale}
+									viewport={effectiveViewport}
+									onViewportChange={setViewport}
+									selection={selection}
+									onSelect={selectAndOpen}
+									search={search}
+									collapsed={collapsed}
+									onToggleCollapse={toggleCollapse}
+									traceStart={traceStart}
+								/>
 							</div>
-							<div style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
-								<button type="button" onClick={() => collapseAll(false)} className="stats-trace-back">
-									Expand all
-								</button>
-								<button type="button" onClick={() => collapseAll(true)} className="stats-trace-back">
-									Collapse all
-								</button>
-							</div>
-						</div>
+						</Card>
 
-						<div className="stats-trace-timeline-card">
-							<Minimap
+						<Card
+							index={2}
+							title="Transcript"
+							description="Every span and marker in order; click to inspect"
+							flush
+						>
+							<TranscriptList
 								tracks={tracks}
-								scale={scale}
-								viewport={effectiveViewport}
-								onViewportChange={setViewport}
-							/>
-							<TimelineCanvas
-								tracks={tracks}
-								scale={scale}
-								viewport={effectiveViewport}
-								onViewportChange={setViewport}
 								selection={selection}
-								onSelect={selectAndOpen}
+								onSelect={spanId => {
+									selectAndReveal(spanId);
+									setDrawerOpen(true);
+								}}
 								search={search}
-								collapsed={collapsed}
-								onToggleCollapse={toggleCollapse}
 								traceStart={traceStart}
 							/>
-							<div className="stats-trace-toolbar-hint" style={{ marginLeft: 0 }}>
-								W/S zoom · A/D pan · drag pan · wheel zoom · 0 fit · F focus selection · dbl-click focus · Esc
-								deselect
-							</div>
-						</div>
-						<TranscriptList
-							tracks={tracks}
-							selection={selection}
-							onSelect={spanId => {
-								selectAndReveal(spanId);
-								setDrawerOpen(true);
-							}}
-							search={search}
-							traceStart={traceStart}
-						/>
-						<AggregatesPanel toolStats={trace.summary.toolStats} />
+						</Card>
+						<AggregatesPanel toolStats={loaded.summary.toolStats} index={3} />
 					</>
 				)}
-			</AsyncBoundary>
+			</QueryView>
 
 			<SpanDrawer
 				span={drawerOpen ? (selected?.span ?? null) : null}

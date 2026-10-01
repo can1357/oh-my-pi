@@ -10,7 +10,7 @@ export default class Find extends Command {
 	static description = commandHelp.description;
 	static args = {
 		query: Args.string({ description: "What to find, in plain language", required: false }),
-		path: Args.string({ description: "Directory to search", required: false }),
+		path: Args.string({ description: "Directory or omp:// docs scope to search", required: false }),
 	};
 
 	static flags = {

@@ -83,16 +83,14 @@ describe("task subagent OAuth pin inheritance", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			const otherProviderModel = getBundledModel("openai", "gpt-5-mini");
 			if (!model || !otherProviderModel) throw new Error("Expected bundled test models");
-			await authStorage.set("anthropic", [oauthCredential("a"), oauthCredential("b")]);
-			authStorage.setRuntimeApiKey("openai", "openai-key");
+			await authStorage.credentials.set("anthropic", [oauthCredential("a"), oauthCredential("b")]);
+			authStorage.keys.setRuntime("openai", "openai-key");
 			const parentProviderSessionId = "parent-provider-session";
-			const accountB = authStorage
-				.listOAuthAccounts("anthropic", parentProviderSessionId)
+			const accountB = authStorage.oauth
+				.accounts("anthropic", parentProviderSessionId)
 				.find(account => account.accountId === "account-b");
 			if (!accountB) throw new Error("Expected account B");
-			expect(authStorage.pinSessionOAuthAccount("anthropic", parentProviderSessionId, accountB.credentialId)).toBe(
-				true,
-			);
+			expect(authStorage.sessions.pin("anthropic", parentProviderSessionId, accountB.credentialId)).toBe(true);
 
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 			const settings = Settings.isolated({

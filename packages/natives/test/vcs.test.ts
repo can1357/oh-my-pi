@@ -134,6 +134,29 @@ describe("in-process VCS bindings", () => {
 			expect(performance.now() - started).toBeLessThan(2_000);
 		}
 	});
+
+	test("cancels a task-backed repository operation without replacing an aborted signal handler", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		const controller = new AbortController();
+		const onAbort = () => {};
+		controller.signal.onabort = onAbort;
+		controller.abort();
+
+		await expect(repo.head(controller.signal)).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
+		expect(controller.signal.onabort).toBe(onAbort);
+	});
+
+	test("keeps the VcsError shape when an AbortSignal fires before task settlement", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		const controller = new AbortController();
+		const pending = repo.head(controller.signal);
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+		controller.abort();
+
+		await expect(pending).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
+	});
 });
 
 describe("VcsRepo", () => {

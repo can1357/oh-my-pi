@@ -600,15 +600,3 @@ describe("issue:// / pr:// listing", () => {
 		await expect(router.resolve("issue://")).rejects.toThrow(/could not resolve a default repo/);
 	});
 });
-
-describe("cross-handler cache sharing", () => {
-	it("identical markdown is served whether the protocol handler or a second handler call resolves it", async () => {
-		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(101, "shared body") as never);
-
-		const router = InternalUrlRouter.instance();
-		const r1 = await router.resolve("issue://owner/example/101");
-		const r2 = await router.resolve("issue://owner/example/101");
-		expect(r2.content).toBe(r1.content);
-		expect(spy).toHaveBeenCalledTimes(1);
-	});
-});

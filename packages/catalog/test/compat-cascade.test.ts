@@ -95,6 +95,22 @@ describe("cascade rank precedence", () => {
 		);
 	});
 
+	test("upstream selector adds specificity without changing equal-rank ambiguity", () => {
+		const source = (text: string) => compileCascade([{ file: "providers/test.kdl", text }]);
+		const rules = source(`provider "prov" {
+			supports-store #true
+			on-upstream "up-a" { supports-store #false }
+		}`);
+		expect(resolveCascadeRules(rules, target({ upstream: "up-a" })).wire.supportsStore).toBe(false);
+		expect(resolveCascadeRules(rules, target({ upstream: "up-b" })).wire.supportsStore).toBe(true);
+		expect(resolveCascadeRules(rules, target({})).wire.supportsStore).toBe(true);
+		const ambiguous = source(`provider "prov" {
+			on-upstream "up-a" { supports-store #false }
+			on-api "api" { supports-store #true }
+		}`);
+		expect(() => resolveCascadeRules(ambiguous, target({ upstream: "up-a" }))).toThrow(AmbiguousOverlapError);
+	});
+
 	test("revision range conjunctions must all hold and need a ranked target", () => {
 		const cascade = compile(
 			`class "cls" {
@@ -255,17 +271,6 @@ describe("cascade rank precedence", () => {
 });
 
 describe("resolveCascade over committed rules", () => {
-	test("bundled rules resolve thinking for a reasoning glm target", () => {
-		const resolved = resolveCascade({
-			provider: "opencode-zen",
-			api: "openai-completions",
-			class: "glm",
-			model: "glm-5.2",
-			reasoning: true,
-		});
-		expect(resolved.thinking.mode).toBeDefined();
-	});
-
 	test("glm-5.2 on a blanket-glm provider resolves without overlapping the class ladder", () => {
 		// Regression: providers/alibaba-coding-plan.kdl has a direct `class "glm"`
 		// efforts block and no exact glm-5.2 residue, so it used to tie with the

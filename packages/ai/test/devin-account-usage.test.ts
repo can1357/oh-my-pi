@@ -188,8 +188,8 @@ describe("Devin account usage", () => {
 		expect(capture.metadata?.ideName).toBe("devin-cli");
 		expect(capture.metadata?.ideType).toBe("chisel");
 		expect(capture.metadata?.extensionName).toBe("chisel");
-		expect(capture.metadata?.ideVersion).toBe("3000.6.2");
-		expect(capture.metadata?.extensionVersion).toBe("3000.6.2");
+		expect(capture.metadata?.ideVersion).toBe("3000.11.3");
+		expect(capture.metadata?.extensionVersion).toBe("3000.11.3");
 		expect(capture.metadata?.locale).toBe("en");
 		expect(capture.metadata?.os).toBe(EXPECTED_OS);
 
@@ -248,6 +248,21 @@ describe("Devin account usage", () => {
 			overageBalanceUsd: 2.5,
 		});
 		expect(report.notes).toEqual(["Overage balance: $2.50"]);
+	});
+
+	test("sends API key credentials without the Devin session-token prefix", async () => {
+		const payload = userStatusPayload(
+			{ planName: "Windsurf Enterprise", monthlyPromptCredits: 500 },
+			{ userId: "legacy-user", usedPromptCredits: 125, availablePromptCredits: 375 },
+		);
+		const capture: Capture = {};
+
+		const report = await devinUsageProvider.fetchUsage(params("legacy-windsurf-key", "api_key"), {
+			fetch: mockFetch(payload, capture),
+		});
+
+		expect(capture.metadata?.apiKey).toBe("legacy-windsurf-key");
+		expect(report?.metadata?.accountId).toBe("legacy-user");
 	});
 
 	test("decodes a gzip-encoded response body and keeps an already-prefixed session token", async () => {

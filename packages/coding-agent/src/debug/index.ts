@@ -18,6 +18,7 @@ import {
 	Text,
 } from "@oh-my-pi/pi-tui";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { OverlayPanel } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -162,7 +163,14 @@ export class DebugSelectorComponent extends OverlayPanel {
 		block.addChild(new Text(theme.fg("accent", `${theme.status.info} CPU profiling started`), 1, 0));
 		block.addChild(new Spacer(1));
 		block.addChild(
-			new Text(theme.fg("muted", "Reproduce the performance issue, then press Enter to stop profiling."), 1, 0),
+			new Text(
+				theme.fg(
+					"muted",
+					`Reproduce the performance issue, then press ${editorKey("tui.input.submit")} to stop profiling.`,
+				),
+				1,
+				0,
+			),
 		);
 		this.ctx.present(block);
 
@@ -471,7 +479,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 		if (!suppressed) {
 			const sessionName = this.ctx.sessionManager.getSessionName();
 			const notification: TerminalNotification = {
-				title: sessionName || "Oh My Pi",
+				title: sessionName || "omp",
 				body: "Terminal protocol test",
 				type: "test",
 				actions: "focus",

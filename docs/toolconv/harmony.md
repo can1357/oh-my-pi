@@ -12,6 +12,8 @@ You only deal with raw Harmony if you build your own inference loop. Served thro
 
 The chat template shipped with the gpt-oss weights renders these same token sequences from the standard `messages`/`tools` arrays.
 
+OMP's owned `harmony` dialect is a separate decoded-text converter implemented in `packages/ai/src/dialect/harmony.ts`; it does not use `openai-harmony` or tokenizer IDs. Its tolerant scanner, transcript rendering, and provider-history encoding are described in the OMP sections below. Native server/template behavior should not be assumed to apply to that path.
+
 ## Special tokens
 
 All Harmony control tokens have the literal form `<|type|>` (ASCII pipes `|`, U+007C — no unicode variants). They are real single tokens in `o200k_harmony`, not text that is BPE-split. The structurally meaningful ones:
@@ -130,9 +132,9 @@ The arguments body is a raw JSON object. The optional `<|constrain|>json` conten
 
 OMP emits the first form above: no `<|constrain|>` marker, recipient in the channel section, and compact JSON arguments. It synthesizes a call id on receipt because Harmony carries none. The stateful scanner accepts the recipient in either header section, strips a leading `functions.` from the exposed tool name, and treats any nonempty recipient other than `assistant` as a tool call (including built-ins such as `browser.search`).
 
-Arguments are accumulated until `<|call|>`, `<|end|>`, or `<|return|>` and parsed with JSON repair. Empty arguments, or input that still cannot be parsed after repair, become `{}` rather than a scanner error. The scanner emits `toolStart` when the header completes and `toolEnd` only at the message terminator; `analysis` body chunks stream as thinking deltas, while ordinary assistant `commentary`/`final` bodies stream as text. Non-assistant messages, including tool-result envelopes, are skipped by this output scanner.
+OMP's `HarmonyInbandScanner` (`packages/ai/src/dialect/harmony.ts`) accumulates arguments and parses them with JSON repair. Empty, non-object, or still-unparseable arguments become `{}`. It emits `toolStart` when the recipient-bearing header reaches `<|message|>` and no argument deltas. `<|call|>`, `<|end|>`, and `<|return|>` finish the body; a new `<|start|>` or `<|channel|>` also implicitly finishes it before starting another header. `analysis` chunks stream as thinking deltas, and other assistant bodies stream as visible text. Non-assistant envelopes are skipped. A completion may start with `<|channel|>` alone; an omitted role is treated as assistant, and the scanner does not require a channel. Its factory ignores `parseThinking`, so `analysis` is always parsed as thinking.
 
-An important owned-scanner edge case differs from canonical Harmony. After a recipient-bearing header reaches `<\|message\|>`, OMP has already emitted `toolStart`. If the ordinary streaming path drains the body bytes and the stream then ends without `<\|call\|>`, `<\|end\|>`, or `<\|return\|>`, `flush()` emits no `toolEnd` and does not retract the start. The Harmony scanner emits no argument deltas, so the retained canonical call still has `{}` even if unterminated body text was seen. On a normal stop, OMP changes the turn to `toolUse` and may dispatch that empty call. This is permissive and unsafe recovery behavior, not a valid Harmony terminator rule.
+EOF recovery depends on buffered bytes. If `flush()` still has body bytes, it finishes the body and emits `toolEnd` without a terminator. If the last feed already drained the buffer, `flush()` emits nothing, leaving only `toolStart`; the canonical call retains `{}` because no argument deltas were published. On a normal stop, the owned projector can retain and dispatch that call. These are permissive recovery paths, not valid Harmony terminator rules.
 
 ## Multiple / parallel tool calls
 
@@ -157,7 +159,7 @@ The executed tool's output is fed back as a message whose **author/role is the t
 
 The header ordering is `{toolname} to=assistant<|channel|>commentary`. Built-in tool results follow the same shape (e.g. `<|start|>browser.search to=assistant<|channel|>commentary<|message|>{"result": "https://openai.com/"}<|end|>`). The minimal form the renderer accepts when channel/recipient are not set on the message is just `<|start|>{toolname}<|message|>{output}<|end|>`, but emitting the full `to=assistant<|channel|>commentary` header is what the reference parser round-trips and is recommended. After appending the result, restart generation by emitting the next `<|start|>assistant`.
 
-OMP always renders the full canonical result header shown above and passes `result.text` through verbatim. Harmony has no dedicated error bit, so `isError` is not represented separately; a failure must be described in the result payload.
+OMP renders the full result header shown above and passes `result.text` through verbatim. Its `harmonyRecipient` helper prefixes every name lacking `functions.` (including a supplied `browser.search` name) with `functions.`; it does not special-case built-in recipients. Harmony has no dedicated error bit, so `isError` is not represented separately.
 
 ## End-to-end example
 
@@ -208,17 +210,19 @@ When a server (vLLM/SGLang/Ollama) bridges Harmony to Chat Completions JSON:
 - **`tool_call_id`**: Harmony has no native call ID. The server synthesizes one (e.g. `call_abc123`) and is responsible for correlating the follow-up `role:"tool"` message back to the Harmony tool-result envelope (recipient `to=functions.<name>` / call order).
 - **Tool result messages** (`{"role":"tool","tool_call_id":...,"content":...}`) are rendered into `<|start|>{toolname} to=assistant<|channel|>commentary<|message|>{content}<|end|>`. The server maps `tool_call_id` → the original function name to build the `{toolname}` author.
 - **Reasoning**: `analysis`-channel text is surfaced as `reasoning_content` (vLLM/SGLang) or as a `reasoning`/`thinking` field, and is generally not echoed back on subsequent requests. `final`-channel text is the normal `message.content`. `commentary` preambles, if surfaced, also map to assistant content.
-- **OMP transcript rendering:** `developer`, `user`, and other non-assistant roles map directly to Harmony envelopes. Assistant messages emit, in order, a complete `analysis` message for thinking, a complete `final` message for visible text, then one `commentary` call message per tool call. Thus visible text accompanying a tool call is rendered as `final`, not as a commentary preamble. Tool-result runs become consecutive canonical tool-author envelopes.
+- **OMP transcript rendering:** `renderTranscript` maps `developer`/`user` directly to envelopes and emits assistant thinking (`analysis`), visible text (`final`), then calls (`commentary`) in that order. Empty assistant turns become empty `final` messages. Text/analysis history messages end with `<|end|>`, call messages with `<|call|>`; tool-result runs become consecutive tool-author envelopes. It retains all supplied thinking and appends no generation prompt, unlike a reference renderer configured to drop completed-turn analysis.
+- **OMP owned request history:** `encodeInbandToolHistory` is separate: assistant turns with calls become prose plus call envelopes and lose their thinking/image blocks; call-free assistant turns remain unchanged. Tool-result runs become synthetic **user** messages containing tool-author envelopes, with result images retained separately.
 - **Native server/chat-template compilation:** on the native vLLM/SGLang path, request `tools` / `tool_choice` are compiled by the server's chat template into the developer-message `namespace functions { ... }` block; the system message gains the commentary-routing line.
-- **OMP owned-dialect advertisement:** when OMP's `harmony` dialect is selected, OMP removes native provider tools and appends its generic compact `<tools>` JSON catalog plus the Harmony format guide to the system prompt. This path does not use the canonical developer-message namespace as its tool advertisement.
+- **OMP owned-dialect advertisement:** with tools present, owned mode omits native tools/`tool_choice` and appends the compact `<tools>` JSON catalog plus the Harmony guide to the system prompt, not the canonical developer namespace. Set `tools.format` to `harmony` to force it. Default `auto` selects an owned dialect only for `supportsTools === false`; OpenAI and GPT-OSS model classes map to `harmony`. `PI_DIALECT=harmony` is a fallback when the configured resolver returns no owned dialect.
+- **OMP stream boundary:** fabricated `<|start|>functions.` result envelopes stop projection. `tools.abortOnFabricatedResult` defaults to `true`; disabling it drains but still discards the continuation. Named native calls are forwarded if emitted despite owned mode, and the first native/in-band call channel wins.
 
 ## Parsing notes & gotchas
 
 - **Two stop tokens.** Always stop on both `<|return|>` and `<|call|>`. Stopping only on `<|return|>` will run past tool calls; stopping only on `<|end|>` is wrong for assistant generation.
 - **Recipient position varies.** `to=functions.<name>` may be in the role section (`<|start|>assistant to=...<|channel|>commentary`) or the channel section (`<|channel|>commentary to=...`). A parser must accept both.
-- **Channel is mandatory** on assistant messages; the system message even reminds the model ("Channel must be included for every message."). Missing-channel output is malformed.
+- **Channel convention vs tolerance:** canonical assistant messages include a channel. OMP's scanner tolerates missing channels and defaults non-analysis bodies to visible text; that tolerance is not a canonical formatting rule.
 - **Tool author, not `tool`.** The tool-result message's role is the tool's *name* (`functions.get_current_weather`), not the literal string `tool`. Splitting `functions.x` into namespace + function is the parser's job.
-- **CoT dropping is conditional.** Drop `analysis` only when the previous assistant turn ended on `final`. Dropping the `analysis` that immediately precedes a `<|call|>` breaks multi-step tool reasoning.
+- **Reference CoT dropping is conditional.** A reference renderer may drop completed-turn `analysis` while preserving ongoing tool-turn reasoning. OMP's transcript renderer does not implement this dropping rule; its separate owned-history encoder removes thinking from call-bearing assistant turns.
 - **`arguments` is a string.** Do not double-encode. The body after `<|message|>` is already serialized JSON; pass it through as the `arguments` string.
 - **Content-type variants.** `<|constrain|>json` is optional. If present, it is metadata, not a guarantee of valid JSON. Enforce JSON validity with constrained decoding / your own grammar — the prompt format alone does not guarantee schema adherence (same caveat applies to structured-output `# Response Formats`).
 - **Streaming.** Use a stateful parser (the library ships `StreamableParser`) so partial UTF-8 and the header/channel/recipient/content-type fields are reconstructed incrementally; a naive substring scan mishandles multi-byte splits and the optional header fields. `parse_messages_from_completion_tokens` takes `strict=True|False` — `strict=False` tolerates some malformed headers. Do not pass the trailing stop token into the parser.
@@ -226,6 +230,7 @@ When a server (vLLM/SGLang/Ollama) bridges Harmony to Chat Completions JSON:
 
 ## Sources
 
+- OMP implementation: `packages/ai/src/dialect/harmony.ts`, `rendering.ts` (`harmonyRecipient`), `history.ts`, `owned-stream.ts`, `catalog.ts`; selection: `packages/catalog/src/identity/dialect.ts`, `packages/coding-agent/src/sdk.ts` (`resolveDialect`), `packages/agent/src/agent-loop.ts` (`resolveOwnedDialectFromEnv`).
 - OpenAI Cookbook — OpenAI harmony response format: https://cookbook.openai.com/articles/openai-harmony
 - openai/harmony renderer (README): https://github.com/openai/harmony
 - openai/harmony canonical format guide: https://raw.githubusercontent.com/openai/harmony/main/docs/format.md

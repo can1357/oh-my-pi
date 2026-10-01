@@ -9,11 +9,13 @@ use std::{
 	sync::Arc,
 };
 
+use futures::TryStreamExt as _;
 use jj_lib::{
-	backend::{CommitId, CopyId, TreeValue},
+	backend::CommitId,
 	commit::Commit,
 	config::{ConfigSource, StackedConfig},
 	conflicts::{ConflictMarkerStyle, ConflictMaterializeOptions, materialize_tree_value},
+	copies::CopyRecords,
 	default_backend_factories::{default_backend_factories, default_working_copy_factories},
 	diff_presentation::{
 		LineCompareMode,
@@ -126,12 +128,12 @@ impl JjWorkspace {
 	pub fn status_summary(&self) -> Result<StatusSummary> {
 		self.with_current_repo("jj status", |workspace, repo| {
 			Box::pin(async move {
-				let Some((before, after)) =
+				let Some((before, after, copies)) =
 					working_copy_trees(workspace, repo.as_ref(), "jj status").await?
 				else {
 					return Ok(StatusSummary::default());
 				};
-				let changes = collect_changes(&before, &after, &[], "jj status")?;
+				let changes = collect_changes(&before, &after, &copies, &[], "jj status")?;
 				let mut summary = StatusSummary::default();
 				for change in changes {
 					if change.before.is_absent() {
@@ -151,12 +153,12 @@ impl JjWorkspace {
 		let nul_terminated = options.nul_terminated;
 		self.with_current_repo("jj status", move |workspace, repo| {
 			Box::pin(async move {
-				let Some((before, after)) =
+				let Some((before, after, copies)) =
 					working_copy_trees(workspace, repo.as_ref(), "jj status").await?
 				else {
 					return Ok(String::new());
 				};
-				let changes = collect_changes(&before, &after, &pathspecs, "jj status")?;
+				let changes = collect_changes(&before, &after, &copies, &pathspecs, "jj status")?;
 				Ok(render_status_porcelain(&changes, nul_terminated))
 			})
 		})
@@ -167,12 +169,12 @@ impl JjWorkspace {
 		let files = files.to_vec();
 		self.with_repo(snapshot, "jj diff", move |workspace, repo| {
 			Box::pin(async move {
-				let Some((before, after)) =
+				let Some((before, after, copies)) =
 					working_copy_trees(workspace, repo.as_ref(), "jj diff").await?
 				else {
 					return Ok(String::new());
 				};
-				let changes = collect_changes(&before, &after, &files, "jj diff")?;
+				let changes = collect_changes(&before, &after, &copies, &files, "jj diff")?;
 				render_git_diff(repo.as_ref(), &before, &after, changes).await
 			})
 		})
@@ -183,12 +185,12 @@ impl JjWorkspace {
 		let files = files.to_vec();
 		self.with_repo(snapshot, "jj diff", move |workspace, repo| {
 			Box::pin(async move {
-				let Some((before, after)) =
+				let Some((before, after, copies)) =
 					working_copy_trees(workspace, repo.as_ref(), "jj diff").await?
 				else {
 					return Ok(Vec::new());
 				};
-				Ok(collect_changes(&before, &after, &files, "jj diff")?
+				Ok(collect_changes(&before, &after, &copies, &files, "jj diff")?
 					.into_iter()
 					.map(|change| change.after_path.as_internal_file_string().to_owned())
 					.collect())
@@ -201,12 +203,12 @@ impl JjWorkspace {
 		let files = files.to_vec();
 		self.with_repo(true, "jj diff", move |workspace, repo| {
 			Box::pin(async move {
-				let Some((before, after)) =
+				let Some((before, after, copies)) =
 					working_copy_trees(workspace, repo.as_ref(), "jj diff").await?
 				else {
 					return Ok(Vec::new());
 				};
-				let changes = collect_changes(&before, &after, &files, "jj diff")?;
+				let changes = collect_changes(&before, &after, &copies, &files, "jj diff")?;
 				render_numstat(repo.as_ref(), &before, &after, changes).await
 			})
 		})
@@ -593,7 +595,7 @@ async fn working_copy_trees(
 	workspace: &Workspace,
 	repo: &dyn Repo,
 	context: &'static str,
-) -> Result<Option<(MergedTree, MergedTree)>> {
+) -> Result<Option<(MergedTree, MergedTree, CopyRecords)>> {
 	let Some(wc_id) = repo.view().get_wc_commit_id(workspace.workspace_name()) else {
 		return Ok(None);
 	};
@@ -606,7 +608,22 @@ async fn working_copy_trees(
 		.parent_tree(repo)
 		.await
 		.map_err(|err| Error::backend(context, err))?;
-	Ok(Some((parent_tree, commit.tree())))
+	// Renames and copies come from the backend (the git backend runs gix
+	// rewrite tracking between the two trees, as `jj status` does); tree
+	// entries alone carry no copy information because snapshots never assign
+	// copy ids.
+	let mut copies = CopyRecords::default();
+	for parent_id in commit.parent_ids() {
+		let records = repo
+			.store()
+			.get_copy_records(None, parent_id, commit.id())
+			.map_err(|err| Error::backend(context, err))?
+			.try_collect::<Vec<_>>()
+			.await
+			.map_err(|err| Error::backend(context, err))?;
+		copies.add_records(records);
+	}
+	Ok(Some((parent_tree, commit.tree(), copies)))
 }
 
 fn tree_entries(
@@ -626,6 +643,7 @@ fn tree_entries(
 fn collect_changes(
 	before_tree: &MergedTree,
 	after_tree: &MergedTree,
+	copies: &CopyRecords,
 	files: &[String],
 	context: &'static str,
 ) -> Result<Vec<TreeChange>> {
@@ -652,11 +670,10 @@ fn collect_changes(
 			continue;
 		}
 
-		let source = non_placeholder_copy_id(after_value).and_then(|copy_id| {
-			before.iter().find_map(|(source_path, source_value)| {
-				(non_placeholder_copy_id(source_value) == Some(copy_id)).then_some(source_path)
-			})
-		});
+		let source = copies
+			.for_target(path)
+			.map(|record| &record.source)
+			.filter(|source_path| before.contains_key(*source_path));
 		if let Some(source_path) = source {
 			let operation = if removed.remove(source_path) {
 				"rename"
@@ -733,13 +750,6 @@ fn status_code(change: &TreeChange) -> &'static str {
 		_ if change.before.is_absent() => "A ",
 		_ if change.after.is_absent() => "D ",
 		_ => "M ",
-	}
-}
-
-fn non_placeholder_copy_id(value: &MergedTreeValue) -> Option<&CopyId> {
-	match value.as_resolved()? {
-		Some(TreeValue::File { copy_id, .. }) if !copy_id.as_bytes().is_empty() => Some(copy_id),
-		_ => None,
 	}
 }
 

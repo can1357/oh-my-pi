@@ -9,7 +9,7 @@ const SELECTED_BASE_URL = "https://anthropic-grounding.example.test/v1";
 
 function createFixture(modelId = "claude-haiku-4-5") {
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("anthropic", "selected-anthropic-key");
+	authStorage.keys.setRuntime("anthropic", "selected-anthropic-key");
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	const model = buildModel({
 		id: modelId,
@@ -87,8 +87,8 @@ describe("Anthropic search request body", () => {
 	it("builds a Claude-Code-shaped metadata.user_id for OAuth auth", async () => {
 		const accountUuid = "abcd1234-abcd-1234-abcd-1234abcd1234";
 		const fixture = createFixture();
-		fixture.authStorage.setRuntimeApiKey("anthropic", "sk-ant-oat-fake-oauth-token");
-		vi.spyOn(fixture.authStorage, "getOAuthAccountId").mockReturnValue(accountUuid);
+		fixture.authStorage.keys.setRuntime("anthropic", "sk-ant-oat-fake-oauth-token");
+		vi.spyOn(fixture.authStorage.oauth, "identity").mockReturnValue({ accountId: accountUuid });
 		try {
 			const cap = makeCaptureFetch();
 			await searchAnthropic({

@@ -44,6 +44,16 @@ export interface MnemopiOptions {
 	readonly llmModel?: string | Model<Api>;
 	readonly llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
 	readonly proactiveLinking?: boolean;
+	/**
+	 * Route `recallEnhanced` through polyphonic recall for this instance. Unset
+	 * defers to `configureRecallFeatures`; `MNEMOPI_POLYPHONIC_RECALL` wins when set.
+	 */
+	readonly polyphonicRecall?: boolean;
+	/**
+	 * Cache `recallEnhanced` results for this instance. Unset defers to
+	 * `configureRecallFeatures`; `MNEMOPI_ENHANCED_RECALL` wins when set.
+	 */
+	readonly enhancedRecall?: boolean;
 	/** Escalate best-effort failure logs (embedding pipeline) from debug to warn. */
 	readonly debug?: boolean;
 	/**
@@ -412,6 +422,8 @@ export class Mnemopi {
 			authorType: this.authorType,
 			channelId: this.channelId,
 			proactiveLinking: options.proactiveLinking,
+			polyphonicRecall: options.polyphonicRecall,
+			enhancedRecall: options.enhancedRecall,
 		});
 		this.#ownsDb = options.db === undefined;
 		if (options.db !== undefined) {

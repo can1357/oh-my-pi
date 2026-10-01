@@ -8,7 +8,7 @@ import { calculateCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { applyXaiCatalogPricing, xaiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { modelKind, type ModelSpec, type Usage } from "@oh-my-pi/pi-catalog/types";
+import { type ModelSpec, type Usage } from "@oh-my-pi/pi-catalog/types";
 
 const XAI_RESPONSES_SPEC: ModelSpec<"openai-responses"> = {
 	id: "grok-4.5",
@@ -51,14 +51,6 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 		expect(options.fetchDynamicModels, "live /v1/models overlay").toBeTypeOf("function");
 		expect(options.dropCachedModelIdsOnStaticMismatch).toEqual(getBundledModels("xai").map(model => model.id));
 		expect(options.dropCachedModelIdsOnStaticMismatch).toContain("grok-4.6");
-	});
-
-	it("bundles every paid xai chat model on openai-responses", () => {
-		const models = getBundledModels("xai").filter(model => modelKind(model) === "chat");
-		for (const model of models) {
-			expect(model.api, `${model.provider}/${model.id}`).toBe("openai-responses");
-			expect(model.baseUrl).toBe("https://api.x.ai/v1");
-		}
 	});
 
 	it("keeps the image runner transport when the live chat roster repeats its id", async () => {

@@ -58,6 +58,13 @@ provider "xai-oauth" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=500000 max-tokens=500000
 		}
+		// 500K context per docs.x.ai/developers/models/grok-4.7.
+		model "grok-4.7" name="Grok 4.7" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=500000 max-tokens=500000
+		}
 		// Text-only per the bundled catalog.
 		model "grok-4.20-multi-agent-0309" name="Grok 4.20 (Multi-Agent)" {
 			reasoning #true
@@ -144,7 +151,7 @@ provider "xai-oauth" {
 		supports-reasoning-effort #false
 	}
 	// xhigh-capable SKUs keep xhigh unmapped.
-	models "grok-4.6*" "grok-4.20-multi-agent*" priority=1 {
+	models "grok-4.6*" "grok-4.7*" "grok-4.20-multi-agent*" priority=1 {
 		reasoning-effort-map {
 			minimal "low"
 		}

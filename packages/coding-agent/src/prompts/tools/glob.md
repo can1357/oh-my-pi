@@ -1,19 +1,6 @@
-Globs files, directories, and path-backed internal URLs with fast pattern matching.
-
-<instruction>
-- `path`: glob, file, directory, or path-backed internal URL; separate targets with `;` (`src/**/*.ts; test/**/*.ts`).
-- `memory://` glob patterns are supported. `ssh://` has no local path; use `read`. Other internal URLs accept exact paths only.
-- `gitignore` defaults `true`. Set `false` for ignored files such as `.env*`, logs, or build output.
-- `hidden` defaults `true`; pair it with `gitignore: false` for ignored dotfiles.
-</instruction>
-
-<output>
-Matches are newest-first and grouped by directory; directories end in `/`.
-</output>
-
+Glob files/dirs: `;`-separated paths or internal URLs (`local://*.md`, `omp://**/*.md`); default workspace root.
+`gitignore` and `hidden` default true; ignored dotfiles need `gitignore: false`. Newest-first by directory; dirs end `/`.
 {{#ifAny eagerDelegation hasFind}}
-<avoid>
-{{#if hasFind}}Sweeping directories to locate where a behavior lives → `find` with a descriptive query; glob is for path/name discovery.{{/if}}
-{{#if eagerDelegation}}Open-ended multi-round discovery → {{#if scoutAvailable}}Task + scout.{{else}}Task.{{/if}}{{/if}}
-</avoid>
+{{#if hasFind}}Behavior search → `find`.{{/if}}
+{{#if eagerDelegation}}Multi-round discovery → {{#if scoutAvailable}}Task + scout{{else}}Task{{/if}}.{{/if}}
 {{/ifAny}}

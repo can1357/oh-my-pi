@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -17,22 +18,16 @@ function makeSession(): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
-		settings: {
-			get(key: string) {
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				if (key === "bashInterceptor.enabled") return false;
-				if (key === "astGrep.enabled") return false;
-				if (key === "astEdit.enabled") return false;
-				if (key === "grep.enabled") return false;
-				if (key === "glob.enabled") return false;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return [];
-			},
-		},
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+			"bashInterceptor.enabled": false,
+			"astGrep.enabled": false,
+			"astEdit.enabled": false,
+			"grep.enabled": false,
+			"glob.enabled": false,
+		}),
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
 }
@@ -171,29 +166,30 @@ describe("BashTool skill:// working directory", () => {
 		};
 	}
 
-	it("runs a command with a bare skill URI as cwd", async () => {
-		const { dir, skillDir, skill } = await skillFixture();
+	it("runs a command with a bare skill URI as cwd, resolving relative paths inside it", async () => {
+		const { dir, skill } = await skillFixture();
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cwd", { command: "pwd", cwd: "skill://docs" });
+			const result = await tool.execute("call-skill-cwd", { command: "pwd; cat SKILL.md", cwd: "skill://docs" });
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBeUndefined();
-			expect(text).toContain(skillDir);
+			expect(text).toContain("skill://docs");
+			expect(text).toContain("body");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("runs a leading cd into a bare skill URI", async () => {
-		const { dir, skillDir, skill } = await skillFixture();
+		const { dir, skill } = await skillFixture();
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && pwd" });
+			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && cat SKILL.md" });
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBeUndefined();
-			expect(text).toContain(skillDir);
+			expect(text).toContain("body");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
@@ -223,14 +219,16 @@ describe("BashTool skill:// containment failures", () => {
 		};
 	}
 
-	it("rejects a command reading past the plugin boundary instead of running it", async () => {
-		const { dir, skill } = await containedFixture();
+	it("refuses a read through a symlink past the plugin boundary", async () => {
+		const { dir, outsideFile, skill } = await containedFixture();
+		await fs.symlink(outsideFile, path.join(skill.baseDir, "leak.md"));
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-leak", { command: "cat skill://docs/leak.md" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
-			await expect(tool.execute("call-skill-leak", { command: "cat skill://docs" })).rejects.toThrow(
-				"resolves outside the plugin root",
-			);
+			expect(result.isError).toBe(true);
+			expect(text).not.toContain("outside contents");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

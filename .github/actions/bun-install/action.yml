@@ -77,8 +77,8 @@ runs:
       # against the shared 10 GB repo quota — letting every PR branch save its
       # own copy of the ~500 MB store duplicated it 19x, evicting the far more
       # valuable bazel disk-cache archives (which is why release darwin builds
-      # kept going cold). PRs only restore; non-PR runs (main pushes, releases,
-      # dispatches) produce the shared entry every PR can see.
+      # kept going cold). Only main saves: a tag or branch copy is readable by
+      # that ref alone, so it wastes quota; every other ref restores main's.
       - name: Restore bun store (GitHub cache)
         id: bun-cache
         if: steps.env.outputs.cache == 'gha'
@@ -118,10 +118,10 @@ runs:
            retry_cache="$(mktemp -d "${RUNNER_TEMP:-/tmp}/bun-cache-retry.XXXXXX")"
            bun install --frozen-lockfile --cache-dir="$retry_cache"
 
-      # Producer half of the split cache: only non-PR runs save, so the store
-      # exists once per lockfile generation instead of once per PR ref.
+      # Producer half of the split cache: only main saves, so the store exists
+      # once per lockfile generation instead of once per ref.
       - name: Save bun store (GitHub cache)
-        if: steps.env.outputs.cache == 'gha' && github.event_name != 'pull_request' && steps.bun-cache.outputs.cache-hit != 'true'
+        if: steps.env.outputs.cache == 'gha' && github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
            path: ~/.bun/install/cache

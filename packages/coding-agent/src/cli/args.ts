@@ -2,11 +2,11 @@
  * CLI argument parsing and help display
  */
 import * as path from "node:path";
-import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
+import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { normalizeToolNames } from "../tools/builtin-names";
+import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -81,6 +81,8 @@ export interface Args {
 	skills?: string[];
 	noRules?: boolean;
 	noTitle?: boolean;
+	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
+	noUi?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
 	messages: string[];
@@ -98,6 +100,16 @@ export interface Args {
 	 * session with the misparsed positionals as a prompt (issue #2459).
 	 */
 	unrecognizedFlags: string[];
+	/**
+	 * Usage errors for built-in enum flags (`--mode`, `--thinking`,
+	 * `--approval-mode`) given a value outside their set. Recorded rather than
+	 * thrown because the startup parse runs before extensions load, and an
+	 * extension may register a same-named flag that shadows the built-in; the
+	 * extension-aware reparse routes such a flag to {@link unknownFlags} and
+	 * records nothing. Whatever remains after that reparse is reported by
+	 * {@link reportInvalidFlagValues}.
+	 */
+	invalidFlagValues: string[];
 }
 
 /**
@@ -107,7 +119,6 @@ export interface Args {
  * (which would otherwise trip the profile bootstrap's env-init ordering).
  */
 const PARSE_DEPS: ParseDeps = {
-	logger,
 	parseThinking: parseCliThinkingLevel,
 	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
@@ -154,6 +165,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 		sessionDir: $env.PI_CODING_AGENT_SESSION_DIR || undefined,
 	};
 
@@ -277,6 +289,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noRules = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
+		} else if (arg === "--no-ui") {
+			result.noUi = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
 			result.autoApprove = true;
 		} else if (arg.startsWith("@")) {
@@ -336,15 +350,38 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	return result;
 }
 
-/** Reject requested tool names absent from the fully discovered session registry. */
+/**
+ * Reject requested tool names absent from the fully discovered session registry.
+ *
+ * The registry is already narrowed by the `--tools` filter, so it cannot say
+ * which tools *would* be available. A missing name from the built-in catalog is
+ * reported as unavailable in this session (e.g. `eval` without a working
+ * interpreter), never as unknown; the catalog is listed as "built-in tools",
+ * not as available ones.
+ */
 export function validateToolNames(requested: readonly string[] | undefined, known: readonly string[]): void {
 	if (!requested) return;
 	const knownNames = new Set(known);
-	const unknown = requested.filter(name => !knownNames.has(name));
-	if (unknown.length === 0) return;
-	throw new CliUsageError(
-		`Unknown tool${unknown.length === 1 ? "" : "s"} in --tools: ${unknown.join(", ")}. Valid tools: ${known.join(", ")}.`,
-	);
+	const missing = requested.filter(name => !knownNames.has(name));
+	if (missing.length === 0) return;
+	const builtinNames = new Set<string>(BUILTIN_TOOL_NAMES);
+	const unavailable = missing.filter(name => builtinNames.has(name));
+	const unknown = missing.filter(name => !builtinNames.has(name));
+	const lines: string[] = [];
+	if (unknown.length > 0) {
+		lines.push(`Unknown tool${unknown.length === 1 ? "" : "s"} in --tools: ${unknown.join(", ")}.`);
+		const otherRegistered = known.filter(name => !builtinNames.has(name));
+		lines.push(
+			`Built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}.` +
+				(otherRegistered.length > 0 ? ` Other registered tools: ${otherRegistered.join(", ")}.` : ""),
+		);
+	}
+	if (unavailable.length > 0) {
+		lines.push(
+			`Built-in tool${unavailable.length === 1 ? "" : "s"} unavailable in this session: ${unavailable.join(", ")}.`,
+		);
+	}
+	throw new CliUsageError(lines.join("\n"));
 }
 
 /**
@@ -363,6 +400,20 @@ export function reportUnrecognizedFlags(
 	write(`${chalk.red(`Error: unknown flag${plural}: ${flags.join(", ")}`)}\n`);
 	write(`Run \`${APP_NAME} --help\` for available flags.\n`);
 	return true;
+}
+
+/**
+ * Emit one stderr error per rejected built-in flag value and return `true`
+ * when there were any. Like {@link reportUnrecognizedFlags}, callers run this
+ * only on the extension-aware parse, so a value meant for an extension flag
+ * that shadows the built-in never trips it.
+ */
+export function reportInvalidFlagValues(
+	args: Pick<Args, "invalidFlagValues">,
+	write: (text: string) => void = text => process.stderr.write(text),
+): boolean {
+	for (const message of args.invalidFlagValues) write(`${chalk.red(`Error: ${message}`)}\n`);
+	return args.invalidFlagValues.length > 0;
 }
 
 /** Emit a clean CLI usage error without an internal stack trace. */

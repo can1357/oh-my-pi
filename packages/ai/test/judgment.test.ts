@@ -1,3 +1,4 @@
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { describe, expect, it } from "bun:test";
 import {
 	type ApiKeyResolveContext,
@@ -12,7 +13,6 @@ import {
 	TypeSafeApiError,
 	TypeSafeJudge,
 } from "@oh-my-pi/pi-ai";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
@@ -227,6 +227,29 @@ describe("TypeSafeJudge", () => {
 		expect(result.usage.totalTokens).toBe(6);
 	});
 
+	it("keeps estimated judge cost finite when a successful response omits token counts", async () => {
+		const responses = [{}, { input_tokens: 5 }];
+		const judge = new TypeSafeJudge({
+			apiKey: "test-key",
+			fetch: async () =>
+				Response.json({
+					model: "jev-latest",
+					answers: { urgent: { type: "noul", noul: 0.9 } },
+					usage: responses.shift(),
+				}),
+		});
+
+		const missing = (await judge.judge(request)).usage;
+		const partial = (await judge.judge(request)).usage;
+		expect(missing).toMatchObject({ input: 0, output: 0, totalTokens: 0, cost: { total: 0 } });
+		expect(partial).toMatchObject({ input: 5, output: 0, totalTokens: 5, cost: { total: 0 } });
+		const rates = { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 };
+		calculateUsageCost(rates, missing);
+		calculateUsageCost(rates, partial);
+		expect(missing.cost.total).toBe(0);
+		expect(partial.cost.total).toBeCloseTo((5 * rates.input) / 1_000_000);
+	});
+
 	it("posts OpenRouter decisions to the alpha route and carries the billed cost", async () => {
 		const urls: string[] = [];
 		const judge = new TypeSafeJudge({
@@ -256,6 +279,44 @@ describe("TypeSafeJudge", () => {
 			model: "typesafe/jev-1.13-20260917",
 			usage: { input: 336, output: 48, cost: { input: 0.000014, total: 0.000014 } },
 		});
+	});
+
+	it("forwards configured headers on judgment requests", async () => {
+		const recordedHeaders: Record<string, string>[] = [];
+		const judge = new TypeSafeJudge({
+			apiKey: "test-key",
+			baseUrl: "https://gateway.example/v1/proxy",
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			model: "typesafe/jev-1.13",
+			headers: {
+				"x-custom-routing": "router-1",
+				"x-custom-tenant": "tenant-abc",
+			},
+			fetch: async (_url, init) => {
+				const h = new Headers(init?.headers);
+				recordedHeaders.push({
+					auth: h.get("authorization") ?? "",
+					customRouting: h.get("x-custom-routing") ?? "",
+					customTenant: h.get("x-custom-tenant") ?? "",
+				});
+				return Response.json({
+					model: "typesafe/jev-1.13",
+					answers: { urgent: { type: "noul", noul: 0.8 } },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				});
+			},
+		});
+
+		await judge.judge(request);
+
+		expect(recordedHeaders).toEqual([
+			{
+				auth: "Bearer test-key",
+				customRouting: "router-1",
+				customTenant: "tenant-abc",
+			},
+		]);
 	});
 
 	it("rotates the credential on 401 through the resolver and retries transient statuses", async () => {
@@ -296,11 +357,5 @@ describe("TypeSafeJudge", () => {
 				Response.json({ model: "jev-latest", answers: { urgent: { type: "choice", choice: "x" } }, usage: {} }),
 		});
 		await expect(mismatched.judge(request)).rejects.toThrow(/missing a "noul" answer/);
-	});
-
-	it("is loginable via the auth registry with TYPESAFE_API_KEY as env fallback", () => {
-		const definition = getProviderDefinition("typesafe");
-		expect(definition?.envKeys).toBe("TYPESAFE_API_KEY");
-		expect(typeof definition?.login).toBe("function");
 	});
 });

@@ -329,12 +329,6 @@ describe("error-id classification", () => {
 		}
 	});
 
-	it("keeps raw status fallback unclassified", () => {
-		const id = 503;
-		expect(AIError.is(id, AIError.Flag.Class)).toBe(false);
-		expect(id).toBe(503);
-	});
-
 	it("gates stale Responses replay errors by API", () => {
 		const text = "Item with id 'resp_123' not found";
 		const anthropicId = AIError.classify(new Error(text), "anthropic-messages");

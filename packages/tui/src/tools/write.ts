@@ -21,19 +21,49 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../render/render-utils";
+import type { CoordinationDetails } from "./wait";
+import {
+	describeAgentWrite,
+	describeProcWrite,
+	renderAgentWrite,
+	renderProcWrite,
+	type ProcWriteAction,
+	type ProcWriteDetails,
+} from "./proc-render";
+import type { TspTone } from "@oh-my-pi/pi-wire";
+import { code, compact, node, span } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { diagnosticsBadge, diagnosticsSection, displayPath, errorText, fileHref, resultText } from "./native-view";
+import { describeCfgWrite, renderCfgWrite, type CfgWriteDetails } from "./cfg-render";
 import type { FileDiagnosticsResult } from "./lsp";
 import type { OutputMeta } from "./output-meta";
-import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
+import type { CardToolResult } from "./result-card";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultOptions,
+	ToolActivityContext,
+	ToolActivitySummary,
+	ToolRenderer,
+} from "./renderer";
+import { splitUrlScheme } from "./url-scheme-host";
 import { couldBecomeXdUrl, parseXdUrl } from "./xd-url";
 import {
+	describeXdevCall,
+	describeXdevResult,
 	renderXdevCall,
 	renderXdevResult,
 	xdevActivitySummary,
 	type XdevRenderDispatch,
 	type XdevMountedRenderer,
 } from "./xdev";
-import { isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
-import { REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
+import { describeResolutionDeviceCall, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
+import {
+	describeReportIssueDeviceCall,
+	REPORT_ISSUE_DEVICE_NAME,
+	renderReportIssueDeviceCall,
+} from "./report-tool-issue";
+import { pendingFileLinkPath } from "./read";
 
 /** Details returned by the write tool for transcript rendering. */
 export interface WriteToolDetails {
@@ -46,6 +76,9 @@ export interface WriteToolDetails {
 	resolvedPath?: string;
 	/** Set when the write dispatched an `xd://` tool device; drives renderer delegation. */
 	xdev?: XdevRenderDispatch;
+	message?: CoordinationDetails;
+	proc?: ProcWriteDetails;
+	cfg?: CfgWriteDetails;
 }
 
 interface WriteRenderArgs {
@@ -55,6 +88,8 @@ interface WriteRenderArgs {
 }
 
 const WRITE_PREVIEW_LINES = 6;
+/** Collapsed native write body: the first lines of the file (§7.3). */
+const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
 
 function countLines(text: string): number {
 	if (!text) return 0;
@@ -314,6 +349,141 @@ export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => XdevMountedRenderer | undefined;
 }
 
+/** Process id and operation named by the text after `proc://`. */
+function procWriteTarget(target: string): { id: string; action: ProcWriteAction } {
+	if (target.endsWith("/kill")) return { id: target.slice(0, -5), action: "kill" };
+	if (target.endsWith("/mode")) return { id: target.slice(0, -5), action: "mode" };
+	return { id: target, action: "stdin" };
+}
+
+/** Transcript card for writes to a scheme with its own UI (peer message, process control, setting change). */
+interface WriteUrlCard {
+	/** Result details field whose presence identifies this card. */
+	readonly detailsKey: "message" | "proc" | "cfg";
+	/** Compact activity line for the text after `scheme://`. */
+	activity(target: string): ToolActivitySummary;
+	/** Pending call card when `result` is undefined, else the finished result card. */
+	render(
+		url: string,
+		target: string,
+		content: unknown,
+		result: CardToolResult | undefined,
+		details: WriteToolDetails | undefined,
+		options: RenderResultOptions,
+		uiTheme: Theme,
+	): Component;
+}
+
+/** Write cards keyed by URL scheme. */
+const WRITE_URL_CARDS: Record<string, WriteUrlCard> = {
+	agent: {
+		detailsKey: "message",
+		activity: target => ({ label: "Message", detail: target === "all" ? "broadcast" : target }),
+		render: (_url, target, content, result, details, options, uiTheme) =>
+			renderAgentWrite(
+				target,
+				typeof content === "string" ? content : "",
+				result,
+				details?.message,
+				options,
+				uiTheme,
+			),
+	},
+	proc: {
+		detailsKey: "proc",
+		activity: target => {
+			const { id, action } = procWriteTarget(target);
+			return { label: "Process", detail: `${action} ${shortenPath(id)}` };
+		},
+		render: (_url, target, content, result, details, options, uiTheme) => {
+			const { id, action } = procWriteTarget(target);
+			return renderProcWrite(
+				id,
+				action,
+				typeof content === "string" ? content : undefined,
+				result,
+				details?.proc,
+				options,
+				uiTheme,
+			);
+		},
+	},
+	cfg: {
+		detailsKey: "cfg",
+		activity: target => ({ label: "Config", detail: target }),
+		render: (url, _target, content, result, details, options, uiTheme) =>
+			renderCfgWrite(url, typeof content === "string" ? content : undefined, result, details?.cfg, options, uiTheme),
+	},
+};
+
+/**
+ * Card that renders a write to `rawPath` with the text after `scheme://` as its target.
+ * Result details identify the card before the URL scheme does.
+ */
+function writeUrlCard(rawPath: string, details?: WriteToolDetails): { card: WriteUrlCard; target: string } | undefined {
+	const url = splitUrlScheme(rawPath);
+	const target = url?.rest ?? "";
+	if (details) {
+		for (const scheme in WRITE_URL_CARDS) {
+			const card = WRITE_URL_CARDS[scheme];
+			if (details[card.detailsKey] !== undefined) return { card, target };
+		}
+	}
+	if (!url || !Object.hasOwn(WRITE_URL_CARDS, url.scheme)) return undefined;
+	return { card: WRITE_URL_CARDS[url.scheme], target };
+}
+
+/** Whether a streaming lowercased path is, or could still become, a URL with its own write card. */
+function couldBecomeWriteCardUrl(lowerPath: string): boolean {
+	for (const scheme in WRITE_URL_CARDS) {
+		const prefix = `${scheme}://`;
+		if (prefix.startsWith(lowerPath) || lowerPath.startsWith(prefix)) return true;
+	}
+	return false;
+}
+
+/** Native view of a `proc://`, `agent://` or `cfg://` write. */
+function describeWriteUrl(
+	routed: { card: WriteUrlCard; target: string },
+	url: string,
+	content: unknown,
+	result: CardToolResult | undefined,
+	details: WriteToolDetails | undefined,
+): NativeToolView {
+	const body = typeof content === "string" ? content : undefined;
+	switch (routed.card.detailsKey) {
+		case "message":
+			return describeAgentWrite(routed.target, body ?? "", result, details?.message);
+		case "proc": {
+			const { id, action } = procWriteTarget(routed.target);
+			return describeProcWrite(id, action, body, result, details?.proc);
+		}
+		case "cfg":
+			return describeCfgWrite(url, body, result, details?.cfg);
+	}
+}
+
+/** Native write head shared by the call and result: `Write · path · 22 lines`, executable/diagnostics chips. */
+function writeToolHead(
+	rawPath: string,
+	content: string,
+	details?: Pick<WriteToolDetails, "madeExecutable" | "resolvedPath" | "diagnostics">,
+): NativeToolHead {
+	const lineCount = countLines(content);
+	const badges: { text: string; tone?: TspTone }[] = [];
+	if (details?.madeExecutable) badges.push({ text: "executable", tone: "success" });
+	const diagnostics = diagnosticsBadge([details?.diagnostics]);
+	if (diagnostics) badges.push(diagnostics);
+	return {
+		title: "Write",
+		target: rawPath ? displayPath(rawPath) : undefined,
+		targetKind: "path",
+		href: fileHref(details?.resolvedPath),
+		meta: lineCount > 0 ? [`${lineCount} line${lineCount === 1 ? "" : "s"}`] : undefined,
+		badges: badges.length > 0 ? badges : undefined,
+	};
+}
+
 /** Render file writes and delegated tool-device calls. */
 export const writeToolRenderer = {
 	/** Compact one-line activity: device writes read as the mounted tool (`LSP · references foo`), file writes as `Write · <path>`. */
@@ -326,6 +496,8 @@ export const writeToolRenderer = {
 					? writeArgs.path
 					: "";
 		if (!rawPath) return { label: "Write" };
+		const routed = writeUrlCard(rawPath);
+		if (routed) return routed.card.activity(routed.target);
 		const xdev = parseXdUrl(rawPath);
 		if (xdev?.name) {
 			const resolveMounted = (context.renderContext as WriteRenderContext | undefined)?.resolveXdevMounted;
@@ -347,6 +519,12 @@ export const writeToolRenderer = {
 		// A present-but-malformed path (array/object from a bad provider parse)
 		// is definitively not xd:// — fall through to the legacy frame.
 		if (args.path === undefined && args.file_path === undefined) return undefined;
+		const pathSettled = args.content !== undefined || options.argsComplete === true;
+		const hasStringPath = typeof args.file_path === "string" || typeof args.path === "string";
+		if (hasStringPath && !pathSettled && couldBecomeWriteCardUrl(rawPath.toLowerCase())) return undefined;
+		const routed = writeUrlCard(rawPath);
+		if (routed)
+			return routed.card.render(rawPath, routed.target, args.content, undefined, undefined, options, uiTheme);
 		if (rawPath && couldBecomeXdUrl(rawPath)) {
 			const xdev = parseXdUrl(rawPath);
 			// The path string is settled once the content field started streaming.
@@ -359,7 +537,11 @@ export const writeToolRenderer = {
 		const filePath = shortenPath(rawPath);
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
-		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		// The result has not resolved its target yet. Link the containing file
+		// rather than an archive member or database row selector.
+		const pathDisplay =
+			filePath && args.content !== undefined ? fileHyperlink(pendingFileLinkPath(rawPath), styledPath) : styledPath;
 		// No status icon on the head row: it's the head of the framed block, and
 		// native-scrollback commits are prefix-only — an animated glyph would pin
 		// the commit boundary at the top, and the pending hourglass just adds
@@ -412,6 +594,11 @@ export const writeToolRenderer = {
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
 	): Component {
+		const cardPath =
+			typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : "";
+		const routed = writeUrlCard(cardPath, result.details);
+		if (routed)
+			return routed.card.render(cardPath, routed.target, args?.content, result, result.details, options, uiTheme);
 		// xd:// dispatch results render as the mounted tool's own result.
 		const xdev = result.details?.xdev;
 		if (xdev) {
@@ -498,6 +685,77 @@ export const writeToolRenderer = {
 				borderColor: "borderMuted",
 			};
 		});
+	},
+	describeCall(
+		args: WriteRenderArgs,
+		options: RenderResultOptions & { renderContext?: WriteRenderContext },
+	): NativeToolView | undefined {
+		const rawPath =
+			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		// Same gating as renderCall: nothing until the path provably is not a device/card URL.
+		if (args.path === undefined && args.file_path === undefined) return undefined;
+		const pathSettled = args.content !== undefined || options.argsComplete === true;
+		const hasStringPath = typeof args.file_path === "string" || typeof args.path === "string";
+		if (hasStringPath && !pathSettled && couldBecomeWriteCardUrl(rawPath.toLowerCase())) return undefined;
+		const routed = writeUrlCard(rawPath);
+		if (routed) return describeWriteUrl(routed, rawPath, args.content, undefined, undefined);
+		if (rawPath && couldBecomeXdUrl(rawPath)) {
+			const xdev = parseXdUrl(rawPath);
+			if (!xdev?.name || args.content === undefined) return undefined;
+			if (isResolutionDeviceName(xdev.name)) return describeResolutionDeviceCall(xdev.name, args.content);
+			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return describeReportIssueDeviceCall(args.content);
+			return describeXdevCall(xdev.name, args.content, options, options.renderContext?.resolveXdevMounted);
+		}
+		const content = normalizeDisplayText(args.content);
+		return {
+			tool: writeToolHead(rawPath, content),
+			body: content
+				? [
+						code(content, {
+							lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
+							numbers: true,
+						}),
+					]
+				: [],
+			preview: NATIVE_WRITE_PREVIEW,
+		};
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
+		options: RenderResultOptions & { renderContext?: WriteRenderContext },
+		args?: WriteRenderArgs,
+	): NativeToolView | undefined {
+		const cardPath =
+			typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : "";
+		const routed = writeUrlCard(cardPath, result.details);
+		if (routed) return describeWriteUrl(routed, cardPath, args?.content, result, result.details);
+		const xdev = result.details?.xdev;
+		if (xdev) return describeXdevResult(xdev, result, options, options.renderContext?.resolveXdevMounted);
+		const rawPath =
+			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+		const fileContent = normalizeDisplayText(args?.content);
+		const isPartial = options.isPartial === true;
+		const diagnostics = isPartial ? undefined : result.details?.diagnostics;
+		const tool = writeToolHead(rawPath, fileContent, {
+			madeExecutable: !isPartial && result.details?.madeExecutable === true,
+			resolvedPath: result.details?.resolvedPath,
+			diagnostics,
+		});
+		if (result.isError) return { tool, tone: "error", body: [errorText(resultText(result))] };
+		const progressText = resultText(result);
+		const body = compact<NativeChild>([
+			isPartial &&
+				progressText.length > 0 &&
+				node("text", { spans: [span(progressText, "muted")], truncate: "end" }),
+			fileContent.length > 0 &&
+				code(fileContent, {
+					lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
+					numbers: true,
+				}),
+			diagnosticsSection(diagnostics),
+		]);
+		return { tool, body, preview: NATIVE_WRITE_PREVIEW };
 	},
 	mergeCallAndResult: true,
 	// The collapsed pending preview follows the streaming edge with a tail

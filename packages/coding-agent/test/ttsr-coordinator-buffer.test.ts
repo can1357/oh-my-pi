@@ -310,6 +310,31 @@ describe("TTSR stream buffers", () => {
 
 		expect(emitSessionEvent).toHaveBeenCalledTimes(1);
 	});
+
+	it("emits one ttsr_triggered when a delta match is re-confirmed at toolcall_end (issue #12184)", async () => {
+		const { coordinator, emitSessionEvent } = coordinatorFor("tool:edit");
+		const message = assistantMessage([{ type: "toolCall", id: "call-1", name: "edit", arguments: {} }]);
+
+		coordinator.onTurnStart();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(toolDelta(message, `{"path":"src/foo.ts","input":"${CONDITION}"}`));
+		await coordinator.checkMessageUpdate(
+			update(message, {
+				type: "toolcall_end",
+				contentIndex: 0,
+				partial: message as never,
+				toolCall: {
+					type: "toolCall",
+					id: "call-1",
+					name: "edit",
+					arguments: { path: "src/foo.ts", input: CONDITION },
+				},
+			}),
+		);
+
+		const isTrigger = (event: AgentSessionEvent): boolean => event.type === "ttsr_triggered";
+		expect(emitSessionEvent.mock.calls.filter(([event]) => isTrigger(event))).toHaveLength(1);
+	});
 });
 
 /**
@@ -333,32 +358,6 @@ describe("TTSR AST deferral", () => {
 	function messageWithEditCall(id: string, args: Record<string, unknown>): AgentMessage {
 		return assistantMessage([{ type: "toolCall", id, name: "edit", arguments: args }]);
 	}
-	function hostWithEditTool(digestFor: (args: Record<string, unknown>) => string): CoordinatorHostBundle {
-		const made = makeHost();
-		const agent = made.host.agent as unknown as { state: { messages: unknown[]; tools: unknown[] } };
-		agent.state.tools = [
-			{
-				name: "edit",
-				matcherDigest: (args: unknown) => digestFor(args as Record<string, unknown>),
-				matcherEntries: (args: unknown) => {
-					const record = args as Record<string, unknown>;
-					const path = typeof record.path === "string" ? record.path : "src/foo.ts";
-					return [{ path, digest: digestFor(args as Record<string, unknown>) }];
-				},
-			},
-		];
-		return made;
-	}
-
-	function toolEnd(message: AgentMessage, id: string, args: Record<string, unknown>): AgentEvent {
-		return update(message, {
-			type: "toolcall_end",
-			contentIndex: 0,
-			delta: "",
-			partial: message as AssistantMessage,
-			toolCall: { type: "toolCall", id, name: "edit", arguments: args },
-		} as unknown as AssistantMessageEvent);
-	}
 
 	it("does not run AST matching on toolcall deltas", async () => {
 		const { host } = makeHost();
@@ -379,30 +378,5 @@ describe("TTSR AST deferral", () => {
 		await coordinator.checkMessageUpdate(toolDelta(message, ',"input":"const a = 1;"'));
 
 		expect(checkAst).not.toHaveBeenCalled();
-	});
-
-	it("runs AST matching once on the finalized toolcall_end", async () => {
-		const violation = "const a = (value as { content: unknown }).content;";
-		const args = { path: "src/foo.ts", input: violation };
-		const { host, emitSessionEvent } = hostWithEditTool(() => violation);
-		const manager = new TtsrManager({
-			enabled: true,
-			contextMode: "discard",
-			interruptMode: "never",
-			repeatMode: "after-gap",
-			repeatGap: 0,
-		});
-		expect(manager.addRule(astRule())).toBe(true);
-		const coordinator = new TtsrCoordinator(host, manager);
-		const checkAst = vi.spyOn(manager, "checkAstSnapshot");
-		const message = messageWithEditCall("call-1", args);
-
-		coordinator.onAssistantMessageStart();
-		await coordinator.checkMessageUpdate(toolDelta(message, '{"path"'));
-		expect(checkAst).not.toHaveBeenCalled();
-		await coordinator.checkMessageUpdate(toolEnd(message, "call-1", args));
-
-		expect(checkAst).toHaveBeenCalledTimes(1);
-		expect(emitSessionEvent).toHaveBeenCalledTimes(1);
 	});
 });

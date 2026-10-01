@@ -12,6 +12,10 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import { cfgInterruptMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgFollowUpMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 /**
  * Regression guard for #11555: the RPC queue-mode path (`persist: false`)
  * must configure only the calling session — never write the machine-global
@@ -35,7 +39,7 @@ describe("AgentSession queue-mode controls are session-scoped by default", () =>
 		configPath = path.join(agentDir, "config.yml");
 
 		authStorage = await AuthStorage.create(path.join(agentDir, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 
 		model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model;
@@ -66,9 +70,9 @@ describe("AgentSession queue-mode controls are session-scoped by default", () =>
 		expect(session.steeringMode).toBe("all");
 		expect(session.followUpMode).toBe("all");
 		expect(session.interruptMode).toBe("wait");
-		expect(settings.get("steeringMode")).toBe("one-at-a-time");
-		expect(settings.get("followUpMode")).toBe("one-at-a-time");
-		expect(settings.get("interruptMode")).toBe("immediate");
+		expect(cfgSteeringMode.get(settings)).toBe("one-at-a-time");
+		expect(cfgFollowUpMode.get(settings)).toBe("one-at-a-time");
+		expect(cfgInterruptMode.get(settings)).toBe("immediate");
 		expect(settings.getGlobalSettings()).toEqual({});
 		expect(await Bun.file(configPath).exists()).toBe(false);
 	});
@@ -83,9 +87,9 @@ describe("AgentSession queue-mode controls are session-scoped by default", () =>
 		const laterSession = new AgentSession({
 			agent: new Agent({
 				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-				steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
-				followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
-				interruptMode: settings.get("interruptMode") ?? "immediate",
+				steeringMode: cfgSteeringMode.get(settings) ?? "one-at-a-time",
+				followUpMode: cfgFollowUpMode.get(settings) ?? "one-at-a-time",
+				interruptMode: cfgInterruptMode.get(settings) ?? "immediate",
 			}),
 			sessionManager: SessionManager.create(agentDir, agentDir),
 			settings,

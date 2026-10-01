@@ -3,11 +3,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{
-	ExecutionResult, Shell, builtins,
-	parser::ast,
-	sys::{self, fs::PathExt},
-};
+use brush_core::{ExecutionResult, Shell, builtins, parser::ast, pathsearch, sys};
 use clap::Parser;
 
 /// Inspect the type of a named shell item.
@@ -56,7 +52,7 @@ impl builtins::Command for TypeCommand {
 		let mut result = ExecutionResult::success();
 
 		for name in &self.names {
-			let resolved_types = self.resolve_types(context.shell, name);
+			let resolved_types = self.resolve_types(context.shell, name).await;
 
 			if resolved_types.is_empty() {
 				if !self.type_only && !self.force_path_search && !self.show_path_only {
@@ -144,7 +140,7 @@ impl builtins::Command for TypeCommand {
 }
 
 impl TypeCommand {
-	fn resolve_types<'a, SE: brush_core::ShellExtensions>(
+	async fn resolve_types<'a, SE: brush_core::ShellExtensions>(
 		&self,
 		shell: &'a Shell<SE>,
 		name: &str,
@@ -189,7 +185,9 @@ impl TypeCommand {
 
 		// Look in path.
 		if sys::fs::contains_path_separator(name) {
-			if shell.absolute_path(Path::new(name)).executable() {
+			if pathsearch::is_executable(shell.filesystem(), &shell.absolute_path(Path::new(name)))
+				.await
+			{
 				types.push(ResolvedType::File { path: PathBuf::from(name), hashed: false });
 
 				if !self.all_locations {
@@ -204,7 +202,7 @@ impl TypeCommand {
 				}
 			}
 
-			for item in shell.find_executables_in_path(name) {
+			for item in shell.find_executables_in_path(name).await {
 				types.push(ResolvedType::File { path: item, hashed: false });
 
 				if !self.all_locations {
