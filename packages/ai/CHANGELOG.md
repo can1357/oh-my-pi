@@ -33,6 +33,10 @@
 - xAI OAuth accounts with active weekly credits no longer switch away solely because an uncertain monthly counter exceeds its limit ([#13806](https://github.com/can1357/oh-my-pi/issues/13806)).
 - Cursor retries after a rejected conversation now keep the tool calls and results already completed in the turn, instead of re-sending the last message and redoing that work ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
 
+### Fixed
+
+- Strata's HTTP 400 context-limit errors (`prompt (N tokens) + max tokens (M) exceeds the context (C)` and `prompt (N tokens) leaves no room to answer in the context (C)`) are now recognized as context overflows, so overflow recovery can start even when the response carries no usage ([#13864](https://github.com/can1357/oh-my-pi/pull/13864) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
