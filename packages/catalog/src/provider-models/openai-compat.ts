@@ -7774,9 +7774,11 @@ function baiEndpointTypes(entry: OpenAICompatibleModelRecord): readonly string[]
  * The gateway publishes no limits, tariffs, or reasoning metadata, only each
  * row's `supported_endpoint_types`. A row that serves the OpenAI chat wire is a
  * chat model whose intrinsic capabilities — context window, output limit,
- * reasoning, thinking ladder, modalities — are recovered from any bundled
- * upstream entry via the canonical reference index; pricing is deliberately
- * never borrowed across providers, so cost stays zeroed. A row whose only
+ * reasoning flag, modalities — are recovered from any bundled upstream entry
+ * via the canonical reference index. The reference's thinking surface and
+ * pricing are deliberately never borrowed: both are provider-specific (effort
+ * routing to another host's model ids, wire mode), so B.AI's own KDL policy
+ * resolves thinking and cost stays zeroed. A row whose only
  * surface is `decisions` (TypeSafe Jev) answers System One judgments on
  * `POST {baseUrl}/decisions`, the OpenRouter Decisions wire shape, so it is
  * routed to `openrouter-decisions` as a judge. Every other row (image
@@ -7796,9 +7798,7 @@ function mapBaiModel(entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api
 		};
 	}
 	if (!types.includes(BAI_OPENAI_ENDPOINT) || types.includes("image-generation")) return null;
-	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as
-		| ModelSpec<"openai-completions">
-		| undefined;
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex());
 	if (!canonical) return defaults;
 	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
 	const maxTokens =
@@ -7810,7 +7810,7 @@ function mapBaiModel(entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api
 		name: toModelName(entry.name, canonical.name ?? defaults.name),
 		reasoning: canonical.reasoning,
 		input: canonical.input,
-		...(canonical.thinking && { thinking: canonical.thinking }),
+		// `thinking` is intentionally absent; see above.
 		contextWindow,
 		maxTokens,
 	};

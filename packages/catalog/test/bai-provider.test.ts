@@ -78,10 +78,28 @@ describe("B.AI gateway support", () => {
 		// The gateway publishes none of this; without the reference fill every row
 		// would be non-reasoning with unknown limits, so no effort is ever sent.
 		expect(model?.reasoning).toBe(true);
-		expect(model?.thinking).toMatchObject({ mode: "effort" });
 		expect(model?.contextWindow).toBeGreaterThan(0);
+		expect(buildModel(model!).thinking).toMatchObject({ mode: "effort" });
 		// Another provider's tariff does not apply to B.AI billing.
 		expect(model?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+
+	test("does not inherit another host's thinking surface from a colliding reference", async () => {
+		// Cursor's bundled `claude-4.5-sonnet` reference routes every non-off effort
+		// to `claude-4.5-sonnet-thinking`, an id B.AI never advertises; Anthropic
+		// hosts publish `budget` mode, which an openai-completions row cannot send.
+		const fetch: FetchImpl = async () =>
+			Response.json({
+				data: ["claude-4.5-sonnet", "claude-haiku-4.5"].map(id => ({ id, supported_endpoint_types: ["openai"] })),
+			});
+		const rows = await baiModelManagerOptions({ apiKey: "sk-bai-test", fetch }).fetchDynamicModels?.();
+
+		expect(rows?.map(row => row.id)).toEqual(["claude-4.5-sonnet", "claude-haiku-4.5"]);
+		for (const row of rows ?? []) {
+			const built = buildModel(row);
+			expect(built.thinking?.mode, row.id).toBe("effort");
+			expect(built.thinking, row.id).not.toHaveProperty("effortRouting");
+		}
 	});
 
 	test("keeps decision rows out of chat when rebuilt without a discovery kind", () => {
@@ -107,34 +125,29 @@ describe("B.AI gateway support", () => {
 		expect(login).toBeDefined();
 
 		const { calls, authorizations, fetch } = baiModelsFetch();
-		const previousFetch = globalThis.fetch;
-		globalThis.fetch = fetch as typeof globalThis.fetch;
-		try {
-			const credential = await login?.({
-				onAuth() {},
-				onPrompt: async () => "Bearer sk-bai-pasted",
-			});
-			expect(credential).toBe("sk-bai-pasted");
-			expect(calls).toEqual(["https://api.b.ai/v1/models"]);
-			expect(authorizations).toEqual(["Bearer sk-bai-pasted"]);
-		} finally {
-			globalThis.fetch = previousFetch;
-		}
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign((input: string | URL | Request, init?: RequestInit) => fetch(input, init), {
+				preconnect: globalThis.fetch.preconnect,
+			}),
+		);
+		const credential = await login?.({
+			onAuth() {},
+			onPrompt: async () => "Bearer sk-bai-pasted",
+		});
+		expect(credential).toBe("sk-bai-pasted");
+		expect(calls).toEqual(["https://api.b.ai/v1/models"]);
+		expect(authorizations).toEqual(["Bearer sk-bai-pasted"]);
 	});
 
 	test("rejects a key the models endpoint refuses", async () => {
 		const login = getProviderDefinition("bai")?.login;
-		const previousFetch = globalThis.fetch;
-		globalThis.fetch = (async () =>
-			Response.json(
-				{ error: { message: "Invalid token", type: "api_error" } },
-				{ status: 401 },
-			)) as unknown as typeof globalThis.fetch;
-		try {
-			await expect(login?.({ onAuth() {}, onPrompt: async () => "sk-bai-bad" })).rejects.toThrow(/401/);
-		} finally {
-			globalThis.fetch = previousFetch;
-		}
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async () => Response.json({ error: { message: "Invalid token", type: "api_error" } }, { status: 401 }),
+				{ preconnect: globalThis.fetch.preconnect },
+			),
+		);
+		await expect(login?.({ onAuth() {}, onPrompt: async () => "sk-bai-bad" })).rejects.toThrow(/401/);
 	});
 
 	test("scopes the roster cache to the key and the normalized endpoint", () => {

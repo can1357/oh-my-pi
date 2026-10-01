@@ -2264,7 +2264,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 
 ### Special casings
 - Uses `openai-completions` for every chat row; `GET /v1/models` publishes only `supported_endpoint_types`, so the manager routes rows by that list. Rows that advertise `decisions` without `openai` (TypeSafe Jev) become `openrouter-decisions` judges served at `POST /v1/decisions`; image-generation and Anthropic-only rows are skipped.
-- Chat rows recover context window, output limit, reasoning, thinking ladder, and modalities from the canonical reference index; pricing is never borrowed, so cost stays zero.
+- Chat rows recover context window, output limit, reasoning flag, and modalities from the canonical reference index; the reference's thinking surface and pricing are never borrowed (effort routing and wire mode are host-specific), so thinking resolves from B.AI's own rules and cost stays zero.
 
 ### Auth & usage
 - Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/bai.kdl`. Environment keys: `BAI_API_KEY`. Validation uses `models-endpoint`.
