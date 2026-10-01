@@ -52,7 +52,8 @@ export interface Skill {
 	/**
 	 * When `true`, the skill is loaded and reachable via `skill://<name>` and
 	 * (when enabled) `/skill:<name>`, but is excluded from the rendered system
-	 * prompt's `<skills>` listing.
+	 * prompt's `<skills>` listing. Set from `hide`/`disableModelInvocation`
+	 * frontmatter or a `skills.optInSkills` match.
 	 */
 	hide?: boolean;
 	/**

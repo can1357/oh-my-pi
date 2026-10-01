@@ -563,6 +563,21 @@ enabled: false
 				manualInPrompt: true,
 			});
 		});
+
+		it("does not name an opt-in skill in the unknown-skill error the model reads", async () => {
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [tempSkillsDir],
+				optInSkills: ["manual-skill"],
+			});
+			const error = await InternalUrlRouter.instance()
+				.resolve("skill://typo", { skills })
+				.then(
+					() => undefined,
+					(e: Error) => e.message,
+				);
+			expect(error).toBe("Unknown skill: typo\nAvailable: visible-skill");
+		});
 	});
 
 	it("should expand ~ in customDirectories", async () => {
