@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tryAcquireFileLock`, a non-blocking `acquireFileLock` that returns `null` while another holder owns the lock ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+- Added an `unref` option to `AsyncDrain` so long batch windows do not keep the process alive ([#14001](https://github.com/can1357/oh-my-pi/pull/14001) by [@H4vC](https://github.com/H4vC))
 
 ## [18.4.4] - 2026-09-29
 

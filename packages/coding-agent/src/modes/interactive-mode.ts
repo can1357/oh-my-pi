@@ -449,6 +449,8 @@ type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
+/** Startup emits several status-bar changes within a second; persist only the settled one. */
+const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
 const DEFAULT_WORKING_MESSAGE = "Working…";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
@@ -1240,6 +1242,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
+	#composerStatusPersistTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
 	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
@@ -3583,8 +3586,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setPreferences({ composerShape: shape });
 		this.statusLine.attachToEditor(this.editor, style);
 		this.updateEditorBorderColor();
-		this.#persistComposerStatus();
+		this.#scheduleComposerStatusPersist();
 		this.ui.requestRender();
+	}
+
+	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
+	#scheduleComposerStatusPersist(): void {
+		if (this.#composerStatusPersistTimer) return;
+		this.#composerStatusPersistTimer = setTimeout(() => {
+			this.#composerStatusPersistTimer = undefined;
+			this.#persistComposerStatus();
+		}, COMPOSER_STATUS_PERSIST_DELAY_MS);
+		this.#composerStatusPersistTimer.unref();
 	}
 
 	/**
@@ -6714,6 +6727,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#recorder?.stop();
 		this.#recorder = undefined;
 		// Last chance to refresh the startup status placeholder for the next launch.
+		clearTimeout(this.#composerStatusPersistTimer);
+		this.#composerStatusPersistTimer = undefined;
 		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
@@ -7269,7 +7284,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const providerName = this.session.model?.provider ?? "Unknown";
 		this.composer.updateWelcome({ modelName, providerName });
 		this.#persistComposerWelcome(modelName, providerName);
-		this.#persistComposerStatus();
+		this.#scheduleComposerStatusPersist();
 	}
 
 	#syncConfigWarningHeader(): void {
