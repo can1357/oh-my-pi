@@ -773,6 +773,27 @@ export class RpcClient {
 	}
 
 	/**
+	 * Cancel one running subagent (foreground or background) without aborting
+	 * the session. Resolves `false` when the subagent is unknown or already
+	 * finished.
+	 */
+	async cancelSubagent(subagentId: string): Promise<boolean> {
+		const response = await this.#send({ type: "cancel_subagent", subagentId });
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
+
+	/**
+	 * Send a message to a running subagent as its user, the same way Agent Hub
+	 * chat does: a mid-turn subagent is steered at its next step boundary and one
+	 * between turns starts its next turn. Resolves once the message is queued or
+	 * the subagent's turn starts; rejects when the subagent is not running or the
+	 * message is dropped or refused before that.
+	 */
+	async steerSubagent(subagentId: string, message: string): Promise<void> {
+		this.#getData(await this.#send({ type: "steer_subagent", subagentId, message }));
+	}
+
+	/**
 	 * Set model by provider and ID.
 	 */
 	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
@@ -970,6 +991,26 @@ export class RpcClient {
 	async getLastAssistantText(): Promise<string | null> {
 		const response = await this.#send({ type: "get_last_assistant_text" });
 		return this.#getData<{ text: string | null }>(response).text;
+	}
+
+	/**
+	 * Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset
+	 * into `text`), from the `spelling.autocomplete` engine; `null` when none applies.
+	 */
+	async predictWord(text: string, cursor: number): Promise<string | null> {
+		// The server runs one prediction at a time per session and holds at most one
+		// more behind it, so this request may wait out an in-flight cold request
+		// (up to 3 daemon-start rounds of 30s plus a 30s first completion) before
+		// its own 30s completion: ~150s. Outlast that so the server's answer, not
+		// our timeout, decides.
+		const response = await this.#send({ type: "predict_word", text, cursor }, 155_000);
+		return this.#getData<{ suffix: string | null }>(response).suffix;
+	}
+
+	/** Report a shown suggestion the user accepted or typed past, with the text and cursor it was shown at. */
+	async predictWordFeedback(text: string, cursor: number, suggestion: string, accepted: boolean): Promise<void> {
+		const response = await this.#send({ type: "predict_word_feedback", text, cursor, suggestion, accepted });
+		this.#getData(response);
 	}
 
 	/**

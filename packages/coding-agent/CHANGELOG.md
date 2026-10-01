@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the RPC `cancel_subagent` command (and `RpcClient.cancelSubagent()`) to hard-kill one running subagent, foreground or background, without aborting the session ([#13481](https://github.com/can1357/oh-my-pi/pull/13481) by [@andrebrait](https://github.com/andrebrait)); supersedes [#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)
+- Added the RPC `steer_subagent` command (and `RpcClient.steerSubagent()`) to message a running subagent as its user, like Agent Hub chat ([#13482](https://github.com/can1357/oh-my-pi/pull/13482) by [@andrebrait](https://github.com/andrebrait)); ported from [#10427](https://github.com/can1357/oh-my-pi/pull/10427) by [@agenticfreedom](https://github.com/agenticfreedom)
+- Added `predict_word` and `predict_word_feedback` RPC commands so hosts with their own composer (web and IDE clients) can show the same ghost-text word completion as the terminal editor, using the `spelling.autocomplete` engine and its prose gates ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
+- Added an opt-in RPC ask dialog: after `set_ask_dialog` enables it, the `ask` tool sends all its questions in one `ask` extension UI request and takes the answers back in one `answers` response, so hosts can render every question with checkboxes or radio buttons and submit them together; hosts that don't opt in keep the one-`select`-per-choice prompts ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
+
+### Changed
+
+- RPC mode now sends a `cancel` extension UI request (with `targetId`) when omp's own dialog timeout elapses, for `select`, `confirm`, `input`, and `ask` dialogs, so hosts can close stale dialogs ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

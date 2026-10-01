@@ -1519,7 +1519,10 @@ export class TUI extends Container {
 			this.#native.resume(hello);
 			return;
 		}
-		this.#native = new NativeBackend(this.#nativeHost(), hello, { mirror: this.#debugServer !== undefined });
+		this.#native = new NativeBackend(this.#nativeHost(), hello, {
+			mirror: this.#debugServer !== undefined,
+			scheduler: this.#renderScheduler === DEFAULT_RENDER_SCHEDULER ? undefined : this.#renderScheduler,
+		});
 		this.#native.start();
 	}
 

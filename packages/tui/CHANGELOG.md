@@ -6,6 +6,16 @@
 
 - Fixed the Nerd Font status-line brand icon rendering as a rotating arrow instead of π ([#11802](https://github.com/can1357/oh-my-pi/issues/11802), [#12570](https://github.com/can1357/oh-my-pi/pull/12570) by [@kouhe3](https://github.com/kouhe3)).
 
+### Added
+
+- Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose gates as ghost-text word completion ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.4.8] - 2026-10-01
+
+### Fixed
+
+- Fixed native-terminal (TSP) frames held back by unacknowledged credits waiting for an unrelated render after the 5-second stall fallback expired; a credit-blocked change now renders as soon as the oldest frame counts as stalled.
+
 ## [18.4.7] - 2026-10-01
 
 ### Added
