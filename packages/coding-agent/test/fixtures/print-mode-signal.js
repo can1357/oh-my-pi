@@ -20,6 +20,9 @@ const session = {
 	disableStopTimeTodoReminders() {},
 	setTextOutputCommitted() {},
 	async waitForIdle() {},
+	getQueuedMessages() {
+		return { steering: [], followUp: [] };
+	},
 	async prompt() {
 		process.kill(process.pid, "SIGTERM");
 		await Promise.withResolvers().promise;
