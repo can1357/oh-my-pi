@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `model.toolCallLoopGuard.compactAfter` (off by default): once the tool-call loop guard's redirect is ignored, the session compacts and then stops the turn if the model still repeats the same tool call ([#13955](https://github.com/can1357/oh-my-pi/pull/13955) by [@STRML](https://github.com/STRML))
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
@@ -11,6 +15,11 @@
 - Added queued-message controls to the RPC clients and session API, including promotion of queued follow-ups to steering messages without duplicating text or losing attachments, plus explicit steering or follow-up behavior for prompts sent while the agent is busy.
 - Added support for keeping Claude prompt caches warm on Amazon Bedrock and Bedrock Mantle according to configured model cache lifetimes and retention settings.
 - In Tern terminals, the effort indicator now visualizes the selected thinking level and becomes a fireball at the maximum level.
+- Added JobsSheet overlay for viewing live background jobs without transcript interruption
+- Added agent lineage tracking, enabling navigation between subagents and the main session via a native composer header
+- Added `promote_queued_message` to RPC, with `promoteQueuedMessage()` on the session and TypeScript RPC client and `promote_queued_message()` on the Python RPC client, so a queued follow-up can become a steering message without duplicating its text or losing attachments ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
+- The TypeScript RPC client's `prompt()` accepts a `streamingBehavior` (`"steer"` or `"followUp"`) for prompts sent while the agent is busy ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
+- Claude prompt caches can now stay warm on Amazon Bedrock and Bedrock Mantle, respecting configured per-model cache lifetimes as well as cache retention ([#13871](https://github.com/can1357/oh-my-pi/pull/13871) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Changed
 

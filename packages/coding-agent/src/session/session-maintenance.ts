@@ -114,6 +114,7 @@ import {
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
+	cfgCompactionMidTurnEnabled,
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
 } from "./context-settings";
@@ -2737,6 +2738,71 @@ export class SessionMaintenance {
 			messagesBefore,
 			messagesAfter: activeMessages.length,
 		});
+	}
+
+	/**
+	 * Compact the active history for the tool-call loop ladder.
+	 *
+	 * Unlike {@link maintainContextMidRun} this ignores the token count and the
+	 * Auto-Compact trigger: the caller (the primary session's loop guard) has
+	 * already decided that a repeated tool call must lose context. It still
+	 * honors the user's compaction configuration, so it does nothing when
+	 * `compaction.enabled` is false, no method is configured, or
+	 * `compaction.midTurnEnabled` is false — the ladder must not reintroduce a
+	 * mid-turn compaction the user turned off.
+	 *
+	 * Two deliberate omissions from the mid-run path, both because this rung is
+	 * not a context-pressure rescue:
+	 *
+	 * - `#midTurnCompactionDeadEnds` / `#midTurnDeadEndPendingPrePrompt` are not
+	 *   touched. Those exist to stop the token-triggered path retrying a rescue
+	 *   that cannot make progress; this path retries nothing, because a
+	 *   compaction that rewrote no history leaves `#compactedThisEpisode` false
+	 *   and the ladder keeps steering instead of compacting again.
+	 * - The cut is an ordinary threshold cut, so `findCutPoint` keeps the newest
+	 *   `compaction.keepRecentTokens` worth of history. When the repeated call
+	 *   itself sits inside that suffix the summary covers older turns and the
+	 *   repeated call stays verbatim; the rung still shrinks the context the model
+	 *   replays from and is followed by the redirect, with the abort rung above it.
+	 *   Excising the looping turns themselves would be a different cut policy.
+	 *
+	 * @returns true when compaction actually rewrote the active history.
+	 */
+	async compactForToolLoop(
+		activeMessages: AgentMessage[],
+		signal: AbortSignal | undefined,
+		context: AgentTurnEndContext | undefined,
+	): Promise<boolean> {
+		if (
+			signal?.aborted ||
+			this.#host.isDisposed() ||
+			this.isCompacting ||
+			this.#host.isGeneratingHandoff() ||
+			!context?.willContinue
+		)
+			return false;
+		if (cfgCompactionMidTurnEnabled.get(this.#host.settings) === false) return false;
+
+		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return false;
+		if (signal?.aborted || this.#host.isDisposed()) return false;
+
+		const messagesBefore = activeMessages.length;
+		const firstBefore = activeMessages[0];
+		const result = await this.runAutoCompaction("threshold", false, false, false, {
+			autoContinue: false,
+			suppressContinuation: true,
+			phase: "mid_turn",
+			detachPostCommit: true,
+		});
+		if (signal?.aborted) return false;
+
+		const compactedMessages = this.#host.agent.state.messages;
+		if (compactedMessages !== activeMessages) {
+			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+			invalidateConvertToLlmArrayCache(activeMessages);
+		}
+		if (result.historyRewritten !== undefined) return result.historyRewritten;
+		return activeMessages.length !== messagesBefore || activeMessages[0] !== firstBefore;
 	}
 	/**
 	 * Check if context maintenance or promotion is needed and run it.

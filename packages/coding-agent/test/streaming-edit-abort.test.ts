@@ -32,6 +32,7 @@ function createGuard(
 		emitNotice() {},
 		schedulePostPromptTask() {},
 		discardAssistantTurn() {},
+		compactForToolLoop: async () => false,
 	});
 	return { guard, aborts };
 }

@@ -319,6 +319,19 @@ export const cfgModelToolCallLoopGuardThreshold = register({
 	},
 });
 
+export const cfgModelToolCallLoopGuardCompactAfter = register({
+	id: "model.toolCallLoopGuard.compactAfter",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Tool-Call Loop Compact After",
+		description:
+			"Extra identical tool calls, beyond the threshold, before the session is compacted (0 turns this off). Twice this many triggers an abort",
+	},
+});
+
 export const cfgModelToolCallLoopGuardExemptTools = register({
 	id: "model.toolCallLoopGuard.exemptTools",
 	type: "array",

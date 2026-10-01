@@ -23,6 +23,7 @@ import { cfgEditStreamingAbort } from "../edit/settings";
 import {
 	cfgModelLoopGuardEnabled,
 	cfgModelLoopGuardToolCallReminder,
+	cfgModelToolCallLoopGuardCompactAfter,
 	cfgModelToolCallLoopGuardEnabled,
 	cfgModelToolCallLoopGuardExemptTools,
 	cfgModelToolCallLoopGuardThreshold,
@@ -48,6 +49,39 @@ export interface StreamGuardsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
 	discardAssistantTurn(message: AssistantMessage): void;
+	/** Compacts mid-run for the tool-call loop ladder; returns true when history was rewritten. */
+	compactForToolLoop(
+		messages: AgentMessage[],
+		signal: AbortSignal | undefined,
+		context: AgentTurnEndContext | undefined,
+	): Promise<boolean>;
+}
+
+/** The rung the tool-call loop ladder reaches for one detection. */
+export type ToolLoopRung = "steer" | "compact" | "abort";
+
+/**
+ * Maps an identical-tool-call run to its rung. `compactAfter <= 0` disables the
+ * ladder entirely (steer forever). Otherwise the run compacts once at
+ * `threshold + compactAfter` and aborts at `threshold + 2 * compactAfter` when
+ * that compaction actually rewrote history.
+ *
+ * Both bounds are normalized exactly as {@link ToolCallLoopGuard} normalizes its
+ * threshold (`Math.max(1, Math.trunc(...))`), so a fractional or non-positive
+ * setting cannot shift the rungs out of alignment with the reported count.
+ */
+export function toolLoopRung(
+	count: number,
+	threshold: number,
+	compactAfter: number,
+	compactedThisEpisode: boolean,
+): ToolLoopRung {
+	const minCount = Math.max(1, Math.trunc(threshold));
+	const extra = Math.max(0, Math.trunc(compactAfter));
+	if (extra <= 0) return "steer";
+	if (count >= minCount + 2 * extra && compactedThisEpisode) return "abort";
+	if (count === minCount + extra && !compactedThisEpisode) return "compact";
+	return "steer";
 }
 
 /** Guards streamed edit calls against invalid final previews. */
@@ -125,19 +159,51 @@ export class LoopGuards {
 	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
 	#toolCallLoopGuardSettingsKey: string | undefined;
+	#compactedThisEpisode = false;
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
 	}
 
 	/** Records a completed turn and injects a redirect when calls repeat. */
-	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): void {
+	async recordTurn(
+		messages: AgentMessage[],
+		context: AgentTurnEndContext | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<void> {
 		if (context?.message.role !== "assistant") return;
 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
 		});
-		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
+		if (!detection) {
+			this.#compactedThisEpisode = false;
+			return;
+		}
+		// A detection at count 1 is the first turn of a new run (possible when the
+		// threshold is 1): the previous episode's compaction must not leak into it.
+		if (detection.count <= 1) this.#compactedThisEpisode = false;
+		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const compactAfter = cfgModelToolCallLoopGuardCompactAfter.get(this.#host.settings);
+		const rung = toolLoopRung(detection.count, threshold, compactAfter, this.#compactedThisEpisode);
+		if (rung === "abort") {
+			logger.warn("tool-call loop guard stopped the turn", {
+				toolName: detection.toolName,
+				count: detection.count,
+			});
+			this.#host.emitNotice(
+				"warning",
+				`Stopped: ${detection.toolName} was called ${detection.count} times in a row, even after compacting context.`,
+				"loop-guard",
+			);
+			this.#host.agent.abort("Stopped by tool-call loop guard");
+			return;
+		}
+		if (rung === "compact") {
+			const rewritten = await this.#host.compactForToolLoop(messages, signal, context);
+			this.#compactedThisEpisode = rewritten;
+		}
+		this.#injectToolCallLoopRedirect(messages, detection);
 	}
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
@@ -159,6 +225,9 @@ export class LoopGuards {
 		if (cfgModelToolCallLoopGuardEnabled.get(this.#host.settings) !== true) {
 			this.#toolCallLoopGuard = undefined;
 			this.#toolCallLoopGuardSettingsKey = undefined;
+			// A disabled guard owns no episode, so the compaction rung must not
+			// inherit a live history from before it was turned off.
+			this.#compactedThisEpisode = false;
 			return undefined;
 		}
 		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
@@ -169,6 +238,9 @@ export class LoopGuards {
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
 			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
+			// A rebuilt detector starts a fresh count, so any episode it was
+			// tracking is gone with it.
+			this.#compactedThisEpisode = false;
 		}
 		return this.#toolCallLoopGuard;
 	}
