@@ -935,6 +935,13 @@ fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
 	}
 }
 
+/// Create an empty git repository at `dir`, creating the directory first.
+pub fn init(dir: &Path) -> Result<()> {
+	fs::create_dir_all(dir)?;
+	gix::init(dir).map_err(|e| Error::backend("git init", e))?;
+	Ok(())
+}
+
 /// Sever a copied linked worktree from its source metadata without copying
 /// objects.
 pub fn detach_git_dir(

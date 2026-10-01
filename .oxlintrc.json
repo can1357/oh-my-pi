@@ -51,6 +51,8 @@
 		"packages/stats/test/**",
 		"packages/snapcompact/research/**",
 		"packages/coding-agent/src/export/html/**",
+		"packages/coding-agent/src/tutorials/*/fixture/**",
+		"packages/coding-agent/src/tutorials/*/commits/**",
 		"**/*.js",
 		"**/*.mjs",
 		"**/*.cjs",

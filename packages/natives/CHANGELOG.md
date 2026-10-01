@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `vcs.init(dir)` to create an empty git repository ([#13990](https://github.com/can1357/oh-my-pi/pull/13990))
+
 ## [18.4.7] - 2026-10-01
 
 ### Fixed

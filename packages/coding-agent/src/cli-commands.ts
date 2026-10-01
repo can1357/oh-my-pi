@@ -273,6 +273,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.ttsrHelp,
 	},
 	{
+		name: "tutorial",
+		load: () => import("./commands/tutorial").then(m => m.default),
+		help: commandHelp.tutorialHelp,
+	},
+	{
 		name: "worktree",
 		load: () => import("./commands/worktree").then(m => m.default),
 		aliases: ["wt"],

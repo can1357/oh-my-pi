@@ -156,6 +156,10 @@ export const ttsrHelp = {
 	description: "Inspect and test Time-Traveling Stream Rules (TTSR)",
 } satisfies CommandMetadata;
 
+export const tutorialHelp = {
+	description: "Start an interactive lesson in a throwaway repo (same as /tutorial <id>)",
+} satisfies CommandMetadata;
+
 export const updateHelp = { description: "Check for and install updates" } satisfies CommandMetadata;
 
 export const usageHelp = {

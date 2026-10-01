@@ -612,6 +612,7 @@ async function runInteractiveMode(
 	joinLink?: string,
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
+	tutorialId?: string,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -723,6 +724,11 @@ async function runInteractiveMode(
 			// Join failure returns to the local session; success still needs the
 			// controller observing its eventual restoration without hosting replicas.
 			mode.collabController.autoStart();
+		}
+		// `omp tutorial [<id>]`: same builtin path as a typed `/tutorial`.
+		if (tutorialId !== undefined) {
+			const executeBuiltinSlashCommand = await loadBuiltinSlashCommandExecutor();
+			await executeBuiltinSlashCommand(`/tutorial ${tutorialId}`.trimEnd(), { ctx: mode });
 		}
 		// Keep guest mutations gated through setup dialogs and transcript replay,
 		// not just init. Only a successful outer startup opens the room for input.
@@ -2523,6 +2529,7 @@ export async function runRootCommand(
 						parsedArgs.join,
 						startDeferredStartupWork,
 						startupLease,
+						parsedArgs.tutorial,
 					);
 				} finally {
 					startupLease?.dispose();
