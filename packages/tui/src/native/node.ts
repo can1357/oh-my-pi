@@ -13,7 +13,7 @@
  * See `packages/wire/src/tsp.ts` for the wire vocabulary and
  * `crates/tern/SURFACE_PROTOCOL.md` (Stencil repository) for the spec.
  */
-import type { TspEvent, TspKind, TspProps, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
 
 /** A described node: a wire node minus its id, with components allowed as children. */
@@ -33,8 +33,22 @@ export type NativeNode = {
 		 * added. Key a node by what it points at to reveal it again on a move.
 		 */
 		readonly reveal?: "start" | "end" | "nearest";
+		/**
+		 * Keyboard scrolling forwarded to the terminal (PgUp/PgDn/End reach the
+		 * program): moves the scroller at or above the node by `by` whenever
+		 * `n` differs from the previous description of the same node. Bump `n`
+		 * per key press; presses between two frames repeat the latest `by` once
+		 * each (`start`/`end` once). A freshly added node never scrolls.
+		 */
+		readonly scroll?: NativeScroll;
 	};
 }[TspKind];
+
+/** A {@link NativeNode.scroll} request. */
+export interface NativeScroll {
+	readonly by: TspScrollBy;
+	readonly n: number;
+}
 
 /** A child slot: a described node, or a component that describes itself. */
 export type NativeChild = NativeNode | Component;

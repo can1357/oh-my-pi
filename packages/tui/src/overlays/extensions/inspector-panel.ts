@@ -6,7 +6,10 @@
  * kind-specific surface → contents → boring config.
  */
 import * as os from "node:os";
+import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
+import { code, col, compact, keyed, kv, node, span, stableKey, text } from "../../native/describe";
+import type { NativeChild, NativeNode } from "../../native/node";
 import { visibleWidth, wrapTextWithAnsi } from "../../utils";
 import { KeyValueList } from "../../components/key-value-list";
 import { Section } from "../../components/section";
@@ -41,6 +44,7 @@ import {
 	formatMcpHealthLabel,
 	isDiscoveredMcpServer,
 	type MCPConnectionHealth,
+	type MCPRuntimeCatalogItem,
 	type MCPRuntimeSource,
 	snapshotMcpRuntime,
 	visibleMcpTools,
@@ -61,6 +65,27 @@ interface KindView {
 	preview?: { heading: string; text: string };
 	config: string[];
 }
+
+/** {@link KindView} as native nodes: the same grammar, semantic instead of pre-styled lines. */
+interface NativeKindView {
+	title?: string;
+	description?: string;
+	guidance?: string;
+	/** Runtime facts ahead of the enablement status (MCP health, server, website, skill visibility). */
+	runtime: [string, TspText | undefined][];
+	/** The runtime facts carry a health line: the status shows only when not active (the ANSI `runtimeLine`). */
+	health?: boolean;
+	sections: NativeNode[];
+	preview?: { heading: string; text: string };
+	config: [string, TspText | undefined][];
+}
+
+const MCP_HEALTH_STYLE: Record<MCPConnectionHealth, string> = {
+	connected: "success",
+	connecting: "muted",
+	disconnected: "dim",
+	inactive: "warning",
+};
 
 const PREVIEW_LINE_BUDGET = PREVIEW_LIMITS.EXPANDED_LINES;
 const MCP_TOOL_BUDGET = PREVIEW_LIMITS.COLLAPSED_ITEMS;
@@ -122,6 +147,341 @@ export class InspectorPanel implements Component {
 		this.#width = width;
 		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		return this.#renderExtension(this.#extension, width);
+	}
+
+	/**
+	 * The selected extension as native preview nodes, in the same order as
+	 * {@link render}: identity, runtime/enablement and origin facts,
+	 * description, guidance, kind sections, content preview, config. The
+	 * collapsed budgets follow {@link toggleExpanded} like the ANSI view.
+	 */
+	describePreview(): NativeNode[] {
+		const ext = this.#extension;
+		if (!ext) {
+			return [text([span("Select an extension to view details", "muted")], { wrap: "word" })];
+		}
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		const view = this.#nativeKindView(ext);
+		const name = sanitizeDisplayLine(ext.displayName);
+		const title = sanitizeDisplayLineField(view.title);
+		const levelLabel = ext.source.level === "user" ? "User" : ext.source.level === "project" ? "Project" : "Native";
+		const filePath = sanitizeDisplayText(ext.path);
+		const facts = kv([
+			...view.runtime,
+			["Status", view.health && ext.state === "active" ? undefined : this.#nativeStatus(ext)],
+			["Origin", `via ${sanitizeDisplayLine(ext.source.providerName)} (${levelLabel})`],
+			[
+				"Path",
+				[
+					span(
+						sanitizeDisplayText(shortenPath(ext.path, os.homedir())),
+						"path dim",
+						filePath.startsWith("/") ? { href: `file://${filePath}` } : undefined,
+					),
+				],
+			],
+		]);
+		const out: NativeNode[] = compact<NativeNode>([
+			node("text", { text: name, role: "omp.picker.title" }, undefined, "title"),
+			title && title !== name ? node("text", { spans: [span(title, "muted")] }, undefined, "subtitle") : undefined,
+			facts && keyed(facts, "facts"),
+			this.#nativeShortText(view.description, "description"),
+			this.#nativeShortText(view.guidance, "guidance"),
+			...view.sections,
+		]);
+		if (view.preview) out.push(this.#nativePreviewSection(view.preview.heading, view.preview.text));
+		const config = kv(view.config);
+		if (config) out.push(keyed(config, "config"));
+		return out;
+	}
+
+	#nativeStatus(ext: Extension): TspSpan[] {
+		switch (ext.state) {
+			case "active":
+				return [span(`${theme.status.enabled} ${enablementLabel(ext.state)}`, "success")];
+			case "disabled":
+				return [span(`${theme.status.disabled} ${enablementLabel(ext.state, ext.disabledReason)}`, "dim")];
+			case "shadowed":
+				return [
+					span(
+						`${theme.status.shadowed} ${enablementLabel(ext.state, ext.disabledReason, ext.shadowedBy)}`,
+						"warning",
+					),
+				];
+		}
+	}
+
+	/** Description/guidance prose, clamped to the inline budget until expanded. */
+	#nativeShortText(value: string | undefined, key: string): NativeNode | undefined {
+		const cleaned = sanitizeDisplayField(value);
+		if (!cleaned) return undefined;
+		return node(
+			"text",
+			{
+				text: sanitizeDisplayText(cleaned),
+				wrap: "word",
+				lines: this.#expanded ? undefined : MCP_INLINE_DESC_LINES,
+			},
+			undefined,
+			key,
+		);
+	}
+
+	#nativeSection(head: string, children: readonly NativeChild[]): NativeNode {
+		return node("section", { head: [span(head, "muted")] }, children, stableKey(`section:${head}`));
+	}
+
+	/** File content as markdown source, cut to the preview budget until expanded. */
+	#nativePreviewSection(heading: string, raw: string): NativeNode {
+		if (!raw) return this.#nativeSection(heading, [text([span("(empty)", "dim")])]);
+		const lines = sanitizeDisplayText(raw).split("\n");
+		const cut = !this.#expanded && lines.length > PREVIEW_LINE_BUDGET;
+		const shown = cut ? lines.slice(0, PREVIEW_LINE_BUDGET - 1) : lines;
+		const children: NativeChild[] = [code(shown.join("\n"), { lang: "md", wrap: true })];
+		if (cut) children.push(this.#nativeMore(lines.length - shown.length, "lines"));
+		return this.#nativeSection(heading, children);
+	}
+
+	#nativeMore(hidden: number, noun: string): NativeNode {
+		return text([span(`… ${hidden} more ${noun} (${expandKeyHint()} to expand)`, "dim")]);
+	}
+
+	/** Tool/argument rows: name, type and required flag, then the description. */
+	#nativeParams(params: ToolParamView[]): NativeNode {
+		if (params.length === 0) return text([span("(no arguments)", "dim")]);
+		return node("kv", {
+			items: params.map(param => ({
+				k: [span(param.name, "accent mono")],
+				v: compact<TspSpan>([
+					span(param.type, "muted"),
+					span(`  ${param.flag}`, param.required ? "warning" : "dim"),
+					param.description ? span(`  ${sanitizeDisplayLine(param.description)}`) : undefined,
+				]),
+			})),
+		});
+	}
+
+	/** One catalog entry (MCP tool or factory tool): name, title, description, arguments. */
+	#nativeCatalogEntry(
+		name: string,
+		title: string | undefined,
+		description: string | undefined,
+		parameters: unknown,
+	): NativeNode {
+		const params = toolParamsFromSchema(parameters);
+		const inline = this.#expanded || params.length <= MCP_INLINE_ARG_LIMIT;
+		return col(
+			compact<NativeChild>([
+				text(
+					compact<TspSpan>([
+						span(sanitizeDisplayLine(name), "accent mono"),
+						title && title !== name ? span(`  ${sanitizeDisplayLine(title)}`, "muted") : undefined,
+					]),
+				),
+				description ? text(sanitizeDisplayText(description), { wrap: "word" }) : undefined,
+				inline
+					? this.#nativeParams(params)
+					: text([span(`${params.length} args (${expandKeyHint()} to expand)`, "dim")]),
+			]),
+			{ gap: "xs" },
+		);
+	}
+
+	/** A name-only catalog (MCP resources/prompts) under its budget until expanded. */
+	#nativeNameList(head: string, entries: MCPRuntimeCatalogItem[]): NativeNode {
+		const { shown, hidden } = visibleMcpTools(entries, this.#expanded ? entries.length : MCP_TOOL_BUDGET);
+		const children: NativeChild[] = shown.map(entry => text([span(entry.name, "accent mono")]));
+		if (hidden > 0) children.push(this.#nativeMore(hidden, ""));
+		return this.#nativeSection(head, children);
+	}
+
+	#nativeKindView(ext: Extension): NativeKindView {
+		const base: NativeKindView = { runtime: [], sections: [], config: [] };
+		switch (ext.kind) {
+			case "mcp":
+				return this.#nativeMcpKind(ext);
+			case "tool": {
+				const lives = liveToolsForExtension(ext, this.#toolFrame);
+				const data = toolInspectorData(ext, lives, this.#source);
+				if (data.factory.length > 1) {
+					return {
+						...base,
+						description: data.description,
+						sections: [
+							this.#nativeSection(
+								"Tools",
+								data.factory.map(tool =>
+									this.#nativeCatalogEntry(tool.name, tool.label, tool.description, tool.parameters),
+								),
+							),
+						],
+					};
+				}
+				if (lives.length === 0 && data.params.length === 0) return { ...base, description: data.description };
+				return {
+					...base,
+					title: data.label,
+					description: data.description,
+					sections: [this.#nativeSection("Arguments", [this.#nativeParams(data.params)])],
+				};
+			}
+			case "rule": {
+				const data = ruleInspectorData(ext, this.#source);
+				const applies = kv([
+					["always", data.alwaysApply ? [span("always", "accent")] : undefined],
+					["globs", data.globs?.join(", ")],
+					["condition", this.#nativeList(data.condition)],
+					["ast", this.#nativeList(data.astCondition)],
+					["scope", this.#nativeList(data.scope)],
+					["agents", this.#nativeList(data.agents)],
+					["interrupt", data.interruptMode ? [span(data.interruptMode, "dim")] : undefined],
+				]);
+				return {
+					...base,
+					description: data.description,
+					sections: [this.#nativeSection("Applies", [applies ?? text([span("(no apply conditions)", "dim")])])],
+					preview: { heading: "Rule", text: data.content },
+				};
+			}
+			case "skill": {
+				const data = skillInspectorData(ext);
+				const surface = kv([
+					["apply", data.alwaysApply ? [span("always apply", "accent")] : undefined],
+					["globs", data.globs?.join(", ")],
+				]);
+				return {
+					...base,
+					description: data.description,
+					runtime: data.hidden
+						? [["Visibility", [span("hidden", "warning"), span("  omitted from the system-prompt skill list")]]]
+						: [],
+					sections: surface ? [keyed(surface, "surface")] : [],
+					preview: { heading: "Instruction", text: data.content },
+				};
+			}
+			case "slash-command": {
+				const data = commandInspectorData(ext);
+				const invocation: NativeChild[] = [text([span(`/${sanitizeDisplayText(ext.name)}`, "accent mono")])];
+				const facts = kv([
+					["hint", data.argumentHint ? [span(sanitizeDisplayText(data.argumentHint), "dim")] : undefined],
+				]);
+				if (facts) invocation.push(facts);
+				if (data.usesArguments) invocation.push(text([span("accepts $ARGUMENTS", "dim")]));
+				return {
+					...base,
+					description: data.description,
+					sections: [this.#nativeSection("Invocation", invocation)],
+					preview: { heading: "Template", text: data.body },
+				};
+			}
+			case "hook": {
+				const data = hookInspectorData(ext);
+				const facts = kv([
+					["when", data.hookType],
+					["tool", data.tool],
+				]);
+				return {
+					...base,
+					description: ext.description,
+					sections: [this.#nativeSection("Hook", facts ? [facts] : [])],
+				};
+			}
+			case "prompt":
+				return {
+					...base,
+					description: ext.description,
+					preview: { heading: "Prompt", text: promptInspectorData(ext).content },
+				};
+			case "context-file":
+				return {
+					...base,
+					description: ext.description,
+					preview: { heading: "Preview", text: contextInspectorData(ext).content },
+				};
+			case "instruction": {
+				const data = instructionInspectorData(ext);
+				const files = data.applyTo ? kv([["files", data.applyTo]]) : undefined;
+				return {
+					...base,
+					description: ext.description,
+					sections: files ? [this.#nativeSection("Applies", [files])] : [],
+					preview: { heading: "Instruction", text: data.content },
+				};
+			}
+			default:
+				return {
+					...base,
+					description: ext.description,
+					sections: ext.trigger
+						? [this.#nativeSection("Trigger", [text([span(sanitizeDisplayText(ext.trigger), "accent mono")])])]
+						: [],
+				};
+		}
+	}
+
+	/** A pattern list for a `kv` value, capped until expanded. */
+	#nativeList(items: string[] | undefined): TspSpan[] | undefined {
+		if (!items || items.length === 0) return undefined;
+		const cap = this.#expanded ? items.length : PREVIEW_LIMITS.COLLAPSED_LINES;
+		const shown = items.slice(0, cap).map(item => sanitizeDisplayText(item));
+		const hidden = items.length - shown.length;
+		const spans: TspSpan[] = [span(shown.join("\n"), "accent")];
+		if (hidden > 0) spans.push(span(`\n… ${hidden} more (${expandKeyHint()} to expand)`, "dim"));
+		return spans;
+	}
+
+	#nativeMcpKind(ext: Extension): NativeKindView {
+		const shadowed = isShadowedExtension(ext);
+		if (shadowed) {
+			const command =
+				isDiscoveredMcpServer(ext.raw) && ext.raw.command
+					? shortenPath(sanitizeDisplayText(ext.raw.command), os.homedir())
+					: undefined;
+			return { runtime: [], sections: [], config: [["Command", command ? [span(command, "mono")] : undefined]] };
+		}
+		const snap = isDiscoveredMcpServer(ext.raw)
+			? snapshotMcpRuntime(ext.raw, this.#mcpSource, { enabled: ext.state !== "disabled" })
+			: undefined;
+		const health: MCPConnectionHealth = snap?.health ?? "disconnected";
+		const runtime: [string, TspText | undefined][] = [
+			[
+				"Health",
+				[
+					span(`${MCP_HEALTH_GLYPH[health]()} ${formatMcpHealthLabel(health)}`, MCP_HEALTH_STYLE[health]),
+					span(`  ${snap?.transport ?? "stdio"}`, "muted"),
+				],
+			],
+		];
+		if (snap?.implementationName) {
+			const version = snap.implementationVersion ? ` ${snap.implementationVersion}` : "";
+			runtime.push(["Server", [span(`${snap.implementationName}${version}`, "dim")]]);
+			if (snap.websiteUrl) runtime.push(["Website", [span(snap.websiteUrl, "dim", { href: snap.websiteUrl })]]);
+		}
+		const sections: NativeNode[] = [];
+		if (snap && snap.tools.length > 0) {
+			const { shown, hidden } = visibleMcpTools(snap.tools, this.#expanded ? snap.tools.length : MCP_TOOL_BUDGET);
+			const entries: NativeChild[] = shown.map(tool =>
+				this.#nativeCatalogEntry(tool.name, tool.title, tool.description, tool.parameters),
+			);
+			if (hidden > 0) entries.push(this.#nativeMore(hidden, "tools"));
+			sections.push(this.#nativeSection("Tools", entries));
+		}
+		if (snap && snap.resources.length > 0) sections.push(this.#nativeNameList("Resources", snap.resources));
+		if (snap && snap.prompts.length > 0) sections.push(this.#nativeNameList("Prompts", snap.prompts));
+		return {
+			title: snap?.title,
+			description: snap?.description,
+			guidance: snap?.instructions,
+			runtime,
+			health: true,
+			sections,
+			config: [
+				["Command", snap?.command ? [span(shortenPath(snap.command, os.homedir()), "mono")] : undefined],
+				["URL", snap?.url ? [span(snap.url, "mono", { href: snap.url })] : undefined],
+				["Args", snap?.args && snap.args.length > 0 ? [span(snap.args.join(" "), "mono dim")] : undefined],
+				["Env vars", snap && snap.envCount > 0 ? [span(`${snap.envCount} defined`, "dim")] : undefined],
+			],
+		};
 	}
 
 	#renderExtension(ext: Extension, width: number): string[] {
@@ -662,6 +1022,14 @@ export class InspectorPanel implements Component {
 		}
 	}
 }
+
+/** Glyph of each MCP health, read at call time so glyph presets apply. */
+const MCP_HEALTH_GLYPH: Record<MCPConnectionHealth, () => string> = {
+	connected: () => theme.status.enabled,
+	connecting: () => theme.status.running,
+	disconnected: () => theme.status.shadowed,
+	inactive: () => theme.status.disabled,
+};
 
 function inspectorExtensionKey(extension: Extension | null): string | null {
 	if (!extension) return null;
