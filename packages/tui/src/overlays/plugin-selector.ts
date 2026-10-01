@@ -2,9 +2,10 @@
  * Interactive marketplace plugin selector.
  *
  * Shows available plugins from all configured marketplaces in a SelectList.
- * Selecting a plugin triggers installation. Esc cancels.
+ * Selecting a plugin opens an interactive confirmation list. Esc cancels.
  */
 import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
+import { Text } from "../components/text";
 import { getSelectListTheme } from "../theme/theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { routeSelectListMouseWithTopBorder } from "../chrome/select-list-mouse-routing";
@@ -21,32 +22,42 @@ export interface PluginItem {
 	marketplace: string;
 	/** Scope of this entry. When set, appended to the label and forwarded to onSelect. */
 	scope?: "user" | "project";
+	/** Details shown in a separate interactive confirmation list before `onSelect`. */
+	confirmation?: string;
 }
 
 export class PluginSelectorComponent extends OverlayPanel {
+	#pluginList: SelectList;
 	#selectList: SelectList;
 	#sheet: SelectListSheet;
+	#pluginSheet: SelectListSheet;
+	#callbacks: PluginSelectorCallbacks;
+	#confirmationText: Text | undefined;
+	#confirmationTextRows = 0;
 
 	constructor(
 		marketplaceCount: number,
 		plugins: PluginItem[],
-		installedIds: Set<string>,
+		installedRows: Set<string>,
 		callbacks: PluginSelectorCallbacks,
 	) {
 		super("Plugins", "omp.overlay.plugins");
+		this.#callbacks = callbacks;
 
-		const items: SelectItem[] = plugins.map(({ plugin, marketplace, scope }) => {
+		const confirmations = new Map<string, string>();
+		const items: SelectItem[] = plugins.map(({ plugin, marketplace, scope, confirmation }) => {
 			// Encode scope into the value so onSelect can recover it without a parallel Map.
 			// Format: "name@marketplace" or "name@marketplace#scope"
 			const id = scope ? `${plugin.name}@${marketplace}#${scope}` : `${plugin.name}@${marketplace}`;
-			const installed = installedIds.has(`${plugin.name}@${marketplace}`);
+			const installed = installedRows.has(id);
 			const version = plugin.version ? `@${plugin.version}` : "";
 			const status = installed ? " [installed]" : "";
 			const scopeTag = scope ? ` [${scope}]` : "";
 
+			if (confirmation) confirmations.set(id, confirmation);
 			return {
 				value: id,
-				label: `${plugin.name}${version}${status}${scopeTag}`,
+				label: `${plugin.name}${version}${scopeTag}${status}`,
 				description: plugin.description,
 				hint: marketplace,
 			};
@@ -64,21 +75,21 @@ export class PluginSelectorComponent extends OverlayPanel {
 			});
 		}
 
-		this.#selectList = new SelectList(items, Math.min(items.length, 20), getSelectListTheme());
-
-		this.#selectList.onSelect = item => {
+		this.#pluginList = new SelectList(items, Math.min(items.length, 20), getSelectListTheme());
+		this.#selectList = this.#pluginList;
+		this.#pluginList.onSelect = item => {
 			const [name, marketplace, scope] = splitPluginId(item.value);
-			if (name && marketplace) {
-				callbacks.onSelect(name, marketplace, scope);
+			if (!name || !marketplace) return;
+			const confirmation = confirmations.get(item.value);
+			if (confirmation) {
+				this.#showConfirmation(confirmation, name, marketplace, scope);
+				return;
 			}
+			callbacks.onSelect(name, marketplace, scope);
 		};
-
-		this.#selectList.onCancel = () => {
-			callbacks.onCancel();
-		};
-
-		this.addChild(this.#selectList);
-		this.#sheet = new SelectListSheet(this.#selectList, {
+		this.#pluginList.onCancel = () => callbacks.onCancel();
+		this.addChild(this.#pluginList);
+		this.#pluginSheet = new SelectListSheet(this.#pluginList, {
 			title: "Plugins",
 			icon: "plus",
 			noun: "plugins",
@@ -86,13 +97,18 @@ export class PluginSelectorComponent extends OverlayPanel {
 			decorate: item => (item.hint ? { facts: { marketplace: item.hint } } : undefined),
 			columns: [{ id: "marketplace", format: "dim" }],
 		});
+		this.#sheet = this.#pluginSheet;
+	}
+
+	handleInput(keyData: string): void {
+		this.#selectList.handleInput(keyData);
 	}
 
 	override describe(cx: DescribeContext): NativeNode | null {
 		return cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
 	}
 
-	/** Picker pointer events drive the list exactly as its keys do. */
+	/** Picker pointer events drive the active list exactly as its keys do. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		this.#sheet.handle(event);
 	}
@@ -100,9 +116,56 @@ export class PluginSelectorComponent extends OverlayPanel {
 	getSelectList(): SelectList {
 		return this.#selectList;
 	}
-
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
-		routeSelectListMouseWithTopBorder(this.#selectList, event, line, col);
+		if (this.#confirmationText) {
+			this.#selectList.routeMouse(event, line - 1 - this.#confirmationTextRows, col);
+		} else {
+			routeSelectListMouseWithTopBorder(this.#selectList, event, line, col);
+		}
+	}
+
+	override render(width: number): readonly string[] {
+		this.#confirmationTextRows = this.#confirmationText?.render(Math.max(1, width - 4)).length ?? 0;
+		return super.render(width);
+	}
+
+	#showConfirmation(message: string, pluginName: string, marketplace: string, scope?: "user" | "project"): void {
+		const uninstall = message.startsWith("Uninstall ");
+		this.title = uninstall ? "Confirm plugin uninstall" : "Confirm plugin install";
+		this.clear();
+		this.#confirmationText = new Text(`${message}\n\n↑/↓ choose · Enter confirm · Esc back`, 0, 0);
+		this.addChild(this.#confirmationText);
+
+		const items: SelectItem[] = [
+			{ value: "confirm", label: "Confirm" },
+			{ value: "cancel", label: "Cancel" },
+		];
+		this.#selectList = new SelectList(items, items.length, getSelectListTheme());
+		this.#sheet = new SelectListSheet(this.#selectList, {
+			title: this.title,
+			subtitle: message,
+			icon: uninstall ? "trash" : "plus",
+			noun: "actions",
+		});
+		this.#selectList.onSelect = item => {
+			if (item.value === "confirm") {
+				this.#callbacks.onSelect(pluginName, marketplace, scope);
+			} else {
+				this.#showPluginList();
+			}
+		};
+		this.#selectList.onCancel = () => this.#showPluginList();
+		this.addChild(this.#selectList);
+	}
+
+	#showPluginList(): void {
+		this.title = "Plugins";
+		this.clear();
+		this.#confirmationText = undefined;
+		this.#confirmationTextRows = 0;
+		this.#selectList = this.#pluginList;
+		this.#sheet = this.#pluginSheet;
+		this.addChild(this.#pluginList);
 	}
 }
 

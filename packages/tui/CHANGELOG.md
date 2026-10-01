@@ -6,6 +6,7 @@
 
 - Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose gates as ghost-text word completion ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
 - The native Background jobs sheet now lists every job selectably (↑/↓ or click) and inspects the selected one: status with live elapsed, working directory, live pids, exit code, full command, and a tail-following output pane; X cancels a running job
+- Added an interactive Confirm/Cancel screen to the marketplace plugin selector ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
 
 ### Changed
 

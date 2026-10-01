@@ -10,6 +10,7 @@
 - Added an opt-in RPC ask dialog: after `set_ask_dialog` enables it, the `ask` tool sends all its questions in one `ask` extension UI request and takes the answers back in one `answers` response, so hosts can render every question with checkboxes or radio buttons and submit them together; hosts that don't opt in keep the one-`select`-per-choice prompts ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 - Added `SessionManager.onPersistenceNotice()` for SDK hosts: it reports a session moving to a new file (with the old and new paths) without going through the `onPersistenceError` failure channel ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
 - Added `AgentSession.inspectAsyncJob()` (command, cwd, live pids, exit code, output tail, full-output artifact of one async job) and `AgentSession.cancelAsyncJob()`; the Background jobs sheet uses them to inspect and cancel jobs
+- Added marketplace plugin installation scope selection, letting users choose project-level or user-level installation before confirming the action ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
 
 ### Changed
 
@@ -462,6 +463,7 @@
 - Fixed supervised service exits being missed or repeatedly replayed instead of being delivered to the session that started the service.
 - Fixed memory backend failures to identify the affected item and underlying storage error.
 - Fixed `write xd://<tool>` validation behavior so devices can return precise schema-mismatch responses.
+- Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.0] - 2026-09-24
 
@@ -609,6 +611,7 @@
 - Edits targeting auto-generated files now return a tool-scoped rejection instead of aborting the whole turn ([#12499](https://github.com/can1357/oh-my-pi/pull/12499) by [@Dante-dan](https://github.com/Dante-dan)).
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
+- `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.8] - 2026-09-21
 
