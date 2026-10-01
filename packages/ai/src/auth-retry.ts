@@ -1,3 +1,4 @@
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
@@ -83,6 +84,29 @@ export function getCommandHeaderCredentials(
 	headers: Readonly<Record<string, string>> | undefined,
 ): readonly SentHeaderCommandCredential[] {
 	return (headers as HeadersWithCommandCredentials | undefined)?.[commandHeaderCredentials] ?? [];
+}
+
+/**
+ * Source for model headers dispatched by {@link withAuth}. A model's resolver
+ * is re-run for every request attempt; a function is useful when the caller
+ * owns equivalent registry-backed materialization.
+ */
+export type AuthHeaderResolver =
+	| Model
+	| ((signal?: AbortSignal) => Promise<Record<string, string> | undefined> | Record<string, string> | undefined);
+
+async function resolveAuthHeaders(
+	headerResolver: AuthHeaderResolver | undefined,
+	signal: AbortSignal | undefined,
+): Promise<Record<string, string> | undefined> {
+	if (!headerResolver) return undefined;
+	const headers =
+		typeof headerResolver === "function"
+			? await headerResolver(signal)
+			: headerResolver.resolveHeaders
+				? await headerResolver.resolveHeaders(signal)
+				: headerResolver.headers;
+	return copyHeadersWithCommandCredentials(headers);
 }
 
 /**
@@ -383,22 +407,24 @@ async function runOAuthAttempt<T>(
  */
 export async function withAuth<T>(
 	key: ApiKey | undefined,
-	attempt: (
-		key: string,
-		recordSentCredentials?: (credentials: readonly SentCommandCredential[]) => void,
-	) => Promise<T>,
-	opts?: { isAuthError?: (error: unknown) => boolean; signal?: AbortSignal; missingKeyMessage?: string },
+	attempt: (key: string, headers: Record<string, string> | undefined) => Promise<T>,
+	opts?: {
+		isAuthError?: (error: unknown) => boolean;
+		signal?: AbortSignal;
+		missingKeyMessage?: string;
+		headerResolver?: AuthHeaderResolver;
+	},
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
+	const signal = opts?.signal;
 	const missingKey = (): Error => new AIError.MissingApiKeyError(undefined, opts?.missingKeyMessage);
 
 	if (!isApiKeyResolver(key)) {
 		if (key === undefined) throw missingKey();
-		return attempt(key);
+		return attempt(key, await resolveAuthHeaders(opts?.headerResolver, signal));
 	}
 
 	const resolver = key;
-	const signal = opts?.signal;
 	let initialResolved: ApiKeyResolution;
 	try {
 		initialResolved = await resolver({ lastChance: false, error: undefined, signal, previousKey: undefined });
@@ -410,13 +436,14 @@ export async function withAuth<T>(
 	if (initialKey === undefined) throw missingKey();
 
 	const state = createAuthRetryKeyState(initialKey, initialResolved);
-	const runAttempt = (apiKey: string): Promise<T> =>
-		attempt(apiKey, commandCredentials => {
-			state.lastSentCredentials = {
-				apiKey,
-				commandCredentials: [...state.lastSentCredentials.commandCredentials, ...commandCredentials],
-			};
-		});
+	const runAttempt = async (apiKey: string): Promise<T> => {
+		const headers = await resolveAuthHeaders(opts?.headerResolver, signal);
+		state.lastSentCredentials = {
+			apiKey,
+			commandCredentials: [...state.lastSentCredentials.commandCredentials, ...getCommandHeaderCredentials(headers)],
+		};
+		return attempt(apiKey, headers);
+	};
 	let lastError: unknown;
 	try {
 		return await runAttempt(initialKey);

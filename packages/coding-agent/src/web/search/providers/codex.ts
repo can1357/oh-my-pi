@@ -273,16 +273,21 @@ function extractTextSources(text: string): SearchSource[] {
 	return sources;
 }
 
-async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
-	const baseUrl = params.model.baseUrl;
+function codexSearchTransport(baseUrl: string, headers: Record<string, string> | undefined): CodexSearchTransport {
 	const url = resolveCodexResponsesUrl(baseUrl);
-	const headers = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 	return {
 		baseUrl,
 		url,
 		headers: { ...headers },
 		customEndpoint: url !== resolveCodexResponsesUrl(CODEX_BASE_URL),
 	};
+}
+
+async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
+	return codexSearchTransport(
+		params.model.baseUrl,
+		await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+	);
 }
 
 /**
@@ -554,7 +559,7 @@ async function callCodexSearch(
 
 /** Execute web search through the selected Codex model and transport. */
 export async function searchCodex(params: SearchParams): Promise<SearchResponse> {
-	const transport = await resolveCodexSearchTransport(params);
+	const transport = codexSearchTransport(params.model.baseUrl, undefined);
 	// The ChatGPT-backend Codex endpoint speaks the undocumented codex-rs
 	// request shape (responses-lite moves tools into an `additional_tools`
 	// developer item), so the documented `web_search.filters.allowed_domains`
@@ -582,8 +587,8 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 		result = await withAuth(
 			keyOrResolver,
-			async accessToken => {
-				const requestTransport = await resolveCodexSearchTransport(params);
+			async (accessToken, headers) => {
+				const requestTransport = codexSearchTransport(params.model.baseUrl, headers);
 				return callCodexSearch({ accessToken }, query, {
 					signal: params.signal,
 					timeoutMs: params.timeoutMs,
@@ -596,6 +601,7 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 			},
 			{
 				signal: params.signal,
+				headerResolver: params.model,
 				missingKeyMessage: `Codex credentials not found for selected provider "${params.model.provider}".`,
 			},
 		);

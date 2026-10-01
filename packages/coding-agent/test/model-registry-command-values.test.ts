@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { generateImage } from "@oh-my-pi/pi-ai/images";
+import { TypeSafeJudge } from "@oh-my-pi/pi-ai/judgment";
+import { synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import {
 	getCommandHeaderCredentials,
@@ -11,7 +14,9 @@ import {
 	type ApiKeyResolveContext,
 	withAuth,
 } from "@oh-my-pi/pi-ai/auth-retry";
-import type { Context, FetchImpl, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
+import { searchOpenAIResponses } from "@oh-my-pi/pi-coding-agent/web/search/providers/openai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	describeCommandConfigFailure,
@@ -1292,6 +1297,150 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
 	});
+	type NonStreamingAdapter = {
+		name: string;
+		api: Model["api"];
+		success: () => Response;
+		run: (model: Model, registry: ModelRegistry, fetch: FetchImpl) => Promise<unknown>;
+	};
+
+	const nonStreamingAdapters: readonly NonStreamingAdapter[] = [
+		{
+			name: "image generation",
+			api: "openai-images",
+			success: () => Response.json({ data: [{ b64_json: Buffer.from("image").toString("base64") }] }),
+			run: (model, registry, fetch) =>
+				generateImage(model, { prompt: "synthetic image" }, { apiKey: registry.resolver(model), fetch }),
+		},
+		{
+			name: "TypeSafe judge",
+			api: "typesafe",
+			success: () =>
+				Response.json({
+					model: "adapter-model",
+					answers: { accepted: { type: "noul", noul: 1 } },
+					usage: {},
+				}),
+			run: async (model, registry, fetch) =>
+				new TypeSafeJudge({
+					api: "typesafe",
+					apiKey: registry.resolver(model),
+					headerResolver: signal => registry.resolveModelHeaders(model, signal),
+					fetch,
+				}).judge({ state: "synthetic", questions: { accepted: { type: "noul", instructions: "accept?" } } }),
+		},
+		{
+			name: "Codex custom-endpoint search",
+			api: "openai-codex-responses",
+			success: () =>
+				new Response(
+					[
+						`data: ${JSON.stringify({ type: "response.web_search_call.completed", item_id: "search" })}`,
+						"",
+						`data: ${JSON.stringify({
+							type: "response.output_item.done",
+							item: { type: "message", content: [{ type: "output_text", text: "Synthetic answer" }] },
+						})}`,
+						"",
+						`data: ${JSON.stringify({
+							type: "response.completed",
+							response: { id: "search", model: "adapter-model" },
+						})}`,
+						"",
+					].join("\n"),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				),
+			run: (model, registry, fetch) =>
+				searchCodex({
+					query: "synthetic query",
+					systemPrompt: "synthetic prompt",
+					authStorage,
+					model,
+					modelRegistry: registry,
+					fetch,
+				}),
+		},
+		{
+			name: "OpenAI web search",
+			api: "openai-responses",
+			success: () =>
+				Response.json({
+					model: "adapter-model",
+					output: [
+						{
+							type: "web_search_call",
+							status: "completed",
+							action: { type: "search", sources: [{ url: "https://example.test", title: "Example" }] },
+						},
+					],
+				}),
+			run: (model, registry, fetch) =>
+				searchOpenAIResponses({
+					query: "synthetic query",
+					systemPrompt: "synthetic prompt",
+					authStorage,
+					model,
+					modelRegistry: registry,
+					fetch,
+				}),
+		},
+		{
+			name: "speech",
+			api: "openai-speech",
+			success: () => new Response(new Uint8Array([1]), { headers: { "Content-Type": "audio/mpeg" } }),
+			run: (model, registry, fetch) =>
+				synthesizeSpeech(
+					model,
+					{ text: "synthetic speech", format: "mp3" },
+					{ apiKey: registry.resolver(model), fetch },
+				),
+		},
+	];
+
+	async function assertRejectedHeaderIsNotResent(adapter: NonStreamingAdapter): Promise<void> {
+		const tenantFile = path.join(tempDir, `${adapter.api}-tenant.txt`);
+		fs.writeFileSync(tenantFile, "stale-tenant");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"adapter-proxy": {
+						baseUrl: "https://adapter-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: "static-api-key",
+						headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
+						models: [{ id: "adapter-model", name: "Adapter model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const configuredModel = registry.find("adapter-proxy", "adapter-model");
+		if (!configuredModel) throw new Error(`Expected ${adapter.name} model`);
+		const model: Model = { ...configuredModel, api: adapter.api };
+		const sentHeaders: Array<string | null> = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			const tenant = new Headers(init?.headers).get("x-tenant-token");
+			sentHeaders.push(tenant);
+			if (sentHeaders.length === 1) {
+				fs.writeFileSync(tenantFile, "");
+				return new Response(JSON.stringify({ error: { message: "synthetic unauthorized" } }), { status: 401 });
+			}
+			return adapter.success();
+		};
+
+		await expect(adapter.run(model, registry, fetch)).rejects.toMatchObject({ status: 401 });
+		await adapter.run(model, registry, fetch);
+
+		expect(sentHeaders[0]).toBe("stale-tenant");
+		expect(sentHeaders.slice(1)).not.toContain("stale-tenant");
+	}
+
+	for (const adapter of nonStreamingAdapters) {
+		test(`never re-dispatches a rejected command header through ${adapter.name}`, () =>
+			assertRejectedHeaderIsNotResent(adapter));
+	}
+
 	type MatrixCredentialType = "apiKey only" | "header only" | "both";
 	type MatrixOutcome = "success" | "final failure";
 	type MatrixRetryPath = "normal force-refresh" | "lastChance" | "sibling rotation";
@@ -1507,10 +1656,8 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 								authority.resolve.bind(authority),
 							)
 						: authority.resolve.bind(authority);
-				await withAuth(resolver, (apiKey, recordSentCredentials) => {
-					const headers = authority.headers();
-					recordSentCredentials?.(getCommandHeaderCredentials(headers));
-					return rejectOrSucceed(apiKey, headers);
+				await withAuth(resolver, apiKey => rejectOrSucceed(apiKey, authority.headers()), {
+					headerResolver: () => authority.headers(),
 				});
 			} catch {
 				// The matrix intentionally includes final 401 and command-mint failures.

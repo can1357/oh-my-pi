@@ -1,7 +1,7 @@
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
-import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire } from "./shared";
+import { errorMessage, ImageApiError, imageBaseUrl, usageFromWire } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 interface GeminiPart {
@@ -38,13 +38,13 @@ export async function generateGoogleImage(
 	};
 	const response = await withAuth(
 		options.apiKey,
-		async key => {
+		async (key, headers) => {
 			const result = await fetchImpl(
 				`${imageBaseUrl(model)}/models/${encodeURIComponent(model.requestModelId ?? model.id)}:generateContent`,
 				{
 					method: "POST",
 					headers: {
-						...(await modelHeaders(model, options.signal)),
+						...headers,
 						"Content-Type": "application/json",
 						"x-goog-api-key": key,
 					},
@@ -70,7 +70,7 @@ export async function generateGoogleImage(
 				});
 			}
 		},
-		{ signal: options.signal },
+		{ signal: options.signal, headerResolver: model },
 	);
 	const responseParts = response.candidates?.flatMap(candidate => candidate.content?.parts ?? []) ?? [];
 	const images: GeneratedImage[] = [];

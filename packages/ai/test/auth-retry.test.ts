@@ -8,6 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
+import { setCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	classify,
 	CommandConfigResolutionError,
@@ -543,6 +544,33 @@ describe("withAuth", () => {
 		);
 		expect(result).toBe("ok");
 		expect(keys).toEqual(["k0", "k1"]);
+	});
+	it("materializes command headers for the attempt and sends their provenance to 401 recovery", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		const dispatchedHeaders: Array<string | undefined> = [];
+		await expect(
+			withAuth(
+				ctx => {
+					contexts.push(ctx);
+					return ctx.error === undefined ? { apiKey: "static-key", commandCredentials: [] } : undefined;
+				},
+				async (_key, headers) => {
+					dispatchedHeaders.push(headers?.["x-tenant"]);
+					throw authError();
+				},
+				{
+					headerResolver: () =>
+						setCommandHeaderCredentials({ "x-tenant": "stale-tenant" }, [
+							{ header: "x-tenant", config: "!tenant-command", value: "stale-tenant" },
+						]),
+				},
+			),
+		).rejects.toThrow("401 authentication_error");
+
+		expect(dispatchedHeaders).toEqual(["stale-tenant"]);
+		const sentCredential = contexts[1]?.previousSentCredentials?.commandCredentials[0];
+		expect(sentCredential).toMatchObject({ config: "!tenant-command", value: "stale-tenant" });
+		expect((sentCredential as { header?: string } | undefined)?.header).toBe("x-tenant");
 	});
 });
 

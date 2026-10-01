@@ -6,6 +6,10 @@
 
 - `withAuth` now surfaces a typed `CommandConfigResolutionError` when an initial `!command` credential mint fails, preserving the command diagnostic while leaving other resolver failures as missing-key errors
 
+### Fixed
+
+- Command-backed model headers rejected by a 401 response are no longer resent by non-streaming image, judgment, web-search, or speech requests.
+
 ## [18.4.6] - 2026-10-01
 
 ### Fixed

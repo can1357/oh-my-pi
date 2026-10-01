@@ -330,14 +330,13 @@ export class ChainJudge implements Judge {
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
-			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
 			const judge = new TypeSafeJudge({
 				apiKey,
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
 				baseUrl: model.baseUrl,
-				headers,
+				headerResolver: headerSignal => this.#deps.registry.resolveModelHeaders(model, headerSignal),
 			});
 			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
 		}

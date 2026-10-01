@@ -17,7 +17,6 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { getCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
@@ -613,9 +612,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 		const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 		result = await withAuth(
 			keyOrResolver,
-			async (storedApiKey, recordSentCredentials) => {
-				const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
-				recordSentCredentials?.(getCommandHeaderCredentials(configuredHeaders));
+			async (storedApiKey, configuredHeaders) => {
 				const apiKey = endpoint.isCloudflareGateway
 					? parseCloudflareAiGatewayCredential(storedApiKey)?.token
 					: storedApiKey;
@@ -643,6 +640,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 			},
 			{
 				signal: params.signal,
+				headerResolver: params.model,
 				missingKeyMessage: `No Gemini credentials found for selected provider "${params.model.provider}".`,
 			},
 		);
