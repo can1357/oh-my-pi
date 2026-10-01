@@ -4,11 +4,11 @@
 
 ### Breaking Changes
 
-- SDK callers must pass `inheritedSessionAgents` as a live getter rather than an array so nested delegation tracks parent model availability.
+- SDK callers must pass `inheritedSessionAgents` as a live getter rather than an array so nested delegation tracks parent model availability ([#14054](https://github.com/can1357/oh-my-pi/pull/14054) by [@lockwo](https://github.com/lockwo)).
 
 ### Added
 
-- Available tool-using chat models are now callable as subagents by their exact `provider/model` selector, without agent files or explicit model tags. Newly discovered models appear during existing sessions.
+- Available tool-using chat models are now callable as subagents by their exact `provider/model` selector, without agent files or explicit model tags. Newly discovered models appear during existing sessions ([#14054](https://github.com/can1357/oh-my-pi/pull/14054) by [@lockwo](https://github.com/lockwo)).
 - Added global and per-advisor review cadence, including final-yield reviews and intervals that accumulate skipped transcript updates ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added per-advisor catch-up policy and cancellable `strict` waiting, so asynchronous turn reviewers can run beside synchronous final reviewers ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added `/jobs full` to show each background bash job's full command line; plain `/jobs` still shortens it to fit the terminal ([#13980](https://github.com/can1357/oh-my-pi/pull/13980) by [@rickythefox](https://github.com/rickythefox))
