@@ -4,6 +4,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { DescribeContext, NativeNode } from "../src/native/node";
 import { HookSelectorComponent } from "../src/overlays/hook-selector";
 import { OAuthSelectorComponent, type OAuthSelectorAuthSource } from "../src/overlays/oauth-selector";
+import { PluginSelectorComponent } from "../src/overlays/plugin-selector";
 import { ThemeSelectorComponent } from "../src/overlays/theme-selector";
 import { ThinkingSelectorComponent } from "../src/overlays/thinking-selector";
 import { initTheme } from "../src/theme/theme";
@@ -99,6 +100,56 @@ describe("hook selector picker", () => {
 		expect(picked).toEqual([]);
 		selector.handleNativeEvent(act("confirm"));
 		expect(picked).toEqual(["two"]);
+	});
+});
+
+describe("plugin selector picker", () => {
+	it("keeps project and user installs pending until native confirmation, and Cancel returns to the scope list", () => {
+		const installed: string[] = [];
+		const selector = new PluginSelectorComponent(
+			1,
+			[
+				{
+					plugin: { name: "alpha" },
+					marketplace: "shop",
+					scope: "project",
+					confirmation: "Install alpha into the project registry?",
+				},
+				{
+					plugin: { name: "alpha" },
+					marketplace: "shop",
+					scope: "user",
+					confirmation: "Install alpha into the user registry?",
+				},
+			],
+			new Set<string>(),
+			{
+				onSelect: (name, marketplace, scope) => installed.push(`${name}@${marketplace}#${scope}`),
+				onCancel: () => {},
+			},
+		);
+		expect(sheet(selector.describe(pickerCx)).props.items?.map(item => item.id)).toEqual([
+			"alpha@shop#project",
+			"alpha@shop#user",
+		]);
+
+		selector.handleNativeEvent(at("activate", "alpha@shop#project"));
+		const confirmation = sheet(selector.describe(pickerCx)).props;
+		expect(confirmation.subtitle).toContain("project registry");
+		expect(confirmation.items?.map(item => item.id)).toEqual(["confirm", "cancel"]);
+		expect(installed).toEqual([]);
+
+		selector.handleNativeEvent(at("activate", "cancel"));
+		expect(sheet(selector.describe(pickerCx)).props.items?.map(item => item.id)).toEqual([
+			"alpha@shop#project",
+			"alpha@shop#user",
+		]);
+		expect(installed).toEqual([]);
+
+		selector.handleNativeEvent(at("activate", "alpha@shop#user"));
+		expect(sheet(selector.describe(pickerCx)).props.subtitle).toContain("user registry");
+		selector.handleNativeEvent(at("activate", "confirm"));
+		expect(installed).toEqual(["alpha@shop#user"]);
 	});
 });
 
