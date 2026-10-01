@@ -1,6 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+
 import { logger, prompt, untilAborted, toError } from "@oh-my-pi/pi-utils";
+import { isDakeraConfigured, loadDakeraConfig } from "../dakera/config";
+import type { DakeraRecallOptions } from "../dakera/client";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
@@ -11,6 +14,11 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 
 const memoryRecallSchema = type({
 	query: type("string").describe("natural language search query"),
+	"memory_type?": type("'semantic' | 'episodic' | 'procedural' | 'working'").describe("narrow to one memory type"),
+	"tags?": type("string").array().describe("ANY-match tag filter; only memories carrying at least one match"),
+	"since?": type("string").describe("ISO-8601 lower bound on created_at"),
+	"until?": type("string").describe("ISO-8601 upper bound on created_at"),
+	"min_importance?": type("number").describe("drop memories below this importance (0–1)"),
 });
 
 export type MemoryRecallParams = typeof memoryRecallSchema.infer;
@@ -33,14 +41,50 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 
 	static createIf(session: ToolSession): MemoryRecallTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "dakera") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "dakera" && !isDakeraConfigured(loadDakeraConfig(session.settings))) return null;
 		return new MemoryRecallTool(session);
 	}
 
 	async execute(_id: string, params: MemoryRecallParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
+			if (backend === "dakera") {
+				const state = this.session.getDakeraSessionState?.();
+				if (!state) {
+					throw new Error("Dakera backend is not initialised for this session.");
+				}
+				// Narrowing params win over the configured recall options; absent
+				// params keep the configured recall unchanged.
+				const overrides: Partial<DakeraRecallOptions> = {};
+				if (params.memory_type !== undefined) overrides.memoryType = params.memory_type;
+				if (params.tags !== undefined && params.tags.length > 0) overrides.tags = params.tags;
+				if (params.since !== undefined) overrides.since = params.since;
+				if (params.until !== undefined) overrides.until = params.until;
+				if (params.min_importance !== undefined) overrides.minImportance = params.min_importance;
+				const { hits, text, renderedCount } = await state.recallFormatted(params.query, signal, "pull", overrides);
+				if (hits.length === 0) {
+					return {
+						content: [{ type: "text", text: "No relevant memories found." }],
+						details: {},
+						useless: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							// Count what the block actually renders: the char budget
+							// can drop trailing hits, and a header promising memories
+							// the model cannot see reads as a tool malfunction.
+							text: `Found ${renderedCount} relevant ${renderedCount === 1 ? "memory" : "memories"} (as of ${formatCurrentTime()} UTC):\n\n${text}`,
+						},
+					],
+					details: {},
+				};
+			}
+
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {

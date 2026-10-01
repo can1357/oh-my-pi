@@ -2,7 +2,9 @@ import type { MemoryRetainDetails } from "@oh-my-pi/pi-tui/tools/memory";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { isDakeraConfigured, loadDakeraConfig } from "../dakera/config";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
+import { parseDakeraTriggerValue } from "../dakera/triggers";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -13,6 +15,17 @@ const memoryRetainSchemaBase = type({
 	items: type({
 		content: type("string").describe("information to remember"),
 		"context?": type("string").describe("source context"),
+		"memoryType?": type("'semantic' | 'episodic' | 'procedural' | 'working'").describe(
+			"memory kind; defaults to semantic",
+		),
+		"verified?": type("boolean").describe("the procedure was executed successfully (tests/commands passed)"),
+		"tags?": type("string")
+			.array()
+			.describe("extra row tags; `profile` marks standing facts/rules for the always-in profile section"),
+		"trigger?": type({
+			"keywords?": type("string").array(),
+			"paths?": type("string").array(),
+		}).describe("deterministic surfacing: keywords matched in the recall query, globs matched against touched paths"),
 	})
 		.array()
 		.atLeastLength(1)
@@ -24,6 +37,17 @@ const memoryRetainSchemaWithScope = type({
 	items: type({
 		content: type("string").describe("information to remember"),
 		"context?": type("string").describe("source context"),
+		"memoryType?": type("'semantic' | 'episodic' | 'procedural' | 'working'").describe(
+			"memory kind; defaults to semantic",
+		),
+		"verified?": type("boolean").describe("the procedure was executed successfully (tests/commands passed)"),
+		"tags?": type("string")
+			.array()
+			.describe("extra row tags; `profile` marks standing facts/rules for the always-in profile section"),
+		"trigger?": type({
+			"keywords?": type("string").array(),
+			"paths?": type("string").array(),
+		}).describe("deterministic surfacing: keywords matched in the recall query, globs matched against touched paths"),
 		"scope?": type("'project' | 'global'").describe(
 			"storage scope; defaults to project, global is for durable cross-project knowledge",
 		),
@@ -56,13 +80,49 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "dakera") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "dakera" && !isDakeraConfigured(loadDakeraConfig(session.settings))) return null;
 		return new MemoryRetainTool(session);
 	}
 
 	async execute(toolCallId: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
+		if (backend === "dakera") {
+			const state = this.session.getDakeraSessionState?.();
+			if (!state) {
+				throw new Error("Dakera backend is not initialised for this session.");
+			}
+
+			// A trigger that parses to nothing (empty arrays, junk entries) would
+			// store an inert row; strict tool — fail loud before any write.
+			for (const item of params.items) {
+				if (item.trigger !== undefined && parseDakeraTriggerValue(item.trigger) === undefined) {
+					throw new Error("retain: invalid trigger — provide non-empty keywords or paths");
+				}
+			}
+
+			// Dakera has no local queue: the batch is stored before the call returns,
+			// so the model is told the truth about what already happened.
+			const count = await state.retainItems(
+				params.items.map(item => ({
+					content: item.content,
+					context: item.context,
+					memoryType: item.memoryType,
+					verified: item.verified,
+					tags: item.tags?.map(tag => tag.trim()).filter(Boolean),
+					// Normalized through the same parser that validated it: junk
+					// array entries are dropped before the value is stored.
+					trigger: item.trigger !== undefined ? parseDakeraTriggerValue(item.trigger) : undefined,
+				})),
+			);
+			const noun = count === 1 ? "memory" : "memories";
+			return {
+				content: [{ type: "text", text: `${count} ${noun} stored.` }],
+				details: { count },
+			};
+		}
+
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {

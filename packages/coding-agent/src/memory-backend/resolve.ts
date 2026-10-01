@@ -1,4 +1,5 @@
 import type { Settings } from "../config/settings";
+import { dakeraBackend } from "../dakera/backend";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
@@ -13,6 +14,7 @@ import { cfgMemoryBackend } from "./settings";
  *   - `memory.backend === "hindsight"`  → Hindsight remote memory
  *   - `memory.backend === "mnemopi"`  → local Mnemopi SQLite memory
  *   - `memory.backend === "sharpshooter"` → friction-gated project decision memory
+ *   - `memory.backend === "dakera"`       → Dakera self-hosted remote memory
  *   - `memory.backend === "local"`      → local rollout summary pipeline
  *   - everything else                   → no-op
  *
@@ -24,6 +26,7 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
+	if (id === "dakera") return dakeraBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }
