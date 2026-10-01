@@ -11,6 +11,7 @@ export type KnownProvider =
 	| "anthropic"
 	| "apple"
 	| "azure"
+	| "bai"
 	| "baseten"
 	| "bedrock-mantle"
 	| "cerebras"

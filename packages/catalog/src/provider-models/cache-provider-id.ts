@@ -1,3 +1,4 @@
+import { normalizeBaiBaseUrl } from "../wire/bai";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
@@ -26,6 +27,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	// B.AI answers `/v1/models` only with a key, so the roster namespace must be
+	// resolved with the credential, not the synchronous credential-less read.
+	bai: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -129,6 +133,17 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "bai": {
+			// The roster is fetched with the key and a configured proxy publishes
+			// its own, so hash both: switching either re-runs discovery instead of
+			// serving the previous key's authoritative roster for the full TTL.
+			// Both call paths normalize through `normalizeBaiBaseUrl`, so the
+			// registry's raw configured value and `baiModelManagerOptions`'s
+			// `/v1`-suffixed one land on one namespace.
+			const baseUrl = normalizeBaiBaseUrl(options.baseUrl);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `bai:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "singularityapi-dev":
 		case "singularityapi-tech": {

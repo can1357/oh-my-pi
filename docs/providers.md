@@ -190,6 +190,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
 | `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
 | `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
+| `bai`                            | `BAI_API_KEY`                                                                 |
 
 Vertex ADC availability accepts project aliases `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or `GCLOUD_PROJECT`, and location aliases `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, or `VERTEX_LOCATION`.
 
@@ -204,6 +205,8 @@ SingularityAPI sells two unrelated products behind one brand, so OMP models them
 `singularityapi-dev` is the pay-as-you-go universal inference gateway (300+ models: DeepSeek, Kimi, GLM, frontier flagships). Create a key at `https://app.singularityapi.dev` (or run `/login singularityapi-dev`) and set `SINGULARITYAPI_DEV_API_KEY`; the roster, limits, and tariffs are discovered live from `https://api.singularityapi.dev/v1/models`.
 
 `singularityapi-tech` is the reserved DeepSeek lanes gateway. Usage bills against a booked reservation slot rather than prepaid credit, so a valid key with no active slot answers 403 until you book one at `https://app.singularityapi.tech`. Create an `sk-...` key there (or run `/login singularityapi-tech`), set `SINGULARITYAPI_TECH_API_KEY`, and the lane roster is discovered live from `https://api.singularityapi.tech/v1/models`.
+
+`bai` is B.AI's multi-vendor inference gateway (Claude, GPT, Gemini, GLM, DeepSeek, Kimi, Qwen and more behind one OpenAI-compatible endpoint). Sign in at `https://chat.b.ai/chat`, create an API key, then run `/login bai` or set `BAI_API_KEY`. The roster is discovered live from `https://api.b.ai/v1/models`, which requires the key; TypeSafe Jev rows are exposed as `judge` models served from `/v1/decisions`. The gateway publishes no limits or prices, so capabilities come from the bundled reference catalog and cost is reported as zero.
 
 OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 

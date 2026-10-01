@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `bai` provider for the B.AI multi-vendor gateway: `/login bai` or `BAI_API_KEY` unlocks its live model roster, and `omp --help` now lists `BAI_API_KEY` ([#13962](https://github.com/can1357/oh-my-pi/pull/13962) by [@vanko001](https://github.com/vanko001)).
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

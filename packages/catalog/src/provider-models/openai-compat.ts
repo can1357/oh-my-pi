@@ -42,6 +42,7 @@ import {
 } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
+import { normalizeBaiBaseUrl } from "../wire/bai";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
@@ -7746,4 +7747,97 @@ export function singularityApiTechModelManagerOptions(
 	config?: SingularityApiModelManagerConfig,
 ): ModelManagerOptions<Api> {
 	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
+}
+
+// ---------------------------------------------------------------------------
+// B.AI
+// ---------------------------------------------------------------------------
+
+export interface BaiModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** `supported_endpoint_types` values that decide which transport serves a `/v1/models` row. */
+const BAI_OPENAI_ENDPOINT = "openai";
+const BAI_DECISIONS_ENDPOINT = "decisions";
+
+function baiEndpointTypes(entry: OpenAICompatibleModelRecord): readonly string[] {
+	const types = entry.supported_endpoint_types;
+	return Array.isArray(types) ? types.filter((type): type is string => typeof type === "string") : [];
+}
+
+/**
+ * Map one `/v1/models` row onto its serving transport.
+ *
+ * The gateway publishes no limits, tariffs, or reasoning metadata, only each
+ * row's `supported_endpoint_types`. A row that serves the OpenAI chat wire is a
+ * chat model whose intrinsic capabilities — context window, output limit,
+ * reasoning flag, modalities — are recovered from any bundled upstream entry
+ * via the canonical reference index. The reference's thinking surface and
+ * pricing are deliberately never borrowed: both are provider-specific (effort
+ * routing to another host's model ids, wire mode), so B.AI's own KDL policy
+ * resolves thinking and cost stays zeroed. A row whose only
+ * surface is `decisions` (TypeSafe Jev) answers System One judgments on
+ * `POST {baseUrl}/decisions`, the OpenRouter Decisions wire shape, so it is
+ * routed to `openrouter-decisions` as a judge. Every other row (image
+ * generation, Anthropic-only) has no chat transport here and is skipped rather
+ * than offered and then rejected.
+ */
+function mapBaiModel(entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api>): ModelSpec<Api> | null {
+	const types = baiEndpointTypes(entry);
+	if (types.includes(BAI_DECISIONS_ENDPOINT) && !types.includes(BAI_OPENAI_ENDPOINT)) {
+		return {
+			...defaults,
+			api: "openrouter-decisions",
+			kind: "judge",
+			reasoning: false,
+			input: ["text"],
+			supportsTools: false,
+		};
+	}
+	if (!types.includes(BAI_OPENAI_ENDPOINT) || types.includes("image-generation")) return null;
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex());
+	if (!canonical) return defaults;
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		// `thinking` is intentionally absent; see above.
+		contextWindow,
+		maxTokens,
+	};
+}
+
+/**
+ * `bai` — B.AI's multi-vendor inference gateway (`api.b.ai`). `GET /v1/models`
+ * requires the key, so discovery is skipped without one and the cache
+ * namespace follows the credential (`isCredentialScopedModelCacheProvider`).
+ */
+export function baiModelManagerOptions(config?: BaiModelManagerConfig): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeBaiBaseUrl(config?.baseUrl);
+	return {
+		providerId: "bai",
+		cacheProviderId: resolveModelCacheProviderId("bai", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels<Api>({
+					api: "openai-completions",
+					provider: "bai",
+					baseUrl,
+					apiKey,
+					mapModel: mapBaiModel,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }

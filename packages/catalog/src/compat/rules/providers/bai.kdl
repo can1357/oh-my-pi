@@ -1,0 +1,28 @@
+// B.AI inference gateway (api.b.ai): one OpenAI-compatible endpoint fronting
+// Claude, GPT, Gemini, GLM, DeepSeek, Kimi, Qwen, MiniMax and MiMo rows with
+// `sk-...` bearer keys from chat.b.ai. `GET /v1/models` (key required, 401
+// otherwise) publishes only `id` and `supported_endpoint_types` per row — no
+// limits, tariffs, or reasoning metadata — so discovery maps the wire from
+// the endpoint list and the rest of each row is filled by the shared catalog
+// machinery.
+//
+// Deliberately no `discovery` node: live discovery needs a user credential,
+// and enrolling would freeze one account's snapshot into models.json on every
+// credential-less regen. The provider stays runtime-only and
+// `dynamic-models-authoritative` prunes stale rows.
+provider "bai" {
+	default-model "glm-5.3-flash"
+	env "BAI_API_KEY"
+	dynamic-models-authoritative #true
+
+	// Chat completions through the gateway take `max_tokens`.
+	max-tokens-field "max_tokens"
+
+	// TypeSafe Jev rows advertise only the `decisions` endpoint: they answer
+	// System One judgments on `POST /v1/decisions` (the OpenRouter Decisions
+	// wire shape), never chat. `mapBaiModel` assigns the transport from the
+	// endpoint list; this rule keeps the rows out of chat selection.
+	models "jev-*" {
+		kind "judge"
+	}
+}

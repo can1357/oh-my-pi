@@ -2260,6 +2260,20 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
 - Runtime manager: `singularityApiTechModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
+## B.AI (`bai`)
+
+### Special casings
+- Uses `openai-completions` for every chat row; `GET /v1/models` publishes only `supported_endpoint_types`, so the manager routes rows by that list. Rows that advertise `decisions` without `openai` (TypeSafe Jev) become `openrouter-decisions` judges served at `POST /v1/decisions`; image-generation and Anthropic-only rows are skipped.
+- Chat rows recover context window, output limit, reasoning flag, and modalities from the canonical reference index; the reference's thinking surface and pricing are never borrowed (effort routing and wire mode are host-specific), so thinking resolves from B.AI's own rules and cost stays zero.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/bai.kdl`. Environment keys: `BAI_API_KEY`. Validation uses `models-endpoint`.
+
+### Catalog model handling
+- **Provider entry (`bai`)**: `packages/catalog/src/compat/rules/providers/bai.kdl` declares default model `glm-5.3-flash`. Environment keys: `BAI_API_KEY`.
+- **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
+- Runtime manager: `baiModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## TypeSafe (`typesafe`)
 
 ### Special casings
