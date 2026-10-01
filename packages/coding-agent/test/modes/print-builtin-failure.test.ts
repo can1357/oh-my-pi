@@ -32,6 +32,7 @@ function printSession(cwd: string, prompts: string[]): AgentSession {
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForIdle: async () => {},
 		setTextOutputCommitted: () => {},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		waitForAdvisorCatchup: async () => true,
 		prompt: async (text: string) => {
 			prompts.push(text);
@@ -145,6 +146,7 @@ describe("print mode builtin exit codes", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			waitForAdvisorCatchup: async () => true,
 			prompt: async (text: string) => {
 				prompts.push(text);

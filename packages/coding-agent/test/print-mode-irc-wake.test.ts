@@ -27,6 +27,8 @@ describe("print mode with an inbound IRC wake in flight", () => {
 	let releaseWakeTurn: () => void;
 	let wakeTurnStarted: Promise<void>;
 	let modelCalls: string[];
+	let scenario: "wake" | "next-turn";
+	const holder: { session?: AgentSession } = {};
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `omp-irc-wake-${Snowflake.next()}`);
@@ -57,16 +59,24 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		const tools = await createTools(toolSession);
 		const model = createMockModel({
 			id: "mock-irc-wake",
-			// Call order is fixed by the test: the IRC wake turn is started (and gated) before print
-			// mode dispatches, so the first model call is the wake turn and the second is the prompt.
 			handler: async () => {
-				if (modelCalls.length === 0) {
+				// "wake": the IRC wake turn is started (and gated) before print mode dispatches, so the
+				// first model call is the wake turn and the second is the prompt.
+				if (scenario === "wake" && modelCalls.length === 0) {
 					modelCalls.push("wake");
 					wakeStarted.resolve();
 					await wakeGate.promise;
 					return { content: ["pong"] };
 				}
 				modelCalls.push("prompt");
+				// "next-turn": the prompt turn leaves a hidden next-turn message pending, the way the
+				// todo-error reminder does; it waits for a prompt that print mode will never send.
+				if (scenario === "next-turn") {
+					await holder.session?.sendCustomMessage(
+						{ customType: "print-mode-test-reminder", content: "pending reminder", display: false },
+						{ deliverAs: "nextTurn" },
+					);
+				}
 				return { content: ["OK"] };
 			},
 		});
@@ -84,6 +94,7 @@ describe("print mode with an inbound IRC wake in flight", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
+		holder.session = session;
 	});
 
 	afterEach(async () => {
@@ -96,6 +107,7 @@ describe("print mode with an inbound IRC wake in flight", () => {
 	});
 
 	it("queues the initial prompt behind the wake turn, prints the prompt's answer, and disposes", async () => {
+		scenario = "wake";
 		const disposeSpy = vi.spyOn(session, "dispose");
 		// Resolves once print mode's prompt() call has returned, i.e. the prompt is queued behind
 		// the wake turn (a queued prompt returns immediately; a direct one would have thrown).
@@ -132,5 +144,16 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		expect(stdoutOutput.join("")).toContain("OK");
 		expect(stdoutOutput.join("")).not.toContain("pong");
 		expect(disposeSpy).toHaveBeenCalled();
+	});
+
+	it("does not mistake a pending hidden next-turn message for an undispatched prompt", async () => {
+		scenario = "next-turn";
+
+		const exitCode = await runPrintMode(session, { mode: "text", initialMessage: "Reply with exactly: OK" });
+
+		// The reminder is still waiting for a next prompt; print mode's own prompt ran and answered.
+		expect(exitCode).toBe(0);
+		expect(modelCalls).toEqual(["prompt"]);
+		expect(stdoutOutput.join("")).toContain("OK");
 	});
 });
