@@ -1053,6 +1053,44 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("resolves a rediscovered model's headers through one layer however often it is re-merged", async () => {
+			// Every catalog refresh (one per subagent session) merges the rediscovered model onto
+			// the previous merge result. Layering each merge onto the last nested one resolver per
+			// refresh: unbounded memory, and every request re-ran each discovered source per layer.
+			const bundled = buildModel({
+				id: "gpt-5.5",
+				name: "GPT-5.5",
+				api: "openai-completions",
+				provider: "github-copilot",
+				baseUrl: "https://api.githubcopilot.com",
+				headers: { "Editor-Version": "vscode/1" },
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 32_000,
+			});
+			let discoveredCalls = 0;
+			const discovered = {
+				...bundled,
+				headers: undefined,
+				resolveHeaders: async () => {
+					discoveredCalls++;
+					return { "Copilot-Integration-Id": "vscode-chat" };
+				},
+			};
+			let merged = mergeDiscoveredModel(discovered, bundled, { headers: { "X-Override": "1" } });
+			for (let refresh = 0; refresh < 5; refresh++) {
+				merged = mergeDiscoveredModel(discovered, merged, { headers: { "X-Override": "1" } });
+			}
+			expect(await merged.resolveHeaders?.()).toEqual({
+				"Editor-Version": "vscode/1",
+				"Copilot-Integration-Id": "vscode-chat",
+				"X-Override": "1",
+			});
+			expect(discoveredCalls).toBe(1);
+		});
+
 		test("scopes multiple custom APIs sharing the provider baseUrl", () => {
 			const multiApiRegistry = readonlyRegistry({
 				providers: {

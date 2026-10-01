@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fixed discovered models' request headers being resolved through one extra layer per subagent session, which grew memory and repeated every discovered header lookup on each request.
 - Fixed test suite failures on non-FHS hosts and under ambient terminal and Git configuration ([#12358](https://github.com/can1357/oh-my-pi/pull/12358) by [@olegpulatov](https://github.com/olegpulatov)).
 
 ## [18.4.9] - 2026-10-01

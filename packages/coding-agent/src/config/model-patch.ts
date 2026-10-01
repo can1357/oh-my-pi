@@ -48,6 +48,11 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 	return override.baseUrl;
 }
 
+type HeaderSource = Model<Api>["headers"] | Model<Api>["resolveHeaders"];
+
+/** Header source each {@link mergeDiscoveredModel} resolver layered its discovery onto. */
+const discoveryHeaderBases = new WeakMap<NonNullable<Model<Api>["resolveHeaders"]>, HeaderSource>();
+
 /**
  * Merge a freshly discovered model with the matching bundled/configured entry
  * (or a runtime provider override when no bundled entry exists).
@@ -88,21 +93,27 @@ export function mergeDiscoveredModel<TApi extends Api>(
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
+		// A refresh merges each rediscovered model onto the previous merge result. Layer the fresh
+		// discovery onto the headers that merge started from, not onto the merge itself, so the
+		// resolver stays one layer deep instead of growing one level per refresh.
+		const existingHeaders = existing.resolveHeaders ?? existing.headers;
+		const baseHeaders =
+			existing.resolveHeaders && discoveryHeaderBases.has(existing.resolveHeaders)
+				? discoveryHeaderBases.get(existing.resolveHeaders)
+				: existingHeaders;
+		const resolveHeaders = createConfigHeaderResolver(
+			[baseHeaders, model.resolveHeaders ?? model.headers, providerOverride?.headers],
+			{
+				authHeader: providerOverride?.authHeader,
+				apiKeyConfig: providerOverride?.apiKey,
+			},
+		);
+		if (resolveHeaders) discoveryHeaderBases.set(resolveHeaders, baseHeaders);
 		return buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
 			headers: undefined,
-			resolveHeaders: createConfigHeaderResolver(
-				[
-					existing.resolveHeaders ?? existing.headers,
-					model.resolveHeaders ?? model.headers,
-					providerOverride?.headers,
-				],
-				{
-					authHeader: providerOverride?.authHeader,
-					apiKeyConfig: providerOverride?.apiKey,
-				},
-			),
+			resolveHeaders,
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
