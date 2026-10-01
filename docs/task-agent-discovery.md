@@ -91,6 +91,39 @@ With the default batched task schema, supply shared `context` and per-item `task
 
 `/model`'s Roles view can assign and persist custom role mappings such as `review`, `fast`, and `good`. Changing only the active or default session selection does not remap those roles.
 
+## Automatic model agents
+
+Available tool-using chat models are automatically exposed as general-purpose
+agents. Use the exact `provider/model` selector as `agent`, for example
+`anthropic/claude-sonnet-5-5`. No agent file or `^` tag is required.
+
+The pool follows the session picker's model scope and `enabledModels` allow-list,
+intersected with the authenticated, enabled model registry. An allow-list with no
+available matches exposes no automatic agents. Non-chat models and models that
+explicitly disable tool support are excluded. This exposes available versions,
+not a latest-version preference.
+
+Automatic agents use the bundled task prompt and pin their model to that selector.
+Named agent definitions win collisions. Existing model overrides, authentication
+and retry fallbacks, disabled-agent settings, spawn allow-lists, and recursion
+limits still apply. Registering an automatic agent does not disable fallbacks.
+
+Newly discovered models and removals reach the assistant through a hidden
+`session-agents` notice on the next user turn. The base tool description remains
+frozen until the next base-prompt rebuild, preserving the provider cache prefix.
+Dispatch checks the live pool, so a removed automatic agent cannot be launched
+merely because an older description listed it.
+
+Nested sessions inherit the parent's live automatic model pool rather than
+expanding to their own unscoped registry. Explicit `m<N>` aliases remain a
+snapshot taken when the child starts, so later parent tags or rewinds cannot
+retarget a child's existing alias. SDK callers supplying `inheritedSessionAgents`
+must provide a getter (`() => parent.getSessionAgents()`), not an array, so
+automatic model availability and scope changes remain visible to children.
+Warm revival preserves the spawn's alias snapshot. Cold-revived children obtain
+the owning session's current automatic model pool rather than using an unscoped
+registry.
+
 ## User-tagged model agents
 
 Type `^` in the composer to choose a model from the same scope and ranking as the `Alt+P` session picker. Accepting a completion inserts an atomic chip showing its display name. For example, type `Have ^`, pick a model, then finish with `review this change`.
@@ -208,7 +241,7 @@ Lookup is exact-name linear search:
 1. atomically reloads the live session's persisted global, project, and explicit overlay settings while preserving runtime overrides
 2. resolves the omitted or explicit agent name from the parent spawn policy
 3. enforces depth, blocked-self-recursion, and parent spawn-policy guards
-4. rediscovers agents with the session's cwd and effective extension-root configuration, appends user-tagged session agents, and performs exact lookup
+4. rediscovers agents with the session's cwd and effective extension-root configuration, appends live tagged and automatic model agents, and performs exact lookup
 5. checks `task.disabledAgents`
 6. resolves plan-mode restrictions, output schema, model policy, and isolation policy
 
@@ -216,7 +249,7 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 ### Description vs execution-time discovery
 
-`TaskTool.create()` memoizes discovery by resolved working directory plus the complete effective extension-root configuration when building the model-facing tool description. Each description read also includes the user-tagged model agents frozen into the current base prompt surface (see [user-tagged model agents](#user-tagged-model-agents)) rather than the live set, so tagging a model mid-session cannot mutate the provider tool prefix. Execution rediscovers agents and merges the live session agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
+`TaskTool.create()` memoizes filesystem discovery by working directory and effective extension-root configuration. Its description also includes the session model agents frozen into the current base prompt. Automatic registry changes and explicit tags are delivered through hidden notices instead of mutating the provider tool prefix. Execution rediscovers filesystem agents and merges the live session agents. Both description and dispatch give discovered definitions precedence on name collisions. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
 
 ## Model and structured-output precedence
 

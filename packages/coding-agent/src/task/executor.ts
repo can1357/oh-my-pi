@@ -541,7 +541,7 @@ export interface ExecutorOptions {
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManager;
-	/** User-authorized model agents available to this child and its descendants. */
+	/** Live parent session agents available to this child and its descendants. */
 	inheritedSessionAgents?: CreateAgentSessionOptions["inheritedSessionAgents"];
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -3964,6 +3964,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
+			// Keep aliases fixed for the whole spawn, including warm revivals.
+			const inheritedMentions = options.inheritedSessionAgents?.().filter(agent => !agent.modelAgent);
+			const inheritedSessionAgents = inheritedMentions
+				? () => [
+						...inheritedMentions,
+						...(options.inheritedSessionAgents?.().filter(agent => agent.modelAgent) ?? []),
+					]
+				: undefined;
+
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
 			// of the original run (same agent id, tools, model, system prompt,
@@ -3984,7 +3993,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				getApiKey: options.getApiKey,
 				credentialSourceSessionId: options.credentialSourceSessionId,
-				inheritedSessionAgents: options.inheritedSessionAgents,
+				inheritedSessionAgents,
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,

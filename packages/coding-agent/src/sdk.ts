@@ -514,8 +514,8 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
-	/** User-authorized model agents inherited from the parent session for nested delegation. */
-	inheritedSessionAgents?: readonly AgentDefinition[];
+	/** Live parent agents, preserving picker scope and availability in nested delegation. */
+	inheritedSessionAgents?: () => readonly AgentDefinition[];
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;

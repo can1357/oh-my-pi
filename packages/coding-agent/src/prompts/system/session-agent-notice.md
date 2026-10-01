@@ -1,13 +1,16 @@
 <system-notice id="session-agents">
-User-tagged model agents changed. These `m<N>` pseudonyms are the `agent` names accepted by `task` and eval `agent()`/`workpool()`, each pinned to the model the user tagged; spawn one only when the user names it. This lists only what changed; any pseudonym not named here is unaffected.
+Session agents changed. These are `agent` values for `task` and eval `agent()`/`workpool()`. Named agent definitions and spawn restrictions still take precedence.
 {{#if added.length}}
-Now available:
+Now available (`m<N>` names are user-tagged models, use only when the user names them):
 {{#each added}}
 - `{{name}}`: {{description}}
 {{/each}}
 {{/if}}
+{{#if addedModels.length}}
+Now available model agents (general-purpose, pinned to the exact `provider/model`): {{#list addedModels join=", "}}`{{this}}`{{/list}}
+{{/if}}
 {{#if removed.length}}
-No longer available; calls fail:
+Session model agents removed (a separately configured agent with the same name is unaffected):
 {{#each removed}}
 - `{{this}}`
 {{/each}}

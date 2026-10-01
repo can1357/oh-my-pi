@@ -85,7 +85,7 @@ export interface SessionToolsHost {
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Live enabled eval preludes; candidates for the next base rebuild's advertised snapshot. */
 	evalPreludes(): readonly EvalPreludeDefinition[];
-	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
+	/** Live tagged and automatic model agents for the next base prompt snapshot. */
 	sessionAgents(): readonly AgentDefinition[];
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
@@ -261,7 +261,7 @@ interface PromptSurface {
 	skillHintVisible: boolean;
 	/** Eval preludes in the system prompt and eval description. */
 	evalPreludes: readonly EvalPreludeDefinition[];
-	/** User-tagged model agents listed in the task description. */
+	/** Tagged and automatic model agents listed in the task description. */
 	sessionAgents: readonly AgentDefinition[];
 }
 
@@ -527,7 +527,7 @@ export class SessionTools {
 	}
 
 	/**
-	 * User-tagged model agents the task description advertises (see
+	 * Session model agents the task description advertises (see
 	 * {@link #promptSurface}); the candidate inside a rebuild frame.
 	 */
 	get advertisedSessionAgents(): readonly AgentDefinition[] {
@@ -539,8 +539,16 @@ export class SessionTools {
 		return {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
 			evalPreludes: this.#host.evalPreludes(),
-			sessionAgents: this.#host.sessionAgents(),
+			sessionAgents: this.#visibleSessionAgents(),
 		};
+	}
+
+	#visibleSessionAgents(): readonly AgentDefinition[] {
+		const agents = this.#host.sessionAgents();
+		const task = this.#toolRegistry.get("task") as
+			| (AgentTool & { filterSessionAgents?: (agents: readonly AgentDefinition[]) => AgentDefinition[] })
+			| undefined;
+		return task?.filterSessionAgents?.(agents) ?? agents;
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
 	clearAcpPermissionDecisions(): void {
@@ -1553,10 +1561,8 @@ export class SessionTools {
 	}
 
 	/**
-	 * Builds the hidden notice reconciling the user-tagged model agents the task
-	 * description advertises with the live set. Delivered with the next user
-	 * prompt instead of rewriting the task description, so tagging a model
-	 * mid-session keeps the provider cache prefix intact.
+	 * Reconciles advertised session model agents with the live set on the next
+	 * user prompt, without rewriting the provider's cached tool description.
 	 *
 	 * Known agents are the committed base snapshot, then every agent notice still
 	 * in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
@@ -1570,7 +1576,7 @@ export class SessionTools {
 			for (const name of details.added) if (typeof name === "string") known.add(name);
 			for (const name of details.removed) if (typeof name === "string") known.delete(name);
 		}
-		const live = this.#host.sessionAgents();
+		const live = this.#visibleSessionAgents();
 		const liveNames = new Set(live.map(agent => agent.name));
 		const added = live.filter(agent => !known.has(agent.name));
 		const removed = [...known].filter(name => !liveNames.has(name));
@@ -1579,7 +1585,10 @@ export class SessionTools {
 			role: "custom",
 			customType: SESSION_AGENT_NOTICE_MESSAGE_TYPE,
 			content: prompt.render(sessionAgentNoticePrompt, {
-				added: added.map(agent => ({ name: agent.name, description: agent.description })),
+				added: added
+					.filter(agent => !agent.modelAgent)
+					.map(agent => ({ name: agent.name, description: agent.description })),
+				addedModels: added.filter(agent => agent.modelAgent).map(agent => agent.name),
 				removed,
 			}),
 			details: { added: added.map(agent => agent.name), removed },

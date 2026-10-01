@@ -166,6 +166,8 @@ export function createPersistedSubagentReviverFactory(
 				// frames ride the same bus the RPC/collab surfaces subscribed to.
 				subagentEventBus: ctx.subagentEventBus,
 				modelRegistry: ctx.modelRegistry,
+				// Restore the owner's live automatic pool, not an unscoped child catalog.
+				inheritedSessionAgents: () => ctx.session.getSessionAgents().filter(agent => agent.modelAgent),
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 				modelPatternAuthFallback: init.resolvedModel,
 				settings: subagentSettings,

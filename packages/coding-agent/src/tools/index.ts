@@ -398,7 +398,7 @@ export interface ToolSession {
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
-	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
+	/** Tagged and automatic session model agents, merged after discovered agents. */
 	getSessionAgents?: () => readonly AgentDefinition[];
 	/**
 	 * Session agents baked into the current base prompt surface. The task

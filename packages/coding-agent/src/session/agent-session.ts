@@ -1556,7 +1556,7 @@ export class AgentSession implements SettingsScope {
 		this.#todo = new TodoTracker(todoHost);
 		this.#modelMentions = new ModelMentionRegistry({
 			sessionManager: this.sessionManager,
-			modelRegistry: this.#modelRegistry,
+			availableModels: () => this.getAvailableModels(),
 			scopedModels: () => this.scopedModels.map(s => s.model),
 			inheritedAgents: config.inheritedSessionAgents,
 		});
@@ -8850,7 +8850,7 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.skillWarnings;
 	}
 
-	/** Session-local general-purpose agents pinned to user-tagged models. */
+	/** Session-local agents for explicit model tags and available provider/model selectors. */
 	getSessionAgents(): AgentDefinition[] {
 		return this.#modelMentions.sessionAgents();
 	}

@@ -18,6 +18,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -142,6 +143,79 @@ it("releases a parked keep-alive subagent's session while the agent stays reviva
 		expect(await collected(sessionRef, COLLECT_DEADLINE_MS)).toBe(true);
 		// Still adopted after collection: the release did not come from dropping the reviver.
 		expect(AgentLifecycleManager.global().has(AGENT_ID)).toBe(true);
+	} finally {
+		authStorage.close();
+	}
+}, 20_000);
+
+it("keeps child model aliases stable across warm revival while refreshing automatic models", async () => {
+	const cwd = path.join(root, "work");
+	const artifactsDir = path.join(root, "artifacts");
+	await fs.mkdir(cwd, { recursive: true });
+	await fs.mkdir(artifactsDir, { recursive: true });
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const mock = createMockModel({
+		handler: context =>
+			(context.tools ?? []).some(tool => tool.name === "yield")
+				? { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] }
+				: { content: ["label"] },
+	});
+	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([mock, { ...mock, id: "alternate" }]);
+	const automatic: AgentDefinition = {
+		name: "mock/mock-model",
+		description: "model",
+		systemPrompt: "test",
+		source: "bundled",
+		model: ["mock/mock-model"],
+		modelAgent: true,
+	};
+	let parentAgents: AgentDefinition[] = [automatic];
+	try {
+		const result = await runSubprocess({
+			cwd,
+			artifactsDir,
+			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
+			task: "report done",
+			index: 0,
+			id: AGENT_ID,
+			modelOverride: "mock/mock-model",
+			authStorage,
+			modelRegistry,
+			inheritedSessionAgents: () => parentAgents,
+			settings: Settings.isolated({
+				"task.agentIdleTtlMs": 0,
+				"async.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+				"todo.reminders": false,
+				"advisor.enabled": false,
+				modelRoles: { default: "mock/mock-model" },
+			}),
+			enableLsp: false,
+			enableMCP: false,
+			enableIrc: false,
+		});
+		expect(result.exitCode).toBe(0);
+		const child = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!child) throw new Error("Missing live child");
+		await child.prompt("ask ^mock/alternate");
+		expect(child.getSessionAgents().find(agent => agent.name === "m1")?.model).toEqual(["mock/alternate"]);
+		await AgentLifecycleManager.global().park(AGENT_ID);
+		parentAgents = [
+			{ ...automatic, name: "mock/alternate", model: ["mock/alternate"] },
+			{ ...automatic, name: "m1", modelAgent: undefined },
+		];
+		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		expect(revived.getSessionAgents().find(agent => agent.name === "m1")?.model).toEqual(["mock/alternate"]);
+		expect(
+			revived
+				.getSessionAgents()
+				.filter(agent => agent.modelAgent)
+				.map(agent => agent.name),
+		).toEqual(["mock/alternate"]);
 	} finally {
 		authStorage.close();
 	}
