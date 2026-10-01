@@ -39,10 +39,10 @@ import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCa
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { describeSegment, renderSegment, type SegmentContext } from "./segments";
-import type { TspProps } from "@oh-my-pi/pi-wire";
+import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, span } from "../native/describe";
-import { getContextMeterThresholds, getContextUsageLevel, getContextUsageTone } from "../chrome/context-thresholds";
+import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering } from "../native/state";
 import { getSeparator } from "./separators";
 import type {
@@ -81,10 +81,12 @@ const PINNED_NATIVE_PRIORITY = 1000;
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
  * the context hairline and usage text (context, cost), Tern's pane header
- * (path, git), the tab title (session name, PR), the HUD pills (subagents)
- * and the editor (vim). The brand (`pi`) stays only while focus-proxied.
+ * (path, git), the tab title (session name, PR), the HUD pills (subagents),
+ * the editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent
+ * is the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
+	pi: true,
 	model: true,
 	context_pct: true,
 	context_total: true,
@@ -642,6 +644,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
+	#subagentTreeCost = 0;
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -885,6 +888,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Host-computed spend of the main session's whole subagent tree (Agent Hub projection). */
+	setSubagentTreeCost(cost: number): void {
+		const next = Number.isFinite(cost) && cost > 0 ? cost : 0;
+		if (next === this.#subagentTreeCost) return;
+		this.#subagentTreeCost = next;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2391,6 +2402,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
+			// The tree total describes the main session; a focused subagent's
+			// view falls back to its own completed task results.
+			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			now: new Date(nowMs),
@@ -3367,7 +3381,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const facts: NativeNode[] = [];
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]): void => {
 			ids.forEach((id, index) => {
-				if (COMPOSER_HOMED_SEGMENTS[id] || (id === "pi" && ctx.focusedAgentId === undefined)) return;
+				if (COMPOSER_HOMED_SEGMENTS[id]) return;
 				const view = describeSegment(id, ctx);
 				if (!view) return;
 				const props: TspProps<"seg"> = {
@@ -3397,48 +3411,65 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			window > 0 ? `${formatNumber(ctx.contextTokens)} of ${formatNumber(window)} tokens` : "No context window",
 		];
 		if (boundaries) lines.push(`Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`);
-		if (ctx.compactionSpeculation === "running") lines.push("Compaction summary in progress");
-		else if (ctx.compactionSpeculation === "armed") lines.push("Compaction summary ready");
+		const speculation = ctx.compactionSpeculation;
+		if (speculation === "running") lines.push("Compaction summary in progress");
+		else if (speculation === "armed") lines.push("Compaction summary ready");
+		// The line spans the whole window: omp's boundary symbols sit where speculation
+		// starts and compaction fires, and the share past the speculation point is accent.
+		const used = pct === null ? null : Math.min(1, pct / 100);
+		const speculationAt =
+			boundaries?.speculationPercent == null ? null : Math.min(1, boundaries.speculationPercent / 100);
+		const marks: TspMeterMark[] = [];
+		if (boundaries) {
+			if (speculationAt !== null) {
+				const start: TspMeterMark = {
+					at: speculationAt,
+					icon: "context.speculation",
+					title: `Compaction summary starts at ${Math.round(speculationAt * 100)}%`,
+				};
+				// Lit while a background summary runs or waits armed.
+				if (speculation !== "idle") start.tone = "accent";
+				marks.push(start);
+			}
+			marks.push({
+				at: Math.min(1, boundaries.thresholdPercent / 100),
+				icon: "context.compaction",
+				title: `Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`,
+			});
+		}
 		const context = node(
 			"meter",
 			{
 				role: "omp.composer.context",
-				value: pct === null ? null : Math.min(1, pct / 100),
+				value: used,
 				style: "bar",
 				thresholds: getContextMeterThresholds(window),
-				marks: boundaries
-					? [
-							{
-								at: boundaries.thresholdPercent / 100,
-								title: `Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`,
-							},
-						]
-					: undefined,
+				...(used !== null && speculationAt !== null && used > speculationAt
+					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }
+					: {}),
+				...(marks.length > 0 ? { marks } : {}),
+				...(pct === null ? {} : { label: `${Math.round(pct)}%` }),
+				...(window > 0 ? { total: formatNumber(window) } : {}),
 				title: lines.join("\n"),
+				actions: { click: "status.context" },
 			},
 			undefined,
 			"context",
 		);
 
-		const share =
-			pct !== null && window > 0
-				? `${Math.round(pct)}% of ${formatNumber(window)}`
-				: window > 0
-					? formatNumber(window)
-					: `${formatNumber(ctx.contextTokens)} tokens`;
-		const cost = describeSegment("cost", ctx)
-			?.spans.map(part => part.t)
-			.join("");
-		if (cost) lines.push(`Session cost ${cost}`);
+		// The meter reads the context; the bar's usage is the session's cost.
+		const cost =
+			describeSegment("cost", ctx)
+				?.spans.map(part => part.t)
+				.join("") ?? "";
 		const usage = node(
 			"text",
 			{
 				role: "omp.composer.usage",
-				tone: getContextUsageTone(getContextUsageLevel(pct ?? 0, window)),
-				text: cost ? `${share} · ${cost}` : share,
+				text: cost,
 				wrap: "none",
-				title: lines.join("\n"),
-				actions: { click: "status.context" },
+				...(cost ? { title: `Session cost ${cost}` } : {}),
+				actions: { click: "status.cost" },
 			},
 			undefined,
 			"usage",

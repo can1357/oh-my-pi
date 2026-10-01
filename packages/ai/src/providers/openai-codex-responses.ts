@@ -17,12 +17,12 @@ import {
 	fetchWithRetry,
 	getInstallId,
 	logger,
-	parseStreamingJson,
 	readSseJson,
 	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
@@ -2586,7 +2586,7 @@ class CodexStreamProcessor {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
 				name: item.name,
-				arguments: parseStreamingJson(item.arguments || "{}"),
+				arguments: parseToolCallArguments(item.arguments),
 			};
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled

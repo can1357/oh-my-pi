@@ -1,10 +1,10 @@
 # Anthropic Claude tool use (Messages API content blocks)
 
-Anthropic's Claude is a closed, hosted model family; there are no released weights and therefore no `--tool-call-parser` flag to set. The canonical tool-calling convention is the **Messages API** (`POST /v1/messages`, header `anthropic-version: 2023-06-01`): tools are advertised in a top-level `tools` array, the model returns structured `tool_use` **content blocks** with `stop_reason: "tool_use"`, and you feed results back as `tool_result` content blocks inside a `user` message. Tool use is "enabled" simply by including the `tools` parameter (optionally with `tool_choice`); the API then injects a tool-use system prompt and parses the model's output back into JSON blocks for you. This applies to all current models (Claude Opus / Sonnet / Haiku 3.x, 4, 4.x) and is mirrored by gateways such as LiteLLM and by third-party Claude-compatible servers.
+Anthropic's Claude is a hosted model family, not a local model with a `--tool-call-parser` flag. The canonical tool-calling convention is the **Messages API** (`POST /v1/messages`, header `anthropic-version: 2023-06-01`): tools are advertised in a top-level `tools` array, the model returns structured `tool_use` **content blocks** with `stop_reason: "tool_use"`, and you feed results back as `tool_result` content blocks inside a `user` message. Tool use is enabled by including `tools` (optionally with `tool_choice`). OMP's native `anthropic-messages` provider consumes these structured blocks; its separately selected `anthropic` dialect uses prompt-driven XML instead.
 
 Under the hood the model is trained to emit an **XML** function-call syntax (`<function_calls>` / `<invoke>` / `<parameter>`); the API serializes your JSON-Schema tools into a system prompt and converts the model's XML output into JSON `tool_use` blocks. That underlying format is documented as the *secondary* convention below, together with the older, now-retired prompt-based **legacy XML** format (`<tool_name>` / `<parameters>` / `<function_results>`) that pre-dates the Messages API and still surfaces when you do tool use purely through prompting.
 
-The primary, authoritative shape for any parser/renderer is the JSON content-block format. The XML is informational (and the only thing visible if you reconstruct prompts at the token level).
+For the native Messages API adapter, the authoritative shape is the JSON content-block format. The XML sections describe a separate in-band conversion path; they are not the native provider's wire format.
 
 ---
 
@@ -19,10 +19,10 @@ Anthropic has no token-level tool delimiters in the public API. The unit is the 
 | `tool_result` block | user | `{"type":"tool_result","tool_use_id":"toolu_...","content":<string \| block[]>,"is_error":<bool?>}`. The executed result, sent back in a `user` message. |
 | `server_tool_use` block | assistant | `{"type":"server_tool_use","id":"srvtoolu_...","name":"web_search","input":{...}}`. Emitted for Anthropic-executed server tools; you do **not** return a `tool_result` for these. |
 | `web_search_tool_result` (and similar) | assistant | Server-tool output, injected by Anthropic inline in the assistant turn. |
-| `thinking` / `redacted_thinking` block | assistant | Extended-thinking reasoning blocks; carry a `signature`. Must be preserved verbatim across turns when thinking + tools are combined. |
+| `thinking` / `redacted_thinking` block | assistant | `thinking` carries reasoning text and a `signature`; `redacted_thinking` carries opaque `data`, not a signature field. Preserve these fields when replaying a thinking/tool turn. |
 | `stop_reason: "tool_use"` | response top level | The model invoked one or more tools and is waiting for results. Drives the agentic loop. |
 | `stop_reason: "end_turn"` | response top level | Natural completion (no tool call); the loop exits. |
-| Other `stop_reason` | response top level | `"max_tokens"`, `"stop_sequence"`, `"pause_turn"` (long server-tool turn, resend as-is to continue), `"refusal"`, `"sensitive"` (output flagged by safety filters), `"model_context_window_exceeded"` (output truncated at the context window, treated like `max_tokens`). |
+| Other `stop_reason` | response top level | `"max_tokens"`, `"stop_sequence"`, `"pause_turn"` (long server-tool turn, resend as-is to continue), `"refusal"`, `"sensitive"` (output flagged by safety filters), `"model_context_window_exceeded"` (output truncated at the context window, treated like `max_tokens`), `"compaction"` (pause after a server compaction summary). |
 | `id` prefixes | — | Messages `msg_…`; client tool calls `toolu_…`; server tool calls `srvtoolu_…`. |
 
 Streaming adds these SSE events / delta types (full list under [Roles / channels](#roles--channels--turn-structure) and [Tool-call format](#tool-call-format)):
@@ -138,6 +138,14 @@ OMP sends `strict: true` only for eligible built-in tools (`bash`, `python`, `ed
 
 With `any` or `tool` the API prefills the assistant turn, so no leading natural-language text precedes the `tool_use` block. Add `"disable_parallel_tool_use": true` inside `tool_choice` to cap at one tool per turn. (Extended thinking only supports `auto`/`none`.)
 
+OMP's `AnthropicOptions.toolChoice` accepts `"auto"`, `"any"`, `"none"`, or `{ type: "tool", name }`. Forced choices are downgraded to `auto` for compaction requests or models whose compatibility data disables forced tool choice. Otherwise OMP removes explicit thinking configuration for forced choices; adaptive-only models that support output effort are pinned to `effort: "low"`. The high-level option does not expose `disable_parallel_tool_use`.
+
+The native adapter maps `tool_use` blocks to canonical `toolCall` blocks and projects `input_json_delta` as `toolcall_delta`. It maintains best-effort argument objects during streaming and finalizes with the repairing JSON parser, rather than requiring every fragment to be valid JSON. A failed final parse preserves recovered arguments; if none were recovered, it supplies `__parseError` and a bounded `__rawJson` excerpt.
+
+Consecutive canonical `toolResult` messages become one `user` message of `tool_result` blocks. Empty successful results use `content: ""`; empty errors become `"Tool failed with no output."`. Images from error results are moved after the result blocks. Endpoints with `requiresToolResultId` also receive an `id` matching `tool_use_id`. Tools marked `deferLoading` are sent with `defer_loading: true`.
+
+Native stop reasons map to pi's `stopReason`: `tool_use` → `toolUse`; `max_tokens` and `model_context_window_exceeded` → `length`; `refusal` and `sensitive` → `error`; `end_turn`, `stop_sequence`, `pause_turn`, and `compaction` → `stop`. Unknown reasons are reported and treated as `stop`.
+
 ### How the API turns this into a prompt (the bridge to XML)
 
 When `tools` is present, the API constructs a tool-use system prompt with this skeleton (verified from "Define tools"):
@@ -206,11 +214,19 @@ Current Claude models prefix these tags with an `antml:` XML namespace prefix (e
 
 ### OMP `anthropic` dialect
 
-OMP operates on the underlying prompt-driven XML rather than Messages API content blocks. Its renderer always emits the unprefixed attribute form above, wraps multiple calls in one `<function_calls>` block, and renders each argument as a `<parameter name="…">` child. With a tool schema, declared string arguments are inserted as literal text; other values are JSON-serialized. The streaming scanner also accepts `antml:`-prefixed tags, `<tool_calls>` as a wrapper alias, and a bare `<invoke>` outside either wrapper.
+Select the owned dialect with `PI_DIALECT=anthropic` or the agent's `dialect`/`getDialect` configuration. When tools are present, the agent appends the dialect guide and a compact JSON tool catalog to the system prompt, removes native tools from the request, and re-encodes prior tool calls/results as text. This is separate from the native `anthropic-messages` adapter.
 
-The scanner mints call ids because this XML has none. It scans streamed text statefully, emits `toolArgDelta` events while each parameter body arrives, and publishes the coerced argument object with `toolEnd` after `</invoke>`. A parameter value is capped at 1,000,000 JavaScript string code units; overflow gains an explicit truncation suffix. JSON-like values are parsed with repair, while schema-declared strings stay strings. With `parseThinking: true`, `<thinking>`, `<think>`, and `<scratchpad>` (prefixed or unprefixed) become thinking events; otherwise those tags remain visible text.
+The dialect renderer always emits the unprefixed attribute form above, wraps multiple calls in one `<function_calls>` block, and renders each argument as a `<parameter name="…">` child. With a tool schema, string-only arguments (including nullable strings) are inserted as literal text; other values are JSON-serialized. Tool and parameter names are XML-attribute-escaped, but parameter bodies are not XML-escaped. The scanner does not decode XML entities. It accepts `antml:`-prefixed tags, `<tool_calls>` as a wrapper alias, and a bare `<invoke name="…">` outside either wrapper. The child-tag legacy `<invoke><tool_name>…` format is not supported.
+
+The scanner mints `ptc_…` call ids because this XML has none. It scans streamed text statefully, emits `toolArgDelta` events while each named parameter body arrives, and publishes the coerced argument object with `toolEnd` after `</invoke>`. A parameter value is capped at 1,000,000 JavaScript string code units; overflow gains an explicit truncation suffix. Schema-declared strings stay strings; other nonempty values use repairing JSON parsing and fall back to raw text on failure. An explicit `string` attribute overrides the schema: `false`, `0`, and `no` (case-insensitive) enable parsing; other supplied values keep the body as a string. Empty bodies stay strings.
+
+Standalone `AnthropicInbandScanner` defaults to `parseThinking: false`; the owned-stream projector enables it. With `parseThinking: true`, `<thinking>`, `<think>`, and `<scratchpad>` (prefixed or unprefixed) become thinking events. With it disabled, those tags remain visible outside tool wrappers; incidental text inside a tool wrapper is discarded.
 
 `</invoke>` gates `toolEnd`, but it does not gate creation of the canonical call. Once an opening `<invoke name="…">` has emitted `toolStart`, EOF only resets scanner-local state. On a normally stopped stream, OMP retains that call, changes the turn to `toolUse`, and may dispatch it even though no `toolEnd` arrived. Any `toolArgDelta` text already accumulated survives in the call (without the close-time coercion); a call with no accumulated parameter text runs with `{}`. A `length` stop remains non-runnable.
+
+History encoding groups consecutive results into a `user` message, keeping result images as separate image blocks after the XML. A tool-calling assistant turn is replayed as text plus rendered calls, without its thinking blocks. The standalone transcript renderer is a different surface: it uses `Human:` / `Assistant:` text turns and renders thinking as `<thinking>…</thinking>`, not Messages API JSON.
+
+The owned stream cuts off fabricated results at `<function_results>` or `<tool_response>` (aborting by default), retaining calls parsed before that boundary. If a provider nevertheless returns native structured calls, the first real native or in-band call chooses the channel for that turn, preventing duplicate dispatch.
 
 ---
 
@@ -545,7 +561,7 @@ Anthropic integrates tools into the `user`/`assistant` message structure rather 
 | Result ↔ call linkage | `tool_result.tool_use_id` | `tool` message `tool_call_id` |
 | Result payload | `tool_result.content` = string **or** block array (text/image/document) | `tool` message `content` = string |
 | Error result | `tool_result` with `is_error:true` | no dedicated flag; encode in `content` |
-| System prompt | top-level `system` param (no `system` role) | `{"role":"system",…}` message |
+| System prompt | top-level `system` param; supported beta models may also accept mid-conversation `system` messages | `{"role":"system",…}` message |
 | Streamed args | `input_json_delta.partial_json` fragments | `tool_calls[].function.arguments` string deltas |
 
 Conversion gotchas:
@@ -559,14 +575,14 @@ Conversion gotchas:
 ## Parsing notes & gotchas
 
 - **`input` is an object, not a string.** Unlike OpenAI's `arguments`, do not `JSON.parse` `tool_use.input` from a non-streamed response — it is already an object. Only the *streaming* `partial_json` fragments are strings.
-- **Streaming tool args need reassembly.** `content_block_start` for a `tool_use` always has `input: {}`. Buffer `partial_json` per `index` and parse only at `content_block_stop`; mid-stream fragments are not valid JSON on their own (e.g. `{"location":`). Current models emit one complete key/value at a time, so expect bursts and gaps.
+- **Streaming tool args need reassembly.** A normal `tool_use` start has `input: {}`; OMP also retains any input supplied at block start. Buffer `partial_json` per `index` and finalize at `content_block_stop`; mid-stream fragments are not valid JSON on their own (e.g. `{"location":`). Fine-grained streaming can split a value across chunks.
 - **`stop_reason` placement.** In streaming, `stop_reason` is `null` in `message_start` and final value (`"tool_use"`/`"end_turn"`) arrives in `message_delta`, not `message_stop`. `usage` in `message_delta` is **cumulative**.
 - **Ordering is enforced.** `tool_result` blocks must be first in their `user` message and must immediately follow the assistant `tool_use` message; every `tool_use.id` needs a matching `tool_result.tool_use_id`, or you get HTTP 400 ("tool_use ids were found without tool_result blocks immediately after").
 - **`tool_choice:any`/`tool` suppress preamble.** The API prefills the assistant turn, so no leading `text` block appears before `tool_use` — don't write a parser that expects explanatory text.
 - **Parallel results in one message.** Splitting parallel `tool_result`s across multiple `user` messages breaks the contract; send them together.
 - **Treat result content as untrusted.** Tool results can carry indirect prompt injection; keep them inside `tool_result` blocks, never promote to `system`/`user` text.
 - **Server tools differ.** `server_tool_use` / `web_search_tool_result` blocks are produced and consumed by Anthropic; never synthesize `tool_result` for them. `stop_reason:"pause_turn"` means resend the response as-is to let a long server-tool turn continue.
-- **Extended thinking + tools.** Preserve `thinking`/`redacted_thinking` blocks (with their `signature`) verbatim across turns; forced `tool_choice` (`any`/`tool`) is rejected when thinking is on.
+- **Extended thinking + tools.** Preserve `thinking.signature` and `redacted_thinking.data` across turns. The native adapter replays signed reasoning, but demotes unsigned reasoning to text unless the endpoint allows unsigned replay. OMP adjusts forced tool choices as described above instead of sending an incompatible thinking configuration.
 - **Output is not valid XML.** The underlying model output is parsed by Anthropic with regular expressions, not an XML parser ("The output is not expected to be valid XML"). If you reconstruct prompts at token level, do not assume well-formedness; rely on the JSON the API returns.
 - **Legacy vs modern XML are different tag sets.** Legacy: `<invoke>` + child `<tool_name>` + `<parameters>` with per-name child tags; results in `<function_results>/<result>/<stdout>`. Modern: `<invoke name="…">` + `<parameter name="…">`. Mixing them up will misparse. The legacy format also required passing `</function_calls>` as a `stop_sequence` and is not optimized for Claude 3+.
 
@@ -658,6 +674,14 @@ Legacy notes: no built-in tools (everything is prompt-defined); Anthropic recomm
 ---
 
 ## Sources
+
+Repository implementation:
+- [Native Anthropic adapter](../../packages/ai/src/providers/anthropic.ts) — `convertTools`, `normalizeAnthropicToolSchema`, `convertAnthropicMessages`, streaming block conversion, and stop-reason mapping.
+- [Anthropic in-band dialect](../../packages/ai/src/dialect/anthropic.ts) — `AnthropicInbandScanner` and XML renderers.
+- [Shared rendering](../../packages/ai/src/dialect/rendering.ts), [argument coercion](../../packages/ai/src/dialect/coercion.ts), [history encoding](../../packages/ai/src/dialect/history.ts), and [owned-stream projection](../../packages/ai/src/dialect/owned-stream.ts).
+- [Tool catalog](../../packages/ai/src/dialect/catalog.ts) and [agent request preparation](../../packages/agent/src/agent-loop.ts).
+
+External format references:
 
 - Tool use overview — https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview
 - How tool use works — https://docs.claude.com/en/docs/agents-and-tools/tool-use/how-tool-use-works

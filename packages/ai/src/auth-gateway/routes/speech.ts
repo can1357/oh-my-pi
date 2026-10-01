@@ -57,7 +57,7 @@ export async function handleSpeech(bootOpts: AuthGatewayBootOptions, req: Reques
 	const sessionId = deterministicUuid(`speech\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	logger.info("auth-gateway request", {
 		requestId,

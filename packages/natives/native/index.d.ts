@@ -364,6 +364,15 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
 }
 
 /** One word-completion engine running on its own thread. */
@@ -2594,6 +2603,17 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or

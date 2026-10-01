@@ -498,6 +498,14 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, command_type, {"removed": removed})
             if removed:
                 print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "promote_queued_message":
+            promoted = command["message"] in queued_messages["followUp"]
+            if promoted:
+                queued_messages["followUp"].remove(command["message"])
+                queued_messages["steering"].append(command["message"])
+            respond(request_id, command_type, {"promoted": promoted})
+            if promoted:
+                print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
         elif command_type == "abort":
             respond(request_id, command_type, {})
         elif command_type in {"prompt", "abort_and_prompt"}:
@@ -1094,6 +1102,37 @@ class RpcClientTests(unittest.TestCase):
         with self.make_client(server) as client:
             with self.assertRaises(ValueError):
                 client.remove_queued_message("missing", "steering")
+
+    def test_promote_queued_message_moves_one_follow_up_into_steering(self) -> None:
+        with self.make_client() as client:
+            client.follow_up("same")
+            client.follow_up("same")
+            self.assertIs(client.promote_queued_message("same").promoted, True)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertIs(client.promote_queued_message("same").promoted, True)
+            self.assertIs(client.promote_queued_message("same").promoted, False)
+            self.assertIs(client.promote_queued_message("missing").promoted, False)
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_promote_queued_message_propagates_unsupported_command(self) -> None:
+        server = FAKE_SERVER.replace(
+            'elif command_type == "promote_queued_message":',
+            'elif command_type == "unavailable_promote_queued_message":',
+        )
+        with self.make_client(server) as client:
+            client.follow_up("keep")
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.promote_queued_message("keep")
+            self.assertEqual(ctx.exception.command, "promote_queued_message")
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_promote_queued_message_rejects_missing_or_nonboolean_result(self) -> None:
+        for payload in ("{}", '{"promoted": "false"}'):
+            with self.subTest(payload=payload):
+                server = FAKE_SERVER.replace('{"promoted": promoted}', payload)
+                with self.make_client(server) as client:
+                    with self.assertRaises(ValueError):
+                        client.promote_queued_message("missing")
 
     def test_protocol_v2_decoder_accepts_exact_logical_boundary(self) -> None:
         frame = {

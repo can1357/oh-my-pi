@@ -5,6 +5,8 @@
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { disposeSessionQuietly } from "../../src/main";
@@ -14,6 +16,7 @@ import { formatPersistenceFailure } from "../../src/modes/persistence-failure";
 import { registerRpcPersistenceSurface } from "../../src/modes/rpc/rpc-mode";
 import type { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
+import { FileSessionStorage } from "../../src/session/session-storage";
 
 const tempDirs: TempDir[] = [];
 
@@ -183,6 +186,51 @@ describe("headless persistence-failure surface", () => {
 		expect(transcript).toContain("recovered-user");
 	});
 
+	it("prints a session move as a home-relative warning without failing the run", async () => {
+		const dir = TempDir.createSync("@pi-persistence-surface-");
+		tempDirs.push(dir);
+		const creator = SessionManager.create(dir.path(), dir.path());
+		await creator.ensureOnDisk();
+		const original = creator.getSessionFile() as string;
+		await creator.close();
+
+		// Another live omp process wrote this file first and still has it open.
+		const storage = new FileSessionStorage();
+		const claim = storage.claimSessionFile.bind(storage);
+		spyOn(storage, "claimSessionFile").mockImplementation(sessionPath =>
+			sessionPath === original ? null : claim(sessionPath),
+		);
+		const manager = await SessionManager.open(original, dir.path(), storage, { suppressBreadcrumb: true });
+		const session = {
+			...assistantSession(manager, () => manager.close()),
+			prompt: async () => {
+				manager.appendMessage({ role: "user", content: "moved-user", timestamp: Date.now() } as never);
+			},
+		} as unknown as AgentSession;
+
+		const home = spyOn(os, "homedir").mockReturnValue(dir.path());
+		const stderr = captureStderr();
+		let exitCode = -1;
+		try {
+			exitCode = await runPrintMode(session, { mode: "text", initialMessage: "hello" });
+		} finally {
+			stderr.restore();
+			home.mockRestore();
+		}
+
+		const moved = manager.getSessionFile() as string;
+		expect(moved).not.toBe(original);
+		const warning = stderr
+			.written()
+			.split("\n")
+			.find(line => line.startsWith("Warning: "));
+		expect(warning).toContain(`~/${path.basename(original)}`);
+		expect(warning).toContain(`~/${path.basename(moved)}`);
+		expect(warning).not.toContain(dir.path());
+		expect(stderr.written()).not.toContain("Session persistence failed");
+		expect(exitCode).toBe(0);
+	});
+
 	it("does not misattribute a later non-persistence dispose rejection", async () => {
 		const persistenceError = new Error("temporary persistence failure");
 		const unrelatedDisposeError = new Error("unrelated dispose failure");
@@ -197,6 +245,7 @@ describe("headless persistence-failure surface", () => {
 					notifyPersistenceError = callback;
 					return () => {};
 				},
+				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => assistant(""),
 			prepareForHeadlessAdvisorDrain: () => {},

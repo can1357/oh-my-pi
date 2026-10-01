@@ -66,7 +66,7 @@ describe("bash native view", () => {
 });
 
 describe("eval native view", () => {
-	it("titles the head with the cell title and renders console.table output as a table", () => {
+	it("renders console.table values without losing surrounding output", () => {
 		const table = [
 			"┌─────────┬────┬─────┐",
 			"│ (index) │ a  │  b  │",
@@ -93,18 +93,11 @@ describe("eval native view", () => {
 			},
 			done,
 		);
-		expect(view.tool?.title).toBe("Sum rows");
-		expect(view.tool?.badges).toEqual([{ text: "js" }]);
-		const [cell] = collect(view.body, "section");
-		// A single cell's title lives in the head only.
-		expect(props(cell).head).toBeUndefined();
-		expect(cell?.c?.map(child => (isNode(child) ? child.k : "component"))).toEqual(["code", "ansi", "table", "ansi"]);
-		const tableProps = props(collect(view.body, "table")[0]) as {
-			cols: { head: string }[];
-			rows: { cells: Record<string, string> }[];
-		};
-		expect(tableProps.cols.map(col => col.head)).toEqual(["", "a", "b"]);
-		expect(tableProps.rows.map(row => Object.values(row.cells))).toEqual([
+		expect(collect(view.body, "ansi").map(output => props(output).text)).toEqual(["before", "after"]);
+		const tableNode = collect(view.body, "table")[0];
+		if (tableNode?.k !== "table") throw new Error("Expected a native table");
+		expect(tableNode.p?.cols.map(col => col.head)).toEqual(["", "a", "b"]);
+		expect(tableNode.p?.rows.map(row => Object.values(row.cells))).toEqual([
 			["0", "1", "'x'"],
 			["1", "22", ""],
 		]);

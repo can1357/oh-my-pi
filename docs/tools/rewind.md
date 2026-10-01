@@ -47,8 +47,8 @@ The returned tool result is not the final rewind. `AgentSession` waits until `tu
 6. At `turn_end`, `#extractRewindReport()` finds the pending or successful rewind result and calls `#applyRewind()`.
 7. `#applyRewind()` first calls `sessionManager.branchWithSummary(checkpointEntryId, report, { startedAt })`, recording a `branch_summary` at the checkpoint branch point. If that entry no longer resolves, it logs a warning and branches from root instead.
 8. It appends a hidden persisted `rewind-report` custom message. Its content is rendered from `prompts/system/rewind-report.md`, which tells the next turn that the checkpoint completed, not to call `rewind` again, and includes the report; details contain `{ report, startedAt, rewoundAt }`.
-9. It sets `#lastCompletedRewind`, rebuilds the display/LLM session context from the new active branch, and replaces both the turn's active message array and `agent.state.messages`. The exploratory branch and successful rewind tool result are therefore absent from the next provider call.
-10. It resets advisor session state while preserving cost, synchronizes todo state from the new branch, and closes provider sessions whose history was rewritten.
+9. It reparents completed sibling tool calls and results from the same assistant batch onto the retained branch (excluding `rewind`, including write-device dispatches). It sets `#lastCompletedRewind`, rebuilds display/LLM context, and replaces the active messages. Earlier exploration and the successful rewind tool result are absent from the next provider call; completed sibling work remains visible and persists across resume.
+10. It resets advisor session state while preserving cost, synchronizes todo and model-mention state from the new branch, and closes provider sessions whose history was rewritten.
 11. Finally it clears `#checkpointState` and `#pendingRewindReport`. On later resume or tree navigation, the persisted retained report rehydrates `#lastCompletedRewind`.
 
 ## Modes / Variants
