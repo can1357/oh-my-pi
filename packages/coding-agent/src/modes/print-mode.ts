@@ -485,109 +485,144 @@ async function runPrintModeCore(
 		if (mode === "text") session.setTextOutputCommitted(false);
 		return true;
 	};
-	/** Prompt the model with one input, gated on strict MCP readiness. */
+	/**
+	 * Prompt the model with one input, gated on strict MCP readiness.
+	 *
+	 * A bridge extension claims its IRC namespace during extension load, so an inbound peer message
+	 * can wake this session into a real turn before the dispatch. `prompt()` without a streaming
+	 * behaviour throws AgentBusyError on a busy session; queue behind the wake turn as a follow-up
+	 * instead (irrelevant when idle: the prompt then runs to completion as before). A queued prompt
+	 * returns while the wake turn is still streaming, so wait until nothing is in flight (a stranded
+	 * follow-up re-arms as a tracked continue, hence the loop) and the response read after each
+	 * dispatch is the prompt's own, not the wake turn's reply. A prompt still queued once everything
+	 * is idle (the queued drain was refused, e.g. by a usage-limit denial) must not pass as the
+	 * printed answer of another turn: fail loudly, the catch below still disposes.
+	 */
 	const promptTurn = async (text: string, images?: PrintModeOptions["initialImages"]): Promise<void> => {
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
 		costCapRefusalBeforeTurn = session.costCapRefusal;
 		await logger.time("print:prompt", () =>
-			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
+			session.prompt(
+				text,
+				images !== undefined ? { images, streamingBehavior: "followUp" } : { streamingBehavior: "followUp" },
+			),
 		);
+		while (session.isStreaming) await session.waitForIdle();
+		if (session.queuedMessageCount > 0) {
+			throw new Error("print mode: the prompt was queued behind another turn and never dispatched");
+		}
 	};
 
-	// Inputs run in order. The merged stdin/@file message is never dispatched
-	// (see dispatchCliMessage): it always prompts the model with its text.
-	if (initialMessage !== undefined) {
-		await promptTurn(initialMessage, initialImages);
-	}
-	// Remaining messages are CLI-authored: dispatch the recovery command as
-	// reached, prompt everything else.
-	for (const message of messages) {
-		if (strictMCPFailure) break;
-		if (await dispatchCliMessage(message)) {
-			readinessDirty = true;
-			continue;
-		}
-		await promptTurn(message);
-	}
-	// A run with no model turn (every input consumed locally, or none) still
-	// reports strict unreadiness: `OMP_MCP_REQUIRE_READY=1 omp -p '/mcp reauth
-	// foo'` that failed to repair its server exits with the strict error, not
-	// only the builtin's own failure.
-	if (strict && !admittedAgentTurn && !strictMCPFailure) {
-		await ensureReadiness();
-		if (unavailable.length > 0) reportStrictFailure();
-	}
-
-	// Opt-in (`async.printWake` / `--wait-async`): background jobs the run started
-	// would otherwise be cancelled by the dispose below. Keep the process alive until
-	// the run ends: each job's async-result (or a child agent's message) resumes the
-	// same run for another loop, and the session ends the run once no wake source
-	// remains. This runs before the headless advisor drain because these follow-ups
-	// are primary turns whose answer print mode still reports. The `--max-time`
-	// deadline only aborts running turns, not a paused run or a retry backoff sleep,
-	// so the wait races it; reaching it cancels the jobs and any pending retry
-	// (dispose below) and fails the run. Signal teardown disposes the session, which
-	// ends the wait.
 	let asyncWaitExpired = false;
-	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
-		const { deadline } = options;
-		const deadlineReached = Promise.withResolvers<true>();
-		// setTimeout overflows past 2^31-1 ms and fires in ~1 ms (#12375), and `--max-time 600h`
-		// is valid: wait in bounded slices and recheck the absolute deadline after each one.
-		let deadlineTimer: NodeJS.Timeout | undefined;
-		const armDeadline = (): void => {
-			if (deadline === undefined) return;
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) deadlineReached.resolve(true);
-			else deadlineTimer = setTimeout(armDeadline, Math.min(remaining, MAX_TIMER_MS));
-		};
-		armDeadline();
-		// Dispose cancels the jobs and retry recovery; an abandoned wait then resolves or rejects unobserved.
-		const expires = async (work: Promise<void>): Promise<boolean> => {
-			if (!(await Promise.race([work.then(() => false), deadlineReached.promise]))) return false;
-			work.catch(() => {});
-			return true;
-		};
-		try {
-			// A run that ended just as the deadline fired is complete: its answer stands.
-			asyncWaitExpired = (await expires(session.waitForRunEnd())) && session.isRunActive;
-		} finally {
-			clearTimeout(deadlineTimer);
+	let assistantMsg: AgentMessage | undefined;
+	let costCapped = false;
+	let terminalFailure = false;
+	try {
+		// Inputs run in order. The merged stdin/@file message is never dispatched
+		// (see dispatchCliMessage): it always prompts the model with its text.
+		if (initialMessage !== undefined) {
+			await promptTurn(initialMessage, initialImages);
 		}
-		if (asyncWaitExpired) {
-			writeStderrLine("Error: --max-time reached before the run ended; any running jobs were cancelled.");
+		// Remaining messages are CLI-authored: dispatch the recovery command as
+		// reached, prompt everything else.
+		for (const message of messages) {
+			if (strictMCPFailure) break;
+			if (await dispatchCliMessage(message)) {
+				readinessDirty = true;
+				continue;
+			}
+			await promptTurn(message);
 		}
+		// A run with no model turn (every input consumed locally, or none) still
+		// reports strict unreadiness: `OMP_MCP_REQUIRE_READY=1 omp -p '/mcp reauth
+		// foo'` that failed to repair its server exits with the strict error, not
+		// only the builtin's own failure.
+		if (strict && !admittedAgentTurn && !strictMCPFailure) {
+			await ensureReadiness();
+			if (unavailable.length > 0) reportStrictFailure();
+		}
+
+		// Opt-in (`async.printWake` / `--wait-async`): background jobs the run started
+		// would otherwise be cancelled by the dispose below. Keep the process alive until
+		// the run ends: each job's async-result (or a child agent's message) resumes the
+		// same run for another loop, and the session ends the run once no wake source
+		// remains. This runs before the headless advisor drain because these follow-ups
+		// are primary turns whose answer print mode still reports. The `--max-time`
+		// deadline only aborts running turns, not a paused run or a retry backoff sleep,
+		// so the wait races it; reaching it cancels the jobs and any pending retry
+		// (dispose below) and fails the run. Signal teardown disposes the session, which
+		// ends the wait.
+		if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
+			const { deadline } = options;
+			const deadlineReached = Promise.withResolvers<true>();
+			// setTimeout overflows past 2^31-1 ms and fires in ~1 ms (#12375), and `--max-time 600h`
+			// is valid: wait in bounded slices and recheck the absolute deadline after each one.
+			let deadlineTimer: NodeJS.Timeout | undefined;
+			const armDeadline = (): void => {
+				if (deadline === undefined) return;
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) deadlineReached.resolve(true);
+				else deadlineTimer = setTimeout(armDeadline, Math.min(remaining, MAX_TIMER_MS));
+			};
+			armDeadline();
+			// Dispose cancels the jobs and retry recovery; an abandoned wait then resolves or rejects unobserved.
+			const expires = async (work: Promise<void>): Promise<boolean> => {
+				if (!(await Promise.race([work.then(() => false), deadlineReached.promise]))) return false;
+				work.catch(() => {});
+				return true;
+			};
+			try {
+				// A run that ended just as the deadline fired is complete: its answer stands.
+				asyncWaitExpired = (await expires(session.waitForRunEnd())) && session.isRunActive;
+			} finally {
+				clearTimeout(deadlineTimer);
+			}
+			if (asyncWaitExpired) {
+				writeStderrLine("Error: --max-time reached before the run ended; any running jobs were cancelled.");
+			}
+		}
+
+		// From this point onward a late blocker must be recorded without starting a
+		// primary turn whose response print mode would never emit.
+		session.prepareForHeadlessAdvisorDrain();
+		// Past --max-time a follow-up turn can still sit in retry backoff, which this wait
+		// includes and only dispose cancels: skip it so teardown can run.
+		if (!asyncWaitExpired) await session.waitForIdle();
+
+		// Read via the session accessor, not the raw state tail: a classifier
+		// refusal is pruned from active context at settle, and an aborted turn
+		// can trail synthetic tool results — both would hide the terminal
+		// assistant message (and its error) from a last-element read.
+		assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
+		// A request refused during the last admitted turn ends the run short of an
+		// answer; the refusal (already on stderr, or a `cost-gate` notice in the JSON
+		// stream) is the outcome, with its own exit code.
+		costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== costCapRefusalBeforeTurn;
+		// The terminal stop reason decides the process exit code in every output
+		// mode: `--mode json` used to report success for the same turn-fatal error
+		// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
+		// transitions) and aborts initiated by signal teardown stay non-fatal here;
+		// postmortem owns the signal-specific exit code (130/143/129).
+		terminalFailure =
+			!strictMCPFailure &&
+			!costCapped &&
+			assistantMsg !== undefined &&
+			(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+			!isSilentAbort(assistantMsg) &&
+			!signalTeardownActive();
+	} catch (error) {
+		// A throw here (provider setup, a dropped prompt, a bug) used to escape before the dispose
+		// below, so the extensions never saw `session_shutdown` and a bridge's IRC claims, transports
+		// and remote proxies leaked for the life of the process. Release the session first; the
+		// original error still decides the exit.
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }).catch(disposeError => {
+			logger.error("print mode: dispose after a failed run also failed", {
+				error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+			});
+		});
+		throw error;
 	}
-
-	// From this point onward a late blocker must be recorded without starting a
-	// primary turn whose response print mode would never emit.
-	session.prepareForHeadlessAdvisorDrain();
-	// Past --max-time a follow-up turn can still sit in retry backoff, which this wait
-	// includes and only dispose cancels: skip it so teardown can run.
-	if (!asyncWaitExpired) await session.waitForIdle();
-
-	// Read via the session accessor, not the raw state tail: a classifier
-	// refusal is pruned from active context at settle, and an aborted turn
-	// can trail synthetic tool results — both would hide the terminal
-	// assistant message (and its error) from a last-element read.
-	const assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
-	// A request refused during the last admitted turn ends the run short of an
-	// answer; the refusal (already on stderr, or a `cost-gate` notice in the JSON
-	// stream) is the outcome, with its own exit code.
-	const costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== costCapRefusalBeforeTurn;
-	// The terminal stop reason decides the process exit code in every output
-	// mode: `--mode json` used to report success for the same turn-fatal error
-	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
-	// transitions) and aborts initiated by signal teardown stay non-fatal here;
-	// postmortem owns the signal-specific exit code (130/143/129).
-	const terminalFailure =
-		!strictMCPFailure &&
-		!costCapped &&
-		assistantMsg !== undefined &&
-		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-		!isSilentAbort(assistantMsg) &&
-		!signalTeardownActive();
 
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
