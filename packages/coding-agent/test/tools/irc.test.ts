@@ -3,7 +3,7 @@ import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
+import { executeSend, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -127,9 +127,9 @@ describe("IRC", () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", session: main.session });
 			const a = makeFakeSession();
-			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: a.session });
+			registry.register({ id: "0-A", displayName: "task", kind: "sub", parentId: "Main", session: a.session });
 			const b = makeFakeSession();
-			registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
+			registry.register({ id: "0-B", displayName: "task", kind: "sub", parentId: "Main", session: b.session });
 
 			await bus.send({ from: "Main", to: "0-A", body: "outbound from main" });
 			await bus.send({ from: "0-A", to: "Main", body: "inbound to main" });
@@ -137,6 +137,34 @@ describe("IRC", () => {
 
 			expect(main.relayed).toHaveLength(1);
 			expect(main.relayed[0]?.details).toEqual({ from: "0-A", to: "0-B", body: "sibling note" });
+		});
+
+		it("relays to a custom (non-Main) root — the registry's main ref, not a hardcoded Main", async () => {
+			// ACP/custom-root sessions register the root under its own id (e.g. `acp:<sid>`), not "Main".
+			// The relay must target that main ref; the old hardcoded `Main` lookup dropped it entirely.
+			const root = makeFakeSession();
+			registry.register({ id: "acp:sid", displayName: "acp", kind: "main", session: root.session });
+			const a = makeFakeSession();
+			registry.register({
+				id: "acp:sid-A",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: a.session,
+			});
+			const b = makeFakeSession();
+			registry.register({
+				id: "acp:sid-B",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: b.session,
+			});
+
+			await bus.send({ from: "acp:sid-A", to: "acp:sid-B", body: "sibling note" });
+
+			expect(root.relayed).toHaveLength(1);
+			expect(root.relayed[0]?.details).toEqual({ from: "acp:sid-A", to: "acp:sid-B", body: "sibling note" });
 		});
 
 		it("send to an unknown agent or a killed one without a transcript fails", async () => {
@@ -237,6 +265,27 @@ describe("IRC", () => {
 			expect(receipt).toEqual({ to: "0-Sub", outcome: "injected" });
 			expect(live.delivered.map(msg => msg.body)).toEqual(["hi"]);
 			expect(globalStub.delivered).toEqual([]);
+		});
+
+		it("custom-registry bus revives a parked recipient through its OWN lifecycle manager", async () => {
+			// PR #7401 codex (r3758432383): the custom bus fell back to AgentLifecycleManager.global(),
+			// which does not own the custom registry's parked ref, so send() failed instead of reviving.
+			// The bus now derives its lifecycle from its own registry.
+			const customRegistry = new AgentRegistry();
+			const customBus = IrcBus.forRegistry(customRegistry);
+			const sub = makeFakeSession();
+			sub.setOutcome("woken");
+			customRegistry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
+			AgentLifecycleManager.forRegistry(customRegistry).adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: async () => sub.session,
+			});
+
+			const receipt = await customBus.send({ from: "0-Main", to: "0-Parked", body: "wake up" });
+			expect(receipt.outcome).toBe("revived");
+			expect(sub.delivered.map(msg => msg.body)).toEqual(["wake up"]);
+			expect(customRegistry.get("0-Parked")?.status).toBe("idle");
+			expect(AgentLifecycleManager.global().has("0-Parked")).toBe(false);
 		});
 
 		it("send during pre-detach park keeps the live session and does not revive", async () => {
@@ -829,5 +878,28 @@ describe("IRC", () => {
 			if (parentSteer?.role !== "user") throw new Error("expected queued parent IRC steer");
 			expect(parentSteer.content).toContain("change approach");
 		});
+	});
+});
+
+describe("isIrcEnabled", () => {
+	it("returns true for a leaf top-level session once a remote transport is installed (murmur-q00p)", () => {
+		const settings = Settings.isolated({ "task.maxRecursionDepth": 0 }); // cannot spawn — no LOCAL peers
+		const bus = IrcBus.global();
+		try {
+			expect(isIrcEnabled(settings, 0)).toBe(false);
+			// The murmur bridge installs a transport + seeds remote proxies: a leaf root now has peers.
+			bus.setRemoteTransport(
+				"cluster-a",
+				{
+					async send(m) {
+						return { to: m.to, outcome: "injected" };
+					},
+				},
+				"ext:test",
+			);
+			expect(isIrcEnabled(settings, 0)).toBe(true);
+		} finally {
+			bus.releaseTransportsForOwner("ext:test");
+		}
 	});
 });

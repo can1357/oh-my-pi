@@ -83,12 +83,18 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("__advisor-notes")).toBe("__advisor-notes");
 	});
 
+	it("rejects a subagent name that starts with the reserved remote prefix `@`", async () => {
+		const mgr = new AgentOutputManager(() => null);
+		// `@` is reserved for the cross-process remote id space (`@ns/name`); a local subagent name
+		// may never intrude on it.
+		await expect(mgr.allocate("@spoof")).rejects.toThrow(/reserved for cross-process remote peers/);
+	});
+
 	it("reserves the pinned-HUD toggle sentinel so a task can't collide with it", async () => {
 		const mgr = new AgentOutputManager(() => null);
-		// A subagent allocated the sentinel id would be indistinguishable from
-		// the jump-list expander row in click routing; it bumps to a suffix.
-		expect(await mgr.allocate(PINNED_HUD_TOGGLE_ID)).toBe(`${PINNED_HUD_TOGGLE_ID}-2`);
-		// Unrelated names sharing the prefix are unaffected.
-		expect(await mgr.allocate("@omp:other")).toBe("@omp:other");
+		// The sentinel lives in the reserved `@` space, so no subagent can be allocated it (or any
+		// sibling id) and become indistinguishable from the jump-list expander row in click routing.
+		await expect(mgr.allocate(PINNED_HUD_TOGGLE_ID)).rejects.toThrow(/reserved for cross-process remote peers/);
+		await expect(mgr.allocate("@omp:other")).rejects.toThrow(/reserved for cross-process remote peers/);
 	});
 });

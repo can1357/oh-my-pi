@@ -4,6 +4,7 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { IrcBus } from "../irc/bus";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
@@ -237,6 +238,12 @@ export interface AsyncJobManagerOptions {
 	 * small value to assert eviction without real-time waits.
 	 */
 	consumedResultEvictionMs?: number;
+	/**
+	 * Registry of the session tree whose agents run these jobs; a settled
+	 * subagent job records its reply on that registry's IRC bus. Defaults to
+	 * the process-global registry.
+	 */
+	agentRegistry?: AgentRegistry;
 }
 
 interface AsyncJobDelivery {
@@ -432,6 +439,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
 	readonly #consumedResultEvictionMs: number;
+	readonly #agentRegistry: AgentRegistry | undefined;
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
@@ -476,6 +484,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			0,
 			Math.floor(options.retainedArtifactsCleanupMaxWaitMs ?? RETAINED_ARTIFACTS_CLEANUP_MAX_WAIT_MS),
 		);
+		this.#agentRegistry = options.agentRegistry;
 		this.#consumedResultEvictionMs = Math.max(
 			0,
 			Math.floor(options.consumedResultEvictionMs ?? CONSUMED_RESULT_EVICTION_MS),
@@ -648,7 +657,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	 * a reply `wait` must not keep reporting as owed.
 	 */
 	#recordAgentReply(job: AsyncJob): void {
-		if (job.agentId !== undefined && job.ownerId !== undefined) IrcBus.recordReply(job.agentId, job.ownerId);
+		if (job.agentId !== undefined && job.ownerId !== undefined)
+			IrcBus.recordReply(job.agentId, job.ownerId, this.#agentRegistry);
 	}
 
 	/**
