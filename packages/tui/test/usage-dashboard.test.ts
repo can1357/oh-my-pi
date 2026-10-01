@@ -291,8 +291,8 @@ describe("UsageDashboardComponent", () => {
 					expect(bars[0][0].length).toBeGreaterThanOrEqual(12);
 					for (const bar of bars) expect(bar[0].length).toBe(bars[0][0].length);
 				}
-				expect(quotaLines[0]).toContain("10%");
-				expect(quotaLines[1]).toContain("84%");
+				expect(quotaLines[0]).toContain("10% left");
+				expect(quotaLines[1]).toContain("84% left");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 		} finally {
@@ -398,8 +398,8 @@ describe("UsageDashboardComponent", () => {
 				const output = Bun.stripANSI(lines.join("\n"));
 				expect(output).toContain("Claude 7 Day (Fable)");
 				expect(output).toContain("Claude Extra Usage");
-				expect(output).toContain("84%");
-				expect(output).toContain("95%");
+				expect(output).toContain("84% left");
+				expect(output).toContain("95% left");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 		} finally {

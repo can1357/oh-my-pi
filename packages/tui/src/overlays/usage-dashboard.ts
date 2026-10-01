@@ -521,6 +521,8 @@ const CARD_GUTTER = 3;
 const CARD_MAX_WINDOWS = 4;
 const CARD_MIN_BAR_WIDTH = 12;
 const CARD_MAX_LABEL_LINES = 2;
+/** Column width of the right-aligned quota suffix: the widest `100% left` plus a gap after the bar. */
+const CARD_PCT_WIDTH = leftText(0).length + 1;
 
 interface CardRowLayout {
 	labelWidth: number;
@@ -696,8 +698,7 @@ export class UsageDashboardComponent implements Component {
 				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
-			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
+			const pctText = theme.fg(this.#statusColor(window.status), leftText(window.fraction).padStart(CARD_PCT_WIDTH));
 			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
 			for (const line of wrapTextWithAnsi(
@@ -744,7 +745,7 @@ export class UsageDashboardComponent implements Component {
 				0,
 			);
 			const contentWidth = Math.max(1, cardWidth - 2);
-			const suffixWidth = 5 + (resetWidth > 0 ? resetWidth + 1 : 0);
+			const suffixWidth = CARD_PCT_WIDTH + (resetWidth > 0 ? resetWidth + 1 : 0);
 			const inlineBarWidth = contentWidth - labelWidth - 1 - suffixWidth;
 			const stacked = inlineBarWidth < CARD_MIN_BAR_WIDTH;
 			const labelLines = labels.map(rows =>

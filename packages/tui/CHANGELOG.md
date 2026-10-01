@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `/usage` dashboard grid showing an unlabeled remaining percentage beside a used-quota bar; it now reads `N% left` ([#13971](https://github.com/can1357/oh-my-pi/issues/13971))
+
 ## [18.4.8] - 2026-10-01
 
 ### Fixed

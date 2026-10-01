@@ -428,7 +428,7 @@ describe("interactive /usage account visibility", () => {
 		expect(overview).toContain(email);
 		expect(overview).toContain("org-personal");
 		expect(overview).toContain("usage unavailable");
-		expect(overview).toContain("75%");
+		expect(overview).toContain("75% left");
 		expect(overview).not.toContain("Tavily");
 
 		mounted?.handleInput("\r");
