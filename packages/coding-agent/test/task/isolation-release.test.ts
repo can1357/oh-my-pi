@@ -79,6 +79,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 		});
 		await executorModule.finalizeSubagentLifecycle({
 			id: options.id,
+			registry: AgentRegistry.global(),
 			session,
 			aborted: false,
 			keepAlive: true,

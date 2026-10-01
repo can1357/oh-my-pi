@@ -13,6 +13,7 @@ import type { SessionManager } from "./session-manager";
 export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	agentRegistry?: AgentRegistry;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
@@ -177,7 +178,7 @@ export class IrcBridge {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
+		const fromParent = (this.#host.agentRegistry ?? AgentRegistry.global()).get(msg.to)?.parentId === msg.from;
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent and mid-turn asides have no such relay.

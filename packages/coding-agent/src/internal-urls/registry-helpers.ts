@@ -7,7 +7,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
 
@@ -112,13 +112,15 @@ export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<s
  * and probing never throws: a stale path or unreadable artifacts subtree
  * reads as unavailable instead of disturbing the caller's delivery path.
  */
-export async function hasResolvableTranscript(agentId: string): Promise<boolean> {
+export async function hasResolvableTranscript(
+	agentId: string,
+	registry: AgentRegistry = AgentRegistry.global(),
+): Promise<boolean> {
 	try {
-		const registry = AgentRegistry.global();
 		const lower = agentId.toLowerCase();
 		let ref = registry.get(agentId);
-		if (ref?.kind === "advisor") ref = undefined;
-		ref ??= registry.list().find(candidate => candidate.kind !== "advisor" && candidate.id.toLowerCase() === lower);
+		if (ref && !isLocalSession(ref.kind)) ref = undefined;
+		ref ??= registry.list().find(candidate => isLocalSession(candidate.kind) && candidate.id.toLowerCase() === lower);
 		if (ref?.session) return true;
 		if (ref?.sessionFile && (await isReadableFile(ref.sessionFile))) return true;
 		const files = await sessionFilesFromDisk();

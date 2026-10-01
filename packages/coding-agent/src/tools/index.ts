@@ -775,7 +775,8 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "wait") {
 			return (
 				cfgAsyncEnabled.get(session.settings) ||
-				(session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)) ||
+				(session.enableIrc !== false &&
+					isIrcEnabled(session.settings, session.taskDepth ?? 0, session.agentRegistry)) ||
 				cfgLaunchEnabled.get(session.settings)
 			);
 		}

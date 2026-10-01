@@ -32,7 +32,10 @@ interface WaitMessaging {
 
 function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | undefined {
 	if (!messaging) return undefined;
-	return drainPendingInbox(messaging.registry, messaging.senderId) ?? IrcBus.global().take(messaging.senderId);
+	return (
+		drainPendingInbox(messaging.registry, messaging.senderId) ??
+		IrcBus.forRegistry(messaging.registry).take(messaging.senderId)
+	);
 }
 
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
@@ -114,7 +117,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		const busLeg = messaging
-			? IrcBus.global()
+			? IrcBus.forRegistry(messaging.registry)
 					.wait(messaging.senderId, {}, 0, busAbort.signal)
 					.catch(() => null)
 			: undefined;
