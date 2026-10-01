@@ -6,7 +6,7 @@ import { untilAborted } from "@oh-my-pi/pi-utils";
  * one compaction request, the way stream dispatch does for a normal turn, so
  * configured headers (including command-backed ones) reach the wire.
  */
-export async function resolveCompactionModelHeaders(model: Model, signal: AbortSignal | undefined): Promise<Model> {
+export async function materializeModelHeaders(model: Model, signal: AbortSignal | undefined): Promise<Model> {
 	const resolveHeaders = model.resolveHeaders;
 	if (!resolveHeaders) return model;
 	const headers = await untilAborted(signal, () => resolveHeaders(signal));

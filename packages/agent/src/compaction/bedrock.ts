@@ -1,7 +1,7 @@
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
-import { resolveCompactionModelHeaders } from "./model-headers";
+import { materializeModelHeaders } from "./model-headers";
 
 export interface BedrockCompactionRequest {
 	model: Model;
@@ -26,7 +26,7 @@ export async function prepareBedrockCompactionRequest(
 	fetch: FetchImpl | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<BedrockCompactionRequest> {
-	const resolvedModel = await resolveCompactionModelHeaders(model, signal);
+	const resolvedModel = await materializeModelHeaders(model, signal);
 	const baseFetch = transportFetch(resolvedModel, fetch);
 	const provider = getProviderDefinition(resolvedModel.provider);
 	const providerModel = provider?.prepareModel?.(resolvedModel) ?? resolvedModel;

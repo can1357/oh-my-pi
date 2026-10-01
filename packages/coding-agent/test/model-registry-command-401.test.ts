@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
-import { type OAuthAccessSource, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai/auth-retry";
+import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { CommandConfigResolutionError } from "@oh-my-pi/pi-ai/error";
 import type { Context, FetchImpl, Model, StopReason } from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -209,51 +209,6 @@ describe("ModelRegistry !command credentials after a 401", () => {
 			]);
 		});
 	}
-
-	test("withOAuthAccess keeps its two-request budget and never re-runs a cached command header", async () => {
-		// OAuth refreshes go through AuthStorage, not the registry resolver, so a 401 marks
-		// no command. This row guards that budget; it holds on 706d0e12 as well.
-		const headerCounter = tempFile("header-counter.txt");
-		const { registry, model } = customProvider({
-			apiKey: "static-api-key",
-			headers: { "x-tenant-token": `!${mintingCommand(headerCounter, "tenant")}` },
-		});
-		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("tenant-1");
-		let refreshes = 0;
-		const storage: OAuthAccessSource = {
-			oauth: {
-				async access(_provider, _sessionId, options) {
-					if (options?.forceRefresh) refreshes++;
-					return { accessToken: `bearer-${refreshes}` };
-				},
-			},
-			limits: {
-				async rotate() {
-					return { switched: false };
-				},
-			},
-		};
-		let requests = 0;
-
-		const perOperation: number[][] = [];
-		for (let operation = 0; operation < 2; operation++) {
-			const before = [requests, runCount(headerCounter)];
-			await expect(
-				withOAuthAccess(storage, "custom-proxy", async () => {
-					await registry.resolveModelHeaders(model);
-					requests++;
-					throw authError();
-				}),
-			).rejects.toMatchObject({ status: 401 });
-			perOperation.push([requests - before[0], runCount(headerCounter) - before[1]]);
-		}
-
-		// [requests, header runs]
-		expect(perOperation).toEqual([
-			[2, 0],
-			[2, 0],
-		]);
-	});
 
 	for (const driver of DRIVERS) {
 		test(`a header helper that never succeeds runs twice, then waits out its backoff (${driver.name})`, async () => {

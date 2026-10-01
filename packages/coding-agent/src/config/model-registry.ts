@@ -73,7 +73,7 @@ import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
-	markCommandConfigForRecovery,
+	requireFreshCommandRun,
 	resolveConfigHeaders,
 	resolveConfigValue,
 } from "./resolve-config-value";
@@ -354,21 +354,17 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * On a 401 refresh step, mark the provider's command-backed API key (only
-	 * while it still holds the bearer that failed) and its provider-level and
-	 * current-model header commands, so none of their cached output is sent
-	 * again until a run succeeds.
+	 * On a 401 refresh step, require a fresh run of the provider's command-backed
+	 * API key (only while it still holds the bearer that failed) and of its
+	 * provider-level and current-model header commands, so none of their cached
+	 * output is sent again until a run succeeds.
 	 */
-	#markCommandConfigsForRecovery(
-		provider: string,
-		modelId: string | undefined,
-		previousKey: string | undefined,
-	): void {
+	#requireFreshCommandRuns(provider: string, modelId: string | undefined, previousKey: string | undefined): void {
 		const keyConfigs = new Set([
 			this.#customProviderApiKeys.get(provider),
 			this.#runtimeProviderApiKeys.get(provider)?.keyConfig,
 		]);
-		for (const config of keyConfigs) markCommandConfigForRecovery(config, previousKey);
+		for (const config of keyConfigs) requireFreshCommandRun(config, previousKey);
 		const headerConfigs = new Set([
 			...(this.#commandConfigsByProvider.get(provider) ?? []),
 			...(this.#runtimeCommandConfigsByProvider.get(provider) ?? []),
@@ -378,7 +374,7 @@ export class ModelRegistry {
 				: (this.#runtimeCommandConfigsByProviderModel.get(provider)?.get(modelId) ?? [])),
 		]);
 		for (const config of headerConfigs) {
-			if (!keyConfigs.has(config)) markCommandConfigForRecovery(config);
+			if (!keyConfigs.has(config)) requireFreshCommandRun(config);
 		}
 	}
 
@@ -2963,7 +2959,7 @@ export class ModelRegistry {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		if (options?.forceRefresh) {
 			if (options.refreshReason === "auth-recovery") {
-				this.#markCommandConfigsForRecovery(provider, options.modelId, options.previousKey);
+				this.#requireFreshCommandRuns(provider, options.modelId, options.previousKey);
 			} else {
 				this.#invalidateProviderCommandConfigs(provider);
 			}

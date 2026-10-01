@@ -3,7 +3,8 @@ import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAbo
 
 const COMMAND_TIMEOUT_MS = 10_000;
 const COMMAND_FAILURE_RETRY_MS = 30_000;
-const INITIAL_MINT_ATTEMPTS = 2;
+/** Runs per resolution when nothing is servable: a first mint, or a re-mint after a 401 withheld the value. */
+const NO_SERVABLE_VALUE_ATTEMPTS = 2;
 /** lastGood: stdout of each command's last successful run; a failed run never replaces it. */
 const commandResultCache = new Map<string, string>();
 /** Failed runs wait this long before another run, preventing a credential-helper storm. */
@@ -12,8 +13,8 @@ const commandFailureRetryAt = new Map<string, number>();
 const commandFailure = new Map<string, string>();
 /** Commands an ordinary or explicit refresh asked to run; lastGood stays servable if that run fails. */
 const commandRefreshPending = new Set<string>();
-/** Commands whose cached value a 401 marked: it is not served again until a run succeeds. */
-const commandRecoveryPending = new Set<string>();
+/** Commands whose cached value a 401 withheld: it is not served again until a fresh run succeeds. */
+const commandFreshRunRequired = new Set<string>();
 /** The single shared run per command. */
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 /** Explicit-invalidation epoch; a run that started under an older generation does not update state. */
@@ -53,9 +54,9 @@ function commandProgram(command: string): string {
 	return words.length > 1 ? `${program} …` : program;
 }
 
-/** Withhold a command's cached value while a 401 mark awaits a successful run. */
+/** Withhold a command's cached value while it requires a fresh run. */
 function handOutValue(command: string, value: string | undefined): string | undefined {
-	return commandRecoveryPending.has(command) && value === commandResultCache.get(command) ? undefined : value;
+	return commandFreshRunRequired.has(command) && value === commandResultCache.get(command) ? undefined : value;
 }
 
 /** Invalidate one command-backed value for an ordinary refresh. */
@@ -68,13 +69,13 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 }
 
-/** Mark a command's cached value unservable until a run succeeds. With `sentValue`, only when it is still the cached value. */
-export function markCommandConfigForRecovery(valueConfig: string | undefined, sentValue?: string): void {
+/** Withhold a command's cached value until a fresh run succeeds. With `sentValue`, only while it is still the cached value. */
+export function requireFreshCommandRun(valueConfig: string | undefined, sentValue?: string): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
 	const cached = commandResultCache.get(command);
 	if (cached === undefined || (sentValue !== undefined && sentValue !== cached)) return;
-	commandRecoveryPending.add(command);
+	commandFreshRunRequired.add(command);
 }
 
 /** Invalidate every command-backed value without cancelling shared in-flight processes. */
@@ -119,7 +120,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 	const generation = commandGeneration.get(command) ?? 0;
 	const promise: Promise<string | undefined> = (async () => {
 		let run: CommandRun = { ok: false, failure: "was not run" };
-		let attempts = handOutValue(command, cached) === undefined ? INITIAL_MINT_ATTEMPTS : 1;
+		let attempts = handOutValue(command, cached) === undefined ? NO_SERVABLE_VALUE_ATTEMPTS : 1;
 		for (let attempt = 0; attempt < attempts; attempt++) {
 			run = await runInProjectDir(command);
 			if (run.ok) {
@@ -130,14 +131,14 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 					commandFailureRetryAt.delete(command);
 					commandFailure.delete(command);
 					commandRefreshPending.delete(command);
-					commandRecoveryPending.delete(command);
+					commandFreshRunRequired.delete(command);
 				}
 				return run.value;
 			}
 			// A 401 may arrive while this mint was in flight. Re-evaluate the
 			// state now, then spend one shared replacement attempt if needed.
 			if (attempt === 0 && handOutValue(command, commandResultCache.get(command)) === undefined) {
-				attempts = INITIAL_MINT_ATTEMPTS;
+				attempts = NO_SERVABLE_VALUE_ATTEMPTS;
 			}
 		}
 
@@ -147,7 +148,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 			command: commandProgram(command),
 			failure: run.failure,
 			keptPreviousValue: sendableLastGood !== undefined,
-			awaitingRecovery: lastGood !== undefined && sendableLastGood === undefined,
+			freshRunRequired: lastGood !== undefined && sendableLastGood === undefined,
 		});
 		if ((commandGeneration.get(command) ?? 0) === generation) {
 			commandFailure.set(command, run.failure);
@@ -308,5 +309,5 @@ export function clearConfigValueCache(): void {
 	commandFailureRetryAt.clear();
 	commandFailure.clear();
 	commandRefreshPending.clear();
-	commandRecoveryPending.clear();
+	commandFreshRunRequired.clear();
 }
