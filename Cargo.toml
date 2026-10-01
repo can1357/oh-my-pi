@@ -379,7 +379,9 @@ png = "0.18"
 inferno = { version = "0.12", default-features = false }
 # Oniguruma, not fancy-regex: onig is already linked (pi-builtins), and its
 # compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
-# RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms).
+# RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms). Bumping this version
+# re-syncs crates/pi-natives/src/syntaxes/Markdown.sublime-syntax; see that
+# file's header for the vendored fix it must preserve.
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
