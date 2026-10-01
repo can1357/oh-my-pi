@@ -3,12 +3,10 @@
  *
  * The system prompt must stay byte-stable so open-weight chat templates that
  * render tool schemas *after* the system content keep their prefix cache
- * (#7404). The per-request date/cwd line used to live at the tail of the
- * system prompt (`project-prompt.md`), which invalidated the whole tool array
- * on every directory change or day rollover. It now rides on the first user
- * turn of each provider request instead: built at request time (never stored
- * in the session), deterministic per `(date, cwd)`, so the bytes are stable
- * for the lifetime of a session/day and refresh automatically at midnight.
+ * (#7404). Date/cwd values instead ride on user/developer messages. The first
+ * value is attached to the first plain user turn; later values are append-only.
+ * Reminder ownership follows the messages in each request, so an ephemeral
+ * side request cannot consume the reminder needed by the main history.
  */
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -32,19 +30,29 @@ function injectReminder(message: UserMessage, reminder: string): UserMessage {
 	return { ...message, content };
 }
 
+interface ReminderEntry {
+	reminder: string;
+	message: Message;
+}
+
+interface ReminderHistory {
+	injections: WeakMap<Message, ReminderEntry>;
+	controls: WeakMap<Message, ReminderEntry[]>;
+	seen: WeakSet<Message>;
+}
+
 /**
  * Keeps volatile date/cwd reminders append-only across provider requests.
  *
- * The first value is attached to the first user turn. A changed value attaches
- * to a newly appended user turn or a persistent developer turn, leaving every
- * previously sent message byte-identical.
+ * Plain user turns can carry reminders in their content. Opaque provider payloads
+ * may bypass that content entirely, so they stay untouched and use a later plain
+ * user or a tail-anchored developer turn, after any retained assistant/tool tail.
+ * Previously sent messages remain byte-identical.
  */
 export class DateCwdReminderInjector {
-	#root: UserMessage | undefined;
-	#currentReminder: string | undefined;
-	#injections = new Map<Message, Message>();
-	#controls: Array<{ anchor: Message; message: Message }> = [];
-	#seen = new WeakSet<object>();
+	// Independent side/advisor histories must not discard a still-live main
+	// history's ownership. Neither roots nor removed carriers are held strongly.
+	#histories = new WeakMap<UserMessage, ReminderHistory>();
 
 	/** Apply the current reminder while preserving all earlier injected bytes. */
 	transform(context: Context, date: string, cwd: string): Context {
@@ -57,60 +65,69 @@ export class DateCwdReminderInjector {
 	#inject(messages: Message[], reminder: string): Message[] {
 		const firstUser = messages.find((message): message is UserMessage => message.role === "user");
 		if (!firstUser) return messages;
-		if (this.#root !== firstUser) {
-			this.#root = firstUser;
-			this.#currentReminder = reminder;
-			this.#injections.clear();
-			this.#controls = [];
-			this.#seen = new WeakSet();
-			if (!messageStartsWithReminder(firstUser, reminder)) {
-				this.#injections.set(firstUser, injectReminder(firstUser, reminder));
-			}
-		} else if (this.#currentReminder !== reminder) {
-			let newUser: UserMessage | undefined;
-			for (let index = messages.length - 1; index >= 0; index--) {
-				const candidate = messages[index]!;
-				if (candidate.role === "user" && !this.#seen.has(candidate)) {
-					newUser = candidate;
-					break;
-				}
-			}
-			if (newUser) {
-				this.#injections.set(newUser, injectReminder(newUser, reminder));
-			} else {
-				const anchor = messages.at(-1)!;
-				this.#controls.push({
-					anchor,
-					message: {
-						role: "developer",
-						content: reminder,
-						synthetic: true,
-						timestamp: Date.now(),
-					},
+		let history = this.#histories.get(firstUser);
+		if (!history) {
+			history = { injections: new WeakMap(), controls: new WeakMap(), seen: new WeakSet() };
+			this.#histories.set(firstUser, history);
+			if (firstUser.providerPayload === undefined) {
+				history.injections.set(firstUser, {
+					reminder,
+					message: messageStartsWithReminder(firstUser, reminder)
+						? firstUser
+						: injectReminder(firstUser, reminder),
 				});
 			}
-			this.#currentReminder = reminder;
 		}
 
-		const controlsByAnchor = new Map<Message, Message[]>();
-		for (const control of this.#controls) {
-			const controls = controlsByAnchor.get(control.anchor);
-			if (controls) controls.push(control.message);
-			else controlsByAnchor.set(control.anchor, [control.message]);
-		}
-
+		// Derive the effective reminder from this request, not the last request:
+		// a side request or a trimmed tail may have taken its carrier with it.
+		let currentReminder: string | undefined;
+		let newUserIndex: number | undefined;
 		let changed = false;
 		const out: Message[] = [];
 		for (const message of messages) {
-			const injected = this.#injections.get(message);
-			out.push(injected ?? message);
-			if (injected) changed = true;
-			const controls = controlsByAnchor.get(message);
+			if (message.role === "user" && message.providerPayload === undefined && !history.seen.has(message)) {
+				newUserIndex = out.length;
+			}
+			const injected = history.injections.get(message);
+			out.push(injected?.message ?? message);
+			if (injected) {
+				currentReminder = injected.reminder;
+				newUserIndex = undefined;
+				if (injected.message !== message) changed = true;
+			}
+			const controls = history.controls.get(message);
 			if (controls) {
-				out.push(...controls);
+				for (const control of controls) {
+					out.push(control.message);
+					currentReminder = control.reminder;
+				}
+				newUserIndex = undefined;
 				changed = true;
 			}
-			this.#seen.add(message);
+			history.seen.add(message);
+		}
+
+		if (currentReminder !== reminder) {
+			if (newUserIndex !== undefined) {
+				// Only an unseen user after the last reminder can carry a new value
+				// without rewriting history or being superseded by an older control.
+				const user = out[newUserIndex] as UserMessage;
+				const injected = injectReminder(user, reminder);
+				history.injections.set(user, { reminder, message: injected });
+				out[newUserIndex] = injected;
+			} else {
+				const anchor = messages.at(-1)!;
+				const control: ReminderEntry = {
+					reminder,
+					message: { role: "developer", content: reminder, synthetic: true, timestamp: Date.now() },
+				};
+				const controls = history.controls.get(anchor);
+				if (controls) controls.push(control);
+				else history.controls.set(anchor, [control]);
+				out.push(control.message);
+			}
+			changed = true;
 		}
 		return changed ? out : messages;
 	}

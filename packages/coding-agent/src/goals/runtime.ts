@@ -8,6 +8,7 @@ import type { GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsag
 export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
 	setState(state: GoalModeState | undefined): void;
+	getExecutionBlocker?(): string | undefined;
 	getCurrentUsage(): GoalTokenUsage;
 	emit(event: GoalRuntimeEvent): void | Promise<void>;
 	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState): void;
@@ -141,6 +142,11 @@ export class GoalRuntime {
 		return this.#host.now?.() ?? Date.now();
 	}
 
+	#assertCanExecute(): void {
+		const blocker = this.#host.getExecutionBlocker?.();
+		if (blocker) throw new Error(blocker);
+	}
+
 	#hasAccountingState(): boolean {
 		const state = this.#host.getState();
 		return Boolean(state?.enabled && isAccountingStatus(state.goal));
@@ -259,12 +265,20 @@ export class GoalRuntime {
 	async onThreadResumed(options?: { preserveActiveGoal?: boolean }): Promise<GoalModeState | undefined> {
 		const state = this.#getStateClone();
 		if (!state) return undefined;
-		if (options?.preserveActiveGoal && state.enabled && state.goal.status === "active") {
+		if (
+			options?.preserveActiveGoal &&
+			state.enabled &&
+			state.goal.status === "active" &&
+			!this.#host.getExecutionBlocker?.()
+		) {
 			this.#markActiveAccounting(state.goal, true);
 			await this.#commitState(state, { emit: true });
 			return state;
 		}
-		if (state.goal.status === "active") {
+		if (
+			state.goal.status === "active" ||
+			(state.enabled && isAccountingStatus(state.goal) && this.#host.getExecutionBlocker?.())
+		) {
 			state.enabled = false;
 			state.goal.status = "paused";
 			state.goal.updatedAt = this.#now();
@@ -298,6 +312,7 @@ export class GoalRuntime {
 					shouldSteer = true;
 				}
 			} else if (state.goal.status === "budget-limited") {
+				this.#assertCanExecute();
 				state.goal.status = "active";
 				state.enabled = true;
 				this.#markActiveAccounting(state.goal);
@@ -387,6 +402,7 @@ export class GoalRuntime {
 		if (!objective) throw new Error("objective is required when op=create");
 		validateTokenBudget(input.tokenBudget);
 		return await this.#withAccounting(async () => {
+			this.#assertCanExecute();
 			const existing = this.#host.getState();
 			if (existing?.goal && existing.goal.status !== "dropped" && existing.goal.status !== "complete") {
 				throw new Error("cannot create a new goal because this session already has a goal");
@@ -404,6 +420,7 @@ export class GoalRuntime {
 		if (!objective) throw new Error("objective is required when op=replace");
 		validateTokenBudget(input.tokenBudget);
 		return await this.#withAccounting(async () => {
+			this.#assertCanExecute();
 			const existing = this.#host.getState();
 			if (!existing?.enabled || !isAccountingStatus(existing.goal)) {
 				throw new Error("cannot replace goal because no goal is active");
@@ -419,6 +436,7 @@ export class GoalRuntime {
 
 	async resumeGoal(): Promise<GoalModeState> {
 		return await this.#withAccounting(async () => {
+			this.#assertCanExecute();
 			const state = this.#getStateClone();
 			if (!state?.goal) throw new Error("No paused goal.");
 			if (state.goal.status === "complete") throw new Error("Goal is already complete.");

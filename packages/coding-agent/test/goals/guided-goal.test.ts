@@ -5,7 +5,6 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -30,7 +29,6 @@ type GuidedGoalHarness = {
 	mode: InteractiveMode;
 	session: AgentSession;
 	settings: Settings;
-	goalTool: GoalTool;
 	tempDir: TempDir;
 	cleanup: () => Promise<void>;
 };
@@ -50,9 +48,13 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 	if (!model) {
 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 	}
-	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
+	const toolSession = createToolSession(tempDir.path(), settings, {
+		getGoalModeState: () => session.getGoalModeState(),
+		getGoalRuntime: () => session.goalRuntime,
+	});
+	const initialTools = await createTools(toolSession, ["read"]);
 	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
-	const session = new AgentSession({
+	const session: AgentSession = new AgentSession({
 		agent: new Agent({
 			initialState: {
 				model,
@@ -67,14 +69,6 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 		toolRegistry,
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
-	// Mirror sdk.ts assembly: the goal tool is pre-registered (hidden) whenever
-	// goal.enabled, so /guided-goal can activate it by name for the interview.
-	const goalToolSession = createToolSession(tempDir.path(), settings, {
-		getGoalModeState: () => session.getGoalModeState(),
-		getGoalRuntime: () => session.goalRuntime,
-	});
-	const goalTool = new GoalTool(goalToolSession);
-	toolRegistry.set("goal", goalTool as unknown as Tool);
 	const mode = new InteractiveMode(session, "test");
 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
 	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
@@ -83,7 +77,6 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 		mode,
 		session,
 		settings,
-		goalTool,
 		tempDir,
 		cleanup: async () => {
 			mode.stop();
@@ -281,7 +274,9 @@ describe("guided goal setup", () => {
 				if (event.type === "goal_updated") events.push(event);
 			});
 
-			const result = await harness.goalTool.execute("call-1", {
+			const goalTool = harness.session.agent.state.tools.find(tool => tool.name === "goal");
+			if (!goalTool) throw new Error("Expected the registered Goal tool");
+			const result = await goalTool.execute("call-1", {
 				op: "create",
 				objective: "## Objective\nShip the release.",
 			});
@@ -300,7 +295,7 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("allows explicit goal tool activation without an active goal, but keeps it out of the default set", async () => {
+	it("declares enabled Goal without an active goal and honors capability disablement", async () => {
 		const harness = await createHarness();
 		try {
 			const explicit = await createTools(createToolSession(harness.tempDir.path(), harness.settings), [
@@ -310,7 +305,7 @@ describe("guided goal setup", () => {
 			expect(explicit.map(tool => tool.name)).toContain("goal");
 
 			const defaults = await createTools(createToolSession(harness.tempDir.path(), harness.settings));
-			expect(defaults.map(tool => tool.name)).not.toContain("goal");
+			expect(defaults.map(tool => tool.name)).toContain("goal");
 		} finally {
 			await harness.cleanup();
 		}
@@ -350,7 +345,9 @@ describe("guided goal setup", () => {
 		const harness = await createHarness();
 		try {
 			await startInterview(harness);
-			await harness.goalTool.execute("call-1", { op: "create", objective: "## Objective\nShip it." });
+			const goalTool = harness.session.agent.state.tools.find(tool => tool.name === "goal");
+			if (!goalTool) throw new Error("Expected the registered Goal tool");
+			await goalTool.execute("call-1", { op: "create", objective: "## Objective\nShip it." });
 			for (let i = 0; i < 10; i++) await Promise.resolve();
 			expect(harness.mode.isGuidedGoalInterviewActive()).toBe(false);
 		} finally {

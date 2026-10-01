@@ -9,7 +9,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { Context, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -51,7 +51,7 @@ export interface SessionHandoffHost {
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
-	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
+	buildSideRequestContext(messages: AgentMessage[], systemPrompt?: string[], signal?: AbortSignal): Promise<Context>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
 	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
 }
@@ -130,7 +130,7 @@ export class SessionHandoff {
 			// provider prompt cache the main turn populated instead of cold-missing
 			// the whole prefix: identical system prompt, normalized tools, and
 			// transform-/obfuscation-matched message history via
-			// `convertMessagesToLlm` + `buildSideRequestContext`, plus the live turn's
+			// `buildSideRequestContext`, plus the live turn's
 			// effective provider cache key with a unique side `sessionId` so
 			// OpenAI/Codex append-only state never mixes with the live turn.
 			const cacheSessionId = this.#host.sessionId();
@@ -149,13 +149,13 @@ export class SessionHandoff {
 					timestamp: Date.now(),
 				},
 			];
-			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the document seeds the post-compaction context and must not carry
 			// prompt-specific hook state.
-			const handoffContext = await this.#host.agent.buildSideRequestContext(
-				handoffLlmMessages,
+			const handoffContext = await this.#host.buildSideRequestContext(
+				handoffSnapshot,
 				this.#host.baseSystemPrompt(),
+				handoffSignal,
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{

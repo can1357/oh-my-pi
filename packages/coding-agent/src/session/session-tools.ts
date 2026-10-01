@@ -115,7 +115,7 @@ interface SessionToolsOptions {
 	isDeviceOnlyWrite?: () => boolean;
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
-	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
+	/** Registers the Goal capability after it is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/**
 	 * Re-resolves settings-gated tools against live settings, mutating the shared
@@ -1046,10 +1046,8 @@ export class SessionTools {
 			this.#isDeviceOnlyWrite?.() === true &&
 			this.#setDeviceOnlyWrite !== undefined &&
 			this.#setPendingFullWriteDescription !== undefined;
-		// Goal mode may have been enabled after session creation, leaving the
-		// registry without `goal`. Register it before resolving the selection so
-		// `#enterGoalMode`'s `[...tools, "goal"]` request is honored instead of
-		// silently dropped (issue #9444).
+		// Goal capability may have been enabled after session creation. Resolve
+		// an explicit selection without tying registration to active goal state.
 		if (toolNames.includes("goal") && !this.#toolRegistry.has("goal")) {
 			const goalRegistration = this.#ensureGoalRegistered?.();
 			if (goalRegistration) await untilAborted(signal, goalRegistration);

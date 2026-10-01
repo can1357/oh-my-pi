@@ -94,7 +94,7 @@ import {
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
-import type { CustomMessage, CustomMessagePayload } from "./messages";
+import { type CustomMessage, type CustomMessagePayload, convertToLlm } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	calculateRetryBackoffDelayMs,
@@ -1204,7 +1204,10 @@ export class SessionAdvisors {
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
 				// default converter drops custom roles and would discard their replay.
-				convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+				// A provider transform owns redaction after recording stable reminder carriers.
+				convertToLlm: this.#transformProviderContext
+					? convertToLlm
+					: messages => this.#host.convertToLlmForSideRequest(messages),
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,

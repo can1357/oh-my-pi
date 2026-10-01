@@ -606,9 +606,12 @@ export type ToolName = BuiltinToolName;
  * reconcile. Memory-backend tools other than `learn` follow `memory.backend` through
  * the memory backend's own tool replacement instead.
  */
-export const SETTINGS_GATED_BUILTIN_TOOL_NAMES: readonly BuiltinToolName[] = (
-	Object.keys(BUILTIN_TOOLS) as BuiltinToolName[]
-).filter(name => name === "learn" || !(MEMORY_BACKEND_TOOL_NAMES as readonly string[]).includes(name));
+export const SETTINGS_GATED_BUILTIN_TOOL_NAMES: readonly (BuiltinToolName | "goal")[] = [
+	...(Object.keys(BUILTIN_TOOLS) as BuiltinToolName[]).filter(
+		name => name === "learn" || !(MEMORY_BACKEND_TOOL_NAMES as readonly string[]).includes(name),
+	),
+	"goal",
+];
 
 /** Built-in tool selection {@link createTools} constructs for a session under its current settings. */
 export interface BuiltinToolPlan {
@@ -634,11 +637,11 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		: toolNames
 			? normalizeToolNames(toolNames)
 			: undefined;
-	const goalEnabled = cfgGoalEnabled.get(session.settings);
-	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
+	// Goal is a session capability, not an active-mode toolset.
+	const goalEnabled = !restrictToolNames && cfgGoalEnabled.get(session.settings);
 	const externalThinkingActive =
 		cfgExternalThinking.get(session.settings) && supportsExternalThinking(session.getActiveModel?.());
-	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
+	if (goalEnabled && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
 	}
 	const backends = resolveEvalBackends(session);
@@ -693,9 +696,6 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			if (!requestedTools.includes("context_notes")) requestedTools.push("context_notes");
 			if (!requestedTools.includes("new_context")) requestedTools.push("new_context");
 		}
-		if (goalModeActive && !requestedTools.includes("goal")) {
-			requestedTools.push("goal");
-		}
 		if (
 			requestedTools.includes("grep") &&
 			!requestedTools.includes("ast_grep") &&
@@ -738,16 +738,8 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		}
 	}
 	const isToolAllowed = (name: string) => {
-		// Never in the default set. Explicitly activatable while goal.enabled and
-		// no goal record exists yet — /guided-goal enables it so the agent can
-		// finish the interview with `goal create`, which turns goal mode on. Once
-		// a goal record exists, only an enabled goal keeps the tool: a completed
-		// (exiting) or paused goal must stop advertising it on the next rebuild.
-		if (name === "goal") {
-			if (!goalEnabled || restrictToolNames) return false;
-			const goalState = session.getGoalModeState?.();
-			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
-		}
+		// Pausing, completing, dropping, or restoring a goal preserves its declaration.
+		if (name === "goal") return goalEnabled;
 		if (name === "lsp") return enableLsp && cfgLspEnabled.get(session.settings);
 		if (name === "bash") return cfgBashEnabled.get(session.settings);
 		if (name === "eval") return allowEval;
@@ -810,7 +802,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
 		...(externalThinkingActive ? ["think"] : []),
 		...(includeYield ? ["yield"] : []),
-		...(goalModeActive ? ["goal"] : []),
+		...(goalEnabled ? ["goal"] : []),
 	];
 	return { requestedTools, names, isAllowed: isToolAllowed };
 }

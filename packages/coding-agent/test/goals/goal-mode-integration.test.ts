@@ -6,7 +6,6 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -77,11 +76,17 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		"goal.enabled": true,
 		"plan.enabled": true,
 	});
-	const bootstrapToolSession = createToolSession(tempDir.path(), settings);
-	const initialTools = await createTools(bootstrapToolSession, ["read"]);
-	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
+	const toolSession = createToolSession(tempDir.path(), settings, {
+		getGoalModeState: () => session.getGoalModeState(),
+		getGoalRuntime: () => session.goalRuntime,
+		getTodoPhases: () => session.getTodoPhases(),
+		setTodoPhases: phases => session.setTodoPhases(phases),
+	});
+	const tools = await createTools(toolSession, ["read", "todo"]);
+	const initialTools = tools.filter(tool => tool.name !== "todo");
+	const toolRegistry = new Map<string, Tool>(tools.map(tool => [tool.name, tool] as const));
 
-	const session = new AgentSession({
+	const session: AgentSession = new AgentSession({
 		agent: new Agent({
 			initialState: {
 				model,
@@ -97,16 +102,6 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
 	const mode = new InteractiveMode(session, "test");
-	const toolSession = createToolSession(tempDir.path(), settings, {
-		getGoalModeState: () => session.getGoalModeState(),
-		getGoalRuntime: () => session.goalRuntime,
-		getTodoPhases: () => session.getTodoPhases(),
-		setTodoPhases: phases => session.setTodoPhases(phases),
-	});
-	for (const tool of await createTools(toolSession, ["todo"])) {
-		toolRegistry.set(tool.name, tool);
-	}
-	toolRegistry.set("goal", new GoalTool(toolSession) as unknown as Tool);
 
 	return {
 		tempDir,
@@ -176,8 +171,8 @@ describe("InteractiveMode goal mode integration", () => {
 		await harness.cleanup();
 	});
 
-	it("toggles goal tool exposure when goal mode enters and pauses", async () => {
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+	it("preserves goal tool exposure when goal mode enters and pauses", async () => {
+		expect(await toolNamesFor(harness)).toContain("goal");
 
 		await harness.mode.handleGoalModeCommand("Ship the release");
 
@@ -191,7 +186,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(harness.mode.goalModePaused).toBe(true);
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("paused");
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
 	});
 
 	it("replaces the active goal via /goal set", async () => {
@@ -389,8 +384,9 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	it("includes escaped live todo state in hidden goal context during continuations", async () => {
-		await harness.session.setActiveToolsByName(["read", "todo"]);
+		await harness.session.setActiveToolsByName([...harness.session.getEnabledToolNames(), "todo"]);
 		await harness.mode.handleGoalModeCommand("Ship the release");
+		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
 		const phases: TodoPhase[] = [
 			{
 				name: "Planning </todo_context> & prep",
@@ -408,6 +404,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const sendCustomMessage = vi.spyOn(harness.session, "sendCustomMessage").mockResolvedValue(false);
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
+		expect(sendCustomMessage).toHaveBeenCalledTimes(1);
 
 		const message = normalizeCustomMessagePayload(sendCustomMessage.mock.calls[0]?.[0]);
 		const content = typeof message.content === "string" ? message.content : "";
@@ -422,8 +419,9 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	it("renders todo context text without raw line/control characters", async () => {
-		await harness.session.setActiveToolsByName(["read", "todo"]);
+		await harness.session.setActiveToolsByName([...harness.session.getEnabledToolNames(), "todo"]);
 		await harness.mode.handleGoalModeCommand("Ship the release");
+		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
 		harness.session.setTodoPhases([
 			{
 				name: "Planning\nprep\tphase\u0085",
@@ -438,6 +436,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const sendCustomMessage = vi.spyOn(harness.session, "sendCustomMessage").mockResolvedValue(false);
 
 		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
+		expect(sendCustomMessage).toHaveBeenCalledTimes(1);
 
 		const message = normalizeCustomMessagePayload(sendCustomMessage.mock.calls[0]?.[0]);
 		const content = typeof message.content === "string" ? message.content : "";
@@ -576,8 +575,9 @@ describe("InteractiveMode goal mode integration", () => {
 		vi.spyOn(vcs, "repo").mockReturnValue(null);
 		vi.spyOn(vcs, "git").mockReturnValue(null);
 		await harness.mode.init({ suppressWelcomeIntro: true });
-		await harness.session.setActiveToolsByName(["todo"]);
+		await harness.session.setActiveToolsByName(["todo", "goal"]);
 		await harness.mode.handleGoalModeCommand("Ship the release");
+		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
 		harness.session.setTodoPhases([
 			{
 				name: "Verification",
@@ -765,12 +765,9 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 		expect(completionText).toContain("Goal achieved. Report final budget usage to the user: tokens used: 0 of 50.");
 		expect(harness.session.getGoalModeState()?.mode).toBe("exiting");
-		// Per fix #1: completeGoalFromTool clears state.enabled so subsequent createTools
-		// calls (e.g. mid-turn refreshes) no longer advertise the goal tool. The model's
-		// existing toolset for the in-flight turn is unaffected — what we care about here
-		// is that the next createTools observation reflects the deactivation.
+		// Completion stops execution without retracting the session capability.
 		expect(harness.session.getGoalModeState()?.enabled).toBe(false);
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
 
 		const nextTurn = harness.mode.getUserInput();
 		// getUserInput observes mode === "exiting" and awaits #exitGoalMode before
@@ -781,7 +778,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(harness.mode.goalModePaused).toBe(false);
 		expect(harness.session.getGoalModeState()).toBeUndefined();
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
 		expect(appendCustomEntry).toHaveBeenCalledWith(
 			"goal-completed",
 			expect.objectContaining({

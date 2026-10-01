@@ -1284,7 +1284,7 @@ const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 /** Built-ins `createTools` force-includes into explicit tool lists; the active set mirrors them. */
-const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context"];
+const SESSION_MANAGED_BUILTIN_TOOL_NAMES = ["manage_skill", "learn", "context_notes", "new_context", "goal"];
 
 let sshCleanupRegistered = false;
 
@@ -3310,15 +3310,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		for (const [name, tool] of toolRegistry) {
 			nativeToolsByName.set(name, tool);
 		}
-		if (!restrictToolNames && !toolRegistry.has("goal") && cfgGoalEnabled.get(settings)) {
-			const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
-			if (goalTool) {
-				const wrapped = wrapToolWithMetaNotice(goalTool);
-				toolRegistry.set(goalTool.name, wrapped);
-				builtInRegistryToolNames.add(goalTool.name);
-				nativeToolsByName.set(goalTool.name, wrapped);
-			}
-		}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
@@ -3432,13 +3423,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return writeRegistration;
 		};
 
-		// Goal mode can be enabled after the session was created (settings UI,
-		// `/set goal.enabled true`). The eager registration above only runs at
-		// creation, so a runtime enable would leave the registry without `goal`
-		// and `#enterGoalMode`'s `setActiveToolsByName([...tools, "goal"])` would
-		// silently drop the unknown name — goal mode starts, the model is told to
-		// use the `goal` tool, and the call fails (issue #9444). Register it
-		// lazily on demand, mirroring `ensureWriteRegistered`.
+		// Retain lazy registration for an explicit selection after Goal capability
+		// is enabled at runtime. Mode transitions themselves never select tools.
 		let goalRegistration: Promise<boolean> | undefined;
 		const ensureGoalRegistered = (): Promise<boolean> => {
 			if (toolRegistry.has("goal")) return Promise.resolve(true);
@@ -3498,7 +3484,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					continue;
 				}
 				if (!planned.has(name) || (registered && (isBuiltIn(name) || nativeToolsByName.has(name)))) continue;
-				const tool = await logger.time(`createTools:${name}:settings`, BUILTIN_TOOLS[name], toolSession);
+				const factory = name === "goal" ? HIDDEN_TOOLS.goal : BUILTIN_TOOLS[name];
+				const tool = await logger.time(`createTools:${name}:settings`, factory, toolSession);
 				if (!tool) continue;
 				const native = wrapToolWithMetaNotice(tool);
 				nativeToolsByName.set(name, native);
@@ -3911,7 +3898,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return tool?.defaultInactive === true || tool?.hidden === true;
 			}),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
@@ -3924,8 +3910,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				explicitlyRequestedToolNameSet.has("write") ||
 				toolSession.deviceOnlyWrite === true);
 		const initialRequestedActiveToolNames = options.toolNames
-			? requestedActiveToolNames
-			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
+			? normalizedRequested
+			: normalizedRequested.filter(name => !defaultInactiveToolNames.has(name));
 		let initialToolNames = [...initialRequestedActiveToolNames];
 
 		// Custom tools and extension-registered tools are always included
@@ -4028,25 +4014,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// one mid-session — historical image blocks would otherwise be replayed to
 		// a provider that 400s on them (#5400). Read both dynamically so a `/model`
 		// switch or setting change takes effect on the next turn.
-		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-			const converted = convertToLlm(messages);
+		const blockProviderImages = (messages: Message[], activeModel: Model | undefined): Message[] => {
 			if (cfgImagesBlockImages.get(settings)) {
-				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
+				return replaceLlmImagesWithText(messages, "Image reading is disabled.");
 			}
-			const activeModel = agent?.state.model ?? model;
 			if (activeModel && !activeModel.input.includes("image")) {
-				return replaceLlmImagesWithText(
-					converted,
-					"[image omitted: the active model does not support image input]",
-				);
+				return replaceLlmImagesWithText(messages, "[image omitted: the active model does not support image input]");
 			}
-			return converted;
+			return messages;
 		};
 
-		// Final convertToLlm: live provider replay drops API-level refusal errors,
-		// then applies secret obfuscation to the remaining outbound context.
+		// Keep stable converted message identities until reminder ownership is recorded.
+		const convertToLlmStable = (messages: AgentMessage[]): Message[] =>
+			filterProviderReplayMessages(convertToLlm(messages));
+		// Session side-request consumers also use this converter without the provider
+		// transform, so retain their outbound image blocking and secret redaction.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
+			const converted = blockProviderImages(convertToLlmStable(messages), agent?.state.model ?? model);
 			if (!obfuscator?.hasSecrets()) return converted;
 			return obfuscateMessages(obfuscator, converted);
 		};
@@ -4092,7 +4076,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			blobBroker,
 		);
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
-			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			// Record ownership before image blocking, redaction, or normalization clone
+			// messages. Volatility stays out of the tool-schema prefix cache (#7404).
+			let transformed = dateCwdReminder.transform(
+				context,
+				formatLocalCalendarDate(),
+				normalizePromptPath(sessionManager.getCwd()),
+			);
+			const messages = blockProviderImages(transformed.messages, transformModel);
+			if (messages !== transformed.messages) transformed = { ...transformed, messages };
+			transformed = obfuscator ? obfuscateProviderContext(obfuscator, transformed) : transformed;
 			transformed = await snapcompactInline.transform(transformed, transformModel);
 			transformed = clampProviderContextImages(transformed, transformModel);
 			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
@@ -4101,14 +4094,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// else, and it runs before the blob broker uploads any of these bytes.
 			transformed = await dropUnreadableContextImages(transformed, transformModel);
 			transformed = await blobBroker.decorateContext(transformed, transformModel);
-			// Keep per-request volatility out of the system prompt: the date/cwd
-			// reminder rides on the first user turn so open-weight providers keep
-			// their tool-schema prefix cache (#7404).
-			return dateCwdReminder.transform(
-				transformed,
-				formatLocalCalendarDate(),
-				normalizePromptPath(sessionManager.getCwd()),
-			);
+			return transformed;
 		};
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
@@ -4233,7 +4219,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace/project discovery on the original repo's git remote. Re-read it
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
-			convertToLlm: convertToLlmFinal,
+			convertToLlm: convertToLlmStable,
 			onPayload,
 			onResponse,
 			sessionId: providerSessionId,
@@ -5023,19 +5009,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...captureOptions,
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
-					convertToLlm: convertToLlmFinal,
+					convertToLlm: convertToLlmStable,
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+						let transformed = captureDateCwdReminder.transform(
+							context,
+							formatLocalCalendarDate(),
+							normalizePromptPath(sessionManager.getCwd()),
+						);
+						const messages = blockProviderImages(transformed.messages, transformModel);
+						if (messages !== transformed.messages) transformed = { ...transformed, messages };
+						transformed = obfuscator ? obfuscateProviderContext(obfuscator, transformed) : transformed;
 						transformed = clampProviderContextImages(transformed, transformModel);
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						transformed = await blobBroker.decorateContext(transformed, transformModel);
-						return captureDateCwdReminder.transform(
-							transformed,
-							formatLocalCalendarDate(),
-							normalizePromptPath(sessionManager.getCwd()),
-						);
+						return transformed;
 					},
 					temperature: agent.temperature,
 					topP: agent.topP,

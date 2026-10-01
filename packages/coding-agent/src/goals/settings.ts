@@ -8,7 +8,7 @@ export const cfgGoalEnabled = register({
 		tab: "tasks",
 		group: "Modes",
 		label: "Goal Mode",
-		description: "Enable per-session goal mode and the hidden goal tool",
+		description: "Enable per-session goal mode and the goal tool",
 	},
 });
 
