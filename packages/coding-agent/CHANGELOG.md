@@ -15,6 +15,7 @@
 
 - Migrated `omp predict` compare view to a native UI component featuring interactive table rows, an action bar, and improved status visualization
 - Enhanced MCP authorization prompts with clickable links, native context menus for copying/opening, and improved URL layout
+- `/debug` report bundles and the `/debug` log view write this process's batched log records to disk before reading the log files, so the latest lines are included; the per-rule TTSR registration debug line was removed ([#14011](https://github.com/can1357/oh-my-pi/pull/14011) by [@H4vC](https://github.com/H4vC))
 - RPC mode now sends a `cancel` extension UI request (with `targetId`) when omp's own dialog timeout elapses, for `select`, `confirm`, `input`, and `ask` dialogs, so hosts can close stale dialogs ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 - Saved output of bash, python, and js eval tool calls is now capped at 16 MB per artifact file (the beginning and the most recent output around a truncation notice) instead of growing without limit, and the output notice for a capped file says it holds a head/tail sample instead of offering it as full output; set `tools.artifactMaxBytes` (MB) to raise the cap, or `0` for unlimited ([#14012](https://github.com/can1357/oh-my-pi/pull/14012) by [@H4vC](https://github.com/H4vC))
 
