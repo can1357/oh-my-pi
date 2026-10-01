@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `CredentialUnavailableError`, a transient error for a configured credential source that produced no key (unlike `MissingApiKeyError`, a retry may succeed).
+- Added `CredentialUnavailableError`, a transient error for a configured credential source that produced no key; unlike `MissingApiKeyError`, a retry may succeed ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 
