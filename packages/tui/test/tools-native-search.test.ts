@@ -55,6 +55,7 @@ describe("grep native view", () => {
 		"## a.ts",
 		" 9│ctx",
 		"*10│hit",
+		"   │...",
 		"*40│far",
 		"",
 		"## b.ts",

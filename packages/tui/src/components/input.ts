@@ -6,7 +6,14 @@ import type { TspInputProps } from "@oh-my-pi/pi-wire";
 import { node } from "../native/describe";
 import { sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
-import type { DescribeContext, NativeNode } from "../native/node";
+import {
+	clampTextOffset,
+	type DescribeContext,
+	type NativeNode,
+	type NativeTextEdit,
+	type NativeUiEvent,
+	resolveTextEdit,
+} from "../native/node";
 import { SpaceHoldGesture } from "../space-hold";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import { cursorColumnWindow } from "./scroll-viewport";
@@ -275,6 +282,55 @@ export class Input implements Component, Focusable {
 	 *  (e.g. kitty's OSC 5522 enhanced clipboard read). Mirrors `Editor.pasteText`. */
 	pasteText(text: string): void {
 		this.#handlePaste(text);
+	}
+
+	/** Terminal-side selection edits on the `input` node (see {@link applyHostEdit}). */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "edit") this.applyHostEdit(event);
+	}
+
+	/**
+	 * Apply an edit the terminal made over its own selection (TSP `edit`):
+	 * replace `[from, to)` with `text` (newlines stripped, as a paste) and put
+	 * the caret at `cursor`, as one undo unit. Offsets are in the described
+	 * text, so a masked field's count bullets, one per grapheme. Stale edits
+	 * (`len` no longer the described length) are dropped.
+	 */
+	applyHostEdit(edit: NativeTextEdit): void {
+		let valueEdit = edit;
+		if (this.mask) {
+			// Bullet offsets → value offsets through the grapheme starts.
+			const starts = Array.from(segmenter.segment(this.#value), grapheme => grapheme.index);
+			starts.push(this.#value.length);
+			const bullets = starts.length - 1;
+			if (edit.len !== bullets) return;
+			let from = clampTextOffset(edit.from, bullets);
+			let to = clampTextOffset(edit.to, bullets);
+			if (to < from) [from, to] = [to, from];
+			const text = typeof edit.text === "string" ? edit.text : "";
+			const cursor = clampTextOffset(edit.cursor, bullets - (to - from) + text.length);
+			const after = cursor - from - text.length;
+			valueEdit = {
+				from: starts[from]!,
+				to: starts[to]!,
+				text,
+				cursor:
+					cursor <= from
+						? starts[cursor]!
+						: after >= 0
+							? starts[from]! + text.length + starts[to + after]! - starts[to]!
+							: starts[from]! + cursor - from,
+				len: this.#value.length,
+			};
+		}
+		const resolved = resolveTextEdit(this.#value, valueEdit, toSingleLine);
+		if (!resolved) return;
+		this.#lastAction = null;
+		if (resolved.changed) {
+			this.#pushUndo();
+			this.#value = resolved.text;
+		}
+		this.#cursor = resolved.cursor;
 	}
 
 	/** Programmatically trigger submission (e.g. for voice submit). */

@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("TernSocketClient", () => {
-	it("greets as a protocol-6 script client and correlates answers by id", async () => {
+	it("greets as a protocol-9 script client and correlates answers by id", async () => {
 		const held: bigint[] = [];
 		daemon = await startFakeDaemon((op, id) => {
 			if (op.op === "slow") {
@@ -33,8 +33,8 @@ describe("TernSocketClient", () => {
 		expect(fast).toEqual({ echo: 7 });
 		daemon.answer(held[0]!, { ok: "late" });
 		expect(await slow).toBe("late");
-		// [len=7][tag 0][u32 LE 6][identity absent][ClientKind::Cli]
-		expect([...daemon.hellos[0]!]).toEqual([0x00, 6, 0, 0, 0, 0x00, 0x01]);
+		// [len=7][tag 0][u32 LE 9][identity absent][ClientKind::Cli]
+		expect([...daemon.hellos[0]!]).toEqual([0x00, 9, 0, 0, 0, 0x00, 0x01]);
 		expect(frame(daemon.hellos[0]!).slice(0, 4)).toEqual(new Uint8Array([7, 0, 0, 0]));
 	});
 
@@ -57,7 +57,7 @@ describe("TernSocketClient", () => {
 		expect(failure).toBeInstanceOf(TernBrowserError);
 		expect((failure as TernBrowserError).kind).toBe("refused");
 		expect((failure as TernBrowserError).message).toContain("protocol 7");
-		expect((failure as TernBrowserError).message).toContain("omp speaks Tern protocol 6");
+		expect((failure as TernBrowserError).message).toContain("omp speaks Tern protocol 9");
 		expect(isTernUnavailable(failure)).toBe(true);
 	});
 

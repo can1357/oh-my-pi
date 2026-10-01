@@ -94,5 +94,15 @@
 		"pageBg": "#1e1f29",
 		"cardBg": "#282A36",
 		"infoBg": "#343746"
+	},
+	"terminal": {
+		"background": "background",
+		"foreground": "foreground",
+		"chrome": "toolPendingBg",
+		"widget": "toolPendingBg",
+		"ansi": [
+			"toolPendingBg", "red", "green", "yellow", "purple", "pink", "cyan", "foreground",
+			"comment", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff"
+		]
 	}
 }

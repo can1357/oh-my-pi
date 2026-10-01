@@ -2,12 +2,26 @@
 
 ## [Unreleased]
 
-### Changed
+## [18.4.6] - 2026-10-01
 
-- Cursor's model list now comes from the account's own catalog: one entry per model lane with its real context window, image support, and effort ladder, only models the account can run, and Cursor's account default marked ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+### Added
+
+- Added configurable catalog cache-warming lifetimes for cache-capable Claude models on Amazon Bedrock Converse, Bedrock Runtime, and Mantle, with 5-minute defaults and a 1-hour Converse option where supported.
+
+### Fixed
+
+- Fixed forced tool calls for Claude Opus 5.5 and Sonnet 5.5 on Amazon Bedrock Converse.
+- Fixed the thinking-off setting for Command Code models served through the Responses API so they no longer produce reasoning when disabled.
+
+## [18.4.5] - 2026-09-30
+
 ### Added
 
 - Added the hand-maintained Factory Droid catalog with account policy and regional discovery, upstream-specific reasoning controls, and base credit rates ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz), continued in [#13276](https://github.com/can1357/oh-my-pi/pull/13276) by [@DusKing1](https://github.com/DusKing1)).
+
+### Changed
+
+- Cursor's model list now comes from the account's own catalog: one entry per model lane with its real context window, image support, and effort ladder, only models the account can run, and Cursor's account default marked ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ### Fixed
 

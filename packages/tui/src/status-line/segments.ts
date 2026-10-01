@@ -782,6 +782,13 @@ const tokenRateSegment: StatusLineSegment = {
 /** Billing summary for the `cost` segment, or undefined when there is nothing to bill. */
 function costSummary(ctx: SegmentContext): string | undefined {
 	const { cost, premiumRequests } = ctx.usageStats;
+	// `cost` folds in completed task results; show the session's own spend and
+	// the subagent tree separately. The hub-projected tree total also covers
+	// grandchildren and running/async agents, but it lags persisted-roster
+	// hydration after resume, so the task-result sum is its floor.
+	const taskResultCost = ctx.usageStats.subagentCost ?? 0;
+	const ownCost = Math.max(0, cost - taskResultCost);
+	const subagentCost = Math.max(ctx.subagentTreeCost ?? 0, taskResultCost);
 	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 	const state = ctx.session.state;
 	const pricingPeriod = state.model?.cost
@@ -794,7 +801,8 @@ function costSummary(ctx: SegmentContext): string | undefined {
 	// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
 	return formatBillingSummary(
 		{
-			cost,
+			cost: ownCost,
+			subagentCost,
 			usingSubscription,
 			premiumRequests,
 			fractionDigits: 2,

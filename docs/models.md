@@ -287,11 +287,25 @@ providers:
         promptCache: { short: 300, long: 3600 }
 ```
 
-The bundled catalog fills this in for direct Anthropic (5 min / 1 h). Other providers, including
-Anthropic-compatible gateways and direct OpenAI, have no built-in lifetime until their cache-expiry
-and replay behavior has been validated for warming. A model without a value for the tier a request
-used is never warmed; custom models and `modelOverrides` can opt in with `promptCache` once the
-backing cache behavior is known. See `providers.cacheWarming` in [Settings](./settings.md).
+An explicit `promptCache` replaces the model's catalog lifetimes rather than
+merging with them: `promptCache: {}` disables warming for that model, and a
+`short`-only value does not inherit a catalog `long` lifetime. For a matching
+model, `modelOverrides.promptCache` has highest priority. A runtime-registered
+model definition replaces the matching YAML `models` definition for lifetime
+selection, even when the runtime `promptCache` is omitted: the actual effective
+model's catalog defaults apply instead of the YAML lifetime. Without a runtime
+replacement, the matching YAML lifetime applies, or catalog defaults if absent.
+
+Direct Anthropic keeps its existing 5 min / 1 h lifetimes (`short: 300`, `long: 3600`),
+defaulting to 5 min for API keys and 1 h for OAuth subscriber sessions; API keys can
+explicitly select `long`. Claude on native Amazon Bedrock Converse has a 5 min TTL; 1 h is
+available only where both catalog metadata and the request wire support it. Claude on
+Bedrock Runtime or Mantle's Anthropic Messages route has a 5 min lifetime under existing
+request support; an explicit `long` request falls back to `short` when unsupported. Other Amazon Bedrock models,
+including Nova and GPT, are not enabled for warming. A model without a lifetime for the
+retention tier actually used is never warmed; custom models and `modelOverrides` can opt in
+with `promptCache` once the backing cache behavior is known. See `providers.cacheWarming` in
+[Settings](./settings.md).
 
 ## Usage costs and time-based pricing
 
@@ -842,8 +856,9 @@ drops override keys the resolved shape does not declare.
 ### Bedrock compatibility (`bedrock-converse-stream`)
 
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
-`supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
-`promptCacheMaximumCheckpoints` for Bedrock models.
+`supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`,
+`promptCacheMaximumCheckpoints`, and `supportsForcedToolChoice` (forced `any`/`tool` choices
+fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5) for Bedrock models.
 
 By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`.
 An explicit per-request region or a model ARN's region wins. Otherwise an ambient region from

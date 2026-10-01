@@ -4,7 +4,10 @@ import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 export interface ImageResizeOptions {
 	maxWidth?: number;
 	maxHeight?: number;
-	/** Smallest allowed edge length (px). Inputs below this are scaled up. */
+	/**
+	 * Smallest wanted edge length (px). Inputs below this are scaled up uniformly,
+	 * as far as the caps allow; the aspect ratio is never distorted to reach it.
+	 */
 	minDimension?: number;
 	maxBytes?: number;
 	jpegQuality?: number;
@@ -216,19 +219,17 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			targetHeight = opts.maxHeight;
 		}
 
-		// Lift undersized inputs up to the minimum. A uniform scale covers the
-		// common case (icons, the 1x1 chart) without distortion; an aspect ratio
-		// too extreme to satisfy both floor and cap falls back to stretching the
-		// lagging edge up to the floor via the default fit:"fill" resize.
+		// Lift undersized inputs toward the minimum with a uniform scale that never
+		// crosses a cap (icons, the 1x1 chart). A strip too wide or tall for both
+		// (a toolbar crop) keeps its aspect ratio and ends with its short edge below
+		// the floor; stretching it would distort what the model sees.
 		if (targetWidth < minDimension || targetHeight < minDimension) {
 			const shortEdge = Math.min(targetWidth, targetHeight);
 			const upscale = Math.min(minDimension / shortEdge, opts.maxWidth / targetWidth, opts.maxHeight / targetHeight);
 			if (upscale > 1) {
-				targetWidth = Math.round(targetWidth * upscale);
-				targetHeight = Math.round(targetHeight * upscale);
+				targetWidth = Math.min(opts.maxWidth, Math.round(targetWidth * upscale));
+				targetHeight = Math.min(opts.maxHeight, Math.round(targetHeight * upscale));
 			}
-			targetWidth = Math.min(opts.maxWidth, Math.max(minDimension, targetWidth));
-			targetHeight = Math.min(opts.maxHeight, Math.max(minDimension, targetHeight));
 		}
 
 		// First-attempt encoder: try PNG and JPEG (+ WebP if not excluded) — return smallest.

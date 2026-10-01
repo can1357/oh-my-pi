@@ -13,7 +13,12 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 const authStorage = await AuthStorage.create(path.join(process.cwd(), "auth.db"));
 authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(process.cwd(), "models.yml"));
-const mock = createMockModel({ handler: { content: ["Handled queued request"] } });
+const mock = createMockModel({
+	// The first turn stays in flight long enough for a test to send a second prompt
+	// while streaming and promote it — the delay dwarfs a local RPC round trip.
+	responses: [{ content: ["Started"], delayMs: 1000 }],
+	handler: { content: ["Handled queued request"] },
+});
 const agent = new Agent({
 	getApiKey: () => "test-key",
 	initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
