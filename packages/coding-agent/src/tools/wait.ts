@@ -72,7 +72,7 @@ interface WaitMessaging {
 function handOffMail(messaging: WaitMessaging, woke?: IrcMessage): Promise<void> | undefined {
 	const inbox = messaging.registry.get(messaging.senderId)?.session;
 	if (!inbox) return undefined;
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(messaging.registry);
 	const mail = woke ? [woke] : [];
 	for (let msg = bus.take(messaging.senderId); msg; msg = bus.take(messaging.senderId)) mail.push(msg);
 	if (mail.length === 0) return inbox.hasIrcInterrupts() ? Promise.resolve() : undefined;
@@ -121,7 +121,7 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
 	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
-	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
+	for (const { to, sentAt, promised } of IrcBus.forRegistry(registry).unansweredSends(senderId, since)) {
 		const session = registry.get(to)?.session;
 		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
 		else if (session && registry.awaits.blocksOn(to, USER_AWAIT_ID, sentAt)) replies.onUser.push(to);
@@ -347,7 +347,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		// Without a session to hand it to, a message the leg took would be lost.
 		const busLeg = messaging?.registry.get(messaging.senderId)?.session
-			? IrcBus.global()
+			? IrcBus.forRegistry(messaging.registry)
 					.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
 					.catch(() => null)
 			: undefined;

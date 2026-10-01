@@ -9,7 +9,7 @@ import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi, hasLocalPresence, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 
@@ -42,6 +42,7 @@ export function createAgentHubRuntime(
 	AgentHubDeps<AgentRef>,
 	| "registry"
 	| "inSession"
+	| "hasLocalPresence"
 	| "lifecycle"
 	| "irc"
 	| "activity"
@@ -61,8 +62,9 @@ export function createAgentHubRuntime(
 			rootSessionFile && !options.remote
 				? ref => !ref.sessionFile || sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile) || copied.has(ref)
 				: undefined,
-		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
-		irc: options.irc ?? IrcBus.global(),
+		hasLocalPresence,
+		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.forRegistry(registry),
+		irc: options.irc ?? IrcBus.forRegistry(registry),
 		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
 		manageActivityLive: !options.activity,
 		transcript: agentTranscriptSource,

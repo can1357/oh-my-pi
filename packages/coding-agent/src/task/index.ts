@@ -900,7 +900,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			steps: cfgTaskSteps.get(this.session.settings),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
-			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			planMode,
 			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
@@ -1070,7 +1070,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
-			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 		});
 	}
@@ -1198,7 +1198,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgTaskMaxRecursionDepth.get(this.session.settings),
 			this.session.taskDepth ?? 0,
 		);
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry);
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
@@ -1556,6 +1556,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// A queued job launches (or adopts) its run when it starts; until then
 		// its widget has no tool tap to read.
 		let spawnRun: SpawnRun | undefined = run;
+		const registry = this.session.agentRegistry ?? AgentRegistry.global();
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1563,14 +1564,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// nothing about the worktree itself: the runner keeps it when captured
 			// changes could not be written, and names that path in the result.
 			const isolated = spawnParams.isolated === true;
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+			const ref = aborted ? registry.get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
 				isolated,
 				ircEnabled,
 				resumable: !isolated && isResumable(ref),
-				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId, registry) : true,
 			})}`;
 		};
 		return manager.register(
@@ -1724,7 +1725,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = registry.get(agentId) ? await buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				}
 			},
@@ -1947,7 +1948,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
-				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
 				...(tools ? { onToolResult: (result: SubagentToolResult) => appendToolResult(tools, result) } : {}),

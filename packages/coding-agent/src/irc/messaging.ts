@@ -1,8 +1,9 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import { sanitizeInline } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
-import type { AgentRegistryApi } from "../registry/agent-registry";
+import { type AgentRegistryApi, BROADCAST_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
 
@@ -13,10 +14,16 @@ function coordinationErrorResult(text: string, details: CoordinationDetails): Ag
 }
 
 /** Messaging is available to subagents and to top-level sessions able to spawn peers. */
-export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+export function isIrcEnabled(settings: Settings, taskDepth: number, registry?: AgentRegistryApi): boolean {
 	if (taskDepth > 0) return true;
+	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
+	// uses, reused to avoid drift) OR a remote namespace is claimed — the murmur bridge seeds remote
+	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach. Gate on the
+	// CLAIM (not an installed transport) so hub survives a bridge's install→clear→reinstall reconnect.
 	const maxDepth = cfgTaskMaxRecursionDepth.get(settings);
-	return canSpawnAtDepth(maxDepth, taskDepth);
+	// Namespace claims live on a main-thread bus; a worker's proxy (subagents only, answered above) has none.
+	const bus = registry ? IrcBus.forRegistry(registry) : IrcBus.global();
+	return canSpawnAtDepth(maxDepth, taskDepth) || (bus instanceof IrcBus && bus.hasClaimedNamespace());
 }
 
 /** Send a direct message or, from a top-level agent only, a broadcast; delivery never waits for a reply. */
@@ -32,7 +39,7 @@ export async function executeSend(
 		return coordinationErrorResult("A non-empty message is required.", { op: "send", from: senderId });
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
-	const isBroadcast = to === "all";
+	const isBroadcast = to === BROADCAST_ID;
 	// A subagent's broadcast wakes every live peer for news that is almost never
 	// theirs; it messages the one agent that can answer instead.
 	if (isBroadcast && registry.get(senderId)?.kind !== "main")
@@ -47,7 +54,7 @@ export async function executeSend(
 	}
 
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	const receipts = await Promise.all(
 		targets.map(target =>
 			bus.send({
@@ -70,8 +77,8 @@ export async function executeSend(
 			text += `\n${receipts
 				.map(receipt =>
 					receipt.outcome === "failed"
-						? `- ${receipt.to}: failed — ${receipt.error ?? "not running"}`
-						: `- ${receipt.to}: ${receipt.outcome}`,
+						? `- ${sanitizeInline(receipt.to)}: failed — ${sanitizeInline(receipt.error ?? "not running")}`
+						: `- ${sanitizeInline(receipt.to)}: ${receipt.outcome}`,
 				)
 				.join("\n")}`;
 		}

@@ -449,6 +449,8 @@ export interface ExecutorOptions {
 	asyncJobManager?: AsyncJobManagerApi;
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
+	/** The parent session's agent registry, so a spawned subagent shares its IRC world (peers + bus). Default global. */
+	agentRegistry?: CreateAgentSessionOptions["agentRegistry"];
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -1308,6 +1310,8 @@ const MAX_YIELD_TOOL_ERRORS = 6;
 interface RunMonitorArgs {
 	index: number;
 	id: string;
+	/** Registry this subagent's status/activity + IRC roster are keyed to. */
+	registry: AgentRegistry;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -1722,7 +1726,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist) args.registry.setActivity(id, activityGist);
 		const progressPayload = {
 			index,
 			agent: agent.name,
@@ -3224,6 +3228,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 export interface IrcWakeTurnMonitorOptions {
 	/** Registry id of the kept-alive subagent whose undriven turns are monitored. */
 	id: string;
+	/** Registry the subagent belongs to; defaults to the process-global one. */
+	registry?: AgentRegistry;
 	index?: number;
 	agent: AgentDefinition;
 	description?: string;
@@ -3298,6 +3304,7 @@ async function relayWakeTurnOutput(args: {
 	yielded: boolean;
 	result: SingleResult | undefined;
 	turnText: string;
+	registry: AgentRegistry;
 	/** Short, attributed peer-visible error text (no stack) when the turn died on an error. */
 	error: string | undefined;
 	/** Whether the turn was aborted (runtime limit, cancellation, hard abort). */
@@ -3309,7 +3316,7 @@ async function relayWakeTurnOutput(args: {
 	/** Waker already receiving this turn's outcome as an async job delivery. */
 	jobOwnerId: string | undefined;
 }): Promise<void> {
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(args.registry);
 	const sources = wakeSources(args.records, args.id);
 	if (sources.length === 0) return;
 	const failed = wakeTurnFailed(args);
@@ -3435,6 +3442,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	const registry = options.registry ?? AgentRegistry.global();
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
 	session.setIrcWakeTurnObserver(records => {
@@ -3462,13 +3470,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const turnStartTime = Date.now();
 		const relay = Promise.withResolvers<void>();
 		session.trackIrcReply(relay.promise);
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const sessionFile = registry.get(id)?.sessionFile ?? options.sessionFile ?? undefined;
 		// The parent receives this turn's outcome through an owner-routed job:
 		// ordinary async-result delivery, and what its `wait` blocks on. A
 		// parent wake owns the whole turn; a mid-turn parent request owns it only
 		// after its steer is consumed. Otherwise only an accepted yield registers
 		// a job, before the ref goes idle.
-		const ownerId = AgentRegistry.global().get(id)?.parentId;
+		const ownerId = registry.get(id)?.parentId;
 		const ownerWoken = wakeSources(records, id).some(source => source.from === ownerId);
 		// Cancelling the job cancels the turn it stands for.
 		const jobCancel = new AbortController();
@@ -3516,6 +3524,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
+			registry,
 			agent,
 			task: ircTask,
 			description: options.description,
@@ -3602,7 +3611,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// Acceptance boundary for an autonomous wake turn (#11079): the
 				// turn's terminal yield is settled, so terminalize the ref here
 				// even when the run-state mirror never delivers `idle`.
-				AgentRegistry.global().markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
+				registry.markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
 			}
 			// Read before finalization: a schema-bearing agent that answered in
 			// prose gets a missing-yield warning prepended to `result.output`.
@@ -3702,7 +3711,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						result,
 						turnText,
 						abortReason,
-						alreadyMessaged: IrcBus.global().sentSince(id, wakeJob.ownerId, turnStartTime),
+						alreadyMessaged: IrcBus.forRegistry(registry).sentSince(id, wakeJob.ownerId, turnStartTime),
 					});
 					if (wakeTurnFailed(outcome)) wakeJob.outcome.reject(new Error(text));
 					else wakeJob.outcome.resolve({ text, agentOutputPublished: outputPublished });
@@ -3713,6 +3722,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				try {
 					await relayWakeTurnOutput({
 						id,
+						registry,
 						records,
 						turnStartTime,
 						yielded,
@@ -3747,6 +3757,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
+	registry: AgentRegistry;
 	session: AgentSession;
 	aborted: boolean;
 	/** Which watchdog (if any) requested the abort; `shutdown` releases instead of adopting. */
@@ -3759,7 +3770,7 @@ export async function finalizeSubagentLifecycle(args: {
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	onRelease?: () => Promise<void>;
 }): Promise<void> {
-	const registry = AgentRegistry.global();
+	const registry = args.registry;
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
@@ -3810,7 +3821,7 @@ export async function finalizeSubagentLifecycle(args: {
 		if (ref && ownsRef) {
 			if (shutdownDispose) {
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref, { dispose: shutdownDispose });
+					await AgentLifecycleManager.forRegistry(registry).release(args.id, ref, { dispose: shutdownDispose });
 				} catch (error) {
 					logger.warn("runSubagent: failed to release session during manager shutdown", {
 						id: args.id,
@@ -3824,7 +3835,7 @@ export async function finalizeSubagentLifecycle(args: {
 				// decision is durable and a restart cannot rediscover the transcript
 				// as a revivable parked agent.
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref, { tombstone: true });
+					await AgentLifecycleManager.forRegistry(registry).release(args.id, ref, { tombstone: true });
 				} catch (error) {
 					logger.warn("runSubagent: failed to persist kill tombstone", { id: args.id, error: String(error) });
 					registry.setStatus(args.id, "aborted", ref);
@@ -3854,7 +3865,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await releaseOwnedResources();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	AgentLifecycleManager.forRegistry(registry).adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -3869,6 +3880,8 @@ export async function finalizeSubagentLifecycle(args: {
 export interface FollowUpTurnOptions {
 	/** Registry id of the (live or parked) subagent to continue. */
 	id: string;
+	/** Registry the subagent belongs to; defaults to the process-global one. */
+	registry?: AgentRegistry;
 	/** Agent definition the session was originally spawned with (drives progress labels + finalize). */
 	agent: AgentDefinition;
 	/** The follow-up message; sent as the turn's user prompt (with {@link restore}, only the run's label). */
@@ -3917,8 +3930,8 @@ export interface FollowUpTurnOptions {
  * on the subagent's home thread, where its live session is the local
  * {@link AgentSession}.
  */
-async function ensureLocalLive(id: string): Promise<AgentSession> {
-	const session = await AgentLifecycleManager.global().ensureLive(id);
+async function ensureLocalLive(id: string, registry: AgentRegistryApi = AgentRegistry.global()): Promise<AgentSession> {
+	const session = await AgentLifecycleManager.forRegistry(registry).ensureLive(id);
 	if (!isLocalAgentSession(session)) {
 		throw new Error(`Subagent ${id} is homed on another thread; its follow-up turn must run there.`);
 	}
@@ -3929,8 +3942,8 @@ async function ensureLocalLive(id: string): Promise<AgentSession> {
  * The subagent's own attached session. Its prompt builders run on its home
  * thread, so an attached session is the local {@link AgentSession}.
  */
-function ownAttachedSession(id: string): AgentSession | undefined {
-	const session = AgentRegistry.global().get(id)?.session;
+function ownAttachedSession(id: string, registry: AgentRegistryApi): AgentSession | undefined {
+	const session = registry.get(id)?.session;
 	return session && isLocalAgentSession(session) ? session : undefined;
 }
 
@@ -3952,7 +3965,9 @@ function ownAttachedSession(id: string): AgentSession | undefined {
  */
 export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
 	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(options.id);
+	const session = await AgentLifecycleManager.forRegistry(options.registry ?? AgentRegistry.global()).ensureLive(
+		options.id,
+	);
 	if (!isLocalAgentSession(session)) return runFollowUpTurnOnHome(session, options);
 	// A turn of a main-homed session loads the main thread like a placed run.
 	const endMainRun = isMainThread() ? existingSubagentWorkerPool()?.beginMainRun() : undefined;
@@ -3969,7 +3984,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
  */
 export async function runFollowUpTurnOnThisThread(options: FollowUpTurnOptions): Promise<SingleResult> {
 	const startTime = Date.now();
-	return driveFollowUpTurn(options, await ensureLocalLive(options.id), startTime);
+	return driveFollowUpTurn(options, await ensureLocalLive(options.id, options.registry), startTime);
 }
 
 /** The follow-up turn itself, on `live`, the subagent's revived local session. */
@@ -3980,6 +3995,7 @@ async function driveFollowUpTurn(
 ): Promise<SingleResult> {
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
+	const registry = options.registry ?? AgentRegistry.global();
 	let session = live;
 	// Acquire turn ownership before mutating the shared yield contract: installing
 	// pooled items under a running ordinary wake would reject its in-flight tool
@@ -4013,7 +4029,7 @@ async function driveFollowUpTurn(
 	// already be streaming a wake, so ownership is reacquired every round.
 	for (let acquireAttempts = 0; ; acquireAttempts++) {
 		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-		const live = await ensureLocalLive(id);
+		const live = await ensureLocalLive(id, registry);
 		if (live === session) break;
 		if (acquireAttempts >= 2) {
 			throw new Error(
@@ -4027,7 +4043,7 @@ async function driveFollowUpTurn(
 	// run's incremental-section flag and retry counters so this turn's guards
 	// evaluate against its own state, not stale accumulators.
 	resetYieldTurnState(session.getToolByName("yield"));
-	const ref = AgentRegistry.global().get(id);
+	const ref = registry.get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
@@ -4035,6 +4051,7 @@ async function driveFollowUpTurn(
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
+		registry,
 		agent,
 		task: message,
 		description: options.description,
@@ -4104,7 +4121,7 @@ async function driveFollowUpTurn(
 			if (resultDelivered(outcome, monitor, structured)) {
 				// A follow-up turn's accepted result is the run's final result too:
 				// terminalize the ref here, not just on the initial run (#11079).
-				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
+				registry.markResultAccepted(id, session, monitor.yieldAcceptedAt());
 			}
 		} finally {
 			try {
@@ -4150,6 +4167,8 @@ async function driveFollowUpTurn(
 interface SubagentPromptInputs {
 	id: string;
 	model?: string;
+	/** Registry this subagent's roster, status and revival are keyed to (its paired IrcBus + lifecycle). */
+	registry: AgentRegistry;
 	agentSystemPrompt: string;
 	context: string;
 	planReference: string;
@@ -4237,7 +4256,7 @@ function buildSubagentSessionOptions(
 				: inputs.reviving && inputs.ircRoster
 					? inputs.ircRoster
 					: (heldIrcRoster(inputs, defaultPrompt) ??
-						collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile));
+						collectIrcPeerRoster(inputs.registry, inputs.id, inputs.ircRoot.sessionFile));
 			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 				agent: inputs.agentSystemPrompt,
 				context: inputs.context,
@@ -4251,7 +4270,7 @@ function buildSubagentSessionOptions(
 				// would pin its whole graph past park. A revive builds while the registry session is
 				// null, so it renders the cleared set rather than the launch-time pooled instructions.
 				workPoolYieldItems:
-					ownAttachedSession(inputs.id)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
+					ownAttachedSession(inputs.id, inputs.registry)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
 				ircPeers: ircRoster?.peers ?? [],
 				ircParkedCount: ircRoster?.parkedCount ?? 0,
 				ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -4273,7 +4292,7 @@ function buildSubagentSessionOptions(
  * when the default blocks changed.
  */
 function heldIrcRoster(inputs: SubagentPromptInputs, defaultPrompt: readonly string[]): IrcPeerRosterData | undefined {
-	const held = ownAttachedSession(inputs.id)?.baseSystemPrompt;
+	const held = ownAttachedSession(inputs.id, inputs.registry)?.baseSystemPrompt;
 	if (!held || held.length <= defaultPrompt.length) return undefined;
 	if (defaultPrompt.some((block, index) => held[index] !== block)) return undefined;
 	return held.map(block => inputs.ircRenders.get(block)).find(roster => roster !== undefined);
@@ -4281,7 +4300,7 @@ function heldIrcRoster(inputs: SubagentPromptInputs, defaultPrompt: readonly str
 
 /** Remembers the roster `block` shows, dropping blocks the live session's base prompt no longer holds. */
 function recordIrcRender(inputs: SubagentPromptInputs, block: string, roster: IrcPeerRosterData): void {
-	const held = ownAttachedSession(inputs.id)?.baseSystemPrompt;
+	const held = ownAttachedSession(inputs.id, inputs.registry)?.baseSystemPrompt;
 	if (held) {
 		for (const rendered of inputs.ircRenders.keys()) {
 			if (!held.includes(rendered)) inputs.ircRenders.delete(rendered);
@@ -4311,7 +4330,7 @@ async function refreshSubagentIrcRoot(
 	sessionFile: string | null,
 ): Promise<void> {
 	if (!inputs.ircEnabled) return;
-	const registry = AgentRegistry.global();
+	const registry = inputs.registry;
 	inputs.ircRoot.sessionFile = await ensurePersistedRoster(
 		registry,
 		sessionManager.getSessionFile() ??
@@ -4499,7 +4518,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		} finally {
 			capture.spec.prompt.reviving = false;
 		}
-		AgentRegistry.global().syncSessionStatus(id, revived);
+		capture.spec.prompt.registry.syncSessionStatus(id, revived);
 		attachIrcWakeTurnMonitor(revived, capture.wake);
 		return revived;
 	};
@@ -4563,6 +4582,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
 	const startTime = Date.now();
+
+	// The registry this subagent belongs to: a custom one for an isolated SDK
+	// embedder, else the process-global registry. Its paired IrcBus +
+	// AgentLifecycleManager (both keyed by it) own this subagent's whole
+	// lifecycle — status, activity, roster, adoption, revival, teardown — so a
+	// custom-registry session keeps its finished keep-alive subagents rather
+	// than the global manager disposing a ref it cannot see.
+	const registry = options.agentRegistry ?? AgentRegistry.global();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
@@ -4698,6 +4725,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
+		registry,
 		agent,
 		task,
 		assignment,
@@ -4735,6 +4763,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	let pendingSessionDisposal: Promise<void> | undefined;
 	const wakeOptions: IrcWakeTurnMonitorOptions = {
 		id,
+		registry,
 		index,
 		agent,
 		completionProbe,
@@ -5073,6 +5102,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
+					agentRegistry: options.agentRegistry,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
@@ -5149,6 +5179,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				prompt: {
 					id,
 					model: progress.resolvedModel,
+					registry,
 					agentSystemPrompt: agent.systemPrompt,
 					context: options.context?.trim() ?? "",
 					planReference: options.planReference?.content ?? "",
@@ -5247,7 +5278,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (preparedSession) untrackedSession = undefined;
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
-			const registry = AgentRegistry.global();
 			registry.syncSessionStatus(id, session);
 			const runRef = registry.get(id);
 			if (runRef) {
@@ -5418,7 +5448,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
 			if (resultDelivered(outcome, monitor, structured)) {
-				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
+				registry.markResultAccepted(id, session, monitor.yieldAcceptedAt());
 			}
 			exitCode = outcome.exitCode;
 			error = outcome.error;
@@ -5507,6 +5537,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				}
 				await finalizeSubagentLifecycle({
 					id,
+					registry,
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
@@ -5669,7 +5700,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			sessionFile: subtaskSessionFile,
 			startTime,
 		});
-		AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+		registry.setHistory(id, { outputPath: result.outputPath });
 		return result;
 	} finally {
 		// The result is published: messages held during the run get their own

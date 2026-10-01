@@ -13,6 +13,7 @@ import type { SessionManager } from "./session-manager";
 export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	agentRegistry?: AgentRegistry;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
@@ -181,7 +182,7 @@ export class IrcBridge {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const registry = AgentRegistry.global();
+		const registry = this.#host.agentRegistry ?? AgentRegistry.global();
 		const parentId = registry.get(msg.to)?.parentId;
 		const fromParent = parentId === msg.from;
 		// A subagent's result answers its parent, and its run may be waiting on its

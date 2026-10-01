@@ -49,6 +49,28 @@ describe("hasResolvableTranscript", () => {
 		expect(await hasResolvableTranscript("live")).toBe(true);
 	});
 
+	it.each([true, false])("uses the selected registry for live transcript availability (%s)", async live => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Scoped",
+			displayName: "task",
+			kind: "sub",
+			session: live ? fakeLiveSession() : null,
+			status: "idle",
+		});
+		AgentRegistry.global().register({
+			id: "Scoped",
+			displayName: "task",
+			kind: "sub",
+			session: live ? null : fakeLiveSession(),
+			status: "idle",
+		});
+
+		expect(await hasResolvableTranscript("Scoped", registry)).toBe(live);
+		expect(await hasResolvableTranscript("scoped", registry)).toBe(live);
+		expect(await hasResolvableTranscript("Scoped")).toBe(!live);
+	});
+
 	it("returns false for an aborted ref with no retained session file", async () => {
 		AgentRegistry.global().register({
 			id: "Aborted",
