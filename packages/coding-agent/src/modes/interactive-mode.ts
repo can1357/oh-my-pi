@@ -42,6 +42,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
+import { writeStderrBehindTerminal } from "@oh-my-pi/pi-tui/terminal-handoff";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { col, kbd, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
@@ -6826,7 +6827,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
 			// Command on its own line so triple-click selects just the command (#11001).
-			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
+			// A stalled terminal may not have read the restore yet; the hint queues behind it.
+			writeStderrBehindTerminal(
+				`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`,
+			);
 		}
 
 		await postmortem.quit(0);
@@ -6958,14 +6962,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Close the TSP surfaces first so the drain below also swallows what the
 		// terminal still sends them (acks, events) instead of the shell.
 		this.ui.closeNative();
-		// Drain any in-flight Kitty key release events before stopping.
-		// This prevents escape sequences from leaking to the parent shell over slow SSH.
-		await this.ui.terminal.drainInput(1000);
+		// Settle queued output first so the title pop below heads the queue. Queued
+		// behind a backlog, a later settle (drainInput's, then `ui.stop()`'s) could
+		// drop it, and the parent shell would keep omp's title.
+		this.ui.terminal.settleOutput?.();
 		// Stop the run-state spinner interval BEFORE restoring the shell title, so a
 		// pending tick cannot re-emit an OSC title after `popTerminalTitle` hands the
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		popTerminalTitle();
+		// Drain any in-flight Kitty key release events before stopping.
+		// This prevents escape sequences from leaking to the parent shell over slow SSH.
+		await this.ui.terminal.drainInput(1000);
 		this.stop();
 	}
 

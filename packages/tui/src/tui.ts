@@ -2301,14 +2301,12 @@ export class TUI extends Container {
 		}
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
-		if (this.#resizeInPlaceActive && this.terminal.rows > 0) {
-			// The hardware cursor sits wherever the drag left it, but tracking still
-			// describes the pre-resize row (no alt-buffer restore replays it back).
-			// The shell handoff below moves relatively from the tracked row, so park
-			// absolutely on the bottom row and record it first.
-			this.terminal.write(`\x1b[${this.terminal.rows};1H`);
-			this.#hardwareCursorRow = this.terminal.rows - 1;
-		}
+		// Settle the backlog from before the stop first, so the screen-mode exits
+		// below head the queue: a later settle's wait drains them before it can
+		// discard anything, and one that finds the pump still blocked in the same
+		// write leaves them queued. Never re-emit ?1049l instead: on the normal
+		// screen it restores a stale saved cursor.
+		const backlogDrained = this.terminal.settleOutput?.() ?? true;
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
@@ -2347,7 +2345,14 @@ export class TUI extends Container {
 		// the latch so the flush below writes only un-retired rows.
 		this.#clearScrollbackOnNextRender = false;
 		// The surface already holds the transcript; there's no row history to retire.
-		if (!nativeWasLive) this.#flushHistoryBeforeStop();
+		// Skip the flush when the backlog could not drain: its rows would only be
+		// discarded, and a handoff stop would mark them committed without their
+		// arriving. They stay un-retired: the next frames after start() retire
+		// them, and at exit they remain in the session file.
+		if (!nativeWasLive && backlogDrained) this.#flushHistoryBeforeStop();
+		// Drain or drop what the flush queued before the handoff writes below, so
+		// the prompt placement and cursor show land after it, not mid-output.
+		this.terminal.settleOutput?.();
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
@@ -2364,25 +2369,19 @@ export class TUI extends Container {
 			this.#ghosttyInitialImageDelayTimer.cancel();
 			this.#ghosttyInitialImageDelayTimer = undefined;
 		}
-		// Place the parent shell on the first line after the rendered content. When
-		// that line is still inside the viewport, moving there and writing `\r` is
-		// enough; emitting `\r\n` would create an extra blank row. If the content
-		// already reaches the viewport bottom, scroll exactly once so the prompt
-		// lands directly below the last visible TUI row.
+		// Place the parent shell on the first line after the rendered content,
+		// addressed absolutely like every frame: a settle may have discarded the
+		// tail of a frame after it moved the cursor, so the tracked position can
+		// be wrong. When that line is inside the viewport the move alone is
+		// enough; when the content already reaches the viewport bottom, one line
+		// feed scrolls so the prompt lands directly below the last visible row.
 		if (this.#previousFrameLength > 0) {
 			// Provider frames anchor the mutable viewport below retained history;
 			// the shell prompt belongs on the first row after that content.
 			const targetRow = this.#providerViewportTop + this.#previousFrameLength;
 			const viewportBottom = this.terminal.rows - 1;
-			const clampedCursorRow = Math.max(0, Math.min(this.#hardwareCursorRow, viewportBottom));
-			const moveTargetRow = Math.min(targetRow, viewportBottom);
-			const lineDiff = moveTargetRow - clampedCursorRow;
-			if (lineDiff > 0) {
-				this.terminal.write(`\x1b[${lineDiff}B`);
-			} else if (lineDiff < 0) {
-				this.terminal.write(`\x1b[${-lineDiff}A`);
-			}
-			this.terminal.write(targetRow <= viewportBottom ? "\r" : "\r\n");
+			const placementRow = Math.min(targetRow, viewportBottom);
+			this.terminal.write(`\x1b[${placementRow + 1};1H${targetRow <= viewportBottom ? "" : "\n"}`);
 		}
 
 		// Force: the parent shell needs the cursor back regardless of what the

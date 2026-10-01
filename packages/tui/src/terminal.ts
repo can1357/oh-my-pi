@@ -25,6 +25,13 @@ import {
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
+import {
+	drainTerminalHandoff,
+	holdTerminalHandoff,
+	releaseTerminalHandoff,
+	STOP_DRAIN_MS,
+	writeBehindTerminalHandoff,
+} from "./terminal-handoff";
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
@@ -205,6 +212,14 @@ const STDOUT_STALL_TIMEOUT_MS = 60_000;
 
 /** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
 const STDOUT_STALL_POLL_MS = 250;
+
+/**
+ * Closes whatever a discard may have cut mid-frame: ST ends an open OSC/DCS/APC
+ * string, then synchronized output ends, SGR resets, an open OSC 8 hyperlink
+ * closes, and the cursor (hidden by every paint) shows. ESC also aborts a cut
+ * CSI in the DEC parser.
+ */
+const SETTLE_RESET = "\x1b\\\x1b[?2026l\x1b[0m\x1b]8;;\x07\x1b[?25h";
 
 /**
  * Bounds a never-draining stdout backlog without killing a single large but
@@ -421,6 +436,10 @@ function createConsoleCodepageGuard(): (() => void) | null {
 /**
  * Emergency terminal restore - call this from signal/crash handlers
  * Resets terminal state without requiring access to the ProcessTerminal instance
+ *
+ * Postmortem runs it on every exit path, so it is also the exit boundary: it
+ * returns only once the terminal has taken whatever a stalled stop left
+ * queued (see terminal-handoff.ts).
  */
 export function emergencyTerminalRestore(): void {
 	try {
@@ -432,6 +451,9 @@ export function emergencyTerminalRestore(): void {
 			// Keyboard enhancement state is screen-local: pop the alt-screen
 			// frame before leaving it, then let stop() pop omp's main-screen frame.
 			if (altScreenActive) {
+				// Settle first, as TUI.stop() does, so the exit heads the queue:
+				// stop()'s own settle would otherwise discard it with the backlog.
+				terminal.settleOutput();
 				const keyboardExit =
 					terminal.keyboardEnhancementExitSequence ?? (terminal.kittyEnableSequence ? "\x1b[<u" : "");
 				terminal.write(`${keyboardExit}\x1b[?1049l`);
@@ -442,26 +464,29 @@ export function emergencyTerminalRestore(): void {
 		} else if (terminalEverStarted && !isTerminalHeadless()) {
 			// Blind restore only if we know a terminal was started but lost track of it
 			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
-			process.stdout.write(
+			const restore =
 				"\x1b[?2026l" + // End synchronized output
-					"\x1b[?7h" + // Restore autowrap
-					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
-					"\x1b[?2004l" + // Disable bracketed paste
-					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
-					"\x1b[?2048l" + // Disable in-band resize notifications
-					"\x1b[?5522l" + // Disable enhanced paste notifications
-					"\x1b[<u" + // Pop kitty keyboard protocol
-					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-					"\x1b[?9001l" + // Disable win32-input-mode fallback (Windows console)
-					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
-					// Leave the alternate screen only when a fullscreen overlay
-					// actually holds it — on Windows, DECRST 1049 on the main
-					// buffer homes the cursor (unconditional CursorRestoreState
-					// with no prior save), corrupting the shell handoff on exit.
-					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
-					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
-					"\x1b[?25h", // Show cursor
-			);
+				"\x1b[?7h" + // Restore autowrap
+				"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
+				"\x1b[?2004l" + // Disable bracketed paste
+				"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
+				"\x1b[?2048l" + // Disable in-band resize notifications
+				"\x1b[?5522l" + // Disable enhanced paste notifications
+				"\x1b[<u" + // Pop kitty keyboard protocol
+				"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
+				"\x1b[?9001l" + // Disable win32-input-mode fallback (Windows console)
+				"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+				// Leave the alternate screen only when a fullscreen overlay
+				// actually holds it — on Windows, DECRST 1049 on the main
+				// buffer homes the cursor (unconditional CursorRestoreState
+				// with no prior save), corrupting the shell handoff on exit.
+				(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
+				"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
+				"\x1b[?25h"; // Show cursor
+			// Behind what a stopped terminal still holds (see terminal-handoff.ts): a
+			// direct write would wait out a stalled reader and land ahead of it.
+			// No wait here; the drain in `finally` waits for all of it.
+			if (!writeBehindTerminalHandoff(restore, 0)) process.stdout.write(restore);
 			altScreenActive = false;
 			if (process.stdin.setRawMode) {
 				process.stdin.setRawMode(false);
@@ -469,6 +494,10 @@ export function emergencyTerminalRestore(): void {
 		}
 	} catch {
 		// Terminal may already be dead during crash cleanup - ignore errors
+	} finally {
+		// Whatever threw above, the exit still waits for the held output. A
+		// headless process (tests) makes no terminal side effects, waiting included.
+		if (!isTerminalHeadless()) drainTerminalHandoff();
 	}
 }
 /** Terminal-reported appearance (dark/light mode). */
@@ -552,8 +581,20 @@ export interface Terminal {
 	stop(): void;
 
 	/**
+	 * Hand the terminal back with nothing still queued: wait (bounded) for the
+	 * output backlog to drain, then drop what is left, so the writes that
+	 * follow reach the terminal last. Returns whether the backlog drained;
+	 * false means output was dropped, or is stuck behind a write the terminal
+	 * is not reading. Optional so custom Terminals built against older pi-tui
+	 * versions keep working.
+	 */
+	settleOutput?(): boolean;
+
+	/**
 	 * Drain stdin before exiting to prevent Kitty key release events from
-	 * leaking to the parent shell over slow SSH connections.
+	 * leaking to the parent shell over slow SSH connections. Settles queued
+	 * output first (see {@link settleOutput}), so it can wait up to a second
+	 * for the output backlog and drop what is still queued.
 	 * @param maxMs - Maximum time to drain (default: 1000ms)
 	 * @param idleMs - Exit early if no input arrives within this time (default: 50ms)
 	 */
@@ -753,6 +794,17 @@ function isPrivateModeSupported(status: string): boolean {
 	return status !== "0" && status !== "4";
 }
 
+/** The terminal's off-thread writer: `TtyWriter` in production, a fake in tests. */
+export interface OutputPump {
+	write(data: string): number;
+	pending(): number;
+	readonly dead: boolean;
+	flushSync(timeoutMs: number): boolean;
+	/** Absent on stale prebuilt natives. */
+	discard?(): void;
+	stop(flushTimeoutMs: number): void;
+}
+
 /** Construction-time overrides for {@link ProcessTerminal}. */
 export interface ProcessTerminalOptions {
 	/**
@@ -763,6 +815,12 @@ export interface ProcessTerminalOptions {
 	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
 	 */
 	conpty?: boolean;
+	/**
+	 * Builds the off-thread output writer in place of the native `TtyWriter`.
+	 * Still gated on a non-Windows TTY stdout, but not on `bun test`, so tests
+	 * can drive the pump paths with a fake.
+	 */
+	outputPump?: () => OutputPump;
 	/**
 	 * Whether stdin is a native Windows console handle (win32, not WSL), whose
 	 * console host answers `CSI ? 9001 h` with win32-input-mode key records.
@@ -803,6 +861,16 @@ export class ProcessTerminal implements Terminal {
 		this.#markTerminalDisconnected("stdin failed", err);
 	};
 	#dead = false;
+	// What pending() reads if the pump has written nothing since a settle's
+	// discard, or since a stale addon's undrained wait: the backlog then, plus
+	// the UTF-8 length of every (well-formed) string queued since. While it
+	// still matches, the pump is stalled or still inside the write that was in
+	// flight, and a later settle neither waits nor discards: that would only
+	// drop the handoff bytes queued behind it, which arrive in order once the
+	// terminal reads again.
+	#stalledBacklog: number | undefined;
+	// A stale addon cannot discard; warn about it once, not at every settle.
+	#staleDiscardWarned = false;
 	#active = false;
 	// Last cursor visibility written to the terminal, sniffed from every
 	// outgoing sequence (frame buffers embed their own ?25h/?25l), so
@@ -840,7 +908,9 @@ export class ProcessTerminal implements Terminal {
 	// froze the whole TUI for the duration of a multi-MB repaint. The pump
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
-	#outputPump?: TtyWriter;
+	#outputPump?: OutputPump;
+	// Construction-time stand-in for the native pump (ProcessTerminalOptions.outputPump).
+	readonly #createOutputPump?: () => OutputPump;
 	// Upper bound on the pump's backlog: the count its last enqueue or read
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
@@ -898,6 +968,7 @@ export class ProcessTerminal implements Terminal {
 
 	constructor(options?: ProcessTerminalOptions) {
 		this.#conpty = options?.conpty ?? isConPTYHosted();
+		this.#createOutputPump = options?.outputPump;
 		this.#nativeWindowsConsole = options?.nativeWindowsConsole ?? process.platform === "win32";
 	}
 
@@ -1032,13 +1103,23 @@ export class ProcessTerminal implements Terminal {
 		// Register for emergency cleanup
 		activeTerminal = this;
 		terminalEverStarted = true;
+		// This terminal owns the output from here on: a pump an earlier stop left
+		// holding output exits once its queue drains.
+		releaseTerminalHandoff();
 		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
-		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		// native pump stays off under `bun test` — same philosophy as
+		// isTerminalHeadless. An injected pump factory is still honored there.
+		const createOutputPump = this.#createOutputPump;
+		if (
+			process.platform !== "win32" &&
+			process.stdout.isTTY &&
+			(createOutputPump || !isBunTestRuntime()) &&
+			!this.#outputPump
+		) {
 			try {
-				this.#outputPump = new TtyWriter(1);
+				this.#outputPump = createOutputPump ? createOutputPump() : new TtyWriter(1);
 				this.#pumpBacklogBound = 0;
 			} catch (err) {
 				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
@@ -2066,6 +2147,11 @@ export class ProcessTerminal implements Terminal {
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
 		if (this.#headless) return;
+		// The keyboard-protocol pops below clear their flags, so stop() never
+		// re-emits them. Settle first so they head the queue: they drain during
+		// the wait below and the next settle's bound, ahead of any frame rendered
+		// meanwhile, instead of waiting behind a backlog a later discard drops.
+		this.settleOutput();
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
@@ -2108,6 +2194,45 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	/**
+	 * Hand the terminal back with nothing still queued: wait for the output
+	 * backlog to drain (bounded, so a stalled PTY cannot wedge exit), then drop
+	 * what is left and write a reset that closes whatever the cut left open.
+	 * Whatever is written after this - the TUI's handoff writes, the restore
+	 * sequences, the resume hint - reaches the terminal after it, and no
+	 * detached writer keeps painting into whatever owns the terminal next.
+	 *
+	 * Returns whether the backlog drained. A disconnect already dropped it
+	 * (#markTerminalDisconnected), and a pump still blocked in the write an
+	 * earlier discard could not interrupt is left alone: waiting again buys
+	 * nothing, and a discard would drop only the handoff bytes queued behind
+	 * that write, which arrive in order once the terminal reads again.
+	 */
+	settleOutput(): boolean {
+		const pump = this.#outputPump;
+		if (!pump) return true;
+		if (this.#dead) return false;
+		if (this.#stalledBacklog !== undefined && pump.pending() === this.#stalledBacklog) return false;
+		const bytes = pump.flushSync(STOP_DRAIN_MS) ? 0 : pump.pending();
+		if (bytes === 0) {
+			this.#stalledBacklog = undefined;
+			return true;
+		}
+		if (!pump.discard) {
+			if (!this.#staleDiscardWarned) {
+				this.#staleDiscardWarned = true;
+				logger.warn("Undelivered terminal output could not be discarded (stale natives)", { bytes });
+			}
+			this.#stalledBacklog = pump.pending();
+			return false;
+		}
+		pump.discard();
+		logger.warn("Discarded undelivered terminal output at a terminal handoff", { bytes });
+		this.#stalledBacklog = pump.pending();
+		this.write(SETTLE_RESET);
+		return false;
+	}
+
 	stop(): void {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
@@ -2126,6 +2251,9 @@ export class ProcessTerminal implements Terminal {
 		// suspend, and shutdown see the real stderr even if a later teardown
 		// step throws.
 		restoreTerminalStderr();
+		// Nothing queued may land after the restore writes below. After a caller's
+		// settle the pump is empty or still blocked, so this returns at once.
+		this.settleOutput();
 
 		this.#clearProgressTimer();
 		if (this.#progressActive) {
@@ -2251,11 +2379,17 @@ export class ProcessTerminal implements Terminal {
 		this.#disarmStdoutStallWatchdog();
 		this.#resizeHandler = undefined;
 		// Flush the restore sequences enqueued above (bounded — a stalled PTY
-		// must not wedge exit), then retire the pump. Later writes (emergency
-		// restore's showCursor) fall back to direct stdout writes.
-		if (this.#outputPump) {
-			this.#outputPump.stop(1000);
+		// must not wedge exit), then retire the pump. A pump still inside the
+		// write the settle found it blocked in is not waited on again. One that
+		// still holds bytes keeps running for the handoff (see terminal-handoff.ts):
+		// later writes queue behind them instead of racing them to the terminal.
+		const pump = this.#outputPump;
+		if (pump) {
+			const stalled = this.#stalledBacklog !== undefined && pump.pending() === this.#stalledBacklog;
 			this.#outputPump = undefined;
+			this.#stalledBacklog = undefined;
+			if (this.#dead || pump.dead || (!stalled && pump.flushSync(STOP_DRAIN_MS))) pump.stop(STOP_DRAIN_MS);
+			else holdTerminalHandoff(pump, this);
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
@@ -2292,7 +2426,11 @@ export class ProcessTerminal implements Terminal {
 			this.#bracketedPasteRefreshTimer = undefined;
 		}
 		this.#disarmStdoutStallWatchdog();
-		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
+		// Every later write is a no-op, so nothing can follow the backlog to the
+		// terminal: drop it now, once.
+		const undeliveredBytes = this.#outputPump?.pending() ?? 0;
+		this.#outputPump?.discard?.();
+		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err, undeliveredBytes });
 
 		const disconnectHandler = this.#disconnectHandler;
 		this.#disconnectHandler = undefined;
@@ -2336,12 +2474,16 @@ export class ProcessTerminal implements Terminal {
 		// files). They serve no purpose there and would surface as visible noise.
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
-		this.#trackCursorVisibility(data);
+		// A lone surrogate cannot be encoded: the pump's transcoder pairs it with
+		// the next code unit and swallows that character. Send U+FFFD instead, as
+		// the stream fallback would, so both paths and the stall mark agree.
+		const text = data.isWellFormed() ? data : data.toWellFormed();
+		this.#trackCursorVisibility(text);
 		const pump = this.#outputPump;
 		if (pump) {
 			let pending: number;
 			try {
-				pending = pump.write(data);
+				pending = pump.write(text);
 			} catch (err) {
 				this.#markTerminalDisconnected("stdout failed", err);
 				return;
@@ -2350,11 +2492,12 @@ export class ProcessTerminal implements Terminal {
 			// its UTF-16 length; a dead pump enqueues nothing and reports only the
 			// remainder it is dropping (soon zero). Only a report that small can
 			// come from a dead pump, so the native `dead` read is skipped otherwise.
-			if ((pending < data.length || data.length === 0) && pump.dead) {
+			if ((pending < text.length || text.length === 0) && pump.dead) {
 				this.#markTerminalDisconnected("stdout failed; output pump died");
 				return;
 			}
 			this.#pumpBacklogBound = pending;
+			if (this.#stalledBacklog !== undefined) this.#stalledBacklog += Buffer.byteLength(text, "utf8");
 			// Feed the live backlog to the stall watchdog rather than tripping on
 			// the instantaneous byte count: a single large-but-draining frame (a
 			// resume repaint of many inline images) must open normally, while a
@@ -2362,6 +2505,8 @@ export class ProcessTerminal implements Terminal {
 			this.#trackStdoutBacklog(pending);
 			return;
 		}
+		// Stopped with output still undelivered: queue behind it (see terminal-handoff.ts).
+		if (writeBehindTerminalHandoff(text, STOP_DRAIN_MS, this)) return;
 		// A console-sharing child process may have flipped the console codepage
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
@@ -2379,14 +2524,14 @@ export class ProcessTerminal implements Terminal {
 			// `process.stdout.write(string)` UTF-8-encodes before `WriteFile`,
 			// and a code-unit cap would let CJK transcript rows expand past the
 			// threshold. See #2034 and #2095.
-			const bytes = Buffer.byteLength(data, "utf8");
+			const bytes = Buffer.byteLength(text, "utf8");
 			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
-				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
+				for (const chunk of chunkForConPTY(text, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
 					if (this.#dead) break;
 					process.stdout.write(chunk);
 				}
 			} else {
-				process.stdout.write(data);
+				process.stdout.write(text);
 			}
 			// A stalled-but-alive PTY consumer never throws: write() just queues the
 			// bytes and writableLength grows. Feed that backlog to the stall watchdog
