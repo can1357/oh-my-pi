@@ -16,6 +16,12 @@
    - `packages/coding-agent/src/hindsight/mental-models.ts` — bank-scoped mental-model seeding and cache rendering.
    - `packages/coding-agent/src/hindsight/seeds.json` — built-in mental-model seed definitions.
    - `packages/coding-agent/src/hindsight/transcript.ts` — extracts user/assistant turns for auto-retain.
+- Dakera collaborators:
+   - `packages/coding-agent/src/dakera/state.ts` — session state, synchronous retain path, auto-retain cadence.
+   - `packages/coding-agent/src/dakera/backend.ts` — session bootstrap, prompt injection, clear/enqueue.
+   - `packages/coding-agent/src/dakera/bank.ts` — agent-id derivation and retain tags.
+   - `packages/coding-agent/src/dakera/client.ts` — HTTP `store` / `storeBatch` / `update` calls.
+   - `packages/coding-agent/src/hindsight/content.ts` and `packages/coding-agent/src/hindsight/transcript.ts` — transcript extraction and shaping, reused rather than copied.
 - Mnemopi collaborators:
    - `packages/coding-agent/src/mnemopi/backend.ts` — local backend bootstrap, prompt injection, subagent aliasing, enqueue/clear.
    - `packages/coding-agent/src/mnemopi/state.ts` — scoped recall/retain state and local writes.
@@ -25,8 +31,8 @@
 ## Registration / Visibility
 
 - Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
-- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"dakera"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`), and Dakera requires `isDakeraConfigured(loadDakeraConfig(...))`.
+- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for any of those backends. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
 
@@ -54,17 +60,27 @@ Mnemopi:
 - `details = { count: number }`
 - The tool writes each item synchronously through `rememberScoped(...)`. A storage failure throws, stops the batch, and reports the failed item, ids of earlier items kept, and whether later items were not attempted. A successful count confirms all synchronous writes, not completion of background extraction.
 
-## Flow
+Dakera:
+- `content[0].type = "text"`
+- `content[0].text = "<count> memory stored."` or `"<count> memories stored."`
+- `details = { count: number }`
+- The batch is stored before the call returns, and `<count>` is the number of rows the server answered with a usable `id` — not the number requested. Items whose content is blank after trimming are dropped without a request, and a server that returns rows without ids reports `0 memories stored.` rather than a flattering count.
 
-1. `MemoryRetainTool.createIf(...)` exposes the tool when `memory.backend` is either `"hindsight"` or `"mnemopi"`.
+## Flow
+1. `MemoryRetainTool.createIf(...)` exposes the tool when `memory.backend` is `"hindsight"`, `"mnemopi"`, or `"dakera"`.
 2. `execute(...)` re-reads `memory.backend` and dispatches to the matching session state.
-3. If the backend is `mnemopi`:
+3. If the backend is `dakera`:
+   - it fetches `session.getDakeraSessionState()` and throws if the backend was not started;
+   - `state.retainItems(...)` maps each item to `memory_type: "semantic"`, `importance: dakera.retainImportance`, and `metadata.context` (provenance is never merged into the content);
+   - every field the server persists is passed through `redactMemoryTextFields(...)`, so a secret in `context` cannot ride in via metadata;
+   - one `POST /v1/memories/store/batch` carries the whole batch, stamped with the scope's retain tags and `session_id`.
+4. If the backend is `mnemopi`:
    - it fetches `session.getMnemopiSessionState()` and throws if the backend was not started;
    - if any item has `scope: "global"`, it resolves `state.getGlobalRetainTarget()` first; under `per-project` scoping that throws `Mnemopi global scope requires global or per-project-tagged scoping.` and nothing in the batch is stored;
    - for each item, it calls `state.rememberScoped(item.content, ...)` with `source: "coding-agent-retain"`, `importance: 0.75`, `scope: "bank"`, `extract: true`, `extractEntities: true`, `veracity: "tool"`, `memoryType: "fact"`, and metadata `{ session_id, cwd, context, tool: "retain" }`;
    - project items go to the scoped retain bank and global items to the global target (passed as `rememberScoped`'s third argument); exact duplicate content in the same session updates the existing working-memory row in the Mnemopi core.
    - content and options are passed through `redactRememberWrite(...)` before storage.
-4. If the backend is `hindsight`:
+5. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
    - if any item has `scope: "global"`, it calls `state.assertGlobalRetainAvailable()` first, which throws `Hindsight global scope is off; set hindsight.globalScope to true to enable it.` while `hindsight.globalScope` is off and `Hindsight global scope requires global or per-project-tagged scoping.` under `per-project` scoping; either way nothing in the batch is queued;
    - the whole call is handed to `HindsightSessionState.enqueueRetain(toolCallId, items)`; `HindsightRetainQueue.enqueue(...)` runs the same `global` check (the exported queue enforces it too, not only the tool), then `HindsightOutbox.enqueue(...)` writes one event file per item under `<agentDir>/hindsight-outbox/<destination>/`, all or none: each file is synced and atomically renamed into place, then the directory is synced (except on Windows). Event content, context, tags and session id are stripped of terminal controls, the bearer token, and recognizable secrets first;
@@ -76,6 +92,7 @@ Mnemopi:
 
 - Hindsight tool path: durable outbox, delivered in batches.
 - Mnemopi tool path: direct local `remember(...)` into the scoped retain bank.
+- Dakera tool path: direct synchronous `storeBatch(...)`; there is no local queue, so the reported count is what the server stored.
 - Hindsight bank scoping from `computeBankScope(...)`:
    - `global` — one shared bank, no project tags.
    - `per-project` — bank id gets `-<project label>` appended, where the label is the git primary checkout root basename (cwd basename outside a repo).
@@ -87,24 +104,32 @@ Mnemopi:
    - Per-project recall may add safe legacy banks whose stored working-memory rows all match the active cwd; scanning is capped at 64 candidate bank directories.
 - Session scope:
    - tool-called retains are per-session work for the active backend;
-   - persisted Hindsight memories are cross-session server-side bank data;
+   - persisted Hindsight and Dakera memories are cross-session server-side data;
    - persisted Mnemopi memories are local SQLite data;
-   - subagents alias parent memory state for both supported backends.
+   - subagents alias parent memory state for Hindsight and Mnemopi; a Dakera subagent gets its own state object but resolves the same agent id as its project, and runs no automatic recall or retention.
+- Dakera agent-id scoping from `computeAgentScope(...)` (no bank concept — the `agent_id` is the isolation unit):
+   - `global` — one shared agent id; every retain is tagged `project:<project label>` for provenance, which recall cannot filter on.
+   - `per-project` — `[<prefix>-]<agentId|omp>-<project label>`, so another project cannot read it back at all.
+   - No setup call precedes the first write: storing against an unseen `agent_id` creates it server-side.
 
 ## Side Effects
 
 - Filesystem
    - Hindsight: undelivered tool retains as JSON event files under `<agentDir>/hindsight-outbox/` (directories 0700, files 0600); refused, malformed and expired events move to `hindsight-outbox/quarantine/`, which deletes them 30 days later.
    - Mnemopi: writes to local SQLite under `mnemopi.dbPath`, defaulting beneath the agent memories directory (`mnemopi/mnemopi.db`) with one database file per scoped bank when needed.
+   - Dakera: none. The server holds the only copy.
 - Network
    - Hindsight: `POST /v1/default/banks/{bank_id}/memories` via `retainBatch(...)`, plus optional `PUT /v1/default/banks/{bank_id}` via `ensureBankExists(...)` before the first write per bank per session state (the set is created with the primary session state and shared with subagent aliases).
    - Mnemopi: none unless configured embedding or LLM providers make calls during extraction.
+   - Dakera: `POST /v1/memories/store/batch` via `storeBatch(...)` (single item: `POST /v1/memory/store`), awaited before the tool returns.
 - Session state
    - Hindsight: records each event's scope, captured tags, original timestamp, context and `metadata.session_id` before acknowledging; subagents share the parent's destination.
    - Mnemopi: writes through the session's scoped `Mnemopi` instance, includes `session_id`, `cwd`, and optional `context`, and shares scoped resources with subagents.
+   - Dakera: stamps `session_id` and the scope's tags on each row; the tool call itself awaits the batch store. Fire-and-forget auto-retains are what disposal, `/memory clear`, and a backend switch drain via `awaitPending()` so no write is dropped mid-flight.
 - User-visible prompts / interactive UI
    - Hindsight async flush failures emit `session.emitNotice("warning", ...)`; the model is not told.
    - Mnemopi explicit write failures are returned as tool errors with partial-batch information; earlier successful writes are not rolled back.
+   - Dakera write failures surface to the model as a failed tool call; there is no queue that could swallow them. Auto-retain failures emit `session.emitNotice("warning", ...)` instead.
 - Background work / cancellation
    - Hindsight flush runs on the debounce timer, the queue-size threshold, primary-state installation, agent end, and session disposal; backend `enqueue(...)` and `clear(...)` explicitly drain it. Undelivered events survive the session and process; nothing delivers while no omp process runs.
    - Mnemopi fact/entity extraction and embedding may continue after the synchronous row write. Backend `enqueue(...)` requests full consolidation; backend clear disposes scoped instances before deleting their database files.
@@ -113,7 +138,7 @@ Mnemopi:
 ## Limits & Caps
 
 - Input schema requires `items.length >= 1`; item strings have no schema-level minimum length.
-- Tool availability requires `memory.backend` to be `"hindsight"` or `"mnemopi"`; default `memory.backend` is `"off"`.
+- Tool availability requires `memory.backend` to be `"hindsight"`, `"mnemopi"`, or `"dakera"`; default `memory.backend` is `"off"`.
 - Hindsight queue flush threshold and request batch size: 16 events.
 - Hindsight outbox capacity: 1000 undelivered events per destination; a call that would exceed it fails without writing anything or evicting older events.
 - Hindsight outbox retention: undelivered events are quarantined 7 days after they were written; quarantined events are deleted 30 days after quarantine.
@@ -129,22 +154,33 @@ Mnemopi:
    - `mnemopi.autoRetain = true`
    - `mnemopi.retainEveryNTurns = 4`
    - `mnemopi.scoping = "per-project"`
+- Dakera retain settings:
+   - `dakera.autoRetain = true`
+   - `dakera.retainEveryNTurns = 3`
+   - `dakera.retainMode = "full-session"`
+   - `dakera.retainImportance = 0.5` (the `importance` stamped on every stored row; Dakera raises it on each read)
+   - `dakera.scoping = "per-project"`
+   - `dakera.retainTimeoutMs = 60_000`
 
 ## Errors
 
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.
 - Throws `Hindsight backend is not initialised for this session.` when `memory.backend == "hindsight"` but no state exists.
+- Throws `Dakera backend is not initialised for this session.` when `memory.backend == "dakera"` but no state exists.
 - Hindsight queue enqueue on disposed state throws `Hindsight retain queue is closed.`
 - Hindsight enqueue fails the tool call when the outbox is full or cannot be written (`Hindsight outbox full (...)` / `Hindsight outbox write failed; memory NOT queued.`); nothing from the call is kept.
 - Hindsight HTTP 400, 413 and 422 refuse the request body: the refused event moves to quarantine with a warning notice; a refused multi-item request is resent item by item so only refused items move. Every other failure (connection errors, timeouts, 401/403/404, 408, 429, 5xx) keeps the events and stops the drain; the queue retries with exponential backoff from 5 seconds up to 30 minutes (±20% jitter) and warns once per outage with the count kept.
 - Hindsight bank/mission creation failures are logged at debug level and swallowed in `ensureBankExists(...)`; the later write still runs.
 - Mnemopi explicit `rememberScoped(...)` failures stop the batch and throw `Mnemopi did not store item <n> of <total>: <reason>. ...`, identifying earlier stored ids and unattempted items. Background auto-retain instead uses `rememberInScope(...)`, which logs and swallows storage failures.
+- Dakera store failures propagate as `DakeraError` — nothing is queued, so there is no later flush that could absorb them.
 
 ## Notes
 
 - Hindsight storage is server-side. `hindsightBackend.clear(...)` drains the local queue, clears local cache/state, and warns that upstream deletion must happen in Hindsight UI or `deleteBank`.
+- Dakera storage is server-side and holds the only copy, so `dakeraBackend.clear(...)` really deletes: it lists the agent's memories and posts them to `POST /v1/memory/forget`. Only the first 1000 rows are listed, and a count of exactly that is rendered as `1000+`.
 - Mnemopi storage is local SQLite. `mnemopiBackend.clear(...)` removes the database files for every active scoped bank and then rehydrates the backend when the session remains active.
-- Hindsight auto-retain uses the same bank but a different path than this tool: `retainSession(...)` extracts plain user/assistant transcript, strips `<memories>` / `<mental_models>` blocks, and calls single-item `retain(...)`.
+- Dakera auto-retain keeps one `memory_type: "episodic"` row per transcript in `full-session` mode and rewrites it with `PUT /v1/memory/update/{id}?agent_id=…`; if the server never returned an id for that row, the next retain stores a new one instead of losing the transcript.
+- Hindsight auto-retain uses the same bank but a different path than this tool: `retainSession(...)` extracts plain user/assistant transcript, strips `<memories>` / `<mental_models>` blocks, and calls single-item `retain(...)`. Dakera auto-retain reuses that same shaping through `retainTranscript(...)`.
 - Mnemopi auto-retain stores prepared transcripts with `source: "coding-agent-transcript"`, `importance: 0.65`, `veracity: "unknown"`, and `memoryType: "episode"`.
 - Hindsight mental-model bootstrap lives in the shared backend: `HindsightSessionState.runMentalModelLoad(...)` optionally resolves seeds, creates missing models, then caches a rendered `<mental_models>` block for prompt injection.
 - Built-in Hindsight seeds are `user-preferences`, `project-conventions`, and `project-decisions`. `projectTagged: true` seeds inherit the active scope's retain tags; untagged seeds read the whole bank.

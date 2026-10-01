@@ -74,6 +74,7 @@ import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import { cfgDakeraProtectMemory } from "../dakera/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
@@ -740,6 +741,24 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Append memory-result protection to a prune/shake config: `recall`,
+	 * `retain`, `learn`, `reflect` and `memory_edit` results are delivered
+	 * context — the durable facts the session was built on — not ephemeral tool
+	 * noise, so blanking them saves tokens but loses the memory itself
+	 * (Anthropic context-editing analog: the "clear at least" gate in
+	 * pruning.ts is the savings half, this is the protection half).
+	 * `save_document` deliberately stays prunable — it is a write op, not
+	 * delivered context.
+	 */
+	#withMemoryProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
+		if (!cfgDakeraProtectMemory.get(this.#host.settings)) return config;
+		return {
+			...config,
+			protectedTools: [...config.protectedTools, "recall", "retain", "learn", "reflect", "memory_edit"],
+		};
+	}
+
+	/**
 	 * Durably commit a prune pass, restoring the blanked results when the rewrite
 	 * fails so live context never diverges from the history its derived state
 	 * (advisor prefix, todo phases, provider sessions) was built from.
@@ -760,17 +779,19 @@ export class SessionMaintenance {
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
-			this.#withPlanProtection({
-				...DEFAULT_PRUNE_CONFIG,
-				pruneUseless: this.#compactionSettings.dropUseless,
-				// Cache-stable boundary: never re-write the warm, already-sent prefix
-				// (deep stale/age victims) or summarized-away entries every turn.
-				keepBoundaryId,
-				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
-				cacheWarmSuffixTokens: model?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
-				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
-				convertToLlm,
-			}),
+			this.#withPlanProtection(
+				this.#withMemoryProtection({
+					...DEFAULT_PRUNE_CONFIG,
+					pruneUseless: this.#compactionSettings.dropUseless,
+					// Cache-stable boundary: never re-write the warm, already-sent prefix
+					// (deep stale/age victims) or summarized-away entries every turn.
+					keepBoundaryId,
+					// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+					cacheWarmSuffixTokens: model?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+					cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
+					convertToLlm,
+				}),
+			),
 		);
 		if (result.prunedCount === 0) {
 			return undefined;
@@ -807,20 +828,22 @@ export class SessionMaintenance {
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
-			this.#withPlanProtection({
-				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
-				supersedeComplete: isCompleteReadResult,
-				pruneUseless: dropUseless,
-				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
-				// Never re-write summarized-away entries; only flush the whole sent
-				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
-				keepBoundaryId,
-				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
-				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
-				suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
-				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
-				convertToLlm,
-			}),
+			this.#withPlanProtection(
+				this.#withMemoryProtection({
+					supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
+					supersedeComplete: isCompleteReadResult,
+					pruneUseless: dropUseless,
+					protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
+					// Never re-write summarized-away entries; only flush the whole sent
+					// region once the cache is genuinely cold (idle exceeds the 1h TTL).
+					keepBoundaryId,
+					idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+					// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+					suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
+					cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
+					convertToLlm,
+				}),
+			),
 		);
 		if (result.prunedCount === 0) {
 			return undefined;
@@ -997,14 +1020,16 @@ export class SessionMaintenance {
 		assertCurrent();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
-		const config = this.#withPlanProtection({
-			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect. The cut is
-			// unconditional on the wire (see `buildSessionContext`), so a compaction
-			// the active model cannot replay still hides its prefix from the prompt.
-			keepBoundaryId: latestCompaction?.firstKeptEntryId,
-		});
+		const config = this.#withPlanProtection(
+			this.#withMemoryProtection({
+				...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
+				// Skip entries summarized away by the latest compaction — shaking them
+				// only churns persisted history with no prompt/cache effect. The cut is
+				// unconditional on the wire (see `buildSessionContext`), so a compaction
+				// the active model cannot replay still hides its prefix from the prompt.
+				keepBoundaryId: latestCompaction?.firstKeptEntryId,
+			}),
+		);
 		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
 		if (opts.toolResultsOnly) regions = regions.filter(region => region.kind === "toolResult");
 		if (regions.length === 0) {
