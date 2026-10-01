@@ -41,7 +41,7 @@ import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/p
 import type { InteractiveModeContext } from "../../modes/types";
 import { ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
-import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { computeSessionContextBreakdown, computeSessionContextUsageDetails } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
@@ -713,13 +713,14 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	handleContextCommand(showAll = false): void {
 		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		this.ctx.presentCommandOutput(new ContextUsageView(breakdown, theme));
+		const details = showAll ? computeSessionContextUsageDetails(this.ctx.session) : undefined;
+		this.ctx.presentCommandOutput(new ContextUsageView(breakdown, theme, details));
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
