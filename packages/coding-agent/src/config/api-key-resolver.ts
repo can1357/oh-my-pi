@@ -76,6 +76,11 @@ export function createApiKeyResolver(
 			return resolveKey(undefined);
 		}
 		if (lastChance) {
+			if (AIError.status(error) === 401) {
+				// A second (or later) 401 proves this exact bearer/header set is
+				// rejected too, before rotation considers any sibling or reuses cache.
+				await resolveKey(true, signal, "auth-recovery", previousKey, previousHeaders);
+			}
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor the failed account's retry-after
 			// here — if a sibling exists we switch immediately, and `rotate` itself

@@ -511,6 +511,46 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(sent).toEqual(["bad-key"]);
 	});
 
+	test("a second 401 rejects the refreshed key before last-chance rotation", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		fs.writeFileSync(tokenFile, "fresh-1");
+		const attempts: string[] = [];
+		const result = await withAuth(registry.resolver(model), async key => {
+			attempts.push(key);
+			if (key === "stale-key") throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+			if (key === "fresh-1") {
+				fs.writeFileSync(tokenFile, "fresh-2");
+				throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+			}
+			return key;
+		});
+		expect(result).toBe("fresh-2");
+		const nextTurn = await withAuth(registry.resolver(model), async key => key);
+		expect(nextTurn).toBe("fresh-2");
+		expect(attempts).toEqual(["stale-key", "fresh-1", "fresh-2"]);
+	});
+
 	test("concurrent 401 recoveries share one replacement command run", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
