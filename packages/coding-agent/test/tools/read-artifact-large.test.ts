@@ -96,6 +96,47 @@ describe("read tool large artifact handling", () => {
 		expect(result.details?.meta?.truncation).toBeUndefined();
 	});
 
+	it("bounds oversized selected lines in buffered multi-range artifacts and reports omission", async () => {
+		await Bun.write(
+			path.join(artifactDir, "0.mcp.log"),
+			`${"a".repeat(1_900_000)}\nmiddle\n${"z".repeat(1_900_000)}`,
+		);
+
+		const result = await tool.execute("call-budget-multi", { path: "artifact://0:1-1,3-3" });
+		const output = getTextOutput(result);
+		expect(Buffer.byteLength(output)).toBeLessThan(110_000);
+		expect(output).toContain("Line 1");
+		expect(output).toContain("Line 3");
+		expect(output).toContain("50.0KB");
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation).toBeDefined();
+		expect(truncation?.nextOffset).toBeUndefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("to continue");
+	});
+
+	it("clips oversized enclosing context without clipping selected artifact lines", async () => {
+		const selected = JSON.stringify({ item: "x".repeat(15_000), tail: "selected-tail" });
+		await fs.rm(path.join(artifactDir, "0.mcp.log"));
+		await Bun.write(
+			path.join(artifactDir, "0.json"),
+			[
+				`{"payload":"${"p".repeat(1_000_000)}","items":[`,
+				...Array.from({ length: 520 }, (_, index) => (index === 519 ? `${selected},` : `{"item":${index}},`)),
+				"{}]}",
+			].join("\n"),
+		);
+
+		for (const selector of ["520-522", "2-2,521-522"]) {
+			const result = await tool.execute(`call-budget-context-${selector}`, { path: `artifact://0:${selector}` });
+			const output = getTextOutput(result);
+			expect(Buffer.byteLength(output)).toBeLessThan(50_000);
+			expect(output).toContain(selected);
+			expect(output).toContain('{"payload":"');
+			expect(result.details?.meta?.limits?.columnTruncated?.maxColumn).toBeGreaterThan(0);
+		}
+	});
+
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
 		const output = getTextOutput(result);
