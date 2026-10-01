@@ -441,6 +441,16 @@ export class ModelRegistry {
 		this.authStorage.keys.setConfig(provider, keyConfig, options);
 	}
 
+	/** Label a command-backed API key for the failure log: the providers configured with it, never its command text. */
+	#apiKeyCommandLabel(keyConfig: string): string | undefined {
+		if (!isCommandConfigValue(keyConfig)) return undefined;
+		const providers: string[] = [];
+		for (const [provider, config] of this.#customProviderApiKeys) {
+			if (config === keyConfig) providers.push(provider);
+		}
+		return providers.length > 0 ? `${providers.join(", ")} apiKey` : "apiKey";
+	}
+
 	/**
 	 * @param authStorage - Auth storage for API key resolution
 	 *
@@ -478,7 +488,7 @@ export class ModelRegistry {
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
-		this.authStorage.keys.setResolver(resolveConfigValue);
+		this.authStorage.keys.setResolver(config => resolveConfigValue(config, this.#apiKeyCommandLabel(config)));
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
@@ -1042,7 +1052,9 @@ export class ModelRegistry {
 							? {
 									...model,
 									headers: undefined,
-									resolveHeaders: createConfigHeaderResolver([model.resolveHeaders, model.headers]),
+									resolveHeaders: createConfigHeaderResolver([model.resolveHeaders, model.headers], {
+										provider: model.provider,
+									}),
 								}
 							: model;
 					if (withHeaders.provider !== providerName) return withHeaders as Model<Api>;
@@ -1903,7 +1915,7 @@ export class ModelRegistry {
 		let discoveryAuthRejected = false;
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
-				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
+				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers, undefined, providerId);
 				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
 				const models = this.#applyProviderModelOverrides(
 					providerId,
@@ -1927,6 +1939,7 @@ export class ModelRegistry {
 			? createConfigHeaderResolver([providerOverride?.headers], {
 					authHeader: providerOverride?.authHeader,
 					apiKeyConfig: providerOverride?.apiKey,
+					provider: providerId,
 				})
 			: undefined;
 		const manager = createModelManager<Api>({
@@ -2372,6 +2385,7 @@ export class ModelRegistry {
 	#applyProviderTransportOverride<
 		T extends {
 			api: Api;
+			provider: string;
 			baseUrl?: string;
 			headers?: Record<string, string>;
 			resolveHeaders?: Model<Api>["resolveHeaders"];
@@ -2388,6 +2402,7 @@ export class ModelRegistry {
 			override.headers !== undefined || (override.authHeader === true && override.apiKey !== undefined);
 		const resolveHeaders = changesHeaders
 			? mergeAuthHeaderSources(
+					entry.provider,
 					override.headers
 						? [entry.resolveHeaders ?? entry.headers, override.headers]
 						: [entry.resolveHeaders ?? entry.headers],
@@ -2875,10 +2890,10 @@ export class ModelRegistry {
 	 * Catalog inspection never executes command-backed values.
 	 */
 	async getProviderHeaders(provider: string): Promise<Record<string, string> | undefined> {
-		const resolver = createConfigHeaderResolver([
-			this.#providerOverrides.get(provider)?.headers,
-			this.#runtimeProviderOverrides.get(provider)?.headers,
-		]);
+		const resolver = createConfigHeaderResolver(
+			[this.#providerOverrides.get(provider)?.headers, this.#runtimeProviderOverrides.get(provider)?.headers],
+			{ provider },
+		);
 		return await resolver?.();
 	}
 
@@ -2985,8 +3000,8 @@ export class ModelRegistry {
 	 * from the model. Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`. When the initial resolve finds no servable
 	 * `!command` key, it throws a `CommandConfigResolutionError` (a
-	 * `MissingApiKeyError`) naming the provider, the command's program and how its
-	 * latest run failed.
+	 * `MissingApiKeyError`) naming the provider and how the command's latest run
+	 * failed, never the command text.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;

@@ -31,21 +31,13 @@ export interface CustomModelOverlay extends ModelPatch {
 	isOAuth?: boolean;
 }
 
-function mergeCustomModelHeaders(
-	providerHeaders: Record<string, string> | undefined,
-	modelHeaders: Record<string, string> | undefined,
-	authHeader: boolean | undefined,
-	apiKeyConfig: string | undefined,
-): ConfigHeaderResolver | undefined {
-	return createConfigHeaderResolver([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
-}
-
 export function mergeAuthHeaderSources(
+	provider: string,
 	sources: readonly ConfigHeaderSource[],
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
 ): ConfigHeaderResolver | undefined {
-	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig });
+	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig, provider });
 }
 
 /**
@@ -95,7 +87,11 @@ export function buildCustomModelOverlay(
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
 		preferWebsockets: modelDef.preferWebsockets,
-		resolveHeaders: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		resolveHeaders: createConfigHeaderResolver([providerHeaders, modelDef.headers], {
+			authHeader,
+			apiKeyConfig: providerApiKey,
+			provider: providerName,
+		}),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,

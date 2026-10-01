@@ -6,7 +6,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
-import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
@@ -23,6 +23,7 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	failedTrackingCommand,
+	failOnceCommand,
 	okChatCompletionStream,
 	refreshGateFetch,
 	stdoutCommand,
@@ -60,6 +61,40 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
 		}
 	});
+
+	/** Run one `AgentSession.prompt()` turn against `fetch`; returns the turn's last message. */
+	async function promptOnce(
+		registry: ModelRegistry,
+		model: Model,
+		fetch: FetchImpl,
+	): Promise<AgentMessage | undefined> {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry: registry,
+			model,
+			sessionManager: SessionManager.inMemory(tempDir),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: [],
+		});
+		session.agent.streamFn = (streamModel, context, options) =>
+			streamSimple(streamModel, context, { ...options, fetch });
+		try {
+			await session.prompt("hi");
+			return session.agent.state.messages.at(-1);
+		} finally {
+			await session.dispose();
+		}
+	}
 
 	test("provider apiKey and headers resolve from command stdout", async () => {
 		fs.writeFileSync(
@@ -279,69 +314,113 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	});
 
-	test("a key command diagnostic names the provider, field and program, never its arguments or stdout", async () => {
-		// A bootstrap credential passed as an argument must not leave models.yml.
-		const script = "process.stdout.write('synthetic-command-stdout');process.exit(3)";
-		const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)} --token=SYNTHETIC-ARGUMENT-TOKEN`;
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		const warn = spyOn(piUtils.logger, "warn");
-		let requests = 0;
-		const fetch: FetchImpl = async () => {
-			requests++;
-			return okChatCompletionStream();
-		};
-
-		let withAuthFailure: unknown;
-		let streamError: string | undefined;
-		let logged = "";
-		try {
+	test.skipIf(process.platform === "win32")(
+		"a key command diagnostic names the provider, field and failure, never any command text or stdout",
+		async () => {
+			// Shell forms that hand a bootstrap credential to a credential helper.
+			const secretDir = path.join(tempDir, "SYNTH-PATH-SECRET dir");
+			fs.mkdirSync(secretDir);
+			const helper = path.join(secretDir, "helper");
+			fs.writeFileSync(helper, "#!/bin/sh\nprintf %s synthetic-command-stdout\nexit 1\n");
+			fs.chmodSync(helper, 0o755);
+			const commands = [
+				`AUTH="Bearer SYNTH-DQ-SECRET" printf %s synthetic-command-stdout; exit 1`,
+				`AUTH='Bearer SYNTH-SQ-SECRET' printf %s synthetic-command-stdout; exit 1`,
+				`sh -c 'printf %s synthetic-command-stdout; exit 1' --token=SYNTH-ARG-SECRET`,
+				`'${helper}'`,
+			];
+			const warn = spyOn(piUtils.logger, "warn");
+			let requests = 0;
+			const fetch: FetchImpl = async () => {
+				requests++;
+				return okChatCompletionStream();
+			};
+			const withAuthErrors: unknown[] = [];
+			const streamErrors: Array<string | undefined> = [];
+			let loggedFields: unknown[] = [];
+			let headerValue: string | undefined;
 			try {
-				await withAuth(registry.resolver(model), async () => "unexpected");
-			} catch (error) {
-				withAuthFailure = error;
-			}
-			const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
-			const handle = streamSimple(model, context, { apiKey: registry.resolver(model), fetch, maxTokens: 16 });
-			try {
-				for await (const _event of handle) {
-					// drain
+				for (const command of commands) {
+					fs.writeFileSync(
+						modelsPath,
+						JSON.stringify({
+							providers: {
+								"custom-proxy": {
+									baseUrl: "https://custom-proxy.example.com/v1",
+									api: "openai-completions",
+									apiKey: `!${command}`,
+									models: [{ id: "custom-model", name: "Custom Model" }],
+								},
+							},
+						}),
+					);
+					const registry = new ModelRegistry(authStorage, modelsPath);
+					const model = registry.find("custom-proxy", "custom-model");
+					if (!model) throw new Error("Expected custom model");
+					try {
+						await withAuth(registry.resolver(model), async () => "unexpected");
+					} catch (error) {
+						withAuthErrors.push(error);
+					}
+					const context: Context = {
+						systemPrompt: ["s"],
+						messages: [{ role: "user", content: "hi", timestamp: 0 }],
+					};
+					const handle = streamSimple(model, context, { apiKey: registry.resolver(model), fetch, maxTokens: 16 });
+					try {
+						for await (const _event of handle) {
+							// drain
+						}
+						streamErrors.push((await handle.result()).errorMessage);
+					} catch (error) {
+						streamErrors.push((error as Error).message);
+					}
 				}
-				streamError = (await handle.result()).errorMessage;
-			} catch (error) {
-				streamError = (error as Error).message;
+				// A failing header command is omitted and logged by provider and header name.
+				fs.writeFileSync(
+					modelsPath,
+					JSON.stringify({
+						providers: {
+							"header-proxy": {
+								baseUrl: "https://header-proxy.example.com/v1",
+								api: "openai-completions",
+								apiKey: "static-api-key",
+								headers: {
+									"x-tenant-token": `!AUTH="Bearer SYNTH-HEADER-SECRET" printf %s synthetic-command-stdout; exit 1`,
+								},
+								models: [{ id: "custom-model", name: "Custom Model" }],
+							},
+						},
+					}),
+				);
+				const headerModel = new ModelRegistry(authStorage, modelsPath).find("header-proxy", "custom-model");
+				if (!headerModel) throw new Error("Expected header-proxy model");
+				headerValue = (await headerModel.resolveHeaders?.())?.["x-tenant-token"];
+			} finally {
+				loggedFields = warn.mock.calls
+					.filter(call => call[0] === "config: !command value resolution failed")
+					.map(call => call[1]);
+				warn.mockRestore();
 			}
-		} finally {
-			logged = JSON.stringify(warn.mock.calls);
-			warn.mockRestore();
-		}
 
-		expect(withAuthFailure).toBeInstanceOf(MissingApiKeyError);
-		const withAuthMessage = (withAuthFailure as Error).message;
-		expect(withAuthMessage).toContain("custom-proxy apiKey command `");
-		expect(withAuthMessage).toContain("exited with status 3");
-		expect(streamError).toContain("exited with status 3");
-		expect(logged).toContain("config: !command value resolution failed");
-		for (const surfaced of [withAuthMessage, streamError, logged]) {
-			expect(surfaced).not.toContain("SYNTHETIC-ARGUMENT-TOKEN");
-			expect(surfaced).not.toContain("synthetic-command-stdout");
-		}
-		expect(requests).toBe(0);
-	});
+			const diagnostic = "custom-proxy apiKey command exited with status 1";
+			expect(withAuthErrors).toHaveLength(commands.length);
+			for (const error of withAuthErrors) {
+				expect(error).toBeInstanceOf(MissingApiKeyError);
+				expect((error as Error).message).toBe(diagnostic);
+			}
+			expect(streamErrors).toEqual(
+				commands.map(() => `Failed to resolve API key for provider custom-proxy: ${diagnostic}`),
+			);
+			const failureLog = { failure: "exited with status 1", keptPreviousValue: false, freshRunRequired: false };
+			expect(loggedFields).toEqual([
+				...commands.map(() => ({ label: "custom-proxy apiKey", ...failureLog })),
+				{ label: "header-proxy header x-tenant-token", ...failureLog },
+			]);
+			expect(headerValue).toBeUndefined();
+			expect(requests).toBe(0);
+		},
+	);
 
 	test("prompt() reports a key command that never mints as an assistant error and sends nothing", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
@@ -353,7 +432,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 					"custom-proxy": {
 						baseUrl: "https://custom-proxy.example.com/v1",
 						api: "openai-completions",
-						apiKey: `!${failedTrackingCommand(counterFile)}`,
+						apiKey: `!AUTH="Bearer SYNTH-PROMPT-SECRET" ${failedTrackingCommand(counterFile)}`,
 						models: [{ id: "custom-model", name: "Custom Model" }],
 					},
 				},
@@ -362,45 +441,51 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			authStorage,
-			modelRegistry: registry,
-			model,
-			sessionManager: SessionManager.inMemory(tempDir),
-			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			toolNames: [],
-		});
 		const requests: string[] = [];
 		const recordingFetch: FetchImpl = async input => {
 			requests.push(String(input));
 			return okChatCompletionStream();
 		};
-		session.agent.streamFn = (streamModel, context, options) =>
-			streamSimple(streamModel, context, { ...options, fetch: recordingFetch });
-		let last: AgentMessage | undefined;
-		try {
-			await session.prompt("hi");
-			last = session.agent.state.messages.at(-1);
-		} finally {
-			await session.dispose();
-		}
+		const last = await promptOnce(registry, model, recordingFetch);
 
 		if (last?.role !== "assistant") throw new Error("Expected the turn to end with an assistant message");
 		expect(last.stopReason).toBe("error");
-		expect(last.errorMessage).toContain("custom-proxy apiKey command `");
-		expect(last.errorMessage).toContain("exited with status 1");
+		expect(last.errorMessage).toBe("custom-proxy apiKey command exited with status 1");
 		expect(requests).toEqual([]);
 		// Two bounded first-mint attempts at the request boundary, none before it.
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	}, 20_000);
+
+	test("a first mint that fails once succeeds on the request retry", async () => {
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${failOnceCommand(counterFile, "minted-key")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		const authorizations: Array<string | undefined> = [];
+		const recordingFetch: FetchImpl = async (_url, init) => {
+			authorizations.push(((init?.headers ?? {}) as Record<string, string>).Authorization);
+			return okChatCompletionStream();
+		};
+		const last = await promptOnce(registry, model, recordingFetch);
+
+		// A helper that fails once under load no longer costs the turn.
+		if (last?.role !== "assistant") throw new Error("Expected the turn to end with an assistant message");
+		expect(last.stopReason).toBe("stop");
+		expect(authorizations).toEqual(["Bearer minted-key-2"]);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	}, 20_000);
 
@@ -608,12 +693,16 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		// The refreshes below stay unscoped. Disabling every built-in provider keeps
-		// them from running catalog discovery for ~85 unrelated providers, which takes
-		// seconds; custom-proxy is the only provider they can reach.
+		// The refreshes below stay unscoped. Disabling every built-in provider (the
+		// bundled and descriptor-backed catalogs plus the implicit llama.cpp and
+		// apple discovery) keeps them from running catalog discovery for ~85
+		// unrelated providers, which takes seconds; custom-proxy is the only
+		// provider they can reach.
 		const builtInProviders = new Set<string>([
 			...getBundledProviders(),
 			...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+			"llama.cpp",
+			"apple",
 		]);
 		const registry = new ModelRegistry(authStorage, modelsPath, {
 			settings: Settings.isolated({ disabledProviders: [...builtInProviders] }),

@@ -101,6 +101,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				{
 					authHeader: providerOverride?.authHeader,
 					apiKeyConfig: providerOverride?.apiKey,
+					provider: model.provider,
 				},
 			),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
@@ -120,6 +121,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
 				authHeader: providerOverride.authHeader,
 				apiKeyConfig: providerOverride.apiKey,
+				provider: model.provider,
 			}),
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
@@ -302,10 +304,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (transport === "merge") {
 		if (patch.headers || patch.resolveHeaders) {
 			result.headers = undefined;
-			result.resolveHeaders = createConfigHeaderResolver([
-				base.resolveHeaders ?? base.headers,
-				patch.resolveHeaders ?? patch.headers,
-			]);
+			result.resolveHeaders = createConfigHeaderResolver(
+				[base.resolveHeaders ?? base.headers, patch.resolveHeaders ?? patch.headers],
+				{ provider: base.provider },
+			);
 		}
 		compat = mergeCompat(base.compatConfig, patch.compat);
 	} else {

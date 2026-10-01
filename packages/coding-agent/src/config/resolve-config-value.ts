@@ -31,6 +31,8 @@ export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver |
 export interface ConfigHeaderResolutionOptions {
 	authHeader?: boolean;
 	apiKeyConfig?: string;
+	/** Provider whose configuration these values come from; names a failing command in logs. */
+	provider?: string;
 }
 
 /** Identify command-backed values when collecting credentials that must be invalidated together. */
@@ -40,18 +42,6 @@ export function isCommandConfigValue(valueConfig: string | undefined): valueConf
 
 function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
-}
-
-/**
- * Name a command by its program alone, for diagnostics and logs. Arguments and
- * leading `NAME=value` assignments can carry credentials, so they are elided.
- */
-function commandProgram(command: string): string {
-	const words = command.split(/\s+/);
-	const index = words.findIndex(word => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-	if (index === -1) return "…";
-	const program = words[index].replace(/^["']+|["']+$/g, "");
-	return words.length > 1 ? `${program} …` : program;
 }
 
 /** Withhold a command's cached value while it requires a fresh run. */
@@ -93,9 +83,10 @@ export function invalidateAllCommandConfigs(): void {
 }
 
 /**
- * Describe why a command-backed value resolves to nothing: the command's
- * program (never its arguments), and how its latest run failed. Undefined once
- * a sendable command value has succeeded, or when the value is not a command.
+ * Describe how a command-backed value's latest run failed, such as `exited with
+ * status 1` or `timed out after 10 s`. It never includes the command text,
+ * which can carry credentials. Undefined once a sendable command value has
+ * succeeded, or when the value is not a command.
  */
 export function describeCommandConfigFailure(valueConfig: string | undefined): string | undefined {
 	if (!isCommandConfigValue(valueConfig)) return undefined;
@@ -103,10 +94,10 @@ export function describeCommandConfigFailure(valueConfig: string | undefined): s
 	const failure = commandFailure.get(command);
 	if (failure === undefined) return undefined;
 	if (handOutValue(command, commandResultCache.get(command)) !== undefined) return undefined;
-	return `\`${commandProgram(command)}\` ${failure}`;
+	return failure;
 }
 
-async function executeCommand(valueConfig: string): Promise<string | undefined> {
+async function executeCommand(valueConfig: string, label: string | undefined): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
 
 	const cached = commandResultCache.get(command);
@@ -145,7 +136,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 		const lastGood = commandResultCache.get(command);
 		const sendableLastGood = handOutValue(command, lastGood);
 		logger.warn("config: !command value resolution failed", {
-			command: commandProgram(command),
+			label,
 			failure: run.failure,
 			keptPreviousValue: sendableLastGood !== undefined,
 			freshRunRequired: lastGood !== undefined && sendableLastGood === undefined,
@@ -167,10 +158,11 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
  * Resolve a configuration value. Command values execute asynchronously and
  * cache only successful stdout. A failed run serves the prior stdout through a
  * short backoff; a 401-marked value is not served until the command runs again
- * and succeeds.
+ * and succeeds. `label` names where the value is configured (for example
+ * `my-proxy header x-tenant`) in the failure log, which never carries command text.
  */
-export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
-	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
+export async function resolveConfigValue(valueConfig: string, label?: string): Promise<string | undefined> {
+	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig, label);
 	const envValue = $envExact(valueConfig);
 	return envValue || valueConfig;
 }
@@ -245,17 +237,22 @@ function completedRun(exitCode: number | null | undefined, stdout: string): Comm
 	return value.length > 0 ? { ok: true, value } : { ok: false, failure: "exited with status 0 but printed nothing" };
 }
 
-/** Resolve one raw header record, preserving declaration order and omitting empty values. */
+/**
+ * Resolve one raw header record, preserving declaration order and omitting
+ * empty values. `provider` labels a failing header command in logs.
+ */
 export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
 	signal?: AbortSignal,
+	provider?: string,
 ): Promise<Record<string, string> | undefined> {
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
 	let hasResolved = false;
 	for (const key in headers) {
-		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		const label = provider ? `${provider} header ${key}` : `header ${key}`;
+		const next = await untilAborted(signal, () => resolveConfigValue(headers[key], label));
 		if (!next) continue;
 		resolved[key] = next;
 		hasResolved = true;
@@ -282,7 +279,7 @@ export function createConfigHeaderResolver(
 			const next =
 				typeof source === "function"
 					? await untilAborted(signal, () => source(signal))
-					: await resolveConfigHeaders(source, signal);
+					: await resolveConfigHeaders(source, signal, options?.provider);
 			signal?.throwIfAborted();
 			if (!next) continue;
 			for (const key in next) {
@@ -292,7 +289,8 @@ export function createConfigHeaderResolver(
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
 			const keyConfig = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
+			const label = options.provider ? `${options.provider} apiKey` : "apiKey";
+			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig, label));
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
 				hasResolved = true;

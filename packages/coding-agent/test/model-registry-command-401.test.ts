@@ -310,8 +310,7 @@ describe("ModelRegistry !command credentials after a 401", () => {
 		}
 
 		expect(nextTurnFailure).toBeInstanceOf(CommandConfigResolutionError);
-		expect((nextTurnFailure as Error).message).toContain("custom-proxy apiKey command `");
-		expect((nextTurnFailure as Error).message).toContain("status 1");
+		expect((nextTurnFailure as Error).message).toBe("custom-proxy apiKey command exited with status 1");
 		// The next turn sends nothing.
 		expect(sent).toEqual(["rejected-key"]);
 		expect(await registry.getApiKey(model)).toBeUndefined();
