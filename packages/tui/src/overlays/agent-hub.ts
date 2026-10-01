@@ -49,7 +49,8 @@ import {
 	type AgentMetrics,
 	type AggregateMetrics,
 	aggregateMetrics,
-	progressMetrics,
+	hubFallbackStatsSession,
+	hubRowMetrics,
 	projectAgentTree,
 	STATUS_ORDER,
 } from "./agent-hub-projection";
@@ -1661,19 +1662,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	#metricsFor(ref: TRecord, observed: ObservableSession | undefined): AgentMetrics | undefined {
-		if (observed?.progress) return progressMetrics(observed);
-		if (ref.history?.metrics) return ref.history.metrics;
-		const session = this.#fallbackStatsSession(ref, observed);
-		return session ? this.#sessionMetrics.get(session)?.metrics : undefined;
-	}
-
-	#fallbackStatsSession(
-		ref: TRecord,
-		observed: ObservableSession | undefined,
-	): NonNullable<TRecord["session"]> | undefined {
-		if (observed?.progress) return undefined;
-		const session = ref.session;
-		return session && typeof session.getSessionStats === "function" ? session : undefined;
+		return hubRowMetrics(ref, observed, this.#sessionMetrics);
 	}
 
 	// ========================================================================
@@ -2009,7 +1998,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			rows: this.#rows,
 			observedById: this.#observedById,
 			metricsFor: (ref, observed) => this.#metricsFor(ref, observed),
-			fallbackStatsSession: (ref, observed) => this.#fallbackStatsSession(ref, observed),
+			fallbackStatsSession: hubFallbackStatsSession,
 			sessionMetrics: this.#sessionMetrics,
 			refreshFallback,
 		});

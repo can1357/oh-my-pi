@@ -459,14 +459,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
 				: undefined;
 
-			// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
-			// thinking cannot be disabled, so downgrade its forced choice instead.
-			if (toolConfig?.toolChoice && additionalModelRequestFields) {
-				const tc = toolConfig.toolChoice;
-				if (tc.any || tc.tool) {
-					if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
-					else additionalModelRequestFields = undefined;
-				}
+			// Some models (Opus/Sonnet 5.5) reject forced tool use outright; keep the
+			// tools offered under `auto` and leave thinking intact.
+			const forcedChoice = toolConfig?.toolChoice?.any || toolConfig?.toolChoice?.tool;
+			if (toolConfig && forcedChoice && !model.compat.supportsForcedToolChoice) {
+				toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+			} else if (toolConfig && forcedChoice && additionalModelRequestFields) {
+				// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
+				// thinking cannot be disabled, so downgrade its forced choice instead.
+				if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+				else additionalModelRequestFields = undefined;
 			}
 			if (prefixMismatchBehavior) {
 				additionalModelRequestFields = applyBedrockThinkingBinding(

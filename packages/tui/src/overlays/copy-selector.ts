@@ -48,10 +48,10 @@ import { actionHint, hintsRow, type NativeHint, overlayCard } from "../native/ov
 import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../native/picker";
 
 /** Key of the leading list item that replays the history older than the startup tail. */
-export const EARLIER_TURNS_KEY = "earlier";
+const EARLIER_TURNS_KEY = "earlier";
 
 /** Leading item of a truncated transcript list; selecting it loads the older turns. */
-export const earlierTurnsItem: NativeNode = node(
+const earlierTurnsItem: NativeNode = node(
 	"item",
 	{ label: [span("Earlier turns…", "muted")], hint: ["a"] },
 	undefined,
@@ -112,7 +112,7 @@ function entryTime(entry: TranscriptEntry): string {
  * One list item per outline target, keyed by the turn's opening entry id:
  * the plain turn summary as label, `detail` (or the entry time) on the right.
  */
-export function turnItem(target: OutlineTarget, detail?: TspText): NativeNode {
+function turnItem(target: OutlineTarget, detail?: TspText): NativeNode {
 	const entry = target.entries[0]!;
 	const { label, role } = turnSummary(entry);
 	const time = entryTime(entry);
@@ -164,14 +164,14 @@ function toolCallLabel(name: string, args: Record<string, unknown> | undefined):
 }
 
 /** The timeline pickers' one fact column: a user turn's clock time. */
-export const TIMELINE_COLUMNS: readonly TspPickerColumn[] = [{ id: "at", format: "dim", priority: 1 }];
+const TIMELINE_COLUMNS: readonly TspPickerColumn[] = [{ id: "at", format: "dim", priority: 1 }];
 
 /**
  * The `timeline` picker item of one outline target (rewind, copy), keyed by
  * the turn's opening entry id: user turns carry their `HH:MM`, pure tool turns
  * the tool's role and a `name target` label.
  */
-export function timelineItem(target: OutlineTarget): TspPickerItem {
+function timelineItem(target: OutlineTarget): TspPickerItem {
 	const entry = target.entries[0]!;
 	const id = target.turnId;
 	const summary = turnSummary(entry);
@@ -203,7 +203,7 @@ export function timelineItem(target: OutlineTarget): TspPickerItem {
 }
 
 /** Timeline picker items for `targets`, reused while `targets` is the same array. */
-export class TimelineItems {
+class TimelineItems {
 	#memo: { targets: readonly OutlineTarget[]; items: TspPickerItem[] } | undefined;
 
 	of(targets: readonly OutlineTarget[]): TspPickerItem[] {

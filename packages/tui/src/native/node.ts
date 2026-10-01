@@ -28,6 +28,11 @@ export type NativeNode = {
 		 * or reordered so their ids and terminal-side view state survive.
 		 */
 		readonly key?: string;
+		/**
+		 * Scroll the node into view, placed like the `reveal` op, when it is
+		 * added. Key a node by what it points at to reveal it again on a move.
+		 */
+		readonly reveal?: "start" | "end" | "nearest";
 	};
 }[TspKind];
 
@@ -61,6 +66,15 @@ export interface NativeSurface {
 }
 
 /**
+ * The screen surface a fullscreen overlay fills as a page of its own (see
+ * `Component.describeScreen`): its regions plus the surface `role`, which the
+ * terminal exposes to styling.
+ */
+export interface NativeScreen extends NativeSurface {
+	readonly role: string;
+}
+
+/**
  * A user action on a node a component described, routed back to that
  * component. `key` is the node's key path inside the component (`""` for the
  * component's root node, `"body/3"` for a nested keyed child).
@@ -83,7 +97,100 @@ export type NativeUiEvent =
 			readonly key: string;
 			readonly item: string;
 			readonly value: boolean | number | string | readonly string[] | null;
-	  };
+	  }
+	/** An edit over the terminal's own selection in an `editor`/`input` node (see {@link NativeTextEdit}). */
+	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit);
+
+/**
+ * A primitive edit the terminal made over its own text selection (cut,
+ * typing, Backspace/Delete or paste over it, or collapsing it). Offsets are
+ * UTF-16 code units into the text last described (lines joined with `"\n"`),
+ * the coordinates of the node's `cursor`: replace `[from, to)` with `text`,
+ * then put the caret at `cursor` in the resulting text. `from == to` with an
+ * empty `text` is a pure caret move. `len` is the length of the text the
+ * terminal saw: when the current text differs (keys in flight changed it) the
+ * edit is stale and ignored.
+ */
+export interface NativeTextEdit {
+	readonly from: number;
+	readonly to: number;
+	readonly text: string;
+	readonly cursor: number;
+	readonly len: number;
+}
+
+/** A {@link NativeTextEdit} checked against the current text and clamped, ready to apply. */
+export interface ResolvedTextEdit {
+	/** Replaced range in the current text, widened by the caller's `widen`. */
+	readonly from: number;
+	readonly to: number;
+	/** The cleaned replacement. */
+	readonly insert: string;
+	/** The whole text after the edit. */
+	readonly text: string;
+	/** Caret in {@link text}. */
+	readonly cursor: number;
+	/** Whether the text changes (false: a pure caret move). */
+	readonly changed: boolean;
+}
+
+/** `value` as an integer offset in `[0, max]` (anything non-finite is 0). */
+export function clampTextOffset(value: number, max: number): number {
+	return Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), 0), max) : 0;
+}
+
+/** Whether `offset` falls between the halves of a surrogate pair in `text`. */
+function splitsSurrogatePair(text: string, offset: number): boolean {
+	if (offset <= 0 || offset >= text.length) return false;
+	const high = text.charCodeAt(offset - 1);
+	const low = text.charCodeAt(offset);
+	return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
+/**
+ * Check `edit` against `current` and resolve it: null when stale (`len`
+ * differs), else the range clamped (reversed ends swapped, never splitting a
+ * surrogate pair), widened by `widen` when non-empty, the replacement passed
+ * through `clean`, and the caret mapped from the text the terminal expects
+ * onto the text the edit actually produces.
+ */
+export function resolveTextEdit(
+	current: string,
+	edit: NativeTextEdit,
+	clean: (text: string) => string,
+	widen?: (from: number, to: number) => { from: number; to: number },
+): ResolvedTextEdit | null {
+	if (edit.len !== current.length) return null;
+	const size = current.length;
+	let from = clampTextOffset(edit.from, size);
+	let to = clampTextOffset(edit.to, size);
+	if (to < from) [from, to] = [to, from];
+	if (splitsSurrogatePair(current, from)) from--;
+	if (splitsSurrogatePair(current, to)) to++;
+	const raw = typeof edit.text === "string" ? edit.text : "";
+	const widened = widen && from < to ? widen(from, to) : { from, to };
+	const insert = raw ? clean(raw) : "";
+	const text = current.slice(0, widened.from) + insert + current.slice(widened.to);
+	// Where the terminal's caret sits in its own result (`[from, to)` replaced
+	// by `raw`), carried over to ours: widening swallows neighbours, cleaning
+	// may change the replacement's length.
+	const expected = clampTextOffset(edit.cursor, size - (to - from) + raw.length);
+	let cursor: number;
+	if (expected <= widened.from) cursor = expected;
+	else if (expected <= from) cursor = widened.from;
+	else if (expected < from + raw.length) cursor = widened.from + Math.min(expected - from, insert.length);
+	else cursor = widened.from + insert.length + Math.max(0, expected - from - raw.length - (widened.to - to));
+	cursor = Math.min(cursor, text.length);
+	if (splitsSurrogatePair(text, cursor)) cursor--;
+	return {
+		from: widened.from,
+		to: widened.to,
+		insert,
+		text,
+		cursor,
+		changed: widened.from !== widened.to || insert !== "",
+	};
+}
 
 /** The expanded state a `toggle` on the component's root node asks for, else undefined. */
 export function rootToggleExpanded(event: NativeUiEvent): boolean | undefined {

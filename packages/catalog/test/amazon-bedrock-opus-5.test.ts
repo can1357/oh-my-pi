@@ -142,6 +142,7 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 				supportsLongPromptCacheRetention: true,
 				promptCacheMinimumTokens: 512,
 				promptCacheMaximumCheckpoints: 4,
+				supportsForcedToolChoice: true,
 				// reasoning:true adaptive-thinking family → 900s keepalive-free idle floor.
 				streamIdleTimeoutMs: 900_000,
 				streamRevision: "possible",

@@ -76,6 +76,9 @@ export class CredentialHealth implements HealthApi {
 			email: credential.email,
 			enterpriseUrl: credential.enterpriseUrl,
 			apiEndpoint: credential.apiEndpoint,
+			orgId: credential.orgId,
+			region: credential.region,
+			inferenceRegion: credential.inferenceRegion,
 		};
 	}
 

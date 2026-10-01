@@ -590,6 +590,54 @@ describe("subagent HUD lines", () => {
 			expect(out).not.toContain(os.homedir());
 		});
 
+		it("shortens a path argument by its key but keeps a literal search pattern as written", () => {
+			const homeFile = `${os.homedir()}/.ssh/config`;
+			const preview = (key: string) =>
+				render(
+					[
+						makeSession({
+							id: "Reader",
+							progress: makeProgress({
+								id: "Reader",
+								currentTool: "grep",
+								currentToolArgs: homeFile,
+								currentToolArgsKey: key,
+							}),
+						}),
+					],
+					200,
+					true,
+				);
+			expect(preview("path")).toContain("~/.ssh/config");
+			expect(preview("path")).not.toContain(os.homedir());
+			// A search pattern that names a home path must still show what was searched.
+			expect(preview("pattern")).toContain(homeFile);
+		});
+
+		it("marks the last completed call with how it ended while idle between calls", () => {
+			const rowFor = (isError: boolean) =>
+				render(
+					[
+						makeSession({
+							id: "Worker",
+							progress: makeProgress({
+								id: "Worker",
+								recentTools: [{ tool: "read", args: "a.ts", argsKey: "path", isError, endMs: Date.now() }],
+							}),
+						}),
+					],
+					120,
+					true,
+				)
+					.split("\n")
+					.find(line => line.includes("read: a.ts"));
+			const success = Bun.stripANSI(theme.styledSymbol("status.success", "success"));
+			const error = Bun.stripANSI(theme.styledSymbol("status.error", "error"));
+			expect(rowFor(false)).toContain(`${success} read: a.ts`);
+			expect(rowFor(true)).toContain(`${error} read: a.ts`);
+			expect(rowFor(false)).not.toContain(error);
+		});
+
 		it("keeps the elapsed marker with a very long tool name at a narrow width", () => {
 			const columns = 40;
 			const out = render(
@@ -893,7 +941,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const rebuildHud = vi.spyOn(mode.subagentContainer, "clear");
+		const mountHud = vi.spyOn(mode.subagentContainer, "addChild");
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
 		vi.useFakeTimers();
 
 		for (let index = 0; index < 6; index++) {
@@ -912,7 +961,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("BurstAgent2: Burst job 2");
 		expect(hud).not.toContain("BurstAgent3: Burst job 3");
 		expect(hud).toContain("3 more — expand");
-		expect(rebuildHud).toHaveBeenCalledTimes(1);
+		expect(mountHud.mock.calls.length + updateHud.mock.calls.length).toBe(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 

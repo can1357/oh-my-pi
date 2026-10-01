@@ -54,6 +54,24 @@ provider "commandcode" {
 		supports-eager-tool-input-streaming #false
 		supports-long-cache-retention #false
 	}
+	// Endpoint contract for every id `api-routes provider="commandcode"` sends to
+	// Responses. Responses accepts `reasoning.effort: "none"` while chat
+	// completions rejects it (low|medium|high|xhigh|max only), so thinking-off
+	// disables reasoning instead of clamping to the lowest effort. Ids without
+	// an effort ladder stay inert through provider-level
+	// `supports-reasoning-effort #false`. The Responses endpoint also rejects an
+	// object `tool_choice` (verified 2026-09-29), so named choices degrade to
+	// `"required"`.
+	on-api "openai-responses" {
+		reasoning-disable-mode "none-effort"
+		supports-named-tool-choice #false
+	}
+	// First-party OpenAI grants `none` only to the 5.6 generation
+	// (`providers/openai.kdl`); the gateway may forward `reasoning.effort`
+	// unchanged, so the other GPT ids keep the first-party lowest-effort off.
+	models "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" {
+		reasoning-disable-mode "lowest-effort"
+	}
 	models "typesafe/jev" {
 		kind "judge"
 	}
@@ -154,15 +172,13 @@ provider "commandcode" {
 			max-tokens 65536
 		}
 	}
-	// Command Code's Responses endpoint rejects an object `tool_choice` and returns
-	// no bytes from `image_generation` (verified 2026-09-29), so the openai
-	// class's hosted-image and image-model grants do not apply and named choices
-	// degrade to `"required"`. Hosted web search still works with a string `tool_choice`.
+	// Command Code's Responses endpoint returns no bytes from `image_generation`
+	// (verified 2026-09-29), so the openai class's hosted-image and image-model
+	// grants do not apply. Hosted web search still works with a string `tool_choice`.
 	models "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5" "gpt-5.6-luna" "gpt-5.6-sol" \
 		"gpt-5.6-terra" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" {
 		hosted-image #false
 		image-model #false
-		supports-named-tool-choice #false
 	}
 	// ---------------------------------------------------------------------------
 	// This table prices every model id that GET /provider/v1/models serves.
