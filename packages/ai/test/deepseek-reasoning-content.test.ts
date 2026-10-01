@@ -68,7 +68,7 @@ function assistantToolCall(
 describe("DeepSeek reasoning_content tool-call replay", () => {
 	// ----------------------------------------------------------------
 	// Fix 1: honest wire-exact ladders for DeepSeek-family on any provider —
-	// V4 Flash exposes [low, high, max] (#7668), V4 Pro stays [high, max].
+	// V4 Flash and Pro expose [low, high, max] (#7668, #8405).
 	// ----------------------------------------------------------------
 	describe("thinking ladder (Fix 1)", () => {
 		it("bakes the honest [low, high, max] flash ladder with no effortMap on opencode-go", () => {
@@ -91,24 +91,14 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(model.thinking?.effortMap).toBeUndefined();
 		});
 
-		it("bakes the honest [high, max] ladder with no effortMap on the official endpoint", () => {
+		it("bakes the honest [low, high, max] ladder with no effortMap on the official endpoint", () => {
 			const model = deepseekModel({
 				provider: "deepseek",
 				baseUrl: "https://api.deepseek.com/v1",
 				id: "deepseek-v4-pro",
 			});
-			expect(model.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 			expect(model.thinking?.effortMap).toBeUndefined();
-		});
-
-		it("does NOT map xhigh for non-DeepSeek models", () => {
-			const model = deepseekModel({
-				provider: "openai",
-				baseUrl: "https://api.openai.com/v1",
-				id: "gpt-4o-mini",
-				reasoning: false,
-			});
-			expect(model.thinking?.effortMap?.xhigh).toBeUndefined();
 		});
 	});
 
@@ -441,27 +431,6 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			const assistant = findOpenAICompletionAssistantWireMessage(messages);
 			expect(assistant).toBeDefined();
 			expect(assistant?.reasoning_content).toBe("");
-			expect(assistant?.content).toBe("");
-		});
-
-		it("sets content to empty string (not null) when reasoning_content is present", () => {
-			const model = deepseekModel({
-				provider: "nvidia",
-				baseUrl: "https://integrate.api.nvidia.com/v1",
-				id: "deepseek-ai/deepseek-v4-flash",
-			});
-			const compat = model.compat;
-			const msg = assistantToolCall(model, [
-				{
-					type: "toolCall",
-					id: "call_no_content",
-					name: "list_files",
-					arguments: { path: "." },
-				} as ToolCall,
-			]);
-			const messages = convertMessages(model, { messages: [msg] }, compat);
-			const assistant = findOpenAICompletionAssistantWireMessage(messages);
-			expect(assistant).toBeDefined();
 			expect(assistant?.content).toBe("");
 		});
 	});

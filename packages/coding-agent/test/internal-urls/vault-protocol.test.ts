@@ -6,11 +6,10 @@ import {
 	InternalUrlRouter,
 	parseInternalUrl,
 	parseVaultUrl,
-	resolveVaultUrlToPath,
 	VaultProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as vaultProtocol from "@oh-my-pi/pi-coding-agent/internal-urls/vault-protocol";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-protocol-"));
@@ -106,7 +105,7 @@ describe("VaultProtocolHandler", () => {
 		expect(() => parseVaultUrl("vault://Work?op=eval")).toThrow("Unsupported vault:// vault op: eval");
 	});
 
-	it("rejects traversal and symlink escapes for reads and writes", async () => {
+	it("rejects traversal and symlink escapes for reads and write targets", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
 			await fs.mkdir(root, { recursive: true });
@@ -119,9 +118,9 @@ describe("VaultProtocolHandler", () => {
 			await expect(handler.resolve(resourceUrl("vault://Work/%2E%2E/secret.md"))).rejects.toThrow(
 				"Path traversal (..) is not allowed in vault:// URLs",
 			);
-			await expect(handler.write(resourceUrl("vault://Work//absolute.md"), "x")).rejects.toThrow(
-				"Absolute paths are not allowed in vault:// URLs",
-			);
+			await expect(
+				handler.locate(resourceUrl("vault://Work//absolute.md"), undefined, { create: true }),
+			).rejects.toThrow("Absolute paths are not allowed in vault:// URLs");
 
 			if (process.platform === "win32") return;
 
@@ -133,8 +132,33 @@ describe("VaultProtocolHandler", () => {
 			await expect(handler.resolve(resourceUrl("vault://Work/linked/secret.md"))).rejects.toThrow(
 				"vault:// URL escapes vault root",
 			);
-			await expect(handler.write(resourceUrl("vault://Work/linked/new.md"), "new")).rejects.toThrow(
-				"vault:// URL escapes vault root",
+			for (const target of ["vault://Work/linked/new.md", "vault://Work/linked/newdir/new.md"]) {
+				await expect(handler.locate(resourceUrl(target), undefined, { create: true })).rejects.toThrow(
+					"vault:// URL escapes vault root",
+				);
+			}
+			await fs.symlink(path.join(outside, "victim.md"), path.join(root, "dangling.md"));
+			await expect(
+				handler.locate(resourceUrl("vault://Work/dangling.md"), undefined, { create: true }),
+			).rejects.toThrow("dangling symlink");
+		});
+	});
+
+	it("refuses write targets that address a directory", async () => {
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			await fs.mkdir(path.join(root, "Folder"), { recursive: true });
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+
+			for (const target of ["vault://Work/Folder", "vault://Work/Folder/", "vault://Work/New/"]) {
+				await expect(handler.locate(resourceUrl(target), undefined, { create: true })).rejects.toThrow(
+					`vault:// URL must resolve to a file: ${target}`,
+				);
+			}
+			// Reads still locate the directory.
+			expect(await handler.locate(resourceUrl("vault://Work/Folder"))).toBe(
+				await fs.realpath(path.join(root, "Folder")),
 			);
 		});
 	});
@@ -183,7 +207,27 @@ describe("VaultProtocolHandler", () => {
 			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault", "info", "path"]);
 		});
 	});
-	it("writes files through the protocol hook and resolves cached vault paths for edit plumbing", async () => {
+
+	it("targets a named vault by prepending vault= before the vault info subcommand", async () => {
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "work-vault");
+			await fs.mkdir(root, { recursive: true });
+			await Bun.write(path.join(root, "note.md"), "note");
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+			const spawnSpy = vi.spyOn(vaultProtocol, "spawnObsidian").mockResolvedValue({
+				stdout: `name\tWork\npath\t${root}\n`,
+				stderr: "",
+				exitCode: 0,
+			});
+			const handler = testHandler(vaultProtocol.spawnObsidian);
+
+			await handler.resolve(resourceUrl("vault://Work"));
+
+			expect(spawnSpy).toHaveBeenCalledTimes(1);
+			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault=Work", "vault", "info"]);
+		});
+	});
+	it("locates create targets and existing files from the cached vault root", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
 			await fs.mkdir(root, { recursive: true });
@@ -195,14 +239,14 @@ describe("VaultProtocolHandler", () => {
 			});
 			const handler = testHandler(vaultProtocol.spawnObsidian);
 
-			await handler.write(resourceUrl("vault://Work/scratch.md"), "new body");
-			const resource = await handler.resolve(resourceUrl("vault://Work/scratch.md"));
+			const url = resourceUrl("vault://Work/notes/scratch.md");
+			expect(await handler.locate(url)).toBeNull();
+			const target = path.join(await fs.realpath(root), "notes", "scratch.md");
+			expect(await handler.locate(url, undefined, { create: true })).toBe(target);
+			await Bun.write(target, "new body");
 
-			expect(await Bun.file(path.join(root, "scratch.md")).text()).toBe("new body");
-			expect(resource.content).toBe("new body");
-			expect(resolveVaultUrlToPath("vault://Work/scratch.md")).toBe(
-				await fs.realpath(path.join(root, "scratch.md")),
-			);
+			expect((await handler.resolve(url)).content).toBe("new body");
+			expect(await handler.locate(url)).toBe(await fs.realpath(path.join(root, "notes", "scratch.md")));
 			expect(spawnSpy).not.toHaveBeenCalled();
 		});
 	});
@@ -290,31 +334,31 @@ describe("VaultProtocolHandler", () => {
 		}
 
 		expect(calls).toEqual({
-			outline: ["outline", "path=Note.md", "format=md", "vault=Work"],
-			backlinks: ["backlinks", "path=Note.md", "counts", "format=tsv", "vault=Work"],
-			links: ["links", "path=Note.md", "vault=Work"],
-			fileTags: ["tags", "path=Note.md", "counts", "format=json", "vault=Work"],
-			fileProperties: ["properties", "path=Note.md", "format=yaml", "vault=Work"],
-			fileTasks: ["tasks", "path=Note.md", "verbose", "format=json", "vault=Work"],
-			wordcount: ["wordcount", "path=Note.md", "vault=Work"],
-			history: ["history", "path=Note.md", "vault=Work"],
-			base: ["base:query", "path=Note.md", "view=Main", "format=md", "vault=Work"],
-			search: ["search:context", "query=plan", "path=Folder", "limit=5", "case", "format=json", "vault=Work"],
-			daily: ["daily:read", "vault=Work"],
-			dailyPath: ["daily:path", "vault=Work"],
-			vaultTags: ["tags", "counts", "format=json", "vault=Work"],
-			tag: ["tag", "name=#todo", "verbose", "vault=Work"],
-			vaultTasks: ["tasks", "todo", "verbose", "format=json", "vault=Work"],
-			orphans: ["orphans", "vault=Work"],
-			unresolved: ["unresolved", "counts", "verbose", "format=json", "vault=Work"],
-			deadends: ["deadends", "vault=Work"],
-			bases: ["bases", "vault=Work"],
-			bookmarks: ["bookmarks", "verbose", "format=json", "vault=Work"],
-			recents: ["recents", "vault=Work"],
-			templates: ["templates", "vault=Work"],
-			aliases: ["aliases", "verbose", "format=json", "vault=Work"],
-			vaultProperties: ["properties", "counts", "format=yaml", "vault=Work"],
-			property: ["property:read", "name=status", "path=Note.md", "vault=Work"],
+			outline: ["vault=Work", "outline", "path=Note.md", "format=md"],
+			backlinks: ["vault=Work", "backlinks", "path=Note.md", "counts", "format=tsv"],
+			links: ["vault=Work", "links", "path=Note.md"],
+			fileTags: ["vault=Work", "tags", "path=Note.md", "counts", "format=json"],
+			fileProperties: ["vault=Work", "properties", "path=Note.md", "format=yaml"],
+			fileTasks: ["vault=Work", "tasks", "path=Note.md", "verbose", "format=json"],
+			wordcount: ["vault=Work", "wordcount", "path=Note.md"],
+			history: ["vault=Work", "history", "path=Note.md"],
+			base: ["vault=Work", "base:query", "path=Note.md", "view=Main", "format=md"],
+			search: ["vault=Work", "search:context", "query=plan", "path=Folder", "limit=5", "case", "format=json"],
+			daily: ["vault=Work", "daily:read"],
+			dailyPath: ["vault=Work", "daily:path"],
+			vaultTags: ["vault=Work", "tags", "counts", "format=json"],
+			tag: ["vault=Work", "tag", "name=#todo", "verbose"],
+			vaultTasks: ["vault=Work", "tasks", "todo", "verbose", "format=json"],
+			orphans: ["vault=Work", "orphans"],
+			unresolved: ["vault=Work", "unresolved", "counts", "verbose", "format=json"],
+			deadends: ["vault=Work", "deadends"],
+			bases: ["vault=Work", "bases"],
+			bookmarks: ["vault=Work", "bookmarks", "verbose", "format=json"],
+			recents: ["vault=Work", "recents"],
+			templates: ["vault=Work", "templates"],
+			aliases: ["vault=Work", "aliases", "verbose", "format=json"],
+			vaultProperties: ["vault=Work", "properties", "counts", "format=yaml"],
+			property: ["vault=Work", "property:read", "name=status", "path=Note.md"],
 		});
 	});
 
@@ -347,9 +391,10 @@ describe("VaultProtocolHandler", () => {
 	});
 
 	it("aborts an in-flight spawn when the AbortSignal is cancelled", async () => {
-		if (!(await Bun.file("/bin/sleep").exists())) return;
+		const sleep = $which("sleep");
+		if (!sleep) return;
 		const controller = new AbortController();
-		const promise = vaultProtocol.spawnObsidian("/bin/sleep", ["10"], controller.signal, 30_000);
+		const promise = vaultProtocol.spawnObsidian(sleep, ["10"], controller.signal, 30_000);
 
 		await Bun.sleep(20);
 		controller.abort();
@@ -389,21 +434,20 @@ describe("VaultProtocolHandler", () => {
 		});
 	});
 
-	it("refuses resolve, write, and path resolution when vault.enabled is false", async () => {
+	it("refuses resolve and locate when vault.enabled is false", async () => {
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		const handler = testHandler(vaultProtocol.spawnObsidian);
 
 		await expect(handler.resolve(resourceUrl("vault://Work/foo.md"))).rejects.toThrow(
 			vaultProtocol.VaultDisabledError,
 		);
-		await expect(handler.write(resourceUrl("vault://Work/foo.md"), "body")).rejects.toThrow(
+		await expect(handler.locate(resourceUrl("vault://Work/foo.md"), undefined, { create: true })).rejects.toThrow(
 			vaultProtocol.VaultDisabledError,
 		);
-		expect(() => resolveVaultUrlToPath("vault://Work/foo.md")).toThrow(vaultProtocol.VaultDisabledError);
 	});
 
 	it("reports hasObsidian() as false when the gate is off, even if the binary is on disk", () => {
-		// hasObsidian feeds Handlebars `{{#if hasObsidian}}` in the system prompt.
+		// hasObsidian gates the vault:// promptDoc in the system prompt's Internal URLs list.
 		// Disabling the gate MUST hide vault:// from the prompt regardless of binary presence.
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue("/test/obsidian");
@@ -418,5 +462,26 @@ describe("VaultProtocolHandler", () => {
 
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue(null);
 		expect(vaultProtocol.hasObsidian()).toBe(false);
+	});
+
+	it("resolves and locates the same vault root file to one spelling", async () => {
+		// On Windows hosts whose TEMP/profile is an 8.3 short-name alias, a vault
+		// root can have two absolute-path spellings; the read and the edit/write
+		// target must agree on one.
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "vault");
+			const note = path.join(root, "Folder", "note.md");
+			await fs.mkdir(path.dirname(note), { recursive: true });
+			await fs.writeFile(note, "# Note\nbody");
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+
+			const handler = new VaultProtocolHandler({ resolveObsidianBinary: () => null });
+			const resource = await handler.resolve(resourceUrl("vault://Work/Folder/note.md"));
+
+			// os.tmpdir() is short-name on some Windows setups; whatever the
+			// spelling of `root`, both paths must agree on the same file.
+			expect(resource.sourcePath).toBeString();
+			expect(await handler.locate(resourceUrl("vault://Work/Folder/note.md"))).toBe(resource.sourcePath ?? null);
+		});
 	});
 });

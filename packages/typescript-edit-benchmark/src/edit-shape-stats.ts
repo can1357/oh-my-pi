@@ -321,9 +321,12 @@ async function main(): Promise<number> {
 	const workers = Array.from({ length: 16 }, async () => {
 		while (next < sessionFiles.length) {
 			const file = sessionFiles[next++];
-			const scan = await collectSessionEdits(file).catch(
-				(): SessionScan => ({ edits: [], requestFiles: [], formats: new Map(), skipped: 0 }),
-			);
+			const scan = await collectSessionEdits(file).catch((): SessionScan => ({
+				edits: [],
+				requestFiles: [],
+				formats: new Map(),
+				skipped: 0,
+			}));
 			skipped += scan.skipped;
 			for (const [format, count] of scan.formats) {
 				formatCounts.set(format, (formatCounts.get(format) ?? 0) + count);

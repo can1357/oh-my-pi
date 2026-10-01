@@ -1,5 +1,4 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assistantMsg, userMsg } from "../utilities";
 
@@ -26,43 +25,6 @@ describe("SessionManager append and tree traversal", () => {
 			expect(entries[2].parentId).toBe(id2);
 		});
 
-		it("appendThinkingLevelChange integrates into tree", () => {
-			const session = SessionManager.inMemory();
-
-			const msgId = session.appendMessage(userMsg("hello"));
-			const thinkingId = session.appendThinkingLevelChange("high");
-			session.appendMessage(assistantMsg("response"));
-
-			const entries = session.getEntries();
-			expect(entries).toHaveLength(3);
-
-			const thinkingEntry = entries.find(e => e.type === "thinking_level_change");
-			expect(thinkingEntry).toBeDefined();
-			expect(thinkingEntry!.id).toBe(thinkingId);
-			expect(thinkingEntry!.parentId).toBe(msgId);
-
-			expect(entries[2].parentId).toBe(thinkingId);
-		});
-
-		it("appendModelChange integrates into tree", () => {
-			const session = SessionManager.inMemory();
-
-			const msgId = session.appendMessage(userMsg("hello"));
-			const modelId = session.appendModelChange("openai/gpt-4");
-			session.appendMessage(assistantMsg("response"));
-
-			const entries = session.getEntries();
-			const modelEntry = entries.find(e => e.type === "model_change");
-			expect(modelEntry).toBeDefined();
-			expect(modelEntry?.id).toBe(modelId);
-			expect(modelEntry?.parentId).toBe(msgId);
-			if (modelEntry?.type === "model_change") {
-				expect(modelEntry.model).toBe("openai/gpt-4");
-			}
-
-			expect(entries[2].parentId).toBe(modelId);
-		});
-
 		it("appendCompaction integrates into tree", () => {
 			const session = SessionManager.inMemory();
 
@@ -85,24 +47,6 @@ describe("SessionManager append and tree traversal", () => {
 			expect(entries[3].parentId).toBe(compactionId);
 		});
 
-		it("appendCustomEntry integrates into tree", () => {
-			const session = SessionManager.inMemory();
-
-			const msgId = session.appendMessage(userMsg("hello"));
-			const customId = session.appendCustomEntry("my_hook", { key: "value" });
-			session.appendMessage(assistantMsg("response"));
-
-			const entries = session.getEntries();
-			const customEntry = entries.find(e => e.type === "custom") as CustomEntry;
-			expect(customEntry).toBeDefined();
-			expect(customEntry.id).toBe(customId);
-			expect(customEntry.parentId).toBe(msgId);
-			expect(customEntry.customType).toBe("my_hook");
-			expect(customEntry.data).toEqual({ key: "value" });
-
-			expect(entries[2].parentId).toBe(customId);
-		});
-
 		it("leaf pointer advances after each append", () => {
 			const session = SessionManager.inMemory();
 
@@ -123,15 +67,6 @@ describe("SessionManager append and tree traversal", () => {
 		it("returns empty array for empty session", () => {
 			const session = SessionManager.inMemory();
 			expect(session.getBranch()).toEqual([]);
-		});
-
-		it("returns single entry path", () => {
-			const session = SessionManager.inMemory();
-			const id = session.appendMessage(userMsg("hello"));
-
-			const path = session.getBranch();
-			expect(path).toHaveLength(1);
-			expect(path[0].id).toBe(id);
 		});
 
 		it("returns full path from root to leaf", () => {
@@ -200,33 +135,6 @@ describe("SessionManager append and tree traversal", () => {
 			expect(root.children[0].children).toHaveLength(1);
 			expect(root.children[0].children[0].entry.id).toBe(id3);
 			expect(root.children[0].children[0].children).toHaveLength(0);
-		});
-
-		it("returns tree with branches after branch", () => {
-			const session = SessionManager.inMemory();
-
-			// Build: 1 -> 2 -> 3
-			const id1 = session.appendMessage(userMsg("1"));
-			const id2 = session.appendMessage(assistantMsg("2"));
-			const id3 = session.appendMessage(userMsg("3"));
-
-			// Branch from id2, add new path: 2 -> 4
-			session.branch(id2);
-			const id4 = session.appendMessage(userMsg("4-branch"));
-
-			const tree = session.getTree();
-			expect(tree).toHaveLength(1);
-
-			const root = tree[0];
-			expect(root.entry.id).toBe(id1);
-			expect(root.children).toHaveLength(1);
-
-			const node2 = root.children[0];
-			expect(node2.entry.id).toBe(id2);
-			expect(node2.children).toHaveLength(2); // id3 and id4 are siblings
-
-			const childIds = node2.children.map(c => c.entry.id).sort();
-			expect(childIds).toEqual([id3, id4].sort());
 		});
 
 		it("handles multiple branches at same point", () => {

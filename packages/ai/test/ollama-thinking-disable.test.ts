@@ -20,6 +20,7 @@ interface OllamaChatRequestPayload {
 	think?: unknown;
 	messages?: OllamaChatMessagePayload[];
 	tools?: OllamaToolPayload[];
+	options?: { num_predict?: unknown; temperature?: unknown; top_p?: unknown };
 }
 
 function isOllamaChatRequestPayload(value: unknown): value is OllamaChatRequestPayload {
@@ -392,5 +393,64 @@ describe("Ollama chat thinking controls", () => {
 		expect(toolMessage.images).toEqual(["ZmFrZQ=="]);
 		expect(toolMessage.content).toContain("Screenshot captured");
 		expect(toolMessage.content).not.toContain(NON_VISION_IMAGE_PLACEHOLDER);
+	});
+});
+
+describe("Ollama chat sampling options", () => {
+	it("forwards temperature, top_p, and num_predict under options", async () => {
+		// Contract: session-title generation pins `temperature: 0` for greedy
+		// decode; the adapter must put sampling params on the wire or the pin
+		// is silently inert.
+		let payload: OllamaChatRequestPayload | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isOllamaChatRequestPayload(parsed)) {
+				throw new Error("Expected Ollama payload object");
+			}
+			payload = parsed;
+			return new Response('{"message":{"content":"ok"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "title this", timestamp: 0 }],
+		};
+
+		await streamOllama(createReasoningOllamaModel(), context, {
+			apiKey: "test-key",
+			temperature: 0,
+			topP: 0.9,
+			maxTokens: 1024,
+			fetch: fetchMock,
+		}).result();
+
+		expect(payload?.options).toEqual({ num_predict: 1024, temperature: 0, top_p: 0.9 });
+	});
+
+	it("omits the options object when no runtime options are set", async () => {
+		let payload: OllamaChatRequestPayload | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isOllamaChatRequestPayload(parsed)) {
+				throw new Error("Expected Ollama payload object");
+			}
+			payload = parsed;
+			return new Response('{"message":{"content":"ok"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "hello", timestamp: 0 }],
+		};
+
+		const model = createReasoningOllamaModel();
+		model.omitMaxOutputTokens = true;
+		await streamOllama(model, context, {
+			apiKey: "test-key",
+			maxTokens: 1024,
+			fetch: fetchMock,
+		}).result();
+
+		expect(payload && "options" in payload && payload.options !== undefined).toBe(false);
 	});
 });

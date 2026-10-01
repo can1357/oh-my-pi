@@ -1,24 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { GoogleOAuthFlow } from "../src/registry/oauth/google-oauth-shared";
-import type { OAuthController } from "../src/registry/oauth/types";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 
-describe("GoogleOAuthFlow callback hostname", () => {
-	it("uses 127.0.0.1 as the callback hostname to avoid IPv6 and proxy delays", () => {
-		const ctrl: OAuthController = {
-			onAuth: () => {},
-		};
-		const flow = new GoogleOAuthFlow(ctrl, {
-			provider: "google-gemini-cli",
-			clientId: "test-client",
-			clientSecret: "test-secret",
-			authUrl: "https://example.com/auth",
-			tokenUrl: "https://example.com/token",
-			scopes: ["scope1"],
-			callbackPort: 51121,
-			callbackPath: "/callback",
-			discoverProject: async () => "test-project",
-		});
-
-		expect(flow.callbackHostname).toBe("127.0.0.1");
+describe("Google OAuth callback hostname", () => {
+	it("uses 127.0.0.1 to avoid IPv6 and proxy delays", () => {
+		for (const provider of ["google-gemini-cli", "google-antigravity"] as const) {
+			const login = authPolicyFor(provider)?.login;
+			expect(login?.kind).toBe("oauth-code");
+			if (login?.kind !== "oauth-code") throw new Error(`missing OAuth policy for ${provider}`);
+			expect(login.callback.hostname).toBe("127.0.0.1");
+		}
 	});
 });

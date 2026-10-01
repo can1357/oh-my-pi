@@ -19,6 +19,8 @@ export interface Fact {
 	readonly timestamp: string;
 	readonly confidence: number;
 	readonly temporalQualifier?: string | null;
+	/** Memory the fact was extracted from (`facts.source_msg_id`), when stored. */
+	readonly memoryId?: string | null;
 }
 
 export interface GraphEdge {
@@ -155,6 +157,7 @@ function rowToFact(row: FactRow): Fact {
 		timestamp: row.timestamp ?? "",
 		confidence: row.confidence ?? 0.5,
 		temporalQualifier: null,
+		memoryId: row.source_msg_id,
 	};
 }
 
@@ -447,6 +450,25 @@ export class EpisodicGraph {
 		}
 		return results;
 	}
+	/**
+	 * Edges touching any of `nodeIds` in one query, strongest first, at most `limit` rows.
+	 * Batched frontier expansion for bounded traversals; see {@link findRelatedMemories}
+	 * for the per-node walk.
+	 */
+	findEdgesTouching(nodeIds: readonly string[], edgeType: string, minWeight: number, limit: number): GraphEdge[] {
+		const max = Math.max(0, Math.trunc(limit));
+		if (nodeIds.length === 0 || max === 0) return [];
+		const placeholders = nodeIds.map(() => "?").join(", ");
+		const rows = this.db
+			.query(
+				`SELECT source, target, edge_type, weight, timestamp FROM graph_edges
+				 WHERE (source IN (${placeholders}) OR target IN (${placeholders})) AND edge_type = ? AND weight >= ?
+				 ORDER BY weight DESC, id
+				 LIMIT ?`,
+			)
+			.all(...nodeIds, ...nodeIds, edgeType, clampWeight(minWeight), max) as EdgeRow[];
+		return rows.map(edgeFromRow);
+	}
 	findFactsBySubject(subject: string): Fact[] {
 		const rows = this.db
 			.query("SELECT * FROM facts WHERE subject = ? ORDER BY confidence DESC, timestamp DESC")
@@ -565,7 +587,14 @@ export class EpisodicGraph {
 	}
 
 	private extractParticipants(content: string): string[] {
-		const names = Array.from(content.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g), match => match[1] ?? "");
+		// Match capitalized proper nouns across cased scripts (Latin, Greek, Cyrillic, …).
+		// `[A-Z][a-z]+` plus ASCII `\b` matched no non-Latin token, so any non-English
+		// memory produced zero participants (issue #7918). Unicode property escapes with
+		// the `u` flag, and `\p{L}`-based lookaround boundaries in place of `\b`, fix that.
+		const names = Array.from(
+			content.matchAll(/(?<![\p{L}\p{N}_])(\p{Lu}\p{Ll}+(?:\s+\p{Lu}\p{Ll}+)?)(?![\p{L}\p{N}_])/gu),
+			match => match[1] ?? "",
+		);
 		const pronouns = Array.from(
 			content.matchAll(/\b(I|you|we|they|he|she|it|me|us|them|him|her)\b/gi),
 			match => match[1] ?? "",
@@ -590,7 +619,7 @@ export class EpisodicGraph {
 
 	private extractLocation(content: string): string | null {
 		const properPlace =
-			/\b(?:at|in|from)\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:yesterday|today|tomorrow|now|last|next|on|at)\b|$)/i.exec(
+			/\b(?:at|in|from)\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:yesterday|today|tomorrow|now|last|next|on|at)\b|$)/.exec(
 				content,
 			);
 		if (properPlace?.[1] !== undefined) return properPlace[1].trim();

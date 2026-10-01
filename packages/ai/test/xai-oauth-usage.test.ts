@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { buildXAICliBillingUrl } from "@oh-my-pi/pi-ai/oauth/xai-oauth";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
-import { xaiOauthUsageProvider } from "@oh-my-pi/pi-ai/usage/xai-oauth";
+import { xaiOauthRankingStrategy, xaiOauthUsageProvider } from "@oh-my-pi/pi-ai/usage/xai-oauth";
+import { isUsageLimitReached, reserveUsageLimits } from "../src/auth/usage-report";
 
 const USER_ID = "cf12ecb5-cca4-4ba0-9f02-298071a2d052";
 
@@ -125,6 +126,9 @@ function dualBillingFetch(
 			});
 		}
 		const payload = url.includes("format=credits") ? creditsPayload : monthlyPayload;
+		if (payload === null) {
+			return new Response("internal error", { status: 500 });
+		}
 		return new Response(JSON.stringify(payload), {
 			status: 200,
 			headers: { "content-type": "application/json" },
@@ -224,6 +228,139 @@ describe("xai-oauth usage provider", () => {
 		expect(report?.limits[0]?.id).toBe("xai-oauth:credits:1w");
 		expect(report?.limits[0]?.window?.resetsAt).toBe(Date.parse(periodEnd));
 	});
+	it("rejects an expired weekly period when creditUsagePercent is omitted", async () => {
+		const periodEnd = new Date(Date.now() - 60_000).toISOString();
+		const periodStart = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+		const report = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential() },
+			{
+				fetch: capturingFetch({
+					config: {
+						currentPeriod: {
+							end: periodEnd,
+							start: periodStart,
+							type: "USAGE_PERIOD_TYPE_WEEKLY",
+						},
+					},
+				}).fetch,
+			},
+		);
+
+		expect(report).toBeNull();
+	});
+
+	it("reports zero usage when weekly period is active but creditUsagePercent is omitted (fresh reset)", async () => {
+		const periodEnd = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString();
+		const periodStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+		const report = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential() },
+			{
+				fetch: capturingFetch({
+					config: {
+						currentPeriod: {
+							end: periodEnd,
+							start: periodStart,
+							type: "USAGE_PERIOD_TYPE_WEEKLY",
+						},
+						isUnifiedBillingUser: true,
+						onDemandCap: { val: 0 },
+						onDemandUsed: { val: 0 },
+					},
+				}).fetch,
+			},
+		);
+
+		expect(report?.metadata?.billingKind).toBe("weekly");
+		expect(report?.limits.map(limit => limit.id)).toEqual(["xai-oauth:credits:1w"]);
+		const credits = report?.limits[0];
+		expect(credits?.amount.used).toBe(0);
+		expect(credits?.amount.limit).toBe(100);
+		expect(credits?.amount.remaining).toBe(100);
+		expect(credits?.amount.usedFraction).toBe(0);
+		expect(credits?.amount.remainingFraction).toBe(1);
+		expect(credits?.status).toBe("ok");
+		expect(credits?.window?.resetsAt).toBe(Date.parse(periodEnd));
+	});
+
+	it("rejects inferred unified weekly usage when the monthly probe encounters a network error", async () => {
+		const periodEnd = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString();
+		const periodStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+		const report = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential() },
+			{
+				fetch: dualBillingFetch(
+					{
+						config: {
+							currentPeriod: {
+								end: periodEnd,
+								start: periodStart,
+								type: "USAGE_PERIOD_TYPE_WEEKLY",
+							},
+							isUnifiedBillingUser: true,
+						},
+					},
+					null,
+				).fetch,
+			},
+		);
+
+		expect(report).toBeNull();
+	});
+	it("rejects inferred unified weekly usage when monthly config has a positive limit but malformed fields", async () => {
+		const periodEnd = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString();
+		const periodStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+		const report = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential() },
+			{
+				fetch: dualBillingFetch(
+					{
+						config: {
+							currentPeriod: {
+								end: periodEnd,
+								start: periodStart,
+								type: "USAGE_PERIOD_TYPE_WEEKLY",
+							},
+							isUnifiedBillingUser: true,
+						},
+					},
+					{
+						config: {
+							isUnifiedBillingUser: true,
+							monthlyLimit: { val: 15000 },
+							// Missing 'used' and billingPeriod dates
+						},
+					},
+				).fetch,
+			},
+		);
+
+		expect(report).toBeNull();
+	});
+
+	it("rejects inferred unified weekly usage when monthly quota evidence is absent", async () => {
+		const periodEnd = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString();
+		const periodStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+		const report = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential() },
+			{
+				fetch: dualBillingFetch(
+					{
+						config: {
+							currentPeriod: {
+								end: periodEnd,
+								start: periodStart,
+								type: "USAGE_PERIOD_TYPE_WEEKLY",
+							},
+							isUnifiedBillingUser: true,
+						},
+					},
+					{ config: { isUnifiedBillingUser: true } },
+				).fetch,
+			},
+		);
+
+		expect(report).toBeNull();
+	});
 
 	it("falls back to monthly included quota when credits has no percent fields", async () => {
 		const { fetch, calls } = dualBillingFetch(makeUnifiedCreditsPayload(), makeUnifiedMonthlyPayload());
@@ -252,6 +389,55 @@ describe("xai-oauth usage provider", () => {
 		expect(included?.window?.label).toBe("Monthly");
 		expect(included?.window?.resetsAt).toBe(Date.parse("2026-08-01T00:00:00+00:00"));
 		expect(included?.status).toBe("ok");
+	});
+
+	it("does not block dispatch on an over-limit monthly counter with active inferred weekly credits", async () => {
+		const now = Date.now();
+		const credits = {
+			config: {
+				...makeUnifiedCreditsPayload().config,
+				currentPeriod: {
+					start: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+					end: new Date(now + 6 * 24 * 60 * 60 * 1000).toISOString(),
+					type: "USAGE_PERIOD_TYPE_WEEKLY",
+				},
+			},
+		};
+		const monthly = makeUnifiedMonthlyPayload({
+			monthlyLimit: { val: 9516 },
+			used: { val: 9624 },
+			billingPeriodStart: new Date(now - 27 * 24 * 60 * 60 * 1000).toISOString(),
+			billingPeriodEnd: new Date(now + 3 * 24 * 60 * 60 * 1000).toISOString(),
+		});
+		const report = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential({ email: "stored@example.com" }) },
+			{ fetch: dualBillingFetch(credits, monthly).fetch },
+		);
+		if (!report) throw new Error("Expected xai-oauth billing report");
+
+		expect(report.limits[0]?.amount.used).toBe(9624);
+		expect(report.limits[0]?.amount.limit).toBe(9516);
+		expect(report.limits[0]?.notes?.[0]).toContain("enforcement uncertain");
+		expect(xaiOauthRankingStrategy.scopeLimits?.(report, { modelId: "grok-4.7" })).toEqual([]);
+		expect(reserveUsageLimits(xaiOauthRankingStrategy, report, { modelId: "grok-4.7" })).toEqual([]);
+		expect(xaiOauthRankingStrategy.findWindowLimits(report).secondary).toBeUndefined();
+
+		const monthlyOnly = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential({ email: "stored@example.com" }) },
+			{ fetch: dualBillingFetch({ config: { isUnifiedBillingUser: true } }, monthly).fetch },
+		);
+		if (!monthlyOnly) throw new Error("Expected monthly-only billing report");
+		expect(isUsageLimitReached(xaiOauthRankingStrategy.scopeLimits?.(monthlyOnly) ?? [])).toBe(true);
+		expect(reserveUsageLimits(xaiOauthRankingStrategy, monthlyOnly, { modelId: "grok-4.7" })[0]?.status).toBe(
+			"exhausted",
+		);
+
+		const explicitWeekly = await xaiOauthUsageProvider.fetchUsage(
+			{ provider: "xai-oauth", credential: makeCredential({ email: "stored@example.com" }) },
+			{ fetch: dualBillingFetch({ config: { ...credits.config, creditUsagePercent: 2 } }, monthly).fetch },
+		);
+		if (!explicitWeekly) throw new Error("Expected explicit weekly billing report");
+		expect(isUsageLimitReached(xaiOauthRankingStrategy.scopeLimits?.(explicitWeekly) ?? [])).toBe(true);
 	});
 
 	it("merges weekly credits with monthly included when unified account returns both", async () => {
@@ -290,7 +476,6 @@ describe("xai-oauth usage provider", () => {
 				).fetch,
 			},
 		);
-
 		expect(report?.limits.map(limit => limit.id)).toEqual(["xai-oauth:included:1mo", "xai-oauth:on-demand"]);
 		const onDemand = report?.limits.find(limit => limit.id === "xai-oauth:on-demand");
 		expect(onDemand?.amount.used).toBe(25);
@@ -299,10 +484,11 @@ describe("xai-oauth usage provider", () => {
 	});
 
 	it("returns null when both credits and monthly billing shapes are unusable", async () => {
+		const creditsUnusable = { config: { isUnifiedBillingUser: true, onDemandCap: { val: 0 } } };
 		const report = await xaiOauthUsageProvider.fetchUsage(
 			{ provider: "xai-oauth", credential: makeCredential() },
 			{
-				fetch: dualBillingFetch(makeUnifiedCreditsPayload(), {
+				fetch: dualBillingFetch(creditsUnusable, {
 					config: { isUnifiedBillingUser: true, monthlyLimit: { val: 0 }, used: { val: 0 } },
 				}).fetch,
 			},

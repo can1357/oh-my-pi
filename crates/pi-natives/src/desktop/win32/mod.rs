@@ -3,8 +3,12 @@ mod ax;
 #[cfg(target_os = "windows")]
 mod capture;
 pub mod delivery;
+#[cfg(any(target_os = "windows", test))]
+mod geometry;
 #[cfg(target_os = "windows")]
 mod input;
+#[cfg(target_os = "windows")]
+mod window;
 
 #[cfg(target_os = "windows")]
 use enigo::Enigo;
@@ -36,8 +40,9 @@ pub(crate) struct Win32Backend {
 #[cfg(target_os = "windows")]
 impl Win32Backend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
-		// Initialize DPI awareness before xcap or input observes desktop geometry,
-		// keeping both APIs in the same per-monitor physical coordinate regime.
+		// Initialize DPI awareness before xcap or input observes desktop
+		// geometry, keeping both APIs in the same per-monitor physical
+		// coordinate regime.
 		let global_input = input::create_global_input()?;
 		let _ = capture::displays(&display)?;
 		Ok(Self { display, global_input, ax: Win32Ax::new() })
@@ -48,8 +53,7 @@ impl Win32Backend {
 impl Backend for Win32Backend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let display_count = capture::displays(&self.display)
-			.map(|displays| displays.len().min(u32::MAX as usize) as u32)
-			.unwrap_or(0);
+			.map_or(0, |displays| displays.len().min(u32::MAX as usize) as u32);
 		DesktopCapabilities {
 			backend: "win32".to_string(),
 			display_server: Some("win32".to_string()),
@@ -57,7 +61,7 @@ impl Backend for Win32Backend {
 			input: true,
 			ax: true,
 			background_window_input: true,
-			delivery_modes: vec!["background".to_string(), "foreground".to_string()],
+			takeover: true,
 			capture_permission: if display_count > 0 {
 				"granted"
 			} else {
@@ -93,7 +97,7 @@ impl Backend for Win32Backend {
 		_frame: &FrameGeometry,
 		mode: DeliveryMode,
 	) -> CoreResult<()> {
-		input::pointer(&mut self.global_input, target, event, mode)
+		input::pointer(&mut self.global_input, &mut self.ax, target, event, mode)
 	}
 
 	fn type_text(&mut self, target: &Target, text: &str, mode: DeliveryMode) -> CoreResult<()> {

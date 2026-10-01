@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "./capability";
+import { resolveClaudePaths } from "./config/claude-paths";
 import { expandTilde } from "./tools/path-utils";
 
 export * from "./config/config-file";
@@ -76,12 +78,12 @@ export function getChangelogPath(): string | undefined {
 // =============================================================================
 
 /**
- * Config directory bases in priority order (highest first).
- * User-level: ~/.omp/agent, ~/.claude, ~/.codex, ~/.gemini
+ * User-level: ~/.omp/agent, Claude's active config directory, ~/.codex, ~/.gemini
  * Project-level: .omp, .claude, .codex, .gemini
  */
 const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
-	base: () => path.join(os.homedir(), globalAgentDir ? globalAgentDir() : dir),
+	base: () =>
+		dir === ".claude" ? resolveClaudePaths().configDir : path.join(os.homedir(), globalAgentDir?.() ?? dir),
 	name: dir,
 }));
 
@@ -130,6 +132,9 @@ export function getConfigDirs(subpath: string, options: GetConfigDirsOptions = {
 	// User-level directories (highest priority)
 	if (user) {
 		for (const { base, name } of USER_CONFIG_BASES) {
+			if (name !== CONFIG_DIR_NAME && !isUserSourceEnabled(name.replace(/^\./, ""))) {
+				continue;
+			}
 			const resolvedPath = path.resolve(base(), subpath);
 			if (!existingOnly || fs.existsSync(resolvedPath)) {
 				results.push({ path: resolvedPath, source: name, level: "user" });

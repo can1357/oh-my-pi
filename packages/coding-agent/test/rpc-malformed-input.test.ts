@@ -1,61 +1,32 @@
 import { describe, expect, test } from "bun:test";
-import * as path from "node:path";
-import { isRecord, readJsonl } from "@oh-my-pi/pi-utils";
+import { readRpcInputFrames } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-input";
 
 /**
  * Regression test for issue #5194: a non-JSON stdin line crashed the whole RPC
- * process with an uncaught `SyntaxError: Failed to parse JSONL` escaping the
- * frame loop. A malformed line must instead be reported as an error frame and
- * the process must keep reading subsequent frames.
+ * process with an uncaught parse error escaping the frame loop. A malformed
+ * line must instead be reported and the reader must keep yielding later frames.
  */
 describe("RPC mode malformed stdin", () => {
-	test("reports a bad line as an error frame and keeps serving subsequent commands", async () => {
-		const cliPath = path.join(import.meta.dir, "..", "src", "cli.ts");
-		const child = Bun.spawn(
-			["bun", cliPath, "--mode", "rpc", "--provider", "anthropic", "--model", "claude-sonnet-4-5"],
-			{
-				cwd: path.join(import.meta.dir, ".."),
-				env: { ...Bun.env, PI_NO_TITLE: "1" },
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-			},
+	test("reports a bad line and keeps reading subsequent commands", async () => {
+		const input = new Blob([
+			"this is not json\n",
+			`${JSON.stringify({ type: "get_state", id: "probe" })}\n`,
+			`${JSON.stringify({ type: "get_messages_page", id: "page-probe", limit: 1 })}\n`,
+		]).stream();
+		const frames: unknown[] = [];
+		const parseErrors: string[] = [];
+
+		await readRpcInputFrames(
+			input,
+			frame => frames.push(frame),
+			message => parseErrors.push(message),
 		);
 
-		// A non-JSON line followed by a valid command. Pre-fix the first line
-		// crashed the generator before the second was ever read.
-		child.stdin.write("this is not json\n");
-		child.stdin.write(`${JSON.stringify({ type: "get_state", id: "probe" })}\n`);
-		child.stdin.write(`${JSON.stringify({ type: "get_messages_page", id: "page-probe", limit: 1 })}\n`);
-		await child.stdin.flush();
-
-		let parseError: Record<string, unknown> | undefined;
-		let stateResponse: Record<string, unknown> | undefined;
-		let pageResponse: Record<string, unknown> | undefined;
-
-		for await (const frame of readJsonl<unknown>(child.stdout as ReadableStream<Uint8Array>)) {
-			if (!isRecord(frame)) continue;
-			if (frame.type === "response" && frame.command === "parse" && frame.success === false) {
-				parseError = frame;
-			}
-			if (frame.type === "response" && frame.id === "probe") {
-				stateResponse = frame;
-			}
-			if (frame.type === "response" && frame.id === "page-probe") pageResponse = frame;
-			if (stateResponse && pageResponse) break;
-		}
-
-		child.stdin.end();
-		child.kill();
-		await child.exited.catch(() => {});
-
-		expect(parseError).toBeDefined();
-		expect(String(parseError?.error)).toContain("Failed to parse command");
-		expect(stateResponse).toBeDefined();
-		expect(stateResponse?.success).toBe(true);
-		expect(pageResponse).toMatchObject({
-			success: true,
-			data: { messages: [], totalMessages: 0 },
-		});
-	}, 30000);
+		expect(parseErrors).toHaveLength(1);
+		expect(parseErrors[0]).toContain("Failed to parse command");
+		expect(frames).toEqual([
+			{ type: "get_state", id: "probe" },
+			{ type: "get_messages_page", id: "page-probe", limit: 1 },
+		]);
+	});
 });

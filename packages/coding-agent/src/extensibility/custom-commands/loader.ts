@@ -10,11 +10,13 @@ import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getConfigDirs } from "../../config";
+
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import * as typebox from "../legacy-typebox";
 import { GreenCommand } from "./bundled/ci-green";
+import { AnnotateCommand } from "./bundled/annotate";
 import { ReviewCommand } from "./bundled/review";
 import type {
 	CustomCommand,
@@ -24,6 +26,8 @@ import type {
 	CustomCommandsLoadResult,
 	LoadedCustomCommand,
 } from "./types";
+
+const arktype = Object.assign(Function.prototype.bind.call(type, undefined) as typeof type, type, { type });
 
 /**
  * Load a single command module using native Bun import.
@@ -164,6 +168,12 @@ function loadBundledCommands(sharedApi: CustomCommandAPI): LoadedCustomCommand[]
 		command: new ReviewCommand(sharedApi),
 		source: "bundled",
 	});
+	bundled.push({
+		path: "bundled:annotate",
+		resolvedPath: "bundled:annotate",
+		command: new AnnotateCommand(sharedApi),
+		source: "bundled",
+	});
 
 	return bundled;
 }
@@ -187,7 +197,7 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 		exec: (command: string, args: string[], execOptions) =>
 			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions),
 		typebox,
-		arktype: type,
+		arktype,
 		zod,
 		pi: PiCodingAgent,
 	};

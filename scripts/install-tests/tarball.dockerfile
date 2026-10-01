@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y curl ca-certificates unzip jq procps bu
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:$PATH"
 
-# Install Rust (needed to build native addon)
+# Install Rust — the host native addon builds through the default
+# cargo/napi-rs backend, so no bazelisk is needed.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
 ENV PATH="/root/.cargo/bin:$PATH"
 

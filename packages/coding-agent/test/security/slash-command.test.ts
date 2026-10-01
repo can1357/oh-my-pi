@@ -10,6 +10,8 @@ import type { SlashCommandRuntime } from "../../src/slash-commands/types";
 import type { ToolSession } from "../../src/tools";
 import { SecurityScanTool } from "../../src/tools/security-scan";
 
+import { cfgSecurityEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 const SARIF_FIXTURE = path.join(import.meta.dir, "..", "fixtures", "security", "generic-results.sarif");
 let temporaryRoot = "";
 let repositoryRoot = "";
@@ -141,7 +143,7 @@ describe("/security", () => {
 	});
 
 	test("disabled command is consumed without touching session state", async () => {
-		settings.override("security.enabled", false);
+		cfgSecurityEnabled.override(settings, false);
 		const result = await command("scans");
 		expect(result).toEqual({ consumed: true });
 		expect(output.at(-1)).toContain("disabled");

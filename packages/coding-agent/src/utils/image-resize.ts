@@ -1,9 +1,13 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 export interface ImageResizeOptions {
 	maxWidth?: number;
 	maxHeight?: number;
-	/** Smallest allowed edge length (px). Inputs below this are scaled up. */
+	/**
+	 * Smallest wanted edge length (px). Inputs below this are scaled up uniformly,
+	 * as far as the caps allow; the aspect ratio is never distorted to reach it.
+	 */
 	minDimension?: number;
 	maxBytes?: number;
 	jpegQuality?: number;
@@ -167,7 +171,9 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 
 	try {
 		const { width: originalWidth, height: originalHeight, format } = await new Bun.Image(inputBuffer).metadata();
-		const sourceMime = img.mimeType ?? `image/${format}`;
+		// Trust decoded bytes over caller metadata. A mislabeled WebP must not take
+		// the fast path when the target decoder explicitly excludes WebP.
+		const sourceMime = format ? `image/${format}` : img.mimeType;
 
 		// Fast path: already within dimensions AND well under budget.
 		// Threshold is 1/4 of budget — if already that compact, don't re-encode.
@@ -213,19 +219,17 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			targetHeight = opts.maxHeight;
 		}
 
-		// Lift undersized inputs up to the minimum. A uniform scale covers the
-		// common case (icons, the 1x1 chart) without distortion; an aspect ratio
-		// too extreme to satisfy both floor and cap falls back to stretching the
-		// lagging edge up to the floor via the default fit:"fill" resize.
+		// Lift undersized inputs toward the minimum with a uniform scale that never
+		// crosses a cap (icons, the 1x1 chart). A strip too wide or tall for both
+		// (a toolbar crop) keeps its aspect ratio and ends with its short edge below
+		// the floor; stretching it would distort what the model sees.
 		if (targetWidth < minDimension || targetHeight < minDimension) {
 			const shortEdge = Math.min(targetWidth, targetHeight);
 			const upscale = Math.min(minDimension / shortEdge, opts.maxWidth / targetWidth, opts.maxHeight / targetHeight);
 			if (upscale > 1) {
-				targetWidth = Math.round(targetWidth * upscale);
-				targetHeight = Math.round(targetHeight * upscale);
+				targetWidth = Math.min(opts.maxWidth, Math.round(targetWidth * upscale));
+				targetHeight = Math.min(opts.maxHeight, Math.round(targetHeight * upscale));
 			}
-			targetWidth = Math.min(opts.maxWidth, Math.max(minDimension, targetWidth));
-			targetHeight = Math.min(opts.maxHeight, Math.max(minDimension, targetHeight));
 		}
 
 		// First-attempt encoder: try PNG and JPEG (+ WebP if not excluded) — return smallest.
@@ -417,4 +421,34 @@ export function formatDimensionNote(result: ResizedImage): string | undefined {
 	}
 	const scale = result.originalWidth / result.width;
 	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
+}
+
+/** Format screenshot metadata and coordinate mapping for tool output. */
+export function formatScreenshot(opts: {
+	saveFullRes: boolean;
+	savedMimeType: string;
+	savedByteLength: number;
+	dest: string;
+	resized: ResizedImage;
+}): string[] {
+	const lines = ["Screenshot captured"];
+	if (opts.saveFullRes) {
+		lines.push(
+			`Saved: ${opts.savedMimeType} (${(opts.savedByteLength / 1024).toFixed(2)} KB) to ${shortenPath(opts.dest)}`,
+		);
+		lines.push(
+			`Model: ${opts.resized.mimeType} (${(opts.resized.buffer.length / 1024).toFixed(2)} KB, ${opts.resized.width}x${opts.resized.height})`,
+		);
+	} else {
+		lines.push(`Format: ${opts.resized.mimeType} (${(opts.resized.buffer.length / 1024).toFixed(2)} KB)`);
+		lines.push(`Dimensions: ${opts.resized.width}x${opts.resized.height}`);
+	}
+	if (opts.resized.decodeFailed) {
+		lines.push("Resize: image decoder failed; using original image bytes");
+	}
+	const dimensionNote = formatDimensionNote(opts.resized);
+	if (dimensionNote) {
+		lines.push(dimensionNote);
+	}
+	return lines;
 }

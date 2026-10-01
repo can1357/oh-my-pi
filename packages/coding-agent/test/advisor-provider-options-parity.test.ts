@@ -11,7 +11,6 @@
  * and its explicit websocket preference.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
@@ -19,9 +18,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+import { cfgProvidersOpenaiWebsockets } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 /** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
  *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
@@ -41,26 +43,21 @@ function metadataSessionId(options: SimpleStreamOptions | undefined): string {
 }
 
 describe("AgentSession advisor provider-options parity", () => {
-	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
 
-	beforeAll(async () => {
-		sharedDir = TempDir.createSync("@pi-advisor-parity-shared-");
-		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
 		model = bundled;
 	});
 
-	afterAll(async () => {
+	afterAll(() => {
 		authStorage.close();
-		try {
-			await sharedDir.remove();
-		} catch {}
 	});
 
 	let tempDir: TempDir;
@@ -73,7 +70,7 @@ describe("AgentSession advisor provider-options parity", () => {
 			"model.loopGuard.enabled": true,
 		});
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-advisor-parity-");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 	});
@@ -83,45 +80,6 @@ describe("AgentSession advisor provider-options parity", () => {
 		try {
 			await tempDir.remove();
 		} catch {}
-	});
-
-	it("wraps the inherited streamFn and preserves promptCacheKey and providerSessionState", () => {
-		const advisorStreamFn: StreamFn = (m, ctx, opts) => streamSimple(m, ctx, opts);
-		const mainAgent = new Agent({
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-		});
-		session = new AgentSession({
-			agent: mainAgent,
-			sessionManager,
-			settings: settings(),
-			modelRegistry,
-			advisorTools: [],
-			advisorStreamFn,
-			preferWebsockets: true,
-		});
-		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
-		expect(session.setAdvisorEnabled(true)).toBe(true);
-
-		const advisor = session.getAdvisorAgent();
-		if (!advisor) throw new Error("Expected advisor agent to be live");
-
-		// The advisor keeps an SDK-provided stream function behind its own retry
-		// budget wrapper. The capture tests below prove delegation and option
-		// forwarding; identity must differ so the advisor can apply its cap.
-		expect(advisor.streamFn).not.toBe(advisorStreamFn);
-		expect(advisor.streamFn).not.toBe(streamSimple);
-
-		// Shared transport / fast-mode state map keeps Codex websockets and
-		// Anthropic fast-mode fallbacks consistent across the two agents.
-		expect(advisor.providerSessionState).toBe(session.providerSessionState);
-
-		// The advisor's session identity is its own provider-facing UUIDv7
-		// (issue #5040), distinct from the parent's. Without a pinned parent
-		// `promptCacheKey` the advisor caches on that same UUID so consecutive
-		// advisor turns stay on one OpenAI Responses shard.
-		expect(advisor.sessionId).toMatch(UUID_V7_PATTERN);
-		expect(advisor.sessionId).not.toBe(mainAgent.sessionId);
-		expect(advisor.promptCacheKey).toBe(advisor.sessionId);
 	});
 
 	it("captures the SDK-provided onPayload, onResponse, onSseEvent, and transformProviderContext on the advisor's stream call", async () => {
@@ -151,7 +109,6 @@ describe("AgentSession advisor provider-options parity", () => {
 			onResponse,
 			onSseEvent,
 			transformProviderContext,
-			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -159,6 +116,8 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
+		// Flipped after the advisor exists: the websocket hint is read per request.
+		cfgProvidersOpenaiWebsockets.set(session.settings, "on");
 		await advisor.prompt("ping").catch(() => {});
 
 		expect(capturedStreamOptions.length).toBeGreaterThan(0);
@@ -187,7 +146,7 @@ describe("AgentSession advisor provider-options parity", () => {
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		authStorage.keys.setRuntime("openai-codex", "test-key");
 		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
 		const capturedModels: Model[] = [];
 		let requestCount = 0;

@@ -8,12 +8,14 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+import { cfgTodoEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 type ObservedPromptCall = {
 	toolChoice: string | undefined;
@@ -80,18 +82,18 @@ describe("AgentSession eager task prelude", () => {
 		tempDir.removeSync();
 	});
 
-	async function createHarness(
+	function createHarness(
 		settingsOverride: Record<string, unknown> = {},
 		agentId?: string,
 		taskWireName?: string,
 		agentKind?: "main" | "sub",
-	): Promise<Harness> {
+	): Harness {
 		const observedCalls: ObservedPromptCall[] = [];
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${harnesses.length}.db`));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${harnesses.length}.yml`));
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -117,7 +119,7 @@ describe("AgentSession eager task prelude", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
-		const todoEnabled = settings.get("todo.enabled") === true;
+		const todoEnabled = cfgTodoEnabled.get(settings) === true;
 		const toolSession: ToolSession = {
 			cwd: tempDir.path(),
 			hasUI: false,
@@ -130,7 +132,6 @@ describe("AgentSession eager task prelude", () => {
 			? [todoTool as unknown as AgentTool, mockTaskTool, mockBashTool]
 			: [mockTaskTool, mockBashTool];
 
-		let session: AgentSession;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -170,7 +171,7 @@ describe("AgentSession eager task prelude", () => {
 		]);
 		if (todoTool) toolRegistry.set(todoTool.name, todoTool as unknown as AgentTool);
 
-		session = new AgentSession({
+		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
@@ -186,7 +187,7 @@ describe("AgentSession eager task prelude", () => {
 	}
 
 	it("prepends a hidden eager task reminder without forcing task or repeating the prompt text", async () => {
-		const { session, observedCalls } = await createHarness();
+		const { session, observedCalls } = createHarness();
 
 		await session.prompt("refactor the parser across modules");
 
@@ -201,7 +202,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("skips eager task prelude for prompts ending with a question mark", async () => {
-		const { session, observedCalls } = await createHarness();
+		const { session, observedCalls } = createHarness();
 
 		await session.prompt("should I refactor the parser?");
 
@@ -211,7 +212,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("skips eager task prelude for prompts ending with an exclamation mark", async () => {
-		const { session, observedCalls } = await createHarness();
+		const { session, observedCalls } = createHarness();
 
 		await session.prompt("refactor the parser now!");
 
@@ -221,7 +222,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("skips eager task prelude for subsequent user messages", async () => {
-		const { session, observedCalls } = await createHarness();
+		const { session, observedCalls } = createHarness();
 
 		await session.prompt("refactor the parser across modules");
 		expect(observedCalls).toHaveLength(1);
@@ -240,7 +241,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("skips eager task prelude when task.eager is disabled", async () => {
-		const { session, observedCalls } = await createHarness({ "task.eager": "default" });
+		const { session, observedCalls } = createHarness({ "task.eager": "default" });
 
 		await session.prompt("refactor the parser across modules");
 
@@ -250,7 +251,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("skips eager task prelude when task.eager is preferred (prompt section only, no reminder)", async () => {
-		const { session, observedCalls } = await createHarness({ "task.eager": "preferred" });
+		const { session, observedCalls } = createHarness({ "task.eager": "preferred" });
 
 		await session.prompt("refactor the parser across modules");
 
@@ -260,7 +261,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("skips eager task prelude for subagent sessions", async () => {
-		const { session, observedCalls } = await createHarness({}, "SubAgent", undefined, "sub");
+		const { session, observedCalls } = createHarness({}, "SubAgent", undefined, "sub");
 
 		await session.prompt("refactor the parser across modules");
 
@@ -270,7 +271,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("prepends eager task prelude for a main session with a custom agent id", async () => {
-		const { session, observedCalls } = await createHarness({}, "Alice", undefined, "main");
+		const { session, observedCalls } = createHarness({}, "Alice", undefined, "main");
 
 		await session.prompt("refactor the parser across modules");
 
@@ -279,7 +280,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("prepends both todo and task preludes when both are eager, keeping the forced todo choice", async () => {
-		const { session, observedCalls } = await createHarness({
+		const { session, observedCalls } = createHarness({
 			"todo.enabled": true,
 			"todo.eager": "always",
 			"todo.reminders": false,
@@ -299,7 +300,7 @@ describe("AgentSession eager task prelude", () => {
 	});
 
 	it("renders the task tool's wire name in the eager reminder", async () => {
-		const { session, observedCalls } = await createHarness({}, undefined, "delegate");
+		const { session, observedCalls } = createHarness({}, undefined, "delegate");
 
 		await session.prompt("refactor the parser across modules");
 

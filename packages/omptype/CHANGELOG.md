@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added `trim()`, `superRefine()`, and one-argument `record()` support to the Zod compatibility facade ([#12011](https://github.com/can1357/oh-my-pi/pull/12011) by [@bnivanov](https://github.com/bnivanov)).
+
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed TypeBox adapter omitting pattern, non-URL format, and multipleOf constraints from the emitted JSON Schema.
+
+## [17.3.0] - 2026-08-13
+
+### Added
+
+- Added `type.withJsonSchema(schema, json)` to wrap a validation-only schema, ensuring JSON Schema emission yields the provided `json` verbatim even when nested inside objects, arrays, or unions. Schemas with defaults or output-changing morphs are rejected to prevent transformed outputs from being discarded.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed

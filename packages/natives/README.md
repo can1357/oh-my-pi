@@ -5,11 +5,12 @@ Native Rust functionality via N-API.
 ## What's Inside
 
 - **Grep**: Regex-based search powered by ripgrep's engine with native file walking and matching
-- **Find**: Glob-based file/directory discovery with gitignore support (pure TypeScript via `globPaths`)
+- **Find**: Native glob-based file/directory discovery with gitignore support
 - **SIXEL**: Terminal image encoding for SIXEL-capable terminals (decode, resize, encode in one pass)
 - **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
 - **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
+- **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
 
 General-purpose image processing (decode/resize/encode for files and buffers)
 lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
@@ -19,7 +20,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { grep, find, encodeSixel } from "@oh-my-pi/pi-natives";
+import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -38,7 +39,19 @@ const files = await find({
 
 // SIXEL encode for a terminal cell box (px)
 const sequence = encodeSixel(pngBytes, widthPx, heightPx);
+
+// Extract PDF text and identify pages that still need OCR
+const pdf = await pdfToMarkdown(pdfBytes);
+console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
+
+### Lazy Windows path helpers
+
+Import `expandWindowsLongPath` and `getWindowsShortPath` from
+`@oh-my-pi/pi-natives/path` when importing a module must not load the native addon.
+The addon loads only when a helper is called on Windows; other platforms preserve
+the input path without loading it. These helpers change long/8.3 spellings without
+resolving symlinks or junctions.
 
 ## Building
 

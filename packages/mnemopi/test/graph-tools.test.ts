@@ -50,6 +50,36 @@ describe("EpisodicGraph CRUD", () => {
 	});
 });
 
+describe("EpisodicGraph gist location extraction", () => {
+	it("captures capitalized proper-noun places and ignores lowercase prose", () => {
+		withGraph(graph => {
+			expect(graph.extractGist("Met Bob in Paris yesterday.", "mem_loc_1").location).toBe("Paris");
+			// Regression for #7917: the /i flag made [A-Z] match lowercase mid-sentence
+			// prose, so ordinary text like "...in your loaded context plus" leaked in as a location.
+			expect(graph.extractGist("We stored the summary in your loaded context plus.", "mem_loc_2").location).toBe(
+				null,
+			);
+		});
+	});
+});
+
+describe("EpisodicGraph non-Latin participants", () => {
+	it("extracts proper nouns from Greek and Cyrillic content (issue #7918)", () => {
+		withGraph(graph => {
+			const greek = graph.extractGist("Ο Βασίλης συνάντησε τη Μαρία στην Αθήνα.", "mem_el");
+			expect(greek.participants).toContain("Βασίλης");
+			expect(greek.participants).toContain("Μαρία");
+
+			const cyrillic = graph.extractGist("Иван встретил Анну в Москве.", "mem_ru");
+			expect(cyrillic.participants).toContain("Иван");
+			expect(cyrillic.participants).toContain("Анну");
+
+			graph.storeGist(greek, "mem_el");
+			expect(graph.findGistsByParticipant("Βασίλης")).toHaveLength(1);
+		});
+	});
+});
+
 describe("EpisodicGraph links and traversal", () => {
 	it("creates idempotent weighted links and traverses neighborhoods", () => {
 		withGraph(graph => {

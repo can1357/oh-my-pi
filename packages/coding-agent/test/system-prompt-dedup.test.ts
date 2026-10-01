@@ -21,6 +21,7 @@ const READ_TOOL = new Map<string, SystemPromptToolMetadata>([
 			label: "Read",
 			description: "Reads files from disk.",
 			parameters: { type: "object", properties: { path: { type: "string" } } },
+			readsSkillUris: true,
 		},
 	],
 ]);
@@ -39,7 +40,11 @@ describe("SYSTEM.md prompt assembly", () => {
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
-	it("renders an absolute cwd beneath the user's home directory", async () => {
+	it("keeps per-request date/cwd out of the system prompt footer", async () => {
+		// The date/cwd line was moved out of the system prompt and onto the first
+		// user turn (#7404): any byte that changes per request at the tail of the
+		// system block invalidates the tool-schema prefix cache on open-weight
+		// providers. The footer must not interpolate the cwd or the date.
 		const projectDir = path.join(os.homedir(), "project");
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: projectDir,
@@ -59,8 +64,9 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		const promptText = systemPrompt.join("\n\n");
 		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
-		// cwd interpolation: the quoted absolute path appears in the footer line.
-		expect(promptText).toContain(`'${normalizedProjectDir}'`);
+		expect(promptText).not.toContain(normalizedProjectDir);
+		expect(promptText).not.toContain("Today");
+		expect(promptText).not.toContain("current working directory");
 	});
 
 	it("renders SYSTEM.md exactly once when it is used as the custom base prompt", async () => {
@@ -156,13 +162,14 @@ describe("SYSTEM.md prompt assembly", () => {
 		});
 
 		const promptText = systemPrompt.join("\n\n");
-		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
 		const appendMatches = promptText.match(new RegExp(escapeRegExp(appendPrompt), "g")) ?? [];
 		expect(systemPrompt).toHaveLength(2);
 		expect(promptText).toContain("CLI custom prompt");
 		expect(promptText).toContain("<workspace-tree>");
 		expect(promptText).toContain("<dir-context>");
-		expect(promptText).toContain(`'${normalizedProjectDir}'`);
+		// The project/environment footer survives even though the date/cwd line was
+		// relocated out of it; <workstation> is rendered only by that footer.
+		expect(promptText).toContain("<workstation>");
 		expect(appendMatches).toHaveLength(1);
 		expect(promptText).not.toContain("Discovered project SYSTEM prompt");
 	});
@@ -170,6 +177,7 @@ describe("SYSTEM.md prompt assembly", () => {
 	it("renders active child repo context in the main system prompt", async () => {
 		const parentDir = path.join(tempDir, "parent-cwd");
 		fs.mkdirSync(path.join(parentDir, "active-project", ".git"), { recursive: true });
+		fs.writeFileSync(path.join(parentDir, "active-project", ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
 
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: parentDir,
@@ -187,8 +195,6 @@ describe("SYSTEM.md prompt assembly", () => {
 		});
 
 		const promptText = systemPrompt.join("\n\n");
-		expect(promptText).toContain("<active-repo-context>");
-		expect(promptText).toContain("`active-project`");
 		expect(promptText).toContain("`active-project/`");
 	});
 

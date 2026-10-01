@@ -24,6 +24,15 @@ afterEach(async () => {
 	clearCustomApis();
 	configureProviderMaxInFlightRequests(undefined);
 	__providerInFlightForTesting.setRoot(undefined);
+	__providerInFlightForTesting.setHeartbeatTimings(undefined);
+	__providerInFlightForTesting.setHeartbeatWriter(undefined);
+	__providerInFlightForTesting.setLeaseRemover(undefined);
+	__providerInFlightForTesting.setWaitObserver(undefined);
+	__providerInFlightForTesting.setLockCreatedObserver(undefined);
+	__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+	__providerInFlightForTesting.setLockMkdirOverride(undefined);
+	__providerInFlightForTesting.setLockPlatformOverride(undefined);
+	__providerInFlightForTesting.setLockRetryTimings(undefined);
 	if (limiterRoot !== undefined) {
 		await fs.rm(limiterRoot, { recursive: true, force: true });
 		limiterRoot = undefined;
@@ -37,6 +46,13 @@ async function useIsolatedLimiterRoot(): Promise<void> {
 
 function limiterDir(provider: string): string {
 	return __providerInFlightForTesting.providerDir(provider);
+}
+function nextLimiterWait(provider = "tests"): Promise<void> {
+	const waiting = Promise.withResolvers<void>();
+	__providerInFlightForTesting.setWaitObserver(waitingProvider => {
+		if (waitingProvider === provider) waiting.resolve();
+	});
+	return waiting.promise;
 }
 
 describe("provider in-flight request limits", () => {
@@ -72,9 +88,9 @@ describe("provider in-flight request limits", () => {
 		const firstResult = first.result();
 		await firstStarted.promise;
 
+		const secondWaiting = nextLimiterWait();
 		const second = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } });
-		await Bun.sleep(20);
-		expect(mock.calls).toHaveLength(1);
+		await secondWaiting;
 
 		releaseFirst.resolve();
 		const [firstMessage, secondMessage] = await Promise.all([firstResult, second.result()]);
@@ -83,6 +99,192 @@ describe("provider in-flight request limits", () => {
 		expect(secondMessage.content).toEqual([{ type: "text", text: "reply 2" }]);
 		expect(maxActive).toBe(1);
 		expect(mock.calls).toHaveLength(2);
+	});
+
+	test("releases its provider lease before reporting terminal completion", async () => {
+		registerMockApi();
+		const removalStarted = Promise.withResolvers<void>();
+		const allowRemoval = Promise.withResolvers<void>();
+		__providerInFlightForTesting.setLeaseRemover(async leasePath => {
+			removalStarted.resolve();
+			await allowRemoval.promise;
+			await fs.rm(leasePath, { recursive: true, force: true });
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const stream = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } });
+		const terminalObserved = Promise.withResolvers<"done" | "error">();
+		const terminalObservation = (async () => {
+			for await (const event of stream) {
+				if (event.type !== "done" && event.type !== "error") continue;
+				terminalObserved.resolve(event.type);
+				return event.type;
+			}
+			return undefined;
+		})();
+		const resultPromise = stream.result();
+		await removalStarted.promise;
+		let terminalCompleted = false;
+		let resultCompleted = false;
+		void terminalObserved.promise.then(() => {
+			terminalCompleted = true;
+		});
+		void resultPromise.then(() => {
+			resultCompleted = true;
+		});
+		await Promise.resolve();
+		expect(terminalCompleted).toBe(false);
+		expect(resultCompleted).toBe(false);
+		allowRemoval.resolve();
+		const [result, terminalType] = await Promise.all([resultPromise, terminalObservation]);
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(terminalType).toBe("done");
+		const entries = await fs.readdir(limiterDir("tests"), { withFileTypes: true });
+		expect(entries.filter(entry => entry.isDirectory())).toHaveLength(0);
+	});
+
+	test("keeps a completed response when provider lease removal fails", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLeaseRemover(async () => {
+			throw Object.assign(new Error("simulated lease removal failure"), { code: "EBUSY" });
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		const entries = await fs.readdir(limiterDir("tests"), { withFileTypes: true });
+		expect(entries.filter(entry => entry.isDirectory())).toHaveLength(1);
+	});
+
+	test("preserves a provider failure when provider lease removal also fails", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLeaseRemover(async () => {
+			throw Object.assign(new Error("simulated lease removal failure"), { code: "EBUSY" });
+		});
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				throw new Error("PROVIDER-ORIGINAL-ERROR");
+			},
+		});
+
+		const outcome = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } })
+			.result()
+			.then(
+				message => message.errorMessage ?? JSON.stringify(message.content),
+				error => String(error),
+			);
+
+		expect(outcome).toContain("PROVIDER-ORIGINAL-ERROR");
+		expect(outcome).not.toContain("simulated lease removal failure");
+	});
+
+	test("does not recreate a released lease when a heartbeat outlives its flush timeout", async () => {
+		registerMockApi();
+		const requestStarted = Promise.withResolvers<void>();
+		const finishRequest = Promise.withResolvers<void>();
+		const heartbeatStarted = Promise.withResolvers<void>();
+		const resumeHeartbeat = Promise.withResolvers<void>();
+		const heartbeatSettled = Promise.withResolvers<void>();
+		let heartbeatWrites = 0;
+		__providerInFlightForTesting.setHeartbeatTimings({ heartbeatMs: 5, heartbeatFlushTimeoutMs: 20 });
+		__providerInFlightForTesting.setHeartbeatWriter(async writeProviderInFlightInfo => {
+			heartbeatWrites++;
+			heartbeatStarted.resolve();
+			await resumeHeartbeat.promise;
+			try {
+				await writeProviderInFlightInfo();
+			} finally {
+				heartbeatSettled.resolve();
+			}
+		});
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				requestStarted.resolve();
+				await finishRequest.promise;
+				return { content: ["reply"] };
+			},
+		});
+
+		const stream = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } });
+		const resultPromise = stream.result();
+		const keepAlive = setInterval(() => {}, 1_000);
+		try {
+			await requestStarted.promise;
+			await heartbeatStarted.promise;
+			finishRequest.resolve();
+			const result = await resultPromise;
+			expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+			const entries = await fs.readdir(limiterDir("tests"), { withFileTypes: true });
+			expect(entries.filter(entry => entry.isDirectory())).toHaveLength(0);
+		} finally {
+			clearInterval(keepAlive);
+			finishRequest.resolve();
+			resumeHeartbeat.resolve();
+		}
+		await heartbeatSettled.promise;
+
+		expect(heartbeatWrites).toBe(1);
+		const entries = await fs.readdir(limiterDir("tests"), { withFileTypes: true });
+		expect(entries.filter(entry => entry.isDirectory())).toHaveLength(0);
+	});
+
+	test("does not refresh a surviving lease after heartbeat shutdown", async () => {
+		registerMockApi();
+		const requestStarted = Promise.withResolvers<void>();
+		const finishRequest = Promise.withResolvers<void>();
+		const heartbeatStarted = Promise.withResolvers<void>();
+		const resumeHeartbeat = Promise.withResolvers<void>();
+		const heartbeatSettled = Promise.withResolvers<void>();
+		__providerInFlightForTesting.setHeartbeatTimings({ heartbeatMs: 5, heartbeatFlushTimeoutMs: 20 });
+		__providerInFlightForTesting.setHeartbeatWriter(async writeProviderInFlightInfo => {
+			heartbeatStarted.resolve();
+			await resumeHeartbeat.promise;
+			try {
+				await writeProviderInFlightInfo();
+			} finally {
+				heartbeatSettled.resolve();
+			}
+		});
+		__providerInFlightForTesting.setLeaseRemover(async () => {
+			throw Object.assign(new Error("simulated lease removal failure"), { code: "EBUSY" });
+		});
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				requestStarted.resolve();
+				await finishRequest.promise;
+				return { content: ["reply"] };
+			},
+		});
+
+		const stream = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } });
+		const resultPromise = stream.result();
+		const keepAlive = setInterval(() => {}, 1_000);
+		let infoPath: string;
+		let infoBeforeLateHeartbeat: string;
+		try {
+			await requestStarted.promise;
+			await heartbeatStarted.promise;
+			finishRequest.resolve();
+			const result = await resultPromise;
+			expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+			const entries = await fs.readdir(limiterDir("tests"), { withFileTypes: true });
+			const lease = entries.find(entry => entry.isDirectory());
+			if (!lease) throw new Error("Expected failed cleanup to leave a provider lease");
+			infoPath = path.join(limiterDir("tests"), lease.name, "info.json");
+			infoBeforeLateHeartbeat = await Bun.file(infoPath).text();
+		} finally {
+			clearInterval(keepAlive);
+			finishRequest.resolve();
+			resumeHeartbeat.resolve();
+		}
+		await heartbeatSettled.promise;
+
+		expect(await Bun.file(infoPath).text()).toBe(infoBeforeLateHeartbeat);
 	});
 
 	test("removes an aborted queued request without dispatching it", async () => {
@@ -133,12 +335,13 @@ describe("provider in-flight request limits", () => {
 
 		const controller = new AbortController();
 		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		const waiting = nextLimiterWait();
 		const stream = streamSimple(mock.model, context(), {
 			maxInFlightRequests: { tests: 1 },
 			signal: controller.signal,
 		});
 
-		await Bun.sleep(150);
+		await waiting;
 		expect(mock.calls).toHaveLength(0);
 
 		await fs.rm(externalLease, { recursive: true, force: true });
@@ -160,12 +363,13 @@ describe("provider in-flight request limits", () => {
 
 		const controller = new AbortController();
 		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		const waiting = nextLimiterWait();
 		const stream = streamSimple(mock.model, context(), {
 			maxInFlightRequests: { tests: 1 },
 			signal: controller.signal,
 		});
 
-		await Bun.sleep(50);
+		await waiting;
 		expect(await Bun.file(path.join(providerDir, ".wakeup")).exists()).toBe(false);
 		expect(mock.calls).toHaveLength(0);
 
@@ -208,12 +412,13 @@ describe("provider in-flight request limits", () => {
 
 		const controller = new AbortController();
 		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		const waiting = nextLimiterWait();
 		const stream = streamSimple(mock.model, context(), {
 			maxInFlightRequests: { tests: 1 },
 			signal: controller.signal,
 		});
 
-		await Bun.sleep(150);
+		await waiting;
 		expect(mock.calls).toHaveLength(0);
 
 		controller.abort(new Error("cancel lock waiter"));
@@ -232,12 +437,13 @@ describe("provider in-flight request limits", () => {
 
 		const controller = new AbortController();
 		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		const waiting = nextLimiterWait();
 		const stream = streamSimple(mock.model, context(), {
 			maxInFlightRequests: { tests: 1 },
 			signal: controller.signal,
 		});
 
-		await Bun.sleep(150);
+		await waiting;
 		expect(mock.calls).toHaveLength(0);
 
 		controller.abort(new Error("cancel partial-info waiter"));
@@ -285,6 +491,79 @@ describe("provider in-flight request limits", () => {
 
 		const remaining = JSON.parse(await Bun.file(path.join(lockDir, "info.json")).text()) as { token: string };
 		expect(remaining.token).toBe("fresh-lock");
+	});
+
+	test("retries when another process removes a newly created lock", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockCreatedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockCreatedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries when another process removes an identified lock before its info write", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockIdentifiedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries transient EPERM from the win32 lock mkdir until the lease is acquired", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLockPlatformOverride("win32");
+		let mkdirAttempts = 0;
+		__providerInFlightForTesting.setLockMkdirOverride(async lockDir => {
+			mkdirAttempts++;
+			if (mkdirAttempts <= 2) {
+				throw Object.assign(new Error("simulated delete-pending lock mkdir"), { code: "EPERM" });
+			}
+			await fs.mkdir(lockDir);
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+		expect(mkdirAttempts).toBe(3);
+	});
+
+	test("rethrows a persistent EPERM lock mkdir failure after the retry budget elapses", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLockPlatformOverride("win32");
+		__providerInFlightForTesting.setLockRetryTimings({ budgetMs: 100, initialDelayMs: 5, maxDelayMs: 10 });
+		let mkdirAttempts = 0;
+		__providerInFlightForTesting.setLockMkdirOverride(async () => {
+			mkdirAttempts++;
+			throw Object.assign(new Error("simulated persistent lock mkdir denial"), { code: "EPERM" });
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const startedAt = Date.now();
+		const request = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+		const outcome = await request.then(
+			() => undefined,
+			(error: unknown) => error as NodeJS.ErrnoException,
+		);
+
+		expect(outcome?.code).toBe("EPERM");
+		expect(outcome?.message).toBe("simulated persistent lock mkdir denial");
+		expect(mkdirAttempts).toBeGreaterThan(1);
+		expect(Date.now() - startedAt).toBeLessThan(2_000);
+		expect(mock.calls).toHaveLength(0);
 	});
 
 	test("does not dispatch when aborted immediately after slot acquisition", async () => {

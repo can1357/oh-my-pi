@@ -1,11 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { NextPromptSuggestionController } from "@oh-my-pi/pi-coding-agent/modes/controllers/next-prompt-suggestion-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import * as theme from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import * as theme from "@oh-my-pi/pi-tui/theme/theme";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";

@@ -1,11 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
 import {
 	alibabaTokenPlanRankingStrategy,
 	alibabaTokenPlanUsageProvider,
 } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
-import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import {
+	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+	serializeAlibabaTokenPlanCredential,
+} from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
 function params(apiKey: string): UsageFetchParams {
 	return {
@@ -102,6 +105,121 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 		expect(windows.secondary?.id).toBe("credits:7d");
 	});
 
+	test("fetches China quota through the Beijing console gateway", async () => {
+		const requests: { url: string; init?: RequestInit }[] = [];
+		const fetchMock: FetchImpl = (input, init) => {
+			requests.push({ url: String(input), init });
+			if (requests.length === 1) {
+				return Promise.resolve(
+					new Response('<script>window.ALIYUN_CONSOLE_CONFIG = { SEC_TOKEN: "cn-sec-token" };</script>'),
+				);
+			}
+			return Promise.resolve(
+				Response.json({
+					code: "200",
+					data: {
+						DataV2: {
+							data: {
+								data: {
+									per1WeekPercentage: 0.7913113,
+									per1WeekResetTime: 1_786_716_480_000,
+								},
+							},
+						},
+					},
+					successResponse: true,
+				}),
+			);
+		};
+		const cookie = "login_aliyunid_csrf=cn-csrf; aliyun_lang=zh";
+		const credential = serializeAlibabaTokenPlanCredential("sk-sp-beijing", cookie, ALIBABA_TOKEN_PLAN_CN_BASE_URL);
+
+		const report = await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock });
+
+		expect(requests).toHaveLength(2);
+		expect(requests[0]?.url).toBe("https://bailian.console.aliyun.com/cn-beijing?tab=plan");
+		expect(new Headers(requests[0]?.init?.headers).get("Cookie")).toBe(cookie);
+		expect(requests[1]?.url).toBe(
+			"https://bailian-cs.console.aliyun.com/data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=zeldaHttp.apikeyMgr.%2Ftokenplan%2Fpersonal%2Fapi%2Fv2%2Fusage",
+		);
+		const usageHeaders = new Headers(requests[1]?.init?.headers);
+		expect(usageHeaders.get("Origin")).toBe("https://bailian.console.aliyun.com");
+		expect(usageHeaders.get("Referer")).toBe("https://bailian.console.aliyun.com/cn-beijing?tab=plan");
+		const body = new URLSearchParams(String(requests[1]?.init?.body));
+		expect(body.get("action")).toBe("BroadScopeAspnGateway");
+		expect(body.get("region")).toBe("cn-beijing");
+		expect(body.get("sec_token")).toBe("cn-sec-token");
+		const gatewayParams: unknown = JSON.parse(body.get("params") ?? "null");
+		expect(gatewayParams).toMatchObject({
+			Api: "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage",
+			Data: {
+				cornerstoneParam: {
+					feTraceId: expect.any(String),
+					feURL: "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/token-plan/personal",
+					protocol: "V2",
+					console: "ONE_CONSOLE",
+					productCode: "p_efm",
+					switchUserType: 3,
+					domain: "bailian.console.aliyun.com",
+					consoleSite: "BAILIAN_ALIYUN",
+					userNickName: "",
+					userPrincipalName: "",
+					xsp_lang: "zh-CN",
+				},
+			},
+			V: "1.0",
+		});
+		expect(gatewayParams).not.toHaveProperty("Data.cornerstoneParam.switchAgent");
+		expect(report).toMatchObject({
+			provider: "alibaba-token-plan",
+			limits: [
+				{
+					id: "credits:7d",
+					window: { id: "7d", durationMs: 604_800_000, resetsAt: 1_786_716_480_000 },
+					amount: { usedFraction: 0.7913113, unit: "percent" },
+				},
+			],
+		});
+		expect(report?.limits).toHaveLength(1);
+	});
+
+	test("warns with the gateway error code when China quota access is rejected", async () => {
+		let requestCount = 0;
+		const fetchMock: FetchImpl = () => {
+			requestCount++;
+			return Promise.resolve(
+				requestCount === 1
+					? new Response('<script>window.ALIYUN_CONSOLE_CONFIG = { SEC_TOKEN: "cn-sec-token" };</script>')
+					: Response.json({
+							code: "200",
+							data: {
+								success: false,
+								httpStatus: 200,
+								errorCode: "BailianGateway.Workspace.NotAuthorised",
+							},
+							successResponse: true,
+						}),
+			);
+		};
+		const warn = mock(() => {});
+		const credential = serializeAlibabaTokenPlanCredential(
+			"sk-sp-beijing",
+			"session_id=test",
+			ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+		);
+
+		expect(
+			await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), {
+				fetch: fetchMock,
+				logger: { warn, debug: () => {} },
+			}),
+		).toBeNull();
+		expect(warn).toHaveBeenCalledWith("Alibaba Token Plan usage request rejected", {
+			provider: "alibaba-token-plan",
+			errorCode: "BailianGateway.Workspace.NotAuthorised",
+		});
+	});
+
 	test("does not claim quota support for API-key-only credentials", async () => {
 		let fetched = false;
 		const fetchMock: FetchImpl = () => {
@@ -113,6 +231,50 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 		expect(alibabaTokenPlanUsageProvider.supports?.(request)).toBe(false);
 		expect(await alibabaTokenPlanUsageProvider.fetchUsage(request, { fetch: fetchMock })).toBeNull();
 		expect(fetched).toBe(false);
+	});
+
+	test("reports the monthly window when the plan exposes only that bucket", async () => {
+		let requestCount = 0;
+		const fetchMock: FetchImpl = () => {
+			requestCount++;
+			return Promise.resolve(
+				requestCount === 1
+					? Response.json({ code: "200", data: { secToken: "sec-token", accountId: "account-1" } })
+					: Response.json({
+							data: {
+								DataV2: {
+									data: {
+										data: {
+											per1MonthPercentage: 0.0104,
+											per1MonthResetTime: 1_800_200_000_000,
+										},
+									},
+								},
+							},
+						}),
+			);
+		};
+		const credential = serializeAlibabaTokenPlanCredential("sk-sp-test", "session_id=test");
+
+		const report = await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock });
+
+		expect(report).toMatchObject({
+			provider: "alibaba-token-plan",
+			limits: [
+				{
+					id: "credits:monthly",
+					scope: { windowId: "monthly" },
+					window: { id: "monthly", label: "Monthly Credits", resetsAt: 1_800_200_000_000 },
+					amount: { usedFraction: 0.0104, unit: "percent" },
+				},
+			],
+		});
+		// The console never states the monthly span, so the window must not claim one.
+		expect(report?.limits[0]?.window?.durationMs).toBeUndefined();
+		// Monthly is display-only: ranking still drives off the burst/weekly windows.
+		const windows = alibabaTokenPlanRankingStrategy.findWindowLimits(report!, { modelId: "qwen3.7-plus" });
+		expect(windows.primary).toBeUndefined();
+		expect(windows.secondary).toBeUndefined();
 	});
 
 	test("fails closed when the stored console session has expired", async () => {

@@ -88,16 +88,46 @@ describe("AIError.classify — structural provider errors", () => {
 		expect(AIError.retriable(id)).toBe(true);
 	});
 
-	it("classifies an empty provider response as transient + retryable", () => {
-		// Regression: "Cloud Code Assist API returned an empty response" matched no
-		// text pattern and empty-body carried no flag, so retry/model-fallback
-		// chains never engaged and the turn hard-failed.
-		const err = new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
-			provider: "google-antigravity",
+	it("keeps a terminal 4xx that wraps a stream-truncation cause terminal", () => {
+		const err = new AIError.ProviderHttpError("Bad Request", 400, { cause: new Error("unexpected EOF") });
+		const id = AIError.classify(err);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("keeps a retryable-status wrapper over a stream-truncation cause transient", () => {
+		for (const wrapped of [
+			new AIError.ProviderHttpError("Service Unavailable", 503, { cause: new Error("unexpected EOF") }),
+			new AIError.ProviderHttpError("Too Many Requests", 429, { cause: new Error("eof while parsing") }),
+		]) {
+			const id = AIError.classify(wrapped);
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
+	it("keeps empty response bodies on the generic transient fallback path", () => {
+		const err = new AIError.ProviderResponseError("Google API returned an empty response body", {
+			provider: "google",
 			kind: "empty-body",
 		});
 		const id = AIError.classify(err);
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.EmptyResponse)).toBe(false);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("classifies thought-only output as transient + empty-response + retryable", () => {
+		const err = new AIError.ProviderResponseError(
+			"Cloud Code Assist API returned a thought-only response without final output",
+			{
+				provider: "google-antigravity",
+				kind: "empty-output",
+			},
+		);
+		const id = AIError.classify(err);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.EmptyResponse)).toBe(true);
 		expect(AIError.retriable(id)).toBe(true);
 	});
 
@@ -127,6 +157,24 @@ describe("AIError.finalize", () => {
 		const result = await AIError.finalize(new AIError.ProviderHttpError("Bad Gateway", 502), {});
 		expect(result.status).toBe(502);
 		expect(AIError.is(result.id, AIError.Flag.Transient)).toBe(true);
+	});
+
+	it("applies a captured terminal 4xx before classifying a truncation error", async () => {
+		const result = await AIError.finalize(new Error("unexpected EOF"), {
+			capturedErrorResponse: { status: 400 },
+		});
+
+		expect(result.status).toBe(400);
+		expect(AIError.is(result.id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(result.id)).toBe(false);
+	});
+
+	it("preserves nested token-overflow evidence through finalization", async () => {
+		const inner = Object.assign(new Error("Error: maximum context length is 128000 tokens"), { status: 413 });
+		const result = await AIError.finalize(new Error("Provider returned error", { cause: inner }));
+
+		expect(AIError.is(result.id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(result.id, AIError.Flag.PayloadRejected)).toBe(false);
 	});
 
 	it("keeps an incomplete-stream provider error retryable through finalize + classifyMessage", async () => {

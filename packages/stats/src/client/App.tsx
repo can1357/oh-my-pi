@@ -1,11 +1,12 @@
 import { useCallback, useRef, useState } from "react";
-import { AppLayout } from "./app/AppLayout";
-import type { DashboardSection } from "./app/routes";
+import type { DashboardSection } from "./app/nav";
+import { Shell } from "./app/Shell";
+import { LiveProvider } from "./data/live";
 import { useHashRoute } from "./data/useHashRoute";
 import {
-	BehaviorRoute,
 	CostsRoute,
 	ErrorsRoute,
+	FrustrationRoute,
 	GainRoute,
 	ModelsRoute,
 	OverviewRoute,
@@ -13,99 +14,66 @@ import {
 	ProvidersRoute,
 	RequestsRoute,
 	ToolsRoute,
+	TracesRoute,
 } from "./routes";
 import { RequestDrawer } from "./ui/RequestDrawer";
 
 export default function App() {
-	const { section, setSection, range, setRange } = useHashRoute();
-	const [refreshTrigger, setRefreshTrigger] = useState(0);
+	return (
+		<LiveProvider>
+			<Dashboard />
+		</LiveProvider>
+	);
+}
+
+function Dashboard() {
+	const { section, setSection, range, setRange, session, setSession } = useHashRoute();
 	const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
-	const [updatedAt, setUpdatedAt] = useState<number | null>(() => Date.now());
-
-	const handleSyncComplete = useCallback((result: { success: boolean }) => {
-		if (result.success) {
-			setRefreshTrigger(prev => prev + 1);
-			setUpdatedAt(Date.now());
-		}
-	}, []);
-
-	// Stable identity so the drawer's effects don't tear down on every App render.
+	// Stable identity so the drawer's effects don't tear down on every render.
 	const closeDrawer = useCallback(() => setSelectedRequestId(null), []);
 
-	const active = section;
+	// Visited pages stay mounted (hidden) so revisits are instant and keep their
+	// scroll-independent UI state; only the active page fetches (`active`).
+	const mounted = useRef(new Set<DashboardSection>());
+	mounted.current.add(section);
 
-	// Keep every visited section mounted and just toggle visibility. Remounting a
-	// route on each navigation replays the chart entry animations (a visible
-	// flicker); keeping it alive makes revisits instant while the live chart
-	// instances still animate in place on data/range updates. Only the active
-	// route fetches/polls (enabled), so hidden routes don't keep hitting the API.
-	const mountedRef = useRef<Set<DashboardSection>>(new Set());
-	mountedRef.current.add(active);
-
-	const renderRoute = (target: DashboardSection) => {
-		const isActive = target === active;
+	const render = (target: DashboardSection) => {
+		const active = target === section;
 		switch (target) {
 			case "overview":
-				return (
-					<OverviewRoute
-						active={isActive}
-						range={range}
-						refreshTrigger={refreshTrigger}
-						onRequestClick={setSelectedRequestId}
-					/>
-				);
+				return <OverviewRoute active={active} range={range} onRequestClick={setSelectedRequestId} />;
 			case "requests":
-				return (
-					<RequestsRoute
-						active={isActive}
-						range={range}
-						refreshTrigger={refreshTrigger}
-						onRequestClick={setSelectedRequestId}
-					/>
-				);
+				return <RequestsRoute active={active} range={range} onRequestClick={setSelectedRequestId} />;
 			case "errors":
-				return (
-					<ErrorsRoute
-						active={isActive}
-						range={range}
-						refreshTrigger={refreshTrigger}
-						onRequestClick={setSelectedRequestId}
-					/>
-				);
+				return <ErrorsRoute active={active} range={range} onRequestClick={setSelectedRequestId} />;
+			case "traces":
+				return <TracesRoute active={active} session={session} onOpenSession={setSession} />;
 			case "models":
-				return <ModelsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return <ModelsRoute active={active} range={range} />;
 			case "providers":
-				return <ProvidersRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
-			case "tools":
-				return <ToolsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return <ProvidersRoute active={active} range={range} />;
 			case "costs":
-				return <CostsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
-			case "behavior":
-				return <BehaviorRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return <CostsRoute active={active} range={range} />;
+			case "tools":
+				return <ToolsRoute active={active} range={range} />;
+			case "frustration":
+				return <FrustrationRoute active={active} range={range} />;
 			case "projects":
-				return <ProjectsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return <ProjectsRoute active={active} range={range} />;
 			case "gain":
-				return <GainRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+				return <GainRoute active={active} range={range} />;
 		}
 	};
 
 	return (
 		<>
-			<AppLayout
-				activeSection={active}
-				onSectionChange={setSection}
-				range={range}
-				onRangeChange={setRange}
-				updatedAt={updatedAt}
-				onSyncComplete={handleSyncComplete}
-			>
-				{[...mountedRef.current].map(target => (
-					<div key={target} hidden={target !== active}>
-						{renderRoute(target)}
+			<Shell section={section} onSectionChange={setSection} range={range} onRangeChange={setRange}>
+				{[...mounted.current].map(target => (
+					<div key={target} hidden={target !== section}>
+						{render(target)}
 					</div>
 				))}
-			</AppLayout>
-
+			</Shell>
 			<RequestDrawer id={selectedRequestId} onClose={closeDrawer} />
 		</>
 	);

@@ -9,6 +9,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { asStrict } from "../providers/aws-sigv4";
 import type { SnapshotResponse } from "./types";
 
 const MAGIC = new Uint8Array([0x4f, 0x4d, 0x50, 0x53]); // "OMPS"
@@ -106,6 +107,34 @@ export async function writeAuthBrokerSnapshotCache(opts: WriteAuthBrokerSnapshot
 	} finally {
 		if (removeTemp) await fs.rm(tmpPath, { force: true }).catch(() => {});
 	}
+	await sweepStaleTempFiles(opts.path);
+}
+/** Temp files older than this are debris from a killed process, never a live write. */
+const STALE_TMP_MAX_AGE_MS = 60 * 60_000;
+
+/**
+ * Remove abandoned `<cache>.<pid>.<hex>.tmp` siblings. Writes are fire-and-forget
+ * from snapshot callbacks, so a process exiting between `open` and `rename`
+ * strands its temp file; without this sweep they accumulate unboundedly.
+ */
+async function sweepStaleTempFiles(cachePath: string): Promise<void> {
+	const dir = path.dirname(cachePath);
+	const prefix = `${path.basename(cachePath)}.`;
+	let names: string[];
+	try {
+		names = await fs.readdir(dir);
+	} catch {
+		return;
+	}
+	const cutoff = Date.now() - STALE_TMP_MAX_AGE_MS;
+	for (const name of names) {
+		if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+		const staleTmp = path.join(dir, name);
+		try {
+			if ((await fs.stat(staleTmp)).mtimeMs > cutoff) continue;
+			await fs.rm(staleTmp, { force: true });
+		} catch {}
+	}
 }
 
 async function encryptCachePayload(snapshot: SnapshotResponse, token: string, url: string): Promise<Uint8Array> {
@@ -180,15 +209,6 @@ function cacheAdditionalData(url: string): Uint8Array<ArrayBuffer> {
 async function deriveAesKey(token: string, usages: Array<"encrypt" | "decrypt">): Promise<CryptoKey> {
 	const digest = await globalThis.crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(token));
 	return globalThis.crypto.subtle.importKey("raw", digest, AES_ALGORITHM, false, usages);
-}
-
-function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-		return bytes as Uint8Array<ArrayBuffer>;
-	}
-	const copy = new Uint8Array(bytes.byteLength);
-	copy.set(bytes);
-	return copy;
 }
 
 function randomHex(byteLength: number): string {

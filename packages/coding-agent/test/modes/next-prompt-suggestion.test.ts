@@ -18,7 +18,8 @@ import {
 	NEXT_PROMPT_MAX_TOKENS,
 	NEXT_PROMPT_SUGGESTION_MAX_CHARS,
 } from "@oh-my-pi/pi-coding-agent/modes/next-prompt-suggestion";
-import { obfuscateMessages, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
+import { obfuscateMessages } from "@oh-my-pi/pi-coding-agent/secrets/message-transform";
+import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 interface GeneratorHarnessOptions {

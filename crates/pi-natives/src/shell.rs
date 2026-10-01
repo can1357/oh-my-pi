@@ -1,6 +1,8 @@
 //! Brush-based shell execution exported via N-API.
 
-use std::{collections::HashMap, sync::Arc};
+pub mod vfs;
+
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use napi::{
 	Env, Result,
@@ -15,7 +17,42 @@ use pi_shell::{
 	execute_shell as core_execute_shell, minimizer,
 };
 
+use self::vfs::ShellFilesystem;
 use crate::task;
+
+/// Expand Windows 8.3 components without resolving symlinks or junctions.
+#[napi]
+#[allow(clippy::missing_const_for_fn, reason = "windows branch calls non-const path helpers")]
+pub fn expand_windows_long_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::expand_to_long_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
+
+/// Get the existing Windows 8.3 spelling; preserve the input when unavailable.
+#[napi]
+#[allow(clippy::missing_const_for_fn, reason = "windows branch calls non-const path helpers")]
+pub fn get_windows_short_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::get_short_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
 
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
@@ -64,7 +101,7 @@ impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 }
 
 /// Options for configuring a persistent shell session.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellOptions {
 	/// Environment variables to apply once per session.
 	pub session_env:   Option<HashMap<String, String>>,
@@ -72,6 +109,8 @@ pub struct ShellOptions {
 	pub snapshot_path: Option<String>,
 	/// Optional per-command output minimizer configuration.
 	pub minimizer:     Option<MinimizerOptions>,
+	/// Filesystem backing every run of this session (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
 }
 
 impl From<ShellOptions> for CoreShellOptions {
@@ -80,12 +119,16 @@ impl From<ShellOptions> for CoreShellOptions {
 			session_env:   value.session_env,
 			snapshot_path: value.snapshot_path,
 			minimizer:     value.minimizer.map(Into::into),
+			filesystem:    value
+				.filesystem
+				.map(ShellFilesystem::into_fs)
+				.unwrap_or_default(),
 		}
 	}
 }
 
 /// Options for running a shell command.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellRunOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:    String,
@@ -97,10 +140,13 @@ pub struct ShellRunOptions<'env> {
 	pub timeout_ms: Option<u32>,
 	/// Abort signal for cancelling the operation.
 	pub signal:     Option<Unknown<'env>>,
+	/// Filesystem for this run only, replacing the session's; the session's
+	/// filesystem applies again to later runs.
+	pub filesystem: Option<ShellFilesystem>,
 }
 
 /// Options for executing a shell command via brush-core.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:       String,
@@ -118,6 +164,8 @@ pub struct ShellExecuteOptions<'env> {
 	pub minimizer:     Option<MinimizerOptions>,
 	/// Abort signal for cancelling the operation.
 	pub signal:        Option<Unknown<'env>>,
+	/// Filesystem backing the command (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
 }
 
 /// Telemetry for a single minimization.
@@ -223,6 +271,7 @@ impl Shell {
 			cwd:        options.cwd,
 			env:        options.env,
 			timeout_ms: options.timeout_ms,
+			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -231,9 +280,7 @@ impl Shell {
 				.await
 				.map(Into::into)
 				.map_err(|err| Error::from_reason(err.to_string()));
-			if let Some(handle) = drain_handle {
-				let _ = handle.await;
-			}
+			await_drain(drain_handle, &result).await;
 			result
 		})
 	}
@@ -254,6 +301,17 @@ impl Shell {
 	#[napi]
 	pub async fn live_background_job_count(&self) -> u32 {
 		self.inner.live_background_job_count().await
+	}
+
+	/// Pids of the still-alive processes spawned by this session's in-flight
+	/// `run`, in spawn order: foreground commands, pipeline stages, and `&`
+	/// jobs started by that run. Builtins run in-process and never appear.
+	/// Empty when no run is executing; children that outlive their run are no
+	/// longer reported once it returns. Synchronous and never waits on the
+	/// running command.
+	#[napi]
+	pub fn pids(&self) -> Vec<i32> {
+		self.inner.pids()
 	}
 }
 
@@ -278,6 +336,10 @@ pub fn execute_shell<'env>(
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
 		minimizer:     options.minimizer.map(Into::into),
+		filesystem:    options
+			.filesystem
+			.map(ShellFilesystem::into_fs)
+			.unwrap_or_default(),
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -285,9 +347,7 @@ pub fn execute_shell<'env>(
 			.await
 			.map(Into::into)
 			.map_err(|err| Error::from_reason(err.to_string()));
-		if let Some(handle) = drain_handle {
-			let _ = handle.await;
-		}
+		await_drain(drain_handle, &result).await;
 		result
 	})
 }
@@ -300,6 +360,19 @@ pub fn execute_shell<'env>(
 /// process memory (#4078).
 const BRIDGE_QUEUE_CHUNKS: usize = 64;
 
+/// Maximum time a single chunk-forwarding `call_async` may take before the
+/// pump treats the JS consumer as wedged and disconnects the bridge.
+///
+/// A healthy consumer runs each callback in microseconds; a slow-but-alive one
+/// still returns per chunk, resetting this deadline, so output is never dropped
+/// from a consumer that is merely behind. This bound only fires when a single
+/// napi callback never returns — the wedge that otherwise leaves the bridge
+/// queue full, the pipe reader parked on `send_async`, and the child blocked in
+/// `write(2)` so it never exits and the run never settles (#12657). 30s is far
+/// beyond any legitimate per-callback latency while still recovering a stranded
+/// background job in bounded time.
+const FORWARD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn bridge_chunks(
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 ) -> (Option<flume::Sender<String>>, Option<napi::tokio::task::JoinHandle<()>>) {
@@ -307,23 +380,29 @@ fn bridge_chunks(
 		return (None, None);
 	};
 	let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
-	let handle = napi::tokio::spawn(pump_chunks(rx, async move |payload: String| {
-		// `call_async` resolves only after the JS callback ran, so at most
-		// one batch sits in the napi queue at a time and the JS event loop's
-		// actual consumption rate backpressures the whole pipeline. An error
-		// means the JS side is gone (env teardown) — stop forwarding.
-		on_chunk.call_async(Ok(payload)).await.is_ok()
-	}));
+	let handle =
+		napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async move |payload: String| {
+			// `call_async` resolves only after the JS callback ran, so at most
+			// one batch sits in the napi queue at a time and the JS event loop's
+			// actual consumption rate backpressures the whole pipeline. An error
+			// means the JS side is gone (env teardown) — stop forwarding.
+			on_chunk.call_async(Ok(payload)).await.is_ok()
+		}));
 	(Some(tx), Some(handle))
 }
 
 /// Drain `rx`, greedily coalescing queued chunks into ≤64 KiB batches, and
 /// feed each batch to `forward`, awaiting its completion before pulling more.
-/// Returns when `rx` disconnects (all senders dropped) or `forward` reports
-/// the consumer is gone; dropping `rx` then disconnects the channel so
-/// parked/future senders fail fast and the pipe readers keep draining the
-/// child instead of wedging it.
-async fn pump_chunks(rx: flume::Receiver<String>, mut forward: impl AsyncFnMut(String) -> bool) {
+/// Returns when `rx` disconnects (all senders dropped), when `forward` reports
+/// the consumer is gone, or when a single `forward` stalls past `stall_timeout`
+/// (a wedged JS consumer). In every case dropping `rx` disconnects the channel
+/// so parked/future senders fail fast and the pipe readers keep draining the
+/// child instead of wedging it (#12657).
+async fn pump_chunks(
+	rx: flume::Receiver<String>,
+	stall_timeout: Duration,
+	mut forward: impl AsyncFnMut(String) -> bool,
+) {
 	// Hard cap on one coalesced batch so the JS main thread never sees a
 	// multi-MB napi callback (a giant single string would stall sanitize +
 	// tail-buffer maintenance for the whole copy).
@@ -346,15 +425,63 @@ async fn pump_chunks(rx: flume::Receiver<String>, mut forward: impl AsyncFnMut(S
 			}
 		}
 		let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-		if !forward(payload).await {
-			return;
+		// A single napi `call_async` that never returns (a wedged JS consumer)
+		// must not park the pump forever: that keeps the bridge queue full, the
+		// pipe reader parked on `send_async`, and the child blocked in `write(2)`
+		// so it never exits and the run never settles (#12657). Bound each
+		// forward; on a stall, return so `rx` drops and the bridge disconnects,
+		// unblocking the reader and child. The deadline resets per forward, so a
+		// slow-but-progressing consumer still drains losslessly.
+		match napi::tokio::time::timeout(stall_timeout, forward(payload)).await {
+			Ok(true) => {},
+			Ok(false) | Err(_) => return,
 		}
+	}
+}
+
+/// Upper bound on how long to wait for the chunk-forwarding pump after an
+/// interrupted run resolves. Native cancellation may detach a pipe reader whose
+/// sender never closes when a grandchild inherited stdout; waiting for channel
+/// disconnect would then wedge the run promise past its requested timeout
+/// (#10308). Successful and failed runs remain unbounded so every chunk already
+/// accepted by the bridge reaches JavaScript before the result resolves.
+const INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Finish forwarding accepted output after a native shell run resolves.
+///
+/// Normal completion and errors drain without a deadline to preserve every
+/// accepted chunk. Cancellation and timeout are bounded because an orphaned
+/// pipe reader can otherwise keep a sender alive forever; aborting the pump
+/// drops its `flume::Receiver`, disconnecting that reader.
+async fn await_drain(
+	handle: Option<napi::tokio::task::JoinHandle<()>>,
+	result: &Result<ShellRunResult>,
+) {
+	let Some(mut handle) = handle else {
+		return;
+	};
+	if !matches!(result, Ok(result) if result.cancelled || result.timed_out) {
+		let _ = handle.await;
+		return;
+	}
+	if napi::tokio::time::timeout(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT, &mut handle)
+		.await
+		.is_err()
+	{
+		handle.abort();
+		let _ = handle.await;
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
+	use std::{
+		sync::{
+			Arc,
+			atomic::{AtomicBool, Ordering},
+		},
+		time::Duration,
+	};
 
 	use flume;
 	use pi_shell::{
@@ -363,7 +490,10 @@ mod tests {
 	};
 	use tokio::time;
 
-	use super::{BRIDGE_QUEUE_CHUNKS, CoreShell, pump_chunks};
+	use super::{
+		BRIDGE_QUEUE_CHUNKS, CoreShell, FORWARD_STALL_TIMEOUT, INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT,
+		ShellRunResult, await_drain, pump_chunks,
+	};
 
 	/// Regression for #4078: the reader→JS bridge queue must stay bounded when
 	/// the JS side (here: a deliberately slow `forward`) cannot keep up with a
@@ -394,7 +524,7 @@ mod tests {
 		let mut received = String::with_capacity(CHUNKS * CHUNK_BYTES);
 		time::timeout(
 			Duration::from_secs(30),
-			pump_chunks(rx, async |payload: String| {
+			pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |payload: String| {
 				received.push_str(&payload);
 				// Emulate a busy JS event loop: each napi callback takes a while.
 				time::sleep(Duration::from_micros(500)).await;
@@ -420,7 +550,8 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn bridge_pump_death_disconnects_channel_without_blocking_senders() {
 		let (tx, rx) = flume::bounded::<String>(4);
-		let pump = tokio::spawn(pump_chunks(rx, async |_payload: String| false));
+		let pump =
+			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| false));
 		let producer = tokio::spawn(async move {
 			let mut disconnected = 0usize;
 			for _ in 0..64 {
@@ -441,6 +572,116 @@ mod tests {
 			.expect("pump task");
 	}
 
+	/// A successful run must wait for every accepted bridge chunk even when a
+	/// slow JavaScript consumer takes longer than the interrupted-run bound.
+	/// Bounding this path reports success while silently dropping queued output.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn await_drain_preserves_slow_output_after_success() {
+		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
+		let forwarded = Arc::new(AtomicBool::new(false));
+		let observed = Arc::clone(&forwarded);
+		let handle = napi::tokio::spawn(pump_chunks(
+			rx,
+			FORWARD_STALL_TIMEOUT,
+			async move |_payload: String| {
+				time::sleep(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_millis(100)).await;
+				observed.store(true, Ordering::Release);
+				true
+			},
+		));
+		tx.send("accepted".to_string())
+			.expect("pump should be connected");
+		drop(tx);
+		let result = Ok(ShellRunResult {
+			exit_code:   Some(0),
+			cancelled:   false,
+			timed_out:   false,
+			minimized:   None,
+			working_dir: None,
+		});
+
+		time::timeout(
+			INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_secs(2),
+			await_drain(Some(handle), &result),
+		)
+		.await
+		.expect("successful completion must drain slow accepted output");
+		assert!(
+			forwarded.load(Ordering::Acquire),
+			"accepted output was dropped before success returned"
+		);
+	}
+
+	/// Regression for #10308: a grandchild that inherits the stdout pipe keeps a
+	/// pipe-reader task alive after an interrupted run resolves, so one
+	/// bridge-queue sender is never dropped and `pump_chunks` never sees channel
+	/// disconnect. `await_drain` must return after the interrupted-run bound and
+	/// abort the pump instead of wedging the native promise forever.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn await_drain_returns_when_a_reader_orphans_a_sender_after_timeout() {
+		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
+		let orphan = tx.clone();
+		let handle =
+			napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| true));
+		drop(tx);
+		let result = Ok(ShellRunResult {
+			exit_code:   None,
+			cancelled:   false,
+			timed_out:   true,
+			minimized:   None,
+			working_dir: None,
+		});
+		let started = time::Instant::now();
+		time::timeout(
+			INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_secs(2),
+			await_drain(Some(handle), &result),
+		)
+		.await
+		.expect("await_drain must return when an interrupted reader orphans a sender");
+		assert!(
+			started.elapsed() >= INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT,
+			"await_drain returned before its bound; the drain was not actually blocked",
+		);
+		// The pump was aborted, so its receiver is dropped: the orphaned sender
+		// now observes a disconnected channel instead of parking forever.
+		assert!(
+			orphan.send("late".to_string()).is_err(),
+			"aborting the pump must disconnect the channel"
+		);
+	}
+
+	/// Regression for #12657: a single chunk-forward that never returns (a
+	/// wedged JS `call_async` while the child still has megabytes buffered) must
+	/// not park the pump forever. The pump abandons the stalled forward after
+	/// `stall_timeout` and returns, dropping `rx` so the pipe reader parked on a
+	/// full bridge disconnects, the child unblocks and exits, and the run
+	/// settles instead of stranding as `running`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pump_disconnects_when_a_single_forward_wedges() {
+		const STALL: Duration = Duration::from_millis(100);
+		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
+		// Prime one chunk so the pump enters `forward`, which then wedges.
+		tx.send("first".to_string()).expect("send primes the pump");
+		let started = time::Instant::now();
+		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, async |_payload: String| {
+			std::future::pending::<bool>().await
+		}));
+		time::timeout(STALL + Duration::from_secs(5), pump)
+			.await
+			.expect("pump must return after the per-forward stall deadline")
+			.expect("pump task");
+		assert!(
+			started.elapsed() >= STALL,
+			"pump returned before its stall deadline; the forward was not actually blocked",
+		);
+		// The pump dropped `rx`, so a pipe reader's send now fails fast instead
+		// of parking forever — the deadlock breaker.
+		assert!(
+			tx.send_async("late".to_string()).await.is_err(),
+			"the wedged pump must disconnect the bridge so the pipe reader unblocks",
+		);
+	}
+
 	mod child_session_action_tests {
 		use pi_shell::{ChildSessionAction, child_session_action};
 
@@ -453,8 +694,8 @@ mod tests {
 		#[test]
 		fn non_terminal_stdin_detaches_regardless_of_pipeline() {
 			assert_eq!(child_session_action(true, false, false), ChildSessionAction::DetachSession);
-			// A leading-new-pgroup stage of a pipeline still detaches: setsid keeps
-			// it off the host's controlling tty.
+			// A leading-new-pgroup stage of a pipeline still detaches: setsid
+			// keeps it off the host's controlling tty.
 			assert_eq!(child_session_action(true, false, true), ChildSessionAction::DetachSession);
 		}
 
@@ -477,7 +718,8 @@ mod tests {
 		fn pipeline_stage_with_non_terminal_stdin_detaches() {
 			// Regression: an interactive child inside a pipeline (`zsh -i | awk`)
 			// must not stay in the host session and seize its tty. Pre-fix this
-			// returned `None`, leaving the stage attached and able to SIGTTIN the host.
+			// returned `None`, leaving the stage attached and able to SIGTTIN the
+			// host.
 			assert_eq!(child_session_action(false, false, true), ChildSessionAction::DetachSession);
 		}
 	}
@@ -491,10 +733,11 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
+						command:    "sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
+						filesystem: None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -542,6 +785,7 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
+						filesystem: None,
 					},
 					None,
 					cancel,
@@ -563,28 +807,50 @@ mod tests {
 	async fn timeout_drains_pipeline_output_before_stopping_reader() {
 		let shell = CoreShell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
-		// `tail` runs as an in-process builtin, so cancellation kills only the
-		// external `yes`; tail then sees EOF and flushes its final 5 lines into
-		// the post-cancel reader grace window. The deadline must be generous
-		// enough that `yes` has demonstrably spawned and produced before the
-		// timeout fires — a 50ms budget lost that race on cold CI runners and
-		// tail flushed an empty ring buffer.
-		const TIMEOUT_MS: u32 = 750;
-		let result = shell
-			.run(
-				CoreShellRunOptions {
-					command:    "yes x | tail -5".to_string(),
-					cwd:        None,
-					env:        None,
-					timeout_ms: Some(TIMEOUT_MS),
-				},
-				Some(tx),
-				CancelToken::new(Some(TIMEOUT_MS)),
-			)
-			.await
-			.expect("shell run");
-
+		// The producer writes five lines, signals readiness on stderr, then
+		// holds the pipe open. `tail` flushes its buffered lines only after
+		// timeout cancellation stops that producer. Waiting for readiness avoids
+		// cancelling before the producer starts under concurrent CI load.
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let handle = tokio::spawn(async move {
+			shell
+				.run(
+					CoreShellRunOptions {
+						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; printf 'READY\\n' >&2; sleep 30; \
+						             } | tail -5"
+							.to_string(),
+						cwd:        None,
+						env:        None,
+						timeout_ms: None,
+						filesystem: None,
+					},
+					Some(tx),
+					cancel,
+				)
+				.await
+		});
 		let mut output = String::new();
+		time::timeout(Duration::from_secs(10), async {
+			while !output.contains("READY") {
+				output.push_str(
+					&rx.recv_async()
+						.await
+						.expect("shell output closed before readiness"),
+				);
+			}
+		})
+		.await
+		.expect("producer did not become ready");
+		// Give the downstream builtin a turn to consume the queued pipe data
+		// before cancellation closes the producer.
+		time::sleep(Duration::from_millis(200)).await;
+		abort.abort(AbortReason::Timeout);
+		let result = time::timeout(Duration::from_secs(10), handle)
+			.await
+			.expect("shell run did not stop after timeout")
+			.expect("shell task panicked")
+			.expect("shell run");
 		while let Ok(chunk) = rx.recv_async().await {
 			output.push_str(&chunk);
 		}

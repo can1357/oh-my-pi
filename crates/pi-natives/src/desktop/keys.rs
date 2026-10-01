@@ -60,7 +60,7 @@ impl KeyName {
 		matches!(self, Self::Ctrl | Self::Alt | Self::Shift | Self::Meta)
 	}
 
-	#[cfg(any(target_os = "macos", target_os = "windows"))]
+	#[cfg(target_os = "windows")]
 	pub(crate) const fn to_enigo(self) -> enigo::Key {
 		use enigo::Key;
 		match self {
@@ -74,10 +74,7 @@ impl KeyName {
 			Self::Space => Key::Space,
 			Self::Backspace => Key::Backspace,
 			Self::Delete => Key::Delete,
-			#[cfg(target_os = "windows")]
 			Self::Insert => Key::Insert,
-			#[cfg(target_os = "macos")]
-			Self::Insert => Key::Other(0x72),
 			Self::Home => Key::Home,
 			Self::End => Key::End,
 			Self::PageUp => Key::PageUp,
@@ -87,14 +84,8 @@ impl KeyName {
 			Self::Left => Key::LeftArrow,
 			Self::Right => Key::RightArrow,
 			Self::CapsLock => Key::CapsLock,
-			#[cfg(target_os = "windows")]
 			Self::NumLock => Key::Numlock,
-			#[cfg(target_os = "macos")]
-			Self::NumLock => Key::Other(0x47),
-			#[cfg(target_os = "windows")]
 			Self::PrintScreen => Key::PrintScr,
-			#[cfg(target_os = "macos")]
-			Self::PrintScreen => Key::Other(0x69),
 			Self::F1 => Key::F1,
 			Self::F2 => Key::F2,
 			Self::F3 => Key::F3,
@@ -115,22 +106,10 @@ impl KeyName {
 			Self::F18 => Key::F18,
 			Self::F19 => Key::F19,
 			Self::F20 => Key::F20,
-			#[cfg(target_os = "windows")]
 			Self::F21 => Key::F21,
-			#[cfg(target_os = "windows")]
 			Self::F22 => Key::F22,
-			#[cfg(target_os = "windows")]
 			Self::F23 => Key::F23,
-			#[cfg(target_os = "windows")]
 			Self::F24 => Key::F24,
-			#[cfg(target_os = "macos")]
-			Self::F21 => Key::Other(0x6e),
-			#[cfg(target_os = "macos")]
-			Self::F22 => Key::Other(0x6f),
-			#[cfg(target_os = "macos")]
-			Self::F23 => Key::Other(0x70),
-			#[cfg(target_os = "macos")]
-			Self::F24 => Key::Other(0x71),
 			Self::Char(character) => Key::Unicode(character),
 		}
 	}

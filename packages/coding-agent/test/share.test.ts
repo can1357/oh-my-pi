@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SessionData } from "../src/export/html";
 import {
 	buildShareSnapshot,
@@ -12,6 +14,8 @@ import type { SessionEntry } from "../src/session/session-entries";
 import type { SessionManager } from "../src/session/session-manager";
 
 const IV_LENGTH = 12;
+const TEST_MAX_SEALED_BYTES = 4_000;
+const CLI_ENTRY = path.join(import.meta.dir, "..", "src", "cli.ts");
 
 async function makeKey(): Promise<CryptoKey> {
 	const bytes = new Uint8Array(32);
@@ -66,14 +70,14 @@ describe("sealToFit", () => {
 	test("trims oversized text into budget without dropping entries", async () => {
 		const key = await makeKey();
 		const data = sessionData(
-			[messageEntry("e1", null, "keep me"), messageEntry("e2", "e1", randomHex(1_500_000))],
+			[messageEntry("e1", null, "keep me"), messageEntry("e2", "e1", randomHex(10_000))],
 			"e2",
 		);
 
-		const { sealed, truncated } = await sealToFit(key, data, SERVER_MAX_SEALED_BYTES);
+		const { sealed, truncated } = await sealToFit(key, data, TEST_MAX_SEALED_BYTES);
 
 		expect(truncated).toBe(true);
-		expect(sealed.byteLength).toBeLessThanOrEqual(SERVER_MAX_SEALED_BYTES);
+		expect(sealed.byteLength).toBeLessThanOrEqual(TEST_MAX_SEALED_BYTES);
 		const opened = await open(key, sealed);
 		expect(opened.entries).toHaveLength(2);
 		expect(opened.leafId).toBe("e2");
@@ -92,13 +96,13 @@ describe("sealToFit", () => {
 				role: "user",
 				content: [
 					{ type: "text", text: "see screenshot" },
-					{ type: "image", data: randomHex(800_000), mimeType: "image/png" },
+					{ type: "image", data: randomHex(2_000), mimeType: "image/png" },
 				],
 			},
 		} as unknown as SessionEntry;
 		const data = sessionData([imageEntry], "img");
 
-		const { sealed, truncated } = await sealToFit(key, data, SERVER_MAX_SEALED_BYTES);
+		const { sealed, truncated } = await sealToFit(key, data, TEST_MAX_SEALED_BYTES);
 
 		expect(truncated).toBe(true);
 		const flat = JSON.stringify(await open(key, sealed));
@@ -588,5 +592,33 @@ describe("shareSession", () => {
 		} finally {
 			server.stop(true);
 		}
+	});
+});
+
+describe("share command", () => {
+	test("rejects a missing path without creating or uploading a session", async () => {
+		using tempDir = TempDir.createSync("@omp-share-missing-");
+		const sessionArg = "./ghost.jsonl";
+		const missingSession = path.join(tempDir.path(), "ghost.jsonl");
+		const proc = Bun.spawn([process.execPath, CLI_ENTRY, "share", sessionArg], {
+			cwd: tempDir.path(),
+			env: {
+				...process.env,
+				NO_COLOR: "1",
+				PI_CODING_AGENT_DIR: path.join(tempDir.path(), "agent"),
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+
+		expect(exitCode).toBe(1);
+		expect(stdout).toBe("");
+		expect(stderr).toBe(`Session "${sessionArg}" not found.\n`);
+		expect(await Bun.file(missingSession).exists()).toBe(false);
 	});
 });

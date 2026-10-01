@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { realpathSync } from "node:fs";
 import { symlink, unlink } from "node:fs/promises";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -10,16 +10,17 @@ import { loadSessionExtensions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 let tempDir: TempDir;
 let authStorage: AuthStorage;
 
-beforeEach(async () => {
+beforeAll(async () => {
 	tempDir = await TempDir.create("@cli-explicit-extension-isolation-");
-	authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+	authStorage = createInMemoryAuthStorage();
 });
 
-afterEach(async () => {
+afterAll(async () => {
 	authStorage.close();
 	await tempDir.remove();
 });
@@ -37,20 +38,7 @@ test("buildSessionOptions retains explicit extensions and hooks under --no-exten
 	expect(options.additionalExtensionPaths).toEqual([extensionPath, hookPath]);
 });
 
-test("buildSessionOptions uses trusted extensions as the exact module allowlist", async () => {
-	const trustedPath = tempDir.join("trusted.ts");
-	await Bun.write(trustedPath, "export default function () {}");
-	const parsed = parseArgs(["--trusted-extension", trustedPath]);
-	const settings = Settings.isolated();
-	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-
-	const options = await buildSessionOptions(parsed, [], SessionManager.inMemory(), modelRegistry, settings);
-
-	expect(options.disableExtensionDiscovery).toBe(true);
-	expect(options.additionalExtensionPaths).toEqual([realpathSync.native(trustedPath)]);
-});
-
-test("trusted file symlinks cannot be retargeted to expand a directory", async () => {
+test("trusted extension allowlists are canonical and cannot be expanded by retargeting a symlink", async () => {
 	const trustedTarget = tempDir.join("trusted-target.ts");
 	const replacementDir = tempDir.join("replacement");
 	const trustedLink = tempDir.join("trusted.ts");
@@ -62,6 +50,9 @@ test("trusted file symlinks cannot be retargeted to expand a directory", async (
 	const settings = Settings.isolated();
 	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 	const options = await buildSessionOptions(parsed, [], SessionManager.inMemory(), modelRegistry, settings);
+
+	expect(options.disableExtensionDiscovery).toBe(true);
+	expect(options.additionalExtensionPaths).toEqual([realpathSync.native(trustedTarget)]);
 
 	await unlink(trustedLink);
 	await symlink(replacementDir, trustedLink);

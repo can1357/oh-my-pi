@@ -49,12 +49,12 @@ describe("OAuthCallbackFlow port fallback policy", () => {
 	it("falls back to a random port by default so historical AI-provider flows keep working", async () => {
 		const blocker = occupyLoopbackPort();
 		const progress: string[] = [];
+		const controller = new AbortController();
 		const flow = new TestCallbackFlow(
 			{
-				onAuth: () => {},
+				onAuth: () => controller.abort(new Error("redirect URI observed")),
 				onProgress: msg => progress.push(msg),
-				// Short abort — we only care that the flow advertised the fallback URI.
-				signal: AbortSignal.timeout(100),
+				signal: controller.signal,
 			},
 			{ preferredPort: blocker.port },
 		);

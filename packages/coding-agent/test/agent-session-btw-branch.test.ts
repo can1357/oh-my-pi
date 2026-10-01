@@ -88,9 +88,9 @@ describe("AgentSession.branchFromBtw", () => {
 		const sessionManager =
 			options?.persisted === false ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -141,7 +141,12 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(result.sessionFile).not.toBe(originalFile);
 		expect(fs.readFileSync(originalFile!, "utf8")).toBe(originalRaw);
 		const messages = activeSession.messages;
-		expect(messages.at(-2)).toMatchObject({ role: "user", content: [{ type: "text", text: "why did this fail?" }] });
+		// The promoted question is the user's own words, so it must carry the user's attribution.
+		expect(messages.at(-2)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "why did this fail?" }],
+			attribution: "user",
+		});
 		const promoted = messages.at(-1);
 		expect(promoted?.role).toBe("assistant");
 		if (promoted?.role !== "assistant") throw new Error("Expected promoted assistant message");
@@ -319,7 +324,7 @@ describe("AgentSession.branchFromBtw", () => {
 		const bashPromise = activeSession.executeBash('bun -e "await Bun.sleep(60_000)"', () => undefined, {
 			useUserShell: false,
 		});
-		while (!activeSession.isBashRunning) await Bun.sleep(1);
+		expect(activeSession.isBashRunning).toBe(true);
 
 		await expect(
 			activeSession.branchFromBtw(

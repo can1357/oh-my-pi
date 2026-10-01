@@ -3,12 +3,13 @@
  */
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
-import { estimateTokens } from "./compaction";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import {
 	collectToolCallsById,
+	getToolResultMessage,
 	isProtectedToolResult,
 	isSkillReadToolResult,
 	type ProtectedToolMatcher,
@@ -61,6 +62,34 @@ export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 export interface PruneResult {
 	prunedCount: number;
 	tokensSaved: number;
+	/**
+	 * Restore every result this pass blanked. Pruning mutates entries in place,
+	 * so a caller whose persistence of the pruned history fails calls this to keep
+	 * memory matching what is durable.
+	 */
+	undo(): void;
+}
+
+const NOTHING_PRUNED: PruneResult = { prunedCount: 0, tokensSaved: 0, undo: () => {} };
+
+/** Blank `message` to `notice`, returning the step that restores it. */
+function blankToolResult(message: ToolResultMessage, notice: string, prunedAt: number): () => void {
+	const { content, prunedAt: previousPrunedAt } = message;
+	message.content = [{ type: "text", text: notice }];
+	message.prunedAt = prunedAt;
+	invalidateMessageCache(message as AgentMessage);
+	return () => {
+		message.content = content;
+		message.prunedAt = previousPrunedAt;
+		invalidateMessageCache(message as AgentMessage);
+	};
+}
+
+/** Combine per-message restore steps into one {@link PruneResult.undo}. */
+function undoAll(steps: Array<() => void>): () => void {
+	return () => {
+		for (const step of steps) step();
+	};
 }
 
 /** Exact placeholder written over a superseded tool result. */
@@ -120,14 +149,7 @@ function createPrunedNotice(tokens: number): string {
  * own rules: useless already drops no-savings candidates, superseded prunes for
  * correctness regardless of size.
  */
-const MIN_PRUNE_TOKENS = 50;
-
-function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefined {
-	if (entry.type !== "message") return undefined;
-	const message = entry.message as AgentMessage;
-	if (message.role !== "toolResult") return undefined;
-	return message as ToolResultMessage;
-}
+export const MIN_PRUNE_TOKENS = 50;
 
 function estimatePrunedSavings(tokens: number, notice: string): number {
 	const noticeTokens = Math.ceil(notice.length / 4);
@@ -140,13 +162,14 @@ function estimatePrunedSavings(tokens: number, notice: string): number {
  * (cacheWrite premium) if that entry is mutated in place. Used to keep prune
  * mutations inside the cheap-to-recache tail.
  */
-function computeMessageSuffixTokens(entries: readonly SessionEntry[]): number[] {
+function computeMessageSuffixTokens(entries: readonly SessionEntry[], tokenizer: Tokenizer): number[] {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const suffix = new Array<number>(entries.length);
 	let accumulated = 0;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		suffix[i] = accumulated;
 		const entry = entries[i];
-		if (entry.type === "message") accumulated += estimateTokens(entry.message as AgentMessage);
+		if (entry.type === "message") accumulated += tokenizer.countMessage(entry.message as AgentMessage);
 	}
 	return suffix;
 }
@@ -181,6 +204,7 @@ interface SupersedeCandidate {
  */
 function collectSupersededResults(
 	entries: readonly SessionEntry[],
+	tokenizer: Tokenizer,
 	toolCallsById: ReadonlyMap<string, AgentToolCall>,
 	supersedeKey: SupersedeKeyFn,
 	protectedTools: readonly ProtectedToolMatcher[],
@@ -204,7 +228,7 @@ function collectSupersededResults(
 			entry: entry as SessionMessageEntry,
 			message,
 			index: i,
-			tokens: estimateTokens(message as AgentMessage),
+			tokens: tokenizer.countMessage(message as AgentMessage),
 			notice: SUPERSEDED_NOTICE,
 		});
 	}
@@ -219,6 +243,7 @@ function collectSupersededResults(
  */
 function collectUselessResults(
 	entries: readonly SessionEntry[],
+	tokenizer: Tokenizer,
 	toolCallsById: ReadonlyMap<string, AgentToolCall>,
 	protectedTools: readonly ProtectedToolMatcher[],
 	exclude: ReadonlySet<ToolResultMessage>,
@@ -230,7 +255,7 @@ function collectUselessResults(
 		if (message?.useless !== true || message.prunedAt !== undefined || message.isError === true) continue;
 		if (exclude.has(message)) continue;
 		if (isProtectedToolResult(message, toolCallsById.get(message.toolCallId), protectedTools)) continue;
-		const tokens = estimateTokens(message as AgentMessage);
+		const tokens = tokenizer.countMessage(message as AgentMessage);
 		if (estimatePrunedSavings(tokens, USELESS_NOTICE) <= 0) continue;
 		candidates.push({ entry: entry as SessionMessageEntry, message, index: i, tokens, notice: USELESS_NOTICE });
 	}
@@ -246,17 +271,21 @@ function collectUselessResults(
  * the provider cache is cold anyway (then all still-sent candidates flush).
  * Never mutates entries before `keepBoundaryId` (summarized away — not sent).
  */
-export function pruneSupersededToolResults(entries: SessionEntry[], config: SupersedePruneConfig): PruneResult {
+export function pruneSupersededToolResults(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: SupersedePruneConfig,
+): PruneResult {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
-		? collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools)
+		? collectSupersededResults(entries, tokenizer, toolCallsById, config.supersedeKey, config.protectedTools)
 		: [];
 	if (config.pruneUseless) {
 		const exclude = new Set(candidates.map(candidate => candidate.message));
-		candidates.push(...collectUselessResults(entries, toolCallsById, config.protectedTools, exclude));
+		candidates.push(...collectUselessResults(entries, tokenizer, toolCallsById, config.protectedTools, exclude));
 		candidates.sort((a, b) => a.index - b.index);
 	}
-	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+	if (candidates.length === 0) return NOTHING_PRUNED;
 
 	const now = config.now ?? Date.now();
 	let lastMessageTimestamp: number | undefined;
@@ -284,34 +313,35 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 		// Mutating a candidate re-writes its suffix in the warm cache, so prune only
 		// when that suffix is small (cheap-to-recache tail) and the candidate sits
 		// at/after the compaction boundary.
-		const suffixTokens = computeMessageSuffixTokens(entries);
+		const suffixTokens = computeMessageSuffixTokens(entries, tokenizer);
 		toPrune = candidates.filter(
 			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
 		);
 	}
-	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+	if (toPrune.length === 0) return NOTHING_PRUNED;
 
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
-	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
-		candidate.message.prunedAt = prunedAt;
-		invalidateMessageCache(candidate.message as AgentMessage);
+	const steps = toPrune.map(candidate => {
 		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
-	}
-	return { prunedCount: toPrune.length, tokensSaved };
+		return blankToolResult(candidate.message, candidate.notice, prunedAt);
+	});
+	return { prunedCount: toPrune.length, tokensSaved, undo: undoAll(steps) };
 }
 
-export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
-	let prunedCount = 0;
 
 	const candidates: Array<{ entry: SessionMessageEntry; tokens: number; superseded: boolean; useless: boolean }> = [];
 	const toolCallsById = collectToolCallsById(entries);
 	const supersededMessages = config.supersedeKey
 		? new Set(
-				collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools).map(
+				collectSupersededResults(entries, tokenizer, toolCallsById, config.supersedeKey, config.protectedTools).map(
 					candidate => candidate.message,
 				),
 			)
@@ -321,6 +351,7 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 			? new Set(
 					collectUselessResults(
 						entries,
+						tokenizer,
 						toolCallsById,
 						config.protectedTools,
 						supersededMessages ?? new Set(),
@@ -331,14 +362,15 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
 	const cacheWarmSuffixTokens = config.cacheWarmSuffixTokens;
 	// All-message suffix per index, only when the cache guard is armed.
-	const messageSuffix = cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries);
+	const messageSuffix =
+		cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries, tokenizer);
 
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
 		if (!message) continue;
 
-		const tokens = estimateTokens(message as AgentMessage);
+		const tokens = tokenizer.countMessage(message as AgentMessage);
 		const isProtected = isProtectedToolResult(message, toolCallsById.get(message.toolCallId), config.protectedTools);
 
 		if (message.prunedAt !== undefined) {
@@ -387,24 +419,20 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	}
 
 	if (tokensSaved < config.minimumSavings || candidates.length === 0) {
-		return { prunedCount: 0, tokensSaved: 0 };
+		return NOTHING_PRUNED;
 	}
 
 	const prunedAt = Date.now();
-	for (const candidate of candidates) {
-		const message = candidate.entry.message as ToolResultMessage;
+	const steps = candidates.map(candidate => {
 		const notice = candidate.superseded
 			? SUPERSEDED_NOTICE
 			: candidate.useless
 				? USELESS_NOTICE
 				: createPrunedNotice(candidate.tokens);
-		message.content = [{ type: "text", text: notice }];
-		message.prunedAt = prunedAt;
-		invalidateMessageCache(message as AgentMessage);
-		prunedCount++;
-	}
+		return blankToolResult(candidate.entry.message as ToolResultMessage, notice, prunedAt);
+	});
 
-	return { prunedCount, tokensSaved };
+	return { prunedCount: candidates.length, tokensSaved, undo: undoAll(steps) };
 }
 
 /**

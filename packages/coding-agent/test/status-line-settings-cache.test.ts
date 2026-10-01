@@ -4,15 +4,26 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-tui/status-line/presets";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { StatusLineTestComponents } from "./helpers/status-line";
+
+import {
+	cfgGitEnabled,
+	cfgStatusLineLeftSegments,
+	cfgStatusLinePreset,
+	cfgStatusLineRightSegments,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 let settingsState: SettingsTestState | undefined;
 let projectDir = "";
+const statusLines = new StatusLineTestComponents();
 
 beforeEach(async () => {
 	settingsState = beginSettingsTest();
@@ -23,6 +34,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	statusLines.dispose();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 	if (projectDir) {
@@ -70,34 +82,52 @@ function makeSession(sessionName = "Cache Session") {
 }
 
 function makeComponent(statusLineSettings: StatusLineSettings): StatusLineComponent {
-	const component = new StatusLineComponent(makeSession());
+	const component = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
 	component.updateSettings(statusLineSettings);
 	return component;
 }
 
 describe("StatusLineComponent effective settings cache", () => {
-	it("keeps repeated cached renders byte-identical across presets and widths", () => {
-		const cases: StatusLineSettings[] = [
-			{ preset: "default", sessionAccent: false },
-			{ preset: "minimal", sessionAccent: false },
-			{
-				preset: "custom",
-				leftSegments: ["pi", "model"],
-				rightSegments: ["session_name", "context_pct"],
-				separator: "pipe",
-				sessionAccent: false,
-				segmentOptions: { model: { showThinkingLevel: false } },
-			},
-		];
+	it("skips the entire segment pipeline until a visible input invalidates it", () => {
+		const session = makeSession();
+		let snapshotCalls = 0;
+		const getSnapshot = session.getAsyncJobSnapshot.bind(session);
+		session.getAsyncJobSnapshot = () => {
+			snapshotCalls++;
+			return getSnapshot();
+		};
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "mode"],
+			rightSegments: ["session_name"],
+			sessionAccent: false,
+		});
 
-		for (const statusLineSettings of cases) {
-			const component = makeComponent(statusLineSettings);
-			for (const width of [36, 120]) {
-				const first = component.getTopBorder(width);
-				const second = component.getTopBorder(width);
-				expect(second).toEqual(first);
-			}
-		}
+		const first = component.getTopBorder(120);
+		const second = component.getTopBorder(120);
+		expect(second).toEqual(first);
+		expect(snapshotCalls).toBe(1);
+
+		component.invalidate();
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(2);
+
+		component.setPlanModeStatus({ enabled: true, paused: false });
+		const withPlan = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withPlan).toContain("Plan");
+		expect(snapshotCalls).toBe(3);
+
+		const mutableModel = session.state.model as { name: string };
+		mutableModel.name = "Renamed Model";
+		const withModel = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withModel).toContain("Renamed Model");
+		expect(snapshotCalls).toBe(4);
+
+		const mutableMessages = session.messages as unknown[];
+		mutableMessages.push({ role: "user", content: "new tail" });
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(5);
 	});
 
 	it("invalidates on updateSettings and reflects hook visibility changes", () => {
@@ -157,17 +187,35 @@ describe("StatusLineComponent effective settings cache", () => {
 		const customComponent = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 		expect(customComponent.getEffectiveSettingsForTest().leftSegments).toEqual([]);
 		expect(customComponent.getEffectiveSettingsForTest().rightSegments).toEqual([]);
-		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0 });
+		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
+	});
+
+	it("renders custom preset defaults when segment arrays are unconfigured", () => {
+		cfgStatusLinePreset.override(Settings.instance, "custom");
+		const component = makeComponent({
+			preset: cfgStatusLinePreset.get(Settings.instance),
+			leftSegments: cfgStatusLineLeftSegments.get(Settings.instance),
+			rightSegments: cfgStatusLineRightSegments.get(Settings.instance),
+			sessionAccent: false,
+		});
+
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.leftSegments).toEqual(STATUS_LINE_PRESETS.custom.leftSegments);
+		expect(effective.rightSegments).toEqual(STATUS_LINE_PRESETS.custom.rightSegments);
+
+		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(content).toContain("Test Model");
+		expect(content).toContain("Cache Session");
 	});
 
 	it("surfaces active subagents even when custom segments omit subagents", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
-		component.setSubagentCount(2);
+		component.setRunningSubagents(["sub-1", "sub-2"]);
 
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(content).toContain("2 agents");
-		expect(content).not.toContain("running");
+		expect(content).toContain(`${theme.icon.agents} 2`);
+		expect(content).not.toContain("agents");
 	});
 
 	it("keeps plan and hook state dynamic without settings invalidation", () => {
@@ -186,6 +234,36 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(component.getEffectiveSettingsForTest()).toBe(effective);
 	});
 
+	it("renders arbitrary extension statuses in deterministic segment order", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["pi", "status", "model"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			showHookStatus: false,
+			sessionAccent: false,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		});
+
+		component.setHookStatus("z-tests", "Tests passing");
+		component.setHookStatus("a-indexer", "\x1b]8;;https://example.com\x07Indexer ready\x1b]8;;\x07");
+
+		const border = component.getTopBorder(120).content;
+		const content = stripVTControlCharacters(border);
+		expect(border).not.toContain("https://example.com");
+		expect(content.indexOf("Indexer ready")).toBeGreaterThanOrEqual(0);
+		expect(content.indexOf("Indexer ready")).toBeLessThan(content.indexOf("Tests passing"));
+		expect(content.indexOf("Tests passing")).toBeLessThan(content.indexOf("Test Model"));
+		expect(component.render(120)).toEqual([]);
+		expect(visibleWidth(component.getTopBorder(24).content)).toBeLessThanOrEqual(24);
+
+		component.setHookStatus("a-indexer", undefined);
+		component.setHookStatus("z-tests", undefined);
+		const cleared = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(cleared).not.toContain("Indexer ready");
+		expect(cleared).not.toContain("Tests passing");
+	});
+
 	it("does not mutate shared preset segment options during narrow renders", () => {
 		const before = { ...STATUS_LINE_PRESETS.default.segmentOptions?.path };
 		const component = makeComponent({ preset: "default", sessionAccent: false });
@@ -196,27 +274,12 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path).toEqual(before);
 		expect(component.getEffectiveSettingsForTest().segmentOptions.path).toEqual(before);
 	});
-
-	it("reuses the effective-settings object until settings change", () => {
-		const component = makeComponent({ preset: "default", sessionAccent: false });
-		const effective = component.getEffectiveSettingsForTest();
-
-		for (let i = 0; i < 5; i++) {
-			component.getTopBorder(100);
-			expect(component.getEffectiveSettingsForTest()).toBe(effective);
-		}
-
-		component.updateSettings({ preset: "minimal", sessionAccent: false });
-		const nextEffective = component.getEffectiveSettingsForTest();
-		expect(nextEffective).not.toBe(effective);
-		expect(component.getEffectiveSettingsForTest()).toBe(nextEffective);
-	});
 	it("skips git probes when git integration is disabled", async () => {
-		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
-		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
-		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		const headSpy = spyOn(vcs, "gitInfo");
+		const statusSpy = spyOn(vcs, "watch");
+		const repoSpy = spyOn(vcs, "repo");
 		try {
-			Settings.instance.override("git.enabled", false);
+			cfgGitEnabled.override(Settings.instance, false);
 			const component = makeComponent({
 				preset: "custom",
 				leftSegments: ["git", "pr"],
@@ -241,9 +304,9 @@ describe("StatusLineComponent effective settings cache", () => {
 	});
 
 	it("skips git probes when no git-backed segment is visible", async () => {
-		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
-		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
-		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		const headSpy = spyOn(vcs, "gitInfo");
+		const statusSpy = spyOn(vcs, "watch");
+		const repoSpy = spyOn(vcs, "repo");
 		try {
 			const component = makeComponent({
 				preset: "custom",

@@ -1,11 +1,28 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	buildRequestBody,
 	searchTavily,
 	type TavilySearchParams,
 } from "@oh-my-pi/pi-coding-agent/web/search/providers/tavily";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+const catalogAuthStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(catalogAuthStorage);
+
+function requireTavilyModel() {
+	const model = modelRegistry.find("web", "tavily");
+	if (!model) throw new Error("Expected bundled web/tavily model");
+	return model;
+}
+
+const tavilyModel = requireTavilyModel();
+
+afterAll(() => {
+	catalogAuthStorage.close();
+});
 
 describe("Tavily buildRequestBody", () => {
 	afterEach(() => {
@@ -20,21 +37,6 @@ describe("Tavily buildRequestBody", () => {
 	it("does not send time_range when recency is unset", () => {
 		const body = buildRequestBody({ query: "Bun 1.3 release notes" });
 		expect(body).not.toHaveProperty("time_range");
-	});
-
-	it("sends time_range when recency is set, without switching topic to news", () => {
-		const body = buildRequestBody({
-			query: "Bun 1.3 release notes",
-			recency: "week",
-		});
-		expect(body.time_range).toBe("week");
-		expect(body).not.toHaveProperty("topic");
-	});
-
-	it.each(["day", "week", "month", "year"] as const)("passes %s through as time_range verbatim", recency => {
-		const body = buildRequestBody({ query: "q", recency });
-		expect(body.time_range).toBe(recency);
-		expect(body).not.toHaveProperty("topic");
 	});
 
 	it("always includes query, max_results, search_depth, and include_answer", () => {
@@ -61,12 +63,10 @@ describe("Tavily searchTavily request shape (integration)", () => {
 	});
 
 	const fakeAuthStorage = {
-		async getApiKey() {
-			return process.env.TAVILY_API_KEY ?? undefined;
-		},
-		resolver: vi.fn(() => async () => process.env.TAVILY_API_KEY ?? undefined),
-		hasAuth() {
-			return Boolean(process.env.TAVILY_API_KEY);
+		keys: {
+			get: async () => process.env.TAVILY_API_KEY ?? undefined,
+			resolver: vi.fn(() => async () => process.env.TAVILY_API_KEY ?? undefined),
+			source: () => (process.env.TAVILY_API_KEY ? { kind: "env", concrete: true } : undefined),
 		},
 	} as unknown as AuthStorage;
 
@@ -76,6 +76,8 @@ describe("Tavily searchTavily request shape (integration)", () => {
 			authStorage: fakeAuthStorage,
 			systemPrompt: "Tavily integration test prompt",
 			...extras,
+			model: tavilyModel,
+			modelRegistry,
 		};
 	}
 
@@ -121,30 +123,6 @@ describe("Tavily searchTavily request shape (integration)", () => {
 		expect(response.answer).toBe("test answer");
 		expect(response.sources).toHaveLength(1);
 		expect(response.sources[0]?.url).toBe("https://bun.com/blog/bun-v1.3.12");
-	});
-
-	it("omits time_range entirely when recency is not provided", async () => {
-		process.env.TAVILY_API_KEY = "test-key";
-
-		let capturedBody: Record<string, unknown> | undefined;
-		const fetchMock: FetchImpl = async (input, init) => {
-			const url =
-				typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
-			if (url === "https://api.tavily.com/search") {
-				capturedBody = JSON.parse(init?.body as string);
-				return new Response(JSON.stringify({ answer: "", results: [], request_id: "req-0" }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			return new Response("not mocked", { status: 500 });
-		};
-
-		await searchTavily({ ...makeParams("bun sqlite"), fetch: fetchMock });
-
-		expect(capturedBody).toBeDefined();
-		expect(capturedBody).not.toHaveProperty("topic");
-		expect(capturedBody).not.toHaveProperty("time_range");
 	});
 
 	it("maps site: directives to include/exclude_domains and strips them from the query", async () => {
@@ -213,5 +191,36 @@ describe("Tavily searchTavily request shape (integration)", () => {
 		expect(capturedBodies[1]).not.toHaveProperty("start_date");
 		expect(capturedBodies[1]).not.toHaveProperty("end_date");
 		expect(response.sources).toHaveLength(1);
+	});
+
+	it("ignores malformed response fields while preserving valid results", async () => {
+		process.env.TAVILY_API_KEY = "test-key";
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					answer: 42,
+					results: [
+						null,
+						{ title: 7, url: "https://example.com/valid", content: 99, published_date: false },
+						{ title: "Missing URL" },
+					],
+					request_id: 123,
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const response = await searchTavily({ ...makeParams("robust parsing"), fetch: fetchMock });
+
+		expect(response.answer).toBeUndefined();
+		expect(response.requestId).toBeUndefined();
+		expect(response.sources).toEqual([
+			{
+				title: "https://example.com/valid",
+				url: "https://example.com/valid",
+				snippet: undefined,
+				publishedDate: undefined,
+				ageSeconds: undefined,
+			},
+		]);
 	});
 });

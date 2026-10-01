@@ -1,18 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type KagiSearchRequest, searchWithKagi } from "@oh-my-pi/pi-coding-agent/web/kagi";
 import { KagiProvider, searchKagi } from "@oh-my-pi/pi-coding-agent/web/search/providers/kagi";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+const providerAuthStorage = createInMemoryAuthStorage();
+providerAuthStorage.keys.setRuntime("kagi", "test-kagi-key");
+const modelRegistry = new ModelRegistry(providerAuthStorage);
+const kagiModel = modelRegistry.find("web", "kagi");
+if (!kagiModel) throw new Error("Expected bundled web/kagi model");
+
+afterAll(() => {
+	providerAuthStorage.close();
+});
 
 const fakeAuthStorage = {
-	async getApiKey() {
-		return process.env.KAGI_API_KEY ?? undefined;
-	},
-	resolver() {
-		return async () => process.env.KAGI_API_KEY ?? undefined;
-	},
-	hasAuth() {
-		return Boolean(process.env.KAGI_API_KEY);
+	keys: {
+		get: async () => process.env.KAGI_API_KEY ?? undefined,
+		resolver: () => async () => process.env.KAGI_API_KEY ?? undefined,
+		source: () => (process.env.KAGI_API_KEY ? { kind: "env", concrete: true } : undefined),
 	},
 } as unknown as AuthStorage;
 
@@ -58,6 +66,34 @@ describe("Kagi web search error handling", () => {
 			"Kagi API error (502)",
 		);
 	});
+
+	it("reports malformed success responses as Kagi API errors", async () => {
+		const invalidJsonFetch: FetchImpl = async () => new Response("<html>not json</html>", { status: 200 });
+		const invalidEnvelopeFetch: FetchImpl = async () =>
+			new Response(JSON.stringify(["unexpected"]), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await expect(searchWithKagi("invalid json", { fetch: invalidJsonFetch }, fakeAuthStorage)).rejects.toThrow(
+			"Kagi API returned an invalid response: invalid JSON",
+		);
+		await expect(
+			searchWithKagi("invalid envelope", { fetch: invalidEnvelopeFetch }, fakeAuthStorage),
+		).rejects.toThrow("Kagi API returned an invalid response: expected an object envelope");
+	});
+
+	it("recognizes errors plural in a successful HTTP envelope", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ errors: [{ code: 429, message: "quota exceeded" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await expect(searchWithKagi("envelope error", { fetch: fetchMock }, fakeAuthStorage)).rejects.toThrow(
+			"Kagi API error (429): quota exceeded",
+		);
+	});
 	it("applies the configured timeout at the provider fetch boundary", async () => {
 		const timeoutSignal = new AbortController().signal;
 		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
@@ -73,7 +109,9 @@ describe("Kagi web search error handling", () => {
 		await new KagiProvider().search({
 			query: "slow kagi search",
 			systemPrompt: "",
-			authStorage: fakeAuthStorage,
+			authStorage: providerAuthStorage,
+			model: kagiModel,
+			modelRegistry,
 			timeoutMs: 180_000,
 			fetch: fetchMock,
 		});
@@ -156,6 +194,39 @@ describe("Kagi search result parsing", () => {
 		expect(result.sources[2]).toMatchObject({ title: "[News] Breaking News", url: "https://example.com/news" });
 		expect(result.relatedQuestions).toEqual(["related query one", "related query two"]);
 		expect(result.answer).toBeUndefined();
+	});
+
+	it("accepts documented result aliases and skips malformed items", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						search: [
+							null,
+							{ title: "Missing URL" },
+							{
+								href: "https://example.com/alias",
+								name: "Alias Result",
+								description: "Alias description",
+							},
+						],
+						related_search: { invalid: true },
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const result = await searchWithKagi("aliases", { fetch: fetchMock }, fakeAuthStorage);
+
+		expect(result.sources).toEqual([
+			{
+				title: "Alias Result",
+				url: "https://example.com/alias",
+				snippet: "Alias description",
+				publishedDate: undefined,
+			},
+		]);
+		expect(result.relatedQuestions).toEqual([]);
 	});
 
 	it("parses direct_answer into the answer field", async () => {

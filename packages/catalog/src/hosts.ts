@@ -47,7 +47,7 @@ export const KNOWN_HOSTS = {
 	},
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
-	xai: { providers: ["xai"], urlMarkers: ["api.x.ai"] },
+	xai: { providers: ["xai", "xai-oauth"], urlMarkers: ["api.x.ai"] },
 	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
@@ -61,6 +61,8 @@ export const KNOWN_HOSTS = {
 	qwenPortal: { providers: ["qwen-portal"], urlMarkers: ["portal.qwen.ai"] },
 	/** NVIDIA NIM (`integrate.api.nvidia.com`). Qwen NIM endpoints take `chat_template_kwargs.enable_thinking`, never top-level `enable_thinking`. */
 	nvidia: { providers: ["nvidia"], urlMarkers: ["integrate.api.nvidia.com"] },
+	/** Venice AI (`api.venice.ai`). OpenAI-compatible; drives reasoning via top-level `reasoning_effort` (and `venice_parameters.disable_thinking`), and rejects DashScope's top-level `enable_thinking` with a 400 (`additionalProperties: false` request schema). */
+	venice: { providers: ["venice"], urlMarkers: ["api.venice.ai"] },
 	moonshotNative: { providers: ["moonshot", "kimi-code"], urlMarkers: ["api.moonshot.ai", "api.kimi.com"] },
 	/** Google AI Studio's OpenAI-compatible shim (`/v1beta/openai`) — a subset of chat-completions; rejects `store` with a 400. Native Gemini uses `google-generative-ai` api instead. */
 	googleAistudio: { providers: [], urlMarkers: ["generativelanguage.googleapis.com"] },
@@ -72,13 +74,34 @@ export const KNOWN_HOSTS = {
 
 export type KnownHost = keyof typeof KNOWN_HOSTS;
 
+// Host checks fan out across every compatibility field for a model. Bound the
+// cache because custom providers may contribute arbitrary endpoints at runtime.
+const MAX_URL_HOST_MATCHES = 512;
+const urlHostMatches = new Map<string, Map<KnownHost, boolean>>();
+
+function getUrlHostMatches(baseUrl: string): Map<KnownHost, boolean> {
+	let matches = urlHostMatches.get(baseUrl);
+	if (matches !== undefined) return matches;
+	if (urlHostMatches.size === MAX_URL_HOST_MATCHES) urlHostMatches.clear();
+	matches = new Map<KnownHost, boolean>();
+	urlHostMatches.set(baseUrl, matches);
+	return matches;
+}
+
 /** URL-only host check (for call sites that have no provider id, e.g. raw env config). */
 export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): boolean {
 	if (!baseUrl) return false;
+	const matches = getUrlHostMatches(baseUrl);
+	const cached = matches.get(host);
+	if (cached !== undefined) return cached;
 	const spec: HostClassSpec = KNOWN_HOSTS[host];
 	for (const marker of spec.urlMarkers) {
-		if (includesAsciiCaseInsensitive(baseUrl, marker)) return true;
+		if (includesAsciiCaseInsensitive(baseUrl, marker)) {
+			matches.set(host, true);
+			return true;
+		}
 	}
+	matches.set(host, false);
 	return false;
 }
 
@@ -144,6 +167,53 @@ export function isVertexRawPredictUrl(baseUrl: string): boolean {
 /** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
 export function isAzureDeploymentsUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/deployments/");
+}
+
+// Bedrock inference endpoints, per AWS's endpoint and PrivateLink docs:
+// - bedrock-runtime: `bedrock-runtime.<region>.amazonaws.com`, FIPS `bedrock-runtime-fips.<region>.amazonaws.com`
+// - bedrock-mantle: `bedrock-mantle.<region>.api.aws`; the bundled provider keeps a `{region}`
+//   template until request preparation fills it in
+// - PrivateLink endpoint-specific names for either service, Regional or zonal:
+//   `<vpce-id>[-<az>].<service>.<region>.vpce.amazonaws.com`
+// With private DNS enabled, a VPC endpoint answers on the public names above.
+const BEDROCK_PUBLIC_HOST =
+	/^(?:(?<runtime>bedrock-runtime(?:-fips)?)\.[a-z0-9-]+\.amazonaws\.com|bedrock-mantle\.(?:[a-z0-9-]+|\{region\})\.api\.aws)$/;
+const BEDROCK_PRIVATELINK_HOST =
+	/^vpce-[a-z0-9-]+\.(?:(?<runtime>bedrock-runtime(?:-fips)?)|bedrock-mantle)\.[a-z0-9-]+\.vpce\.amazonaws\.com$/;
+
+function hasPathPrefix(pathname: string, prefix: string): boolean {
+	return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+/**
+ * Amazon Bedrock API route on a bedrock-runtime or bedrock-mantle endpoint
+ * (public, FIPS, or PrivateLink hostname):
+ * - `anthropic`: the Anthropic Messages API under `/anthropic`.
+ * - `openai`: the OpenAI-compatible APIs under `/openai`, plus Mantle's
+ *   documented `/v1` base (`https://bedrock-mantle.<region>.api.aws/v1`).
+ *
+ * Hostnames are parsed strictly so proxies that embed these hosts in a path
+ * do not match.
+ */
+export function isBedrockRouteUrl(baseUrl: string | undefined, route: "openai" | "anthropic"): boolean {
+	if (!baseUrl) return false;
+	let url: URL;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		return false;
+	}
+	if (url.protocol !== "https:") return false;
+	const host = BEDROCK_PUBLIC_HOST.exec(url.hostname) ?? BEDROCK_PRIVATELINK_HOST.exec(url.hostname);
+	if (!host) return false;
+	if (route === "anthropic") return hasPathPrefix(url.pathname, "/anthropic");
+	const isMantle = host.groups?.runtime === undefined;
+	return hasPathPrefix(url.pathname, "/openai") || (isMantle && hasPathPrefix(url.pathname, "/v1"));
+}
+
+/** Amazon Bedrock's OpenAI-compatible routes; see {@link isBedrockRouteUrl}. */
+export function isBedrockOpenAIUrl(baseUrl: string | undefined): boolean {
+	return isBedrockRouteUrl(baseUrl, "openai");
 }
 
 /** Alibaba DashScope consumer `compatible-mode` endpoint (rejects multimodal arrays for some text-only SKUs). */

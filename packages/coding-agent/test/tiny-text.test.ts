@@ -143,6 +143,14 @@ describe("normalizeGeneratedTitle", () => {
 		expect(normalizeGeneratedTitle(null)).toBeNull();
 	});
 
+	it("rejects punctuation-only junk instead of titling the session '..'", () => {
+		// Regression: a sampling model occasionally emits bare punctuation; the
+		// trailing-punctuation strip then left "." as an accepted title.
+		expect(normalizeGeneratedTitle("..")).toBeNull();
+		expect(normalizeGeneratedTitle("---")).toBeNull();
+		expect(normalizeGeneratedTitle("<title>..</title>")).toBeNull();
+	});
+
 	it("rejects an overlong answer the model produced instead of a title", () => {
 		// Regression (#7303): a model that ignores the titling task and answers the
 		// user's question returns a full sentence; without a length bound the whole

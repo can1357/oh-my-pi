@@ -954,5 +954,35 @@
       }
     ],
     "html": "<div>\nraw *html*\n</div><p>inline <span>x</span> end</p>\n"
+  },
+  {
+    "name": "lazyContinuation",
+    "source": "tree root\n└── last branch\n    └── child under last branch\n\n    real indented code\n",
+    "tokens": [
+      {
+        "type": "paragraph",
+        "raw": "tree root\n└── last branch\n    └── child under last branch",
+        "text": "tree root\n└── last branch\n    └── child under last branch",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "tree root\n└── last branch\n    └── child under last branch",
+            "text": "tree root\n└── last branch\n    └── child under last branch",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "code",
+        "raw": "    real indented code\n",
+        "codeBlockStyle": "indented",
+        "text": "real indented code\n"
+      }
+    ],
+    "html": "<p>tree root\n└── last branch\n    └── child under last branch</p>\n<pre><code>real indented code\n</code></pre>\n"
   }
 ]

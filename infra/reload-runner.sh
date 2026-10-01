@@ -166,8 +166,12 @@ start_buildkitd() {
 }
 
 verify_baked_tools() {
-  local runner="$1"
-  "$runner" --namespace k8s.io run --rm --entrypoint bash "$IMAGE" -lc '
+  # nerdctl defaults to /run/containerd/containerd.sock; k3s runs its own
+  # containerd, so the address must be explicit or the image "does not exist"
+  # and nerdctl tries to pull it from Docker Hub. --net host skips the CNI
+  # plugin lookup a bridged container would need.
+  "$NERDCTL_BIN" --address "$CONTAINERD_SOCKET" --namespace k8s.io \
+    run --rm --net host --entrypoint bash "$IMAGE" -lc '
     set -e
     for b in gh fd rg magick bun cargo rustc pkg-config clang lld sccache zstd zig cmake ninja cargo-nextest cargo-zigbuild cargo-xwin bazelisk bazel; do
       command -v "$b" >/dev/null || { echo "MISSING: $b"; exit 1; }
@@ -176,22 +180,34 @@ verify_baked_tools() {
   '
 }
 
+# containerd stores image names verbatim, while kubelet and nerdctl resolve a
+# bare `name:tag` as `docker.io/library/name:tag`. buildctl must be handed the
+# qualified form or the image lands under a name nothing else looks up.
+qualify_ref() {
+  case "$1" in
+    */*) echo "$1" ;;
+    *)   echo "docker.io/library/$1" ;;
+  esac
+}
+
 build_with_containerd() {
   bootstrap_containerd_tools
   start_buildkitd
 
-  echo "==> [2/5] building $IMAGE directly into k3s containerd (k8s.io namespace)"
+  local ref
+  ref="$(qualify_ref "$IMAGE")"
+  echo "==> [2/5] building $ref directly into k3s containerd (k8s.io namespace)"
   "$BUILDKITCTL_BIN" --addr "$BUILDKIT_ADDR" build \
     --progress=plain \
     --frontend dockerfile.v0 \
     --local context=. \
     --local dockerfile=. \
     --opt filename=Dockerfile \
-    --output "type=image,name=$IMAGE,store=true"
-  k3s ctr -n k8s.io images tag "$IMAGE" omp-kata-runner:preloaded >/dev/null 2>&1 || true
+    --output "type=image,name=$ref,store=true"
+  k3s ctr -n k8s.io images tag --force "$ref" "$(qualify_ref omp-kata-runner:preloaded)" >/dev/null 2>&1 || true
 
   echo "==> [3/5] verifying baked tools from k3s containerd"
-  verify_baked_tools "$NERDCTL_BIN"
+  verify_baked_tools
 }
 
 build_with_docker() {

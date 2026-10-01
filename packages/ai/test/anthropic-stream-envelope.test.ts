@@ -6,11 +6,15 @@ import {
 	type AnthropicMessagesClientLike,
 	type AnthropicRequestOptions,
 } from "@oh-my-pi/pi-ai/providers/anthropic-client";
-import type { WebSearchToolResultBlockParam } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type {
+	ToolSearchToolResultBlockParam,
+	WebSearchToolResultBlockParam,
+} from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessageEvent, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import { withEnv } from "./helpers";
+import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
 const model: Model<"anthropic-messages"> = buildModel({
 	id: "claude-sonnet-4-5",
@@ -108,6 +112,26 @@ function createRawSseRequest(frames: string[]): { asResponse(): Promise<Response
 				headers: {
 					"content-type": "text/event-stream",
 					"request-id": "req_raw_mock",
+				},
+			});
+		},
+	};
+}
+
+function createNeverClosingRawSseRequest(frames: string[]): { asResponse(): Promise<Response> } {
+	return {
+		async asResponse() {
+			const encoder = new TextEncoder();
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const frame of frames) controller.enqueue(encoder.encode(frame));
+				},
+			});
+			return new Response(body, {
+				status: 200,
+				headers: {
+					"content-type": "text/event-stream",
+					"request-id": "req_raw_never_closes",
 				},
 			});
 		},
@@ -347,6 +371,8 @@ function countEvents(events: AssistantMessageEvent[], type: AssistantMessageEven
 afterEach(() => {
 	vi.restoreAllMocks();
 });
+
+withOfficialAnthropicEndpoint();
 
 describe("anthropic stream envelope handling", () => {
 	it("ignores duplicate message_start envelopes without resetting streamed text", async () => {
@@ -673,6 +699,117 @@ describe("anthropic stream envelope handling", () => {
 				content: "forecast contents",
 				is_error: false,
 			},
+		]);
+	});
+
+	it("replays tool-search server blocks between signed thinking and a client tool call", async () => {
+		const toolSearchResult: ToolSearchToolResultBlockParam = {
+			type: "tool_search_tool_result",
+			tool_use_id: "srvtoolu_search",
+			content: {
+				type: "tool_search_tool_search_result",
+				tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+			},
+		};
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: {
+							id: "msg_tool_search",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+					{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Find read." } },
+					{ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-1" } },
+					{ type: "content_block_stop", index: 0 },
+					{
+						type: "content_block_start",
+						index: 1,
+						content_block: {
+							type: "server_tool_use",
+							id: "srvtoolu_search",
+							name: "tool_search_tool_regex",
+						},
+					},
+					{
+						type: "content_block_delta",
+						index: 1,
+						delta: { type: "input_json_delta", partial_json: '{"pattern":"read"}' },
+					},
+					{ type: "content_block_stop", index: 1 },
+					{ type: "content_block_start", index: 2, content_block: toolSearchResult },
+					{ type: "content_block_stop", index: 2 },
+					{ type: "content_block_start", index: 3, content_block: { type: "thinking", thinking: "" } },
+					{ type: "content_block_delta", index: 3, delta: { type: "thinking_delta", thinking: "Use read." } },
+					{ type: "content_block_delta", index: 3, delta: { type: "signature_delta", signature: "sig-2" } },
+					{ type: "content_block_stop", index: 3 },
+					{
+						type: "content_block_start",
+						index: 4,
+						content_block: { type: "tool_use", id: "tool_1", name: "_read", input: {} },
+					},
+					{
+						type: "content_block_delta",
+						index: 4,
+						delta: { type: "input_json_delta", partial_json: '{"path":"notes.txt"}' },
+					},
+					{ type: "content_block_stop", index: 4 },
+					{
+						type: "message_delta",
+						delta: { stop_reason: "tool_use" },
+						usage: {
+							input_tokens: 12,
+							output_tokens: 20,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		for await (const _ of stream) {
+			// drain stream
+		}
+		const result = structuredCloneJSON(await stream.result());
+		const replay = convertAnthropicMessages(
+			[
+				context.messages[0],
+				result,
+				{
+					role: "toolResult",
+					toolCallId: "tool_1",
+					toolName: "_read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			model,
+			false,
+		);
+		const assistant = replay.find(message => message.role === "assistant");
+
+		expect(assistant?.content).toEqual([
+			{ type: "thinking", thinking: "Find read.", signature: "sig-1" },
+			{
+				type: "server_tool_use",
+				id: "srvtoolu_search",
+				name: "tool_search_tool_regex",
+				input: { pattern: "read" },
+			},
+			toolSearchResult,
+			{ type: "thinking", thinking: "Use read.", signature: "sig-2" },
+			{ type: "tool_use", id: "tool_1", name: "_read", input: { path: "notes.txt" } },
 		]);
 	});
 
@@ -1245,6 +1382,15 @@ describe("anthropic stream envelope handling", () => {
 				{ status: 400 },
 			),
 		],
+		[
+			"a strict tool schema a translating gateway forwarded to an OpenAI upstream",
+			Object.assign(
+				new Error(
+					"400 {\"error\":{\"message\":\"Invalid schema for function 'bash': In context=(), 'required' is required to be supplied and to be an array including every key in properties. Missing 'timeout'.\"}}",
+				),
+				{ status: 400 },
+			),
+		],
 	])("retries without strict tools when the endpoint rejects %s", async (_case, rejection) => {
 		const toolContext: Context = {
 			...context,
@@ -1348,8 +1494,11 @@ describe("anthropic stream envelope handling", () => {
 		if (toolCall?.type !== "toolCall") {
 			throw new Error("Expected toolCall content in degraded payload");
 		}
-		// Best-effort arguments recovered by the throttled streaming parser are retained.
-		expect(toolCall.arguments).toEqual({ city: "Par" });
+		// Keep the turn non-fatal, but never execute the auto-closed preview.
+		expect(toolCall.arguments).toEqual({ __parseError: expect.any(String), __rawJson: '{"city":"Par' });
+		expect(() =>
+			validateToolArguments({ name: "lookup_weather", description: "", parameters: cityObjectSchema }, toolCall),
+		).toThrow("Tool call arguments are not valid JSON");
 		expect((toolCall as unknown as Record<string, unknown>).partialJson).toBeUndefined();
 	});
 
@@ -1430,6 +1579,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("finishes on message_stop when the raw SSE connection stays open", async () => {
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() => createNeverClosingRawSseRequest(createTextSuccessSseFrames("complete")) as never,
+		);
+
+		const stream = streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			signal: AbortSignal.timeout(500),
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "error")).toBe(0);
+		expect(countEvents(events, "done")).toBe(1);
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "complete" }]);
 	});
 
 	it("degrades to best-effort content when a raw SSE stream closes before message_stop", async () => {
@@ -1735,7 +1905,7 @@ describe("anthropic stream envelope handling", () => {
 		expect(cacheControls[2]).toEqual({ type: "ephemeral" });
 	});
 
-	it("defaults API-key requests to 1h cache TTL where long retention is supported", async () => {
+	it("defaults Anthropic requests to 5m writes and keeps 1h retention opt-in", async () => {
 		type CapturedParams = { messages: Array<{ content: unknown }> };
 		const payloads: CapturedParams[] = [];
 		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
@@ -1758,7 +1928,7 @@ describe("anthropic stream envelope handling", () => {
 
 		await drain(model);
 		await drain(proxyModel);
-		await withEnv({ PI_CACHE_RETENTION: "short" }, () => drain(model));
+		await withEnv({ PI_CACHE_RETENTION: "long" }, () => drain(model));
 
 		const cacheControls = payloads.map(payload => {
 			const content = payload.messages.at(-1)?.content;
@@ -1766,13 +1936,508 @@ describe("anthropic stream envelope handling", () => {
 			const lastBlock: { cache_control?: { ttl?: string; type: string } } | undefined = content.at(-1);
 			return lastBlock?.cache_control;
 		});
-		// Agent sessions idle past 5 minutes on background jobs; the canonical
-		// Anthropic API defaults to the 1h breakpoint so resume doesn't cold-miss
-		// the whole prefix.
-		expect(cacheControls[0]).toEqual({ type: "ephemeral", ttl: "1h" });
-		// Endpoints without long-cache support keep the plain 5m breakpoint.
+		expect(cacheControls[0]).toEqual({ type: "ephemeral" });
 		expect(cacheControls[1]).toEqual({ type: "ephemeral" });
-		// PI_CACHE_RETENTION=short opts back out of the 1h default.
-		expect(cacheControls[2]).toEqual({ type: "ephemeral" });
+		expect(cacheControls[2]).toEqual({ type: "ephemeral", ttl: "1h" });
+	});
+
+	it("captures fallback_credit_token into fallbackCreditHandle on refusal", async () => {
+		const refusalEvents: MockAnthropicEvent[] = [
+			{
+				type: "message_start",
+				message: {
+					id: "msg_refusal_with_credit",
+					usage: { input_tokens: 10, output_tokens: 0 },
+				},
+			},
+			{
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "text", text: "Partial thoughts before refusal" },
+			},
+			{
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "text_delta", text: "..." },
+			},
+			{
+				type: "content_block_stop",
+				index: 0,
+			},
+			{
+				type: "message_delta",
+				delta: {
+					stop_reason: "refusal",
+					stop_sequence: null,
+					stop_details: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "Declined",
+						fallback_credit_token: "fct_test_123",
+						fallback_has_prefill_claim: true,
+					},
+				},
+				usage: { input_tokens: 10, output_tokens: 2 },
+			},
+			{ type: "message_stop" },
+		];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() => createMockRequest(refusalEvents) as never,
+		);
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.stopDetails?.fallback_credit_token).toBe("fct_test_123");
+		expect(result.stopDetails?.fallback_has_prefill_claim).toBe(true);
+		expect(result.fallbackCreditHandle).toBeDefined();
+		expect(result.fallbackCreditHandle?.token).toBe("fct_test_123");
+		expect(result.fallbackCreditHandle?.prefillClaim).toBe(true);
+		expect(result.fallbackCreditHandle?.params).toBeDefined();
+		expect(result.fallbackCreditHandle?.expiresAt).toBeGreaterThan(Date.now());
+	});
+
+	it("redeems fallback credit token with frozen request body and continuation prefill", async () => {
+		let capturedParams: any;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((params: any) => {
+			capturedParams = params;
+			const successEvents: MockAnthropicEvent[] = [
+				{
+					type: "message_start",
+					message: {
+						id: "msg_fallback_success",
+						usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 10 },
+					},
+				},
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "text", text: "" },
+				},
+				{
+					type: "content_block_delta",
+					index: 0,
+					delta: { type: "text_delta", text: "Resumed seamlessly" },
+				},
+				{
+					type: "content_block_stop",
+					index: 0,
+				},
+				{
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+				{ type: "message_stop" },
+			];
+			return createMockRequest(successEvents) as never;
+		}) as never);
+
+		const fallbackModel = { ...model, id: "claude-opus-4-8" };
+		const stream = streamAnthropic(fallbackModel, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_test_456",
+				prefillClaim: true,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Hello world" }],
+					max_tokens: 1024,
+					stream: true,
+				},
+				betas: ["fallback-credit-2026-06-01"],
+				expiresAt: Date.now() + 60000,
+				refusedContent: [{ type: "text", text: "Partial before refusal  " }],
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedParams.model).toBe("claude-opus-4-8");
+		expect(capturedParams.fallback_credit_token).toBe("fct_test_456");
+		expect(capturedParams.messages).toHaveLength(2);
+		expect(capturedParams.messages[1]).toEqual({
+			role: "assistant",
+			content: [{ type: "text", text: "Partial before refusal" }],
+		});
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
+			{ type: "text", text: "Partial before refusal" },
+			{ type: "text", text: "Resumed seamlessly" },
+		]);
+	});
+
+	it("steps down from continuation shape to unchanged body on 400 error", async () => {
+		const attemptedBodies: Array<Record<string, unknown>> = [];
+		let attempts = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((rawParams: unknown) => {
+			attempts++;
+			const params = rawParams as Record<string, unknown>;
+			attemptedBodies.push(structuredClone(params));
+			if (attempts === 1) {
+				const badRequest = new Error("400 continuation prefill not accepted for model");
+				Object.assign(badRequest, { status: 400 });
+				return {
+					withResponse: async () => {
+						throw badRequest;
+					},
+				} as never;
+			}
+			const successEvents: MockAnthropicEvent[] = [
+				{
+					type: "message_start",
+					message: {
+						id: "msg_fallback_success_stepdown",
+						usage: { input_tokens: 10, output_tokens: 5 },
+					},
+				},
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "text", text: "Recovered via unchanged body" },
+				},
+				{
+					type: "content_block_stop",
+					index: 0,
+				},
+				{
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+				{ type: "message_stop" },
+			];
+			return createMockRequest(successEvents) as never;
+		}) as never);
+
+		const fallbackModel = { ...model, id: "claude-opus-4-8" };
+		const stream = streamAnthropic(fallbackModel, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_test_789",
+				prefillClaim: true,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Hello world" }],
+					fallbacks: [{ model: "claude-opus-4-8" }],
+					stream: true,
+				},
+				betas: ["fallback-credit-2026-06-01", "server-side-fallback-2026-06-01"],
+				expiresAt: Date.now() + 60000,
+				refusedContent: [{ type: "text", text: "Refused mid-way" }],
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(attempts).toBe(2);
+		// First attempt had continuation assistant message
+		expect(attemptedBodies[0].messages).toHaveLength(2);
+		expect(attemptedBodies[0].fallback_credit_token).toBe("fct_test_789");
+		expect(attemptedBodies[0].fallbacks).toBeUndefined();
+		// Second attempt stepped down to unchanged body (1 message) with the token
+		expect(attemptedBodies[1].messages).toHaveLength(1);
+		expect(attemptedBodies[1].fallback_credit_token).toBe("fct_test_789");
+		expect(attemptedBodies[1].fallbacks).toBeUndefined();
+	});
+
+	it("drops credit token and retries standard request when 400 names fallback_credit_token", async () => {
+		const attemptedBodies: Array<Record<string, unknown>> = [];
+		let attempts = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((rawParams: unknown) => {
+			attempts++;
+			const params = rawParams as Record<string, unknown>;
+			attemptedBodies.push(structuredClone(params));
+			if (attempts === 1) {
+				const badRequest = new Error("400 invalid fallback_credit_token expired");
+				Object.assign(badRequest, { status: 400 });
+				return {
+					withResponse: async () => {
+						throw badRequest;
+					},
+				} as never;
+			}
+			const successEvents: MockAnthropicEvent[] = [
+				{
+					type: "message_start",
+					message: {
+						id: "msg_fallback_success_token_dropped",
+						usage: { input_tokens: 10, output_tokens: 5 },
+					},
+				},
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "text", text: "Standard request succeeded" },
+				},
+				{
+					type: "content_block_stop",
+					index: 0,
+				},
+				{
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+				{ type: "message_stop" },
+			];
+			return createMockRequest(successEvents) as never;
+		}) as never);
+
+		const fallbackModel = { ...model, id: "claude-opus-4-8" };
+		const stream = streamAnthropic(fallbackModel, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_expired",
+				prefillClaim: false,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Hello world" }],
+					stream: true,
+				},
+				betas: ["fallback-credit-2026-06-01"],
+				expiresAt: Date.now() + 60000,
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(attempts).toBe(2);
+		// First attempt sent the token
+		expect(attemptedBodies[0].fallback_credit_token).toBe("fct_expired");
+		// Second attempt dropped the token entirely
+		expect(attemptedBodies[1].fallback_credit_token).toBeUndefined();
+	});
+
+	it("echoes refused thinking and server tools and keeps them replayable in the stored turn", async () => {
+		let capturedParams: Record<string, unknown> | undefined;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((rawParams: unknown) => {
+			capturedParams = rawParams as Record<string, unknown>;
+			const successEvents: MockAnthropicEvent[] = [
+				{
+					type: "message_start",
+					message: {
+						id: "msg_fallback_server_tool",
+						usage: { input_tokens: 10, output_tokens: 5 },
+					},
+				},
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "text", text: "Done" },
+				},
+				{
+					type: "content_block_stop",
+					index: 0,
+				},
+				{
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+				{ type: "message_stop" },
+			];
+			return createMockRequest(successEvents) as never;
+		}) as never);
+
+		const fallbackModel = { ...model, id: "claude-opus-4-8" };
+		const stream = streamAnthropic(fallbackModel, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_test_server_tool",
+				prefillClaim: true,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Search web" }],
+					stream: true,
+				},
+				betas: ["fallback-credit-2026-06-01"],
+				expiresAt: Date.now() + 60000,
+				refusedContent: [
+					{ type: "thinking", thinking: "Search first.", thinkingSignature: "sig-refused" },
+					{
+						type: "anthropicServerTool",
+						block: {
+							type: "server_tool_use",
+							id: "stu_123",
+							name: "web_search",
+							input: { query: "weather" },
+						},
+					},
+					{
+						type: "text",
+						text: "Based on search: ",
+					},
+				],
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(capturedParams).toBeDefined();
+		const messages = capturedParams?.messages as Array<Record<string, unknown>>;
+		expect(messages).toHaveLength(2);
+		const assistantMsg = messages[1];
+		expect(assistantMsg.role).toBe("assistant");
+		const content = assistantMsg.content as Array<Record<string, unknown>>;
+		expect(content).toEqual([
+			{ type: "thinking", thinking: "Search first.", signature: "sig-refused" },
+			// Server tool is unwrapped to wire block
+			{ type: "server_tool_use", id: "stu_123", name: "web_search", input: { query: "weather" } },
+			{ type: "text", text: "Based on search:" },
+		]);
+
+		// The stored turn carries the echoed prefix in AssistantMessage form, so a
+		// later replay still sends the signed thinking and the server tool call.
+		const replay = convertAnthropicMessages([context.messages[0], structuredCloneJSON(result)], fallbackModel, false);
+		const replayed = replay.find(message => message.role === "assistant");
+		expect(replayed?.content).toEqual([
+			{ type: "thinking", thinking: "Search first.", signature: "sig-refused" },
+			{ type: "server_tool_use", id: "stu_123", name: "web_search", input: { query: "weather" } },
+			// The mock continuation streams no text delta, so only the prefix text replays.
+			expect.objectContaining({ type: "text", text: "Based on search:" }),
+		]);
+	});
+
+	it("surfaces error when transient redemption retries run out without stepping down", async () => {
+		let attempts = 0;
+		const attemptedBodies: Array<Record<string, unknown>> = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((rawParams: unknown) => {
+			attempts++;
+			attemptedBodies.push(structuredClone(rawParams as Record<string, unknown>));
+			const transientErr = new Error("400 redemption temporarily unavailable");
+			Object.assign(transientErr, { status: 400 });
+			return {
+				withResponse: async () => {
+					throw transientErr;
+				},
+			} as never;
+		}) as never);
+
+		const fallbackModel = { ...model, id: "claude-opus-4-8" };
+		const stream = streamAnthropic(fallbackModel, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_transient_exhaust",
+				prefillClaim: true,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Hello" }],
+					stream: true,
+				},
+				betas: ["fallback-credit-2026-06-01"],
+				expiresAt: Date.now() + 60000,
+				refusedContent: [{ type: "text", text: "Partial" }],
+			},
+		});
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("redemption temporarily unavailable");
+		// Did not step down to unchanged body (all attempts remained continuation shape with 2 messages)
+		expect(attempts).toBe(3); // 1 initial + 2 transient retries
+		for (const body of attemptedBodies) {
+			expect(body.messages).toHaveLength(2);
+		}
+	});
+
+	it("surfaces error instead of retrying tokenless when refused turn executed server tools", async () => {
+		let attempts = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			attempts++;
+			const tokenErr = new Error("400 invalid fallback_credit_token rejected");
+			Object.assign(tokenErr, { status: 400 });
+			return {
+				withResponse: async () => {
+					throw tokenErr;
+				},
+			} as never;
+		});
+
+		const fallbackModel = { ...model, id: "claude-opus-4-8" };
+		const stream = streamAnthropic(fallbackModel, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_token_server_tool",
+				prefillClaim: false,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Hello" }],
+					stream: true,
+				},
+				betas: ["fallback-credit-2026-06-01"],
+				expiresAt: Date.now() + 60000,
+				refusedContent: [
+					{
+						type: "anthropicServerTool",
+						block: {
+							type: "server_tool_use",
+							id: "stu_executed",
+							name: "web_search",
+							input: { query: "weather" },
+						},
+					},
+				],
+			},
+		});
+
+		// Must throw directly, not silently drop token and re-run
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("fallback_credit_token");
+		expect(attempts).toBe(1);
+	});
+
+	it("forfeits the credit token when an in-loop retry rebuilds the request body", async () => {
+		const attemptedBodies: Array<Record<string, unknown>> = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((rawParams: unknown) => {
+			attemptedBodies.push(structuredClone(rawParams as Record<string, unknown>));
+			if (attemptedBodies.length === 1) {
+				const grammarError = new Error(
+					'400 {"type":"error","error":{"type":"invalid_request_error","message":"The compiled grammar is too large"}}',
+				);
+				Object.assign(grammarError, { status: 400 });
+				return {
+					withResponse: async () => {
+						throw grammarError;
+					},
+				} as never;
+			}
+			return createMockRequest([
+				{ type: "message_start", message: { id: "msg_rebuilt", usage: { input_tokens: 10, output_tokens: 5 } } },
+				{ type: "content_block_start", index: 0, content_block: { type: "text", text: "Rebuilt" } },
+				{ type: "content_block_stop", index: 0 },
+				{
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+				{ type: "message_stop" },
+			]) as never;
+		}) as never);
+
+		const stream = streamAnthropic({ ...model, id: "claude-opus-4-8" }, context, {
+			apiKey: "sk-ant-test",
+			fallbackCreditRedemption: {
+				token: "fct_strict",
+				prefillClaim: false,
+				params: {
+					model: "claude-fable-5",
+					messages: [{ role: "user", content: "Hello" }],
+					tools: [{ name: "read", input_schema: { type: "object", properties: {} }, strict: true }],
+					stream: true,
+				},
+				betaHeader: "fallback-credit-2026-06-01",
+				expiresAt: Date.now() + 60000,
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(attemptedBodies).toHaveLength(2);
+		expect(attemptedBodies[0].fallback_credit_token).toBe("fct_strict");
+		// Stripping strict tools changes `tools`, which must match the refused
+		// request exactly, so the retry is a standard request without the token.
+		expect(attemptedBodies[1].fallback_credit_token).toBeUndefined();
 	});
 });

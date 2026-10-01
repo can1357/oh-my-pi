@@ -3,9 +3,10 @@ import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AssistantThinkingRenderer } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { clearMermaidCache } from "@oh-my-pi/pi-coding-agent/modes/theme/mermaid-cache";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 
 const originalImageProtocol = TERMINAL.imageProtocol;
@@ -55,6 +56,150 @@ afterEach(() => {
 	clearMermaidCache();
 });
 
+describe("AssistantMessageComponent transcript lifecycle", () => {
+	it("keeps a revised streaming message mutable until finalization", () => {
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		component.updateContent(
+			createAssistantMessage(
+				"First completed paragraph is deliberately long enough to wrap.\n\nCurrent partial paragraph",
+			),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+
+		component.updateContent(
+			createAssistantMessage("Revised opening paragraph replaces the prior draft.\n\nCurrent partial paragraph"),
+			{ transient: true },
+		);
+		const live = Bun.stripANSI(transcript.renderViewport(80, 20, { now: 1, tick: 1 }).join("\n"));
+		expect(live).toContain("Revised opening paragraph");
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+
+		component.markTranscriptBlockFinalized();
+		const batch = transcript.peekFlushBatch(80);
+		expect(Bun.stripANSI(batch?.rows.join("\n") ?? "")).toContain("Revised opening paragraph");
+	});
+
+	it("retires the frozen thinking prefix into history while still streaming", () => {
+		const thinkingMessage = (thinking: string): AssistantMessage => ({
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking }],
+		});
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		component.updateContent(
+			thinkingMessage("Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail"),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+		component.updateContent(
+			thinkingMessage(
+				"Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail keeps growing.\n\nNewer tail",
+			),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 1, tick: 1 });
+
+		// Under pressure the frozen thinking prefix retires while streaming.
+		const first = transcript.peekFinalizedBatch(80, 0);
+		expect(first).toBeDefined();
+		const firstText = Bun.stripANSI(first!.rows.join("\n"));
+		expect(firstText).toContain("Alpha reasoning paragraph.");
+		expect(firstText).not.toContain("Newer tail");
+		transcript.acknowledgeFinalizedBatch(first!.id);
+
+		// Emitted rows leave the mutable viewport; the streaming tail stays live.
+		const live = Bun.stripANSI(transcript.renderViewport(80, 20, { now: 2, tick: 2 }).join("\n"));
+		expect(live).not.toContain("Alpha reasoning paragraph.");
+		expect(live).toContain("Newer tail");
+
+		// Finalization retires exactly the un-emitted remainder — no duplicates.
+		component.markTranscriptBlockFinalized();
+		const flush = transcript.peekFlushBatch(80);
+		const flushText = Bun.stripANSI(flush?.rows.join("\n") ?? "");
+		expect(flushText).not.toContain("Alpha reasoning paragraph.");
+		expect(flushText).toContain("Newer tail");
+	});
+
+	it("retires frozen prose into history while an append-only wire is still streaming", () => {
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		component.updateContent(createAssistantMessage("Alpha completed paragraph.\n\nPartial tail"), {
+			transient: true,
+		});
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+		component.updateContent(createAssistantMessage("Alpha completed paragraph.\n\nPartial tail grows.\n\nNew tail"), {
+			transient: true,
+		});
+		transcript.renderViewport(80, 20, { now: 1, tick: 1 });
+
+		const batch = transcript.peekFinalizedBatch(80, 0);
+		expect(Bun.stripANSI(batch?.rows.join("\n") ?? "")).toContain("Alpha completed paragraph.");
+	});
+
+	it("withholds mid-stream retirement when the wire may revise streamed text", () => {
+		const thinkingMessage = (thinking: string): AssistantMessage => ({
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking }],
+		});
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		// `stream-revision "possible"`: bytes may be revised after they stream.
+		component.setMidStreamPublication(false);
+
+		component.updateContent(
+			thinkingMessage("Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail"),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+		component.updateContent(
+			thinkingMessage(
+				"Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail keeps growing.\n\nNewer tail",
+			),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 1, tick: 1 });
+
+		// Nothing publishes under pressure: a revision could not be retracted from history.
+		expect(component.getTranscriptStableRows()).toHaveLength(0);
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+
+		// Withholding costs reachability only — finalization still retires the whole block.
+		component.markTranscriptBlockFinalized();
+		const flushText = Bun.stripANSI(transcript.peekFlushBatch(80)?.rows.join("\n") ?? "");
+		expect(flushText).toContain("Alpha reasoning paragraph.");
+		expect(flushText).toContain("Newer tail");
+	});
+
+	it("appends a late cache-miss marker after assistant output", () => {
+		const component = new AssistantMessageComponent();
+		component.updateContent(
+			createAssistantMessage(
+				"First completed paragraph is deliberately long enough to wrap.\n\nCurrent partial paragraph",
+			),
+			{ transient: true },
+		);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+
+		component.setCacheInvalidation({ reprocessedTokens: 50_000 });
+		component.markTranscriptBlockFinalized();
+
+		const batch = transcript.peekFlushBatch(80);
+		const rendered = Bun.stripANSI(batch?.rows.join("\n") ?? "");
+		expect(rendered).toContain("Current partial paragraph");
+		expect(rendered.indexOf("cache miss")).toBeGreaterThan(rendered.indexOf("Current partial paragraph"));
+	});
+});
+
 describe("AssistantMessageComponent mermaid markdown", () => {
 	it("renders fenced Mermaid ASCII without terminal image protocol", () => {
 		const rendered = renderAssistantMessage("```mermaid\nflowchart TD\n  Start-->Stop\n```");
@@ -67,9 +212,9 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 	});
 
 	it("aligns box borders for CJK labels in display columns", () => {
-		// Defends the first-party vendored Mermaid ASCII renderer's CJK/East-Asian
-		// display-width handling (packages/utils/src/vendor/mermaid-ascii): Hangul is 2
-		// terminal columns wide, so every row of a single-node diagram must
+		// Defends the native Mermaid ASCII renderer's CJK/East-Asian display-width
+		// handling: Hangul is 2 terminal columns wide, so every row of a single-node
+		// diagram must
 		// measure the same display width or the right border drifts.
 		const rendered = renderAssistantMessage("```mermaid\nflowchart TD\n  A[수집 스케줄러]\n```");
 		const displayCols = (line: string): number => {
@@ -95,56 +240,6 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 		expect(TERMINAL.imageProtocol).toBeNull();
 		expect(rendered).toContain("```mermaid");
 		expect(rendered).toContain("this is not mermaid");
-	});
-});
-
-describe("AssistantMessageComponent settled-row commit boundary", () => {
-	function renderStreamingMarkdown(markdown: string): AssistantMessageComponent {
-		const component = new AssistantMessageComponent();
-		component.updateContent(createAssistantMessage(markdown), { transient: true });
-		component.render(80);
-		return component;
-	}
-
-	it("exposes frozen paragraph rows for streaming prose", () => {
-		const component = renderStreamingMarkdown(
-			"First paragraph is already byte-stable.\n\nSecond paragraph is still streaming tokens",
-		);
-
-		expect(component.getTranscriptBlockSettledRows()).toBeGreaterThan(0);
-	});
-
-	it("exposes zero settled rows for Mermaid while streaming", () => {
-		for (const markdown of [
-			"Here is the flow:\n\n```mermaid\nflowchart TD\n  A-->B",
-			"```mermaid\nflowchart TD\n  A-->B\n```",
-		]) {
-			const component = renderStreamingMarkdown(markdown);
-
-			expect(component.getTranscriptBlockSettledRows()).toBe(0);
-		}
-	});
-
-	it("keeps a streaming table in the unsettled tail", () => {
-		const component = renderStreamingMarkdown("Results:\n\n| Name | Score |\n| --- | --- |\n| a | 1 |");
-		const renderedRows = component.render(80);
-		const settledRows = component.getTranscriptBlockSettledRows();
-
-		expect(settledRows).toBeGreaterThan(0);
-		expect(settledRows).toBeLessThan(renderedRows.length);
-		expect(Bun.stripANSI(renderedRows.slice(settledRows).join("\n"))).toContain("Name");
-	});
-
-	it("exposes zero settled rows after a reflowing block finalizes", () => {
-		for (const markdown of [
-			"```mermaid\nflowchart TD\n  A-->B\n```",
-			"| Name | Score |\n| --- | --- |\n| a | 1 |\n| b | 2 |",
-		]) {
-			const component = renderStreamingMarkdown(markdown);
-			component.markTranscriptBlockFinalized();
-
-			expect(component.getTranscriptBlockSettledRows()).toBe(0);
-		}
 	});
 });
 

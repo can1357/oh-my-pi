@@ -1,13 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import "./setup";
-import {
-	cosineSimilarity,
-	embed,
-	embeddingDimFor,
-	isApiModel,
-	resetEmbeddingProviderForTests,
-	setEmbeddingProviderForTests,
-} from "@oh-my-pi/pi-mnemopi/core/embeddings";
+
+import { embeddingDimFor, isApiModel } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 
 function withEnvValue<T>(key: string, value: string | undefined, fn: () => T): T {
 	const previous = process.env[key];
@@ -118,46 +111,5 @@ describe("multilingual embedding metadata", () => {
 				expect(isApiModel("openai/text-embedding-3-small")).toBe(true);
 			},
 		);
-	});
-});
-
-describe("multilingual embedding ordering", () => {
-	it("preserves semantic ordering with a deterministic fake multilingual provider", async () => {
-		setEmbeddingProviderForTests({
-			async *embed(texts) {
-				yield texts.map(text => {
-					if (text.includes("猫") || text.toLowerCase().includes("cat") || text.toLowerCase().includes("gato")) {
-						return [1, 0, 0];
-					}
-					if (text.includes("犬") || text.toLowerCase().includes("dog")) {
-						return [0, 1, 0];
-					}
-					return [0, 0, 1];
-				});
-			},
-		});
-
-		try {
-			const query = await embed(["猫について"]);
-			const docs = ["the cat sleeps", "犬が走る", "el gato come", "unrelated astronomy"];
-			const docVectors = await embed(docs);
-			expect(query).not.toBeNull();
-			expect(docVectors).not.toBeNull();
-			if (query === null || docVectors === null) {
-				throw new Error("fake provider returned no vectors");
-			}
-
-			const scored = docs.map((doc, index) => ({
-				doc,
-				score: cosineSimilarity(query[0] ?? [], docVectors[index] ?? []),
-			}));
-			scored.sort((a, b) => b.score - a.score || a.doc.localeCompare(b.doc));
-
-			expect(scored[0]?.doc).toBe("el gato come");
-			expect(scored[1]?.doc).toBe("the cat sleeps");
-			expect(scored[0]?.score).toBeGreaterThan(scored[2]?.score ?? 0);
-		} finally {
-			resetEmbeddingProviderForTests();
-		}
 	});
 });

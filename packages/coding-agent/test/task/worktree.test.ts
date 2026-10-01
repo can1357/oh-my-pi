@@ -9,14 +9,14 @@ import {
 	cleanupTaskBranches,
 	commitToBranch,
 	ensureIsolation,
-	getGitNoIndexNullPath,
 	getRepoRoot,
+	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
-	parseIsolationMode,
+	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -39,47 +39,135 @@ async function runGit(repo: string, args: string[]): Promise<string> {
 	return stdout.trim();
 }
 
-async function createGitRepo(): Promise<{ baseBranch: string; repo: string }> {
+async function createGitRepo(): Promise<string> {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-"));
 	tempDirs.push(repo);
-	await runGit(repo, ["init"]);
-	await runGit(repo, ["config", "user.email", "test@example.com"]);
-	await runGit(repo, ["config", "user.name", "Test User"]);
-	await fs.writeFile(path.join(repo, "merged.txt"), "base version\n");
-	await fs.writeFile(path.join(repo, "staged.txt"), "base staged\n");
-	await runGit(repo, ["add", "."]);
-	await runGit(repo, ["commit", "-m", "initial"]);
-	return {
-		baseBranch: await runGit(repo, ["branch", "--show-current"]),
-		repo,
-	};
+	await runGit(repo, ["init", "-q", "-b", "main"]);
+	return repo;
 }
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	jj.repo.clearRootCache();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 describe("worktree isolation helpers", () => {
-	it("returns platform-specific null path for git --no-index diffs", () => {
-		const expected = process.platform === "win32" ? "NUL" : "/dev/null";
-		expect(getGitNoIndexNullPath()).toBe(expected);
+	it("maps every isolation backend to the native backend contract", () => {
+		expect(parseIsolationBackend("auto")).toBeUndefined();
+		expect(parseIsolationBackend("apfs")).toBe(natives.IsoBackendKind.Apfs);
+		expect(parseIsolationBackend("btrfs")).toBe(natives.IsoBackendKind.Btrfs);
+		expect(parseIsolationBackend("zfs")).toBe(natives.IsoBackendKind.Zfs);
+		expect(parseIsolationBackend("reflink")).toBe(natives.IsoBackendKind.LinuxReflink);
+		expect(parseIsolationBackend("overlayfs")).toBe(natives.IsoBackendKind.Overlayfs);
+		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
+		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
+		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
 	});
 
-	it("maps every isolation mode to the native backend contract", () => {
-		expect(parseIsolationMode("none")).toBeUndefined();
-		expect(parseIsolationMode("auto")).toBeUndefined();
-		expect(parseIsolationMode("apfs")).toBe(natives.IsoBackendKind.Apfs);
-		expect(parseIsolationMode("btrfs")).toBe(natives.IsoBackendKind.Btrfs);
-		expect(parseIsolationMode("zfs")).toBe(natives.IsoBackendKind.Zfs);
-		expect(parseIsolationMode("reflink")).toBe(natives.IsoBackendKind.LinuxReflink);
-		expect(parseIsolationMode("overlayfs")).toBe(natives.IsoBackendKind.Overlayfs);
-		expect(parseIsolationMode("fuse-overlay")).toBe(natives.IsoBackendKind.Overlayfs);
-		expect(parseIsolationMode("projfs")).toBe(natives.IsoBackendKind.Projfs);
-		expect(parseIsolationMode("fuse-projfs")).toBe(natives.IsoBackendKind.Projfs);
-		expect(parseIsolationMode("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
-		expect(parseIsolationMode("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
-		expect(parseIsolationMode("worktree")).toBe(natives.IsoBackendKind.Rcopy);
+	// Regression for #8939: baseline capture buffered every untracked byte into
+	// one in-memory string, so a multi-GB working tree OOM'd and trapped the
+	// whole host at isolated-task spawn. captureRepoBaseline now stats untracked
+	// size up front and refuses over-budget trees with a typed, actionable error
+	// before any content is buffered. Sparse files give a large logical size at
+	// ~zero disk cost, so the guard trips deterministically without writing GBs.
+	it("refuses to snapshot a working tree whose untracked content exceeds the isolation budget", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "README.md"), "hi\n");
+		await runGit(repo, ["add", "README.md"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+
+		const half = Math.ceil(ISOLATION_BASELINE_MAX_CONTENT_BYTES / 2) + 1;
+		for (const name of ["big-a.bin", "big-b.bin"]) {
+			const file = path.join(repo, name);
+			await fs.writeFile(file, "");
+			await fs.truncate(file, half); // sparse: logical size only
+		}
+
+		const error = await captureBaseline(repo).then(
+			() => null,
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(IsolationBaselineTooLargeError);
+		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeGreaterThan(
+			ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+		);
+		expect((error as Error).message).toContain("task.isolation.enabled: false");
+	});
+
+	// Regression: the staged and unstaged diffs were rendered in full before the
+	// #8939 gate ran, so a working tree whose index-vs-HEAD diff was enormous
+	// (a jj conflict commit exported to git materialises every side as a
+	// `.jjconflict-*` subtree) grew one omp process to 141 GB and took the host
+	// down. The renderer now stops at the budget; the caller sees the same typed
+	// refusal it gets for oversized untracked content, with no measured total.
+	it("refuses to snapshot a working tree whose staged diff exceeds the isolation budget", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "README.md"), "hi\n");
+		await runGit(repo, ["add", "README.md"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+		await fs.writeFile(path.join(repo, "staged.txt"), "staged content that outgrows a tiny budget\n".repeat(64));
+		await runGit(repo, ["add", "staged.txt"]);
+
+		const budget = 256;
+		const error = await captureBaseline(repo, budget).then(
+			() => null,
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(IsolationBaselineTooLargeError);
+		expect((error as IsolationBaselineTooLargeError).budgetBytes).toBe(budget);
+		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeUndefined();
+		expect((error as Error).message).toContain("task.isolation.enabled: false");
+
+		const within = await captureBaseline(repo);
+		expect(within.root.staged).toContain("+++ b/staged.txt");
+	});
+
+	// The unstaged diff is rendered against what the staged diff left of the
+	// budget. If that remaining-budget arithmetic regressed to the full budget,
+	// a large-but-admissible staged patch followed by a large unstaged patch
+	// would buffer nearly twice the budget before anything refused.
+	it("charges the unstaged diff against the budget the staged diff left", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "README.md"), "hi\n");
+		await fs.writeFile(path.join(repo, "tracked.txt"), "tracked\n");
+		await runGit(repo, ["add", "README.md", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+		await fs.writeFile(path.join(repo, "staged.txt"), "staged line\n".repeat(20));
+		await runGit(repo, ["add", "staged.txt"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "unstaged line\n".repeat(20));
+
+		const { staged, unstaged } = (await captureBaseline(repo)).root;
+		// Each patch fits on its own; only their sum crosses the budget.
+		const budget = Math.max(staged.length, unstaged.length) + 16;
+		expect(staged.length + unstaged.length).toBeGreaterThan(budget);
+
+		const error = await captureBaseline(repo, budget).then(
+			() => null,
+			(err: unknown) => err,
+		);
+		expect(error).toBeInstanceOf(IsolationBaselineTooLargeError);
+		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeUndefined();
+		expect(unstaged).toContain("+unstaged line");
+	});
+
+	it("sizes an untracked symlink itself rather than its target", async () => {
+		if (process.platform === "win32") return;
+		const repo = await createGitRepo();
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-symlink-target-"));
+		tempDirs.push(targetDir);
+		const target = path.join(targetDir, "large.bin");
+		await fs.writeFile(target, "");
+		await fs.truncate(target, ISOLATION_BASELINE_MAX_CONTENT_BYTES + 1);
+		await fs.symlink(target, path.join(repo, "large-link.bin"));
+
+		const baseline = await captureBaseline(repo);
+		expect(baseline.root.untracked).toEqual(["large-link.bin"]);
+		expect(baseline.root.untrackedPatch).toContain(target);
 	});
 
 	// Real git worktree/stash/merge I/O is the contract under test and cannot be
@@ -304,7 +392,7 @@ describe("worktree isolation helpers", () => {
 				await runGit(repo, ["commit", "-q", "-m", "task-change-ignored-note"]);
 				await runGit(repo, ["checkout", "-q", BASE_BRANCH]);
 				try {
-					vi.spyOn(git.patch, "canApplyText").mockResolvedValue(true);
+					vi.spyOn(natives.VcsGitRepo.prototype, "canApplyPatch").mockResolvedValue(true);
 					await fs.writeFile(path.join(repo, "merged.txt"), "user wip\n");
 					await fs.writeFile(path.join(repo, magicName), "untracked wip\n");
 					await fs.writeFile(buildLog, "ignored build artifact\n");
@@ -502,12 +590,12 @@ describe("worktree isolation helpers", () => {
 
 describe("getRepoRoot", () => {
 	it("returns the git root for a plain git checkout", async () => {
-		const { repo } = await createGitRepo();
+		const repo = await createGitRepo();
 		expect(await getRepoRoot(repo)).toBe(repo);
 	});
 
 	it("returns the git root for a colocated jj-git workspace", async () => {
-		const { repo } = await createGitRepo();
+		const repo = await createGitRepo();
 		await fs.mkdir(path.join(repo, ".jj", "repo", "store"), { recursive: true });
 		expect(await getRepoRoot(repo)).toBe(repo);
 	});
@@ -530,7 +618,7 @@ describe("getRepoRoot", () => {
 		// `git.repo.root(inner)` walks up and finds the outer .git — without
 		// the pure-jj check running first, isolation would silently target the
 		// surrounding git tree behind jj's back.
-		const { repo: outer } = await createGitRepo();
+		const outer = await createGitRepo();
 		const inner = path.join(outer, "nested-jj");
 		await fs.mkdir(path.join(inner, ".jj", "repo", "store"), { recursive: true });
 
@@ -549,8 +637,6 @@ describe("getRepoRoot", () => {
 		const inner = path.join(outer, "vendor");
 		await fs.mkdir(inner, { recursive: true });
 		await runGit(inner, ["init", "-q", "-b", "main"]);
-		await runGit(inner, ["config", "user.email", "test@example.com"]);
-		await runGit(inner, ["config", "user.name", "Test"]);
 
 		expect(await getRepoRoot(inner)).toBe(inner);
 	});
@@ -599,7 +685,7 @@ describe("detachGitDir", () => {
 		const iso = await copyTree(wt);
 		const statusBefore = await runGit(iso, ["status", "--porcelain=v1"]);
 
-		const result = await git.detachGitDir(iso, commonDir);
+		const result = await vcs.detachGitDir(iso, commonDir);
 
 		expect(result).toBe("detached");
 		// Working tree (staged/unstaged/untracked) is preserved verbatim.
@@ -629,6 +715,26 @@ describe("detachGitDir", () => {
 		expect(await runGit(wt, ["rev-parse", "omp-fetched"])).toBe(taskCommit);
 	});
 
+	it.skipIf(process.getuid?.() === 0)("keeps shared git metadata intact when the index cannot be read", async () => {
+		const { wt, commonDir } = await makeLinkedWorktree();
+		const iso = await copyTree(wt);
+		const gitEntry = path.join(iso, ".git");
+		const pointerBefore = await fs.readFile(gitEntry, "utf8");
+		const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+		const indexMode = (await fs.stat(indexPath)).mode;
+		await fs.chmod(indexPath, 0);
+		try {
+			await expect(vcs.detachGitDir(iso, commonDir)).rejects.toMatchObject({
+				code: "Io",
+				stderr: expect.stringContaining("Permission denied"),
+			});
+		} finally {
+			await fs.chmod(indexPath, indexMode);
+		}
+		expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
+		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
+	});
+
 	it("leaves an already-independent full-copy checkout untouched", async () => {
 		const src = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-src-"));
 		tempDirs.push(src);
@@ -643,7 +749,7 @@ describe("detachGitDir", () => {
 		);
 		const iso = await copyTree(src); // full `.git` directory copied — its own ODB
 
-		expect(await git.detachGitDir(iso, srcCommon)).toBe("independent");
+		expect(await vcs.detachGitDir(iso, srcCommon)).toBe("independent");
 		// Its objects are self-contained: no alternates file was written.
 		expect(await Bun.file(path.join(iso, ".git", "objects", "info", "alternates")).exists()).toBe(false);
 	});
@@ -661,7 +767,7 @@ describe("detachGitDir", () => {
 		const iso = await copyTree(wt);
 		const statusBefore = await runGit(iso, ["status", "--porcelain=v1"]);
 
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 		// The unborn branch name is preserved and the common dir is now private.
 		expect(await runGit(iso, ["symbolic-ref", "HEAD"])).toBe("refs/heads/fresh-orphan");
 		const isoCommon = path.resolve(
@@ -700,7 +806,7 @@ describe("detachGitDir", () => {
 		expect(await Bun.file(path.join(wt, "drop", "d.txt")).exists()).toBe(false);
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 
 		// The detached isolation still honours sparse checkout: `drop/d.txt` keeps
 		// its skip-worktree bit and is NOT reported as a deletion (which delta
@@ -715,6 +821,7 @@ describe("detachGitDir", () => {
 		const origin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-origin-"));
 		tempDirs.push(origin);
 		await runGit(origin, ["init", "-q", "-b", "main"]);
+		await runGit(origin, ["config", "core.fsmonitor", "false"]);
 		await runGit(origin, ["config", "user.email", "src@example.com"]);
 		await runGit(origin, ["config", "user.name", "Source User"]);
 		await fs.writeFile(path.join(origin, "one.txt"), "one\n");
@@ -726,25 +833,29 @@ describe("detachGitDir", () => {
 
 		const clone = path.join(origin, "..", `${path.basename(origin)}-shallow`);
 		tempDirs.push(clone);
-		await runGit(origin, ["clone", "-q", "--depth", "1", `file://${origin}`, clone]);
+		await runGit(origin, ["-c", "core.fsmonitor=false", "clone", "-q", "--depth", "1", `file://${origin}`, clone]);
 		await runGit(clone, ["config", "user.email", "src@example.com"]);
 		await runGit(clone, ["config", "user.name", "Source User"]);
 		await runGit(clone, ["config", "core.fileMode", "false"]);
+		// Git's fsmonitor/split-index interaction can crash during fixture setup.
+		await runGit(clone, ["config", "core.fsmonitor", "false"]);
 		await runGit(clone, ["config", "core.splitIndex", "true"]);
 		const wt = path.join(origin, "..", `${path.basename(origin)}-shallow-wt`);
 		tempDirs.push(wt);
 		await runGit(clone, ["worktree", "add", "-q", wt, "-b", "feature/parent", "HEAD"]);
 		// Split the worktree's own index so it references a sharedindex.* file.
-		await runGit(wt, ["update-index", "--split-index"]);
+		await runGit(wt, ["-c", "core.fsmonitor=false", "update-index", "--split-index"]);
 		const commonDir = path.resolve(
 			(await runGit(clone, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
 		);
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 
 		// filemode parity: an explicit core.fileMode=false survives re-init.
 		expect(await runGit(iso, ["config", "core.fileMode"])).toBe("false");
+		// The detached repo must not inherit an unrelated global fsmonitor daemon.
+		await runGit(iso, ["config", "core.fsmonitor", "false"]);
 		// Split index: status works (sharedindex.* was carried) and stays clean.
 		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
 		// Shallow boundary: history traversal stops cleanly instead of failing
@@ -767,7 +878,7 @@ describe("detachGitDir", () => {
 		const aliasCommonDir = path.join(aliasMain, ".git");
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, aliasCommonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, aliasCommonDir)).toBe("detached");
 
 		// Isolation is fully functional: task branch + commit stay private.
 		await runGit(iso, ["checkout", "-q", "-b", "feature/a", baseSha]);
@@ -815,32 +926,50 @@ describe("detachGitDir", () => {
 });
 
 describe("applyNestedPatches", () => {
+	const nestedRel = "sub";
+	let fixtureParent: string;
 	let parentRepo: string;
-	let nestedRel: string;
 	let nestedDir: string;
 
-	beforeEach(async () => {
-		parentRepo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-apply-"));
-		await runGit(parentRepo, ["init", "-q", "-b", "main"]);
-		await runGit(parentRepo, ["config", "user.email", "test@example.com"]);
-		await runGit(parentRepo, ["config", "user.name", "Test User"]);
-		await fs.writeFile(path.join(parentRepo, ".gitignore"), "sub/\n");
-		await runGit(parentRepo, ["add", "."]);
-		await runGit(parentRepo, ["commit", "-q", "-m", "parent-init"]);
+	beforeAll(async () => {
+		fixtureParent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-fixture-"));
+		await runGit(fixtureParent, ["init", "-q", "-b", "main"]);
+		await runGit(fixtureParent, ["config", "user.email", "test@example.com"]);
+		await runGit(fixtureParent, ["config", "user.name", "Test User"]);
+		// beforeEach copies both repos with fs.cp; auto maintenance would race
+		// the copy the same way as in the commitToBranch fixture below.
+		await runGit(fixtureParent, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureParent, ["config", "gc.auto", "0"]);
+		await fs.writeFile(path.join(fixtureParent, ".gitignore"), "sub/\n");
+		await runGit(fixtureParent, ["add", "."]);
+		await runGit(fixtureParent, ["commit", "-q", "-m", "parent-init"]);
 
-		nestedRel = "sub";
+		const fixtureNested = path.join(fixtureParent, nestedRel);
+		await fs.mkdir(fixtureNested, { recursive: true });
+		await runGit(fixtureNested, ["init", "-q", "-b", "main"]);
+		await runGit(fixtureNested, ["config", "user.email", "test@example.com"]);
+		await runGit(fixtureNested, ["config", "user.name", "Test User"]);
+		await runGit(fixtureNested, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureNested, ["config", "gc.auto", "0"]);
+		await fs.writeFile(path.join(fixtureNested, "file.txt"), "v1\n");
+		await runGit(fixtureNested, ["add", "."]);
+		await runGit(fixtureNested, ["commit", "-q", "-m", "nested-init"]);
+	});
+
+	beforeEach(async () => {
+		// The tests mutate independent copies of one immutable repository pair;
+		// rebuilding both Git histories per case only tests `git init`.
+		parentRepo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-apply-"));
+		await fs.cp(fixtureParent, parentRepo, { recursive: true });
 		nestedDir = path.join(parentRepo, nestedRel);
-		await fs.mkdir(nestedDir, { recursive: true });
-		await runGit(nestedDir, ["init", "-q", "-b", "main"]);
-		await runGit(nestedDir, ["config", "user.email", "test@example.com"]);
-		await runGit(nestedDir, ["config", "user.name", "Test User"]);
-		await fs.writeFile(path.join(nestedDir, "file.txt"), "v1\n");
-		await runGit(nestedDir, ["add", "."]);
-		await runGit(nestedDir, ["commit", "-q", "-m", "nested-init"]);
 	});
 
 	afterEach(async () => {
 		await removeWithRetries(parentRepo);
+	});
+
+	afterAll(async () => {
+		await removeWithRetries(fixtureParent);
 	});
 
 	it("does not fold pre-existing dirty nested-repo state into the agent commit", async () => {
@@ -927,37 +1056,47 @@ describe("applyNestedPatches", () => {
 });
 
 describe("commitToBranch preserves agent commits", () => {
+	let fixtureRepo: string;
 	let parent: string;
 	let isolation: string;
 
-	async function gitr(repo: string, args: string[]): Promise<string> {
-		return runGit(repo, args);
-	}
-
-	beforeEach(async () => {
-		parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-parent-"));
-		isolation = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-iso-"));
-		await gitr(parent, ["init", "-q", "-b", "main"]);
-		await gitr(parent, ["config", "user.email", "user@example.com"]);
-		await gitr(parent, ["config", "user.name", "Parent User"]);
+	beforeAll(async () => {
+		fixtureRepo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-fixture-"));
+		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
+		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
+		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
+		// `git commit` kicks off `git maintenance run --auto`, which writes
+		// `.git/objects/maintenance.lock` and removes it again. beforeEach copies
+		// this repo with fs.cp, and a lock that disappears between readdir and
+		// lstat fails the copy with ENOENT.
+		await runGit(fixtureRepo, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureRepo, ["config", "gc.auto", "0"]);
 		await fs.writeFile(
-			path.join(parent, "EXP_CLEAN_COMMIT.txt"),
+			path.join(fixtureRepo, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
 		);
-		await gitr(parent, ["add", "."]);
-		await gitr(parent, ["commit", "-q", "-m", "add clean test fixture"]);
+		await runGit(fixtureRepo, ["add", "."]);
+		await runGit(fixtureRepo, ["commit", "-q", "-m", "add clean test fixture"]);
+	});
 
-		// Simulate copy-on-write isolation: a real local clone so the agent's
-		// commit objects live in `isolation/.git`, just like the overlay/rcopy
-		// isolation backends would arrange them at runtime.
-		await fs.rm(isolation, { recursive: true, force: true });
-		await gitr(parent, ["clone", "-q", "--no-hardlinks", "--local", parent, isolation]);
-		await gitr(isolation, ["config", "user.email", "agent@example.com"]);
-		await gitr(isolation, ["config", "user.name", "Agent User"]);
+	beforeEach(async () => {
+		// Each test needs separate object databases, not a fresh Git history.
+		// Copying the immutable tiny fixture preserves the isolation contract while
+		// avoiding two init/config/add/commit/clone sequences per case.
+		parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-parent-"));
+		isolation = await fs.mkdtemp(path.join(os.tmpdir(), "omp-commit-iso-"));
+		await Promise.all([
+			fs.cp(fixtureRepo, parent, { recursive: true }),
+			fs.cp(fixtureRepo, isolation, { recursive: true }),
+		]);
 	});
 
 	afterEach(async () => {
 		await Promise.all([removeWithRetries(parent), removeWithRetries(isolation)]);
+	});
+
+	afterAll(async () => {
+		await removeWithRetries(fixtureRepo);
 	});
 
 	// Reproduces issue #3842: agent commits with a specific message inside
@@ -970,9 +1109,9 @@ describe("commitToBranch preserves agent commits", () => {
 			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nLINE5-AGENT-WITH-MESSAGE\nline6\nline7\nline8\nline9\nline10\n",
 		);
-		await gitr(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
+		await runGit(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
 		const agentMessage = "fix(test): agent committed with specific message for preservation check";
-		await gitr(isolation, ["commit", "-q", "-m", agentMessage]);
+		await runGit(isolation, ["commit", "-q", "-m", agentMessage]);
 
 		const taskId = "preservation-check";
 		const aiMessage = vi.fn(async () => "fix: update line5 in clean commit example");
@@ -984,7 +1123,7 @@ describe("commitToBranch preserves agent commits", () => {
 		// message is taken verbatim.
 		expect(aiMessage).not.toHaveBeenCalled();
 
-		const branchSubject = await gitr(parent, ["log", "-1", "--pretty=%s", result!.branchName!]);
+		const branchSubject = await runGit(parent, ["log", "-1", "--pretty=%s", result!.branchName!]);
 		expect(branchSubject).toBe(agentMessage);
 
 		const merge = await mergeTaskBranches(parent, [
@@ -993,7 +1132,7 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(merge.failed).toEqual([]);
 		expect(merge.merged).toEqual([result!.branchName!]);
 
-		const headSubject = await gitr(parent, ["log", "-1", "--pretty=%s"]);
+		const headSubject = await runGit(parent, ["log", "-1", "--pretty=%s"]);
 		expect(headSubject).toBe(agentMessage);
 	});
 
@@ -1001,11 +1140,11 @@ describe("commitToBranch preserves agent commits", () => {
 		const baseline = await captureBaseline(parent);
 
 		await fs.writeFile(path.join(isolation, "a.txt"), "alpha\n");
-		await gitr(isolation, ["add", "a.txt"]);
-		await gitr(isolation, ["commit", "-q", "-m", "feat: add alpha file"]);
+		await runGit(isolation, ["add", "a.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "feat: add alpha file"]);
 		await fs.writeFile(path.join(isolation, "b.txt"), "beta\n");
-		await gitr(isolation, ["add", "b.txt"]);
-		await gitr(isolation, ["commit", "-q", "-m", "test: add beta coverage"]);
+		await runGit(isolation, ["add", "b.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "test: add beta coverage"]);
 
 		const result = await commitToBranch(isolation, baseline, "multi", undefined);
 		expect(result?.branchName).toBe("omp/task/multi");
@@ -1015,7 +1154,7 @@ describe("commitToBranch preserves agent commits", () => {
 		]);
 		expect(merge).toEqual({ failed: [], merged: ["omp/task/multi"] });
 
-		const subjects = (await gitr(parent, ["log", "-2", "--pretty=%s"])).split("\n");
+		const subjects = (await runGit(parent, ["log", "-2", "--pretty=%s"])).split("\n");
 		expect(subjects).toEqual(["test: add beta coverage", "feat: add alpha file"]);
 	});
 
@@ -1023,8 +1162,8 @@ describe("commitToBranch preserves agent commits", () => {
 		const baseline = await captureBaseline(parent);
 
 		await fs.writeFile(path.join(isolation, "a.txt"), "alpha\n");
-		await gitr(isolation, ["add", "a.txt"]);
-		await gitr(isolation, ["commit", "-q", "-m", "feat: add alpha file"]);
+		await runGit(isolation, ["add", "a.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "feat: add alpha file"]);
 		// Uncommitted change on top of the agent's commit — should land as one
 		// extra commit with the AI-generated message, NOT silently dropped.
 		await fs.writeFile(path.join(isolation, "b.txt"), "beta\n");
@@ -1034,16 +1173,16 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(result?.branchName).toBe("omp/task/leftover");
 		expect(aiMessage).toHaveBeenCalledTimes(1);
 
-		const subjects = (await gitr(parent, ["log", "-2", "--pretty=%s", result!.branchName!])).split("\n");
+		const subjects = (await runGit(parent, ["log", "-2", "--pretty=%s", result!.branchName!])).split("\n");
 		expect(subjects).toEqual(["chore: leftover beta wip", "feat: add alpha file"]);
 	});
 
 	it("filters baseline WIP when the agent commits with git add -A", async () => {
 		await fs.writeFile(path.join(parent, "staged.txt"), "baseline staged wip\n");
-		await gitr(parent, ["add", "staged.txt"]);
+		await runGit(parent, ["add", "staged.txt"]);
 		await fs.writeFile(path.join(parent, "user-wip.txt"), "baseline untracked wip\n");
 		await fs.writeFile(path.join(isolation, "staged.txt"), "baseline staged wip\n");
-		await gitr(isolation, ["add", "staged.txt"]);
+		await runGit(isolation, ["add", "staged.txt"]);
 		await fs.writeFile(path.join(isolation, "user-wip.txt"), "baseline untracked wip\n");
 		const baseline = await captureBaseline(parent);
 
@@ -1051,16 +1190,16 @@ describe("commitToBranch preserves agent commits", () => {
 			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nLINE5-AGENT-WITH-MESSAGE\nline6\nline7\nline8\nline9\nline10\n",
 		);
-		await gitr(isolation, ["add", "-A"]);
+		await runGit(isolation, ["add", "-A"]);
 		const agentMessage = "fix(test): preserve message without baseline wip";
-		await gitr(isolation, ["commit", "-q", "-m", agentMessage]);
+		await runGit(isolation, ["commit", "-q", "-m", agentMessage]);
 
 		const aiMessage = vi.fn(async () => "fix: generated fallback");
 		const result = await commitToBranch(isolation, baseline, "dirty-baseline", undefined, aiMessage);
 		expect(result?.branchName).toBe("omp/task/dirty-baseline");
 		expect(aiMessage).not.toHaveBeenCalled();
 
-		const branchFiles = (await gitr(parent, ["show", "--name-only", "--pretty=format:", result!.branchName!]))
+		const branchFiles = (await runGit(parent, ["show", "--name-only", "--pretty=format:", result!.branchName!]))
 			.split("\n")
 			.filter(Boolean);
 		expect(branchFiles).toEqual(["EXP_CLEAN_COMMIT.txt"]);
@@ -1071,8 +1210,8 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(merge).toEqual({ failed: [], merged: ["omp/task/dirty-baseline"] });
 
 		const [headSubject, status, fixture] = await Promise.all([
-			gitr(parent, ["log", "-1", "--pretty=%s"]),
-			gitr(parent, ["status", "--porcelain=v1"]),
+			runGit(parent, ["log", "-1", "--pretty=%s"]),
+			runGit(parent, ["status", "--porcelain=v1"]),
 			fs.readFile(path.join(parent, "EXP_CLEAN_COMMIT.txt"), "utf8"),
 		]);
 		expect(headSubject).toBe(agentMessage);
@@ -1101,8 +1240,8 @@ describe("commitToBranch preserves agent commits", () => {
 		const agentLines = parentLines.slice();
 		agentLines[4] = "LINE5-AGENT-EDIT";
 		await fs.writeFile(path.join(isolation, "EXP_CLEAN_COMMIT.txt"), agentLines.join("\n"));
-		await gitr(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
-		await gitr(isolation, ["commit", "-q", "-m", "agent: edit line 5"]);
+		await runGit(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "agent: edit line 5"]);
 
 		const taskId = "dirty-parent-committed-agent";
 		const result = await commitToBranch(isolation, baseline, taskId, undefined);
@@ -1126,7 +1265,7 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(result?.branchName).toBe("omp/task/nocommit");
 		expect(aiMessage).toHaveBeenCalledTimes(1);
 
-		const branchSubject = await gitr(parent, ["log", "-1", "--pretty=%s", result!.branchName!]);
+		const branchSubject = await runGit(parent, ["log", "-1", "--pretty=%s", result!.branchName!]);
 		expect(branchSubject).toBe("feat: add alpha");
 	});
 
@@ -1153,14 +1292,12 @@ describe("commitToBranch preserves agent commits", () => {
 			const head = Array.from({ length: 40 }, (_, i) => `# line ${i + 1}\n`).join("");
 			await fs.mkdir(path.join(parent, "src"), { recursive: true });
 			await fs.writeFile(path.join(parent, fixture), head);
-			await gitr(parent, ["add", "."]);
-			await gitr(parent, ["commit", "-q", "-m", "add fixture"]);
+			await runGit(parent, ["add", "."]);
+			await runGit(parent, ["commit", "-q", "-m", "add fixture"]);
 
-			// Isolation must be re-cloned so the fixture is present in HEAD.
+			// Refresh the independent isolation object database at the new HEAD.
 			await fs.rm(isolation, { recursive: true, force: true });
-			await gitr(parent, ["clone", "-q", "--no-hardlinks", "--local", parent, isolation]);
-			await gitr(isolation, ["config", "user.email", "agent@example.com"]);
-			await gitr(isolation, ["config", "user.name", "Agent User"]);
+			await fs.cp(parent, isolation, { recursive: true });
 
 			// Parent WIP: change line 10 (unstaged edit to an existing tracked file).
 			const wipLines = head.split("\n");
@@ -1177,7 +1314,7 @@ describe("commitToBranch preserves agent commits", () => {
 			const result = await commitToBranch(isolation, baseline, "wip-tracked-file", undefined);
 			expect(result?.branchName).toBe("omp/task/wip-tracked-file");
 
-			const branchDiff = await gitr(parent, ["show", "--pretty=format:", result!.branchName!]);
+			const branchDiff = await runGit(parent, ["show", "--pretty=format:", result!.branchName!]);
 			expect(branchDiff).toContain("+# line 30 def new_func()");
 			// --3way must subtract the WIP change from the commit; only the
 			// agent's line 30 edit belongs on the task branch.
@@ -1199,7 +1336,7 @@ describe("commitToBranch preserves agent commits", () => {
 			const result = await commitToBranch(isolation, baseline, "wip-untracked", undefined);
 			expect(result?.branchName).toBe("omp/task/wip-untracked");
 
-			const branchDiff = await gitr(parent, ["show", "--pretty=format:", result!.branchName!]);
+			const branchDiff = await runGit(parent, ["show", "--pretty=format:", result!.branchName!]);
 			expect(branchDiff).toContain("new file mode");
 			expect(branchDiff).toContain("src/new.py");
 			expect(branchDiff).toContain("+WIP header");
@@ -1209,9 +1346,9 @@ describe("commitToBranch preserves agent commits", () => {
 		it("commits a staged-new WIP file that the agent modifies inside isolation", async () => {
 			// Parent WIP: stage a new file that isn't yet in HEAD.
 			await fs.writeFile(path.join(parent, "notes.md"), "l1\nl2\nl3\n");
-			await gitr(parent, ["add", "notes.md"]);
+			await runGit(parent, ["add", "notes.md"]);
 			await fs.copyFile(path.join(parent, "notes.md"), path.join(isolation, "notes.md"));
-			await gitr(isolation, ["add", "notes.md"]);
+			await runGit(isolation, ["add", "notes.md"]);
 
 			// Agent edits the staged-new file.
 			await fs.writeFile(path.join(isolation, "notes.md"), "l1\nl2 agent\nl3\n");
@@ -1221,7 +1358,7 @@ describe("commitToBranch preserves agent commits", () => {
 			const result = await commitToBranch(isolation, baseline, "wip-staged-new", undefined);
 			expect(result?.branchName).toBe("omp/task/wip-staged-new");
 
-			const branchDiff = await gitr(parent, ["show", "--pretty=format:", result!.branchName!]);
+			const branchDiff = await runGit(parent, ["show", "--pretty=format:", result!.branchName!]);
 			expect(branchDiff).toContain("new file mode");
 			expect(branchDiff).toContain("notes.md");
 			expect(branchDiff).toContain("+l2 agent");
@@ -1233,12 +1370,10 @@ describe("commitToBranch preserves agent commits", () => {
 			await fs.mkdir(path.join(parent, "src"), { recursive: true });
 			await fs.writeFile(path.join(parent, "src/wanted.py"), "unchanged\n");
 			await fs.writeFile(path.join(parent, "src/wip-only.py"), "unchanged\n");
-			await gitr(parent, ["add", "."]);
-			await gitr(parent, ["commit", "-q", "-m", "seed"]);
+			await runGit(parent, ["add", "."]);
+			await runGit(parent, ["commit", "-q", "-m", "seed"]);
 			await fs.rm(isolation, { recursive: true, force: true });
-			await gitr(parent, ["clone", "-q", "--no-hardlinks", "--local", parent, isolation]);
-			await gitr(isolation, ["config", "user.email", "agent@example.com"]);
-			await gitr(isolation, ["config", "user.name", "Agent User"]);
+			await fs.cp(parent, isolation, { recursive: true });
 
 			await fs.writeFile(path.join(parent, "src/wip-only.py"), "wip edit\n");
 			await fs.writeFile(path.join(parent, "src/wanted.py"), "wip mixed\n");
@@ -1256,7 +1391,7 @@ describe("commitToBranch preserves agent commits", () => {
 			const result = await commitToBranch(isolation, baseline, "wip-filter", undefined);
 			expect(result?.branchName).toBe("omp/task/wip-filter");
 
-			const files = (await gitr(parent, ["show", "--name-only", "--pretty=format:", result!.branchName!]))
+			const files = (await runGit(parent, ["show", "--name-only", "--pretty=format:", result!.branchName!]))
 				.split("\n")
 				.filter(Boolean);
 			// Only the agent-touched file lands on the branch — no WIP-only files.
@@ -1281,8 +1416,8 @@ describe("commitToBranch preserves agent commits", () => {
 			// baseline dirty tree.
 			await fs.mkdir(path.join(isolation, "src"), { recursive: true });
 			await fs.copyFile(path.join(parent, "src/new.py"), path.join(isolation, "src/new.py"));
-			await gitr(isolation, ["add", "-A"]);
-			await gitr(isolation, ["commit", "-q", "-m", "chore: capture baseline"]);
+			await runGit(isolation, ["add", "-A"]);
+			await runGit(isolation, ["commit", "-q", "-m", "chore: capture baseline"]);
 
 			// Real, uncommitted agent edit on top of the WIP file.
 			await fs.writeFile(path.join(isolation, "src/new.py"), "WIP header\nagent-edit\n");
@@ -1292,7 +1427,7 @@ describe("commitToBranch preserves agent commits", () => {
 			const result = await commitToBranch(isolation, baseline, "wip-only-commit", undefined);
 			expect(result?.branchName).toBe("omp/task/wip-only-commit");
 
-			const branchDiff = await gitr(parent, ["show", "--pretty=format:", result!.branchName!]);
+			const branchDiff = await runGit(parent, ["show", "--pretty=format:", result!.branchName!]);
 			expect(branchDiff).toContain("new file mode");
 			expect(branchDiff).toContain("src/new.py");
 			expect(branchDiff).toContain("+WIP header");

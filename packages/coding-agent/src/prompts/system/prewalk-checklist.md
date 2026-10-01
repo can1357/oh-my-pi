@@ -1,7 +1,7 @@
-Before you consider this task finished, verify:
+Before task complete, verify:
 
-- Consistency: if you changed a pattern, signature, or check in one place, grep for every other call site or duplicate copy that needs the identical change. A fix applied to only some of the matching sites is still a failure.
-- Scope: if your diff does more than the minimal change needed to resolve the issue, confirm you have not altered behavior for any case outside the reported issue. Prefer the smallest correct diff over a broader rewrite.
-- Verification: run the full test module or file the issue lives in, not just the one test you expect to flip. A change that breaks a sibling test is not a fix.
+- Consistency: If a pattern, signature, or check changed in one place, grep every other call site or duplicate copy needing identical change. A fix at only some matching sites fails.
+- Scope: If diff exceeds the minimal issue-resolving change, confirm behavior unchanged outside the reported issue. Prefer the smallest correct diff over a broader rewrite.
+- Verification: Run the issue's full test module or file, not only the expected-to-flip test. A sibling-test-breaking change fails.
 
-Do not claim the task is complete until you have done these three checks.
+Do not claim task complete until all three checks done.

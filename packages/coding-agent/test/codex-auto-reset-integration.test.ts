@@ -23,9 +23,10 @@
  * sweep scheduling — is real. Each test injects its own coordinator, so the
  * process-wide default is never touched.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -40,7 +41,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const ACCOUNT_ID = "acct-1";
 const EMAIL = "user@example.com";
@@ -56,11 +57,13 @@ interface CodexReportOpts {
 	limitReached: boolean;
 	credits: number;
 	creditExpiresInMs?: number;
+	accountId?: string;
 }
 
 /** A fresh openai-codex usage report for the stubbed account. */
 function codexReport(opts: CodexReportOpts): UsageReport {
 	const now = Date.now();
+	const accountId = opts.accountId ?? ACCOUNT_ID;
 	return {
 		provider: "openai-codex",
 		fetchedAt: now,
@@ -68,14 +71,14 @@ function codexReport(opts: CodexReportOpts): UsageReport {
 			{
 				id: "openai-codex:primary",
 				label: "5 Hour",
-				scope: { provider: "openai-codex", accountId: ACCOUNT_ID },
+				scope: { provider: "openai-codex", accountId },
 				window: { id: "5h", label: "5 Hour", resetsAt: now + 2 * HOUR },
 				amount: { usedFraction: opts.primaryUsed, unit: "percent" },
 			},
 			{
 				id: "openai-codex:secondary",
 				label: "Weekly",
-				scope: { provider: "openai-codex", accountId: ACCOUNT_ID },
+				scope: { provider: "openai-codex", accountId },
 				window: { id: "7d", label: "Weekly", resetsAt: now + 3 * 24 * HOUR },
 				amount: { usedFraction: opts.weeklyUsed, unit: "percent" },
 			},
@@ -87,15 +90,20 @@ function codexReport(opts: CodexReportOpts): UsageReport {
 					? undefined
 					: [{ status: "available", expiresAt: new Date(now + opts.creditExpiresInMs).toISOString() }],
 		},
-		metadata: { accountId: ACCOUNT_ID, email: EMAIL, limitReached: opts.limitReached },
+		metadata: { accountId, email: EMAIL, limitReached: opts.limitReached },
 	};
 }
 
 /** Live credits-route row for the stubbed account, as the overlay consumes it. */
-function liveCreditStatus(availableCount: number, expiresInMs?: number): ResetCreditAccountStatus {
+function liveCreditStatus(
+	availableCount: number,
+	expiresInMs?: number,
+	accountId: string = ACCOUNT_ID,
+): ResetCreditAccountStatus {
 	return {
+		provider: "openai-codex",
 		credentialId: 1,
-		accountId: ACCOUNT_ID,
+		accountId,
 		email: EMAIL,
 		active: true,
 		availableCount,
@@ -107,19 +115,24 @@ function liveCreditStatus(availableCount: number, expiresInMs?: number): ResetCr
 }
 
 describe("codex saved-reset trigger integration", () => {
-	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
+	let lockRoot: string;
+	let extraStorages: AuthStorage[];
+
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+	});
 
 	beforeEach(async () => {
-		tempDir = TempDir.createSync("@pi-codex-reset-int-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		lockRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-reset-"));
 		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		sessions = [];
 		managers = [];
+		extraStorages = [];
 	});
 
 	afterEach(async () => {
@@ -129,16 +142,22 @@ describe("codex saved-reset trigger integration", () => {
 		for (const manager of managers.splice(0).reverse()) {
 			await manager.close();
 		}
-		authStorage.close();
-		tempDir.removeSync();
 		vi.restoreAllMocks();
+		for (const storage of extraStorages) storage.close();
+		await fs.rm(lockRoot, { recursive: true, force: true });
+	});
+
+	afterAll(() => {
+		authStorage.close();
 	});
 
 	interface HarnessOpts {
 		settings: Record<string, unknown>;
-		report: UsageReport;
+		report: UsageReport | null;
 		liveCredits: ResetCreditAccountStatus[];
 		streamErrorFirst?: boolean;
+		storage?: AuthStorage;
+		accountId?: string;
 	}
 
 	interface Harness {
@@ -148,14 +167,15 @@ describe("codex saved-reset trigger integration", () => {
 	}
 
 	function buildSession(opts: HarnessOpts): Harness {
-		const model = getBundledModel("openai-codex", "gpt-5.4");
-		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.4 to exist");
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
-		vi.spyOn(authStorage, "getOAuthAccountIdentity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
-		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => [opts.report]);
-		vi.spyOn(authStorage, "listResetCredits").mockImplementation(async () => opts.liveCredits);
+		const storage = opts.storage ?? authStorage;
+		const model = getBundledModel("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.5 to exist");
+		storage.keys.setRuntime("openai-codex", "test-key");
+		vi.spyOn(storage.oauth, "identity").mockReturnValue({ accountId: opts.accountId ?? ACCOUNT_ID, email: EMAIL });
+		vi.spyOn(storage.usage, "reports").mockImplementation(async () => (opts.report ? [opts.report] : null));
+		vi.spyOn(storage.resets, "list").mockImplementation(async () => opts.liveCredits);
 		const redeemTargets: ResetCreditTarget[] = [];
-		vi.spyOn(authStorage, "redeemResetCredit").mockImplementation(async options => {
+		vi.spyOn(storage.resets, "redeem").mockImplementation(async options => {
 			redeemTargets.push(options.target);
 			return { ok: true, code: "reset", accountId: ACCOUNT_ID, email: EMAIL, creditId: "credit-1" };
 		});
@@ -185,14 +205,17 @@ describe("codex saved-reset trigger integration", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
+		coordinator.resetLockPath = path.join(lockRoot, "agent.db");
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
-			modelRegistry,
+			modelRegistry: opts.storage
+				? new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true })
+				: modelRegistry,
 			codexResetCoordinator: coordinator,
 		});
 		sessions.push(session);
@@ -208,12 +231,14 @@ describe("codex saved-reset trigger integration", () => {
 			liveCredits: [liveCreditStatus(1)],
 			streamErrorFirst: true,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();
 
-		expect(redeemTargets).toEqual([{ accountId: ACCOUNT_ID, email: EMAIL }]);
+		expect(redeemTargets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
+		]);
 		// The block episode is recorded in the injected coordinator so it cannot double-spend.
 		expect([...coordinator.attemptedKeys].some(key => key.startsWith("block|"))).toBe(true);
 		// The turn actually recovered on the retry after the redeem.
@@ -230,6 +255,23 @@ describe("codex saved-reset trigger integration", () => {
 		expect(recovered).toBe(true);
 	});
 
+	it("recovers from a missing usage report only when live status supplies the unique credential", async () => {
+		const { session, redeemTargets } = buildSession({
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
+			report: null,
+			liveCredits: [liveCreditStatus(1)],
+			streamErrorFirst: true,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit without a usage snapshot");
+		await session.waitForIdle();
+
+		expect(redeemTargets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
+		]);
+	});
+
 	it("corrects a stale-zero usage count from the live credits route before deciding", async () => {
 		// /wham/usage says 0 credits (stale — never corrected upstream on zero),
 		// weekly exhausted and blocked; the dedicated credits route says 1.
@@ -239,12 +281,14 @@ describe("codex saved-reset trigger integration", () => {
 			liveCredits: [liveCreditStatus(1)],
 			streamErrorFirst: true,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();
 
-		expect(redeemTargets).toEqual([{ accountId: ACCOUNT_ID, email: EMAIL }]);
+		expect(redeemTargets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
+		]);
 	});
 
 	it("salvages an expiring credit on a 5h-only exhausted account from the usage heartbeat, exactly once", async () => {
@@ -266,7 +310,9 @@ describe("codex saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		expect(coordinator.sweepPromise).toBeDefined();
 		await coordinator.sweepPromise;
-		expect(redeemTargets).toEqual([{ accountId: ACCOUNT_ID, email: EMAIL }]);
+		expect(redeemTargets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: ACCOUNT_ID, email: EMAIL },
+		]);
 
 		// A later heartbeat re-plans over the same snapshot: the attempt key must
 		// make it a no-op instead of a second spend.
@@ -274,6 +320,115 @@ describe("codex saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 		expect(redeemTargets).toHaveLength(1);
+	});
+
+	it("spends one credit when independent sessions encounter the same blocked account together", async () => {
+		const options: HarnessOpts = {
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1, limitReached: true, credits: 2 }),
+			liveCredits: [liveCreditStatus(2)],
+			streamErrorFirst: true,
+		};
+		const first = buildSession(options);
+		const secondStorage = await AuthStorage.create(":memory:");
+		extraStorages.push(secondStorage);
+		const second = buildSession({ ...options, storage: secondStorage });
+		const originalReports = options.report;
+		let redeemed = false;
+		let listed = 0;
+		const bothListed = Promise.withResolvers<void>();
+		const firstRedeemed = Promise.withResolvers<void>();
+		let spends = 0;
+		for (const [index, storage] of [authStorage, secondStorage].entries()) {
+			vi.spyOn(storage.usage, "reports").mockImplementation(async () =>
+				redeemed
+					? [codexReport({ primaryUsed: 0, weeklyUsed: 0, limitReached: false, credits: 1 })]
+					: [originalReports!],
+			);
+			vi.spyOn(storage.resets, "list").mockImplementation(async () => {
+				if (++listed === 2) bothListed.resolve();
+				if (index === 1) await firstRedeemed.promise;
+				return redeemed ? [liveCreditStatus(1)] : [liveCreditStatus(2)];
+			});
+			vi.spyOn(storage.resets, "redeem").mockImplementation(async () => {
+				await bothListed.promise;
+				spends++;
+				redeemed = true;
+				firstRedeemed.resolve();
+				return { ok: true, code: "reset", accountId: ACCOUNT_ID, creditId: `credit-${spends}` };
+			});
+		}
+		mockSchedulerWaitWithClock();
+
+		await Promise.all([
+			first.session.prompt("trigger first blocked turn"),
+			second.session.prompt("trigger second blocked turn"),
+		]);
+		await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		const lastCreditStorage = await AuthStorage.create(":memory:");
+		extraStorages.push(lastCreditStorage);
+		const lastCredit = buildSession({
+			...options,
+			storage: lastCreditStorage,
+			report: codexReport({ primaryUsed: 0, weeklyUsed: 0, limitReached: false, credits: 0 }),
+			liveCredits: [liveCreditStatus(0)],
+		});
+		await lastCredit.session.prompt("retry a stale 429 after the final credit was spent");
+		await lastCredit.session.waitForIdle();
+		expect(lastCredit.redeemTargets).toEqual([]);
+		expect(spends).toBe(1);
+		for (const { session } of [first, second, lastCredit]) {
+			expect(
+				session.sessionManager
+					.getEntries()
+					.some(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							entry.message.content.some(
+								block => block.type === "text" && block.text === "recovered after reset redemption",
+							),
+					),
+			).toBe(true);
+		}
+	});
+
+	it("does not reuse another account's reset when credential stores share a credential id", async () => {
+		const settings = { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 };
+		const first = buildSession({
+			settings,
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1, limitReached: true, credits: 1 }),
+			liveCredits: [liveCreditStatus(1)],
+			streamErrorFirst: true,
+		});
+		mockSchedulerWaitWithClock();
+		await first.session.prompt("block the first account");
+		await first.session.waitForIdle();
+
+		// Another agentDir's store also numbers its first Codex row 1, but for a different account.
+		const otherStorage = await AuthStorage.create(":memory:");
+		extraStorages.push(otherStorage);
+		const other = buildSession({
+			settings,
+			storage: otherStorage,
+			accountId: "acct-other",
+			report: codexReport({
+				primaryUsed: 0.6,
+				weeklyUsed: 1,
+				limitReached: true,
+				credits: 1,
+				accountId: "acct-other",
+			}),
+			liveCredits: [liveCreditStatus(1, undefined, "acct-other")],
+			streamErrorFirst: true,
+		});
+		await other.session.prompt("block an unrelated account");
+		await other.session.waitForIdle();
+
+		expect(first.redeemTargets).toHaveLength(1);
+		expect(other.redeemTargets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-other", email: EMAIL },
+		]);
 	});
 
 	it("asks before spending in unset mode and never spends headless", async () => {

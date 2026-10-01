@@ -2,12 +2,11 @@
 
 use std::{collections::BTreeSet, path::Path};
 
-use anyhow::{Result, anyhow};
-use ast_grep_core::tree_sitter::LanguageExt;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
-use crate::language::SupportLang;
+use crate::{language::SupportLang, parse_cache::parse_cached};
 
 const DEFAULT_MIN_BODY_LINES: u32 = 4;
 const DEFAULT_MIN_COMMENT_LINES: u32 = 6;
@@ -172,11 +171,7 @@ pub fn summarize_code(options: SummaryOptions) -> Result<SummaryResult> {
 		return Ok(unparsed_result(source, total_lines));
 	};
 
-	let mut parser = Parser::new();
-	parser
-		.set_language(&language.get_ts_language())
-		.map_err(|err| anyhow!("Failed to load tree-sitter language: {err}"))?;
-	let Some(tree) = parser.parse(&source, None) else {
+	let Some(tree) = parse_cached(&source, language)? else {
 		return Ok(unparsed_result(source, total_lines));
 	};
 	let root = tree.root_node();
@@ -993,6 +988,19 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_go_new_with_expression_operand() {
+		// Go 1.26 `new(expr)` must parse alongside the classic `new(T)` form.
+		let result = summarize(
+			"package p\n\nfunc f() {\n\tframe.Due = new(work.Due.Add(delay))\n\tx := new(g(1))\n\ty \
+			 := new(T)\n\t_, _ = x, y\n}\n",
+			"fixture.go",
+		);
+
+		assert!(result.parsed);
+		assert_eq!(result.language.as_deref(), Some("go"));
+	}
+
+	#[test]
 	fn summarizes_emacs_lisp_defun_body() {
 		let code = "(defun greet (name)\n  \"Doc.\"\n  (let ((message (format \"Hello %s\" \
 		            name)))\n    (message \"%s\" message)\n    message)\n)\n";
@@ -1369,8 +1377,8 @@ mod tests {
 			kept_text.contains("<section class=\"sec5\">"),
 			"all sibling sections should surface"
 		);
-		// The <style> raw text stays folded as one elided span — no CSS interior leaks
-		// into kept content.
+		// The <style> raw text stays folded as one elided span — no CSS interior
+		// leaks into kept content.
 		assert!(!kept_text.contains(".rule0 {"), "oversized style body must stay folded");
 	}
 }

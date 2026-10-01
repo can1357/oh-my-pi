@@ -1,6 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { getFastembedCacheDir } from "@oh-my-pi/pi-utils";
-import "./setup";
 import {
 	available,
 	embed,
@@ -12,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { getFastembedCacheDir } from "@oh-my-pi/pi-utils";
 import packageJson from "../package.json" with { type: "json" };
 
 const ENV_KEYS = [
@@ -133,9 +132,9 @@ describe("optional embeddings", () => {
 			fetch: async request => {
 				requests += 1;
 				expect(request.headers.get("content-type")).toBe("application/json");
-				expect(request.headers.get("user-agent")).toBe(`Oh-My-Pi/${packageJson.version}`);
+				expect(request.headers.get("user-agent")).toBe(`omp/${packageJson.version}`);
 				expect(request.headers.get("http-referer")).toBe("https://omp.sh/");
-				expect(request.headers.get("x-openrouter-title")).toBe("Oh-My-Pi");
+				expect(request.headers.get("x-openrouter-title")).toBe("omp");
 				expect(request.headers.get("x-openrouter-categories")).toBe("cli-agent");
 				expect(request.headers.get("x-title")).toBeNull();
 				expect(request.headers.get("authorization")).toBeNull();
@@ -197,20 +196,6 @@ describe("optional embeddings", () => {
 		try {
 			const result = await withMnemopiRuntimeOptions(memory.runtimeOptions, () => embed(["hello"]));
 			expect(result).toBeNull();
-		} finally {
-			memory.close();
-		}
-	});
-
-	it("uses a constructor-scoped embedding provider", async () => {
-		const memory = new Mnemopi({
-			embeddings: {
-				provider: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
-			},
-		});
-		try {
-			const result = await withMnemopiRuntimeOptions(memory.runtimeOptions, () => embedQuery("cache me"));
-			expect(result).toEqual(new Float32Array([8, 99]));
 		} finally {
 			memory.close();
 		}

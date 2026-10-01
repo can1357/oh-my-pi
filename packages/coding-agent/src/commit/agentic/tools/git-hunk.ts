@@ -1,7 +1,8 @@
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { parseDiffHunks } from "../../../commit/git/diff";
 import type { DiffHunk, FileHunks } from "../../../commit/types";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
-import * as git from "../../../utils/git";
 
 const hunkIndexType = type("number").describe("1-based hunk index");
 
@@ -18,6 +19,7 @@ function selectHunks(fileHunks: FileHunks, requested?: number[]): DiffHunk[] {
 }
 
 export function createGitHunkTool(cwd: string): CustomTool<typeof gitHunkSchema> {
+	const repo = vcs.requireGit(cwd);
 	return {
 		name: "git_hunk",
 		label: "Git Hunk",
@@ -25,7 +27,7 @@ export function createGitHunkTool(cwd: string): CustomTool<typeof gitHunkSchema>
 		parameters: gitHunkSchema,
 		async execute(_toolCallId, params) {
 			const staged = params.staged ?? true;
-			const hunks = await git.diff.hunks(cwd, [params.file], { cached: staged });
+			const hunks = parseDiffHunks(await repo.diffText({ cached: staged, files: [params.file] }));
 			const fileHunks = hunks.find(entry => entry.filename === params.file) ?? {
 				filename: params.file,
 				isBinary: false,

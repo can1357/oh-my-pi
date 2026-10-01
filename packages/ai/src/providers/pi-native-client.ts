@@ -15,7 +15,8 @@
  * route every LLM call through a credential-holding sidecar so the slot
  * itself stays credential-free.
  */
-import { readSseJson } from "@oh-my-pi/pi-utils";
+import * as os from "node:os";
+import { getAppName, getInstallId, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -117,7 +118,14 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 		Accept: "text/event-stream",
-		...(model.headers ?? {}),
+		// Usage-attribution identity: the gateway reports this request's token
+		// burn to the broker under the ORIGINATING client, not the gateway host.
+		// Attribution-only — the gateway never forwards x-omp-* upstream. Header
+		// values must stay ISO-8859-1-safe, hence the hostname scrub.
+		"x-omp-install-id": getInstallId(),
+		"x-omp-hostname": os.hostname().replace(/[^\x20-\x7e]/g, "?"),
+		"x-omp-app": getAppName(),
+		...model.headers,
 	};
 	if (apiKey && !headers.Authorization) {
 		headers.Authorization = `Bearer ${apiKey}`;
@@ -228,10 +236,6 @@ export function streamPiNative<TApi extends Api>(
 			}
 
 			if (!sawTerminal) {
-				// SSE closed before a terminal event reached us — synthesize one
-				// so awaiters of `.result()` resolve instead of hanging forever.
-				// Matches the gateway's own defensive fallback in
-				// `pi-native-server.encodeStream`.
 				const aborted = abortTracker.wasCallerAbort();
 				const partial = makeSyntheticAssistant(model as Model<Api>);
 				if (aborted) {
@@ -239,8 +243,16 @@ export function streamPiNative<TApi extends Api>(
 					partial.errorMessage = "stream closed without terminal event";
 					stream.push({ type: "error", reason: "aborted", error: partial });
 				} else {
-					partial.stopReason = "stop";
-					stream.push({ type: "done", reason: "stop", message: partial });
+					stream.fail(
+						new AIError.ProviderResponseError(
+							"pi-native stream read error: stream closed before a terminal response event",
+							{
+								provider: model.provider,
+								kind: "incomplete-stream",
+							},
+						),
+					);
+					return;
 				}
 			}
 			stream.end();

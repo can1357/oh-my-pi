@@ -7,6 +7,7 @@ import {
 	type NextPromptSuggestionGenerator,
 } from "../next-prompt-suggestion";
 import type { InteractiveModeContext } from "../types";
+import { cfgNextPromptSuggestionEnabled } from "../settings";
 
 function isEligible(
 	ctx: InteractiveModeContext,
@@ -15,7 +16,7 @@ function isEligible(
 	editor: InteractiveModeContext["editor"],
 ): boolean {
 	return (
-		ctx.settings.get("nextPromptSuggestion.enabled") === true &&
+		cfgNextPromptSuggestionEnabled.get(ctx.settings) &&
 		event.isTerminal === true &&
 		ctx.session === session &&
 		ctx.viewSession === session &&

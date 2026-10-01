@@ -1,4 +1,8 @@
+// Deep import: the pi-utils barrel loads the host native addon, which is
+// absent on cross-compiling release runners.
+import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { buildDocsIndexPayload } from "./generate-docs-index";
+import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
@@ -16,6 +20,8 @@ export interface CodingAgentCompileOptions {
 	readonly transformersVersion: string;
 	/** Optional cross-compilation runtime target. */
 	readonly target?: Bun.Build.CompileTarget;
+	/** Optional unmodified Bun executable used as the standalone runtime template. */
+	readonly executablePath?: string;
 	/** Match release builds that minify identifiers while retaining names. */
 	readonly minifyIdentifiers?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
@@ -41,13 +47,25 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
+			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
+			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).
+			// Keep import.meta.resolve in bundled dependencies valid under bytecode.
+			format: "esm",
+			bytecode: true,
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
 			},
-			plugins: [await createLegacyPiVirtualModulePlugin()],
+			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
 			compile: {
-				...(options.target ? { target: options.target } : {}),
+				// Bun's process-wide fetch User-Agent default. Any explicit
+				// provider fingerprint (Anthropic/Codex OAuth) still wins.
+				execArgv: [`--user-agent=${USER_AGENT}`],
+				...(options.executablePath
+					? { executablePath: options.executablePath }
+					: options.target
+						? { target: options.target }
+						: {}),
 				outfile: options.outfile,
 				autoloadBunfig: false,
 				autoloadDotenv: false,

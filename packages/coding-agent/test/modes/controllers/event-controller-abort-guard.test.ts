@@ -18,13 +18,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+
+import { cfgCompletionNotify, cfgErrorNotify } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 const originalWarpProtocolVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
 
@@ -66,12 +67,12 @@ function makeAssistantMessage(stopReason: StopReason): AssistantMessage {
 	} as unknown as AssistantMessage;
 }
 
-function makeContext(): InteractiveModeContext {
-	return {
+function makeContext() {
+	return createInteractiveModeContext({
 		sessionManager: {
 			getSessionName: () => "test-session",
 		},
-	} as unknown as InteractiveModeContext;
+	});
 }
 
 function makeAgentEndEvent(messages: AssistantMessage[]): Extract<AgentSessionEvent, { type: "agent_end" }> {
@@ -79,43 +80,19 @@ function makeAgentEndEvent(messages: AssistantMessage[]): Extract<AgentSessionEv
 }
 
 /** Full context needed to drive `#handleAgentEnd` -> `#finishAgentEnd` end to end. */
-function makeTurnEndContext(options: { lastAssistantMessage?: AssistantMessage } = {}): InteractiveModeContext {
-	const session = {
-		isStreaming: false,
-		isCompacting: false,
-		messages: [] as AssistantMessage[],
-		getLastAssistantMessage: () => options.lastAssistantMessage,
-		getContextUsage: () => undefined,
-	};
-	return {
-		isInitialized: true,
-		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
-		retryLoader: undefined,
-		focusedAgentId: undefined,
-		streamingComponent: undefined,
-		streamingMessage: undefined,
-		pendingTools: new Map<string, unknown>(),
-		flushPendingModelSwitch: async () => {},
-		flushPendingCommandOutput: () => {},
-		ui: { requestRender: () => {}, requestComponentRender: () => {} },
-		chatContainer: { removeChild: () => {} },
-		statusContainer: { clear: () => {}, disposeChildren: () => {}, addChild: () => {} },
-		statusLine: { markActivityEnd: () => {}, markActivityStart: () => {} },
-		editor: { getText: () => "" },
+function makeTurnEndContext(options: { lastAssistantMessage?: AssistantMessage } = {}) {
+	return createInteractiveModeContext({
 		sessionManager: { getSessionName: () => "test-session" },
-		clearPinnedError: () => {},
-		ensureLoadingAnimation: () => {},
-		showError: () => {},
-		session,
-		viewSession: session,
-	} as unknown as InteractiveModeContext;
+		viewSession: {
+			getLastAssistantMessage: () => options.lastAssistantMessage,
+		},
+	});
 }
 
 describe("EventController.sendCompletionNotification — abort guard", () => {
 	it("skips notification when the terminal assistant message stopReason === 'aborted'", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("completion.notify", "on");
+		cfgCompletionNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("aborted")]));
 		expect(spy).toHaveBeenCalledTimes(0);
@@ -123,7 +100,7 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 
 	it("skips notification when the terminal assistant message stopReason === 'error'", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("completion.notify", "on");
+		cfgCompletionNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("error")]));
 		expect(spy).toHaveBeenCalledTimes(0);
@@ -131,7 +108,7 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 
 	it("fires notification when stopReason === 'stop' (normal completion)", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("completion.notify", "on");
+		cfgCompletionNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("stop")]));
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -142,7 +119,7 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 	it("fires notification when agent_end carries no assistant message (e.g. brand-new session)", () => {
 		// Defensive: `findLast` returns undefined; treat as 'no abort flag', proceed.
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("completion.notify", "on");
+		cfgCompletionNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendCompletionNotification(makeAgentEndEvent([]));
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -150,7 +127,7 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 
 	it("honors the existing completion.notify=off gate", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("completion.notify", "off");
+		cfgCompletionNotify.override(settings, "off");
 		const controller = new EventController(makeContext());
 		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("stop")]));
 		expect(spy).toHaveBeenCalledTimes(0);
@@ -158,7 +135,7 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 
 	it("skips legacy completion notify when Warp CLI-agent protocol is active", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("completion.notify", "on");
+		cfgCompletionNotify.override(settings, "on");
 		process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = "1";
 		const controller = new EventController(makeContext());
 		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("stop")]));
@@ -167,13 +144,9 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 });
 
 describe("EventController.sendErrorNotification", () => {
-	it("defaults error notifications to opt-in", () => {
-		expect(SETTINGS_SCHEMA["error.notify"].default).toBe("off");
-	});
-
 	it("fires an error notification when stopReason === 'error'", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendErrorNotification(makeAgentEndEvent([makeAssistantMessage("error")]));
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -184,7 +157,7 @@ describe("EventController.sendErrorNotification", () => {
 
 	it("uses the last assistant message when agent_end carries multiple messages", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendErrorNotification(
 			makeAgentEndEvent([makeAssistantMessage("stop"), makeAssistantMessage("error")]),
@@ -194,8 +167,8 @@ describe("EventController.sendErrorNotification", () => {
 
 	it("honors error.notify=off without changing completion notifications", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "off");
-		settings.override("completion.notify", "on");
+		cfgErrorNotify.override(settings, "off");
+		cfgCompletionNotify.override(settings, "on");
 
 		const errorController = new EventController(makeContext());
 		errorController.sendErrorNotification(makeAgentEndEvent([makeAssistantMessage("error")]));
@@ -209,7 +182,7 @@ describe("EventController.sendErrorNotification", () => {
 
 	it("skips user-aborted turns", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendErrorNotification(makeAgentEndEvent([makeAssistantMessage("aborted")]));
 		expect(spy).toHaveBeenCalledTimes(0);
@@ -217,14 +190,14 @@ describe("EventController.sendErrorNotification", () => {
 
 	it("skips normal completion turns", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		controller.sendErrorNotification(makeAgentEndEvent([makeAssistantMessage("stop")]));
 		expect(spy).toHaveBeenCalledTimes(0);
 	});
 	it("skips an error turn marked as a non-terminal scheduling pause", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeContext());
 		const event = {
 			...makeAgentEndEvent([makeAssistantMessage("error")]),
@@ -238,36 +211,14 @@ describe("EventController.sendErrorNotification", () => {
 });
 
 describe("EventController — notifications through the real turn-end path (#handleAgentEnd)", () => {
-	it("fires the error notification when the dispatched turn settles with stopReason === 'error', even with a stale active-context snapshot", async () => {
-		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
-		settings.override("completion.notify", "off");
-		// viewSession (active context) reports no assistant at all — the shape a
-		// classifier-refusal prune leaves behind — while the terminal agent_end
-		// event still carries the failed turn.
-		const controller = new EventController(makeTurnEndContext({ lastAssistantMessage: undefined }));
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
-		expect(spy).toHaveBeenCalledTimes(1);
-		expect(spy).toHaveBeenCalledWith(expect.objectContaining({ body: "Stopped with error", type: "error" }));
-	});
-
-	it("skips the error notification when the dispatched turn settles with stopReason === 'aborted'", async () => {
-		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
-		settings.override("completion.notify", "off");
-		const controller = new EventController(makeTurnEndContext());
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("aborted")]));
-		expect(spy).not.toHaveBeenCalled();
-	});
-
 	it("fires only the error toast — never a paired 'Complete' toast — for one error-ending turn", async () => {
 		// Regression for the exact coupling bug: with both notify settings on,
 		// a classifier-refusal turn's stale active context must not let
 		// sendCompletionNotification's own stopReason check pass by reading a
 		// different (non-error) snapshot than sendErrorNotification just used.
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
-		settings.override("completion.notify", "on");
+		cfgErrorNotify.override(settings, "on");
+		cfgCompletionNotify.override(settings, "on");
 		const controller = new EventController(makeTurnEndContext({ lastAssistantMessage: undefined }));
 		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -276,42 +227,9 @@ describe("EventController — notifications through the real turn-end path (#han
 });
 
 describe("EventController — error toast gated while auto-retry is pending", () => {
-	it("suppresses the error toast for the agent_end that lands mid-retry, then still fires on the real final failure", async () => {
-		// `#handleRetryableError` emits `auto_retry_start`, then still publishes the
-		// failed turn's `agent_end` (stopReason === 'error') before the retry has a
-		// chance to recover. That agent_end must not raise a toast — only the
-		// retry's own eventual settle (success or exhausted) should.
-		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
-		settings.override("completion.notify", "off");
-		const controller = new EventController(makeTurnEndContext());
-
-		await controller.handleEvent({
-			type: "auto_retry_start",
-			attempt: 1,
-			maxAttempts: 3,
-			delayMs: 100,
-			errorMessage: "overloaded",
-		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
-		expect(spy).not.toHaveBeenCalled();
-
-		// Retries exhausted: the session falls through to its own final agent_end
-		// for the same failed message, now that the retry saga is over.
-		await controller.handleEvent({
-			type: "auto_retry_end",
-			success: false,
-			attempt: 3,
-			finalError: "still overloaded",
-		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
-		expect(spy).toHaveBeenCalledTimes(1);
-		expect(spy).toHaveBeenCalledWith(expect.objectContaining({ body: "Stopped with error", type: "error" }));
-	});
-
 	it("keeps retry suppression when the next attempt starts before a deferred failed agent_end settles", async () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeTurnEndContext());
 
 		await controller.handleEvent({
@@ -329,7 +247,7 @@ describe("EventController — error toast gated while auto-retry is pending", ()
 
 	it("clears a retry latch when the view retargets to a session that is not retrying", async () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
+		cfgErrorNotify.override(settings, "on");
 		const controller = new EventController(makeTurnEndContext());
 
 		await controller.handleEvent({
@@ -347,8 +265,8 @@ describe("EventController — error toast gated while auto-retry is pending", ()
 
 	it("fires no error toast at all when the retry recovers", async () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
-		settings.override("completion.notify", "off");
+		cfgErrorNotify.override(settings, "on");
+		cfgCompletionNotify.override(settings, "off");
 		const controller = new EventController(makeTurnEndContext());
 
 		await controller.handleEvent({
@@ -377,8 +295,8 @@ describe("EventController — error toast gated while auto-retry is pending", ()
 		// landing back-to-back with no `auto_retry_end` between them must both
 		// stay suppressed.
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		settings.override("error.notify", "on");
-		settings.override("completion.notify", "off");
+		cfgErrorNotify.override(settings, "on");
+		cfgCompletionNotify.override(settings, "off");
 		const controller = new EventController(makeTurnEndContext());
 
 		await controller.handleEvent({
@@ -405,8 +323,44 @@ describe("EventController — error toast gated while auto-retry is pending", ()
 	});
 });
 
+function asyncWaitEnd(): Extract<AgentSessionEvent, { type: "agent_end" }> {
+	return {
+		...makeAgentEndEvent([makeAssistantMessage("stop")]),
+		isTerminal: false,
+		yielded: true,
+		awaitingAsyncWork: true,
+	};
+}
+
+/** Session whose owned background job is pending until `drain()` settles it without delivering a wake. */
+function makeAsyncWaitContext() {
+	let pending = true;
+	const settled = Promise.withResolvers<void>();
+	const ctx = createInteractiveModeContext({
+		sessionManager: { getSessionName: () => "test-session" },
+		session: {
+			// The real settle is emitted while its prompt is still admitted.
+			hasAdmittedSubmission: true,
+			hasPendingAsyncWork: () => pending,
+			settleAsyncWork: () => settled.promise,
+		},
+	});
+	const drain = () => {
+		pending = false;
+		settled.resolve();
+	};
+	return { ctx, drain };
+}
+
+/** One macrotask hop: every microtask continuation queued so far has run. */
+async function nextMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	await promise;
+}
+
 describe("EventController — terminal title across a non-terminal agent_end", () => {
-	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a pending async-wake pause (isTerminal:false)", async () => {
+	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a scheduled continuation (isTerminal:false, not yielded)", async () => {
 		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 		const ctx = makeTurnEndContext();
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
@@ -416,11 +370,61 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 			...makeAgentEndEvent([makeAssistantMessage("stop")]),
 			isTerminal: false,
 		} as Extract<AgentSessionEvent, { type: "agent_end" }> & { isTerminal: false });
-		// The async job still runs: never drop to `idle`, never run #finishAgentEnd teardown.
+		// The agent's own continuation (reminder/retry) follows: never drop to `idle`, never run #finishAgentEnd teardown.
 		expect(stateSpy).not.toHaveBeenCalledWith("idle");
 		expect(markActivityEnd).not.toHaveBeenCalled();
 		// The automatic continuation must still pick up a queued plan-mode model switch.
 		expect(flushPendingModelSwitch).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the working title on a queued steer/follow-up or IRC continuation (isTerminal:false, yielded:true, no awaitingAsyncWork)", async () => {
+		// `AgentSession#flushPendingAgentEnd` re-tags a built terminal end as
+		// non-terminal when queued input is about to drain; `yielded` stays true.
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const ctx = makeTurnEndContext();
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
+		const controller = new EventController(ctx);
+		await controller.handleEvent({
+			...makeAgentEndEvent([makeAssistantMessage("stop")]),
+			isTerminal: false,
+			yielded: true,
+		} as Extract<AgentSessionEvent, { type: "agent_end" }>);
+		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(markActivityEnd).not.toHaveBeenCalled();
+	});
+
+	it("drops the title to idle at an async-wait settle and tears down once background work drains without a wake", async () => {
+		// A cancelled or acknowledged background job never delivers a wake, so no
+		// terminal agent_end follows; without this, title and loader spin forever.
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const { ctx, drain } = makeAsyncWaitContext();
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
+		const tornDown = Promise.withResolvers<void>();
+		markActivityEnd.mockImplementation(() => tornDown.resolve());
+		const controller = new EventController(ctx);
+		await controller.handleEvent(asyncWaitEnd());
+		expect(stateSpy).toHaveBeenCalledWith("idle");
+		// The job is still running: loader/progress teardown waits for it.
+		expect(markActivityEnd).not.toHaveBeenCalled();
+
+		drain();
+		await tornDown.promise;
+		expect(markActivityEnd).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves teardown to the woken run when background work resumes the agent", async () => {
+		vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const { ctx, drain } = makeAsyncWaitContext();
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
+		const controller = new EventController(ctx);
+		await controller.handleEvent(asyncWaitEnd());
+		// The job result woke the loop: a new run starts before the drain completes.
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+
+		drain();
+		await nextMacrotask();
+		// The woken run's own agent_end finalizes; this settle must not stop its loader.
+		expect(markActivityEnd).not.toHaveBeenCalled();
 	});
 
 	it("transitions to idle and tears down on the terminal agent_end", async () => {

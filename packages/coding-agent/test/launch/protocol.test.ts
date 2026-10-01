@@ -18,6 +18,18 @@ const baseResult = {
 	state: "running" as const,
 };
 
+const baseSnapshot = {
+	name: "web",
+	id: "daemon-1",
+	state: "ready" as const,
+	createdAt: 1,
+	startedAt: 1,
+	restartCount: 0,
+	outputBytes: 5,
+	persist: false,
+	detached: false,
+};
+
 describe("launch logs protocol", () => {
 	it("decodes terminal rows without changing their bytes", () => {
 		const terminalRows = ["\x1b[0m\x1b[1;38;5;2mready", "", "界e\u0301"];
@@ -72,5 +84,53 @@ describe("launch logs compatibility", () => {
 		const result = parseDaemonRpcResult(operation, { ...baseResult, terminalText: "progress\rready" });
 		if (result.op !== "logs") throw new Error("unexpected result");
 		expect("terminalText" in result ? result.terminalText : undefined).toBe("progress\rready");
+	});
+});
+
+describe("daemon mode protocol", () => {
+	it("accepts persistence transitions and rejects unsupported modes", () => {
+		const request = parseDaemonWireRequest({
+			id: "mode-request",
+			token: "token",
+			operation: { op: "mode", name: "web", mode: "persist" },
+		});
+		expect(request.operation).toEqual({ op: "mode", name: "web", mode: "persist" });
+		expect(
+			parseDaemonRpcResult(
+				{ op: "mode", name: "web", mode: "persist" },
+				{ daemon: { ...baseSnapshot, persist: true } },
+			),
+		).toEqual({ op: "mode", daemon: { ...baseSnapshot, persist: true } });
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "bad-mode",
+				token: "token",
+				operation: { op: "mode", name: "web", mode: "restart" },
+			}),
+		).toThrow("operation.mode must be persist, session, or detached");
+	});
+});
+
+describe("regex-derived protocol fields", () => {
+	it("preserves an empty wait pattern match", () => {
+		const waitOperation: Extract<DaemonOperation, { op: "wait" }> = {
+			op: "wait",
+			name: "web",
+			for: "ready",
+			pattern: "^",
+			timeoutMs: 1_000,
+		};
+		expect(
+			parseDaemonRpcResult(waitOperation, {
+				daemon: baseSnapshot,
+				matched: "",
+				timedOut: false,
+			}),
+		).toEqual({
+			op: "wait",
+			daemon: baseSnapshot,
+			matched: "",
+			timedOut: false,
+		});
 	});
 });

@@ -4,6 +4,7 @@ function randu32() {
 
 const EPOCH = 1420070400000;
 const MAX_SEQ = 0x3fffff;
+const MAX_DT = 2 ** 42 - 1;
 
 // Snowflake as a hex string (16 chars, zero-padded).
 //
@@ -25,14 +26,24 @@ namespace Snowflake {
 	//
 	export const MAX_SEQUENCE = MAX_SEQ;
 
+	// Last timestamp representable in the 42-bit timestamp field (~year 2154).
+	//
+	export const MAX_TIMESTAMP = EPOCH + MAX_DT;
+
 	// Formats a sequence and timestamp into a snowflake hex string.
 	//
 	// dt fits well within BigInt range: (dt << 22) | seq stays under 2^64 for
 	// any dt < 2^42 (~year 2154), so a single 64-bit format is exact — and
 	// measures ~1.7x faster than stitching four 16-bit hex segments.
 	//
+	// dt is saturated into [0, 2^42) so the result is always a valid snowflake:
+	// a negative delta (a timestamp before EPOCH) would otherwise render a
+	// leading "-", and a delta past ~2154 would widen the string beyond 16
+	// chars. Both cases produce a value that fails this module's own valid().
+	//
 	export function formatParts(dt: number, seq: number): Snowflake {
-		return ((BigInt(dt) << 22n) | BigInt(seq)).toString(16).padStart(16, "0") as Snowflake;
+		const clamped = Math.min(Math.max(dt, 0), MAX_DT);
+		return ((BigInt(clamped) << 22n) | BigInt(seq)).toString(16).padStart(16, "0") as Snowflake;
 	}
 
 	// Snowflake generator type.

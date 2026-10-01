@@ -6,7 +6,7 @@
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { dateToAgeSeconds } from "../utils";
@@ -205,7 +205,7 @@ export async function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | null> {
-	return (await authStorage.getApiKey("zai", sessionId, { signal })) ?? null;
+	return (await authStorage.keys.get("zai", sessionId, { signal })) ?? null;
 }
 
 async function callZaiTool(
@@ -353,11 +353,20 @@ function parseSearchPayload(rawResult: unknown): {
 			for (const part of content) {
 				const text = isRecord(part) ? asString(part.text) : null;
 				if (!text) continue;
-				textParts.push(text);
 				try {
-					candidates.push(JSON.parse(text));
+					let parsed: unknown = JSON.parse(text);
+					if (typeof parsed === "string") {
+						try {
+							parsed = JSON.parse(parsed);
+						} catch {
+							// The decoded string is answer text rather than another JSON payload.
+						}
+					}
+					candidates.push(parsed);
+					if (getSearchResults(parsed).length === 0) textParts.push(text);
 				} catch {
-					// Not JSON payload; keep as fallback answer text.
+					// Non-JSON content is preserved as answer text.
+					textParts.push(text);
 				}
 			}
 		}
@@ -402,7 +411,7 @@ function toSources(results: ZaiSearchResult[]): SearchSource[] {
 
 /** Execute Z.AI web search via remote MCP endpoint. */
 export async function searchZai(params: ZaiSearchParams): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("zai", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("zai", {
 		sessionId: params.sessionId,
 	});
 
@@ -433,7 +442,7 @@ export class ZaiProvider extends SearchProvider {
 	readonly label = "Z.AI";
 
 	isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
-		return authStorage.hasAuth("zai") || !!getEnvApiKey("zai");
+		return authStorage.keys.source("zai") !== undefined || !!getEnvApiKey("zai");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

@@ -71,7 +71,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession compaction e2e", 
 
 		sessionManager = inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1 });
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		session = new AgentSession({

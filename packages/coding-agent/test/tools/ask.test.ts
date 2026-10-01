@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -8,10 +8,21 @@ import type {
 	ExtensionAskDialogResult,
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import * as ai from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+// 1x1 transparent PNG.
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -21,6 +32,7 @@ function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated(),
 		...overrides,
+		canPromptUser: overrides.canPromptUser ?? overrides.hasUI ?? true,
 	};
 }
 
@@ -78,8 +90,13 @@ function selectItemLabel(option: ExtensionUISelectItem | undefined): string | un
 	return typeof option === "string" ? option : option?.label;
 }
 
+let darkTheme: Theme;
+
 beforeAll(async () => {
 	await initTheme(false);
+	const loadedTheme = await getThemeByName("dark");
+	if (!loadedTheme) throw new Error("Expected dark theme");
+	darkTheme = loadedTheme;
 });
 
 describe("AskTool cancellation", () => {
@@ -188,8 +205,6 @@ describe("AskTool cancellation", () => {
 				options: ExtensionUISelectItem[],
 				dialogOptions?: { initialIndex?: number; timeout?: number; onTimeout?: () => void },
 			) => {
-				const timeout = dialogOptions?.timeout ?? 1;
-				await Bun.sleep(timeout + 5);
 				dialogOptions?.onTimeout?.();
 				const selected = options[dialogOptions?.initialIndex ?? 0];
 				return typeof selected === "string" ? selected : selected?.label;
@@ -238,8 +253,6 @@ describe("AskTool cancellation", () => {
 		const abort = vi.fn();
 		const context = createContext({
 			select: async (_prompt, _options, dialogOptions) => {
-				const timeout = dialogOptions?.timeout ?? 1;
-				await Bun.sleep(timeout + 5);
 				dialogOptions?.onTimeout?.();
 				return undefined;
 			},
@@ -462,8 +475,7 @@ describe("AskTool option descriptions", () => {
 	});
 
 	it("renders descriptions under labels in ask call previews", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{
 				question: "How should authentication continue?",
@@ -573,188 +585,43 @@ describe("AskTool custom input", () => {
 		expect(editor).toHaveBeenCalledTimes(1);
 		expect(abort).not.toHaveBeenCalled();
 	});
-	it("keeps question context visible while entering Other custom input", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const questions = [
-			{
-				id: "details",
-				question: "Share details",
-				options: [{ label: "yes" }, { label: "no", description: "Skip the optional detail." }],
-			},
-		];
-		const context = createContext({
-			select: async () => "Other (type your own)",
-			editor,
-		});
-
-		await tool.execute("call-editor-context", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title).toContain("Share details");
-		expect(title).toContain("yes");
-		expect(title).toContain("no");
-		expect(title).toContain("Skip the optional detail.");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("caps Other editor context for long option lists with long descriptions", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const longDescription = "x".repeat(400);
-		const optionCount = 20;
-		const options = Array.from({ length: optionCount }, (_, i) => ({
-			label: `option-${i}`,
-			description: longDescription,
-		}));
-		const questions = [{ id: "pick", question: "Pick one", options }];
-		const context = createContext({
-			select: async () => "Other (type your own)",
-			editor,
-		});
-
-		await tool.execute("call-editor-cap", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		const lineCount = title.split("\n").length;
-		// Cap is 8 option rows + their (single-line) descriptions + chrome; far below
-		// 20 options × (label + multi-line description) the unbounded path would emit.
-		expect(lineCount).toBeLessThanOrEqual(22);
-		expect(title).toContain("Pick one");
-		expect(title).toContain("option-0");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-		// Descriptions are flattened to a single line and truncated.
-		expect(title).not.toContain("x".repeat(400));
-		// Every option-row description must fit on one line.
-		for (const line of title.split("\n")) {
-			expect(line.length).toBeLessThanOrEqual(160);
-		}
-	});
-
-	it("keeps user-checked options visible in capped multi-select context", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Multi pick", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				call += 1;
-				if (call === 1) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-12"));
-				if (call === 2) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-17"));
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-multi", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		// Checked options must survive the window so the user sees what they had
-		// already toggled before switching to Other.
-		expect(title).toContain("opt-12");
-		expect(title).toContain("opt-17");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-	});
-
-	it("summarizes excess checked options instead of exceeding the context cap", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `checked-${i}` }));
-		const questions = [{ id: "pick", question: "Pick many", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				if (call < 12) {
-					const label = `checked-${call}`;
-					call += 1;
-					return selectItemLabel(opts.find(o => selectItemLabel(o) === label));
-				}
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-many-checked", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		const optionRows = title
-			.split("\n")
-			.filter(line => line.includes("checked-") || line.includes("Other (type your own)"));
-		expect(optionRows.length).toBeLessThanOrEqual(8);
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("checked");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("keeps sparse checked gap markers within the Other title budget", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const checkedLabels = [10, 20, 30, 40, 50, 60].map(i => `opt-${i}`);
-		const options = Array.from({ length: 61 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Pick sparse", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				const next = checkedLabels[call++];
-				return next ? selectItemLabel(opts.find(o => selectItemLabel(o) === next)) : "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-sparse-checked", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title.split("\n").length).toBeLessThanOrEqual(16);
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("enforces total title row budget under narrow terminals", async () => {
+	it("titles the Other editor with the question text alone, free of terminal layout", async () => {
 		const originalColumns = process.stdout.columns;
-		// Force an 80-wide terminal so long descriptions would wrap to multiple
-		// rendered rows without per-line width truncation + total row budget.
-		Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+		// A narrow terminal must not clip the title: UI surfaces own its layout.
+		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
 		try {
+			const question = "A question long enough to exceed any clipped terminal width, ending here?";
 			const tool = new AskTool(createSession());
 			const editor = vi.fn(async (_title: string) => "custom");
-			const longDescription = "x".repeat(400);
-			const options = Array.from({ length: 8 }, (_, i) => ({
-				label: `option-${i}`,
-				description: longDescription,
-			}));
-			const questions = [{ id: "pick", question: "Pick one", options }];
 			const context = createContext({
 				select: async () => "Other (type your own)",
 				editor,
 			});
+			await tool.execute(
+				"call-editor-title-single",
+				{ questions: [{ id: "one", question, options: [{ label: "yes", description: "Detail." }] }] },
+				undefined,
+				undefined,
+				context,
+			);
+			expect(editor.mock.calls[0]?.[0]).toBe(question);
 
-			await tool.execute("call-editor-row-budget", { questions }, undefined, undefined, context);
-
-			const title = editor.mock.calls[0]?.[0] ?? "";
-			const lines = title.split("\n");
-			// 16-row hard budget keeps the input row + hint reachable on 80x24.
-			expect(lines.length).toBeLessThanOrEqual(16);
-			// Every emitted line must fit on a single 80-cell row after truncation.
-			for (const line of lines) {
-				expect(stripAnsi(line).length).toBeLessThanOrEqual(80);
-			}
-			expect(title).toContain("Pick one");
-			expect(title).toContain("Other (type your own)");
-			expect(title).toContain("Enter your response:");
-			expect(title).not.toContain("x".repeat(400));
+			const multiEditor = vi.fn(async (_title: string) => "custom");
+			let call = 0;
+			const multiContext = createContext({
+				select: async () => (call++ === 0 ? "yes" : "Other (type your own)"),
+				editor: multiEditor,
+			});
+			await tool.execute(
+				"call-editor-title-multi",
+				{ questions: [{ id: "many", question, options: [{ label: "yes" }, { label: "no" }], multi: true }] },
+				undefined,
+				undefined,
+				multiContext,
+			);
+			expect(multiEditor.mock.calls[0]?.[0]).toBe(`(1 selected) ${question}`);
 		} finally {
-			if (originalColumns === undefined) {
-				Object.defineProperty(process.stdout, "columns", { value: undefined, configurable: true });
-			} else {
-				Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
-			}
+			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
 		}
 	});
 
@@ -940,8 +807,7 @@ describe("AskTool custom input", () => {
 		expect(result.content[0].text).toContain("alpha");
 		expect(result.content[0].text).toContain("custom detail");
 
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme!);
 		const renderedText = stripAnsi(rendered.render(120).join("\n"));
 		expect(renderedText).toContain("alpha");
@@ -1028,8 +894,7 @@ describe("AskTool multiline custom input rendering", () => {
 
 		expect(result.details?.customInput).toBe(multilineText);
 
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme!);
 		const renderedText = stripAnsi(rendered.render(120).join("\n"));
 
@@ -1083,8 +948,7 @@ describe("AskTool multiline custom input rendering", () => {
 			context,
 		);
 
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme!);
 		const renderedText = stripAnsi(rendered.render(120).join("\n"));
 
@@ -1338,8 +1202,7 @@ describe("AskTool multi-question navigation", () => {
 
 describe("AskTool option markers", () => {
 	it("renders single-choice call options with circular radio markers, not checkboxes", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{ question: "Pick one", options: [{ label: "Alpha" }, { label: "Beta" }] },
 			{ expanded: true, isPartial: false },
@@ -1351,8 +1214,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("renders multi-select call options with rectangular checkbox markers, not radios", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{ question: "Pick many", options: [{ label: "Alpha" }, { label: "Beta" }], multi: true },
 			{ expanded: true, isPartial: false },
@@ -1364,8 +1226,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("keeps option rows stable across repeated renders", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const options = [
 			{ label: "TypeScript" },
 			{ label: "Rust" },
@@ -1416,8 +1277,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("keeps single-question option rows stable across repeated renders", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		// The question body comes from the Markdown render cache, which returns
 		// the SAME array on every render of identical text at identical width.
 		// Appending option rows in place would poison that cached entry, so a
@@ -1451,8 +1311,7 @@ describe("AskTool option markers", () => {
 		expect(secondResult.match(/OptionDupCanary/g)?.length).toBe(1);
 	});
 	it("renders single-choice result selection with a filled radio marker", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "" }],
@@ -1467,8 +1326,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("renders multi-select result selections with checkbox markers", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "" }],
@@ -1485,8 +1343,7 @@ describe("AskTool option markers", () => {
 
 describe("askToolRenderer malformed call args", () => {
 	it("renders double-encoded questions string instead of crashing the TUI", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		// Models occasionally JSON-encode the questions array as a string; a bare
 		// string passes a truthy `.length` check but has no `.map` (TUI crash).
 		const doubleEncoded = JSON.stringify([
@@ -1504,8 +1361,7 @@ describe("askToolRenderer malformed call args", () => {
 	});
 
 	it("falls back to the error frame for unparseable questions without throwing", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		for (const questions of ["[{trunc", 42, { 0: { id: "x" } }]) {
 			const rendered = askToolRenderer.renderCall(
 				{ questions } as never,
@@ -1518,8 +1374,7 @@ describe("askToolRenderer malformed call args", () => {
 	});
 
 	it("drops malformed question entries and option items while keeping valid ones", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{
 				questions: [
@@ -1598,6 +1453,278 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("returns custom-answer and note images after text, numbering markers across answers in text and details", async () => {
+		// A clipboard paste committed to the session carries its file; the model gets the same
+		// source notice a main-editor attachment gets, right before the image.
+		const customImage = tagImageAttachmentSource(
+			{ type: "image", data: "custom-image", mimeType: "image/webp" },
+			"local://pasted-image-abc.webp",
+			"image",
+		);
+		const firstImage = { type: "image" as const, data: "first-image", mimeType: "image/png" };
+		const secondImage = { type: "image" as const, data: "second-image", mimeType: "image/jpeg" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					selectedOptions: [],
+					customInput: "Like [Image #1]",
+					customInputImages: [customImage],
+					note: "Evidence [Image #1]",
+					noteImages: [firstImage],
+				},
+				{
+					id: "q2",
+					selectedOptions: ["B"],
+					note: "Evidence [Image #1]",
+					noteImages: [secondImage],
+				},
+			],
+		});
+		const tool = new AskTool(createSession());
+		const result = await tool.execute(
+			"call-images",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: 'User answers:\nq1: "Like [Image #1]" (note: Evidence [Image #2])\nq2: B (note: Evidence [Image #3])',
+			},
+			{ type: "text", text: expect.stringContaining("local://pasted-image-abc.webp") },
+			// The source tag stays on the block so `attachment://1` resolves to the pasted file.
+			customImage,
+			{ type: "image", data: "first-image", mimeType: "image/png" },
+			{ type: "image", data: "second-image", mimeType: "image/jpeg" },
+		]);
+		expect(result.details).toMatchObject({
+			results: [{ customInput: "Like [Image #1]", note: "Evidence [Image #2]" }, { note: "Evidence [Image #3]" }],
+		});
+		for (const data of ["custom-image", "first-image", "second-image"]) {
+			expect(JSON.stringify(result.details)).not.toContain(data);
+		}
+	});
+
+	it("renumbers only markers that refer to the answer's own images", async () => {
+		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "q1", selectedOptions: [], customInput: "Like [Image #1]", customInputImages: [image] },
+				{
+					id: "q2",
+					selectedOptions: [],
+					customInput: "Match the mock in [Image #1]",
+					note: "[Image #1] beside [Image #5]",
+					noteImages: [image],
+				},
+			],
+		});
+		const result = await new AskTool(createSession()).execute(
+			"call-typed-markers",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.details).toMatchObject({
+			results: [
+				{ customInput: "Like [Image #1]" },
+				{ customInput: "Match the mock in [Image #1]", note: "[Image #2] beside [Image #5]" },
+			],
+		});
+	});
+
+	describe("answer images for a text-only model", () => {
+		const visionModel = buildModel({
+			id: "gpt-4o",
+			name: "GPT-4o",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		});
+		const textModel: Model<Api> = { ...visionModel, id: "gpt-4.1-mini", input: ["text"] };
+		const image = { type: "image" as const, data: TINY_PNG_BASE64, mimeType: "image/png" };
+		const answerText = { type: "text" as const, text: "User selected: A\nUser added note: see [Image #1]" };
+		let tempDir: TempDir;
+		let describeCalls: unknown[][];
+
+		beforeEach(async () => {
+			tempDir = await TempDir.create("@omp-ask-describe-");
+			describeCalls = [];
+			vi.spyOn(ai, "completeSimple").mockImplementation(completeImpl);
+		});
+
+		afterEach(async () => {
+			vi.restoreAllMocks();
+			await tempDir.remove();
+		});
+
+		/** Vision-model stand-in, shaped like `makeCompleteStub` in image-vision-fallback.test.ts. */
+		const completeImpl = async (...args: unknown[]) => {
+			describeCalls.push(args);
+			return {
+				role: "assistant",
+				api: visionModel.api,
+				provider: visionModel.provider,
+				model: visionModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "A red banner reading ZEBRA 42." }],
+			} satisfies AssistantMessage;
+		};
+
+		function runAsk(options: {
+			model: Model<Api>;
+			settings?: Settings;
+			getApiKey?: () => Promise<string | undefined>;
+			selectedOptions?: string[];
+		}) {
+			const askDialog = vi.fn().mockResolvedValue({
+				kind: "submit",
+				results: [
+					{
+						id: "q1",
+						selectedOptions: options.selectedOptions ?? ["A"],
+						note: "see [Image #1]",
+						noteImages: [image],
+					},
+				],
+			});
+			return new AskTool(
+				createSession({
+					settings: options.settings ?? Settings.isolated(),
+					getActiveModel: () => options.model,
+					getArtifactsDir: () => tempDir.path(),
+					getSessionId: () => "session",
+					modelRegistry: {
+						getAvailable: () => [visionModel],
+						getApiKey: options.getApiKey ?? (async () => "test-key"),
+						resolver: () => async () => "test-key",
+					} as unknown as ToolSession["modelRegistry"],
+				}),
+			).execute(
+				"call-describe",
+				{ questions: [{ id: "q1", question: "Q?", options: [{ label: "A" }] }] },
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+		}
+
+		it("follows each answer image with a vision-model description", async () => {
+			const result = await runAsk({ model: textModel });
+
+			expect(result.content).toEqual([
+				answerText,
+				image,
+				{ type: "text", text: expect.stringContaining("A red banner reading ZEBRA 42.") },
+			]);
+		});
+
+		it("keeps the answer and its images when describing them fails", async () => {
+			const result = await runAsk({
+				model: textModel,
+				getApiKey: async () => {
+					throw new Error("credential lookup failed");
+				},
+			});
+
+			expect(result.content).toEqual([answerText, image]);
+		});
+
+		it("makes no vision call for a cancelled ask", async () => {
+			await expect(runAsk({ model: textModel, selectedOptions: [] })).rejects.toBeInstanceOf(ToolAbortError);
+			expect(describeCalls).toHaveLength(0);
+		});
+
+		it("sends the image alone to a vision model, or with the setting off", async () => {
+			expect((await runAsk({ model: visionModel })).content).toEqual([answerText, image]);
+			expect(
+				(
+					await runAsk({
+						model: textModel,
+						settings: Settings.isolated({ "images.describeForTextModels": false }),
+					})
+				).content,
+			).toEqual([answerText, image]);
+			expect(describeCalls).toHaveLength(0);
+		});
+	});
+
+	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
+		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "storage",
+					question: "Storage?",
+					options: ["SQLite", "PostgreSQL"],
+					multi: false,
+					selectedOptions: ["PostgreSQL"],
+				},
+			],
+		});
+		const tool = new AskTool(
+			createSession({
+				hasUI: false,
+				canPromptUser: true,
+				settings: Settings.isolated({ "ask.notify": "on" }),
+			}),
+		);
+
+		try {
+			await tool.execute(
+				"call-acp-dialog",
+				{
+					questions: [
+						{
+							id: "storage",
+							question: "Storage?",
+							options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+			expect(sendNotification).not.toHaveBeenCalled();
+		} finally {
+			sendNotification.mockRestore();
+		}
+	});
+
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
@@ -1617,6 +1744,84 @@ describe("AskTool rich ask dialog", () => {
 		).rejects.toThrow(ToolAbortError);
 
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts an empty multi-select submission instead of aborting", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: [],
+					customInput: undefined,
+					timedOut: undefined,
+				},
+			],
+		});
+		const context = createContext({ askDialog, abort });
+
+		const result = await tool.execute(
+			"call-empty-multi",
+			{
+				questions: [{ id: "q1", question: "Choose?", options: [{ label: "A" }, { label: "B" }], multi: true }],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(result.details?.selectedOptions).toEqual([]);
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toContain("User did not select any options");
+		}
+	});
+
+	it("formats an empty multi-select answer in a multi-question response as an empty selection", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose any?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: [],
+				},
+				{
+					id: "q2",
+					question: "Choose one?",
+					options: ["C", "D"],
+					multi: false,
+					selectedOptions: ["C"],
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-empty-multi-among-many",
+			{
+				questions: [
+					{ id: "q1", question: "Choose any?", options: [{ label: "A" }, { label: "B" }], multi: true },
+					{ id: "q2", question: "Choose one?", options: [{ label: "C" }, { label: "D" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toBe("User answers:\nq1: []\nq2: C");
+		}
 	});
 
 	it("returns chat redirect result when askDialog returns kind chat", async () => {
@@ -1690,5 +1895,426 @@ describe("AskTool rich ask dialog", () => {
 			questions: [{ id: "q1", question: "Q?", options: [{ label: "Next →" }] }],
 		});
 		expect(reservedNext instanceof type.errors).toBe(true);
+	});
+});
+
+describe("AskTool carriage-return sanitization", () => {
+	it("strips \\r runs from dialog input and result echo (GLM-style degenerate JSON strings)", async () => {
+		const tool = new AskTool(createSession());
+		let captured: ExtensionAskDialogQuestion[] = [];
+		const context = createContext({
+			askDialog: async questions => {
+				captured = questions;
+				return {
+					kind: "submit",
+					results: [
+						{
+							id: "q3a",
+							question: "Q3 A  —  Fallback  path .  What  happens ?",
+							options: ["Abort   +  log", "Continue  anyway"],
+							multi: false,
+							selectedOptions: ["Abort   +  log"],
+						},
+					],
+				};
+			},
+		});
+		const result = await tool.execute(
+			"call-cr-sanitize",
+			{
+				questions: [
+					{
+						id: "q3a",
+						question: "Q3\r\rA\r\r —\r\r Fallback\r\r path\r\r.\r\r What\r\r happens\r\r?",
+						header: "Fallback\r\r path",
+						options: [
+							{
+								label: "Abort\r\r \r\r+\r\r log",
+								description: "The\r\r worker\r\r pool\r\r sees\r\r nothing\r\r.",
+								preview: 'idle\r\r loop\r\r:\r\n\r\r \r\r if\r\r "done"\r\r in\r\r state',
+							},
+							{ label: "Continue\r\r anyway" },
+						],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(captured).toHaveLength(1);
+		const [dialogQuestion] = captured;
+		expect(dialogQuestion?.question).toBe("Q3 A  —  Fallback  path .  What  happens ?");
+		expect(dialogQuestion?.header).toBe("Fallback  path");
+		expect(dialogQuestion?.options[0]?.label).toBe("Abort   +  log");
+		expect(dialogQuestion?.options[0]?.description).toBe("The  worker  pool  sees  nothing .");
+		expect(dialogQuestion?.options[0]?.preview).toBe('idle  loop :\n    if  "done"  in  state');
+		expect(JSON.stringify(captured)).not.toContain("\r");
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		expect(result.content[0].text).toContain("User selected: Abort   +  log");
+		expect(result.content[0].text).not.toContain("\r");
+	});
+	it("fails closed when sanitization collapses a label into a reserved runtime label", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn(async () => undefined);
+		const context = createContext({ askDialog: askDialog as never });
+		// Raw args pass schema validation — no literal reserved label — but
+		// sanitizing `Other\r(type your own)` forms the exact custom-input
+		// sentinel, which would hijack the OTHER_OPTION branch and duplicate
+		// the rich dialog row.
+		const args = {
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Other\r(type your own)" }] }],
+		};
+		expect(tool.parameters(args) instanceof type.errors).toBe(false);
+		const result = await tool.execute("call-cr-reserved", args, undefined, undefined, context);
+		expect(askDialog).not.toHaveBeenCalled();
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		expect(result.content[0].text).toContain("reserved runtime labels");
+		expect(result.content[0].text).toContain("Other (type your own)");
+		expect(result.content[0].text).not.toContain("\r");
+	});
+
+	it("sanitizes carriage returns in legacy question text and transcript question ids", async () => {
+		const theme = darkTheme;
+		const rendered = askToolRenderer.renderCall(
+			{
+				questions: [{ id: "q\r\r3a", question: "Q3\r\rA?", options: [{ label: "Alpha" }] }],
+			} as never,
+			{ expanded: true, isPartial: true },
+			theme!,
+		);
+		const text = stripAnsi(rendered.render(120).join("\n"));
+		expect(text).toContain("[q 3a]");
+		expect(text).toContain("Q3 A?");
+		expect(text).not.toContain("\r");
+
+		const legacy = askToolRenderer.renderCall(
+			{ question: "Idle\r\rloop?", options: [{ label: "Alpha" }] },
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const legacyText = stripAnsi(legacy.render(120).join("\n"));
+		expect(legacyText).toContain("Idle loop?");
+		expect(legacyText).not.toContain("\r");
+	});
+
+	it("fails closed when sanitization merges distinct labels into one", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn(async () => undefined);
+		const context = createContext({ askDialog: askDialog as never });
+		// Distinct raw labels, but dialog selection is label-keyed — sanitized,
+		// one row would check both and submit duplicates.
+		const args = {
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Retry\rnow" }, { label: "Retry now" }] }],
+		};
+		const result = await tool.execute("call-cr-duplicate", args, undefined, undefined, context);
+		expect(askDialog).not.toHaveBeenCalled();
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		expect(result.content[0].text).toContain("unique within a question");
+		expect(result.content[0].text).toContain("Retry now");
+		expect(result.content[0].text).not.toContain("\r");
+	});
+
+	it("sanitizes persisted result details so pre-fix transcripts render as prose", async () => {
+		const theme = darkTheme;
+		// Multi-part branch: `\r`-laden id/question/labels flow into section labels and Markdown.
+		const multi = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					results: [
+						{
+							id: "q\r\r3a",
+							question: "Q3\r\rA?",
+							options: ["Abort\r\rlog", "Continue\r\ranyway"],
+							multi: false,
+							selectedOptions: ["Abort\r\rlog"],
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const multiText = stripAnsi(multi.render(120).join("\n"));
+		expect(multiText).toContain("[q 3a]");
+		expect(multiText).toContain("Q3 A?");
+		expect(multiText).toContain("Abort log");
+		expect(multiText).not.toContain("\r");
+
+		// Single-question branch plus user-authored echo fields.
+		const single = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					question: "Idle\r\rloop?",
+					options: ["Alpha"],
+					multi: false,
+					selectedOptions: ["Alpha"],
+					note: "a\r\rnote",
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const singleText = stripAnsi(single.render(120).join("\n"));
+		expect(singleText).toContain("Idle loop?");
+		expect(singleText).toContain("a note");
+		expect(singleText).not.toContain("\r");
+
+		// Chat-redirect branch.
+		const chat = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { chatRedirect: true, questions: ["Chat\r\rabout?"] },
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const chatText = stripAnsi(chat.render(120).join("\n"));
+		expect(chatText).toContain("Chat about?");
+		expect(chatText).not.toContain("\r");
+
+		// Content-text fallbacks (no details / no question).
+		for (const stale of [
+			{ content: [{ type: "text", text: "stale\r\rtranscript" }] },
+			{ content: [{ type: "text", text: "stale\r\rtranscript" }], details: {} },
+		]) {
+			const fallback = askToolRenderer.renderResult(stale, { expanded: true, isPartial: false }, theme!);
+			const fallbackText = stripAnsi(fallback.render(120).join("\n"));
+			expect(fallbackText).toContain("stale transcript");
+			expect(fallbackText).not.toContain("\r");
+		}
+	});
+
+	it("keeps pre-fix colliding selections on their original row", async () => {
+		const theme = darkTheme;
+		// Pre-fix persisted result: distinct raw options merged by
+		// sanitization, only the second selected. Label matching would mark
+		// both rows; resolving against the raw labels keeps the marker right.
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					results: [
+						{
+							id: "q1",
+							question: "Retry?",
+							options: ["Retry\rnow", "Retry now"],
+							multi: true,
+							selectedOptions: ["Retry now"],
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const text = stripAnsi(rendered.render(120).join("\n"));
+		expect(text).not.toContain("\r");
+		const rows = text.split("\n").filter(line => line.includes("Retry now"));
+		expect(rows).toHaveLength(2);
+		const checked = theme!.checkbox.checked;
+		expect(rows[0]).not.toContain(checked);
+		expect(rows[1]).toContain(checked);
+	});
+
+	it("keeps every duplicate selection marked on pre-guard replay", async () => {
+		const theme = darkTheme;
+		// Before the duplicate-label guard, `options: ["A", "A"]` could record
+		// both rows selected. Each occurrence must consume a distinct index
+		// or replay unmarks history the old renderer showed as checked.
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					results: [
+						{
+							id: "q1",
+							question: "Pick?",
+							options: ["A", "A"],
+							multi: true,
+							selectedOptions: ["A", "A"],
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const text = stripAnsi(rendered.render(120).join("\n"));
+		const checked = theme!.checkbox.checked;
+		const unchecked = theme!.checkbox.unchecked;
+		const rows = text.split("\n").filter(line => line.includes(checked) || line.includes(unchecked));
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toContain(checked);
+		expect(rows[1]).toContain(checked);
+	});
+
+	it("fails closed when sanitization merges distinct question ids", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn(async () => undefined);
+		const context = createContext({ askDialog: askDialog as never });
+		// Distinct raw ids, but multi-question answers echo `id: ...` lines
+		// the model uses to correlate — merged ids would be unanswerable.
+		const args = {
+			questions: [
+				{ id: "deploy\rmode", question: "Deploy?", options: [{ label: "Yes" }] },
+				{ id: "deploy mode", question: "Really?", options: [{ label: "No" }] },
+			],
+		};
+		const result = await tool.execute("call-cr-id-collision", args, undefined, undefined, context);
+		expect(askDialog).not.toHaveBeenCalled();
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		expect(result.content[0].text).toContain("question ids must be unique");
+		expect(result.content[0].text).toContain("deploy mode");
+		expect(result.content[0].text).not.toContain("\r");
+	});
+
+	it("marks every duplicate row for a single persisted occurrence", async () => {
+		const theme = darkTheme;
+		// The legacy selector recorded one occurrence for duplicate rows it
+		// marked together; the old label-keyed renderer showed both checked,
+		// so replay must too — not just the first index.
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					results: [
+						{
+							id: "q1",
+							question: "Pick?",
+							options: ["A", "A"],
+							multi: true,
+							selectedOptions: ["A"],
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const text = stripAnsi(rendered.render(120).join("\n"));
+		const checked = theme!.checkbox.checked;
+		const unchecked = theme!.checkbox.unchecked;
+		const rows = text.split("\n").filter(line => line.includes(checked) || line.includes(unchecked));
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toContain(checked);
+		expect(rows[1]).toContain(checked);
+	});
+
+	it("expands tabs and clamps long values in validation errors", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn(async () => undefined);
+		const context = createContext({ askDialog: askDialog as never });
+		// Degenerate duplicate values echo through the plain Text fallback
+		// renderer — raw tabs or kilobytes of text would corrupt the frame.
+		const dupe = `Tab\there${"\t".repeat(40)}${"x".repeat(500)}`;
+		const args = {
+			questions: [{ id: "q1", question: "Q?", options: [{ label: dupe }, { label: dupe }] }],
+		};
+		const result = await tool.execute("call-cr-error-value", args, undefined, undefined, context);
+		expect(askDialog).not.toHaveBeenCalled();
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		const text = result.content[0].text;
+		expect(text).toContain("unique within a question");
+		expect(text).not.toContain("\t");
+		expect(text).not.toContain("\r");
+		expect(text.length).toBeLessThan(250);
+	});
+
+	it("preserves suffixed labels through the degraded selector", async () => {
+		const tool = new AskTool(createSession());
+		// `Use cache\r(Recommended)` sanitizes to a label ending with the
+		// recommendation suffix; mapping the displayed choice back by
+		// stripping would corrupt it to `Use cache`.
+		const select = vi.fn(async (_prompt: string, options: ExtensionUISelectItem[]) => {
+			const selected = options[0];
+			return typeof selected === "string" ? selected : selected?.label;
+		});
+		const context = createContext({ select });
+		const result = await tool.execute(
+			"call-cr-suffix",
+			{
+				questions: [
+					{
+						id: "q1",
+						question: "Cache?",
+						options: [{ label: "Use cache\r(Recommended)" }, { label: "Fetch anew" }],
+						recommended: 0,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.details?.selectedOptions).toEqual(["Use cache (Recommended)"]);
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		expect(result.content[0].text).toContain("Use cache (Recommended)");
+		expect(result.content[0].text).not.toContain("\r");
+	});
+
+	it("disambiguates badged rows in the degraded selector", async () => {
+		const tool = new AskTool(createSession());
+		// Recommended `Retry\rnow` badges to `Retry now (Recommended)`,
+		// colliding with the literal second option — rows must stay distinct
+		// and the second row must map back to its own original.
+		const select = vi.fn(async (_prompt: string, options: ExtensionUISelectItem[]) => {
+			const labels = options.map(selectItemLabel);
+			expect(labels.slice(0, 2)).toEqual(["Retry now (Recommended)", "Retry now (Recommended) (2)"]);
+			return "Retry now (Recommended) (2)";
+		});
+		const context = createContext({ select });
+		const result = await tool.execute(
+			"call-cr-degraded-badge",
+			{
+				questions: [
+					{
+						id: "q1",
+						question: "Retry?",
+						options: [{ label: "Retry\rnow" }, { label: "Retry now (Recommended)" }],
+						recommended: 0,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.details?.selectedOptions).toEqual(["Retry now (Recommended)"]);
+	});
+
+	it("fails closed when a label sanitizes to the multi-select Done action", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn(async () => "unreached");
+		const context = createContext({ select });
+		// The degraded Done row is theme-labeled and conditional, but the
+		// choice handler matches it unconditionally — a sanitized model
+		// label would exit instead of selecting.
+		const args = {
+			questions: [
+				{
+					id: "q1",
+					question: "Q?",
+					options: [{ label: `${theme.status.success}\rDone selecting` }, { label: "Other" }],
+					multi: true,
+				},
+			],
+		};
+		const result = await tool.execute("call-cr-done", args, undefined, undefined, context);
+		expect(select).not.toHaveBeenCalled();
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") throw new Error("Expected text result");
+		expect(result.content[0].text).toContain("reserved runtime labels");
+		expect(result.content[0].text).not.toContain("\r");
 	});
 });

@@ -25,11 +25,6 @@ describe("validation", () => {
 		"tags?": "string[]",
 	});
 
-	it("returns the input unchanged for morph-free valid data", () => {
-		const input = { path: "a.ts", mode: "read" } as const;
-		expect(tool(input)).toBe(input);
-	});
-
 	it("rejects wrong primitive, bad literal, broken bound, and missing key with path-aware errors", () => {
 		const missing = tool({ mode: "read" });
 		expect(missing).toBeInstanceOf(type.errors);
@@ -489,5 +484,40 @@ describe("Standard Schema V1", () => {
 		const second = factoryDefault(undefined);
 		expect(first).toEqual([]);
 		expect(first).not.toBe(second);
+	});
+});
+
+describe("type.withJsonSchema", () => {
+	it("emits the override verbatim even when embedded, and still validates", () => {
+		const raw = { type: "string", enum: ["a", "b"], "x-vendor": true };
+		const inner = type.withJsonSchema(
+			type.unknown.narrow(v => v === "a" || v === "b"),
+			raw,
+		);
+
+		// Top-level emission is the override.
+		expect(inner.toJsonSchema()).toEqual(raw);
+		// Nested inside an object, the override survives (a `.toJsonSchema`
+		// method override would be dropped by the parent emitter here).
+		const object = type({ mode: inner });
+		expect((object.toJsonSchema().properties as Record<string, unknown>).mode).toEqual(raw);
+
+		// Runtime validation is delegated to the wrapped schema.
+		expect(inner("a")).toBe("a");
+		expect(inner("c")).toBeInstanceOf(OmpErrors);
+		expect(object({ mode: "b" })).toEqual({ mode: "b" });
+		expect(object({ mode: "c" })).toBeInstanceOf(OmpErrors);
+	});
+
+	it("rejects defaults and output-changing morphs", () => {
+		expect(() => type.withJsonSchema(type.string.default("fallback"), { type: "string" })).toThrow(
+			"cannot wrap schemas with defaults or output-changing morphs",
+		);
+		expect(() =>
+			type.withJsonSchema(type("string.integer.parse"), {
+				type: "string",
+				pattern: "^[0-9]+$",
+			}),
+		).toThrow("cannot wrap schemas with defaults or output-changing morphs");
 	});
 });

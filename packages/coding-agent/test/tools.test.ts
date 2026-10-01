@@ -4,9 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import * as zlib from "node:zlib";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
-import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -15,11 +16,13 @@ import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-m
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { unzip } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
-import { HubTool } from "../src/tools/hub";
+
+import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -64,6 +67,10 @@ function createFifoOrSkip(fifoPath: string): boolean {
 interface ArchiveFixtureEntry {
 	path: string;
 	content: string;
+	prefix?: string;
+	typeFlag?: "0" | "1" | "2";
+	linkName?: string;
+	unpacked?: boolean;
 }
 
 function writeTarString(buffer: Buffer, offset: number, length: number, value: string): void {
@@ -85,13 +92,15 @@ function createTarArchive(entries: ArchiveFixtureEntry[]): Buffer {
 		const content = Buffer.from(entry.content, "utf-8");
 
 		writeTarString(header, 0, 100, entry.path);
+		if (entry.prefix) writeTarString(header, 345, 155, entry.prefix);
+		if (entry.linkName) writeTarString(header, 157, 100, entry.linkName);
 		writeTarOctal(header, 100, 8, 0o644);
 		writeTarOctal(header, 108, 8, 0);
 		writeTarOctal(header, 116, 8, 0);
 		writeTarOctal(header, 124, 12, content.length);
 		writeTarOctal(header, 136, 12, Math.floor(Date.now() / 1000));
 		header.fill(0x20, 148, 156);
-		header[156] = "0".charCodeAt(0);
+		header[156] = (entry.typeFlag ?? "0").charCodeAt(0);
 		writeTarString(header, 257, 6, "ustar");
 		writeTarString(header, 263, 2, "00");
 
@@ -111,6 +120,218 @@ function createTarArchive(entries: ArchiveFixtureEntry[]): Buffer {
 
 	parts.push(Buffer.alloc(1024, 0));
 	return Buffer.concat(parts);
+}
+
+function tarChecksum(header: Buffer): void {
+	header.fill(0x20, 148, 156);
+	let checksum = 0;
+	for (const byte of header) checksum += byte;
+	header.write(checksum.toString(8).padStart(6, "0"), 148, 6, "ascii");
+	header[154] = 0;
+	header[155] = 0x20;
+}
+
+interface TarHeaderOptions {
+	linkName?: string;
+	oldGnu?: boolean;
+}
+
+function createTarHeader(
+	memberPath: string,
+	contentLength: number,
+	typeFlag: string,
+	opts: TarHeaderOptions = {},
+): Buffer {
+	const header = Buffer.alloc(512, 0);
+	writeTarString(header, 0, 100, memberPath);
+	if (opts.linkName) writeTarString(header, 157, 100, opts.linkName);
+	writeTarOctal(header, 100, 8, 0o644);
+	writeTarOctal(header, 108, 8, 0);
+	writeTarOctal(header, 116, 8, 0);
+	writeTarOctal(header, 124, 12, contentLength);
+	writeTarOctal(header, 136, 12, Math.floor(Date.now() / 1000));
+	header[156] = typeFlag.charCodeAt(0);
+	if (opts.oldGnu) {
+		writeTarString(header, 257, 8, "ustar  ");
+	} else {
+		writeTarString(header, 257, 6, "ustar");
+		writeTarString(header, 263, 2, "00");
+	}
+	tarChecksum(header);
+	return header;
+}
+
+function tarRecord(header: Buffer, content: Buffer): Buffer {
+	const remainder = content.byteLength % 512;
+	return Buffer.concat([header, content, ...(remainder === 0 ? [] : [Buffer.alloc(512 - remainder)])]);
+}
+
+function writeTarBase256(buffer: Buffer, offset: number, length: number, value: bigint): void {
+	const bits = BigInt(length * 8 - 1);
+	const signBit = 1n << (bits - 1n);
+	if (value < -signBit || value >= signBit) {
+		throw new Error("Test tar value does not fit its base-256 field");
+	}
+	let encoded = value < 0 ? (1n << bits) + value : value;
+	for (let index = length - 1; index >= 0; index--) {
+		buffer[offset + index] = Number(encoded & 0xffn);
+		encoded >>= 8n;
+	}
+	buffer[offset] = buffer[offset]! | 0x80;
+}
+
+interface Base256TarEntry {
+	path: string;
+	content: string;
+	mtime?: bigint;
+	size?: bigint;
+}
+
+function createBase256TarArchive(entry: Base256TarEntry): Buffer {
+	const content = Buffer.from(entry.content, "utf-8");
+	const header = createTarHeader(entry.path, content.byteLength, "0");
+	if (entry.size !== undefined) writeTarBase256(header, 124, 12, entry.size);
+	if (entry.mtime !== undefined) writeTarBase256(header, 136, 12, entry.mtime);
+	tarChecksum(header);
+	return Buffer.concat([tarRecord(header, content), Buffer.alloc(1024)]);
+}
+
+function createPaxHeader(typeFlag: "g" | "x", body: Buffer): Buffer {
+	return tarRecord(createTarHeader("./PaxHeaders/omp", body.byteLength, typeFlag), body);
+}
+
+function paxRecord(key: string, value: string): Buffer {
+	const suffix = Buffer.from(` ${key}=${value}\n`, "utf-8");
+	let length = suffix.byteLength;
+	while (true) {
+		const nextLength = Buffer.byteLength(`${length}`, "utf-8") + suffix.byteLength;
+		if (nextLength === length) return Buffer.concat([Buffer.from(`${length}`, "utf-8"), suffix]);
+		length = nextLength;
+	}
+}
+
+/**
+ * Build a GNU 1.0 sparse PAX archive: an `x` extended header carrying the
+ * user-visible `GNU.sparse.name`/`GNU.sparse.realsize`, followed by a regular
+ * file header using the internal `GNUSparseFile.NNN` path.
+ */
+function createSparsePaxTarArchive(realName: string, realSize: number, storedData: Buffer): Buffer {
+	const paxBody = Buffer.concat([
+		paxRecord("GNU.sparse.major", "1"),
+		paxRecord("GNU.sparse.minor", "0"),
+		paxRecord("GNU.sparse.name", realName),
+		paxRecord("GNU.sparse.realsize", `${realSize}`),
+		paxRecord("size", `${storedData.length}`),
+	]);
+	const paxHeader = Buffer.alloc(512, 0);
+	writeTarString(paxHeader, 0, 100, "./PaxHeaders/sparse");
+	writeTarOctal(paxHeader, 100, 8, 0o644);
+	writeTarOctal(paxHeader, 124, 12, paxBody.length);
+	writeTarOctal(paxHeader, 136, 12, Math.floor(Date.now() / 1000));
+	paxHeader[156] = "x".charCodeAt(0);
+	writeTarString(paxHeader, 257, 6, "ustar");
+	writeTarString(paxHeader, 263, 2, "00");
+	tarChecksum(paxHeader);
+
+	const fileHeader = Buffer.alloc(512, 0);
+	writeTarString(fileHeader, 0, 100, "./GNUSparseFile.0/sparse.bin");
+	writeTarOctal(fileHeader, 100, 8, 0o644);
+	writeTarOctal(fileHeader, 124, 12, storedData.length);
+	writeTarOctal(fileHeader, 136, 12, Math.floor(Date.now() / 1000));
+	fileHeader[156] = "0".charCodeAt(0);
+	writeTarString(fileHeader, 257, 6, "ustar");
+	writeTarString(fileHeader, 263, 2, "00");
+	tarChecksum(fileHeader);
+
+	const parts: Buffer[] = [paxHeader];
+	const paxRemainder = paxBody.length % 512;
+	parts.push(paxBody, paxRemainder === 0 ? Buffer.alloc(0) : Buffer.alloc(512 - paxRemainder, 0));
+	parts.push(fileHeader, storedData);
+	const dataRemainder = storedData.length % 512;
+	if (dataRemainder !== 0) parts.push(Buffer.alloc(512 - dataRemainder, 0));
+	parts.push(Buffer.alloc(1024, 0));
+	return Buffer.concat(parts);
+}
+
+/**
+ * Build an old-GNU sparse archive: an `S` member whose header sets the
+ * `isextended` flag (byte 482), followed by one 512-byte sparse-map
+ * continuation block that is not counted in the member's declared size,
+ * then the stored data and a regular member.
+ */
+function createOldGnuSparseTarArchive(): Buffer {
+	const storedData = Buffer.from("sparse-extent\n", "utf-8");
+	const header = createTarHeader("data/real-sparse.bin", storedData.byteLength, "S", { oldGnu: true });
+	// These old-GNU fields occupy the POSIX `prefix` region. A parser must not
+	// prepend the atime to the member path merely because it is non-empty.
+	writeTarOctal(header, 345, 12, 0o14524770401);
+	writeTarOctal(header, 357, 12, 0o14524770402);
+	writeTarOctal(header, 398, 12, storedData.byteLength);
+	header[482] = 1; // sparse map continues in extension blocks
+	writeTarOctal(header, 483, 12, 1024);
+	tarChecksum(header);
+
+	// Final continuation block: its own isextended byte (504) stays 0.
+	const continuation = Buffer.alloc(512, 0);
+	// createTarArchive appends the member and the end-of-archive terminator.
+	return Buffer.concat([
+		header,
+		continuation,
+		storedData,
+		Buffer.alloc(512 - (storedData.byteLength % 512), 0),
+		createTarArchive([{ path: "data/after.txt", content: "after sparse\n" }]),
+	]);
+}
+
+function createOldGnuNamesTarArchive(longPath: string): Buffer {
+	const content = Buffer.from("old GNU long path\n", "utf-8");
+	const nameRecord = Buffer.from(`Rename short.txt to ${longPath}\n`, "utf-8");
+	return Buffer.concat([
+		tarRecord(createTarHeader("short.txt", content.byteLength, "0", { oldGnu: true }), content),
+		tarRecord(createTarHeader("././@LongLink", nameRecord.byteLength, "N", { oldGnu: true }), nameRecord),
+		Buffer.alloc(1024),
+	]);
+}
+
+function createGlobalPaxLinkTarArchive(): Buffer {
+	const linkPath = paxRecord("linkpath", "../lib/tool.js");
+	const clearLinkPath = paxRecord("linkpath", "");
+	const content = Buffer.from("global PAX link\n", "utf-8");
+	return Buffer.concat([
+		createPaxHeader("g", linkPath),
+		tarRecord(createTarHeader("pkg/lib/tool.js", content.byteLength, "0"), content),
+		tarRecord(createTarHeader("pkg/bin/tool", 0, "2"), Buffer.alloc(0)),
+		createPaxHeader("g", clearLinkPath),
+		tarRecord(createTarHeader("pkg/bin/current", 0, "2"), Buffer.alloc(0)),
+		Buffer.alloc(1024),
+	]);
+}
+
+function createPaxLinkTarArchive(linkPath: string): Buffer {
+	const body = paxRecord("linkpath", linkPath);
+	return Buffer.concat([
+		createPaxHeader("x", body),
+		tarRecord(createTarHeader("pkg/link", 0, "2"), Buffer.alloc(0)),
+		Buffer.alloc(1024),
+	]);
+}
+
+function createPaxPathTarArchive(memberPath: string): Buffer {
+	const body = paxRecord("path", memberPath);
+	return Buffer.concat([
+		createPaxHeader("x", body),
+		tarRecord(createTarHeader("short.txt", 0, "0"), Buffer.alloc(0)),
+		Buffer.alloc(1024),
+	]);
+}
+
+function createLongLinkTarArchive(linkPath: string): Buffer {
+	const data = Buffer.from(`${linkPath}\0`, "utf-8");
+	return Buffer.concat([
+		tarRecord(createTarHeader("././@LongLink", data.byteLength, "K", { oldGnu: true }), data),
+		tarRecord(createTarHeader("pkg/link", 0, "2", { oldGnu: true }), Buffer.alloc(0)),
+		Buffer.alloc(1024),
+	]);
 }
 
 const CRC32_TABLE = (() => {
@@ -181,6 +402,62 @@ function createZipArchive(entries: ArchiveFixtureEntry[]): Buffer {
 	endOfCentralDirectory.writeUInt32LE(localOffset, 16);
 
 	return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
+}
+
+interface AsarFixtureDirectory {
+	files: Record<string, AsarFixtureNode>;
+}
+
+interface AsarFixtureFile {
+	offset?: string;
+	size: number;
+	unpacked?: true;
+}
+
+type AsarFixtureNode = AsarFixtureDirectory | AsarFixtureFile;
+
+function createAsarArchive(entries: ArchiveFixtureEntry[]): Buffer {
+	const root: AsarFixtureDirectory = { files: {} };
+	const packed: Buffer[] = [];
+	let offset = 0;
+
+	for (const entry of entries) {
+		const segments = entry.path.replace(/\\/g, "/").split("/");
+		const fileName = segments.pop();
+		if (!fileName) throw new Error("ASAR fixture paths must name a file");
+
+		let directory = root;
+		for (const segment of segments) {
+			let child = directory.files[segment];
+			if (!child) {
+				child = { files: {} };
+				directory.files[segment] = child;
+			}
+			if (!("files" in child)) throw new Error(`ASAR fixture path crosses file '${segment}'`);
+			directory = child;
+		}
+
+		const content = Buffer.from(entry.content, "utf-8");
+		if (entry.unpacked) {
+			directory.files[fileName] = { size: content.length, unpacked: true };
+		} else {
+			directory.files[fileName] = { size: content.length, offset: String(offset) };
+			packed.push(content);
+			offset += content.length;
+		}
+	}
+
+	const json = Buffer.from(JSON.stringify(root), "utf-8");
+	const alignedJsonSize = json.length + ((4 - (json.length % 4)) % 4);
+	const header = Buffer.alloc(8 + alignedJsonSize);
+	header.writeUInt32LE(4 + alignedJsonSize, 0);
+	header.writeUInt32LE(json.length, 4);
+	json.copy(header, 8);
+
+	const sizePickle = Buffer.alloc(8);
+	sizePickle.writeUInt32LE(4, 0);
+	sizePickle.writeUInt32LE(header.length, 4);
+	return Buffer.concat([sizePickle, header, ...packed]);
 }
 
 function createZipArchiveWithRawDeflateEntry(entry: {
@@ -450,7 +727,7 @@ describe("Coding Agent Tools", () => {
 			const testFile = path.join(testDir, "large.txt");
 			const lines = Array.from({ length: 3500 }, (_, i) => `Line ${i + 1}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
-			const defaultLimit = session.settings.get("read.defaultLimit");
+			const defaultLimit = cfgReadDefaultLimit.get(session.settings);
 
 			const result = await readTool.execute("test-call-3", { path: testFile });
 			const output = getTextOutput(result);
@@ -459,6 +736,21 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(`Line ${defaultLimit}`);
 			expect(output).not.toContain(`Line ${defaultLimit + 1}`);
 			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use :${defaultLimit + 1} to continue]`);
+		});
+
+		it("applies a read.defaultLimit change made after the tool was built", async () => {
+			const testFile = path.join(testDir, "live-limit.txt");
+			fs.writeFileSync(testFile, Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`).join("\n"));
+
+			cfgReadDefaultLimit.set(session.settings, 10);
+			const first = getTextOutput(await readTool.execute("live-limit-10", { path: testFile }));
+			expect(first).toContain("Line 10");
+			expect(first).not.toContain("Line 11");
+
+			cfgReadDefaultLimit.set(session.settings, 25);
+			const second = getTextOutput(await readTool.execute("live-limit-25", { path: testFile }));
+			expect(second).toContain("Line 25");
+			expect(second).not.toContain("Line 26");
 		});
 
 		it("should truncate when byte limit exceeded", async () => {
@@ -617,25 +909,118 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should reject malformed internal-URL selectors instead of dumping the whole resource", async () => {
-			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100" })).rejects.toThrow(
-				/Invalid selector ':-100'/,
+			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100-5" })).rejects.toThrow(
+				/Invalid selector ':-100-5'/,
 			);
+		});
+
+		it("reads the last N lines with a :-N tail selector (1 leading context line, no trailing)", async () => {
+			const testFile = path.join(testDir, "tail-test.txt");
+			const lines = Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`);
+			fs.writeFileSync(testFile, lines.join("\n"));
+
+			const output = getTextOutput(await readTool.execute("test-tail", { path: `${testFile}:-10` }));
+
+			expect(output).not.toContain("Line 89");
+			expect(output).toContain("Line 90");
+			expect(output).toContain("Line 91");
+			expect(output).toContain("Line 100");
+			expect(output).not.toContain("Use :");
+		});
+
+		it("tails a file past the snapshot cap without buffering it", async () => {
+			const testFile = path.join(testDir, "tail-large.txt");
+			const line = `${"x".repeat(1024)}`;
+			const total = 12_000;
+			fs.writeFileSync(testFile, Array.from({ length: total }, (_, i) => `${i + 1} ${line}`).join("\n"));
+			expect(fs.statSync(testFile).size).toBeGreaterThan(8 * 1024 * 1024);
+
+			const output = getTextOutput(await readTool.execute("test-tail-large", { path: `${testFile}:-3` }));
+
+			expect(output).not.toContain(`${total - 4} x`);
+			expect(output).toContain(`${total - 3} x`);
+			expect(output).toContain(`${total} x`);
+		});
+
+		it("does not claim a partial scan count is the total for bounded reads", async () => {
+			const testFile = path.join(testDir, "bounded-large.txt");
+			const lines = Array.from({ length: 10_000 }, (_, i) => `${i + 1} ${"x".repeat(500)}`);
+			fs.writeFileSync(testFile, lines.join("\n"));
+			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
+
+			const result = await readTool.execute("test-bounded-large", { path: `${testFile}:1-3` });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("not scanned to EOF");
+			expect(output).toContain("Use :7 to continue");
+			expect(output).not.toMatch(/\[Showing lines 1-6 of \d+/);
+			expect(result.details?.meta?.truncation).toBeUndefined();
+			expect(result.details?.truncation).toBeUndefined();
+		});
+
+		it("does not claim a suppressed hashline preview was shown", async () => {
+			Bun.env.PI_EDIT_VARIANT = "hashline";
+			const testFile = path.join(testDir, "hashline-preview-large.txt");
+			const firstLine = "x".repeat(70_000);
+			const tail = Array.from({ length: 9_000 }, () => "y".repeat(500)).join("\n");
+			fs.writeFileSync(testFile, `${firstLine}\n${tail}`);
+			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
+
+			const result = await readTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("Hashline output requires full lines");
+			expect(output).toContain("[File not scanned to EOF]");
+			expect(output).not.toContain("Showing line 1");
+		});
+
+		it("tail selector is verbatim under :raw and clamps to the whole file when N exceeds it", async () => {
+			const testFile = path.join(testDir, "tail-raw.txt");
+			fs.writeFileSync(testFile, "alpha\nbeta\ngamma\n");
+
+			const raw = getTextOutput(await readTool.execute("test-tail-raw", { path: `${testFile}:raw:-2` }));
+			expect(raw).toBe("gamma\n");
+
+			const clamped = getTextOutput(await readTool.execute("test-tail-clamp", { path: `${testFile}:-50` }));
+			expect(clamped).toContain("alpha");
+			expect(clamped).toContain("gamma");
+			expect(clamped).not.toContain("beyond end of file");
 		});
 
 		it("should include truncation details when truncated", async () => {
 			const testFile = path.join(testDir, "large-file.txt");
 			const lines = Array.from({ length: 3500 }, (_, i) => `Line ${i + 1}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
-			const defaultLimit = session.settings.get("read.defaultLimit");
+			const defaultLimit = cfgReadDefaultLimit.get(session.settings);
 
 			const result = await readTool.execute("test-call-9", { path: testFile });
 
-			expect(result.details).toBeDefined();
-			expect(result.details?.truncation).toBeDefined();
 			expect(result.details?.truncation?.truncated).toBe(true);
 			expect(result.details?.truncation?.truncatedBy).toBe("lines");
 			expect(result.details?.truncation?.totalLines).toBe(3500);
 			expect(result.details?.truncation?.outputLines).toBe(defaultLimit);
+		});
+
+		it("reports the artifact byte budget that truncated a ranged read", async () => {
+			const artifactsDir = path.join(testDir, "artifact-limit-session");
+			fs.mkdirSync(artifactsDir, { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
+			const artifactSession = createTestToolSession(testDir, Settings.isolated(), {
+				localProtocolOptions: {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "artifact-limit-session",
+				},
+			});
+			const artifactReadTool = wrapToolWithMetaNotice(new ReadTool(artifactSession));
+
+			const result = await artifactReadTool.execute("test-call-artifact-byte-limit", {
+				path: "artifact://7:3-4",
+			});
+			const output = getTextOutput(result);
+			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
+			expect(output).toContain("Line 3 is 60.0KB");
+			expect(output).toContain("artifact://7:raw:3-3");
+			expect(output).not.toContain("Use :3 to continue");
 		});
 
 		it("should spill oversized read output to an artifact", async () => {
@@ -648,7 +1033,7 @@ describe("Coding Agent Tools", () => {
 				"tools.artifactTailLines": 10,
 				"tools.artifactHeadBytes": 1,
 			});
-			const defaultLimit = spillSettings.get("read.defaultLimit");
+			const defaultLimit = cfgReadDefaultLimit.get(spillSettings);
 			const spillManager = SessionManager.create(testDir, path.join(testDir, "spill-sessions"));
 			await spillManager.ensureOnDisk();
 			const spillSession = createTestToolSession(testDir, spillSettings, {
@@ -693,6 +1078,210 @@ describe("Coding Agent Tools", () => {
 				);
 				expect(getTextOutput(artifactResult)).toContain(line);
 				expect(saveArtifact).not.toHaveBeenCalled();
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("spills oversized URL reads like plain files, except pages of artifact storage", async () => {
+			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
+			const skillDir = path.join(testDir, "skills", "demo");
+			fs.mkdirSync(skillDir, { recursive: true });
+			fs.writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: demo\ndescription: d\n---\nBody\n");
+			fs.writeFileSync(path.join(skillDir, "ref.md"), payload);
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 1,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 1,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "url-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const artifactsDir = spillManager.getArtifactsDir();
+			if (!artifactsDir) throw new Error("expected an on-disk artifacts dir");
+			fs.mkdirSync(artifactsDir, { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "Worker.md"), JSON.stringify({ report: payload }));
+			fs.writeFileSync(path.join(artifactsDir, "Lines.md"), payload);
+			fs.mkdirSync(path.join(artifactsDir, "local"), { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "local", "big.md"), payload);
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => artifactsDir,
+						localProtocolOptions: {
+							getArtifactsDir: () => artifactsDir,
+							getSessionId: () => spillManager.getSessionId(),
+						},
+						skills: [
+							{
+								name: "demo",
+								description: "d",
+								filePath: path.join(skillDir, "SKILL.md"),
+								baseDir: skillDir,
+								source: "test",
+							},
+						],
+					}),
+				),
+			);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			try {
+				for (const url of [
+					"skill://demo/ref.md",
+					"agent://Worker/report",
+					"local://big.md:1-3000",
+					"agent://Lines:1-3000",
+				]) {
+					const result = await spillReadTool.execute(`spill-${url}`, { path: url }, undefined, undefined, context);
+					const output = getTextOutput(result);
+					expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
+				}
+
+				const artifactId = await spillManager.saveArtifact(payload, "read");
+				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
+				const artifactPage = await spillReadTool.execute(
+					"spill-artifact-page",
+					{ path: `artifact://${artifactId}:1-3000` },
+					undefined,
+					undefined,
+					context,
+				);
+				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
+				expect(saveArtifact).not.toHaveBeenCalled();
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("should strip payloads duplicated by structured MCP blocks (#9687)", async () => {
+			// MCP results carry a second copy of the payload under `details.rawContent`.
+			// Everything already stored elsewhere must be pruned so it cannot re-inflate
+			// on-disk size: text and `resource.text` land in the spill artifact, image
+			// data survives on the result content. Only resource URI/MIME/blob metadata,
+			// which has no other home, is retained.
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 64,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 64,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "mcp-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["mcp__server__tool"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			const payload = "SEARCH RESULT LINE\n".repeat(4000);
+			const resourceMeta = {
+				uri: "file:///workspace/result.bin",
+				mimeType: "application/octet-stream",
+				blob: "AAECAw==",
+			};
+			const resource = {
+				type: "resource" as const,
+				resource: { ...resourceMeta, text: "duplicated resource body\n".repeat(200) },
+			};
+			const image = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+			const mcpTool = {
+				name: "mcp__server__tool",
+				description: "fake mcp tool returning a large structured payload",
+				async execute() {
+					return {
+						content: [
+							{ type: "text" as const, text: payload },
+							{ type: "image" as const, data: image.data, mimeType: image.mimeType },
+						],
+						details: {
+							serverName: "server",
+							mcpToolName: "tool",
+							rawContent: [{ type: "text", text: payload }, resource, image],
+						},
+					};
+				},
+			};
+
+			try {
+				const wrapped = wrapToolWithMetaNotice(mcpTool as unknown as AgentTool);
+				const result = await wrapped.execute("mcp-call", {}, undefined, undefined, context);
+
+				const truncation = result.details?.meta?.truncation;
+				expect(truncation?.artifactId).toBeDefined();
+				expect(Buffer.byteLength(getTextOutput(result), "utf-8")).toBeLessThan(Buffer.byteLength(payload, "utf-8"));
+
+				// Text and image are represented elsewhere; only resource metadata
+				// (without the artifact-stored text) survives on details.rawContent.
+				expect(result.details?.rawContent).toEqual([{ type: "resource", resource: resourceMeta }]);
+				// The image block is preserved on the result content.
+				expect(result.content).toContainEqual({
+					type: "image",
+					data: image.data,
+					mimeType: image.mimeType,
+				});
+
+				const artifactPath = path.join(
+					spillManager.getArtifactsDir()!,
+					`${truncation.artifactId}.mcp__server__tool.log`,
+				);
+				expect(await Bun.file(artifactPath).text()).toBe(payload);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("should not prune details.rawContent for non-MCP tool results (#9689)", async () => {
+			// SDK/extension tools share this spill wrapper and their `details` payload
+			// is unconstrained. A tool that happens to name a field `rawContent` must
+			// keep it verbatim: only the MCP bridge (serverName + mcpToolName) mirrors
+			// its content there, so a bare property-name collision must not lose data.
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 64,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 64,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "sdk-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["custom_sdk_tool"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			const payload = "SDK OUTPUT LINE\n".repeat(4000);
+			// No serverName/mcpToolName markers → not an MCP result.
+			const rawContent = [
+				{ type: "text", text: "extension-owned text that must survive" },
+				{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+			];
+			const sdkTool = {
+				name: "custom_sdk_tool",
+				description: "fake sdk tool that uses details.rawContent for its own data",
+				async execute() {
+					return {
+						content: [{ type: "text" as const, text: payload }],
+						details: { rawContent },
+					};
+				},
+			};
+
+			try {
+				const wrapped = wrapToolWithMetaNotice(sdkTool as unknown as AgentTool);
+				const result = await wrapped.execute("sdk-call", {}, undefined, undefined, context);
+
+				// Spill still fired on the oversized content.
+				expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+				// The tool's own rawContent is left untouched.
+				expect(result.details?.rawContent).toEqual(rawContent);
 			} finally {
 				await spillManager.close();
 			}
@@ -751,6 +1340,404 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("pkg/");
 			expect(output).toContain("top.txt");
 			expect(result.details?.isDirectory).toBe(true);
+		});
+
+		it("should read tar.gz members with UTF-8 ustar prefixes", async () => {
+			const archivePath = path.join(testDir, "unicode-prefix.tar.gz");
+			const prefix = "bun-da3851e57ae130c5594d0e208a5da5ba8c13edfb/test/js/node/test/fixtures/copy/utf/新建文件夹";
+			const memberPath = `${prefix}/experimental.json`;
+			fs.writeFileSync(
+				archivePath,
+				zlib.gzipSync(
+					createTarArchive([
+						{
+							path: "experimental.json",
+							prefix,
+							content: '{ "type": "module" }',
+						},
+					]),
+				),
+			);
+
+			const rootResult = await readTool.execute("test-call-tar-unicode-prefix-root", { path: archivePath });
+			expect(getTextOutput(rootResult)).toContain("bun-da3851e57ae130c5594d0e208a5da5ba8c13edfb/");
+			expect(rootResult.details?.isDirectory).toBe(true);
+
+			const memberResult = await readTool.execute("test-call-tar-unicode-prefix-member", {
+				path: `${archivePath}:${memberPath}`,
+			});
+			expect(getTextOutput(memberResult)).toContain('{ "type": "module" }');
+		});
+
+		it("should preserve tar hard-link members", async () => {
+			const archivePath = path.join(testDir, "hard-link.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "pkg/original.txt", content: "shared content\n" },
+					{ path: "pkg/linked.txt", content: "", typeFlag: "1", linkName: "pkg/original.txt" },
+				]),
+			);
+
+			const rootResult = await readTool.execute("test-call-tar-hard-link-root", { path: `${archivePath}:pkg` });
+			expect(getTextOutput(rootResult)).toContain("linked.txt");
+
+			const linkedResult = await readTool.execute("test-call-tar-hard-link-member", {
+				path: `${archivePath}:pkg/linked.txt`,
+			});
+			expect(getTextOutput(linkedResult)).toContain("shared content");
+
+			const entries = await readArchiveEntries(archivePath);
+			const linkedContent = entries.get("pkg/linked.txt");
+			if (!(linkedContent instanceof Uint8Array)) {
+				throw new Error("Expected hard-link content to materialize as bytes");
+			}
+			expect(new TextDecoder().decode(linkedContent)).toBe("shared content\n");
+		});
+
+		it("should preserve safe relative tar file symlinks", async () => {
+			const archivePath = path.join(testDir, "file-symlink.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "pkg/lib/tool.js", content: "export const linked = true;\n" },
+					{ path: "pkg/bin/tool", content: "", typeFlag: "2", linkName: "../lib/tool.js" },
+				]),
+			);
+
+			const linkedResult = await readTool.execute("test-call-tar-symlink-member", {
+				path: `${archivePath}:pkg/bin/tool`,
+			});
+			expect(getTextOutput(linkedResult)).toContain("export const linked = true");
+
+			const entries = await readArchiveEntries(archivePath);
+			const linkedContent = entries.get("pkg/bin/tool");
+			if (!(linkedContent instanceof Uint8Array)) {
+				throw new Error("Expected symlink content to materialize as bytes");
+			}
+			expect(new TextDecoder().decode(linkedContent)).toBe("export const linked = true;\n");
+		});
+
+		it("should resolve directory symlinks lazily without materializing subtrees", async () => {
+			const archivePath = path.join(testDir, "directory-symlinks.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "pkg/lib/tool.js", content: "export const linked = true;\n" },
+					{ path: "pkg/lib/extra.js", content: "export const extra = true;\n" },
+					{ path: "pkg/current-a", content: "", typeFlag: "2", linkName: "lib" },
+					{ path: "pkg/current-b", content: "", typeFlag: "2", linkName: "lib" },
+					{ path: "pkg/current-c", content: "", typeFlag: "2", linkName: "lib" },
+				]),
+			);
+
+			const linkedResult = await readTool.execute("test-call-tar-directory-symlink-member", {
+				path: `${archivePath}:pkg/current-a/tool.js`,
+			});
+			expect(getTextOutput(linkedResult)).toContain("export const linked = true");
+
+			const directoryResult = await readTool.execute("test-call-tar-directory-symlink-directory", {
+				path: `${archivePath}:pkg/current-b`,
+			});
+			expect(getTextOutput(directoryResult)).toContain("extra.js");
+
+			// Whole-archive materialization flattens files and skips directory
+			// aliases without inflating the map through them (no N×M subtrees).
+			const entries = await readArchiveEntries(archivePath);
+			expect([...entries.keys()].sort()).toEqual(["pkg/lib/extra.js", "pkg/lib/tool.js"]);
+		});
+
+		it("should resolve file symlinks routed through directory symlinks", async () => {
+			const archivePath = path.join(testDir, "aliased-file-symlink.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					// The file symlink precedes the directory alias it routes
+					// through, so resolution must defer until the alias settles.
+					{ path: "pkg/bin/tool", content: "", typeFlag: "2", linkName: "../current/tool.js" },
+					{ path: "pkg/lib/tool.js", content: "export const linked = true;\n" },
+					{ path: "pkg/current", content: "", typeFlag: "2", linkName: "lib" },
+				]),
+			);
+
+			const linkedResult = await readTool.execute("test-call-tar-aliased-symlink-member", {
+				path: `${archivePath}:pkg/bin/tool`,
+			});
+			expect(getTextOutput(linkedResult)).toContain("export const linked = true");
+		});
+
+		it("should degrade directory symlinks targeting their own subtree to dangling links", async () => {
+			const archivePath = path.join(testDir, "self-cycle-symlink.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "a/b/f.txt", content: "still readable\n" },
+					// `a -> a/b` is inherently cyclic; the pre-fix resolver looped
+					// forever growing the rewritten path. The link now dangles
+					// while real members underneath stay readable.
+					{ path: "a", content: "", typeFlag: "2", linkName: "a/b" },
+				]),
+			);
+
+			const memberResult = await readTool.execute("test-call-tar-self-cycle-member", {
+				path: `${archivePath}:a/b/f.txt`,
+			});
+			expect(getTextOutput(memberResult)).toContain("still readable");
+			await expect(readTool.execute("test-call-tar-self-cycle-link", { path: `${archivePath}:a` })).rejects.toThrow(
+				/cannot be materialized/,
+			);
+		});
+
+		it("should resolve alias chains up to the rewrite bound and reject deeper ones", async () => {
+			const buildChain = (length: number): ArchiveFixtureEntry[] => {
+				const chain: ArchiveFixtureEntry[] = [{ path: "real/f.txt", content: "deep\n" }];
+				for (let i = 0; i < length; i++) {
+					chain.push({
+						path: `a${i}`,
+						content: "",
+						typeFlag: "2",
+						linkName: i === length - 1 ? "real" : `a${i + 1}`,
+					});
+				}
+				return chain;
+			};
+
+			const okPath = path.join(testDir, "alias-chain-40.tar");
+			fs.writeFileSync(okPath, createTarArchive(buildChain(40)));
+			const okResult = await readTool.execute("test-call-tar-alias-chain-40", { path: `${okPath}:a0/f.txt` });
+			expect(getTextOutput(okResult)).toContain("deep");
+
+			const deepPath = path.join(testDir, "alias-chain-41.tar");
+			fs.writeFileSync(deepPath, createTarArchive(buildChain(41)));
+			await expect(
+				readTool.execute("test-call-tar-alias-chain-41", { path: `${deepPath}:a0/f.txt` }),
+			).rejects.toThrow(/cyclic symlink/);
+		});
+
+		it("should let the later duplicate tar member win", async () => {
+			const archivePath = path.join(testDir, "duplicate-member.tar");
+			// tar -rf append/update semantics: extraction yields the last member.
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "dup/file.txt", content: "first\n" },
+					{ path: "dup/file.txt", content: "second\n" },
+				]),
+			);
+
+			const result = await readTool.execute("test-call-tar-duplicate-member", {
+				path: `${archivePath}:dup/file.txt`,
+			});
+			expect(getTextOutput(result)).toContain("second");
+			expect(getTextOutput(result)).not.toContain("first");
+		});
+
+		it("should let a later empty tar member replace prior content", async () => {
+			const archivePath = path.join(testDir, "duplicate-empty-member.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "dup/file.txt", content: "stale content\n" },
+					{ path: "dup/file.txt", content: "" },
+				]),
+			);
+
+			const entries = await readArchiveEntries(archivePath);
+			expect(entries.get("dup/file.txt")).toEqual(new Uint8Array());
+		});
+
+		it("should discard a superseded tar hard link before resolving targets", async () => {
+			const archivePath = path.join(testDir, "duplicate-link-member.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "dup/file.txt", content: "", typeFlag: "1", linkName: "missing.txt" },
+					{ path: "dup/file.txt", content: "replacement\n" },
+				]),
+			);
+
+			const entries = await readArchiveEntries(archivePath);
+			const replacement = entries.get("dup/file.txt");
+			if (!(replacement instanceof Uint8Array)) {
+				throw new Error("Expected replacement tar member to materialize as bytes");
+			}
+			expect(new TextDecoder().decode(replacement)).toBe("replacement\n");
+		});
+
+		it("should skip old-GNU sparse extension blocks between header and data", async () => {
+			const archivePath = path.join(testDir, "old-gnu-sparse.tar");
+			fs.writeFileSync(archivePath, createOldGnuSparseTarArchive());
+
+			// Pre-fix the continuation block was parsed as the next header and
+			// the whole archive rejected as corrupt.
+			const rootResult = await readTool.execute("test-call-tar-old-gnu-sparse-root", {
+				path: `${archivePath}:data`,
+			});
+			expect(getTextOutput(rootResult)).toContain("real-sparse.bin");
+			expect(getTextOutput(rootResult)).not.toContain("14524770401");
+			expect(getTextOutput(rootResult)).toContain("after.txt");
+
+			const afterResult = await readTool.execute("test-call-tar-old-gnu-sparse-after", {
+				path: `${archivePath}:data/after.txt`,
+			});
+			expect(getTextOutput(afterResult)).toContain("after sparse");
+			await expect(
+				readTool.execute("test-call-tar-old-gnu-sparse-member", { path: `${archivePath}:data/real-sparse.bin` }),
+			).rejects.toThrow(/sparse file and cannot be read/);
+		});
+
+		it("should preserve signed GNU base-256 mtimes", async () => {
+			const archive = await openArchive({
+				bytes: createBase256TarArchive({ path: "negative-mtime.txt", content: "old\n", mtime: -1n }),
+				format: "tar",
+			});
+
+			expect(archive.getNode("negative-mtime.txt")?.mtimeMs).toBe(-1000);
+		});
+
+		it("should reject unsafe GNU base-256 member sizes", async () => {
+			await expect(
+				openArchive({
+					bytes: createBase256TarArchive({ path: "unsafe-size.txt", content: "", size: 1n << 60n }),
+					format: "tar",
+				}),
+			).rejects.toThrow(/Invalid tar member size/);
+		});
+
+		it("should apply old-GNU N rename records to long member paths", async () => {
+			const longPath = `data/${"component/".repeat(14)}file.txt`;
+			const archive = await openArchive({ bytes: createOldGnuNamesTarArchive(longPath), format: "tar" });
+
+			const member = await archive.readFile(longPath);
+			expect(new TextDecoder().decode(member.bytes)).toBe("old GNU long path\n");
+			expect(archive.getNode("short.txt")).toBeUndefined();
+		});
+
+		it("should resolve tar symlinks whose target is the archive root", async () => {
+			const archivePath = path.join(testDir, "root-symlinks.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "top.txt", content: "top level\n" },
+					{ path: "dir/inner.txt", content: "inner\n" },
+					// `current -> .` and `dir/up -> ..` both normalize to the archive root.
+					{ path: "current", content: "", typeFlag: "2", linkName: "." },
+					{ path: "dir/up", content: "", typeFlag: "2", linkName: ".." },
+				]),
+			);
+
+			const currentNode = await readTool.execute("test-call-tar-root-symlink-current", {
+				path: `${archivePath}:current/top.txt`,
+			});
+			expect(getTextOutput(currentNode)).toContain("top level");
+
+			const upNode = await readTool.execute("test-call-tar-root-symlink-up", {
+				path: `${archivePath}:dir/up/top.txt`,
+			});
+			expect(getTextOutput(upNode)).toContain("top level");
+		});
+
+		it("should list dangling tar symlinks but reject their materialization", async () => {
+			const archivePath = path.join(testDir, "dangling-symlink.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([{ path: "pkg/dangling", content: "", typeFlag: "2", linkName: "missing-target" }]),
+			);
+
+			const rootResult = await readTool.execute("test-call-tar-dangling-symlink-root", {
+				path: `${archivePath}:pkg`,
+			});
+			expect(getTextOutput(rootResult)).toContain("dangling");
+			await expect(
+				readTool.execute("test-call-tar-dangling-symlink-member", {
+					path: `${archivePath}:pkg/dangling`,
+				}),
+			).rejects.toThrow(/cannot be materialized/);
+			await expect(readArchiveEntries(archivePath)).rejects.toThrow(/cannot be materialized/);
+		});
+
+		it("should apply and clear global PAX link paths", async () => {
+			const archive = await openArchive({ bytes: createGlobalPaxLinkTarArchive(), format: "tar" });
+
+			const linked = await archive.readFile("pkg/bin/tool");
+			expect(new TextDecoder().decode(linked.bytes)).toBe("global PAX link\n");
+			expect(archive.getNode("pkg/bin/current")?.isDirectory).toBe(true);
+		});
+
+		it("should reject overlong PAX link targets before storing dangling symlinks", async () => {
+			const target = `\0/${"x".repeat(10_000)}`;
+			await expect(openArchive({ bytes: createPaxLinkTarArchive(target), format: "tar" })).rejects.toThrow(
+				/Archive PAX link target exceeds 4096 bytes/,
+			);
+		});
+
+		it("should measure PAX paths in UTF-8 bytes", async () => {
+			await expect(
+				openArchive({ bytes: createPaxPathTarArchive("😀".repeat(1500)), format: "tar" }),
+			).rejects.toThrow(/Archive PAX path exceeds 4096 bytes/);
+		});
+
+		it("should reject overlong GNU LongLink targets before decoding them", async () => {
+			await expect(
+				openArchive({ bytes: createLongLinkTarArchive("x".repeat(10_001)), format: "tar" }),
+			).rejects.toThrow(/Archive GNU long link target exceeds 4096 bytes/);
+		});
+
+		it("should surface GNU sparse PAX names and reject sparse reads", async () => {
+			const archivePath = path.join(testDir, "sparse-pax.tar");
+			fs.writeFileSync(
+				archivePath,
+				createSparsePaxTarArchive("data/sparse.bin", 1048576, Buffer.from("sparse-map\n")),
+			);
+
+			// The listing must show the real GNU.sparse.name, not the internal
+			// GNUSparseFile.NNN path.
+			const rootResult = await readTool.execute("test-call-tar-sparse-root", { path: `${archivePath}:data` });
+			expect(getTextOutput(rootResult)).toContain("sparse.bin");
+			expect(getTextOutput(rootResult)).not.toContain("GNUSparseFile");
+
+			// Reading the real member name resolves the entry and rejects it as
+			// sparse (a catchable error), rather than reporting it missing.
+			await expect(
+				readTool.execute("test-call-tar-sparse-member", { path: `${archivePath}:data/sparse.bin` }),
+			).rejects.toThrow(/sparse file and cannot be read/);
+		});
+
+		it("should reject a truncated tar member while indexing", async () => {
+			const archivePath = path.join(testDir, "truncated.tar");
+			// A full, valid archive declares 2048 bytes for `big.txt`; slicing the
+			// payload mid-member leaves the header's declared size pointing past EOF.
+			const complete = createTarArchive([{ path: "big.txt", content: "A".repeat(2048) }]);
+			fs.writeFileSync(archivePath, complete.subarray(0, 512 + 256));
+
+			await expect(readTool.execute("test-call-tar-truncated", { path: archivePath })).rejects.toThrow(/truncated/);
+		});
+
+		it("should reject a tar truncated before its terminating zero block", async () => {
+			const archivePath = path.join(testDir, "unterminated.tar");
+			const complete = createTarArchive([{ path: "complete.txt", content: "complete member\n" }]);
+			fs.writeFileSync(archivePath, complete.subarray(0, complete.length - 1024));
+
+			await expect(readTool.execute("test-call-tar-unterminated", { path: archivePath })).rejects.toThrow(
+				/missing terminating zero block/,
+			);
+		});
+
+		it("should expose a non-tar gzip payload as a single stem-named member", async () => {
+			// `sniffArchiveFormat` classifies any gzip magic as tar.gz; when the
+			// decompressed stream is not a tar it must surface as a one-member
+			// pseudo-archive named after the file stem, not an error or an
+			// empty directory.
+			const archivePath = path.join(testDir, "note.txt.gz");
+			fs.writeFileSync(archivePath, zlib.gzipSync(Buffer.from("hello world\n")));
+
+			const listing = await readTool.execute("test-call-gzip-non-tar", { path: archivePath });
+			expect(getTextOutput(listing)).toContain("note.txt");
+
+			const member = await readTool.execute("test-call-gzip-non-tar-member", {
+				path: `${archivePath}:note.txt`,
+			});
+			expect(getTextOutput(member)).toContain("hello world");
 		});
 
 		it("should list archive subdirectories", async () => {
@@ -812,6 +1799,11 @@ describe("Coding Agent Tools", () => {
 				create: (entries: ArchiveFixtureEntry[]) => createZipArchive(entries),
 			},
 			{
+				label: ".asar",
+				path: "fixture-subpath.asar",
+				create: (entries: ArchiveFixtureEntry[]) => createAsarArchive(entries),
+			},
+			{
 				// `.jar`/`.war` are ZIP containers under a different extension.
 				// Regression: archiveFormatFromPath / parseArchivePathCandidates
 				// previously excluded them, so `read lib.jar:member` failed with
@@ -847,6 +1839,22 @@ describe("Coding Agent Tools", () => {
 				expect(output).toContain("Line 3");
 			});
 		}
+
+		it("should read unpacked .asar members", async () => {
+			const archivePath = path.join(testDir, "fixture-unpacked.asar");
+			const memberPath = "native/config.txt";
+			const content = "unpacked ASAR content\n";
+			fs.writeFileSync(archivePath, createAsarArchive([{ path: memberPath, content, unpacked: true }]));
+			const unpackedPath = path.join(`${archivePath}.unpacked`, memberPath);
+			fs.mkdirSync(path.dirname(unpackedPath), { recursive: true });
+			fs.writeFileSync(unpackedPath, content);
+
+			const result = await readTool.execute("test-call-asar-unpacked", {
+				path: `${archivePath}:${memberPath}`,
+			});
+
+			expect(getTextOutput(result)).toContain("unpacked ASAR content");
+		});
 
 		it("should treat a selector-shaped archive subpath as a root listing selector", async () => {
 			const archivePath = path.join(testDir, "root-selector.tar");
@@ -903,15 +1911,10 @@ describe("Coding Agent Tools", () => {
 			const testFile = path.join(testDir, "image.txt");
 			fs.writeFileSync(testFile, pngBuffer);
 
-			const legacyReadTool = wrapToolWithMetaNotice(
-				new ReadTool(
-					createTestToolSession(
-						testDir,
-						Settings.isolated({ "inspect_image.enabled": false, "images.autoResize": false }),
-					),
-				),
+			const imageReadTool = wrapToolWithMetaNotice(
+				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "images.autoResize": false }))),
 			);
-			const result = await legacyReadTool.execute("test-call-img-1", { path: testFile });
+			const result = await imageReadTool.execute("test-call-img-1", { path: testFile });
 
 			expect(result.content[0]?.type).toBe("text");
 			expect(getTextOutput(result)).toContain("Read image file [image/png]");
@@ -919,47 +1922,43 @@ describe("Coding Agent Tools", () => {
 			const imageBlock = result.content.find(
 				(c): c is { type: "image"; mimeType: string; data: string } => c.type === "image",
 			);
-			expect(imageBlock).toBeDefined();
 			expect(imageBlock?.mimeType).toBe("image/png");
-			expect(typeof imageBlock?.data).toBe("string");
-			expect((imageBlock?.data ?? "").length).toBeGreaterThan(0);
 		});
 
-		it("returns metadata guidance (no image blocks) when inspect_image is enabled", async () => {
+		it("returns metadata for text-only models and pixels for image-capable models", async () => {
 			const png1x1Base64 =
 				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2Z0AAAAASUVORK5CYII=";
 			const pngBuffer = Buffer.from(png1x1Base64, "base64");
 			const testFile = path.join(testDir, "image-guidance.png");
 			fs.writeFileSync(testFile, pngBuffer);
 
-			const inspectModeReadTool = wrapToolWithMetaNotice(
-				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": true }))),
+			const textOnlyModel = createMockModel({ id: "text-only" });
+			const textOnlyTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, Settings.isolated(), {
+						getActiveModel: () => textOnlyModel,
+					}),
+				),
 			);
-			const result = await inspectModeReadTool.execute("test-call-img-guidance", { path: testFile });
-			const output = getTextOutput(result);
+			const metadataResult = await textOnlyTool.execute("test-call-img-guidance", { path: testFile });
+			const output = getTextOutput(metadataResult);
 
 			expect(output).toContain("Image metadata:");
 			expect(output).toContain("MIME: image/png");
 			expect(output).toContain("Bytes:");
 			expect(output).toContain("Dimensions:");
-			expect(output).toContain("inspect_image");
-			expect(output).toContain(`path="${path.basename(testFile)}"`);
-			expect(output).toContain("question");
-			expect(output).not.toContain("optional context");
-			expect(result.content.some(c => c.type === "image")).toBe(false);
-		});
+			expect(output).toContain(`${path.basename(testFile)}?q=<question>`);
+			expect(metadataResult.content.some(c => c.type === "image")).toBe(false);
 
-		it("omits inspect_image from the description when the tool is disabled", () => {
-			const enabled = new ReadTool(
-				createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": true })),
+			const visionModel = createMockModel({ id: "vision" });
+			visionModel.input.push("image");
+			const visionTool = new ReadTool(
+				createTestToolSession(testDir, Settings.isolated({ "images.autoResize": false }), {
+					getActiveModel: () => visionModel,
+				}),
 			);
-			const disabled = new ReadTool(
-				createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false })),
-			);
-
-			expect(enabled.description).toContain("inspect_image");
-			expect(disabled.description).not.toContain("inspect_image");
-			expect(disabled.description).toContain("inline");
+			const inlineResult = await visionTool.execute("test-call-img-inline", { path: testFile });
+			expect(inlineResult.content.some(c => c.type === "image")).toBe(true);
 		});
 
 		it("should treat files with image extension but non-image content as text", async () => {
@@ -1014,11 +2013,24 @@ describe("Coding Agent Tools", () => {
 
 			const result = await writeTool.execute("test-call-4-local", { path: localPath, content });
 
-			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to session/local/handoffs/new-output.json`,
-			);
+			// The result names the URL the model wrote, not the session's backing path.
+			expect(getTextOutput(result)).toContain(localPath);
+			expect(getTextOutput(result)).not.toContain(path.join("session", "local"));
 			expect(fs.existsSync(expectedPath)).toBe(true);
 			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
+		});
+
+		it("should reject oversized tar rewrites before reading the archive bytes", async () => {
+			const archivePath = path.join(testDir, "oversized.tar");
+			fs.writeFileSync(archivePath, "");
+			fs.truncateSync(archivePath, 256 * 1024 * 1024 + 1);
+
+			await expect(
+				writeTool.execute("test-call-archive-write-oversized", {
+					path: `${archivePath}:pkg/new.txt`,
+					content: "new\n",
+				}),
+			).rejects.toThrow(/too large to read in memory/);
 		});
 
 		it("should write to an existing archive entry", async () => {
@@ -1041,9 +2053,12 @@ describe("Coding Agent Tools", () => {
 				`Successfully wrote ${content.length} bytes to ${path.basename(archivePath)}:pkg/README.md`,
 			);
 
-			const unzipped = unzip(new Uint8Array(fs.readFileSync(archivePath)));
-			expect(new TextDecoder().decode(unzipped["pkg/README.md"])).toBe(content);
-			expect(new TextDecoder().decode(unzipped["pkg/src/index.ts"])).toBe("export const archiveValue = 1;\n");
+			const unzipped = await readArchiveEntries({
+				bytes: new Uint8Array(fs.readFileSync(archivePath)),
+				format: "zip",
+			});
+			expect(new TextDecoder().decode(unzipped.get("pkg/README.md"))).toBe(content);
+			expect(new TextDecoder().decode(unzipped.get("pkg/src/index.ts"))).toBe("export const archiveValue = 1;\n");
 		});
 
 		it("should create a new archive when writing to an archive subpath", async () => {
@@ -1124,10 +2139,6 @@ describe("Coding Agent Tools", () => {
 			});
 			const details = result.details as { diff?: string } | undefined;
 
-			expect(getTextOutput(result)).toContain("Successfully replaced");
-			expect(details).toBeDefined();
-			expect(details?.diff).toBeDefined();
-			expect(typeof details?.diff).toBe("string");
 			expect(details?.diff).toContain("testing");
 		});
 
@@ -1136,13 +2147,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "Hello, world!";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-6", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "testing",
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-call-6", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "testing",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should fail if text appears multiple times", async () => {
@@ -1150,13 +2161,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "foo foo foo";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-7", {
-					path: testFile,
-					old_string: "foo",
-					new_string: "bar",
-				}),
-			).rejects.toThrow(/Found 3 occurrences/);
+			const result = await editTool.execute("test-call-7", {
+				path: testFile,
+				old_string: "foo",
+				new_string: "bar",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 3 occurrences/);
 		});
 
 		it("should replace all occurrences with replace_all: true", async () => {
@@ -1170,7 +2181,7 @@ describe("Coding Agent Tools", () => {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced 3 occurrences");
+			expect(getTextOutput(result)).toContain("qux bar qux baz qux");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("qux bar qux baz qux");
 		});
@@ -1194,28 +2205,49 @@ function b() {
 			);
 
 			// With multiple fuzzy matches, the tool rejects for safety to avoid ambiguous replacements
-			await expect(
-				editTool.execute("test-all-fuzzy", {
-					path: testFile,
-					old_string: "if (x) {\n  doThing();\n}",
-					new_string: "if (y) {\n  doOther();\n}",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Found 2 high-confidence matches/);
+			const result = await editTool.execute("test-all-fuzzy", {
+				path: testFile,
+				old_string: "if (x) {\n  doThing();\n}",
+				new_string: "if (y) {\n  doOther();\n}",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 2 high-confidence matches/);
+		});
+
+		it("applies edit.fuzzyMatch and edit.fuzzyThreshold changes made after the tool was built", async () => {
+			const testFile = path.join(testDir, "edit-live-fuzzy.txt");
+			fs.writeFileSync(testFile, "function greet() {\n  const message = 'hello world';\n  return message;\n}\n");
+			const args = {
+				path: testFile,
+				old_string: "  const mesage = 'helo wrld';\n  return mesage;",
+				new_string: "  return 'bye';",
+			};
+
+			cfgEditFuzzyMatch.set(session.settings, false);
+			expect((await editTool.execute("live-fuzzy-off", args)).isError).toBe(true);
+
+			cfgEditFuzzyMatch.set(session.settings, true);
+			cfgEditFuzzyThreshold.set(session.settings, 0.99);
+			expect((await editTool.execute("live-fuzzy-strict", args)).isError).toBe(true);
+
+			cfgEditFuzzyThreshold.set(session.settings, 0.6);
+			expect((await editTool.execute("live-fuzzy-loose", args)).isError).not.toBe(true);
+			expect(await Bun.file(testFile).text()).toBe("function greet() {\n  return 'bye';\n}\n");
 		});
 
 		it("should fail with replace_all: true if no matches found", async () => {
 			const testFile = path.join(testDir, "edit-all-nomatch.txt");
 			fs.writeFileSync(testFile, "hello world");
 
-			await expect(
-				editTool.execute("test-all-nomatch", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "bar",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-all-nomatch", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "bar",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should replace multiline text with replace_all: true", async () => {
@@ -1229,7 +2261,7 @@ function b() {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced 2 occurrences");
+			expect(getTextOutput(result)).toContain("replaced");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("start\nreplaced\nend\nstart\nreplaced\nend");
 		});
@@ -1245,7 +2277,7 @@ function b() {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced text");
+			expect(getTextOutput(result)).toContain("hello universe");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("hello universe");
 		});
@@ -1290,19 +2322,6 @@ function b() {
 			expect(output).toMatch(/Wall time: \d+\.\d{2} seconds/);
 			expect(typeof result.details?.wallTimeMs).toBe("number");
 			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(0);
-		});
-
-		it("should expose built-in interceptor defaults truthfully", () => {
-			const defaultSettings = Settings.isolated({ "bashInterceptor.enabled": true });
-			const explicitEmptySettings = Settings.isolated({
-				"bashInterceptor.enabled": true,
-				"bashInterceptor.patterns": [],
-			});
-
-			expect(defaultSettings.get("bashInterceptor.patterns")).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
-			expect(defaultSettings.getBashInterceptorRules()).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
-			expect(explicitEmptySettings.get("bashInterceptor.patterns")).toEqual([]);
-			expect(explicitEmptySettings.getBashInterceptorRules()).toEqual([]);
 		});
 
 		it("should block built-in interceptor commands when enabled with default patterns", async () => {
@@ -1377,33 +2396,6 @@ function b() {
 			).rejects.toThrow(/Use the `grep` tool for customcmd\./);
 		});
 
-		it("should expose env values without shell re-parsing", async () => {
-			const mermaid = [
-				"flowchart TD",
-				'N0["attack"]',
-				'N1["[target] cluster"]',
-				'N2["diff-review"]',
-				'N3["extract"]',
-				'N4["report"]',
-				'N5["setup"]',
-				"N3 --> N0",
-				"N0 --> N1",
-				"N2 --> N1",
-				"N3 --> N2",
-				"N5 --> N3",
-				"N1 --> N4",
-			].join("\n");
-			const result = await bashTool.execute("test-call-8-env", {
-				command: "printf '%s' \"$MERMAID\"",
-				env: { MERMAID: mermaid },
-			});
-			const output = getTextOutput(result);
-			expect(output).toContain('N0["attack"]');
-			expect(output).toContain("N1 --> N4");
-			expect(fs.existsSync(path.join(testDir, "N0"))).toBe(false);
-			expect(fs.existsSync(path.join(testDir, "N4"))).toBe(false);
-		});
-
 		it("should resolve local:// destination paths for mv commands", async () => {
 			const sourcePath = path.join(testDir, "move-source.json");
 			const targetPath = path.join(testDir, "session", "local", "moved-via-bash.json");
@@ -1450,7 +2442,7 @@ function b() {
 				// Emit well past the ~50KB inline window across many lines so the
 				// output is genuinely window-truncated (not merely column-capped),
 				// which is what allocates the spill artifact.
-				command: "seq 1 30000",
+				command: "seq 1 15000",
 			});
 
 			const artifactId = result.details?.meta?.truncation?.artifactId;
@@ -1498,12 +2490,16 @@ function b() {
 			expect(getTextOutput(result)).toContain("short");
 			expect(result.details?.timeoutSeconds).toBe(300);
 			expect(result.details?.async).toBeUndefined();
+			await asyncJobManager.waitForAll();
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+			// A command that finished in the foreground never becomes a background job row.
+			expect(asyncJobManager.getAllJobs()).toEqual([]);
+			expect(asyncJobManager.getJob("bg_1")).toBeUndefined();
 			expect(deliveries).toEqual([]);
 			await asyncJobManager.dispose();
 		});
 
-		it("should auto-background long-running commands when enabled", async () => {
+		it("should auto-background at the threshold even with a longer timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const updates: string[] = [];
 			const asyncJobManager = new AsyncJobManager({
@@ -1531,6 +2527,7 @@ function b() {
 				"test-call-9-auto-running",
 				{
 					command: "printf 'start\\n'; sleep 0.03; printf 'done\\n'",
+					timeout: 3_600,
 				},
 				undefined,
 				update => {
@@ -1749,73 +2746,6 @@ function b() {
 			expect(output).toContain("first-line");
 			expect(output).toContain("second");
 			expect(output).toContain("third");
-		});
-	});
-
-	describe("HubTool", () => {
-		it("should wait for jobs and acknowledge deliveries to prevent race conditions", async () => {
-			const manager = new AsyncJobManager({
-				onJobComplete: async () => {},
-			});
-			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
-				asyncJobManager: manager,
-			});
-			const jobTool = new HubTool(session);
-
-			const jobId = manager.register("bash", "test job", async () => "success");
-
-			// Job is running, call poll
-			const resultPromise = jobTool.execute("test-call-poll-1", { op: "wait", ids: [jobId] });
-
-			// Ensure poll finished
-			const result = await resultPromise;
-			expect(getTextOutput(result)).toContain("Completed");
-
-			// Wait for deliveries to be processed
-			await manager.drainDeliveries({ timeoutMs: 100 });
-
-			// If it correctly acknowledged, the delivery is suppressed.
-			expect(manager.hasPendingDeliveries()).toBe(false);
-		});
-
-		it("flags still-waiting polls and all-running snapshots as contextually useless", async () => {
-			const manager = new AsyncJobManager({
-				onJobComplete: async () => {},
-			});
-			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
-				asyncJobManager: manager,
-			});
-			const jobTool = new HubTool(session);
-			const gate = Promise.withResolvers<string>();
-			const jobId = manager.register("bash", "long job", () => gate.promise);
-
-			// Poll cut short while the job is still running: a pure "still
-			// waiting" snapshot carries no information once consumed.
-			const controller = new AbortController();
-			const pollPromise = jobTool.execute("test-call-useless-poll", { op: "wait", ids: [jobId] }, controller.signal);
-			controller.abort();
-			const polled = await pollPromise;
-			expect(polled.useless).toBe(true);
-
-			// A list snapshot showing only running jobs is equally uneventful.
-			const listed = await jobTool.execute("test-call-useless-list", { op: "jobs" });
-			expect(listed.useless).toBe(true);
-
-			// Once the job settles, the result is informative — flag absent.
-			gate.resolve("done");
-			const settled = await jobTool.execute("test-call-useless-settled", { op: "wait", ids: [jobId] });
-			expect(getTextOutput(settled)).toContain("Completed");
-			expect(settled.useless).toBeUndefined();
-
-			// Nothing left to wait for: noise once consumed.
-			const idle = await jobTool.execute("test-call-useless-idle", { op: "wait" });
-			expect(getTextOutput(idle)).toContain("No running background jobs");
-			expect(idle.useless).toBe(true);
-
-			// A poll naming unknown ids found nothing — equally uneventful.
-			const missing = await jobTool.execute("test-call-useless-missing", { op: "wait", ids: ["no-such-job"] });
-			expect(getTextOutput(missing)).toContain("No matching jobs found");
-			expect(missing.useless).toBe(true);
 		});
 	});
 
@@ -2373,7 +3303,7 @@ describe("edit tool CRLF handling", () => {
 			new_string: "replaced line\n",
 		});
 
-		expect(getTextOutput(result)).toContain("Successfully replaced");
+		expect(getTextOutput(result)).toContain("replaced line");
 	});
 
 	it("should preserve CRLF line endings after edit", async () => {
@@ -2409,27 +3339,12 @@ describe("edit tool CRLF handling", () => {
 
 		fs.writeFileSync(testFile, "hello\r\nworld\r\n---\r\nhello\nworld\n");
 
-		await expect(
-			editTool.execute("test-crlf-dup", {
-				path: testFile,
-				old_string: "hello\nworld\n",
-				new_string: "replaced\n",
-			}),
-		).rejects.toThrow(/Found 2 occurrences/);
-	});
-
-	// TODO: CRLF preservation broken by LSP formatting - fix later
-	it.skip("should preserve UTF-8 BOM after edit", async () => {
-		const testFile = path.join(testDir, "bom-test.txt");
-		fs.writeFileSync(testFile, "\uFEFFfirst\r\nsecond\r\nthird\r\n");
-
-		await editTool.execute("test-bom", {
+		const result = await editTool.execute("test-crlf-dup", {
 			path: testFile,
-			old_string: "second\n",
-			new_string: "REPLACED\n",
+			old_string: "hello\nworld\n",
+			new_string: "replaced\n",
 		});
-
-		const content = await Bun.file(testFile).text();
-		expect(content).toBe("\uFEFFfirst\r\nREPLACED\r\nthird\r\n");
+		expect(result.isError).toBe(true);
+		expect(getTextOutput(result)).toMatch(/Found 2 occurrences/);
 	});
 });

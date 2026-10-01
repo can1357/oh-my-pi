@@ -1,9 +1,21 @@
 import type { Mock } from "bun:test";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { loginAlibabaCodingPlan } from "../src/registry/alibaba-coding-plan";
 import * as apiKeyValidation from "../src/registry/api-key-validation";
 import { getOAuthApiKey } from "../src/registry/oauth/index";
 import type { OAuthController } from "../src/registry/oauth/types";
+import { getProviderDefinition } from "../src/registry/registry";
+
+function registeredLogin(options: OAuthController) {
+	const login = getProviderDefinition("alibaba-coding-plan")?.login;
+	if (!login) throw new Error("Alibaba Coding Plan login is not registered");
+	return login(options);
+}
+
+async function loginAlibabaCodingPlan(options: OAuthController) {
+	const result = await registeredLogin(options);
+	if (typeof result === "string") throw new Error("Expected Alibaba Coding Plan OAuth credentials");
+	return result;
+}
 
 describe("alibaba-coding-plan endpoint selection", () => {
 	let validateSpy: Mock<typeof apiKeyValidation.validateOpenAICompatibleApiKey>;
@@ -69,8 +81,10 @@ describe("alibaba-coding-plan endpoint selection", () => {
 		expect(result.access).toBe("sk-cn-key");
 		expect(result.refresh).toBe("sk-cn-key");
 		expect(result.enterpriseUrl).toBe("https://coding.dashscope.aliyuncs.com/v1");
-		expect(capturedAuth?.url).toBe("https://dashscope.console.aliyun.com/");
-		expect(capturedAuth?.instructions).toContain("China mainland");
+		expect(capturedAuth?.url).toBe("https://bailian.console.aliyun.com/?tab=model#/api-key");
+		expect(capturedAuth?.instructions).toBe(
+			"Copy your API key from the Alibaba Cloud Bailian console (China mainland)",
+		);
 
 		expect(validateSpy).toHaveBeenCalledWith({
 			provider: "Alibaba Coding Plan",
@@ -207,39 +221,5 @@ describe("alibaba-coding-plan JSON apiKey", () => {
 		const parsed = JSON.parse(result!.apiKey);
 		expect(parsed.token).toBe("sk-test-key");
 		expect(parsed.enterpriseUrl).toBe("https://coding.dashscope.aliyuncs.com/v1");
-	});
-
-	it("JSON apiKey parsing extracts token for Bearer header", () => {
-		const rawApiKey = JSON.stringify({
-			token: "sk-bearer-token",
-			enterpriseUrl: "https://custom.endpoint.com/v1",
-		});
-		const parsed = JSON.parse(rawApiKey);
-		const apiKey = typeof parsed?.token === "string" ? parsed.token : rawApiKey;
-		expect(apiKey).toBe("sk-bearer-token");
-	});
-
-	it("JSON apiKey parsing extracts enterpriseUrl for baseUrl", () => {
-		const rawApiKey = JSON.stringify({
-			token: "sk-test",
-			enterpriseUrl: "https://china.dashscope.aliyuncs.com/v1",
-		});
-		const parsed = JSON.parse(rawApiKey);
-		const baseUrl = typeof parsed?.enterpriseUrl === "string" ? parsed.enterpriseUrl : undefined;
-		expect(baseUrl).toBe("https://china.dashscope.aliyuncs.com/v1");
-	});
-
-	it("non-JSON apiKey falls back to raw value", () => {
-		const rawApiKey = "sk-plain-key";
-		let apiKey = rawApiKey;
-		try {
-			const parsed = JSON.parse(rawApiKey);
-			if (typeof parsed?.token === "string") {
-				apiKey = parsed.token;
-			}
-		} catch {
-			// Not JSON — use raw apiKey
-		}
-		expect(apiKey).toBe("sk-plain-key");
 	});
 });

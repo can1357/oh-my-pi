@@ -1,15 +1,17 @@
 /**
- * HTTP loopback bridge that lets the Python kernel synchronously invoke
- * host-side tools by name, mirroring the JS worker's `tool.<name>(args)` proxy.
+ * HTTP loopback bridge that lets the Python kernel invoke host-side tools and
+ * enabled eval-prelude capabilities, mirroring the JavaScript worker bridge.
  *
- * The Python prelude builds a `tool` proxy that POSTs to `/v1/tool` over a
- * 127.0.0.1 loopback socket; the host resolves the request against the
- * `ToolSession` registered for the current execution and forwards to the same
- * `callSessionTool` implementation the JS bridge uses.
+ * The Python prelude POSTs to `/v1/tool` over a 127.0.0.1 loopback socket; the
+ * host resolves the request against the `ToolSession` registered for the
+ * current execution and forwards to the same `callSessionTool` implementation
+ * the JavaScript bridge uses.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
-import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import type { RuntimeCallIdentity } from "../js/shared/runtime";
+import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
 
 export interface PyToolBridgeEntry {
 	toolSession: ToolSession;
@@ -26,6 +28,7 @@ export interface PyToolBridgeEntry {
 	 * cell on top of a still-running, abort-insensitive merge.
 	 */
 	shieldedSignal?: AbortSignal;
+	shadowCell?: EvalShadowCellSession;
 	emitStatus?: (event: JsStatusEvent) => void;
 	abortRequested?: () => boolean;
 }
@@ -43,6 +46,40 @@ interface BridgeServer {
 const registrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
+function markExpectedBridgeShutdownError(error: unknown): error is Error {
+	if (!(error instanceof Error)) return false;
+	const expected =
+		error.name === "AbortError" ||
+		("code" in error &&
+			(error.code === "ERR_SOCKET_CLOSED" || error.code === "ECONNRESET" || error.code === "EPIPE"));
+	if (expected) postmortem.markExpectedCleanupError(error);
+	return expected;
+}
+
+async function waitForSpeculativeClaim<T>(claim: Promise<T>, name: string, signal?: AbortSignal): Promise<T> {
+	if (!signal) return await claim;
+	if (signal.aborted) {
+		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+	}
+	const { promise, resolve, reject } = Promise.withResolvers<T>();
+	let settled = false;
+	let onAbort: () => void = () => {};
+	const finish = (settle: () => void): void => {
+		if (settled) return;
+		settled = true;
+		signal.removeEventListener("abort", onAbort);
+		settle();
+	};
+	onAbort = (): void =>
+		finish(() => reject(new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`)));
+	signal.addEventListener("abort", onAbort, { once: true });
+	void claim.then(
+		value => finish(() => resolve(value)),
+		error => finish(() => reject(error)),
+	);
+	return await promise;
+}
+
 /**
  * Forward a bridge call to {@link callSessionTool}, failing fast once the cell
  * has been interrupted.
@@ -57,20 +94,40 @@ let serverPromise: Promise<BridgeServer> | null = null;
  *   It is deferred across a critical `agent()` phase, so a cancel landing
  *   mid-merge cannot return early and let the cell settle while an
  *   abort-insensitive cherry-pick is still rewriting the repo.
- *
- * Calls arriving after an abort are rejected before starting. Otherwise the
- * usual path is that the tool observes its own abort and rejects; the race only
- * matters for tools that ignore the signal, keeping the kernel unwinding
- * promptly instead of being hard-killed.
+ * Calls arriving after an abort are rejected before starting. A speculative
+ * claim is also raced against cancellation, and its late outcome is observed
+ * after the bridge has settled. Otherwise the usual path is that the tool
+ * observes its own abort and rejects; the race only matters for tools that
+ * ignore the signal, keeping the kernel unwinding promptly instead of being
+ * hard-killed.
  */
-async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: PyToolBridgeEntry): Promise<unknown> {
+async function callSessionToolPromptOnAbort(
+	name: string,
+	args: unknown,
+	entry: PyToolBridgeEntry,
+	identity?: RuntimeCallIdentity,
+): Promise<unknown> {
 	if (entry.abortRequested?.()) {
 		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+	}
+	const claimSignal = entry.signal ?? entry.shieldedSignal;
+	if (entry.shadowCell && identity && name === "read") {
+		const claimed = await waitForSpeculativeClaim(
+			entry.shadowCell.claim(name, args, identity, Number.MAX_SAFE_INTEGER, claimSignal),
+			name,
+			claimSignal,
+		);
+		if (claimSignal?.aborted || entry.abortRequested?.()) {
+			throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+		}
+		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
+		defaultIntent: "py prelude",
+		identity,
 	});
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
@@ -105,9 +162,15 @@ async function startServer(): Promise<BridgeServer> {
 				return new Response("Forbidden", { status: 403 });
 			}
 
-			let body: { session?: unknown; run?: unknown; name?: unknown; args?: unknown };
+			let body: { session?: unknown; run?: unknown; name?: unknown; args?: unknown; identity?: unknown };
 			try {
-				body = (await req.json()) as { session?: unknown; run?: unknown; name?: unknown; args?: unknown };
+				body = (await req.json()) as {
+					session?: unknown;
+					run?: unknown;
+					name?: unknown;
+					args?: unknown;
+					identity?: unknown;
+				};
 			} catch {
 				return Response.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
 			}
@@ -127,7 +190,20 @@ async function startServer(): Promise<BridgeServer> {
 			}
 
 			try {
-				const value = await callSessionToolPromptOnAbort(name, body.args, entry);
+				const identityRecord =
+					body.identity && typeof body.identity === "object" && !Array.isArray(body.identity)
+						? body.identity
+						: undefined;
+				const siteId =
+					identityRecord && "siteId" in identityRecord && typeof identityRecord.siteId === "string"
+						? identityRecord.siteId
+						: undefined;
+				const occurrence =
+					identityRecord && "occurrence" in identityRecord && typeof identityRecord.occurrence === "number"
+						? identityRecord.occurrence
+						: undefined;
+				const identity = siteId !== undefined && occurrence !== undefined ? { siteId, occurrence } : undefined;
+				const value = await callSessionToolPromptOnAbort(name, body.args, entry, identity);
 				return Response.json({ ok: true, value });
 			} catch (err) {
 				return Response.json({
@@ -136,6 +212,16 @@ async function startServer(): Promise<BridgeServer> {
 				});
 			}
 		},
+		error(err) {
+			if (markExpectedBridgeShutdownError(err)) {
+				logger.debug("Python tool bridge connection closed during shutdown", { error: err.message });
+			} else {
+				logger.error("Python tool bridge request failed", { error: err });
+			}
+			// Bun requires an error response even when the peer has already gone.
+			// An empty body minimizes further writes to a closing socket.
+			return new Response(null, { status: 500 });
+		},
 	});
 
 	const info: PyToolBridgeInfo = {
@@ -143,11 +229,18 @@ async function startServer(): Promise<BridgeServer> {
 		token,
 	};
 	logger.debug("Python tool bridge listening", { url: info.url });
+	let stopPromise: Promise<void> | null = null;
 
 	return {
 		info,
-		stop: async () => {
-			await server.stop(true);
+		stop: () => {
+			stopPromise ??= Promise.try(() => server.stop(true)).catch(error => {
+				if (!markExpectedBridgeShutdownError(error)) throw error;
+				logger.debug("Python tool bridge stopped after its socket closed", {
+					error: error.message,
+				});
+			});
+			return stopPromise;
 		},
 	};
 }

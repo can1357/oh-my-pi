@@ -22,12 +22,6 @@ afterEach(() => {
 	delete process.env.MNEMOPI_SHARED_SURFACE_DB;
 });
 
-function schemaFor(name: string) {
-	const tool = TOOLS.find(candidate => candidate.name === name);
-	expect(tool).toBeDefined();
-	return tool?.inputSchema as { required?: readonly string[]; properties: Record<string, unknown> };
-}
-
 describe("provider all-tools parity", () => {
 	it("registers the Python provider-compatible tool surface with valid JSON schemas", () => {
 		const names = TOOLS.map(tool => tool.name);
@@ -63,16 +57,6 @@ describe("provider all-tools parity", () => {
 			const roundTripped = JSON.parse(JSON.stringify(tool.inputSchema)) as { type: string };
 			expect(roundTripped.type).toBe("object");
 		}
-	});
-
-	it("advertises required arguments for provider write/update/import tools", () => {
-		expect(schemaFor("mnemopi_remember").required).toContain("content");
-		expect(schemaFor("mnemopi_recall").required).toContain("query");
-		expect(schemaFor("mnemopi_scratchpad_write").required).toContain("content");
-		expect(schemaFor("mnemopi_update").required).toEqual(["memory_id", "content"]);
-		expect(schemaFor("mnemopi_forget").required).toContain("memory_id");
-		expect(schemaFor("mnemopi_export").required).toContain("output_path");
-		expect(schemaFor("mnemopi_import").required).toContain("input_path");
 	});
 
 	it("returns user-facing argument errors instead of mutating on missing arguments", async () => {

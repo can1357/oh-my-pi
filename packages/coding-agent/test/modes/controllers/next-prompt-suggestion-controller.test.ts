@@ -9,6 +9,7 @@ import {
 	NEXT_PROMPT_TIMEOUT_MS,
 	type NextPromptSuggestionGenerator,
 } from "@oh-my-pi/pi-coding-agent/modes/next-prompt-suggestion";
+import { cfgNextPromptSuggestionEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -92,9 +93,11 @@ function createHarness(generateResult: Promise<string | null> = Promise.resolve(
 		isGeneratingHandoff: false,
 		queuedMessageCount: 0,
 	} as unknown as AgentSession;
-	const settings = {
-		get: (path: string) => (path === "nextPromptSuggestion.enabled" ? state.enabled : undefined),
-	};
+	const settings = Settings.isolated({ "nextPromptSuggestion.enabled": true });
+	Object.defineProperty(state, "enabled", {
+		get: () => cfgNextPromptSuggestionEnabled.get(settings),
+		set: (enabled: boolean) => cfgNextPromptSuggestionEnabled.override(settings, enabled),
+	});
 	const requestComponentRender = vi.fn();
 	const ui = {
 		getFocused: () => (state.focused ? editor : null),

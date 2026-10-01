@@ -229,7 +229,8 @@ fn is_kubectl_non_table_format(command: &str) -> bool {
 				return true;
 			}
 		}
-		// Fully-attached form: `-oname`, `-ojsonpath=...`, `-ogo-template=...`, etc.
+		// Fully-attached form: `-oname`, `-ojsonpath=...`, `-ogo-template=...`,
+		// etc.
 		if let Some(val) = tok
 			.strip_prefix("-o")
 			.filter(|v| !v.is_empty() && !v.starts_with('='))
@@ -829,7 +830,8 @@ mod tests {
 	fn dedups_compose_service_prefixed_log_messages() {
 		let input = "api-1  | ready\napi-2  | ready\napi | ready\nworker | busy\n";
 		let out = filter_docker_logs(input);
-		// Different services with the same message must NOT be collapsed together.
+		// Different services with the same message must NOT be collapsed
+		// together.
 		assert!(out.contains("api-1  | ready"), "distinct service must be preserved: {out}");
 		assert!(out.contains("api-2  | ready"), "distinct service must be preserved: {out}");
 		assert!(out.contains("api | ready"), "distinct service must be preserved: {out}");
@@ -1240,7 +1242,7 @@ mod tests {
 		let out = filter(&kubectl_ctx, input, 0).text;
 		// Falls back — table compaction would try to process this
 		// The key is: doesn't crash, doesn't lose data
-		assert!(!out.is_empty());
+		assert_ne!(out, "");
 	}
 
 	#[test]
@@ -1286,7 +1288,8 @@ mod tests {
 
 	#[test]
 	fn kubectl_get_oyaml_attached_preserves_yaml() {
-		// `-oyaml` must be treated as `-o yaml` — passthrough, no table compaction.
+		// `-oyaml` must be treated as `-o yaml` — passthrough, no table
+		// compaction.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = MinimizerCtx {
 			program:    "kubectl",
@@ -1611,8 +1614,8 @@ mod tests {
 	#[test]
 	fn test_compose_up_logs_preserved() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		// Legacy docker-compose up: detect.rs sets subcommand="up", command retains
-		// "docker-compose".
+		// Legacy docker-compose up: detect.rs sets subcommand="up", command
+		// retains "docker-compose".
 		let input = "web_1    | [2024-01-01 00:00:00] INFO Server started\ndb_1     | 2024-01-01 \
 		             00:00:01 [Note] mysqld: ready for connections\n";
 		let ctx = make_ctx("docker", Some("up"), "docker-compose up", &cfg);

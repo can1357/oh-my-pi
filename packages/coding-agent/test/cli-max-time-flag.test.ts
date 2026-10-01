@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
@@ -79,7 +78,7 @@ describe("parseArgs — --max-time flag", () => {
 
 	it("converts maxTime to an absolute session deadline", async () => {
 		using tempDir = TempDir.createSync("@omp-max-time-");
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
 		let observedOptions: CreateAgentSessionOptions | undefined;
 		const parsed = parseArgs(["--max-time", "3", "--print", "hello"]);

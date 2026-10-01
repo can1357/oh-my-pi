@@ -1,9 +1,10 @@
 //! Cross-platform microphone capture and streaming speaker playback.
 //!
-//! miniaudio owns platform device discovery, format conversion, channel mixing,
-//! and resampling. The engine exposes one stable mono `f32` contract: the
-//! N-API classes in pi-natives adapt it to TypeScript, and [`crate::live`]
-//! shares [`PlaybackStream`] for remote-audio rendering.
+//! The per-platform backends in [`crate::device`] own device access, format
+//! conversion, channel mixing, and resampling. The engine exposes one stable
+//! mono `f32` contract: the N-API classes in pi-natives adapt it to
+//! TypeScript, and [`crate::live`] shares [`PlaybackStream`] for remote-audio
+//! rendering.
 
 use std::sync::{
 	Arc,
@@ -11,46 +12,33 @@ use std::sync::{
 };
 
 use flume::TryRecvError;
-use maudio::{
-	audio::{performance::PerformanceProfile, sample_rate::SampleRate},
-	backend::Backend,
-	device::{
-		Device,
-		device_builder::{DeviceBuilder, DeviceBuilderOps},
-	},
-};
 use tokio::sync::Notify;
 
-use crate::VoiceResult;
+use crate::{
+	VoiceResult,
+	device::{CaptureDevice, DeviceConfig, PlaybackDevice, playback_drain_periods},
+};
 
-const AUDIO_CHANNELS: u32 = 1;
 // PulseAudio TCP playback stutters with a 20 ms target buffer; 50 ms absorbs
 // transport jitter while preserving interactive latency.
 #[cfg(target_os = "linux")]
 const PLAYBACK_PERIOD_MS: u32 = 50;
 #[cfg(not(target_os = "linux"))]
 const PLAYBACK_PERIOD_MS: u32 = 20;
-// miniaudio's PulseAudio backend reserves three periods. Android's OpenSL ES
-// source emits 125 ms fragments, so Linux capture needs at least 150 ms queued.
 #[cfg(target_os = "linux")]
 const CAPTURE_PERIOD_MS: u32 = 50;
 #[cfg(not(target_os = "linux"))]
 const CAPTURE_PERIOD_MS: u32 = 20;
-// PulseAudio can retain its default three periods after the producer closes.
-// Wait for all of them before stopping the device so the tail reaches the sink.
-#[cfg(target_os = "linux")]
-const PLAYBACK_DRAIN_CALLBACKS: usize = 3;
-#[cfg(not(target_os = "linux"))]
-const PLAYBACK_DRAIN_CALLBACKS: usize = 2;
-
-#[cfg(target_os = "macos")]
-const AUDIO_BACKENDS: &[Backend] = &[Backend::CoreAudio];
-#[cfg(target_os = "windows")]
-const AUDIO_BACKENDS: &[Backend] = &[Backend::Wasapi];
-#[cfg(target_os = "linux")]
-const AUDIO_BACKENDS: &[Backend] = &[Backend::PulseAudio, Backend::Alsa, Backend::Jack];
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-const AUDIO_BACKENDS: &[Backend] = &[Backend::Sndio, Backend::Audio4, Backend::Oss];
+// Backends queue up to `device::playback_drain_periods` periods (three for
+// AudioQueue buffers/WASAPI padding; PulseAudio scales this with the widened
+// remote/`PULSE_LATENCY_MSEC` backlog — see that function). Draining needs
+// that many silence periods COMMITTED to the OS behind the tail: once the
+// last is accepted into the backend's FIFO, everything ahead of it has
+// played. The callback that marks drained races teardown — on Linux the
+// delivery gate may cancel that callback's own write after `wait_for_drain`
+// wakes — so count one extra empty callback: the racy, possibly-uncommitted
+// write is always the last one, which is margin rather than accounted flush.
+const PLAYBACK_DRAIN_MARGIN_CALLBACKS: usize = 1;
 
 /// Shared render-time state for one playback device: gain, drain, stop.
 ///
@@ -105,6 +93,18 @@ impl PlaybackState {
 	}
 }
 
+/// Wakes drain waiters when the backend drops the fill callback (device loss
+/// or stop) so `wait_for_drain` can never outlive the render path.
+struct FillGuard {
+	state: Arc<PlaybackState>,
+}
+
+impl Drop for FillGuard {
+	fn drop(&mut self) {
+		self.state.mark_stopped();
+	}
+}
+
 /// Producer endpoint for one native playback device. Cloned into the WebRTC
 /// remote-audio decoder so it can feed the same speaker stream.
 #[derive(Clone)]
@@ -131,7 +131,7 @@ impl PlaybackWriter {
 
 /// Running mono playback stream shared by N-API playback and native WebRTC.
 pub struct PlaybackStream {
-	device: Option<Device<f32>>,
+	device: Option<PlaybackDevice>,
 	writer: Option<PlaybackWriter>,
 	state:  Arc<PlaybackState>,
 }
@@ -146,15 +146,17 @@ impl PlaybackStream {
 		let mut current = Vec::new();
 		let mut cursor = 0;
 		let mut empty_callbacks = 0;
-		let mut builder = DeviceBuilder::playback().f32();
-		builder
-			.sample_rate(sample_rate)
-			.playback_channels(AUDIO_CHANNELS)
-			.period_size_millis(PLAYBACK_PERIOD_MS)
-			.performance_profile(PerformanceProfile::LowLatency)
-			.backends(AUDIO_BACKENDS);
-		let mut device = builder
-			.with_callback(move |_device, output| {
+		let config = DeviceConfig { sample_rate, period_ms: PLAYBACK_PERIOD_MS };
+		let drain_callbacks =
+			(playback_drain_periods(config) as usize) + PLAYBACK_DRAIN_MARGIN_CALLBACKS;
+		// The guard travels inside the fill closure: if the backend drops the
+		// callback for any reason (worker exit on device loss, stop), waiters
+		// blocked in `wait_for_drain` wake instead of hanging forever.
+		let guard = FillGuard { state: Arc::clone(&state) };
+		let device = PlaybackDevice::start(
+			config,
+			Box::new(move |output| {
+				let _ = &guard;
 				fill_playback(
 					&rx,
 					&mut current,
@@ -162,12 +164,11 @@ impl PlaybackStream {
 					output,
 					&callback_state,
 					&mut empty_callbacks,
+					drain_callbacks,
 				);
-			})
-			.map_err(|error| format!("Failed to open the default speaker: {error}"))?;
-		device
-			.device_start()
-			.map_err(|error| format!("Failed to start speaker playback: {error}"))?;
+			}),
+		)
+		.map_err(|error| format!("Failed to open the default speaker: {error}"))?;
 
 		Ok(Self {
 			device: Some(device),
@@ -212,9 +213,7 @@ impl PlaybackStream {
 		let Some(mut device) = self.device.take() else {
 			return Ok(());
 		};
-		device
-			.device_stop()
-			.map_err(|error| format!("Failed to stop speaker playback: {error}"))
+		device.stop()
 	}
 }
 
@@ -224,9 +223,12 @@ impl Drop for PlaybackStream {
 	}
 }
 
-fn audio_sample_rate(sample_rate: u32) -> VoiceResult<SampleRate> {
-	SampleRate::try_from(sample_rate)
-		.map_err(|error| format!("Unsupported audio sample rate {sample_rate}: {error}"))
+/// Bounds the logical rate to what OS converters accept before device open.
+fn audio_sample_rate(sample_rate: u32) -> VoiceResult<u32> {
+	if !(8_000..=384_000).contains(&sample_rate) {
+		return Err(format!("Unsupported audio sample rate {sample_rate}"));
+	}
+	Ok(sample_rate)
 }
 
 fn fill_playback(
@@ -236,6 +238,7 @@ fn fill_playback(
 	output: &mut [f32],
 	state: &PlaybackState,
 	empty_callbacks: &mut usize,
+	drain_callbacks: usize,
 ) {
 	output.fill(0.0);
 	if state.stopped.load(Ordering::Acquire) {
@@ -258,7 +261,7 @@ fn fill_playback(
 				},
 				Err(TryRecvError::Disconnected) => {
 					*empty_callbacks += 1;
-					if *empty_callbacks >= PLAYBACK_DRAIN_CALLBACKS {
+					if *empty_callbacks >= drain_callbacks {
 						state.mark_drained();
 					}
 					break;
@@ -282,10 +285,10 @@ fn fill_playback(
 }
 
 /// Running default-microphone capture delivering low-latency mono `f32`
-/// chunks to its callback. Wraps the miniaudio device so N-API callers never
-/// see maudio types.
+/// chunks to its callback. Wraps the platform device so N-API callers never
+/// see backend types.
 pub struct CaptureStream {
-	device: Option<Device<f32>>,
+	device: Option<CaptureDevice>,
 }
 
 impl CaptureStream {
@@ -296,23 +299,16 @@ impl CaptureStream {
 		C: FnMut(&[f32]) + Send + 'static,
 	{
 		let sample_rate = audio_sample_rate(sample_rate)?;
-		let mut builder = DeviceBuilder::capture().f32();
-		builder
-			.sample_rate(sample_rate)
-			.capture_channels(AUDIO_CHANNELS)
-			.period_size_millis(CAPTURE_PERIOD_MS)
-			.performance_profile(PerformanceProfile::LowLatency)
-			.backends(AUDIO_BACKENDS);
-		let mut device = builder
-			.with_callback(move |_device, samples| {
+		let config = DeviceConfig { sample_rate, period_ms: CAPTURE_PERIOD_MS };
+		let device = CaptureDevice::start(
+			config,
+			Box::new(move |samples| {
 				if !samples.is_empty() {
 					on_audio(samples);
 				}
-			})
-			.map_err(|error| format!("Failed to open the default microphone: {error}"))?;
-		device
-			.device_start()
-			.map_err(|error| format!("Failed to start microphone capture: {error}"))?;
+			}),
+		)
+		.map_err(|error| format!("Failed to open the default microphone: {error}"))?;
 		Ok(Self { device: Some(device) })
 	}
 
@@ -321,9 +317,7 @@ impl CaptureStream {
 		let Some(mut device) = self.device.take() else {
 			return Ok(());
 		};
-		device
-			.device_stop()
-			.map_err(|error| format!("Failed to stop microphone capture: {error}"))
+		device.stop()
 	}
 }
 
@@ -345,6 +339,12 @@ mod tests {
 
 	use super::*;
 
+	// Base three-period assumption (`PULSE_BACKLOG_PERIODS` on Linux; fixed
+	// for other backends) plus the one callback of teardown-race margin
+	// (`PLAYBACK_DRAIN_MARGIN_CALLBACKS`) — what every backend uses for a
+	// period-sized local target.
+	const LOCAL_DRAIN_CALLBACKS: usize = 3 + PLAYBACK_DRAIN_MARGIN_CALLBACKS;
+
 	#[test]
 	fn playback_preserves_chunk_order_and_applies_render_gain() {
 		let state = PlaybackState::new();
@@ -358,20 +358,82 @@ mod tests {
 		let mut empty_callbacks = 0;
 		let mut output = [9.0; 5];
 
-		fill_playback(&rx, &mut current, &mut cursor, &mut output, &state, &mut empty_callbacks);
+		fill_playback(
+			&rx,
+			&mut current,
+			&mut cursor,
+			&mut output,
+			&state,
+			&mut empty_callbacks,
+			LOCAL_DRAIN_CALLBACKS,
+		);
 
 		assert_eq!(output, [0.5, -0.5, 0.25, -0.25, 0.0]);
 		assert!(!state.drained.load(Ordering::Acquire));
 		let mut silence = [1.0; 2];
-		while empty_callbacks < PLAYBACK_DRAIN_CALLBACKS {
+		while empty_callbacks < LOCAL_DRAIN_CALLBACKS {
 			silence.fill(1.0);
-			fill_playback(&rx, &mut current, &mut cursor, &mut silence, &state, &mut empty_callbacks);
+			fill_playback(
+				&rx,
+				&mut current,
+				&mut cursor,
+				&mut silence,
+				&state,
+				&mut empty_callbacks,
+				LOCAL_DRAIN_CALLBACKS,
+			);
 			assert_eq!(silence, [0.0, 0.0]);
 			assert_eq!(
 				state.drained.load(Ordering::Acquire),
-				empty_callbacks >= PLAYBACK_DRAIN_CALLBACKS
+				empty_callbacks >= LOCAL_DRAIN_CALLBACKS
 			);
 		}
+	}
+
+	/// Regression guard: a widened playback backlog (remote `PULSE_SERVER` or
+	/// `PULSE_LATENCY_MSEC`) must not be declared drained after only the
+	/// local three-period margin — queued audio would still be flushing to
+	/// the speaker and `AudioPlayback.end()` would clip it. Draining must
+	/// wait out the full widened `drain_callbacks` count.
+	#[test]
+	fn widened_backlog_is_not_drained_within_local_margin() {
+		let state = PlaybackState::new();
+		let (tx, rx) = flume::unbounded::<Vec<f32>>();
+		drop(tx);
+		let mut current = Vec::new();
+		let mut cursor = 0;
+		let mut empty_callbacks = 0;
+		let mut output = [0.0; 2];
+		let widened_drain_callbacks = LOCAL_DRAIN_CALLBACKS * 4;
+
+		for _ in 0..LOCAL_DRAIN_CALLBACKS {
+			fill_playback(
+				&rx,
+				&mut current,
+				&mut cursor,
+				&mut output,
+				&state,
+				&mut empty_callbacks,
+				widened_drain_callbacks,
+			);
+		}
+		assert!(
+			!state.drained.load(Ordering::Acquire),
+			"drained after only the local margin despite a widened backlog"
+		);
+
+		while empty_callbacks < widened_drain_callbacks {
+			fill_playback(
+				&rx,
+				&mut current,
+				&mut cursor,
+				&mut output,
+				&state,
+				&mut empty_callbacks,
+				widened_drain_callbacks,
+			);
+		}
+		assert!(state.drained.load(Ordering::Acquire));
 	}
 
 	#[test]

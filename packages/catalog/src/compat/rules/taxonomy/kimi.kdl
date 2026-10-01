@@ -1,0 +1,20 @@
+class "kimi" {
+    namespace "moonshotai"
+    bounded "kimi"
+
+    family "k2" glob="*kimi-k2*"
+    family "k2.5" glob="*kimi-k2.5*" priority=10
+    family "k2.6" glob="*kimi-k2.6*" priority=10
+    // Fireworks spells versions with `p` (kimi-k2p6, router lanes).
+    family "k2.6" glob="*kimi-k2p6*" priority=10
+    family "k2.7-code" glob="*kimi-k2.7-code*" priority=10
+    // Venice dash-spells the version (kimi-k2-7-code).
+    family "k2.7-code" glob="*kimi-k2-7-code*" priority=10
+    family "k2.7-code" glob="*kimi-k2p7*code*" priority=10
+    family "k2-thinking" glob="*kimi-k2-thinking*" priority=20
+    family "k3" glob="*kimi-k3*"
+
+    override id="kilo-kimi-k2-thinking-product" provider="kilo" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="openrouter-kimi-k2-thinking-product" provider="openrouter" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="vercel-kimi-k2-thinking-product" provider="vercel-ai-gateway" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+}

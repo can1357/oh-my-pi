@@ -1,11 +1,10 @@
 /**
  * Utilities for launching an external text editor ($VISUAL / $EDITOR).
  */
-import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, $which, Snowflake } from "@oh-my-pi/pi-utils";
 
 /**
  * Returns the user's preferred editor command, or a platform default.
@@ -28,10 +27,29 @@ export function getEditorCommand(): string | undefined {
 export interface OpenInEditorOptions {
 	/** File extension for the temp file (default: ".md"). */
 	extension?: string;
-	/** Custom stdio configuration (default: all "inherit"). */
-	stdio?: [number | "inherit", number | "inherit", number | "inherit"];
 	/** Keep the file's trailing newline instead of trimming it from the returned text. */
 	trimTrailingNewline?: boolean;
+}
+
+/** Subprocess argv and Windows quoting mode used to launch an external editor. */
+export interface EditorSpawnCommand {
+	cmd: string[];
+	windowsVerbatimArguments: boolean;
+}
+
+/** Resolves shell argv without letting the host runtime re-quote the editor command. */
+export function resolveEditorSpawnCommand(
+	editorCmd: string,
+	tmpFile: string,
+	platform: NodeJS.Platform = process.platform,
+): EditorSpawnCommand {
+	const windows = platform === "win32";
+	// cmd.exe strips the outer /s /c quote pair; Bun must pass the embedded
+	// editor/path quotes verbatim instead of applying argv escaping to them.
+	const cmd = windows
+		? ["cmd.exe", "/d", "/s", "/c", `"${editorCmd} "${tmpFile}""`]
+		: [$which("sh") ?? "sh", "-c", `${editorCmd} "$1"`, "sh", tmpFile];
+	return { cmd, windowsVerbatimArguments: windows };
 }
 
 /**
@@ -51,17 +69,16 @@ export async function openInEditor(
 	try {
 		await Bun.write(tmpFile, content);
 
-		const [editor, ...editorArgs] = editorCmd.split(" ");
-		const stdio = options?.stdio ?? ["inherit", "inherit", "inherit"];
-		const child =
-			process.platform === "win32"
-				? spawn(editor, [...editorArgs, tmpFile], { stdio, shell: true })
-				: spawn("/bin/sh", ["-c", `${editorCmd} "$1"`, "sh", tmpFile], { stdio });
-		const { promise, reject, resolve } = Promise.withResolvers<number>();
-		child.once("exit", (code, signal) => resolve(code ?? (signal ? -1 : 0)));
-		child.once("error", error => reject(error));
-		const exitCode = await promise;
-
+		const spawnCommand = resolveEditorSpawnCommand(editorCmd, tmpFile);
+		// Inherit the real pane pty so terminal editors (including emacsclient,
+		// which resolves the device via ttyname) render into the visible pane.
+		const child = Bun.spawn(spawnCommand.cmd, {
+			stdin: "inherit",
+			stdout: "inherit",
+			stderr: "inherit",
+			windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
+		});
+		const exitCode = await child.exited;
 		if (exitCode === 0) {
 			const text = await Bun.file(tmpFile).text();
 			if (options?.trimTrailingNewline === false) {

@@ -116,8 +116,8 @@ function finiteNumber(expected = "a number"): IR {
 }
 
 function jsonObject(): IR {
-	let value: IR;
-	const resolveValue = (): IR => value;
+	const value: { current?: IR } = {};
+	const resolveValue = (): IR => value.current as IR;
 	const object: IR = {
 		k: "object",
 		props: [],
@@ -129,7 +129,7 @@ function jsonObject(): IR {
 		el: { k: "alias", name: "$jsonValue", resolve: resolveValue },
 		desc: "an object",
 	};
-	value = {
+	value.current = {
 		k: "union",
 		members: [
 			object,

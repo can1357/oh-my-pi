@@ -14,11 +14,68 @@
  * silently reporting a successful no-op navigation (review on #5895).
  */
 import { describe, expect, it, vi } from "bun:test";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ExtensionRunner, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
-import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/ask";
-import { assistantMsg, createTestSession, userMsg } from "./utilities";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+
+const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+
+async function createTestSession(
+	options: { inMemory?: boolean; extensionRunner?: ExtensionRunner; obfuscator?: SecretObfuscator } = {},
+) {
+	const sessionManager = SessionManager.inMemory();
+	const settings = Settings.isolated();
+	const modelRegistry = {} as never;
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: TEST_MODEL,
+				systemPrompt: ["test"],
+				tools: [],
+			},
+		}),
+		sessionManager,
+		settings,
+		modelRegistry,
+		extensionRunner: options.extensionRunner,
+		obfuscator: options.obfuscator,
+	});
+	return {
+		session,
+		sessionManager,
+		cleanup: () => session.dispose(),
+	};
+}
+
+function userMsg(text: string) {
+	return { role: "user" as const, content: text, timestamp: Date.now() };
+}
+
+function assistantMsg(text: string) {
+	return {
+		role: "assistant" as const,
+		content: [{ type: "text" as const, text }],
+		api: "anthropic-messages" as const,
+		provider: "anthropic",
+		model: "test",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop" as const,
+		timestamp: Date.now(),
+	};
+}
 
 const ORIGINAL_QUESTIONS = [
 	{
@@ -105,6 +162,43 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.reopenAsk?.toolCallId).toBe(askCallId);
 			expect(result.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
 			// Nothing was mutated: the leaf is exactly where it was before probing.
+			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("reopens a persisted Ask result with null optional previews instead of moving the leaf", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const { session, sessionManager } = ctx;
+			const savedQuestions = [
+				{
+					id: "deploy_target",
+					question: "Which deploy target?",
+					options: [
+						{ label: "staging", preview: null },
+						{ label: "production", preview: "Production rollout" },
+					],
+				},
+			];
+			sessionManager.appendMessage(userMsg("please deploy"));
+			sessionManager.appendMessage(toolCallMsg("ask-null-preview", "ask", { questions: savedQuestions }));
+			const resultId = sessionManager.appendMessage(
+				toolResultMsg("ask-null-preview", "ask", "User selected: staging"),
+			);
+			sessionManager.appendMessage(assistantMsg("deploying to staging"));
+			const leafBeforeProbe = sessionManager.getLeafId();
+
+			const result = await session.navigateTree(resultId, { allowAskReopen: true });
+
+			expect(result.reopenAsk?.questions).toEqual([
+				{
+					id: "deploy_target",
+					question: "Which deploy target?",
+					options: [{ label: "staging" }, { label: "production", preview: "Production rollout" }],
+				},
+			]);
 			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
 		} finally {
 			await ctx.cleanup();
@@ -504,6 +598,69 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 		}
 	});
 
+	it("coalesces concurrent continuation sources instead of calling a busy agent", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		const { session } = ctx;
+		const releaseContinue = Promise.withResolvers<void>();
+		const continueStarted = Promise.withResolvers<void>();
+		let continueInFlight = false;
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			if (continueInFlight) throw new AgentBusyError();
+			continueInFlight = true;
+			continueStarted.resolve();
+			await releaseContinue.promise;
+			continueInFlight = false;
+		});
+		try {
+			session.resumeAfterAskReanswer();
+			session.resumeAfterAskReanswer();
+			await continueStarted.promise;
+			releaseContinue.resolve();
+			await session.waitForIdle();
+
+			expect(continueSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			releaseContinue.resolve();
+			continueSpy.mockRestore();
+			await ctx.cleanup();
+		}
+	});
+
+	it("starts a fresh continue for work queued while a scheduled continuation settles", async () => {
+		// A continuation scheduled during the previous attempt's settle drain
+		// (#endInFlight -> #drainStrandedQueuedMessages -> queued-message-drain)
+		// must run its own agent.continue(), not coalesce onto the finished attempt
+		// and strand the queued message until the next prompt.
+		const ctx = await createTestSession({ inMemory: true });
+		const { session } = ctx;
+		let calls = 0;
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			calls++;
+			if (calls === 1) {
+				// The turn ended with a steer stranded past its final queue poll.
+				session.agent.steer({
+					role: "user",
+					content: "stranded",
+					steering: true,
+					attribution: "user",
+					timestamp: Date.now(),
+				});
+			} else {
+				session.agent.replaceQueues([], []);
+			}
+		});
+		try {
+			session.resumeAfterAskReanswer();
+			await session.waitForIdle();
+
+			expect(calls).toBe(2);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		} finally {
+			continueSpy.mockRestore();
+			await ctx.cleanup();
+		}
+	});
+
 	it("(l) does not report a committed re-answer for a plain non-ask leaf move", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
@@ -523,30 +680,6 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			await session.waitForIdle();
 			expect(continueSpy).not.toHaveBeenCalled();
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-});
-
-describe("AgentSession.buildAskReanswerContext", () => {
-	it("builds an AgentToolContext backed by real session state, not a fabricated stub", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const { session } = ctx;
-			const uiContext = { select: async () => undefined } as unknown as ExtensionUIContext;
-
-			const toolContext = session.buildAskReanswerContext(uiContext);
-
-			expect(toolContext.sessionManager).toBe(session.sessionManager);
-			expect(toolContext.modelRegistry).toBe(session.modelRegistry);
-			expect(toolContext.model).toBe(session.model);
-			expect(toolContext.settings).toBe(session.settings);
-			expect(toolContext.hasUI).toBe(true);
-			expect(toolContext.ui).toBe(uiContext);
-			expect(toolContext.isIdle?.()).toBe(true);
-			expect(toolContext.hasQueuedMessages?.()).toBe(false);
-			expect(() => toolContext.abort?.()).not.toThrow();
 		} finally {
 			await ctx.cleanup();
 		}

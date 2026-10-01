@@ -1,6 +1,15 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type {
+	ImageContent,
+	MessageAttribution,
+	ServiceTierByFamily,
+	StopReason,
+	TextContent,
+	Usage,
+} from "@oh-my-pi/pi-ai";
+import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { CompactionMethod } from "./compaction-methods";
+import type { RetryFallbackRole } from "./retry-fallback-chains";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -53,6 +62,8 @@ export interface NewSessionOptions {
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
+	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
+	sessionDir?: string;
 }
 
 export interface SessionEntryBase {
@@ -65,6 +76,20 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+}
+
+/** Usage from a model call that does not belong in the conversation transcript. */
+export interface ModelUsageEntry extends SessionEntryBase {
+	type: "model_usage";
+	purpose: string;
+	/** Resolved model role used for the call, such as `tiny` or `smol`. */
+	role?: string;
+	api: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	stopReason: StopReason;
+	errorMessage?: string;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -99,6 +124,12 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	shortSummary?: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/** Estimated context tokens after the rewrite (display metadata). */
+	tokensAfter?: number;
+	/** Method that produced this entry; absent on legacy sessions and extension-provided compactions. */
+	method?: CompactionMethod;
+	/** Last branch entry represented by provider-native replay history; later entries replay normally. */
+	providerReplayThroughEntryId?: string;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Hook-provided data to persist across compaction */
@@ -171,7 +202,7 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 	interface CustomCompactionSessionEntries {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
-		resetBoundary: ResetBoundaryEntry;
+		modelUsage: ModelUsageEntry;
 	}
 }
 
@@ -215,6 +246,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
+	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
+	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
 	/** Output schema if structured output was requested. */
@@ -227,6 +260,12 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
+	advisor?: string;
+	/** Effective thresholds for a child with an explicit compaction override. */
+	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
+	isolated?: boolean;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
@@ -263,6 +302,7 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
+	| ModelUsageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
 	| ServiceTierChangeEntry
@@ -303,4 +343,23 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
+	subagentCost: number;
+}
+/**
+ * True when a raw JSONL line is a complete `message` record carrying an
+ * assistant role. Parses the line, so valid JSON whitespace (`"role" :
+ * "assistant"`, tabs, newlines-in-string excluded by line framing) classifies
+ * correctly — unlike substring checks for exact serializations. Malformed or
+ * partial lines (mid-write truncation) return false.
+ */
+export function isAssistantMessageLine(line: string): boolean {
+	if (line.length === 0 || line.charCodeAt(0) !== 123) return false;
+	let record: { type?: unknown; message?: { role?: unknown } };
+	try {
+		record = JSON.parse(line) as { type?: unknown; message?: { role?: unknown } };
+	} catch {
+		return false;
+	}
+	return record.type === "message" && record.message?.role === "assistant";
 }

@@ -2,12 +2,14 @@ import {
 	type ClipboardImage,
 	copyToClipboard as nativeCopyToClipboard,
 	readImageFromClipboard as nativeReadImageFromClipboard,
+	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
+import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
 import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
 
-type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
+type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<string, string | undefined> };
 
 /**
  * Run a subprocess and capture its stdout without blocking the event loop.
@@ -35,6 +37,7 @@ async function spawnCapture(
 		stdout: "pipe",
 		stderr: "ignore",
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
+		...(options.env ? { env: options.env } : {}),
 	});
 	let timedOut = false;
 	const timer = setTimeout(() => {
@@ -62,8 +65,15 @@ function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
-function isWsl(): boolean {
-	return process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
+/**
+ * True when `pbcopy(1)` would type this text as a document instead of as text:
+ * it sniffs the leading bytes and puts input opening with a PDF (`%PDF-`),
+ * EPS (`%!PS`), or RTF (`{\rtf`) header on the pasteboard as that data type.
+ * A code block or diff whose first line is such a header must not go through it,
+ * or a plain-text paste target receives document data — or nothing.
+ */
+function isPasteboardTypedByHeader(text: string): boolean {
+	return text.startsWith("%PDF-") || text.startsWith("%!PS") || text.startsWith("{\\rtf");
 }
 
 /**
@@ -88,6 +98,8 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
 		return [];
 	}
 }
+
+let macClipboardWrite = Promise.resolve();
 
 /**
  * Copy text to the system clipboard.
@@ -127,6 +139,16 @@ export async function copyToClipboard(text: string): Promise<void> {
 		}
 	}
 
+	// Keep pbcopy, document-header writes, and native fallbacks in invocation order.
+	let releaseWrite: (() => void) | undefined;
+	if (process.platform === "darwin") {
+		const previousWrite = macClipboardWrite;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		macClipboardWrite = promise;
+		releaseWrite = resolve;
+		await previousWrite;
+	}
+
 	// Also try native tools (best effort for local sessions)
 	try {
 		if (process.env.TERMUX_VERSION) {
@@ -137,10 +159,40 @@ export async function copyToClipboard(text: string): Promise<void> {
 				// Fall through to native
 			}
 		}
+		// macOS: prefer `pbcopy` over the in-process AppKit write, mirroring the
+		// read path which already shells out to `pbpaste`. An in-process
+		// NSPasteboard write logs
+		// `-[NSPasteboard _setData:forType:index:usesPboardTypes:] returns false`
+		// straight to stderr whenever it loses pasteboard ownership — during
+		// process teardown, or to another app that writes at the same moment. The
+		// copy itself is best-effort and the failure is swallowed here, but the
+		// AppKit line still lands in the user's terminal. The child's stderr is
+		// discarded by spawnCapture, and `pbcopy` ships with every macOS.
+		//
+		// Two `pbcopy(1)` behaviours are worked around. It types input by sniffing
+		// the leading bytes: text opening with a PDF, EPS, or RTF header lands on the
+		// pasteboard as that document type instead of as text, so such text keeps
+		// the in-process write. And it decodes stdin per `LANG`, defaulting to
+		// ASCII when unset, which mangles non-ASCII input under `LANG=C` or a bare
+		// launchd/SSH environment — so the child gets an explicit UTF-8 locale.
+		if (process.platform === "darwin" && !isPasteboardTypedByHeader(text)) {
+			try {
+				await spawnCapture(["pbcopy"], {
+					input: text,
+					timeoutMs: 5000,
+					env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
+				});
+				return;
+			} catch {
+				// Fall through to native.
+			}
+		}
 
 		await nativeCopyToClipboard(text);
 	} catch {
 		// Ignore — clipboard copy is best-effort
+	} finally {
+		releaseWrite?.();
 	}
 }
 
@@ -271,10 +323,12 @@ async function readTextFromX11Clipboard(): Promise<string> {
  * Read an image from the system clipboard.
  *
  * Returns null on Termux (no image clipboard support) or when no display
- * server is available (headless/SSH without forwarding). Under native Windows
- * and WSL, the Windows clipboard is also reached through `powershell.exe`
- * because terminal clipboard paths can leave image payloads invisible to the
- * native bridge.
+ * server is available (headless/SSH without forwarding). Native Windows trusts
+ * the native reader's "no image" answer — it returns null only when no bitmap
+ * format is on the clipboard, and throws when one is present but undecodable —
+ * so `powershell.exe` starts only after a throw and a text-only clipboard never
+ * waits on a cold PowerShell start. WSL reaches the host clipboard through
+ * `powershell.exe`.
  *
  * @returns A supported image payload or null when no image is available.
  */
@@ -293,12 +347,11 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 
 	if (process.platform === "win32") {
 		try {
-			const image = await nativeReadImageFromClipboard();
-			if (image) return image;
+			return (await nativeReadImageFromClipboard()) ?? null;
 		} catch (err) {
 			logger.warn("clipboard: native Windows image read failed", { error: String(err) });
+			return await readImageViaPowerShell();
 		}
-		return await readImageViaPowerShell();
 	}
 
 	if (process.platform === "linux" && process.env.WAYLAND_DISPLAY) {
@@ -318,11 +371,24 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 		return null;
 	}
 
-	return (await nativeReadImageFromClipboard()) ?? null;
+	try {
+		return (await nativeReadImageFromClipboard()) ?? null;
+	} catch (error) {
+		// Some selection owners make the native image read throw instead of
+		// reporting "no image" — e.g. an xclip-written text-only selection
+		// (arboard: "Unknown error ... incorrect type received from clipboard").
+		// Treat a failed image read as "no image" so the caller's smart-paste
+		// text fallback still delivers the clipboard content.
+		logger.warn("clipboard: failed to read clipboard image", { error: String(error) });
+		return null;
+	}
 }
 
 /**
  * Read plain text from the system clipboard.
+ *
+ * Native Windows reads through the native addon and only falls back to
+ * `powershell.exe` when that read throws.
  */
 export async function readTextFromClipboard(): Promise<string> {
 	try {
@@ -331,7 +397,12 @@ export async function readTextFromClipboard(): Promise<string> {
 			return await spawnCapture(["pbpaste"]);
 		}
 		if (p === "win32") {
-			return (await readTextViaPowerShell()) ?? "";
+			try {
+				return ((await nativeReadTextFromClipboard()) ?? "").replaceAll("\r\n", "\n");
+			} catch (err) {
+				logger.warn("clipboard: native Windows text read failed", { error: String(err) });
+				return (await readTextViaPowerShell()) ?? "";
+			}
 		}
 		if (process.env.TERMUX_VERSION) {
 			return await spawnCapture(["termux-clipboard-get"]);
@@ -345,7 +416,7 @@ export async function readTextFromClipboard(): Promise<string> {
 		const hasX11Display = Boolean(process.env.DISPLAY);
 		if (hasWaylandDisplay) {
 			try {
-				return await spawnCapture(["wl-paste", "--type", "text/plain", "--no-newline"]);
+				return await spawnCapture(["wl-paste", "--type", "text", "--no-newline"]);
 			} catch {
 				if (hasX11Display) {
 					return await readTextFromX11Clipboard();

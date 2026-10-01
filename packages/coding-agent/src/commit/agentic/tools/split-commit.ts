@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState, SplitCommitGroup, SplitCommitPlan } from "../../../commit/agentic/state";
 import { computeDependencyOrder } from "../../../commit/agentic/topo-sort";
 import {
@@ -12,17 +13,11 @@ import {
 import { validateScope } from "../../../commit/analysis/validation";
 import { normalizeDetails } from "../../../commit/utils";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
-import * as git from "../../../utils/git";
 import { commitTypeSchema, detailSchema } from "./schemas.js";
 
-const hunkSelectorSchema = type({ type: "'all'" })
-	.or({ type: "'indices'", indices: "number[]" })
-	.or({ type: "'lines'", start: "number", end: "number" });
-
-const fileChangeSchema = type({
-	path: "string",
-	hunks: hunkSelectorSchema,
-});
+const fileChangeSchema = type({ path: "string", kind: "'all'" })
+	.or({ path: "string", kind: "'indices'", indices: "number[]" })
+	.or({ path: "string", kind: "'lines'", start: "number", end: "number" });
 
 const commitItemSchema = type({
 	changes: fileChangeSchema.array(),
@@ -51,20 +46,20 @@ export function createSplitCommitTool(
 	state: CommitAgentState,
 	changelogTargets: string[],
 ): CustomTool<typeof splitCommitSchema> {
+	const repo = vcs.requireGit(cwd);
 	return {
 		name: "split_commit",
 		label: "Split Commit",
 		description: "Propose multiple atomic commits for unrelated changes.",
 		parameters: splitCommitSchema,
 		async execute(_toolCallId, params) {
-			const stagedFiles = state.overview?.files ?? (await git.diff.changedFiles(cwd, { cached: true }));
+			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
 			const stagedSet = new Set(stagedFiles);
 			const changelogSet = new Set(changelogTargets);
 			const usedFiles = new Set<string>();
 			const errors: string[] = [];
 			const warnings: string[] = [];
-			const diffText = await git.diff(cwd, { cached: true });
-			const validateHunksForDiff = git.createHunkSelectionValidator(diffText);
+			const diffText = await repo.diffText({ cached: true });
 
 			const commits: SplitCommitGroup[] = params.commits.map((commit, index) => {
 				const scope = commit.scope?.trim() || null;
@@ -76,7 +71,10 @@ export function createSplitCommitTool(
 				const dependencies = (commit.dependencies ?? []).map(dep => Math.floor(dep));
 				const changes = commit.changes.map(change => ({
 					path: change.path,
-					hunks: change.hunks,
+					kind: change.kind,
+					indices: change.kind === "indices" ? change.indices : undefined,
+					start: change.kind === "lines" ? change.start : undefined,
+					end: change.kind === "lines" ? change.end : undefined,
 				}));
 				const files = changes.map(change => change.path);
 
@@ -99,7 +97,7 @@ export function createSplitCommitTool(
 				}
 				warnings.push(...summaryValidation.warnings.map(warning => `Commit ${index + 1}: ${warning}`));
 				warnings.push(...typeValidation.warnings.map(warning => `Commit ${index + 1}: ${warning}`));
-				const hunkValidation = validateHunkSelectors(index, changes, files, validateHunksForDiff);
+				const hunkValidation = validateHunkSelectors(index, changes, files, diffText);
 				warnings.push(...hunkValidation.warnings);
 				errors.push(...hunkValidation.errors);
 				errors.push(...validateDependencies(index, dependencies, params.commits.length));
@@ -183,7 +181,7 @@ function validateHunkSelectors(
 	commitIndex: number,
 	changes: SplitCommitGroup["changes"],
 	files: string[],
-	validateHunksForDiff: (changes: SplitCommitGroup["changes"]) => git.HunkSelectionValidationError[],
+	rawDiff: string,
 ): { errors: string[]; warnings: string[] } {
 	const errors: string[] = [];
 	const warnings: string[] = [];
@@ -193,18 +191,17 @@ function validateHunkSelectors(
 		return { errors, warnings };
 	}
 	for (const change of changes) {
-		if (change.hunks.type === "indices") {
-			const invalid = change.hunks.indices.filter(
-				value => !Number.isFinite(value) || Math.floor(value) !== value || value < 1,
-			);
+		if (change.kind === "indices") {
+			const invalid =
+				change.indices?.filter(value => !Number.isFinite(value) || Math.floor(value) !== value || value < 1) ?? [];
 			if (invalid.length > 0) {
 				errors.push(`${prefix}: invalid hunk indices for ${change.path}`);
 			}
 			continue;
 		}
-		if (change.hunks.type === "lines") {
-			const { start, end } = change.hunks;
-			if (!Number.isFinite(start) || !Number.isFinite(end)) {
+		if (change.kind === "lines") {
+			const { start, end } = change;
+			if (typeof start !== "number" || typeof end !== "number" || !Number.isFinite(start) || !Number.isFinite(end)) {
 				errors.push(`${prefix}: invalid line range for ${change.path}`);
 				continue;
 			}
@@ -214,7 +211,7 @@ function validateHunkSelectors(
 		}
 	}
 	if (errors.length === 0) {
-		for (const error of validateHunksForDiff(changes)) {
+		for (const error of vcs.validateHunkSelections(rawDiff, changes)) {
 			errors.push(`${prefix}: ${error.message}`);
 		}
 	}

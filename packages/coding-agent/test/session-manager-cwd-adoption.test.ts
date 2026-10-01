@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
 
@@ -11,7 +12,27 @@ function makeTempDir(prefix: string): string {
 	return dir.path();
 }
 
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalPiProfile = process.env.PI_PROFILE;
+const originalOmpProfile = process.env.OMP_PROFILE;
+
+function restoreEnv(key: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[key];
+	} else {
+		process.env[key] = value;
+	}
+}
+
+beforeEach(() => {
+	setAgentDir(path.join(makeTempDir("@pi-cwd-agent-dir-"), "agent"));
+});
+
 afterEach(async () => {
+	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+	restoreEnv("PI_PROFILE", originalPiProfile);
+	restoreEnv("OMP_PROFILE", originalOmpProfile);
+	__resetDirsFromEnvForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -95,6 +116,28 @@ describe("SessionManager cwd adoption on resume", () => {
 		expect(manager.getCwd()).toBe(path.resolve(projectA));
 		expect(manager.getSessionDir()).toBe(path.resolve(sessionsA));
 	});
+	it("clears fallback persistence after adopting an accessible session", async () => {
+		const launch = makeTempDir("@pi-cwd-fallback-launch-");
+		const deniedProject = makeTempDir("@pi-cwd-fallback-denied-");
+		const store = makeTempDir("@pi-cwd-fallback-store-");
+		const launchSessions = path.join(launch, "sessions");
+		const deniedFile = await writeSession(deniedProject, store);
+		const accessibleFile = await writeSession(launch, launchSessions);
+		await removeWithRetries(deniedProject);
+
+		const manager = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: launch });
+		await manager.setSessionFile(accessibleFile);
+		await manager.addWorkspaceDirectory(path.join(launch, "extra"));
+		await manager.flush();
+		await manager.close();
+
+		const reopened = await SessionManager.open(accessibleFile);
+		try {
+			expect(reopened.getAdditionalDirectories()).toContain(path.join(launch, "extra"));
+		} finally {
+			await reopened.close();
+		}
+	});
 
 	it("keeps the current cwd when the resumed session's project directory is gone", async () => {
 		const launch = makeTempDir("@pi-cwd-launch-");
@@ -115,18 +158,28 @@ describe("SessionManager cwd adoption on resume", () => {
 		expect(manager.getSessionDir()).toBe(path.resolve(launchSessions));
 	});
 
-	it("falls back to the launch cwd when opening a session whose project directory is gone", async () => {
+	it("falls back to the launch cwd with one full read when the recorded project directory is gone", async () => {
 		const launch = makeTempDir("@pi-cwd-launch-");
 		const store = makeTempDir("@pi-cwd-store-");
 		const goneProject = makeTempDir("@pi-cwd-gone-");
 		const file = await writeSession(goneProject, store);
 		await removeWithRetries(goneProject);
+		class CountingFileSessionStorage extends FileSessionStorage {
+			fullReads = 0;
 
-		const manager = await SessionManager.open(file, undefined, undefined, { initialCwd: launch });
+			override readText(filePath: string): Promise<string> {
+				this.fullReads++;
+				return super.readText(filePath);
+			}
+		}
+		const storage = new CountingFileSessionStorage();
+
+		const manager = await SessionManager.open(file, undefined, storage, { initialCwd: launch });
 
 		expect(manager.getCwd()).toBe(path.resolve(launch));
 		// /new and /branch anchor to the launch cwd, not the deleted project's store.
 		expect(manager.getSessionDir()).toBe(SessionManager.getDefaultSessionDir(launch));
 		expect(manager.getSessionDir()).not.toBe(path.resolve(store));
+		expect(storage.fullReads).toBe(1);
 	});
 });

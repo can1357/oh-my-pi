@@ -19,6 +19,13 @@ export interface ProfileAliasCommand {
 	powerShell: string;
 }
 
+/** Process inputs used to select the installed command or preserve a source invocation. */
+export interface ProfileAliasProcessOptions {
+	argv?: readonly string[];
+	cwd?: string;
+	compiled?: boolean;
+}
+
 const DEFAULT_ALIAS_COMMAND: ProfileAliasCommand = {
 	display: "omp",
 	posix: "omp",
@@ -189,10 +196,14 @@ function normalizeShellName(
 	throw new Error(`Unsupported shell${shell ? ` "${shell}"` : ""}. Supported shells: bash, zsh, fish, PowerShell.`);
 }
 
-export function resolveProfileAliasCommandFromProcess(
-	argv: readonly string[] = process.argv,
-	cwd: string = process.cwd(),
-): ProfileAliasCommand {
+/** Resolve the command a generated profile alias should invoke. */
+export function resolveProfileAliasCommandFromProcess({
+	argv = process.argv,
+	cwd = process.cwd(),
+	compiled = process.env.PI_COMPILED === "true",
+}: ProfileAliasProcessOptions = {}): ProfileAliasCommand {
+	if (compiled) return DEFAULT_ALIAS_COMMAND;
+
 	const runtime = argv[0];
 	const script = argv[1];
 	if (!runtime || !script || !/\.[cm]?[jt]s$/.test(script)) return DEFAULT_ALIAS_COMMAND;

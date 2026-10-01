@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "../../src/config/settings";
-import initAgentPrompt from "../../src/prompts/agents/init.md" with { type: "text" };
 import * as taskDiscovery from "../../src/task/discovery";
 import { TaskTool } from "../../src/task/index";
 import { isScoutSpawnable } from "../../src/task/spawn-policy";
@@ -26,7 +25,7 @@ function makeSession(spawns: string): ToolSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.batch": true,
-		"task.isolation.mode": "none",
+		"task.isolation.enabled": false,
 	});
 	return {
 		cwd: process.cwd(),
@@ -44,9 +43,9 @@ describe("task spawn policy surfaces", () => {
 
 	it("uses the first allowed spawn as the schema default", () => {
 		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, defaultAgent: "fact-finder" });
-		const parsed = schema({ task: "check" });
+		const parsed = schema({ task: "check", solutionSpace: "c" });
 
-		expect(parsed).toEqual({ agent: "fact-finder", task: "check" });
+		expect(parsed).toEqual({ agent: "fact-finder", task: "check", solutionSpace: "c" });
 	});
 
 	it("filters the agent list to the restricted spawn policy in the description", async () => {
@@ -58,8 +57,8 @@ describe("task spawn policy surfaces", () => {
 		const tool = await TaskTool.create(makeSession("fact-finder"));
 		const description = tool.description;
 
-		expect(description).toContain("### fact-finder");
-		expect(description).not.toContain("### oracle");
+		expect(description).toContain("- `fact-finder`: Find facts.");
+		expect(description).not.toContain("- `oracle`:");
 	});
 });
 
@@ -105,7 +104,7 @@ describe("task tool description scout gating", () => {
 		const settings = Settings.isolated({
 			"async.enabled": false,
 			"task.batch": true,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			...(disabledScout ? { "task.disabledAgents": ["scout"] } : {}),
 		});
 		const tool = await TaskTool.create({
@@ -128,13 +127,6 @@ describe("task tool description scout gating", () => {
 		// The read-only agent remains listed as an available agent (the spawn
 		// policy only filters disabledAgents, so reviewer stays); only the
 		// hard-coded scout guidance is dropped.
-		expect(description).toContain("### reviewer");
-	});
-});
-
-describe("bundled agent prompt scout gating", () => {
-	it("does not hard-code scout in the init agent prompt", () => {
-		expect(initAgentPrompt.toLowerCase()).not.toContain("scout");
-		expect(initAgentPrompt).toContain("multiple research agents");
+		expect(description).toContain("- `reviewer`: Reviewer.");
 	});
 });

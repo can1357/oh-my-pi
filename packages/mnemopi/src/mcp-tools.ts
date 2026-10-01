@@ -759,7 +759,7 @@ async function handleSharedRemember(args: ToolArguments): Promise<ToolResult> {
 		const memoryId = beam.remember(labelled, {
 			source: "surface_manual",
 			importance: Math.max(0, Math.min(1, numberArg(args, "importance", 0.8))),
-			metadata: { ...(metadataArg(args) ?? {}), shared_memory: true, surface_kind: kind },
+			metadata: { ...metadataArg(args), shared_memory: true, surface_kind: kind },
 			veracity: stringArg(args, "veracity", "unknown"),
 			scope: "global",
 		});

@@ -1,6 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type {
-	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
 	UsageLimit,
@@ -9,10 +8,9 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
+import { buildUsageAmount, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const QUOTAS_URL = "https://api.synthetic.new/v2/quotas";
-const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function parseDollarAmount(value: unknown): number | undefined {
 	if (typeof value !== "string") return undefined;
@@ -21,47 +19,12 @@ function parseDollarAmount(value: unknown): number | undefined {
 	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function parseIsoMs(value: unknown): number | undefined {
-	if (typeof value !== "string" || !value) return undefined;
-	const ms = Date.parse(value);
-	return Number.isFinite(ms) ? ms : undefined;
-}
-
-function buildUsageAmount(args: {
-	used: number | undefined;
-	limit: number | undefined;
-	remaining: number | undefined;
-	usedFraction: number | undefined;
-	unit: UsageAmount["unit"];
-}): UsageAmount {
-	let usedFraction = args.usedFraction;
-	if (usedFraction === undefined && args.used !== undefined && args.limit !== undefined && args.limit > 0) {
-		usedFraction = Math.min(args.used / args.limit, 1);
-	}
-	const remainingFraction = usedFraction !== undefined ? Math.max(1 - usedFraction, 0) : undefined;
-	return {
-		...(args.used !== undefined ? { used: args.used } : {}),
-		...(args.limit !== undefined ? { limit: args.limit } : {}),
-		...(args.remaining !== undefined ? { remaining: args.remaining } : {}),
-		...(usedFraction !== undefined ? { usedFraction } : {}),
-		...(remainingFraction !== undefined ? { remainingFraction } : {}),
-		unit: args.unit,
-	};
-}
-
-function getUsageStatus(usedFraction: number | undefined): UsageStatus | undefined {
-	if (usedFraction === undefined) return undefined;
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
-}
-
 function parseRollingFiveHourLimit(raw: unknown, provider: UsageFetchParams["provider"]): UsageLimit | null {
 	if (!isRecord(raw)) return null;
 	const remaining = typeof raw.remaining === "number" ? raw.remaining : undefined;
 	const max = typeof raw.max === "number" ? raw.max : undefined;
 	const limited = raw.limited === true;
-	const nextTickAt = parseIsoMs(raw.nextTickAt);
+	const nextTickAt = parseIsoTimestamp(raw.nextTickAt);
 	const tickPercent = typeof raw.tickPercent === "number" ? raw.tickPercent : undefined;
 
 	if (remaining === undefined && max === undefined) return null;
@@ -71,17 +34,11 @@ function parseRollingFiveHourLimit(raw: unknown, provider: UsageFetchParams["pro
 	const window: UsageWindow = {
 		id: "5h",
 		label: regenPercent !== undefined ? `5h · regen ${regenPercent}%/tick` : "5h",
-		durationMs: FIVE_HOUR_MS,
+		durationMs: 5 * HOUR_MS,
 		...(nextTickAt !== undefined ? { resetsAt: nextTickAt, resetLabel: "tick" } : {}),
 	};
-	const amount = buildUsageAmount({
-		used,
-		limit: max,
-		remaining,
-		usedFraction: undefined,
-		unit: "requests",
-	});
-	const status: UsageStatus = limited ? "exhausted" : (getUsageStatus(amount.usedFraction) ?? "ok");
+	const amount = buildUsageAmount({ used, limit: max, remaining, unit: "requests" });
+	const status: UsageStatus = limited ? "exhausted" : usageStatus(amount.usedFraction ?? 0);
 	return {
 		id: "synthetic:requests:5h",
 		label: "Synthetic Requests",
@@ -97,7 +54,7 @@ function parseWeeklyTokenLimit(raw: unknown, provider: UsageFetchParams["provide
 	const remainingCredits = parseDollarAmount(raw.remainingCredits);
 	const maxCredits = parseDollarAmount(raw.maxCredits);
 	const percentRemaining = typeof raw.percentRemaining === "number" ? raw.percentRemaining : undefined;
-	const nextRegenAt = parseIsoMs(raw.nextRegenAt);
+	const nextRegenAt = parseIsoTimestamp(raw.nextRegenAt);
 
 	if (remainingCredits === undefined && maxCredits === undefined) return null;
 
@@ -124,7 +81,7 @@ function parseWeeklyTokenLimit(raw: unknown, provider: UsageFetchParams["provide
 		scope: { provider, windowId: "7d", shared: true },
 		window,
 		amount,
-		status: getUsageStatus(amount.usedFraction),
+		status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 	};
 }
 

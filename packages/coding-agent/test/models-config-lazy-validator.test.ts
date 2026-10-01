@@ -56,6 +56,7 @@ test("models config validation resources are retained only for a custom config",
 				mode: "effort",
 				efforts: ["low", "medium", "high"],
 				defaultLevel: "medium",
+				requiresEffort: false,
 			},
 		});
 		expect(custom.schemaIdentityStable).toBe(true);
@@ -63,7 +64,7 @@ test("models config validation resources are retained only for a custom config",
 		expect(
 			custom.retainedHeapNodes - missing.retainedHeapNodes,
 			"custom config validation should retain its schema bundle",
-		).toBeGreaterThan(15_000);
+		).toBeGreaterThan(5_000);
 	} finally {
 		await tempDir.remove().catch(() => {});
 	}

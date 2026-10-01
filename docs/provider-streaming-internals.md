@@ -4,13 +4,13 @@ This document explains how token/tool streaming is normalized in `@oh-my-pi/pi-a
 
 ## End-to-end flow
 
-1. `streamSimple()` (`packages/ai/src/stream.ts`) maps generic options and dispatches to a provider stream function. Heavy built-ins are reached through the lazy wrappers in `packages/ai/src/providers/register-builtins.ts`; thin routing wrappers remain eager.
-2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Current built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, Devin, pi-native gateway transport, plus GitLab Duo/Kimi/Synthetic wrappers and extension-registered custom APIs.
+1. `streamSimple()` (`packages/ai/src/stream.ts`) resolves credentials, maps generic options, and dispatches to a provider stream function. Built-ins use the eagerly imported adapters in `packages/ai/src/providers/register-builtins.ts`; routing wrappers and extension-registered APIs have their own dispatch paths. Shared dispatch also applies provider in-flight limits, leaked-thinking healing, and thinking-loop guards.
+2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, Devin, Apple Foundation Models, and pi-native gateway transport, plus GitLab Duo, GitLab Duo Workflow, Kimi, and Synthetic wrappers. xAI Grok uses the shared OpenAI Responses path with catalog-level compat. OpenRouter defaults to Responses; `PI_OPENROUTER_RESPONSES=0` selects Chat Completions.
 3. Each provider pushes events into `AssistantMessageEventStream` (`packages/ai/src/utils/event-stream.ts`), which exposes:
    - async iteration for incremental updates
    - `result()` for the final `AssistantMessage`
-4. The lazy forwarding wrapper applies first-progress and idle watchdogs. The synthetic `start` event does not count as first progress; a provider can mark server-requested local work with `trackLocalWork()` so that work does not look like a stalled stream.
-5. `agentLoop` (`packages/agent/src/agent-loop.ts`) consumes those events, mutates in-flight assistant state, and emits `message_update` events carrying the raw `assistantMessageEvent`.
+4. The built-in forwarding wrapper supplies watchdogs where the provider does not own them. Anthropic and the OpenAI family own first-event and idle handling; Gemini CLI owns first-event recovery while the wrapper handles idle gaps. The synthetic `start` event does not count as first progress. Providers can mark server-requested local work with `trackLocalWork()` (and forward that state with `forwardLocalWorkFrom()`) so it does not look like a stall.
+5. `agentLoop` (`packages/agent/src/agent-loop.ts`) consumes those events, updates in-flight assistant state, and emits `message_update` events carrying read-only snapshots of the assistant event and message. Open blocks are copied incrementally; finalized blocks are shared between snapshots.
 6. `AgentSession` (`packages/coding-agent/src/session/agent-session.ts`) subscribes to agent events, persists messages, drives extension hooks, and applies session behaviors (retry, compaction, TTSR, streaming-edit abort checks).
 
 ## Unified stream contract in `@oh-my-pi/pi-ai`
@@ -36,7 +36,7 @@ All providers emit the same shape (`AssistantMessageEvent` in `packages/ai/src/t
 
 ## Delta throttling behavior
 
-`AssistantMessageEventStream` itself no longer throttles or merges delta events — every provider event is delivered as pushed. The per-delta cost control moved into tool-call argument parsing: providers accumulate partial JSON and re-parse it via `parseStreamingJsonThrottled()` (`packages/utils/src/json-parse.ts`), which skips the re-parse until at least `STREAMING_JSON_PARSE_MIN_GROWTH` (256) new bytes have arrived, bounding mid-stream parse cost from quadratic to linear. The final parse at the tool-call boundary is unconditional and authoritative.
+`AssistantMessageEventStream` does not throttle or merge delta events — every provider event is delivered as pushed. Tool-call argument parsing uses `parseStreamingJsonThrottled()` (`packages/utils/src/json-parse.ts`): the first nonempty buffer is parsed, then reparsing requires growth of `max(STREAMING_JSON_PARSE_MIN_GROWTH, buffer.length >> 5)`, with a default floor of 256 string code units. The geometric gate avoids fixed-cadence full-buffer reparsing for large arguments. The final parse at the tool-call boundary is unconditional and authoritative.
 
 There is no provider backpressure: providers still produce at full speed, while the local stream queues.
 
@@ -57,13 +57,29 @@ Normalization points:
   - `signature_delta` updates `thinkingSignature` only (no event)
 - `content_block_stop` emits corresponding `*_end`
 - `message_delta.stop_reason` maps via `mapStopReason()`
+- signed `compaction` blocks are retained in `providerPayload` only when the terminal stop reason confirms compaction; no ordinary text/thinking delta is synthesized for them
 
 Tool-call argument streaming:
 
-- each tool block carries internal `partialJson`
-- every JSON delta appends to `partialJson`
-- `arguments` are reparsed on appended deltas via `parseStreamingJsonThrottled()` (re-parse only after ≥256 new bytes)
-- `toolcall_end` reparses once more, then strips `partialJson`
+- each tool block carries a symbol-backed `kStreamingPartialJson` buffer
+- every JSON delta appends to that buffer
+- `arguments` are reparsed on appended deltas via `parseStreamingJsonThrottled()` (first buffer, then the geometric growth gate)
+- `toolcall_end` reparses once more, then removes internal streaming state
+
+## OpenAI Chat Completions (`openai-completions`)
+
+Source: `packages/ai/src/providers/openai-completions.ts`
+
+- Visible content deltas become text blocks; reasoning fields become thinking blocks.
+- Tool-call deltas are associated with streamed call indices/IDs. String argument
+  fragments accumulate with throttled JSON parsing; object-valued argument
+  snapshots (MiniMax) are merged directly.
+- Final tool-call arguments are parsed at the block boundary. Structured calls
+  promote a benign `"stop"` finish into tool use.
+- Compat controls cumulative reasoning, leaked-template-token stripping, markup
+  healing, and the empty length-finish context-error case.
+- First-event/idle handling and replay-safe retries live in this provider, not
+  the shared forwarder.
 
 ## OpenAI Responses family (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`)
 
@@ -76,11 +92,13 @@ Normalization points:
 - output/refusal deltas become `text_delta`
 - `response.function_call_arguments.delta` and `response.custom_tool_call_input.delta` become `toolcall_delta`
 - `response.output_item.done` emits `thinking_end` / `text_end` / `toolcall_end`
-- `response.completed` maps status to stop reason and usage; `response.failed` / SDK `error` events throw into the wrapper's terminal `error` path
+- `response.completed`, `response.incomplete`, and legacy `response.done` finalize status and usage, then stop reading even if the transport remains open
+- `response.failed` / `error` events throw into the terminal `error` path; `incomplete_details.reason: "content_filter"` is an error, not a length limit
+- native computer calls become complete tool-call blocks; completed image-generation items emit `image_end`
 
 Tool-call argument streaming:
 
-- same `partialJson` accumulation pattern as Anthropic for function-call JSON arguments
+- same symbol-backed accumulation pattern as Anthropic for function-call JSON arguments
 - custom tools stream raw string input and expose final arguments as `{ input: <raw> }`
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
@@ -92,7 +110,8 @@ Source: `packages/ai/src/providers/google.ts` (thin request wrapper) and `google
 Normalization points:
 
 - iterates `candidate.content.parts`
-- text parts are split into thinking vs text by `isThinkingPart(part)`
+- text parts are split into thinking vs text by `isThinkingPart(part)` (`thought === true`; a signature alone is not a thinking marker)
+- thought signatures are preserved on their original text/thinking/tool-call blocks for replay
 - block transitions close previous block before starting a new one
 - `part.functionCall` is treated as a complete tool call (start/delta/end emitted immediately)
 - finish reason mapped by `mapStopReason()` from `google-shared.ts`
@@ -115,16 +134,16 @@ Implications:
 
 - malformed or truncated argument deltas do not crash stream processing immediately
 - in-progress `arguments` may temporarily be `{}`
-- later valid deltas can recover structured arguments because parsing is retried as the buffer grows (throttled to ≥256-byte growth steps mid-stream)
+- later valid deltas can recover structured arguments as the buffer grows; mid-stream reparsing uses the geometric growth gate
 - final `toolcall_end` performs one more parse attempt before emission
 
 ## Stop reasons vs transport/runtime errors
 
 Provider stop reasons are mapped to normalized `stopReason`:
 
-- Anthropic: `end_turn`→`stop`, `max_tokens`→`length`, `tool_use`→`toolUse`, safety/refusal cases→`error`
-- OpenAI Responses: `completed`→`stop`, `incomplete`→`length`, `failed/cancelled`→`error`
-- Google: `STOP`→`stop`, `MAX_TOKENS`→`length`, safety/prohibited/malformed-function-call classes→`error`
+- Anthropic: `end_turn`/`stop_sequence`/`pause_turn`/`compaction`→`stop`, `max_tokens`/`model_context_window_exceeded`→`length`, `tool_use`→`toolUse`, `refusal`/`sensitive`→`error`; unknown reasons are logged and treated as `stop`
+- OpenAI Responses: `completed`→`stop`, `incomplete`→`length` except content filtering→`error`, `failed/cancelled`→`error`; completed tool calls can promote benign finishes to `toolUse`
+- Google: `STOP`→`stop`, `MAX_TOKENS`→`length`, safety/prohibited/malformed-function-call classes→`error`; tool calls promote only benign stop/length finishes to `toolUse`
 
 Error semantics are split in two stages:
 
@@ -133,9 +152,10 @@ Error semantics are split in two stages:
 
 If provider stream throws or signals failure, each provider wrapper catches and emits terminal `error` event with:
 
-- `stopReason = "aborted"` when abort signal is set
+- `stopReason = "aborted"` for caller cancellation
 - otherwise `stopReason = "error"`
-- `errorMessage = finalizeErrorMessage(error, rawRequestDump)` (`packages/ai/src/utils/http-inspector.ts`), which wraps `formatErrorMessageWithRetryAfter()` and appends any captured HTTP-error body / raw-request dump (the `cursor` wrapper calls `formatErrorMessageWithRetryAfter()` directly)
+- provider errors normally pass through `finalizeErrorMessage(error, rawRequestDump)` (`packages/ai/src/utils/http-inspector.ts`), which formats retry-after information and captured HTTP/request diagnostics; shared-wrapper failures use the thrown error's message
+- watchdog-triggered local aborts remain `"error"` rather than being mislabeled as caller cancellation
 
 ## Malformed chunk / SSE parse failure behavior
 
@@ -146,7 +166,7 @@ Observed behavior in current implementation:
 - malformed SSE framing or chunk JSON surfaces as an exception or stream `error` event
 - malformed Codex SSE JSON/framing throws from the local SSE reader
 - providers do not resume from an individual malformed chunk. Depending on the provider and whether any replay-unsafe output has been emitted, a bounded provider-owned request retry may start a fresh attempt for transient transport or malformed-envelope failures.
-- provider-owned recovery also includes bounded empty-completion retries (OpenAI Responses, OpenAI Completions, Anthropic, Google native/Vertex, Gemini CLI, and Ollama) and capability fallbacks such as retrying without rejected strict-tool fields
+- provider-owned recovery includes bounded empty-completion retries and capability fallbacks such as retrying without rejected strict-tool fields; Azure also has one replay-safe transient provider-error retry
 - Codex can fall back from websocket to SSE only before replay-unsafe output is emitted
 - `AgentSession` separately handles message-level auto-retry; it does not replay a stream from the failed chunk
 
@@ -161,12 +181,28 @@ Cancellation is layered:
 
 Tool execution cancellation is separate from model stream cancellation:
 
-- tool runners use `AbortSignal.any([agentSignal, steeringAbortSignal])`
-- steering interrupts can abort remaining tool execution while preserving already-produced tool results
+- interruptible wait-like tools observe a combined external/steering/IRC abort signal
+- side-effecting foreground tools observe only the external abort signal; steering and IRC reach them through a cooperative `steeringSignal`, not a hard kill
+- queued interruptions are injected at execution boundaries while completed tool results are preserved
+
+## Watchdog configuration
+
+`packages/ai/src/utils/idle-iterator.ts` defaults both first-event and idle budgets
+to 300,000 ms. Caller `streamFirstEventTimeoutMs` / `streamIdleTimeoutMs` options
+win over environment values; `0` disables that watchdog. Generic transports use
+`PI_STREAM_IDLE_TIMEOUT_MS` (then the legacy OpenAI alias) and
+`PI_STREAM_FIRST_EVENT_TIMEOUT_MS`. OpenAI-family transports prefer
+`PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` and `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS`.
+Without an OpenAI-specific first-event override, their first-event budget is
+floored at the resolved idle budget. Catalog compat can supply provider/model
+fallbacks, including unbounded first-event waits on local backends.
+
+A pre-response timer is cleared once the HTTP attempt settles; it is not an
+absolute deadline on an actively streaming body. Retries arm a fresh timer.
 
 ## Backpressure boundaries
 
-There is no hard backpressure mechanism between provider SDK stream and downstream consumers:
+There is no hard backpressure mechanism between provider transports and downstream consumers:
 
 - `EventStream` uses in-memory queues with no max size
 - the throttled partial-JSON re-parse reduces per-delta CPU cost but does not slow provider intake
@@ -179,15 +215,15 @@ Current design favors responsiveness and simple ordering over bounded-buffer flo
 `agentLoop.streamAssistantResponse()` bridges `AssistantMessageEvent` to `AgentEvent`:
 
 - on `start`: pushes placeholder assistant message and emits `message_start`
-- on block events (`text_*`, `thinking_*`, `image_end`, `toolcall_*`): updates the last assistant message and emits `message_update` with the raw `assistantMessageEvent`
+- on block events (`text_*`, `thinking_*`, `image_end`, `toolcall_*`): updates the last assistant message and emits `message_update` with a read-only event/message snapshot; consumers MUST NOT mutate shared finalized blocks
 - on terminal (`done`/`error`): resolves final message from `response.result()`, emits `message_end`
 
 `AgentSession` then consumes those events for session-level behaviors:
 
 - TTSR watches `message_update.assistantMessageEvent` for `text_delta`, `thinking_delta`, and `toolcall_delta`
-- streaming edit guard inspects `toolcall_delta`/`toolcall_end` on `edit` calls and can abort early
+- tool argument streams consume `toolcall_*` events and emit `tool_stream_update`; the streaming edit guard aborts on an `edit` final preview (`streaming: false`) with a real file error, not a no-change diagnostic
 - persistence writes finalized messages at `message_end`
-- auto-retry examines assistant `stopReason === "error"` plus `errorMessage` heuristics
+- auto-retry classifies assistant failures through structured `errorId` / AI error predicates, with message classification as a fallback
 
 ## Unified vs provider-specific responsibilities
 
@@ -209,14 +245,13 @@ Provider-specific (not fully abstracted):
 
 ## Implementation files
 
-- [`../../ai/src/stream.ts`](../packages/ai/src/stream.ts) — provider dispatch, option mapping, API key/session plumbing, custom API dispatch, and provider-specific credential handling.
-- [`../../ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts) — generic stream queue + final-result resolution.
-- [`../../utils/src/json-parse.ts`](../packages/utils/src/json-parse.ts) — partial JSON parsing for streamed tool arguments.
-- [`../../ai/src/providers/anthropic.ts`](../packages/ai/src/providers/anthropic.ts) — Anthropic event translation and tool JSON delta accumulation.
-- [`../../ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts), [`openai-shared.ts`](../packages/ai/src/providers/openai-shared.ts), [`openai-codex-responses.ts`](../packages/ai/src/providers/openai-codex-responses.ts), [`azure-openai-responses.ts`](../packages/ai/src/providers/azure-openai-responses.ts) — Responses-family event translation and status mapping.
-- [`../../ai/src/providers/google.ts`](../packages/ai/src/providers/google.ts), [`google-gemini-cli.ts`](../packages/ai/src/providers/google-gemini-cli.ts), [`google-vertex.ts`](../packages/ai/src/providers/google-vertex.ts) — Gemini stream chunk-to-block translation variants.
-- [`../../ai/src/providers/google-shared.ts`](../packages/ai/src/providers/google-shared.ts) — Gemini finish-reason mapping and shared conversion rules.
-- [`../../ai/src/providers/amazon-bedrock.ts`](../packages/ai/src/providers/amazon-bedrock.ts), [`openai-completions.ts`](../packages/ai/src/providers/openai-completions.ts), [`ollama.ts`](../packages/ai/src/providers/ollama.ts), [`cursor.ts`](../packages/ai/src/providers/cursor.ts), [`pi-native-client.ts`](../packages/ai/src/providers/pi-native-client.ts) — additional built-in stream adapters using the same event contract.
-- [`../../ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts) and [`../../ai/src/utils/idle-iterator.ts`](../packages/ai/src/utils/idle-iterator.ts) — lazy provider forwarding, first-progress/idle watchdogs, and local-work-aware stall handling.
-- [`../../agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts) — provider stream consumption and `message_update` bridging.
-- [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — session-level handling of streaming updates, abort, retry, and persistence.
+- [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts) — provider dispatch, option mapping, credential/session plumbing, and custom API dispatch.
+- [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts) — stream queue and final-result resolution.
+- [`packages/utils/src/json-parse.ts`](../packages/utils/src/json-parse.ts) — partial JSON parsing for streamed tool arguments.
+- [`packages/ai/src/providers/anthropic.ts`](../packages/ai/src/providers/anthropic.ts) — Anthropic event translation and tool JSON accumulation.
+- [`packages/ai/src/providers/openai-shared.ts`](../packages/ai/src/providers/openai-shared.ts) — shared Responses event translation; [`openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts), [`openai-codex-responses.ts`](../packages/ai/src/providers/openai-codex-responses.ts), and [`azure-openai-responses.ts`](../packages/ai/src/providers/azure-openai-responses.ts) — transport/request variants.
+- [`packages/ai/src/providers/google-shared.ts`](../packages/ai/src/providers/google-shared.ts) — shared Gemini conversion and event translation; [`google.ts`](../packages/ai/src/providers/google.ts), [`google-gemini-cli.ts`](../packages/ai/src/providers/google-gemini-cli.ts), and [`google-vertex.ts`](../packages/ai/src/providers/google-vertex.ts) — request/transport variants.
+- [`amazon-bedrock.ts`](../packages/ai/src/providers/amazon-bedrock.ts), [`openai-completions.ts`](../packages/ai/src/providers/openai-completions.ts), [`ollama.ts`](../packages/ai/src/providers/ollama.ts), [`cursor.ts`](../packages/ai/src/providers/cursor.ts), [`apple-foundation-models.ts`](../packages/ai/src/providers/apple-foundation-models.ts), and [`pi-native-client.ts`](../packages/ai/src/providers/pi-native-client.ts) — additional stream adapters.
+- [`packages/ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts) and [`packages/ai/src/utils/idle-iterator.ts`](../packages/ai/src/utils/idle-iterator.ts) — built-in forwarding, shared first-progress/idle watchdogs, and local-work-aware stall handling.
+- [`packages/agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts) — provider stream consumption and `message_update` snapshots.
+- [`packages/coding-agent/src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts), [`stream-guards.ts`](../packages/coding-agent/src/session/stream-guards.ts), and [`ttsr-coordinator.ts`](../packages/coding-agent/src/session/ttsr-coordinator.ts) — session updates, guards, abort, and persistence.

@@ -7,7 +7,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-const THEMES_DIR = join(process.cwd(), "packages/coding-agent/src/modes/interactive/theme/defaults");
+const THEMES_DIR = join(process.cwd(), "packages/tui/src/theme/defaults");
 const INDEX_FILE = join(THEMES_DIR, "index.ts");
 
 async function main() {

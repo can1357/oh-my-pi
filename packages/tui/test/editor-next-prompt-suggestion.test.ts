@@ -7,6 +7,51 @@ import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { defaultEditorTheme } from "./test-themes";
 
 describe("Editor next prompt suggestion", () => {
+	it("describes a contextual ghost for native hosts and accepts it without submitting or replacing a placeholder", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const suggestion = "Inspect the current result";
+		let submitted = false;
+		editor.placeholder = () => "Start typing";
+		editor.describePlaceholder = () => "Start typing";
+		editor.onSubmit = () => {
+			submitted = true;
+		};
+		editor.setNextPromptSuggestion(suggestion);
+		const described = editor.describe({
+			cols: 80,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		});
+		const input = described.c?.find(child => "k" in child && child.k === "editor");
+		expect(input).toMatchObject({ p: { text: "", ghost: suggestion, placeholder: undefined } });
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe(suggestion);
+		expect(submitted).toBe(false);
+	});
+
+	it.each(["field", "rail"])(
+		"keeps the IME cursor row clear while showing a contextual ghost in the %s composer",
+		shape => {
+			const editor = new Editor(defaultEditorTheme);
+			const suggestion = "Inspect the current result";
+			editor.setBorderStyle(shape);
+			editor.focused = true;
+			editor.setUseTerminalCursor(true);
+			editor.setImeSafeCursorLayout(true);
+			editor.setNextPromptSuggestion(suggestion);
+			const rendered = editor.render(80);
+			const cursorRow = rendered.find(line => line.includes(CURSOR_MARKER))!;
+			expect(
+				stripVTControlCharacters(cursorRow.slice(cursorRow.indexOf(CURSOR_MARKER) + CURSOR_MARKER.length)),
+			).toBe("");
+			expect(stripVTControlCharacters(rendered.join("\n"))).toContain(suggestion);
+			editor.handleInput("\t");
+			expect(editor.getText()).toBe(suggestion);
+		},
+	);
+
 	it("renders a contextual ghost outside the buffer and accepts it with Tab without submitting", () => {
 		const suggestion = "Inspect the failing test";
 		const editor = new Editor(defaultEditorTheme);

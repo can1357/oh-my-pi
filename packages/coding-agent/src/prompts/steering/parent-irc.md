@@ -1,5 +1,4 @@
-Your current interruptible wait was interrupted because an IRC message arrived from your parent agent `{{from}}`.
-
-Parent IRC message:
-
+[Wait interrupted by message]
+<irc from="parent" agent="{{from}}">
 {{message}}
+</irc>

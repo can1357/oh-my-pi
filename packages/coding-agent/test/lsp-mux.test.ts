@@ -90,6 +90,10 @@ class MuxTestClient {
 		this.#write({ jsonrpc: "2.0", method, params });
 	}
 
+	sendRaw(bytes: Buffer): void {
+		this.#socket.write(bytes);
+	}
+
 	async nextNotification<T>(method: string): Promise<T> {
 		const queued = this.#notifications.get(method);
 		const message = queued?.shift();
@@ -120,8 +124,8 @@ class MuxTestClient {
 	#receive(message: RpcMessage): void {
 		if (message.method !== undefined) {
 			if (message.id !== undefined) {
+				// Reply first, then queue the request so tests can await it via nextNotification.
 				this.#write({ jsonrpc: "2.0", id: message.id, result: message.params });
-				return;
 			}
 			const waiters = this.#notificationWaiters.get(message.method);
 			const waiter = waiters?.shift();
@@ -148,12 +152,14 @@ class MuxTestClient {
 }
 
 async function withTimeout<T>(promise: Promise<T>, description: string, timeoutMs = 5_000): Promise<T> {
-	return Promise.race([
-		promise,
-		Bun.sleep(timeoutMs).then(() => {
-			throw new Error(`Timed out waiting for ${description}`);
-		}),
-	]);
+	// Real socket/subprocess integration needs a wall-clock failure watchdog; always cancel it when the event wins.
+	const timeout = Promise.withResolvers<never>();
+	const timer = setTimeout(() => timeout.reject(new Error(`Timed out waiting for ${description}`)), timeoutMs);
+	try {
+		return await Promise.race([promise, timeout.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 const fixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server.ts");
@@ -211,24 +217,51 @@ describe("LspMuxServer", () => {
 	}
 
 	it.skipIf(process.platform === "win32")(
-		"spawns one server and caches its initialize result across links",
+		"disconnects a malformed link without terminating other sessions",
+		async () => {
+			const healthy = await link();
+			await initialize(healthy.client);
+			const malformed = await MuxTestClient.connect(socketPath);
+			clients.push(malformed);
+			const closed = malformed.waitForClose();
+			malformed.sendRaw(Buffer.alloc(16 * 1024, 97));
+			await closed;
+			expect(await healthy.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({
+				alive: true,
+			});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a language server that declares an oversized response",
+		async () => {
+			connectParams.args = ["run", path.join(import.meta.dir, "fixtures", "malformed-jsonrpc-peer.ts")];
+			const { client } = await link();
+			await expect(withTimeout(initialize(client), "invalid server frame")).rejects.toThrow("Mux socket closed");
+			await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "malformed server exit");
+			expect(server.sessionCount).toBe(0);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"spawns one server per concurrent link",
 		async () => {
 			const first = await link();
 			const second = await link();
 			expect(first.connected.spawned).toBe(true);
-			expect(second.connected.spawned).toBe(false);
-			expect(second.connected.pid).toBe(first.connected.pid);
+			expect(second.connected.spawned).toBe(true);
+			expect(second.connected.pid).not.toBe(first.connected.pid);
 
 			const [firstInitialize, secondInitialize] = await Promise.all([
 				initialize(first.client),
 				initialize(second.client),
 			]);
-			expect(firstInitialize).toEqual(secondInitialize);
 			const firstInfo = firstInitialize.serverInfo as { version: string };
 			const secondInfo = secondInitialize.serverInfo as { version: string };
 			expect(firstInfo.version).toBe(String(first.connected.pid));
-			expect(secondInfo.version).toBe(firstInfo.version);
+			expect(secondInfo.version).toBe(String(second.connected.pid));
 			expect((await state(first.client)).initializeCount).toBe(1);
+			expect((await state(second.client)).initializeCount).toBe(1);
 		},
 		10_000,
 	);
@@ -260,61 +293,56 @@ describe("LspMuxServer", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"reference-counts opens and rewrites shared document versions",
+		"isolates open-document overlays between concurrent sessions",
 		async () => {
 			const first = await link();
 			const second = await link();
+			expect(second.connected.pid).not.toBe(first.connected.pid);
 			await Promise.all([initialize(first.client), initialize(second.client)]);
 			const uri = "file:///shared.ts";
 			first.client.notify("textDocument/didOpen", {
 				textDocument: { uri, languageId: "typescript", version: 1, text: "first" },
 			});
-			await pollUntil(async () => (await state(first.client)).didOpen[uri] === 1, "first didOpen");
-
 			second.client.notify("textDocument/didOpen", {
 				textDocument: { uri, languageId: "typescript", version: 1, text: "second" },
 			});
-			await pollUntil(async () => {
-				const snapshot = await state(first.client);
-				return snapshot.didOpen[uri] === 1 && (snapshot.didChange[uri]?.some(version => version >= 2) ?? false);
-			}, "second open converted to change");
 
-			first.client.notify("textDocument/didClose", { textDocument: { uri } });
-			await first.client.request("test/echo", { barrier: true });
-			expect((await state(second.client)).didClose).not.toContain(uri);
-			second.client.notify("textDocument/didClose", { textDocument: { uri } });
-			await pollUntil(async () => (await state(second.client)).didClose.includes(uri), "final didClose");
+			await pollUntil(async () => {
+				const [seenByFirst, seenBySecond] = await Promise.all([
+					first.client.request<string | null>("test/documentText", { uri }),
+					second.client.request<string | null>("test/documentText", { uri }),
+				]);
+				return seenByFirst === "first" && seenBySecond === "second";
+			}, "session-specific document contents");
 		},
 		10_000,
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"broadcasts diagnostics and replays the cached publication to a new link",
+		"replays cached diagnostics when an idle server is reused",
 		async () => {
 			const first = await link();
-			const second = await link();
-			await Promise.all([initialize(first.client), initialize(second.client)]);
+			await initialize(first.client);
 			const uri = "file:///diagnostics.ts";
 			first.client.notify("textDocument/didOpen", {
 				textDocument: { uri, languageId: "typescript", version: 1, text: "x" },
 			});
-			const [firstPublish, secondPublish] = await Promise.all([
-				first.client.nextNotification<PublishDiagnosticsParams>("textDocument/publishDiagnostics"),
-				second.client.nextNotification<PublishDiagnosticsParams>("textDocument/publishDiagnostics"),
-			]);
-			expect(firstPublish).toMatchObject({
+			const publication = await first.client.nextNotification<PublishDiagnosticsParams>(
+				"textDocument/publishDiagnostics",
+			);
+			expect(publication).toMatchObject({
 				uri,
 				version: 1,
 				diagnostics: [{ message: "fake", severity: 2, range: expect.any(Object) }],
 			});
-			expect(secondPublish).toMatchObject({
-				uri,
-				diagnostics: [{ message: "fake", severity: 2, range: expect.any(Object) }],
-			});
 
-			const third = await link();
-			await initialize(third.client);
-			const replay = await third.client.nextNotification<PublishDiagnosticsParams>(
+			first.client.destroy();
+			await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
+			const second = await link();
+			expect(second.connected.spawned).toBe(false);
+			expect(second.connected.pid).toBe(first.connected.pid);
+			await initialize(second.client);
+			const replay = await second.client.nextNotification<PublishDiagnosticsParams>(
 				"textDocument/publishDiagnostics",
 			);
 			expect(replay).toMatchObject({
@@ -351,36 +379,105 @@ describe("LspMuxServer", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"restarts a shared server and disconnects every attached session",
+		"restarts only the calling session's server",
 		async () => {
 			const first = await link();
 			const second = await link();
 			await Promise.all([initialize(first.client), initialize(second.client)]);
 			const firstClosed = first.client.waitForClose();
-			const secondClosed = second.client.waitForClose();
 			first.client.notify(MUX_RESTART_METHOD);
-			await Promise.all([firstClosed, secondClosed]);
+			await firstClosed;
+			expect(await second.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
 
 			const replacement = await link();
 			expect(replacement.connected.spawned).toBe(true);
 			expect(replacement.connected.pid).not.toBe(first.connected.pid);
+			expect(replacement.connected.pid).not.toBe(second.connected.pid);
 		},
 		10_000,
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"closes orphaned documents when a session drops abruptly",
+		"survives a language server that exits while documents are open",
+		async () => {
+			// Regression: session teardown wrote didClose to the exited child's
+			// stdin; that rejection escaped #closeSession (invoked via `void`
+			// from the socket "close" handler) and killed the whole daemon.
+			const { client } = await link();
+			await initialize(client);
+			const uri = "file:///crash.ts";
+			client.notify("textDocument/didOpen", {
+				textDocument: { uri, languageId: "typescript", version: 1, text: "x" },
+			});
+			await pollUntil(async () => (await state(client)).didOpen[uri] === 1, "didOpen to reach the server");
+			const closed = client.waitForClose();
+			client.notify(MUX_RESTART_METHOD);
+			await closed;
+			await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "exited server cleanup");
+			// The daemon itself must keep serving fresh sessions.
+			const fresh = await link();
+			await initialize(fresh.client);
+			expect(await fresh.client.request<{ alive: boolean }>("test/echo", { alive: true })).toEqual({ alive: true });
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"contains write failures when a language server stops reading stdin",
+		async () => {
+			// The server closes stdin, then sends a request (signalling stdin is closed) and stays
+			// alive, so tearing down the session's open document fails with EPIPE.
+			const request = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "workspace/applyEdit", params: {} });
+			connectParams.command = "sh";
+			connectParams.args = [
+				"-c",
+				'exec 0<&-; printf "%s" "$1"; exec sleep 30',
+				"sh",
+				`Content-Length: ${Buffer.byteLength(request)}\r\n\r\n${request}`,
+			];
+			const first = await link();
+			first.client.notify("textDocument/didOpen", {
+				textDocument: { uri: "file:///epipe.ts", languageId: "typescript", version: 1, text: "x" },
+			});
+			await first.client.nextNotification("workspace/applyEdit");
+			first.client.destroy();
+			await pollUntil(() => Promise.resolve(server.sessionCount === 0), "first session close");
+			// Teardown must finish and release the server for reuse instead of rejecting mid-cleanup.
+			await pollUntil(async () => {
+				const next = await link();
+				next.client.destroy();
+				return next.connected.pid === first.connected.pid;
+			}, "idle server reuse");
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"finishes orphan document closes before reusing a server",
 		async () => {
 			const first = await link();
-			const second = await link();
-			await Promise.all([initialize(first.client), initialize(second.client)]);
-			const uri = "file:///orphan.ts";
-			first.client.notify("textDocument/didOpen", {
-				textDocument: { uri, languageId: "typescript", version: 1, text: "orphan" },
-			});
-			await pollUntil(async () => (await state(second.client)).didOpen[uri] === 1, "orphan didOpen");
+			await initialize(first.client);
+			const uris = Array.from({ length: 128 }, (_, index) => `file:///orphan-${index}.ts`);
+			for (const uri of uris) {
+				first.client.notify("textDocument/didOpen", {
+					textDocument: { uri, languageId: "typescript", version: 1, text: "orphan" },
+				});
+			}
+			await first.client.request("test/echo", { barrier: true });
+			const firstClosed = first.client.waitForClose();
 			first.client.destroy();
-			await pollUntil(async () => (await state(second.client)).didClose.includes(uri), "orphan didClose");
+			await firstClosed;
+
+			const second = await link();
+			expect(second.connected.spawned).toBe(false);
+			const uri = uris.at(-1);
+			expect(uri).toBeDefined();
+			await initialize(second.client);
+			second.client.notify("textDocument/didOpen", {
+				textDocument: { uri, languageId: "typescript", version: 1, text: "replacement" },
+			});
+			await second.client.request("test/echo", { barrier: true });
+			expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
 		},
 		10_000,
 	);

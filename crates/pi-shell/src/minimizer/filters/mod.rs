@@ -340,7 +340,8 @@ fn normalize_uv_form(subcommand: Option<&str>, command: &str) -> Option<&'static
 	if sub == "-m" {
 		// Only the immediate next non-flag token after `-m` may select a tool;
 		// scanning all subsequent tokens would pick up positional arguments
-		// (e.g. `uv -m my_module pytest` where `pytest` is an arg to `my_module`).
+		// (e.g. `uv -m my_module pytest` where `pytest` is an arg to
+		// `my_module`).
 		let mut tokens = command.split_whitespace().skip_while(|t| t != &"-m");
 		tokens.next(); // consume `-m` itself
 		let next = tokens.next().filter(|tok| !tok.starts_with('-'))?;
@@ -488,7 +489,7 @@ fn wrapper_invoked_tool<'a>(ctx: &'a MinimizerCtx<'_>, tools: &[&'a str]) -> Opt
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::minimizer::MinimizerConfig;
+	use crate::minimizer::{MinimizerConfig, engine::MIN_MINIMIZE_CHARS};
 
 	fn ctx<'a>(
 		program: &'a str,
@@ -497,6 +498,14 @@ mod tests {
 		config: &'a MinimizerConfig,
 	) -> MinimizerCtx<'a> {
 		MinimizerCtx { program, subcommand, command, config }
+	}
+
+	fn minimizable_input(input: &str) -> String {
+		let mut output = input.to_string();
+		while output.chars().count() < MIN_MINIMIZE_CHARS {
+			output.push('\n');
+		}
+		output
 	}
 
 	#[test]
@@ -546,8 +555,8 @@ mod tests {
 	#[test]
 	fn pkg_test_routing_ignores_test_as_argument() {
 		let config = MinimizerConfig::default();
-		// a non-test script that merely passes `test` as an argument must not route as
-		// a test
+		// a non-test script that merely passes `test` as an argument must not
+		// route as a test
 		assert!(!is_pkg_test_invocation(&ctx("npm", Some("run"), "npm run build -- test", &config)));
 		assert!(is_pkg_test_invocation(&ctx("npm", Some("run"), "npm run test", &config)));
 		assert!(is_pkg_test_invocation(&ctx("npm", Some("test"), "npm test", &config)));
@@ -580,8 +589,9 @@ mod tests {
 	#[test]
 	fn uv_wrapper_skips_value_taking_option_values() {
 		let config = MinimizerConfig::default();
-		// `--with <pkg>` consumes the following token as its value; that value must
-		// not be mistaken for the invoked command and route output through it.
+		// `--with <pkg>` consumes the following token as its value; that value
+		// must not be mistaken for the invoked command and route output through
+		// it.
 		assert_eq!(
 			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --with pytest echo hi", &config)),
 			None
@@ -610,8 +620,8 @@ mod tests {
 	#[test]
 	fn uv_run_with_option_value_is_left_opaque() {
 		let config = MinimizerConfig::default();
-		// `pytest` is the value of `--with`, the invoked command is `echo` — output
-		// (including PASS/✓-style lines) must pass through untouched.
+		// `pytest` is the value of `--with`, the invoked command is `echo` —
+		// output (including PASS/✓-style lines) must pass through untouched.
 		let context = ctx("uv", Some("run"), "uv run --with pytest echo PASS", &config);
 		let input = "collected 2 items\nPASS\n";
 		let out = filter(&context, input, 0);
@@ -622,8 +632,8 @@ mod tests {
 	#[test]
 	fn uv_run_echo_pytest_is_left_opaque() {
 		let config = MinimizerConfig::default();
-		// `pytest` is an argument to `echo`, not the invoked command — output must pass
-		// through
+		// `pytest` is an argument to `echo`, not the invoked command — output
+		// must pass through
 		let context = ctx("uv", Some("run"), "uv run echo pytest", &config);
 		let input = "collected 2 items\npytest\n";
 		let out = filter(&context, input, 0);
@@ -975,9 +985,11 @@ mod tests {
 	fn bundle_exec_rails_db_migrate_routes_to_def() {
 		let config = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("exec"), "bundle exec rails db:migrate", &config);
-		let input = "== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== \
-		             20240115 CreateUsers: migrated\n";
-		let out = filter(&context, input, 0);
+		let input = minimizable_input(
+			"== 20240115 CreateUsers: migrating\n-- create_table(:users)\n   -> 0.0234s\n== 20240115 \
+			 CreateUsers: migrated\n",
+		);
+		let out = filter(&context, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("CreateUsers"));
 		assert!(!out.text.contains("-- create_table"));
@@ -987,8 +999,10 @@ mod tests {
 	fn bundle_exec_rails_routes_routes_to_def() {
 		let config = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("exec"), "bundle exec rails routes", &config);
-		let input = "                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n";
-		let out = filter(&context, input, 0);
+		let input = minimizable_input(
+			"                                  Prefix Verb   URI Pattern                                                                                       Controller#Action\n                                    root GET    /                                                                                                 home#index\n",
+		);
+		let out = filter(&context, &input, 0);
 		assert!(out.changed);
 		assert!(!out.text.contains("Prefix"));
 		assert!(out.text.contains("root GET"));
@@ -998,9 +1012,11 @@ mod tests {
 	fn bundle_exec_rspec_routes_to_ruby_filter() {
 		let config = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = ctx("bundle", Some("exec"), "bundle exec rspec", &config);
-		let input = "Randomized with seed 12345\n\nUserController\n  GET /users\n    returns a list \
-		             of users\n\nFinished in 0.45 seconds\n5 examples, 0 failures\n";
-		let out = filter(&context, input, 0);
+		let input = minimizable_input(
+			"Randomized with seed 12345\n\nUserController\n  GET /users\n    returns a list of \
+			 users\n\nFinished in 0.45 seconds\n5 examples, 0 failures\n",
+		);
+		let out = filter(&context, &input, 0);
 		assert!(out.changed);
 		assert!(out.text.contains("5 examples, 0 failures"));
 		assert!(!out.text.contains("returns a list of users"));

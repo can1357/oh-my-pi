@@ -4,28 +4,24 @@ import { PerplexityProvider, searchPerplexity } from "@oh-my-pi/pi-coding-agent/
 import { getAvailableAuthMethods } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity-auth";
 
 const API_URL = "https://api.perplexity.ai/chat/completions";
-const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 const RESPONSES_URL = "https://api.perplexity.ai/v1/responses";
 
-// API-key path only: getOAuthAccess returns undefined so findPerplexityAuth
+// API-key path only: OAuth access returns undefined so findPerplexityAuth
 // falls through to PERPLEXITY_API_KEY (set per-test, restored in afterEach).
 const apiKeyAuthStorage = {
-	async getOAuthAccess() {
-		return undefined;
-	},
-	async getApiKey(provider: string) {
-		if (provider === "perplexity") return process.env.PERPLEXITY_API_KEY;
-		if (provider === "openrouter") return process.env.OPENROUTER_API_KEY;
-		return undefined;
-	},
-	getCredentialOrigin(provider: string) {
-		// Env-backed key (not OAuth) — the direct api-key config must still be emitted.
-		if (provider === "perplexity" && process.env.PERPLEXITY_API_KEY) return { kind: "env" };
-		if (provider === "openrouter" && process.env.OPENROUTER_API_KEY) return { kind: "env" };
-		return undefined;
-	},
-	hasAuth() {
-		return false;
+	oauth: { access: async () => undefined },
+	keys: {
+		get: async (provider: string) => {
+			if (provider === "perplexity") return process.env.PERPLEXITY_API_KEY;
+			if (provider === "openrouter") return process.env.OPENROUTER_API_KEY;
+			return undefined;
+		},
+		source: (provider: string) => {
+			// Env-backed key (not OAuth) — the direct api-key config must still be emitted.
+			if (provider === "perplexity" && process.env.PERPLEXITY_API_KEY) return { kind: "env", concrete: true };
+			if (provider === "openrouter" && process.env.OPENROUTER_API_KEY) return { kind: "env", concrete: true };
+			return undefined;
+		},
 	},
 } as unknown as AuthStorage;
 
@@ -75,11 +71,13 @@ describe("Perplexity API-key request shape", () => {
 	const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
 	const savedCookies = process.env.PERPLEXITY_COOKIES;
 	const savedResponsesMode = process.env.PI_PERPLEXITY_RESPONSES;
+	const savedApiModel = process.env.PI_PERPLEXITY_API_MODEL;
 
 	beforeEach(() => {
 		process.env.PERPLEXITY_API_KEY = "test-key";
 		delete process.env.PERPLEXITY_COOKIES;
 		delete process.env.PI_PERPLEXITY_RESPONSES;
+		delete process.env.PI_PERPLEXITY_API_MODEL;
 	});
 
 	afterEach(() => {
@@ -92,6 +90,8 @@ describe("Perplexity API-key request shape", () => {
 		else process.env.PERPLEXITY_COOKIES = savedCookies;
 		if (savedResponsesMode === undefined) delete process.env.PI_PERPLEXITY_RESPONSES;
 		else process.env.PI_PERPLEXITY_RESPONSES = savedResponsesMode;
+		if (savedApiModel === undefined) delete process.env.PI_PERPLEXITY_API_MODEL;
+		else process.env.PI_PERPLEXITY_API_MODEL = savedApiModel;
 	});
 
 	it("requests comprehensive defaults: 20 results, high context, related questions", async () => {
@@ -102,6 +102,18 @@ describe("Perplexity API-key request shape", () => {
 		expect(body?.num_search_results).toBe(20);
 		expect(body?.web_search_options).toMatchObject({ search_type: "pro", search_context_size: "high" });
 		expect(body?.return_related_questions).toBe(true);
+	});
+
+	it("accepts a configured direct API model", async () => {
+		process.env.PI_PERPLEXITY_API_MODEL = "sonar-deep-research";
+		let body: Record<string, unknown> | undefined;
+		await searchPerplexity({
+			query: "quic vs tcp",
+			authStorage: apiKeyAuthStorage,
+			fetch: mockApi(b => (body = b), baseResponse()),
+		});
+
+		expect(body?.model).toBe("sonar-deep-research");
 	});
 
 	it("honors a caller-supplied num_search_results over the default", async () => {
@@ -160,30 +172,20 @@ describe("Perplexity API-key request shape", () => {
 
 		expect(response.relatedQuestions).toBeUndefined();
 	});
-	it("falls back to OpenRouter with the selected API-key config after a non-retryable direct Perplexity failure", async () => {
+	it("never bills an OpenRouter key when the direct Perplexity call fails", async () => {
 		process.env.OPENROUTER_API_KEY = "openrouter-test-key";
 		const urls: string[] = [];
-		const bodies: Record<string, unknown>[] = [];
-		const fetchMock: FetchImpl = async (input, init) => {
+		const fetchMock: FetchImpl = async input => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			urls.push(url);
-			bodies.push(JSON.parse(init?.body as string));
 			if (url === API_URL) return new Response("direct failed", { status: 400 });
-			if (url === OPENROUTER_API_URL) return sseResponse(baseResponse());
-			return new Response("not mocked", { status: 500 });
+			return sseResponse(baseResponse());
 		};
 
-		const response = await searchPerplexity({
-			query: "quic vs tcp",
-			authStorage: apiKeyAuthStorage,
-			fetch: fetchMock,
-		});
-
-		expect(urls).toEqual([API_URL, OPENROUTER_API_URL]);
-		expect(bodies[0]?.model).toBe("sonar-pro");
-		expect(bodies[1]?.model).toBe("perplexity/sonar-pro");
-		expect(response.authMode).toBe("api_key");
-		expect(response.answer).toBe("answer");
+		await expect(
+			searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock, explicit: true }),
+		).rejects.toThrow();
+		expect(urls).toEqual([API_URL]);
 	});
 	it("rejects with the classified upstream error instead of a generic 401 when the only method fails", async () => {
 		delete process.env.OPENROUTER_API_KEY;
@@ -274,39 +276,28 @@ describe("Perplexity API-key request shape", () => {
 
 const OAUTH_ASK_URL = "https://www.perplexity.ai/rest/sse/perplexity_ask";
 
-// OAuth path: getOAuthAccess returns a bearer (no `.`-delimited exp claim, so it
+// OAuth path: OAuth access returns a bearer (no `.`-delimited exp claim, so it
 // is treated as non-expiring), making findPerplexityAuth pick the oauth branch.
 const oauthAuthStorage = {
-	async getOAuthAccess() {
-		return { accessToken: "test-oauth-token" };
-	},
-	async getApiKey() {
-		return undefined;
-	},
-	getCredentialOrigin(provider: string) {
-		return provider === "perplexity" ? { kind: "oauth" } : undefined;
-	},
-	hasAuth() {
-		return true;
+	oauth: { access: async () => ({ accessToken: "test-oauth-token" }) },
+	keys: {
+		get: async () => undefined,
+		source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 	},
 } as unknown as AuthStorage;
 
 const anonymousAuthStorage = {
-	async getOAuthAccess() {
-		return undefined;
-	},
-	async getApiKey() {
-		return undefined;
-	},
-	getCredentialOrigin() {
-		return undefined;
-	},
-	hasAuth() {
-		return false;
+	oauth: { access: async () => undefined },
+	keys: {
+		get: async () => undefined,
+		source: () => undefined,
 	},
 } as unknown as AuthStorage;
 
-function mockOAuth(capture: (body: Record<string, unknown>, headers: Headers) => void): FetchImpl {
+function mockOAuth(
+	capture: (body: Record<string, unknown>, headers: Headers) => void,
+	eventOverrides: Record<string, unknown> = {},
+): FetchImpl {
 	const event = {
 		final: true,
 		display_model: "turbo",
@@ -318,6 +309,7 @@ function mockOAuth(capture: (body: Record<string, unknown>, headers: Headers) =>
 				web_result_block: { web_results: [{ name: "T", url: "https://example.com", snippet: "s" }] },
 			},
 		],
+		...eventOverrides,
 	};
 	const sseBody = `data: ${JSON.stringify(event)}\n\n`;
 	return async (input, init) => {
@@ -356,15 +348,19 @@ function mockAnonymous(capture: (body: Record<string, unknown>, headers: Headers
 
 describe("Perplexity OAuth request shape", () => {
 	const savedCookies = process.env.PERPLEXITY_COOKIES;
+	const savedModel = process.env.PI_PERPLEXITY_MODEL;
 
 	beforeEach(() => {
 		delete process.env.PERPLEXITY_COOKIES; // cookies take precedence over oauth; keep them out
+		delete process.env.PI_PERPLEXITY_MODEL;
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 		if (savedCookies === undefined) delete process.env.PERPLEXITY_COOKIES;
 		else process.env.PERPLEXITY_COOKIES = savedCookies;
+		if (savedModel === undefined) delete process.env.PI_PERPLEXITY_MODEL;
+		else process.env.PI_PERPLEXITY_MODEL = savedModel;
 	});
 
 	it("sends the bare query, never the API-style system prompt, to the ask endpoint", async () => {
@@ -395,6 +391,55 @@ describe("Perplexity OAuth request shape", () => {
 		expect(headers?.has("authorization")).toBe(false);
 		expect(response.authMode).toBe("oauth");
 		expect(response.answer).toBe("OAuth answer");
+		// Authenticated streams sometimes report only the generic `turbo` alias;
+		// preserve the requested subscription model instead of misreporting it.
+		expect(response.model).toBe("experimental");
+	});
+
+	it("accepts a subscription model preference and reports it when the stream returns turbo", async () => {
+		let body: Record<string, unknown> | undefined;
+		const response = await searchPerplexity({
+			query: "latest model",
+			subscription_model: "pplx_reasoning",
+			authStorage: oauthAuthStorage,
+			fetch: mockOAuth(b => (body = b)),
+		});
+
+		expect((body!.params as Record<string, unknown>).model_preference).toBe("pplx_reasoning");
+		expect(response.model).toBe("pplx_reasoning");
+	});
+
+	it("prefers the concrete user-selected model over the generic display alias", async () => {
+		const response = await searchPerplexity({
+			query: "latest model",
+			authStorage: oauthAuthStorage,
+			fetch: mockOAuth(() => {}, { user_selected_model: "pplx_pro_upgraded" }),
+		});
+
+		expect(response.model).toBe("pplx_pro_upgraded");
+	});
+
+	it("deduplicates equivalent subscription source URLs", async () => {
+		const response = await searchPerplexity({
+			query: "latest model",
+			authStorage: oauthAuthStorage,
+			fetch: mockOAuth(() => {}, {
+				blocks: [
+					{ intended_usage: "ask_text", markdown_block: { answer: "OAuth answer" } },
+					{
+						intended_usage: "web_results",
+						web_result_block: {
+							web_results: [
+								{ name: "First", url: "https://EXAMPLE.com/path/" },
+								{ name: "Duplicate", url: "https://example.com/path" },
+							],
+						},
+					},
+				],
+			}),
+		});
+
+		expect(response.sources).toHaveLength(1);
 	});
 
 	it("maps directives onto ask-endpoint native filters and rewrites query_str", async () => {
@@ -431,25 +476,15 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 		else process.env.PERPLEXITY_COOKIES = savedCookies;
 	});
 
-	// Mirrors production: an active OAuth session makes getApiKey("perplexity")
-	// return the OAuth JWT itself, and getCredentialOrigin reports origin "oauth".
+	// Mirrors production: an active OAuth session makes keys.get("perplexity")
+	// return the OAuth JWT itself, and keys.source reports origin "oauth".
 	const oauthOriginStorage = {
-		async getOAuthAccess() {
-			return { accessToken: "oauth-session-jwt" };
+		oauth: { access: async () => ({ accessToken: "oauth-session-jwt" }) },
+		keys: {
+			get: async (provider: string) => (provider === "perplexity" ? "oauth-session-jwt" : undefined),
+			source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 		},
-		async getApiKey(provider: string) {
-			if (provider === "perplexity") return "oauth-session-jwt";
-			return undefined;
-		},
-		getCredentialOrigin(provider: string) {
-			return provider === "perplexity" ? { kind: "oauth" } : undefined;
-		},
-		async rotateSessionCredential() {
-			return false;
-		},
-		hasAuth() {
-			return true;
-		},
+		limits: { rotate: async () => ({ switched: false }) },
 	} as unknown as AuthStorage;
 
 	it("does not emit a direct api-key config from the OAuth session token", async () => {
@@ -457,7 +492,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 		expect(methods.some(m => m.type === "oauth")).toBe(true);
 		// The OAuth JWT must never appear as a Perplexity api_key config — that is
 		// what got sent as a Bearer to api.perplexity.ai and rejected with 401.
-		expect(methods.some(m => m.type === "api_key" && m.provider === "perplexity")).toBe(false);
+		expect(methods.some(m => m.type === "api_key")).toBe(false);
 	});
 
 	it("retries the ask endpoint once on transport failure and never falls through to /chat/completions", async () => {
@@ -547,6 +582,7 @@ describe("Perplexity anonymous fallback", () => {
 			query: "anonymous search",
 			authStorage: anonymousAuthStorage,
 			fetch: fetchMock,
+			explicit: true,
 		});
 		const requestParams = body?.params as Record<string, unknown>;
 
@@ -569,11 +605,13 @@ describe("Perplexity anonymous fallback", () => {
 		]);
 	});
 
-	it("keeps anonymous Perplexity out of auto provider selection but allows explicit selection", () => {
-		const provider = new PerplexityProvider();
+	it("rejects an automatic authless request before using the anonymous transport", async () => {
+		const fetchMock = vi.fn<FetchImpl>();
 
-		expect(provider.isAvailable(anonymousAuthStorage)).toBe(false);
-		expect(provider.isExplicitlyAvailable(anonymousAuthStorage)).toBe(true);
+		await expect(
+			searchPerplexity({ query: "automatic search", authStorage: anonymousAuthStorage, fetch: fetchMock }),
+		).rejects.toThrow("No authentication method available.");
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });
 
@@ -600,14 +638,10 @@ describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {
 
 	it("keeps Perplexity out of the auto chain when only OpenRouter auth is configured", () => {
 		const openrouterOnly = {
-			async getOAuthAccess() {
-				return undefined;
-			},
-			async getApiKey() {
-				return undefined;
-			},
-			hasAuth(provider: string) {
-				return provider === "openrouter";
+			oauth: { access: async () => undefined },
+			keys: {
+				get: async () => undefined,
+				source: (provider: string) => (provider === "openrouter" ? { kind: "env", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 
@@ -617,21 +651,15 @@ describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {
 		// get a chance instead of silently routing through OpenRouter's
 		// `perplexity/sonar-pro` and billing the user for an unrequested path.
 		expect(provider.isAvailable(openrouterOnly)).toBe(false);
-		// Explicit selection still admits the provider so `webSearch: perplexity`
-		// can opt into the OpenRouter-backed path on purpose.
 		expect(provider.isExplicitlyAvailable(openrouterOnly)).toBe(true);
 	});
 
 	it("admits Perplexity to the auto chain when a direct Perplexity credential exists", () => {
 		const perplexityOnly = {
-			async getOAuthAccess() {
-				return undefined;
-			},
-			async getApiKey() {
-				return undefined;
-			},
-			hasAuth(provider: string) {
-				return provider === "perplexity";
+			oauth: { access: async () => undefined },
+			keys: {
+				get: async () => undefined,
+				source: (provider: string) => (provider === "perplexity" ? { kind: "env", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 
@@ -667,17 +695,10 @@ describe("Perplexity Authentication order", () => {
 		});
 
 		const mixedAuthStorage = {
-			async getOAuthAccess() {
-				return { accessToken: "test-oauth-token" };
-			},
-			async getApiKey() {
-				return undefined;
-			},
-			getCredentialOrigin(provider: string) {
-				return provider === "perplexity" ? { kind: "oauth" } : undefined;
-			},
-			hasAuth() {
-				return true;
+			oauth: { access: async () => ({ accessToken: "test-oauth-token" }) },
+			keys: {
+				get: async () => undefined,
+				source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 
@@ -696,18 +717,10 @@ describe("Perplexity Authentication order", () => {
 		delete Bun.env.PERPLEXITY_COOKIES;
 
 		const oauthAndApiKeyAuthStorage = {
-			async getOAuthAccess() {
-				return { accessToken: "oauth-token" };
-			},
-			async getApiKey(provider: string) {
-				if (provider === "perplexity") return "api-key";
-				return undefined;
-			},
-			getCredentialOrigin(provider: string) {
-				return provider === "perplexity" ? { kind: "oauth" } : undefined;
-			},
-			hasAuth() {
-				return true;
+			oauth: { access: async () => ({ accessToken: "oauth-token" }) },
+			keys: {
+				get: async (provider: string) => (provider === "perplexity" ? "api-key" : undefined),
+				source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 			},
 		} as unknown as AuthStorage;
 

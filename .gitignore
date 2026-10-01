@@ -12,9 +12,12 @@ target/
 *.tsbuildinfo
 *.node
 *.b64.js
+/result
+/result-*
 
 # Environment
 .env
+.venv
 
 # Editors
 .vscode/
@@ -62,7 +65,6 @@ pi-*.html
 # Generated files
 packages/coding-agent/src/export/html/tool-views.generated.js
 packages/natives/npm/
-packages/coding-agent/src/utils/mupdf-wasm.wasm
 /runs/
 python/omp-rpc/src/omp_rpc.egg-info/
 python/omp-rpc/build/
@@ -88,4 +90,7 @@ packages/coding-agent/bench/boot-baseline.json
 /bazel-out
 /bazel-testlogs
 /bazel-pi
+/bazel-oh-my-pi
 /.bazelrc.user
+
+.parity/

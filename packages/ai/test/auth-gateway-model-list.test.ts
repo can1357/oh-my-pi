@@ -26,8 +26,26 @@ test("model listing exposes one provider-qualified route per upstream model", as
 		expect(await response.json()).toEqual({
 			object: "list",
 			data: [
-				{ id: "anthropic/shared-model", object: "model", owned_by: "anthropic", api: "mock" },
-				{ id: "devin/shared-model", object: "model", owned_by: "devin", api: "mock" },
+				{
+					id: "anthropic/shared-model",
+					object: "model",
+					owned_by: "anthropic",
+					api: "mock",
+					display_name: "shared-model",
+					context_length: 200_000,
+					max_output_tokens: 32_768,
+					input_modalities: ["text"],
+				},
+				{
+					id: "devin/shared-model",
+					object: "model",
+					owned_by: "devin",
+					api: "mock",
+					display_name: "shared-model",
+					context_length: 200_000,
+					max_output_tokens: 32_768,
+					input_modalities: ["text"],
+				},
 			],
 		});
 	} finally {

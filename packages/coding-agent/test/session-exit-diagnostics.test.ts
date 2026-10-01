@@ -11,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	collectPendingToolCalls,
+	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	describePendingToolCalls,
 	SESSION_EXIT_CUSTOM_TYPE,
@@ -63,11 +64,11 @@ describe("session exit diagnostics", () => {
 	it("records a durable tool start marker and shutdown diagnostic before a pending result exists", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -116,9 +117,15 @@ describe("session exit diagnostics", () => {
 
 		await session.dispose();
 		session = undefined;
-		const exitEntry = sessionManager
+		// dispose() released the in-memory transcript; the exit marker's contract
+		// is durability, so assert against the persisted file.
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		const exitEntry = reopened
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+		await reopened.close();
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
 		expect(exitEntry.data).toMatchObject({
 			reason: "dispose",
@@ -136,11 +143,11 @@ describe("session exit diagnostics", () => {
 	it("signal teardown persists the postmortem reason, not the generic dispose", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-signal-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -187,9 +194,13 @@ describe("session exit diagnostics", () => {
 		await teardown(postmortem.Reason.SIGTERM);
 		session = undefined;
 
-		const exitEntry = sessionManager
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		const exitEntry = reopened
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+		await reopened.close();
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
 		expect(exitEntry.data).toMatchObject({
 			reason: "sigterm",
@@ -360,6 +371,66 @@ describe("session exit diagnostics", () => {
 			model: pendingAssistant.model,
 			stopReason: "aborted",
 		});
+	});
+
+	it("keeps an interrupted ask question in resumed model context without replaying completed calls", () => {
+		const sessionManager = SessionManager.inMemory();
+		const question = { questions: [{ question: "Deploy now?", options: ["Yes", "No"], recommended: "Yes" }] };
+		sessionManager.appendMessage({ role: "user", content: "prepare deployment", timestamp: Date.now() });
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{ type: "toolCall", id: "toolu_done", name: "read", arguments: { path: "deploy.md" } },
+				{ type: "toolCall", id: "toolu_ask", name: "ask", arguments: question },
+			],
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_done",
+			toolName: "read",
+			content: [{ type: "text", text: "Deployment instructions" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: "toolu_ask",
+			toolName: "ask",
+			startedAt: "2026-09-30T00:00:00.000Z",
+		});
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-09-30T00:00:01.000Z",
+		});
+
+		const branch = sessionManager.getBranch();
+		const aborted = createInterruptedTurnAbortMessage(branch);
+		expect(aborted).toBeDefined();
+		for (const result of createInterruptedToolResults(branch)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(aborted!);
+		const context = sessionManager.buildSessionContext().messages;
+		expect(context).toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				content: expect.arrayContaining([
+					expect.objectContaining({
+						type: "toolCall",
+						id: "toolu_ask",
+						arguments: question,
+					}),
+				]),
+			}),
+		);
+		expect(context.filter(message => message.role === "toolResult" && message.toolCallId === "toolu_ask")).toEqual([
+			expect.objectContaining({
+				isError: true,
+				content: [expect.objectContaining({ text: expect.stringContaining("outcome is unknown") })],
+			}),
+		]);
+		expect(
+			context.filter(message => message.role === "toolResult" && message.toolCallId === "toolu_done"),
+		).toHaveLength(1);
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toBeUndefined();
 	});
 
 	it("reconstructs tool-call content even when stopReason is stop", () => {

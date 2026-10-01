@@ -10,7 +10,7 @@ import {
 	runAuthGatewayCommand,
 } from "../cli/auth-gateway-cli";
 import { authGatewayHelp as commandHelp } from "../cli/command-help";
-import { initTheme } from "../modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 export default class AuthGateway extends Command {
 	static description = commandHelp.description;
@@ -30,6 +30,9 @@ export default class AuthGateway extends Command {
 			description:
 				"Disable inbound bearer-token auth (serve). Useful when bound to loopback — any caller is allowed.",
 		}),
+		"trust-proxy-headers": Flags.boolean({
+			description: "Trust forwarded peer IP headers from a reverse proxy (serve); off by default.",
+		}),
 		strict: Flags.boolean({
 			description:
 				"For `check`: additionally probe each credential against its provider's chat-completion endpoint. Slower; consumes a tiny amount of quota per credential.",
@@ -39,6 +42,7 @@ export default class AuthGateway extends Command {
 	static examples = [
 		"# Boot the gateway against the configured broker\n  omp auth-gateway serve",
 		"# Boot on a non-default port\n  omp auth-gateway serve --bind=127.0.0.1:4000",
+		"# Trust client IP headers from a trusted reverse proxy\n  omp auth-gateway serve --trust-proxy-headers",
 		"# Print the gateway bearer token (creates one on first run)\n  omp auth-gateway token",
 		"# Rotate the gateway bearer token\n  omp auth-gateway token --regenerate",
 		"# Run on loopback without any bearer (anyone on this host can call)\n  omp auth-gateway serve --no-auth",
@@ -61,6 +65,7 @@ export default class AuthGateway extends Command {
 				bind: flags.bind,
 				regenerate: flags.regenerate,
 				noAuth: flags["no-auth"],
+				trustProxyHeaders: flags["trust-proxy-headers"],
 				strict: flags.strict,
 			},
 		};

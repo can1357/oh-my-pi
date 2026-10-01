@@ -1,1 +1,1 @@
-Output exceeded the available model context and was truncated
+Output: exceeded available model context → truncated.

@@ -14,9 +14,10 @@
  * estimate (`estimateInlineSavings`) so the two can never disagree.
  */
 
-import { countTokens } from "@oh-my-pi/pi-agent-core";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
 import contextStub from "../prompts/system/snapcompact-context-stub.md" with { type: "text" };
 import systemFramesNote from "../prompts/system/snapcompact-system-frames-note.md" with { type: "text" };
@@ -55,21 +56,19 @@ const MIN_TOOL_RESULT_TOKENS = 3000;
 /** Render only if imageTokens <= textTokens * SAVINGS_MARGIN. */
 const SAVINGS_MARGIN = 0.9;
 
-/** Count image blocks already present across all message contents. */
-function countContextImages(context: Context): number {
+/** Loose block-array view shared by live contexts and session-history estimates. */
+type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown }>;
+
+/** Count image blocks already present across message contents. */
+function countMessageImages(messages: readonly { content?: unknown }[]): number {
 	let count = 0;
-	for (const message of context.messages) {
-		const content = message.content;
-		if (typeof content === "string") continue;
-		for (const block of content) {
+	for (const message of messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const block of message.content as BlockViews) {
 			if (block.type === "image") count++;
 		}
 	}
 	return count;
-}
-
-function isTextContent(block: TextContent | ImageContent): block is TextContent {
-	return block.type === "text";
 }
 
 /** Image tokens must undercut text tokens by the margin to be worth rendering. */
@@ -136,12 +135,10 @@ function selectSystemPromptImageTarget(
 export interface InlineToolResultCandidate {
 	/** Stable identifier for rendering cache key and applying the swap. */
 	id: string;
-	/** Token count of the joined text blocks (0 for empty or image-carrying). */
+	/** Token count of all joined text blocks, including text beside images. */
 	textTokens: number;
-	/** Frames needed to render the text (0 = empty, below floor, image-carrying, or error). */
+	/** Frames needed to render the joined text (0 = empty or below floor). */
 	frames: number;
-	/** Already carries an image (screenshot etc.) — never re-imaged. */
-	hasImage: boolean;
 	/** Error tool results must stay text-only for provider API validation. */
 	isError?: boolean;
 }
@@ -185,7 +182,6 @@ export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
 		// remaining budget is skipped, not a stop — later smaller ones may fit.
 		for (let k = 0; k < input.toolResults.length - 1 && budget > 0; k++) {
 			const candidate = input.toolResults[k];
-			if (candidate.hasImage) continue;
 			if (candidate.isError) continue;
 			if (candidate.textTokens < MIN_TOOL_RESULT_TOKENS) continue;
 			if (candidate.frames === 0 || candidate.frames > budget) continue;
@@ -228,6 +224,47 @@ export interface InlineMessageView {
 	isError?: boolean;
 }
 
+interface BuiltInlineToolResultCandidate {
+	candidate: InlineToolResultCandidate;
+	text: string;
+}
+
+/**
+ * Build the exact same text payload and planning candidate for estimation and
+ * live transformation. Image blocks do not suppress co-resident text.
+ */
+function buildInlineToolResultCandidate(
+	toolCallId: string,
+	content: unknown,
+	messageIsError: boolean | undefined,
+	tokenizer: Tokenizer,
+	shape: snapcompact.Shape,
+): BuiltInlineToolResultCandidate {
+	const blocks: BlockViews = Array.isArray(content) ? (content as BlockViews) : [];
+	const textBlocks: string[] = [];
+	let sourceImageIndex = 0;
+	for (const block of blocks) {
+		if (block.type === "text" && typeof block.text === "string") {
+			textBlocks.push(block.text);
+		} else if (block.type === "image") {
+			sourceImageIndex++;
+			textBlocks.push(`[Source image ${sourceImageIndex} was attached here in the original tool result.]`);
+		}
+	}
+	const text = textBlocks.join("\n");
+	const textTokens = text.length > 0 ? tokenizer.countTokens(text) : 0;
+	const isError = messageIsError === true;
+	return {
+		candidate: {
+			id: toolCallId,
+			textTokens,
+			frames: !isError && textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
+			isError,
+		},
+		text,
+	};
+}
+
 export interface SnapcompactSavingsEstimate {
 	/** Frames only ship on models that accept image input. */
 	visionCapable: boolean;
@@ -258,9 +295,6 @@ export interface SnapcompactSavingsEstimate {
 	savedTokens: number;
 }
 
-/** Loose block-array view of unknown message content. */
-type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown }>;
-
 /**
  * Estimate what `SnapcompactInlineTransformer.transform` would save on the
  * NEXT request, given the session's live system prompt and message history.
@@ -282,35 +316,22 @@ export function estimateInlineSavings(input: {
 	}
 
 	const shape = snapcompact.resolveShape(model, options.shape);
-	let existingImages = 0;
-	for (const message of input.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content as BlockViews) {
-			if (block.type === "image") existingImages++;
-		}
-	}
+	const tokenizer = new Tokenizer(model);
+	const existingImages = countMessageImages(input.messages);
 	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
 
 	const candidates: InlineToolResultCandidate[] = [];
 	if (options.renderToolResults) {
 		for (const message of input.messages) {
 			if (message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
-			if (message.isError) continue;
-			const blocks: BlockViews = Array.isArray(message.content) ? (message.content as BlockViews) : [];
-			const hasImage = blocks.some(block => block.type === "image");
-			const text = hasImage
-				? ""
-				: blocks
-						.filter(block => block.type === "text" && typeof block.text === "string")
-						.map(block => block.text as string)
-						.join("\n");
-			const textTokens = text.length > 0 ? countTokens(text) : 0;
-			candidates.push({
-				id: message.toolCallId,
-				textTokens,
-				frames: textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
-				hasImage,
-			});
+			const built = buildInlineToolResultCandidate(
+				message.toolCallId,
+				message.content,
+				message.isError,
+				tokenizer,
+				shape,
+			);
+			candidates.push(built.candidate);
 		}
 	}
 
@@ -320,7 +341,7 @@ export function estimateInlineSavings(input: {
 		systemPromptTarget = selectSystemPromptImageTarget(input.systemPrompt, options.renderSystemPrompt);
 		if (systemPromptTarget) {
 			systemPromptCandidate = {
-				textTokens: countTokens(systemPromptTarget.text),
+				textTokens: tokenizer.countTokens(systemPromptTarget.text),
 				frames: snapcompact.frames(systemPromptTarget.text, { shape }),
 			};
 		}
@@ -396,13 +417,19 @@ export function estimateInlineSavings(input: {
 
 interface FrameCacheEntry {
 	hash: number | bigint;
+	/** Serialized shape the frames were rendered with; a shape change re-renders. */
+	shapeKey: string;
 	frames: ImageContent[];
+	/** Frame-sink generation the frames were minted under. */
+	generation: number | undefined;
 }
 
 /**
  * Stateless with respect to the model (passed per call, so mid-session model
  * switches re-resolve shape and budget); stateful only for the render caches,
- * which live as long as the session's Agent.
+ * which live as long as the session's Agent. `options` is re-read at the start
+ * of every {@link transform} call, so a live (getter-backed) view makes
+ * settings changes apply on the next request.
  */
 export class SnapcompactInlineTransformer {
 	/** Rendered tool-result frames keyed by toolCallId. */
@@ -412,15 +439,27 @@ export class SnapcompactInlineTransformer {
 	constructor(
 		private readonly options: SnapcompactInlineOptions,
 		private readonly onToolResultSavings?: SnapcompactSavingsSink,
+		private readonly frameSink?: SnapcompactFrameSink,
 	) {}
 
 	async transform(context: Context, model: Model): Promise<Context> {
+		// One consistent snapshot per request, even if settings change mid-transform.
+		const options: SnapcompactInlineOptions = {
+			renderSystemPrompt: this.options.renderSystemPrompt,
+			renderToolResults: this.options.renderToolResults,
+			shape: this.options.shape,
+		};
+		if (!options.renderToolResults) this.#toolCache.clear();
+		if (options.renderSystemPrompt === "none") this.#systemCache = undefined;
+		if (!options.renderToolResults && options.renderSystemPrompt === "none") return context;
 		// Vision gate: providers silently DROP images on text-only models —
 		// rendering would lose the content entirely.
 		if (!model.input.includes("image")) return context;
 
-		const shape = snapcompact.resolveShape(model, this.options.shape);
-		const budget = snapcompact.providerImageBudget(model.provider) - countContextImages(context);
+		const shape = snapcompact.resolveShape(model, options.shape);
+		const shapeKey = JSON.stringify(shape);
+		const tokenizer = new Tokenizer(model);
+		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
 		if (budget <= 0) return context;
 
 		const messages = [...context.messages];
@@ -430,38 +469,30 @@ export class SnapcompactInlineTransformer {
 		const candidates: InlineToolResultCandidate[] = [];
 		const targets = new Map<string, { index: number; message: ToolResultMessage; text: string }>();
 		const liveToolCallIds = new Set<string>();
-		if (this.options.renderToolResults) {
+		if (options.renderToolResults) {
 			for (let i = 0; i < messages.length; i++) {
 				const message = messages[i];
 				if (message.role !== "toolResult") continue;
 				liveToolCallIds.add(message.toolCallId);
-				// Don't re-image results that already carry images (screenshots etc.).
-				const hasImage = message.content.some(block => block.type === "image");
-				if (message.isError) continue;
-				const text = hasImage
-					? ""
-					: message.content
-							.filter(isTextContent)
-							.map(block => block.text)
-							.join("\n");
-				const textTokens = text.length > 0 ? countTokens(text) : 0;
-				candidates.push({
-					id: message.toolCallId,
-					textTokens,
-					frames: textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
-					hasImage,
-				});
-				targets.set(message.toolCallId, { index: i, message, text });
+				const built = buildInlineToolResultCandidate(
+					message.toolCallId,
+					message.content,
+					message.isError,
+					tokenizer,
+					shape,
+				);
+				candidates.push(built.candidate);
+				targets.set(message.toolCallId, { index: i, message, text: built.text });
 			}
 		}
 
 		let systemPromptTarget: SystemPromptImageTarget | undefined;
 		let systemPromptCandidate: InlineSystemPromptCandidate | undefined;
-		if (this.options.renderSystemPrompt !== "none") {
-			systemPromptTarget = selectSystemPromptImageTarget(context.systemPrompt, this.options.renderSystemPrompt);
+		if (options.renderSystemPrompt !== "none") {
+			systemPromptTarget = selectSystemPromptImageTarget(context.systemPrompt, options.renderSystemPrompt);
 			if (systemPromptTarget) {
 				systemPromptCandidate = {
-					textTokens: countTokens(systemPromptTarget.text),
+					textTokens: tokenizer.countTokens(systemPromptTarget.text),
 					frames: snapcompact.frames(systemPromptTarget.text, { shape }),
 				};
 			}
@@ -469,7 +500,7 @@ export class SnapcompactInlineTransformer {
 
 		const userIndex = messages.findIndex(message => message.role === "user");
 		const plan = planInlineSwaps({
-			options: this.options,
+			options,
 			shape,
 			budget,
 			toolResults: candidates,
@@ -482,8 +513,19 @@ export class SnapcompactInlineTransformer {
 		for (const swap of plan.toolResults) {
 			const target = targets.get(swap.id);
 			if (!target) continue;
-			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape);
-			messages[target.index] = { ...target.message, content: [{ type: "text", text: toolResultNote }, ...frames] };
+			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
+			let sourceImageIndex = 0;
+			for (const block of target.message.content) {
+				if (block.type !== "image") continue;
+				sourceImageIndex++;
+				content.push({
+					type: "text",
+					text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
+				});
+				content.push(block);
+			}
+			messages[target.index] = { ...target.message, content };
 			changed = true;
 			savings.push({
 				toolCallId: swap.id,
@@ -491,7 +533,7 @@ export class SnapcompactInlineTransformer {
 			});
 		}
 		if (savings.length > 0) this.onToolResultSavings?.(savings, model);
-		if (this.options.renderToolResults) {
+		if (options.renderToolResults) {
 			// Drop cache entries for tool calls no longer in the context
 			// (compacted away) so the cache stays bounded by live history.
 			for (const key of this.#toolCache.keys()) {
@@ -503,13 +545,18 @@ export class SnapcompactInlineTransformer {
 		if (plan.systemPrompt && userIndex >= 0 && systemPromptTarget) {
 			const hash = Bun.hash(systemPromptTarget.text);
 			let cached = this.#systemCache;
-			if (!cached || cached.hash !== hash) {
+			const generation = this.frameSink?.generation;
+			if (!cached || cached.hash !== hash || cached.shapeKey !== shapeKey || cached.generation !== generation) {
 				cached = {
 					hash,
-					frames: await snapcompact.renderMany(systemPromptTarget.text, {
-						shape,
-						maxFrames: MAX_SYSTEM_PROMPT_FRAMES,
-					}),
+					shapeKey,
+					generation,
+					frames:
+						(await this.frameSink?.framesFor(systemPromptTarget.text, shape, MAX_SYSTEM_PROMPT_FRAMES)) ??
+						(await snapcompact.renderMany(systemPromptTarget.text, {
+							shape,
+							maxFrames: MAX_SYSTEM_PROMPT_FRAMES,
+						})),
 				};
 				this.#systemCache = cached;
 			}
@@ -534,12 +581,18 @@ export class SnapcompactInlineTransformer {
 		key: string,
 		text: string,
 		shape: snapcompact.Shape,
+		shapeKey: string,
 	): Promise<ImageContent[]> {
 		const hash = Bun.hash(text);
+		const generation = this.frameSink?.generation;
 		const cached = cache.get(key);
-		if (cached && cached.hash === hash) return cached.frames;
-		const frames = await snapcompact.renderMany(text, { shape });
-		cache.set(key, { hash, frames });
+		if (cached && cached.hash === hash && cached.shapeKey === shapeKey && cached.generation === generation) {
+			return cached.frames;
+		}
+		// A frame sink defers rasterization until a provider actually fetches
+		// the frame URL — the cache then holds tiny placeholders, not pixels.
+		const frames = (await this.frameSink?.framesFor(text, shape)) ?? (await snapcompact.renderMany(text, { shape }));
+		cache.set(key, { hash, shapeKey, frames, generation });
 		return frames;
 	}
 }

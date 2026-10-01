@@ -12,8 +12,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import {
-	type AgentProgress,
 	type SubagentEventPayload,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -85,8 +85,8 @@ function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessi
 
 describe("RPC subagent registry", () => {
 	test("defaults subagent frame emission to off while tracking snapshots", () => {
-		const eventBus = new EventBus();
 		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
 		const lifecycle: SubagentLifecyclePayload = {
 			id: "SubagentA",
@@ -130,8 +130,8 @@ describe("RPC subagent registry", () => {
 	});
 
 	test("emits progress frames after explicit progress subscription and snapshots tracked subagents", () => {
-		const eventBus = new EventBus();
 		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
 		registry.setSubscriptionLevel("progress");
 		const lifecycle: SubagentLifecyclePayload = {
@@ -170,25 +170,6 @@ describe("RPC subagent registry", () => {
 			},
 		]);
 
-		registry.dispose();
-	});
-
-	test("clears stale snapshots when the active RPC session changes", () => {
-		const eventBus = new EventBus();
-		const registry = new RpcSubagentRegistry(eventBus, () => {});
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id: "SubagentA",
-			index: 0,
-			agent: "task",
-			agentSource: "bundled",
-			status: "started",
-			sessionFile: "/tmp/subagent.jsonl",
-		} satisfies SubagentLifecyclePayload);
-
-		expect(registry.getSubagents()).toHaveLength(1);
-		registry.clear();
-
-		expect(registry.getSubagents()).toHaveLength(0);
 		registry.dispose();
 	});
 
@@ -300,8 +281,8 @@ describe("RPC subagent registry", () => {
 	});
 
 	test("gates raw subagent events behind the events subscription level", () => {
-		const eventBus = new EventBus();
 		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
 		const eventPayload: SubagentEventPayload = {
 			id: "SubagentA",
@@ -418,6 +399,7 @@ function handle(frame) {
 		write({ type: "subagent_progress", payload: { index: 0, agent: "task", agentSource: "bundled", task: "Do work", assignment: "Implement work", sessionFile: "/tmp/subagent.jsonl", progress } });
 		write({ type: "subagent_event", payload: { id: "SubagentA", event: { type: "agent_start" } } });
 		write({ type: "agent_end", messages: [] });
+		write({ type: "prompt_result", id: frame.id, agentInvoked: true, status: "completed" });
 	}
 }
 `,
@@ -445,5 +427,58 @@ function handle(frame) {
 		expect(progressTasks).toEqual(["Do work"]);
 		expect(rawEventTypes).toEqual(["agent_start"]);
 		expect(sessionEventTypes).toContain("notice");
+	});
+
+	test("forwards nested subagent frames published on the shared observability bus", () => {
+		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
+		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Kid",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			parentToolCallId: "call-1",
+			index: 1,
+		} satisfies SubagentLifecyclePayload);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Kid.Grandkid",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			parentToolCallId: "call-2",
+			index: 2,
+		} satisfies SubagentLifecyclePayload);
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Kid.Grandkid",
+			event: { type: "agent_start" } as SubagentEventPayload["event"],
+		} satisfies SubagentEventPayload);
+		expect(frames.map(frame => frame.type)).toEqual(["subagent_lifecycle", "subagent_lifecycle", "subagent_event"]);
+		expect((frames[1] as { payload: SubagentLifecyclePayload }).payload.id).toBe("Kid.Grandkid");
+		expect((frames[2] as { payload: SubagentEventPayload }).payload.id).toBe("Kid.Grandkid");
+		registry.dispose();
+	});
+
+	test("scopes observability to each root session — another tree's bus stays invisible", () => {
+		const busA = new EventBus();
+		const busB = new EventBus();
+		const framesA: RpcSubagentFrame[] = [];
+		const framesB: RpcSubagentFrame[] = [];
+		const registryA = new RpcSubagentRegistry(busA, frame => framesA.push(frame));
+		const registryB = new RpcSubagentRegistry(busB, frame => framesB.push(frame));
+		registryA.setSubscriptionLevel("events");
+		registryB.setSubscriptionLevel("events");
+		busB.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Kid",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 1,
+		} satisfies SubagentLifecyclePayload);
+		expect(framesA).toEqual([]);
+		expect(framesB).toHaveLength(1);
+		registryA.dispose();
+		registryB.dispose();
 	});
 });

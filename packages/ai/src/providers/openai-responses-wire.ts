@@ -791,7 +791,7 @@ export interface Response {
 	 * When this parameter is set, the response body will include the `service_tier`
 	 * utilized.
 	 */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/**
 	 * The status of the response generation. One of `completed`, `failed`,
 	 * `in_progress`, `cancelled`, `queued`, or `incomplete`.
@@ -3013,6 +3013,7 @@ export type ResponseInputItem =
 	| ResponseCustomToolCallOutput
 	| ResponseCustomToolCall
 	| ResponseInputItem.CompactionTrigger
+	| ResponseInputItem.ConfigurationUpdate
 	| ResponseInputItem.ItemReference;
 export declare namespace ResponseInputItem {
 	/**
@@ -3598,6 +3599,20 @@ export declare namespace ResponseInputItem {
 		 * The type of the item. Always `compaction_trigger`.
 		 */
 		type: "compaction_trigger";
+	}
+	/**
+	 * Changes reasoning effort for subsequent responses without touching the
+	 * request-level `reasoning.effort` (GPT-6 Astra). Must not be adjacent to
+	 * another `configuration_update`.
+	 */
+	interface ConfigurationUpdate {
+		/**
+		 * The type of the item. Always `configuration_update`.
+		 */
+		type: "configuration_update";
+		reasoning: {
+			effort: string;
+		};
 	}
 	/**
 	 * An internal identifier for an item to reference.
@@ -5971,7 +5986,7 @@ export interface ResponseCreateParamsBase {
 	 * When this parameter is set, the response body will include the `service_tier`
 	 * utilized.
 	 */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/**
 	 * Whether to store the generated model response for later retrieval via API.
 	 */

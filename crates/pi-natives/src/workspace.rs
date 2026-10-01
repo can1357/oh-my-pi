@@ -7,7 +7,7 @@
 //! walker.
 
 use std::{
-	collections::HashSet,
+	collections::{BTreeMap, BTreeSet, HashSet},
 	path::{Path, PathBuf},
 	sync::LazyLock,
 };
@@ -88,6 +88,31 @@ struct WorkspaceConfig {
 	collect_agents_md: bool,
 }
 
+#[derive(Default)]
+struct WorkspaceResults {
+	entries:         BTreeMap<String, GlobMatch>,
+	agents_md_files: BTreeSet<String>,
+	truncated:       bool,
+}
+
+impl WorkspaceResults {
+	fn insert_entry(&mut self, entry: GlobMatch) {
+		self.entries.entry(entry.path.clone()).or_insert(entry);
+		if self.entries.len() > MAX_ENTRIES {
+			self.entries.pop_last();
+			self.truncated = true;
+		}
+	}
+
+	fn insert_agents_md(&mut self, path: String) {
+		self.agents_md_files.insert(path);
+		if self.agents_md_files.len() > AGENTS_MD_LIMIT {
+			self.agents_md_files.pop_last();
+			self.truncated = true;
+		}
+	}
+}
+
 fn build_workspace_walk_request(config: &WorkspaceConfig) -> pi_walker::WalkRequest {
 	pi_walker::WalkRequest::new(config.root.clone())
 		.hidden(config.include_hidden)
@@ -147,8 +172,7 @@ fn collect_agents_md_in_directory(
 	config: &WorkspaceConfig,
 	directory: &Path,
 	directory_depth: usize,
-	entries: &mut Vec<GlobMatch>,
-	agents_md_files: &mut Vec<String>,
+	results: &mut WorkspaceResults,
 ) {
 	if !config.collect_agents_md {
 		return;
@@ -162,76 +186,55 @@ fn collect_agents_md_in_directory(
 	}
 	let tree_depth = directory_depth + 1;
 	if tree_depth <= config.max_depth {
-		entries.push(entry.clone());
+		results.insert_entry(entry.clone());
 	}
 	// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir AGENTS.md
 	// is depth 1, and so on. We only surface files in depth 1..=4.
 	if (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&directory_depth) {
-		agents_md_files.push(entry.path);
+		results.insert_agents_md(entry.path);
 	}
-}
-
-fn sort_dedup_entries(entries: &mut Vec<GlobMatch>) {
-	entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-	entries.dedup_by(|a, b| a.path == b.path);
-}
-
-fn sort_dedup_paths(paths: &mut Vec<String>) {
-	paths.sort_unstable();
-	paths.dedup();
 }
 
 fn run_list_workspace(
 	config: WorkspaceConfig,
 	ct: task::CancelToken,
 ) -> Result<ListWorkspaceResult> {
-	let mut entries = Vec::new();
-	let mut agents_md_files = Vec::new();
-	collect_agents_md_in_directory(&config, &config.root, 0, &mut entries, &mut agents_md_files);
-
-	let outcome = build_workspace_walk_request(&config)
-		.collect_with_heartbeat(|| ct.heartbeat())
+	let mut results = WorkspaceResults::default();
+	collect_agents_md_in_directory(&config, &config.root, 0, &mut results);
+	build_workspace_walk_request(&config)
+		.for_each_entry_with_heartbeat(
+			|| ct.heartbeat(),
+			|entry| {
+				let file_type = iofs::from_walker_file_type(entry.file_type);
+				if is_excluded_workspace_entry(entry.relative_path, file_type) {
+					return Ok(pi_walker::WalkDecision::SkipDescend);
+				}
+				if file_type == FileType::Dir {
+					collect_agents_md_in_directory(
+						&config,
+						&entry.absolute_path,
+						entry.depth,
+						&mut results,
+					);
+				}
+				if entry.depth <= config.max_depth {
+					results.insert_entry(GlobMatch {
+						path: entry.relative_path.to_owned(),
+						file_type,
+						mtime: entry.mtime,
+						size: entry.size,
+					});
+				}
+				Ok(pi_walker::WalkDecision::Include)
+			},
+			|_| Ok(pi_walker::WalkDecision::Include),
+		)
 		.map_err(iofs::map_walker_error)?;
 
-	for entry in outcome.entries {
-		let file_type = iofs::from_walker_file_type(entry.file_type);
-		if is_excluded_workspace_entry(&entry.path, file_type) {
-			continue;
-		}
-
-		let entry_depth = entry.depth();
-		if file_type == FileType::Dir {
-			let directory = entry.absolute_path(&config.root);
-			collect_agents_md_in_directory(
-				&config,
-				&directory,
-				entry_depth,
-				&mut entries,
-				&mut agents_md_files,
-			);
-		}
-
-		if entry_depth <= config.max_depth {
-			entries.push(entry.into());
-		}
-	}
-
-	sort_dedup_entries(&mut entries);
-	sort_dedup_paths(&mut agents_md_files);
-
-	let entries_truncated = entries.len() > MAX_ENTRIES;
-	if entries_truncated {
-		entries.truncate(MAX_ENTRIES);
-	}
-	let agents_md_truncated = agents_md_files.len() > AGENTS_MD_LIMIT;
-	if agents_md_truncated {
-		agents_md_files.truncate(AGENTS_MD_LIMIT);
-	}
-
 	Ok(ListWorkspaceResult {
-		entries,
-		agents_md_files,
-		truncated: entries_truncated || agents_md_truncated,
+		entries:         results.entries.into_values().collect(),
+		agents_md_files: results.agents_md_files.into_iter().collect(),
+		truncated:       results.truncated,
 	})
 }
 
@@ -273,4 +276,48 @@ pub fn list_workspace(options: ListWorkspaceOptions<'_>) -> task::Promise<ListWo
 			ct,
 		)
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn file(path: String) -> GlobMatch {
+		GlobMatch { path, file_type: FileType::File, mtime: None, size: None }
+	}
+
+	#[test]
+	fn workspace_entry_cap_deduplicates_and_keeps_late_lexical_winners() {
+		let mut results = WorkspaceResults::default();
+		for index in (1..=MAX_ENTRIES).rev() {
+			let path = format!("{index:06}");
+			results.insert_entry(file(path.clone()));
+			results.insert_entry(file(path));
+		}
+		assert!(!results.truncated);
+		results.insert_entry(file("000000".to_owned()));
+		assert!(results.truncated);
+		assert_eq!(results.entries.len(), MAX_ENTRIES);
+		assert_eq!(results.entries.first_key_value().unwrap().0, "000000");
+		assert_eq!(results.entries.last_key_value().unwrap().0, "099999");
+		results.insert_entry(file("zzzzzz".to_owned()));
+		assert_eq!(results.entries.len(), MAX_ENTRIES);
+		assert_eq!(results.entries.last_key_value().unwrap().0, "099999");
+	}
+
+	#[test]
+	fn workspace_agents_cap_deduplicates_and_keeps_late_lexical_winners() {
+		let mut results = WorkspaceResults::default();
+		for index in (1..=AGENTS_MD_LIMIT).rev() {
+			let path = format!("{index:03}/AGENTS.md");
+			results.insert_agents_md(path.clone());
+			results.insert_agents_md(path);
+		}
+		assert!(!results.truncated);
+		results.insert_agents_md("000/AGENTS.md".to_owned());
+		assert!(results.truncated);
+		assert_eq!(results.agents_md_files.len(), AGENTS_MD_LIMIT);
+		assert_eq!(results.agents_md_files.first().unwrap(), "000/AGENTS.md");
+		assert_eq!(results.agents_md_files.last().unwrap(), "199/AGENTS.md");
+	}
 }

@@ -1,42 +1,5 @@
-**Tasks referenced by verbatim content string, NEVER an auto-generated ID — no "task-1"/"task-N" exists. Pass the content text in the `task` field.**
-
-On each completion the earliest still-open task (in phase order) auto-promotes to `in_progress`.
-Completing tasks out of phase order can move this pointer **back** to an earlier phase — expected; completed tasks are never reverted.
-
-## Operations
-
-|`op`|Required fields|Effect|
-|---|---|---|
-|`init`|`list: [{phase, items: string[]}]`|Initialize full list (replaces existing)|
-|`init`|`items: string[]`|Flattened single-phase init|
-|`start`|`task`|Mark in progress|
-|`done`|`task` or `phase`|Mark completed|
-|`drop`|`task` or `phase`|Mark abandoned|
-|`block`|`task` or `phase`, optional `reason`|Mark **blocked** — open but waiting on external input; excluded from the stop-time incomplete-todo reminder|
-|`unblock`|`task` or `phase`|Return a blocked task to `pending`|
-|`rm`|`task` or `phase` (optional)|Remove task or phase; omit both to clear|
-|`append`|`phase`, `items: string[]`|Append tasks to `phase`; lazily creates phase|
-|`view`|—|Read-only: echo list|
-
-## Anatomy
-- **Task content**: 5–10 words; what, not how. Unique identifier.
-- **Phase name**: short noun phrase (e.g. `Foundation`, `Auth`, `Verification`). Unique identifier. NEVER prefix `1.`, `A)`, `Phase 1:`.
-
-## Rules
-- Mark tasks done immediately after finishing. Complete phases in order.
-- NEVER make a todo call your turn's only tool call — batch it with the real work: `init` with the first reads/edits, each `done`/`start` with the next action. Solo todo turns waste a round trip.
-- Waiting on something you can't act on (a user decision, another agent, an external service)? `block` the task (optional `reason`) — it stays in the tracker but won't trip the stop reminder; `unblock` when it's actionable again. If the blocker is itself agent-actionable, `append` an unblocking task instead.
-- Keep `task`/`phase` strings stable once introduced.
-- Lost the exact task text? `view` echoes the list — NEVER guess from memory.
-
-## When to create a list
-- Task requires 3+ distinct steps
-- User explicitly requests one
-- User provides a set of tasks
-- New instructions arrive mid-task — capture before proceeding
-
-<critical>
-User hands you a multi-step plan — phased todo, numbered/bulleted checklist, or "N bugs/items/tasks":
-- You MUST `init` the list with EVERY item as its own task before working.
-- Enumerate all; NEVER summarize into fewer tasks, sample "the important ones", drop items, or track the rest from memory.
-</critical>
+Tasks identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; lost text: view, NEVER guess.
+Before work, init for 3+ steps, requested task sets, or new instructions. MUST list EVERY user item separately (phased/numbered/bulleted/N); NEVER omit or remember leftovers.
+After successful mutation: no active means earliest pending starts (phase order); multiple active means only earliest stays. Blocked NEVER starts automatically; unblock returns pending. Done out of order may rewind pointer but NEVER reopen completed. Mark done immediately; follow phase order.
+External waits (user/agent/service): block with optional reason suppresses stop reminder, starts next pending. Unblock when actionable; append a clearing task for agent-actionable blocker.
+NEVER call todo alone: init with first work; done/start with next action.

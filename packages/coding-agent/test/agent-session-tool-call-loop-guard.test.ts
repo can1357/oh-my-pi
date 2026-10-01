@@ -30,7 +30,7 @@ describe("AgentSession tool-call loop guard", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-tool-call-loop-guard-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 	});
 
 	afterEach(async () => {
@@ -57,7 +57,7 @@ describe("AgentSession tool-call loop guard", () => {
 			convertToLlm,
 			streamFn: (_model, context) => {
 				contexts.push(context);
-				const toolCallTurn = callCount < 5;
+				const toolCallTurn = callCount < 2;
 				const toolCallId = `tc-${callCount}`;
 				callCount++;
 				const message: AssistantMessage = toolCallTurn
@@ -93,8 +93,8 @@ describe("AgentSession tool-call loop guard", () => {
 			"compaction.enabled": false,
 			"todo.enabled": false,
 			"model.toolCallLoopGuard.enabled": true,
-			"model.toolCallLoopGuard.threshold": 5,
-			"model.toolCallLoopGuard.exemptTools": ["hub"],
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.exemptTools": ["wait"],
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		session = new AgentSession({
@@ -108,9 +108,9 @@ describe("AgentSession tool-call loop guard", () => {
 		await session.prompt("run checks");
 		await session.waitForIdle();
 
-		expect(contexts).toHaveLength(6);
-		expect(JSON.stringify(contexts[5]!.messages)).toContain("tool_call_loop_detected");
-		expect(JSON.stringify(contexts[5]!.messages)).toContain("1263 passed, 4 skipped");
+		expect(contexts).toHaveLength(3);
+		expect(JSON.stringify(contexts[2]!.messages)).toContain("tool_call_loop_detected");
+		expect(JSON.stringify(contexts[2]!.messages)).toContain("1263 passed, 4 skipped");
 		const redirects = session.agent.state.messages.filter(
 			(message): message is CustomMessage =>
 				message.role === "custom" && message.customType === "tool-call-loop-redirect",

@@ -6,9 +6,22 @@
 common --enable_platform_specific_config
 
 # Hermetic-ish action env: no host env leaks into action keys. Build scripts
-# that need host tools (cmake for audiopus_sys' bundled opus) get an explicit
+# that need host tools (cmake for opusic-sys' bundled Opus) get an explicit
 # PATH through crate annotations in MODULE.bazel.
 build --incompatible_strict_action_env
+
+# Third-party crate resolution (rules_rust crate_universe) shells out to
+# `cargo-bazel splice`, which runs `cargo metadata` + fetches every git/registry
+# dep. Two knobs matter on cold caches:
+#   1. CARGO_BAZEL_ISOLATED=0 — reuse the host's ~/.cargo registry/index instead
+#      of building a throwaway cargo home per invocation. Without this, every
+#      splice re-clones the entire crates.io index (~1 GiB, minutes on cold DNS).
+#   2. CARGO_BAZEL_TIMEOUT=1800 — cargo-bazel honors this to raise Bazel's
+#      default `repository_ctx.execute` 600s cap. Fresh machines / ephemeral
+#      runners with git-hosted forks (brush, uutils) blow past 600s and abort
+#      with `Timed out` (rules_rust common_utils.bzl:61) before we can help.
+common --repo_env=CARGO_BAZEL_ISOLATED=0
+common --repo_env=CARGO_BAZEL_TIMEOUT=1800
 
 # NOTE: rust pipelined_compilation stays OFF: handing dependents rmeta-only
 # crates breaks `rust_test(crate = ...)` harness compiles whose deps export
@@ -19,17 +32,42 @@ build --@rules_rust//rust/settings:error_format=human
 # Generated toolchains carry target_settings requiring the nightly channel.
 build --@rules_rust//rust/toolchain/channel=nightly
 
+# Pin the macOS deployment target for target and exec links. Unset, the
+# autodetected cc toolchain uses the selected SDK version: 10.11 under Command
+# Line Tools but 27.0 under full Xcode 27 (xcode-27 runners), which would lock
+# the addon to macOS 27+. 12.0 matches the Foundation Models bridge's Swift
+# target.
+build:macos --macos_minimum_os=12.0
+build:macos --host_macos_minimum_os=12.0
+# rustc strips Apple binaries with its bundled rust-objcopy, which leaves
+# minos >= 12.0 dylibs with a LINKEDIT string pool dyld rejects ("mis-aligned
+# LINKEDIT string pool"); rustc reports that for every proc-macro as E0463
+# "can't find crate". Strip at link time instead (-S drops debug info, the
+# opt-mode `strip=debuginfo` equivalent). Exec links (proc-macros, build
+# scripts) are covered here; the shipped addon in bazel/defs.bzl.
+build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cstrip=none
+build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wl,-S
+
 
 # --- Rust validation (replaces cargo clippy/nextest in CI) --------------------
 # Mirrors cargo semantics: crates with `[lints] workspace = true` (pi-ast,
 # pi-iso, pi-natives, pi-shell, pi-voice, pi-walker) get the strict workspace
 # policy
 # (clippy-strict; bazel/clippy.bazelrc is generated from Cargo.toml); everything
-# else gets default clippy + -Dwarnings (clippy).
+# else gets default clippy + -Dwarnings (clippy). pi-builtins allows every
+# clippy group in its manifest (ported brush/uutils/jaq code) while keeping
+# rustc warnings at zero; the aspect ignores Cargo `[lints]`, so clippy-ported
+# re-states those allows on top of -Dwarnings.
 build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=+clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 build:clippy-strict --config=clippy
+build:clippy-ported --config=clippy
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::all
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::pedantic
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::nursery
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::cargo
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aunfulfilled_lint_expectations
 import %workspace%/bazel/clippy.bazelrc
 # rustfmt check via aspect, against the workspace rustfmt.toml.
 build:rustfmt --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect

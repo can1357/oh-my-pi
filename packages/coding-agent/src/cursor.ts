@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-	AgentEvent,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
+import {
+	type AgentEvent,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	joinAdditionalContext,
+	TOOL_RESULT_ADDITIONAL_CONTEXT,
+	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	CursorMcpCall,
@@ -18,6 +21,8 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import {
+	cursorRawReadPath,
+	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
 	piJoinPath,
@@ -25,13 +30,19 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
-} from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+	shellTimeoutSeconds,
+} from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
-import type { ApprovalMode } from "./tools/approval";
-import { resolveApproval } from "./tools/approval";
-import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
-import type { TodoPhase, TodoStatus } from "./tools/todo";
+import { resolveApproval, resolveApprovalFromContext } from "./tools/approval";
+import {
+	confineToWorkspace,
+	resolveReadPathAsync,
+	resolveToCwd,
+	splitPathAndSelPreferringLiteral,
+} from "./tools/path-utils";
+import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -86,15 +97,15 @@ interface CursorExecBridgeOptions {
 	 *
 	 * This is a grant, not a policy: it answers "did the session hand this
 	 * channel a file-writing tool", which callers derive from their own roster
-	 * before any bridge-specific rewriting. The primary Cursor session moves
-	 * `edit` out of {@link tools} and serves it through
-	 * {@link getEditReplaceTool}, so reading the map here would deny an
-	 * edit-only session. Defaults to allowed
-	 * to preserve the primary agent's behavior; callers with a restricted tool
-	 * set (advisors) opt out. The user's approval policy is resolved separately,
-	 * per call.
+	 * before any bridge-specific rewriting. A resolver keeps that answer current
+	 * when runtime tool selection upgrades a restricted transport. The primary
+	 * Cursor session moves `edit` out of {@link tools} and serves it through
+	 * {@link getEditReplaceTool}, so reading the map here would deny an edit-only
+	 * session. Defaults to allowed to preserve the primary agent's behavior;
+	 * callers with a restricted tool set (advisors) opt out. The user's approval
+	 * policy is resolved separately, per call.
 	 */
-	allowDirectFileMutation?: boolean;
+	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor
 	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
@@ -120,7 +131,12 @@ interface CursorExecBridgeOptions {
 	 * either field silently escapes the approval gate that every other call
 	 * goes through.
 	 */
-	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): CursorBridgeTool | undefined;
+	createGrepTool?(options: {
+		context?: number;
+		contextBefore?: number;
+		contextAfter?: number;
+		totalMatchLimit?: number;
+	}): CursorBridgeTool | undefined;
 	/**
 	 * The session's live MCP connections, for Cursor's resource frames.
 	 *
@@ -219,6 +235,35 @@ function createToolResultMessage(
 	};
 }
 
+/**
+ * Per-call passive-context collector for tools the bridge executes directly.
+ * The agent loop never sees these calls, so the bridge installs its own
+ * `addAdditionalContext` sink and attaches what the call reported to the
+ * result message; `Agent` injects it after the buffered Cursor results.
+ */
+function createBridgeToolContext(options: CursorExecBridgeOptions): {
+	context: AgentToolContext | undefined;
+	attach(message: ToolResultMessage): ToolResultMessage;
+} {
+	const reported: string[] = [];
+	const base = options.getToolContext?.();
+	return {
+		context: base && {
+			...base,
+			addAdditionalContext: (value: string) => {
+				reported.push(value);
+			},
+		},
+		attach: message => {
+			const additionalContext = joinAdditionalContext(reported);
+			if (additionalContext !== undefined) {
+				(message as ToolResultWithAdditionalContext)[TOOL_RESULT_ADDITIONAL_CONTEXT] = additionalContext;
+			}
+			return message;
+		},
+	};
+}
+
 function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
@@ -239,7 +284,11 @@ async function executeTool(
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
 
-	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args });
+	// Same rule as synthesizeCursorExecToolCall: optional kwargs must be absent,
+	// not `undefined`, or ArkType validation rejects the call.
+	const toolArgs = omitUndefinedArgs(args);
+
+	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: toolArgs });
 
 	let result: AgentToolResult<unknown>;
 	let isError = false;
@@ -254,19 +303,20 @@ async function executeTool(
 					type: "tool_execution_update",
 					toolCallId,
 					toolName,
-					args,
+					args: toolArgs,
 					partialResult: sanitizedResult,
 				});
 			}
 		: undefined;
 
+	const bridgeContext = createBridgeToolContext(options);
 	try {
 		result = await tool.execute(
 			toolCallId,
-			args as Record<string, unknown>,
+			toolArgs as Record<string, unknown>,
 			undefined,
 			onUpdate,
-			options.getToolContext?.(),
+			bridgeContext.context,
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -281,7 +331,12 @@ async function executeTool(
 	};
 	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result: sanitizedFinalResult, isError });
 
-	return createToolResultMessage(toolCallId, toolName, result, isError);
+	return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
+}
+
+function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
+	const grant = options.allowDirectFileMutation;
+	return typeof grant === "function" ? grant() : grant !== false;
 }
 
 /**
@@ -293,15 +348,12 @@ async function executeTool(
  * proceed, or the refusal text to answer with.
  */
 function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
-	const context = options.getToolContext?.();
-	const settings = context?.settings;
-	const approvalMode: ApprovalMode =
-		context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(options.getToolContext?.());
 	const approval = resolveApproval(
 		{ name: toolName, approval: "write" },
 		{ path: pathArg },
 		approvalMode,
-		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+		userPolicies,
 	);
 	if (approval.policy === "allow") return null;
 	return approval.policy === "deny"
@@ -312,7 +364,7 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
 	const toolName = "delete";
 
-	if (options.allowDirectFileMutation === false) {
+	if (!allowsDirectFileMutation(options)) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
@@ -348,7 +400,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 
 		const sizeText = fileStat.size ? ` (${fileStat.size} bytes)` : "";
 		const message = `Deleted ${pathArg}${sizeText}`;
-		result = { content: [{ type: "text", text: message }], details: {} };
+		result = { content: [{ type: "text", text: message }], details: { fileSize: fileStat.size } };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -357,6 +409,43 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 
 	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result, isError });
 	return createToolResultMessage(toolCallId, toolName, result, isError);
+}
+
+async function resolveCursorReadOffset(
+	options: CursorExecBridgeOptions,
+	readPath: string,
+	offset?: number,
+): Promise<number | undefined> {
+	if (offset === undefined || offset >= 0) return offset;
+	try {
+		const cwd = options.getCwd?.() ?? options.cwd;
+		const { path: filePath } = await splitPathAndSelPreferringLiteral(readPath, cwd);
+		const absolutePath = await resolveReadPathAsync(filePath, cwd);
+		const handle = await fs.promises.open(absolutePath, "r");
+		try {
+			const stat = await handle.stat();
+			if (!stat.isFile()) return offset;
+			const chunk = Buffer.allocUnsafe(Math.min(stat.size, 64 * 1024));
+			let lines = stat.size > 0 ? 1 : 0;
+			let position = 0;
+			let endsWithNewline = false;
+			while (position < stat.size) {
+				const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, stat.size - position), position);
+				if (bytesRead === 0) break;
+				for (let i = 0; i < bytesRead; i++) {
+					if (chunk[i] === 10) lines++;
+				}
+				endsWithNewline = chunk[bytesRead - 1] === 10;
+				position += bytesRead;
+			}
+			if (endsWithNewline) lines--;
+			return Math.max(1, lines + Math.floor(offset) + 1);
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		return offset;
+	}
 }
 
 function decodeToolCallId(toolCallId?: string): string {
@@ -436,7 +525,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const composed = piReadPath(args.path, args.offset, args.limit);
+		const composed = piReadPath(
+			args.path,
+			await resolveCursorReadOffset(this.options, args.path, args.offset),
+			args.limit,
+		);
 		// A present `limit: 0` asks for zero lines; no selector expresses that.
 		if (composed === null) {
 			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
@@ -460,12 +553,22 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
-			pattern: args.pattern,
-			path: searchPath,
-			case: args.caseInsensitive === true ? false : undefined,
-			skip: piGrepSkip(args.offset),
+		const scoped = this.options.createGrepTool?.({
+			contextBefore: args.contextBefore ?? args.context ?? 0,
+			contextAfter: args.contextAfter ?? args.context ?? 0,
 		});
+		const toolResultMessage = await executeTool(
+			this.options,
+			"grep",
+			toolCallId,
+			{
+				pattern: args.pattern,
+				path: searchPath,
+				case: args.caseInsensitive === true ? false : undefined,
+				skip: piGrepSkip(args.offset),
+			},
+			scoped,
+		);
 		return toolResultMessage;
 	}
 
@@ -487,7 +590,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async shell(args: Parameters<NonNullable<ICursorExecHandlers["shell"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+		const timeoutSeconds = shellTimeoutSeconds(args.timeout);
 		const toolResultMessage = await executeTool(this.options, "bash", toolCallId, {
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
@@ -508,12 +611,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
-		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
-		const toolArgs: Record<string, unknown> = {
+		const timeoutSeconds = shellTimeoutSeconds(args.timeout);
+		const toolArgs = omitUndefinedArgs({
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
 			timeout: timeoutSeconds,
-		};
+		});
 
 		this.options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: toolArgs });
 
@@ -559,8 +662,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			canStreamSanitizedDelta = false;
 		};
 
+		const bridgeContext = createBridgeToolContext(this.options);
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, this.options.getToolContext?.());
+			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, bridgeContext.context);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);
@@ -594,7 +698,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			result: sanitizedFinalResult,
 			isError,
 		});
-		return createToolResultMessage(toolCallId, toolName, result, isError);
+		return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 	}
 
 	async diagnostics(args: Parameters<NonNullable<ICursorExecHandlers["diagnostics"]>>[0]) {
@@ -623,14 +727,14 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async piRead(call: Parameters<NonNullable<ICursorExecHandlers["piRead"]>>[0]) {
 		const { path: readPath, offset, limit } = call.args;
-		const composed = piReadPath(readPath, offset, limit);
+		const composed = piReadPath(readPath, await resolveCursorReadOffset(this.options, readPath, offset), limit);
 		// A present `limit: 0` asks for zero lines. The reference slices an empty
 		// string for it; no `read` selector expresses that, so answer directly
 		// rather than falling back to a whole-file read.
 		if (composed === null) {
 			return createToolResultMessage(call.toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		return await executeTool(this.options, "read", call.toolCallId, { path: composed });
+		return await executeTool(this.options, "read", call.toolCallId, { path: cursorRawReadPath(composed) });
 	}
 
 	async piBash(call: Parameters<NonNullable<ICursorExecHandlers["piBash"]>>[0]) {
@@ -778,7 +882,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
 		if (downloadPath) {
-			if (this.options.allowDirectFileMutation === false) {
+			if (!allowsDirectFileMutation(this.options)) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
 			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
@@ -855,7 +959,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * feeds `details.phases` straight into `setTodos`, so echoing the current list
 	 * back would let a call that changed nothing overwrite live UI state.
 	 */
-	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
+	todoSync(
+		snapshot: CursorTodoSnapshot | null,
+		toolCallId: string,
+		error: string | null = null,
+		origin: "read" | "update" = "update",
+	): ToolResultMessage {
 		const setPhases = this.options.setTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
@@ -890,9 +999,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				grouped.delete(phase.name);
 			}
 			for (const [name, tasks] of grouped) next.push({ name, tasks });
-			setPhases(next);
-			this.options.persistTodoPhases?.(next);
-			phases = next;
+			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
+				phases = undefined;
+			} else {
+				setPhases(next);
+				this.options.persistTodoPhases?.(next);
+				phases = next;
+			}
 		}
 
 		const result = buildTodoSyncResult(toolCallId, phases, error);
@@ -919,6 +1032,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
+		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
+			const replaceTool = this.options.getEditReplaceTool?.();
+			if (!replaceTool) {
+				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+				const message = formatMcpToolErrorMessage(toolName, availableTools);
+				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+			}
+			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
+		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
@@ -927,7 +1050,6 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args);
 		return toolResultMessage;
 	}
@@ -942,18 +1064,18 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async mcpApprovalPreflight(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
-		if (!tool) return false;
-		const context = this.options.getToolContext?.();
-		const settings = context?.settings;
-		const approvalMode: ApprovalMode =
-			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
+		const tool = preferReplace
+			? this.options.getEditReplaceTool?.()
+			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		if (!tool) return false;
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(this.options.getToolContext?.());
 		const approval = resolveApproval(
 			tool,
-			args,
+			preferReplace ? normalizeCursorReplaceArgs(args) : args,
 			approvalMode,
-			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+			userPolicies,
 		);
 		return approval.policy === "allow";
 	}

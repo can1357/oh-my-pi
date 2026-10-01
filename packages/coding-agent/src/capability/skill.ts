@@ -43,6 +43,12 @@ export interface Skill {
 	content: string;
 	/** Parsed frontmatter */
 	frontmatter?: SkillFrontmatter;
+	/**
+	 * Filesystem-resolved plugin root this skill was packaged in (Agent Plugins
+	 * §4.1). When set, every `skill://` resource access must realpath-resolve
+	 * within this directory; symlinks may target other files inside it.
+	 */
+	containRoot?: string;
 	/** Source level */
 	level: "user" | "project";
 	/** Source metadata */

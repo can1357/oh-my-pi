@@ -8,13 +8,7 @@ scope: "tool:edit(*.test.ts), tool:write(*.test.ts)"
 interruptMode: never
 ---
 
-**Do not reach for real wall-clock timers in test files.** `Bun.sleep(...)`, `setTimeout(...)`, and `setInterval(...)` tie a test's duration to real time: they slow the suite on every run, and any delay tuned to "long enough" eventually races on a loaded machine and flakes.
-
-## Why it's wrong
-
-- Real delays add fixed latency to every invocation; CI pays it on every run.
-- A sleep sized to mask a race is a guess — the race resurfaces under load.
-- A fixed wait hides *what* you are waiting for, so a failure points at a timeout instead of the real cause.
+**Avoid real wall-clock timers in test files.** `Bun.sleep(...)`, `setTimeout(...)`, and `setInterval(...)` bind duration to real time → fixed latency each invocation; CI pays every run. “Long enough” sleeps guess at and mask races; under load, races resurface and flake. Fixed waits hide the awaited condition, so failures point to a timeout, not the cause.
 
 ## Avoid
 
@@ -43,7 +37,7 @@ test("debounce fires once", () => {
 });
 ```
 
-When the code under test resolves a promise or emits an event, await that signal directly instead of guessing a duration:
+When code resolves a promise or emits an event, await that signal, not a guessed duration:
 
 ```typescript
 await once(emitter, "done"); // await the real event
@@ -52,4 +46,4 @@ const value = await pending; // await the promise the code already exposes
 
 ## Exceptions
 
-An integration test that deliberately exercises real timer behavior against the platform clock may need a genuine delay. Keep it rare, and add a short comment naming why deterministic time control will not work.
+Integration tests deliberately exercising real timer behavior against the platform clock may need a genuine delay. Keep rare; add a short comment naming why deterministic time control will not work.

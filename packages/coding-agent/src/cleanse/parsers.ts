@@ -3,26 +3,40 @@ import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { CleanseDiagnostic, CleanseSeverity } from "./types";
 
 /** Machine and fallback output formats understood by cleanse. */
-export type CleanseParserKind =
-	| "rust"
-	| "rust-test"
-	| "go"
-	| "go-test"
-	| "ruff"
-	| "pyright"
-	| "eslint"
-	| "biome"
-	| "rubocop"
-	| "phpstan"
-	| "psalm"
-	| "swiftlint"
-	| "dart"
-	| "credo"
-	| "shellcheck"
-	| "hlint"
-	| "terraform"
-	| "tflint"
-	| "generic";
+export const CLEANSE_PARSER_KINDS = [
+	"rust",
+	"rust-test",
+	"go",
+	"go-test",
+	"staticcheck",
+	"golangci",
+	"ruff",
+	"pyright",
+	"mypy",
+	"pylint",
+	"flake8",
+	"ty",
+	"eslint",
+	"biome",
+	"oxlint",
+	"deno-lint",
+	"stylelint",
+	"rubocop",
+	"phpstan",
+	"psalm",
+	"swiftlint",
+	"dart",
+	"credo",
+	"shellcheck",
+	"hlint",
+	"terraform",
+	"tflint",
+	"actionlint",
+	"generic",
+] as const;
+
+/** One machine or fallback output format understood by cleanse. */
+export type CleanseParserKind = (typeof CLEANSE_PARSER_KINDS)[number];
 
 /** Captured checker process output passed to a format parser. */
 export interface CleanseParserInput {
@@ -63,14 +77,32 @@ export function parseCleanseDiagnostics(kind: CleanseParserKind, input: CleanseP
 				return parseGo(input);
 			case "go-test":
 				return parseGoTest(input);
+			case "staticcheck":
+				return parseStaticcheck(input);
+			case "golangci":
+				return parseGolangci(input);
 			case "ruff":
 				return parseRuff(input);
 			case "pyright":
 				return parsePyright(input);
+			case "mypy":
+				return parseGeneric(input);
+			case "pylint":
+				return parsePylint(input);
+			case "flake8":
+				return parseFlake8(input);
+			case "ty":
+				return parseTy(input);
 			case "eslint":
 				return parseEslint(input);
 			case "biome":
 				return parseBiome(input);
+			case "oxlint":
+				return parseUnixFormat(input);
+			case "deno-lint":
+				return parseDenoLint(input);
+			case "stylelint":
+				return parseStylelint(input);
 			case "rubocop":
 				return parseRubocop(input);
 			case "phpstan":
@@ -91,6 +123,8 @@ export function parseCleanseDiagnostics(kind: CleanseParserKind, input: CleanseP
 				return parseTerraform(input);
 			case "tflint":
 				return parseTflint(input);
+			case "actionlint":
+				return parseActionlint(input);
 			case "generic":
 				return parseGeneric(input);
 		}
@@ -326,6 +360,44 @@ function parseGoTest(input: CleanseParserInput): CleanseDiagnostic[] {
 	return diagnostics.length > 0 ? diagnostics : parseGeneric(input);
 }
 
+function parseStaticcheck(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	for (const value of allJsonValues(input)) {
+		const record = toRecord(value);
+		const location = nestedRecord(record, "location");
+		const end = nestedRecord(record, "end");
+		addDiagnostic(diagnostics, input, {
+			file: stringField(location, "file"),
+			line: numberField(location, "line"),
+			column: numberField(location, "column"),
+			endLine: numberField(end, "line"),
+			endColumn: numberField(end, "column"),
+			code: stringField(record, "code"),
+			severity: stringField(record, "severity") ?? "warning",
+			message: stringField(record, "message"),
+		});
+	}
+	return diagnostics;
+}
+
+function parseGolangci(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	const text = sanitizeText(`${input.stdout}\n${input.stderr}`);
+	for (const line of text.split("\n")) {
+		const match = /^(.+?):(\d+):(\d+):\s+(.*?)\s+\(([A-Za-z0-9_-]+)\)$/.exec(line.trim());
+		if (!match) continue;
+		addDiagnostic(diagnostics, input, {
+			file: match[1],
+			line: Number.parseInt(match[2], 10),
+			column: Number.parseInt(match[3], 10),
+			code: match[5],
+			severity: "warning",
+			message: match[4],
+		});
+	}
+	return diagnostics;
+}
+
 function parseRuff(input: CleanseParserInput): CleanseDiagnostic[] {
 	const diagnostics: CleanseDiagnostic[] = [];
 	for (const root of allJsonValues(input)) {
@@ -370,6 +442,62 @@ function parsePyright(input: CleanseParserInput): CleanseDiagnostic[] {
 				message: stringField(record, "message"),
 			});
 		}
+	}
+	return diagnostics;
+}
+
+function parsePylint(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	for (const root of allJsonValues(input)) {
+		for (const value of toArray(root)) {
+			const record = toRecord(value);
+			addDiagnostic(diagnostics, input, {
+				file: stringField(record, "path"),
+				line: numberField(record, "line"),
+				column: zeroBased(numberField(record, "column")),
+				endLine: numberField(record, "endLine"),
+				endColumn: zeroBased(numberField(record, "endColumn")),
+				code: stringField(record, "symbol") ?? stringField(record, "message-id"),
+				severity: stringField(record, "type"),
+				message: stringField(record, "message"),
+			});
+		}
+	}
+	return diagnostics;
+}
+
+function parseFlake8(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	const text = sanitizeText(`${input.stdout}\n${input.stderr}`);
+	for (const line of text.split("\n")) {
+		const match = /^(.+?):(\d+):(\d+):\s+([A-Z]+\d+)\s+(.*)$/.exec(line.trim());
+		if (!match) continue;
+		addDiagnostic(diagnostics, input, {
+			file: match[1],
+			line: Number.parseInt(match[2], 10),
+			column: Number.parseInt(match[3], 10),
+			code: match[4],
+			severity: match[4].startsWith("F") || match[4].startsWith("E9") ? "error" : "warning",
+			message: match[5],
+		});
+	}
+	return diagnostics;
+}
+
+function parseTy(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	const text = sanitizeText(`${input.stdout}\n${input.stderr}`);
+	for (const line of text.split("\n")) {
+		const match = /^(.+?):(\d+):(\d+):\s+(error|warning|info)\[([^\]]+)\]\s+(.*)$/.exec(line.trim());
+		if (!match) continue;
+		addDiagnostic(diagnostics, input, {
+			file: match[1],
+			line: Number.parseInt(match[2], 10),
+			column: Number.parseInt(match[3], 10),
+			code: match[5],
+			severity: match[4],
+			message: match[6],
+		});
 	}
 	return diagnostics;
 }
@@ -419,6 +547,83 @@ function parseBiome(input: CleanseParserInput): CleanseDiagnostic[] {
 				severity: stringField(record, "severity"),
 				message,
 			});
+		}
+	}
+	return diagnostics;
+}
+
+function parseUnixFormat(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	const text = sanitizeText(`${input.stdout}\n${input.stderr}`);
+	for (const line of text.split("\n")) {
+		const match = /^(.+?):(\d+):(\d+):\s+(.*?)\s+\[(Error|Warning)\/([^\]]+)\]$/i.exec(line.trim());
+		if (!match) continue;
+		addDiagnostic(diagnostics, input, {
+			file: match[1],
+			line: Number.parseInt(match[2], 10),
+			column: Number.parseInt(match[3], 10),
+			code: match[6],
+			severity: match[5],
+			message: match[4],
+		});
+	}
+	return diagnostics;
+}
+
+function parseDenoLint(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	for (const root of allJsonValues(input)) {
+		const record = toRecord(root);
+		if (!record) continue;
+		for (const value of toArray(record.diagnostics)) {
+			const entry = toRecord(value);
+			const range = nestedRecord(entry, "range");
+			const start = nestedRecord(range, "start");
+			const end = nestedRecord(range, "end");
+			addDiagnostic(diagnostics, input, {
+				file: stringField(entry, "filename"),
+				line: numberField(start, "line"),
+				column: zeroBased(numberField(start, "col")),
+				endLine: numberField(end, "line"),
+				endColumn: zeroBased(numberField(end, "col")),
+				code: stringField(entry, "code"),
+				severity: "warning",
+				message: stringField(entry, "message"),
+				suggestion: stringField(entry, "hint"),
+			});
+		}
+		for (const value of toArray(record.errors)) {
+			const entry = toRecord(value);
+			addDiagnostic(diagnostics, input, {
+				file: stringField(entry, "file_path"),
+				severity: "error",
+				message: stringField(entry, "message"),
+			});
+		}
+	}
+	return diagnostics;
+}
+
+function parseStylelint(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	for (const root of allJsonValues(input)) {
+		for (const value of toArray(root)) {
+			const record = toRecord(value);
+			const source = stringField(record, "source");
+			if (!source) continue;
+			for (const warning of toArray(record?.warnings)) {
+				const entry = toRecord(warning);
+				addDiagnostic(diagnostics, input, {
+					file: source,
+					line: numberField(entry, "line"),
+					column: numberField(entry, "column"),
+					endLine: numberField(entry, "endLine"),
+					endColumn: numberField(entry, "endColumn"),
+					code: stringField(entry, "rule"),
+					severity: stringField(entry, "severity"),
+					message: stringField(entry, "text"),
+				});
+			}
 		}
 	}
 	return diagnostics;
@@ -648,6 +853,24 @@ function parseTflint(input: CleanseParserInput): CleanseDiagnostic[] {
 			addDiagnostic(diagnostics, input, {
 				severity: "error",
 				message: stringField(error, "message"),
+			});
+		}
+	}
+	return diagnostics;
+}
+
+function parseActionlint(input: CleanseParserInput): CleanseDiagnostic[] {
+	const diagnostics: CleanseDiagnostic[] = [];
+	for (const root of allJsonValues(input)) {
+		for (const value of toArray(root)) {
+			const record = toRecord(value);
+			addDiagnostic(diagnostics, input, {
+				file: stringField(record, "filepath"),
+				line: numberField(record, "line"),
+				column: numberField(record, "column"),
+				code: stringField(record, "kind"),
+				severity: "error",
+				message: stringField(record, "message"),
 			});
 		}
 	}

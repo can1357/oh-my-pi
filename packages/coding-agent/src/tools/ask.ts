@@ -1,3 +1,4 @@
+import type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
 /**
  * Ask Tool - Interactive user prompting during execution
  *
@@ -17,35 +18,37 @@
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
-import {
-	type Component,
-	Ellipsis,
-	Markdown,
-	type MarkdownTheme,
-	renderInlineMarkdown,
-	replaceTabs,
-	TERMINAL,
-	Text,
-	truncateToWidth,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
-import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { type ImageContent, type TextContent, type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
+import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
-import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
+import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
-import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
+
 import type { ToolSession } from ".";
-import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
+import {
+	disambiguateDisplayLabels,
+	sanitizeCarriageReturns,
+	TRUNCATE_LENGTHS,
+} from "@oh-my-pi/pi-tui/render/render-utils";
+import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { ToolAbortError } from "./tool-errors";
+
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
+import { cfgSpeechEnabled } from "../tts/settings";
+import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 
 // =============================================================================
 // Types
 // =============================================================================
 
-const OTHER_OPTION = "Other (type your own)";
+export const OTHER_OPTION = "Other (type your own)";
 const CHAT_ABOUT_THIS_OPTION = "Chat about this";
 const NEXT_OPTION = "Next →";
 const RESERVED_OPTION_LABELS: Record<string, true> = {
@@ -55,18 +58,18 @@ const RESERVED_OPTION_LABELS: Record<string, true> = {
 };
 
 const OptionItem = arkType({
-	label: arkType("string").describe("display label"),
-	"description?": arkType("string").describe("optional explanatory text displayed below the label"),
-	"preview?": arkType("string").describe("optional rich preview content for interactive ask dialogs"),
+	label: arkType("string"),
+	"description?": arkType("string"),
+	"preview?": arkType("string").describe("rich preview"),
 });
 
 const QuestionItem = arkType({
-	id: arkType("string").describe("question id"),
-	question: arkType("string").describe("question text"),
-	"header?": arkType("string").describe("optional short display chip for rich ask dialogs"),
-	options: OptionItem.array().describe("available options"),
-	"multi?": arkType("boolean").describe("allow multiple selections"),
-	"recommended?": arkType("number").describe("recommended option index"),
+	id: arkType("string"),
+	question: arkType("string"),
+	"header?": arkType("string").describe("display chip"),
+	options: OptionItem.array(),
+	"multi?": arkType("boolean"),
+	"recommended?": arkType("number").describe("0-based default index"),
 }).narrow((question, ctx) => {
 	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
 	return (
@@ -76,56 +79,34 @@ const QuestionItem = arkType({
 });
 
 const askSchema = arkType({
-	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	questions: QuestionItem.array().atLeastLength(1),
 });
+
+const askRecoveryTool = { name: "ask", description: "", parameters: askSchema };
 
 export type AskToolInput = typeof askSchema.infer;
 
 /**
- * Recover a validated `questions` payload from a persisted `ask` toolCall's
- * `arguments`. Used by `/tree` re-answer (issue #5642): selecting a past
- * `ask` toolResult re-opens the picker with the *original* questions, so the
- * new answer branches as a sibling instead of mutating the old one. Runs the
- * same schema the live tool call validated against — legacy/corrupted
- * persisted args fail closed (`undefined`) rather than feeding malformed
- * data back into the picker.
+ * Recover valid questions from a persisted `ask` tool call for `/tree` re-answer.
+ * Apply live tool-call normalization first so optional null placeholders in saved
+ * arguments do not prevent reopening; malformed questions still fail closed.
  */
 export function recoverAskQuestions(toolCallArguments: unknown): AskToolInput["questions"] | undefined {
-	const parsed = askSchema(toolCallArguments);
+	if (!isRecord(toolCallArguments)) return undefined;
+	let normalized: Record<string, unknown>;
+	try {
+		normalized = validateToolArguments(askRecoveryTool, {
+			type: "toolCall",
+			id: "",
+			name: "ask",
+			arguments: toolCallArguments,
+		});
+	} catch {
+		return undefined;
+	}
+	const parsed = askSchema(normalized);
 	if (parsed instanceof arkType.errors) return undefined;
 	return parsed.questions;
-}
-
-/** Result for a single question */
-export interface QuestionResult {
-	id: string;
-	question: string;
-	options: string[];
-	multi: boolean;
-	selectedOptions: string[];
-	customInput?: string;
-	/** Optional note attached to the selected answer in the rich ask dialog. */
-	note?: string;
-	/** True when the answer was auto-selected because the dialog timed out. */
-	timedOut?: boolean;
-}
-
-export interface AskToolDetails {
-	question?: string;
-	options?: string[];
-	multi?: boolean;
-	selectedOptions?: string[];
-	customInput?: string;
-	/** Optional note attached to the selected answer in the rich ask dialog. */
-	note?: string;
-	/** True when the answer was auto-selected because the dialog timed out. */
-	timedOut?: boolean;
-	/** Multi-part question mode */
-	results?: QuestionResult[];
-	/** Chat redirect: the user chose "Chat about this" instead of answering. */
-	chatRedirect?: boolean;
-	/** Questions surfaced when chatRedirect is true. */
-	questions?: string[];
 }
 
 interface AskOption {
@@ -184,214 +165,6 @@ function getAutoSelectionOnTimeout(options: AskOption[], recommended?: number): 
 /** Strip "(Recommended)" suffix from a label */
 function stripRecommendedSuffix(label: string): string {
 	return label.endsWith(RECOMMENDED_SUFFIX) ? label.slice(0, -RECOMMENDED_SUFFIX.length) : label;
-}
-
-interface CustomInputContext {
-	selectionMarker: "radio" | "checkbox";
-	checkedIndices?: readonly number[];
-	markableCount: number;
-}
-
-/** Hard caps for the editor title rendered while the user types an `Other`
- *  custom answer. {@link HookEditorComponent} renders the title via a single
- *  `Text` child stacked above the prompt editor with no `maxVisible` windowing,
- *  so the title MUST fit a normal terminal:
- *  - {@link MAX_CUSTOM_INPUT_OPTION_ROWS}: at most this many option-row entries
- *    survive {@link pickCustomInputOptionWindow}, regardless of total options.
- *  - {@link MAX_CUSTOM_INPUT_TITLE_ROWS}: hard cap on rendered title rows after
- *    every line is pre-truncated to one row at the live terminal width. Sized
- *    so a 24-row terminal still has space for the input row, hint, and chrome.
- */
-const MAX_CUSTOM_INPUT_OPTION_ROWS = 8;
-const MAX_CUSTOM_INPUT_TITLE_ROWS = 16;
-const MIN_CUSTOM_INPUT_CONTENT_WIDTH = 20;
-/** Subtracted from the terminal width to leave room for the surrounding
- *  `Text(... padX=1)` padding + DynamicBorder vertical chrome. */
-const CUSTOM_INPUT_CHROME_COLUMNS = 4;
-const CUSTOM_INPUT_DESCRIPTION_INDENT = "    ";
-
-function customInputContentWidth(): number {
-	const cols = process.stdout.columns ?? 80;
-	return Math.max(MIN_CUSTOM_INPUT_CONTENT_WIDTH, cols - CUSTOM_INPUT_CHROME_COLUMNS);
-}
-
-function clampLineToWidth(line: string, width: number): string {
-	if (visibleWidth(line) <= width) return line;
-	return truncateToWidth(line, width, Ellipsis.Unicode);
-}
-
-function flattenDescription(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
-
-function getSelectOptionDescription(option: ExtensionUISelectItem): string | undefined {
-	return typeof option === "string" ? undefined : option.description;
-}
-
-interface CustomInputOptionGap {
-	total: number;
-	checked: number;
-}
-
-interface CustomInputOptionWindow {
-	indices: number[];
-	gapBefore: Map<number, CustomInputOptionGap>;
-}
-
-/** Window the option list so the title stays bounded. Required rows are the
- *  selected `Other` row and the first option as an anchor; checked rows fill
- *  the remaining budget before unselected leading rows. Hidden checked options
- *  are summarized in gap markers so the rendered option-row count still never
- *  exceeds {@link MAX_CUSTOM_INPUT_OPTION_ROWS}. */
-function pickCustomInputOptionWindow(
-	total: number,
-	selectedIndex: number,
-	checked: ReadonlySet<number>,
-): CustomInputOptionWindow {
-	if (total === 0) return { indices: [], gapBefore: new Map() };
-	if (total <= MAX_CUSTOM_INPUT_OPTION_ROWS) {
-		return {
-			indices: Array.from({ length: total }, (_, i) => i),
-			gapBefore: new Map(),
-		};
-	}
-	const keep = new Set<number>();
-	const addIfRoom = (index: number) => {
-		if (index >= 0 && index < total && keep.size < MAX_CUSTOM_INPUT_OPTION_ROWS) {
-			keep.add(index);
-		}
-	};
-	addIfRoom(selectedIndex);
-	addIfRoom(0);
-	for (const i of [...checked].sort((a, b) => a - b)) {
-		addIfRoom(i);
-	}
-	for (let i = 0; i < total && keep.size < MAX_CUSTOM_INPUT_OPTION_ROWS; i++) {
-		addIfRoom(i);
-	}
-	const indices = [...keep].sort((a, b) => a - b);
-	const gapBefore = new Map<number, CustomInputOptionGap>();
-	const countCheckedBetween = (startInclusive: number, endExclusive: number): number => {
-		let count = 0;
-		for (const i of checked) {
-			if (i >= startInclusive && i < endExclusive) count++;
-		}
-		return count;
-	};
-	let prev = -1;
-	for (const idx of indices) {
-		if (idx > prev + 1) {
-			gapBefore.set(idx, {
-				total: idx - prev - 1,
-				checked: countCheckedBetween(prev + 1, idx),
-			});
-		}
-		prev = idx;
-	}
-	if (prev < total - 1) {
-		gapBefore.set(total, {
-			total: total - 1 - prev,
-			checked: countCheckedBetween(prev + 1, total),
-		});
-	}
-	return { indices, gapBefore };
-}
-
-interface CustomInputRow {
-	text: string;
-	/** Lower priority drops first when over budget; negative values are pinned.
-	 *  Gap markers are budgeted rows too so sparse checked selections cannot
-	 *  push the editor input off-screen. */
-	priority: number;
-}
-
-function buildCustomInputRows(
-	question: string,
-	options: ExtensionUISelectItem[],
-	context: CustomInputContext,
-	contentWidth: number,
-): CustomInputRow[] {
-	const selectedIndex = options.findIndex(option => getSelectOptionLabel(option) === OTHER_OPTION);
-	const checked = new Set(context.checkedIndices ?? []);
-	const window = pickCustomInputOptionWindow(options.length, selectedIndex, checked);
-	const rows: CustomInputRow[] = [];
-	rows.push({ text: clampLineToWidth(question, contentWidth), priority: -1 });
-	rows.push({ text: "", priority: -1 });
-
-	const emitGap = (gap: CustomInputOptionGap) => {
-		const checkedSuffix = gap.checked > 0 ? `, ${gap.checked} checked` : "";
-		rows.push({
-			text: clampLineToWidth(
-				`    … ${gap.total} more option${gap.total === 1 ? "" : "s"}${checkedSuffix} …`,
-				contentWidth,
-			),
-			priority: 2,
-		});
-	};
-
-	for (const index of window.indices) {
-		const gap = window.gapBefore.get(index);
-		if (gap !== undefined) emitGap(gap);
-		const option = options[index]!;
-		const label = getSelectOptionLabel(option);
-		const isSelected = index === selectedIndex;
-		const isMarkable = index < context.markableCount;
-		const prefix =
-			context.selectionMarker === "radio" && (isMarkable || isSelected)
-				? `${isSelected ? theme.radio.selected : theme.radio.unselected} `
-				: context.selectionMarker === "checkbox" && isMarkable
-					? `${checked.has(index) ? theme.checkbox.checked : theme.checkbox.unchecked} `
-					: isSelected
-						? `${theme.nav.cursor} `
-						: "  ";
-		rows.push({ text: clampLineToWidth(prefix + label, contentWidth), priority: -1 });
-		const description = getSelectOptionDescription(option);
-		if (description) {
-			const flat = flattenDescription(description);
-			if (flat) {
-				rows.push({
-					text: clampLineToWidth(`${CUSTOM_INPUT_DESCRIPTION_INDENT}${flat}`, contentWidth),
-					// Selected (Other) carries no description; favor checked rows
-					// when budget pressure forces description rows to be dropped.
-					priority: isSelected ? 2 : checked.has(index) ? 1 : 0,
-				});
-			}
-		}
-	}
-
-	const trailingGap = window.gapBefore.get(options.length);
-	if (trailingGap !== undefined) emitGap(trailingGap);
-	rows.push({ text: "", priority: -1 });
-	rows.push({ text: "Enter your response:", priority: -1 });
-	return rows;
-}
-
-function applyCustomInputRowBudget(rows: CustomInputRow[], budget: number): CustomInputRow[] {
-	if (rows.length <= budget) return rows;
-	// Drop droppable rows lowest priority first; on ties, drop later rows first
-	// so the user still sees the earliest options' descriptions.
-	const droppable = rows
-		.map((row, index) => ({ row, index }))
-		.filter(entry => entry.row.priority >= 0)
-		.sort((a, b) => a.row.priority - b.row.priority || b.index - a.index);
-	const removed = new Set<number>();
-	for (const { index } of droppable) {
-		if (rows.length - removed.size <= budget) break;
-		removed.add(index);
-	}
-	return rows.filter((_, i) => !removed.has(i));
-}
-
-function formatCustomInputTitle(
-	question: string,
-	options: ExtensionUISelectItem[],
-	context: CustomInputContext,
-): string {
-	const contentWidth = customInputContentWidth();
-	const rows = buildCustomInputRows(question, options, context, contentWidth);
-	return applyCustomInputRowBudget(rows, MAX_CUSTOM_INPUT_TITLE_ROWS)
-		.map(row => row.text)
-		.join("\n");
 }
 
 // =============================================================================
@@ -474,9 +247,8 @@ async function askSingleQuestion(
 			timeoutTriggered = true;
 		};
 		let navigationAction: "back" | "forward" | undefined;
-		const helpText = navigation
-			? "up/down navigate  enter select  ←/→ question  esc cancel"
-			: "up/down navigate  enter select  esc cancel";
+		const questionHint = navigation ? `${formatKeyHints(["left", "right"])} question  ` : "";
+		const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${questionHint}${editorKey("tui.select.cancel")} cancel`;
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
 		const dialogSignal =
@@ -544,14 +316,9 @@ async function askSingleQuestion(
 		}
 	};
 
-	const promptForCustomInput = async (
-		title: string,
-		optionsToShow: ExtensionUISelectItem[],
-		context: CustomInputContext,
-	): Promise<{ input: string | undefined }> => {
+	const promptForCustomInput = async (title: string): Promise<{ input: string | undefined }> => {
 		const dialogOptions = signal ? { signal } : undefined;
-		const editorTitle = formatCustomInputTitle(title, optionsToShow, context);
-		const showCustomInput = () => ui.editor(editorTitle, undefined, dialogOptions, { promptStyle: true });
+		const showCustomInput = () => ui.editor(title, undefined, dialogOptions, { promptStyle: true });
 		const input = signal ? await untilAborted(signal, showCustomInput) : await showCustomInput();
 		return { input };
 	};
@@ -605,11 +372,7 @@ async function askSingleQuestion(
 					timedOut = true;
 					break;
 				}
-				const customResult = await promptForCustomInput(`${prefix}${promptWithProgress}`, opts, {
-					selectionMarker: "checkbox",
-					checkedIndices,
-					markableCount: questionOptions.length,
-				});
+				const customResult = await promptForCustomInput(`${prefix}${promptWithProgress}`);
 				if (customResult.input === undefined) {
 					continue;
 				}
@@ -636,7 +399,14 @@ async function askSingleQuestion(
 		selectedOptions = Array.from(selected);
 	} else {
 		while (true) {
-			const displayOptions = addRecommendedSuffix(questionOptions, recommended);
+			const baseDisplay = addRecommendedSuffix(questionOptions, recommended);
+			// Badging can collide rows (recommended `Retry now` vs a literal
+			// `Retry now (Recommended)`); disambiguate display copies like
+			// the rich dialog and map the choice back by identity below.
+			const displayLabels = disambiguateDisplayLabels(baseDisplay.map(getSelectOptionLabel), [OTHER_OPTION]);
+			const displayOptions: ExtensionUISelectItem[] = baseDisplay.map((option, index) =>
+				typeof option === "string" ? displayLabels[index]! : { ...option, label: displayLabels[index]! },
+			);
 			const optionsWithNavigation: ExtensionUISelectItem[] = [...displayOptions, OTHER_OPTION];
 
 			let initialIndex = recommended;
@@ -675,10 +445,7 @@ async function askSingleQuestion(
 				if (selectTimedOut) {
 					break;
 				}
-				const customResult = await promptForCustomInput(promptWithProgress, optionsWithNavigation, {
-					selectionMarker: "radio",
-					markableCount: displayOptions.length,
-				});
+				const customResult = await promptForCustomInput(promptWithProgress);
 				if (customResult.input === undefined) {
 					continue;
 				}
@@ -686,7 +453,12 @@ async function askSingleQuestion(
 				selectedOptions = [];
 				break;
 			}
-			selectedOptions = [stripRecommendedSuffix(choice)];
+			// Map the displayed choice back to the offered option by identity:
+			// the label itself may end with the recommendation suffix
+			// (intrinsic or via `\r` normalization), so stripping would
+			// corrupt it. First display match wins on identical rows.
+			const pickedIndex = displayOptions.findIndex(option => getSelectOptionLabel(option) === choice);
+			selectedOptions = [pickedIndex >= 0 ? questionOptions[pickedIndex]!.label : stripRecommendedSuffix(choice)];
 			customInput = undefined;
 			break;
 		}
@@ -716,7 +488,7 @@ function formatQuestionResult(result: QuestionResult): string {
 			? `${result.id}: [${result.selectedOptions.join(", ")}]${suffix}`
 			: `${result.id}: ${result.selectedOptions[0]}${suffix}`;
 	}
-	return `${result.id}: (cancelled)${noteSuffix}`;
+	return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
 }
 
 function formatSingleQuestionResponse(result: {
@@ -753,7 +525,8 @@ function formatSingleQuestionResponse(result: {
 				: `User added note: ${result.note}`,
 		);
 	}
-	return responseParts.length > 0 ? responseParts.join("\n") : "User cancelled the selection";
+	if (responseParts.length > 0) return responseParts.join("\n");
+	return result.multi ? "User did not select any options" : "User cancelled the selection";
 }
 
 // =============================================================================
@@ -779,38 +552,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 	readonly examples: readonly ToolExample<typeof askSchema.infer>[] = [
 		{
-			caption: "Single question",
+			caption: "Choice",
 			call: {
 				questions: [
 					{
-						id: "auth_method",
-						question: "Which authentication method should this API use?",
-						options: [
-							{ label: "JWT", description: "Bearer tokens for stateless API clients." },
-							{ label: "OAuth2", description: "Delegated authorization with external identity providers." },
-							{
-								label: "Session cookies",
-								description: "Browser-first authentication backed by server-side sessions.",
-							},
-						],
+						id: "storage",
+						question: "Database?",
+						options: [{ label: "SQLite" }, { label: "Postgres" }],
 						recommended: 0,
-					},
-				],
-			},
-		},
-		{
-			caption: "Multiple questions",
-			call: {
-				questions: [
-					{
-						id: "storage_type",
-						question: "Which storage backend?",
-						options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
-					},
-					{
-						id: "auth_method",
-						question: "Which auth method?",
-						options: [{ label: "JWT" }, { label: "Session cookies" }],
 					},
 				],
 			},
@@ -829,20 +578,66 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	static createIf(session: ToolSession): AskTool | null {
-		return session.hasUI ? new AskTool(session) : null;
+		return (session.canPromptUser ?? session.hasUI) ? new AskTool(session) : null;
 	}
 
 	/** Send terminal notification when ask tool is waiting for input */
 	#sendAskNotification(): void {
-		const method = this.session.settings.get("ask.notify");
+		if (!this.session.hasUI) return;
+		const method = cfgAskNotify.get(this.session.settings);
 		if (method === "off") return;
 		TERMINAL.sendNotification({
-			title: "Oh My Pi",
+			title: "omp",
 			body: "Waiting for input",
 			type: "ask",
 			urgency: "normal",
 			actions: "focus",
 		});
+	}
+
+	/**
+	 * Blocks for answer images: each image with its source-path notice and, for a text-only model,
+	 * the vision description a pasted prompt image gets (best effort).
+	 */
+	async #answerImageBlocks(
+		images: ImageContent[],
+		signal: AbortSignal | undefined,
+	): Promise<Array<TextContent | ImageContent>> {
+		if (images.length === 0) return [];
+		let descriptions: TextContent[] | undefined;
+		const model = this.session.getActiveModel?.();
+		const modelRegistry = this.session.modelRegistry;
+		if (modelRegistry && shouldDescribeImagesForTextModel(model, this.session.settings)) {
+			try {
+				descriptions = await describeAttachedImagesForTextModel(
+					images,
+					{
+						activeModel: model,
+						modelRegistry,
+						settings: this.session.settings,
+						localProtocolOptions: sessionLocalProtocolOptions(this.session),
+						activeModelString: this.session.getActiveModelString?.(),
+						telemetryConfig: this.session.getTelemetry?.(),
+						sessionId: this.session.getSessionId?.() ?? undefined,
+					},
+					signal,
+				);
+			} catch (error) {
+				logger.warn("ask answer image description failed; image left undescribed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const blocks: Array<TextContent | ImageContent> = [];
+		for (const [index, image] of images.entries()) {
+			const notice = renderAttachmentSourceNotice(image, index + 1, { askAnswer: true });
+			if (notice) blocks.push({ type: "text", text: notice.content });
+			// Keep the source tag: `attachment://N` resolves this result's images to their files.
+			blocks.push(image);
+			const description = descriptions?.[index];
+			if (description) blocks.push(description);
+		}
+		return blocks;
 	}
 
 	async execute(
@@ -857,6 +652,84 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			context?.abort();
 			throw new ToolAbortError("Ask tool requires interactive mode");
 		}
+		// Models occasionally inject `\r` runs into string values (observed with
+		// GLM via OpenRouter); sanitize before the dialog renders or the answer
+		// echoes back into session history.
+		params = sanitizeAskParams(params);
+		// Sanitizing `\r` runs can collapse a crafted label into a reserved
+		// runtime label (`Other\r(type your own)` → `Other (type your own)`),
+		// which would hijack the custom-input branch and duplicate the rich
+		// dialog row — fail closed like schema validation does.
+		const reservedCollision = params.questions
+			.flatMap(question => question.options)
+			.find(option => RESERVED_OPTION_LABELS[option.label] === true);
+		if (reservedCollision !== undefined) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Error: option labels must not collide with reserved runtime labels: ${formatErrorValue(reservedCollision.label)}`,
+					},
+				],
+				details: {},
+			};
+		}
+		// The degraded multi-select completion row is theme-labeled and only
+		// appended after an answer exists, but the choice handler matches it
+		// unconditionally — a sanitized model label would exit instead of
+		// selecting. Fail closed like the other sentinels (multi-select only;
+		// single-select has no Done row).
+		const doneActionLabel = getDoneOptionLabel();
+		const doneCollision = params.questions
+			.filter(question => question.multi === true)
+			.flatMap(question => question.options)
+			.find(option => option.label === doneActionLabel);
+		if (doneCollision !== undefined) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Error: option labels must not collide with reserved runtime labels: ${formatErrorValue(doneCollision.label)}`,
+					},
+				],
+				details: {},
+			};
+		}
+		// Sanitizing `\r` runs can also merge distinct labels (`Retry\rnow` and
+		// `Retry now` become one); dialog selection is label-keyed, so one row
+		// would check both — fail closed like schema validation does. The same
+		// holds for question ids (`deploy\rmode`/`deploy mode`), which the
+		// model uses to correlate multi-question answers.
+		const seenIds = new Set<string>();
+		for (const question of params.questions) {
+			if (seenIds.has(question.id)) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: question ids must be unique: ${formatErrorValue(question.id)}`,
+						},
+					],
+					details: {},
+				};
+			}
+			seenIds.add(question.id);
+			const seenLabels = new Set<string>();
+			for (const option of question.options) {
+				if (seenLabels.has(option.label)) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Error: option labels must be unique within a question: ${formatErrorValue(option.label)}`,
+							},
+						],
+						details: {},
+					};
+				}
+				seenLabels.add(option.label);
+			}
+		}
 
 		const extensionUi = context.ui;
 		const ui: UIContext = {
@@ -868,8 +741,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		// Settings.get("ask.timeout") returns seconds (0 = disabled), convert to ms
-		const timeoutSeconds = this.session.settings.get("ask.timeout");
+		// `ask.timeout` is in seconds (0 = disabled); convert to ms
+		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
@@ -886,7 +759,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
 		// mode — it's the assistant addressing the user — gated only by speech.enabled
 		// (the vocalizer re-checks the setting and no-ops when disabled).
-		if (this.session.settings.get("speech.enabled")) {
+		if (cfgSpeechEnabled.get(this.session.settings)) {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
 
@@ -907,7 +780,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{ timeout: timeout ?? undefined, signal, acceptImages: true },
 					);
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) {
@@ -930,28 +803,46 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					throw new Error("Ask dialog returned a result count that does not match the requested questions");
 				}
 				const results: QuestionResult[] = [];
+				// Each prompt numbers markers from 1; shift them so `[Image #N]` indexes all result images.
+				const answerImages: ImageContent[] = [];
 				for (let index = 0; index < params.questions.length; index++) {
 					const question = params.questions[index];
 					const result = richResult.results[index];
 					if (!question || !result || result.id !== question.id) {
 						throw new Error("Ask dialog returned results that do not match the requested question order");
 					}
+					const customOffset = answerImages.length;
+					if (result.customInputImages) answerImages.push(...result.customInputImages);
+					const noteOffset = answerImages.length;
+					if (result.noteImages) answerImages.push(...result.noteImages);
 					results.push({
 						id: question.id,
 						question: question.question,
 						options: question.options.map(option => option.label),
 						multi: question.multi ?? false,
 						selectedOptions: result.selectedOptions,
-						customInput: result.customInput,
-						note: result.note,
+						customInput:
+							result.customInput === undefined
+								? undefined
+								: shiftImageMarkers(result.customInput, customOffset, result.customInputImages?.length ?? 0),
+						note:
+							result.note === undefined
+								? undefined
+								: shiftImageMarkers(result.note, noteOffset, result.noteImages?.length ?? 0),
 						timedOut: result.timedOut,
 					});
 				}
 				if (params.questions.length === 1) {
 					const result = results[0];
+					// An empty multi-select submission is a valid "select none"
+					// answer (#8265 review); only a truly empty single-select
+					// result counts as cancellation.
 					if (
 						!result ||
-						(!result.timedOut && result.selectedOptions.length === 0 && result.customInput === undefined)
+						(!result.timedOut &&
+							!result.multi &&
+							result.selectedOptions.length === 0 &&
+							result.customInput === undefined)
 					) {
 						context.abort();
 						throw new ToolAbortError("Ask tool was cancelled by the user");
@@ -966,11 +857,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						timedOut: result.timedOut,
 					};
 					const responseText = formatSingleQuestionResponse(result);
-					return { content: [{ type: "text" as const, text: responseText }], details };
+					const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+					return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 				}
 				const details: AskToolDetails = { results };
 				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				return { content: [{ type: "text" as const, text: responseText }], details };
+				const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+				return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -1105,355 +998,31 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 }
 
-// =============================================================================
-// TUI Renderer
-// =============================================================================
-
-interface AskRenderOption {
-	label: string;
-	description?: string;
-}
-
-interface AskRenderArgs {
-	question?: string;
-	options?: AskRenderOption[];
-	multi?: boolean;
-	questions?: Array<{
-		id: string;
-		question: string;
-		options: AskRenderOption[];
-		multi?: boolean;
-	}>;
-}
-
 /**
- * Coerce an untrusted option list (streamed or model-mangled call args) into
- * well-formed render options. Bare strings become labels; entries without a
- * string label are dropped.
+ * Format a model-provided id/label for a validation error. Degenerate input
+ * can carry tabs or kilobytes of text, and the error echoes through the
+ * plain `Text` fallback renderer — expand tabs FIRST so the width bound
+ * applies to displayed cells, then clamp like every other error display
+ * path (`formatErrorMessage`).
  */
-function normalizeRenderOptions(raw: unknown): AskRenderOption[] | undefined {
-	if (!Array.isArray(raw)) return undefined;
-	const out: AskRenderOption[] = [];
-	for (const entry of raw) {
-		if (typeof entry === "string") {
-			out.push({ label: entry });
-			continue;
-		}
-		if (!entry || typeof entry !== "object") continue;
-		const { label, description } = entry as Partial<AskRenderOption>;
-		if (typeof label !== "string") continue;
-		out.push(typeof description === "string" ? { label, description } : { label });
-	}
-	return out;
+function formatErrorValue(value: string): string {
+	return truncateToWidth(replaceTabs(value), TRUNCATE_LENGTHS.LINE);
 }
-
-/**
- * Coerce untrusted `questions` call args into a renderable array. Models
- * occasionally double-encode the array as a JSON string — a bare string passes
- * a truthy `.length` check but has no `.map`, which used to crash the TUI
- * render loop. Partially streamed args can also be missing fields.
- */
-function normalizeRenderQuestions(raw: unknown): NonNullable<AskRenderArgs["questions"]> | undefined {
-	if (typeof raw === "string") {
-		try {
-			raw = JSON.parse(raw);
-		} catch {
-			return undefined;
-		}
-	}
-	if (!Array.isArray(raw)) return undefined;
-	const out: NonNullable<AskRenderArgs["questions"]> = [];
-	for (const entry of raw) {
-		if (!entry || typeof entry !== "object") continue;
-		const q = entry as Partial<NonNullable<AskRenderArgs["questions"]>[number]>;
-		out.push({
-			id: typeof q.id === "string" ? q.id : "?",
-			question: typeof q.question === "string" ? q.question : "",
-			options: normalizeRenderOptions(q.options) ?? [],
-			multi: q.multi === true,
-		});
-	}
-	return out;
+/** Strip the `\r` runs degenerate models inject, so persisted call args render as prose. */
+function sanitizeAskParams(params: AskParams): AskParams {
+	return {
+		...params,
+		questions: params.questions.map(question => ({
+			...question,
+			id: sanitizeCarriageReturns(question.id),
+			question: sanitizeCarriageReturns(question.question),
+			...(question.header !== undefined ? { header: sanitizeCarriageReturns(question.header) } : {}),
+			options: question.options.map(option => ({
+				...option,
+				label: sanitizeCarriageReturns(option.label),
+				...(option.description !== undefined ? { description: sanitizeCarriageReturns(option.description) } : {}),
+				...(option.preview !== undefined ? { preview: sanitizeCarriageReturns(option.preview) } : {}),
+			})),
+		})),
+	};
 }
-
-/** Render a custom free-text answer as a status line plus indented continuation rows. */
-function renderCustomInputLines(uiTheme: Theme, customInput: string): string[] {
-	const lines = customInput.split("\n");
-	const out: string[] = [
-		` ${uiTheme.styledSymbol("status.success", "success")} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`,
-	];
-	for (let i = 1; i < lines.length; i++) out.push(`   ${uiTheme.fg("toolOutput", lines[i])}`);
-	return out;
-}
-
-/** Render an answer note with tab replacement and line-width clamping. */
-function renderNoteLines(uiTheme: Theme, note: string, width: number): string[] {
-	const prefix = " Note: ";
-	const continuationPrefix = "       ";
-	const firstLineWidth = Math.max(1, width - visibleWidth(prefix));
-	const continuationWidth = Math.max(1, width - visibleWidth(continuationPrefix));
-	return replaceTabs(note)
-		.split("\n")
-		.map((line, index) => {
-			const linePrefix = index === 0 ? `${uiTheme.fg("dim", " Note:")} ` : continuationPrefix;
-			const maxWidth = index === 0 ? firstLineWidth : continuationWidth;
-			return `${linePrefix}${uiTheme.fg("toolOutput", truncateToWidth(line, maxWidth))}`;
-		});
-}
-
-/**
- * Marker glyph for a question option. Single-choice questions render circular radio
- * buttons (pick one); multi-select questions render rectangular checkboxes (pick many).
- */
-function optionMarker(uiTheme: Theme, multi: boolean | undefined, selected: boolean): string {
-	if (multi) return selected ? uiTheme.checkbox.checked : uiTheme.checkbox.unchecked;
-	return selected ? uiTheme.radio.selected : uiTheme.radio.unselected;
-}
-
-/** Render the offered options for a question form as flat marker bullets (no tree guides). */
-function renderQuestionOptionLines(
-	uiTheme: Theme,
-	mdTheme: MarkdownTheme,
-	options: AskRenderOption[],
-	multi: boolean | undefined,
-): string[] {
-	const out: string[] = [];
-	for (const opt of options) {
-		const optLabel = renderInlineMarkdown(opt.label, mdTheme, t => uiTheme.fg("muted", t));
-		out.push(` ${uiTheme.fg("dim", optionMarker(uiTheme, multi, false))} ${optLabel}`);
-		if (opt.description?.trim()) {
-			const description = renderInlineMarkdown(opt.description.trim(), mdTheme, t => uiTheme.fg("dim", t));
-			out.push(`   ${uiTheme.fg("dim", "↳")} ${description}`);
-		}
-	}
-	return out;
-}
-
-/**
- * Render the answered option list for a question: every offered option with its
- * selection marker filled in, plus any custom free-text answer. Flat marker
- * bullets — the frame is the container, so no tree guides are drawn.
- */
-function renderAnswerOptionLines(
-	uiTheme: Theme,
-	mdTheme: MarkdownTheme,
-	options: string[] | undefined,
-	selectedOptions: string[] | undefined,
-	multi: boolean | undefined,
-	customInput: string | undefined,
-	note: string | undefined,
-	width: number,
-): string[] {
-	const selected = new Set(selectedOptions ?? []);
-	// Prefer the full recorded option set; fall back to the selected labels when
-	// details omit the options array.
-	const list = options && options.length > 0 ? options : (selectedOptions ?? []);
-
-	// Nothing was chosen (and no custom answer) → a lone cancelled marker.
-	if (selected.size === 0 && customInput === undefined && note === undefined) {
-		return [` ${uiTheme.styledSymbol("status.warning", "warning")} ${uiTheme.fg("warning", "Cancelled")}`];
-	}
-
-	const out: string[] = [];
-	for (const label of list) {
-		const isSelected = selected.has(label);
-		const marker = optionMarker(uiTheme, multi, isSelected);
-		const markerStyled = isSelected ? uiTheme.fg("success", marker) : uiTheme.fg("dim", marker);
-		const labelStyled = renderInlineMarkdown(label, mdTheme, t =>
-			isSelected ? uiTheme.fg("toolOutput", t) : uiTheme.fg("muted", t),
-		);
-		out.push(` ${markerStyled} ${labelStyled}`);
-	}
-	if (customInput !== undefined) out.push(...renderCustomInputLines(uiTheme, customInput));
-	if (note !== undefined) out.push(...renderNoteLines(uiTheme, note, width));
-	return out;
-}
-
-export const askToolRenderer = {
-	mergeCallAndResult: true,
-	renderCall(args: AskRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const label = formatTitle("Ask", uiTheme);
-		const mdTheme = getMarkdownTheme();
-		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
-		const md = (text: string, width: number) =>
-			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
-
-		// Multi-part questions: one divider-labelled section per question.
-		// Call args are untrusted (partially streamed or model-mangled) and a
-		// throw here takes down the whole TUI render loop — normalize first.
-		const questions = normalizeRenderQuestions(args.questions);
-		if (questions && questions.length > 0) {
-			const header = `${label} ${uiTheme.fg("muted", `${questions.length} questions`)}`;
-			return framedBlock(uiTheme, width => {
-				const sections = questions.map(q => {
-					const meta: string[] = [];
-					if (q.multi) meta.push("multi");
-					if (q.options?.length) meta.push(`options:${q.options.length}`);
-					const metaStr = meta.length > 0 ? uiTheme.fg("dim", ` · ${meta.join(" · ")}`) : "";
-					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-					const mdLines = md(q.question, width);
-					const lines = q.options?.length
-						? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi)]
-						: mdLines;
-					return { label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, lines };
-				});
-				return { header, sections, state: "pending", borderColor: "borderMuted", width };
-			});
-		}
-
-		// Single question
-		if (typeof args.question !== "string" || !args.question) {
-			const errorLine = formatErrorMessage("No question provided", uiTheme);
-			return framedBlock(uiTheme, width => ({
-				header: errorLine,
-				sections: [],
-				state: "error",
-				borderColor: "error",
-				width,
-			}));
-		}
-
-		const question = args.question;
-		const meta: string[] = [];
-		if (args.multi) meta.push("multi");
-		const questionOptions = normalizeRenderOptions(args.options);
-		if (questionOptions?.length) meta.push(`options:${questionOptions.length}`);
-		const header = `${label}${formatMeta(meta, uiTheme)}`;
-		const multi = args.multi;
-		return framedBlock(uiTheme, width => {
-			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-			const mdLines = md(question, width);
-			const bodyLines = questionOptions?.length
-				? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, questionOptions, multi)]
-				: mdLines;
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: "pending",
-				borderColor: "borderMuted",
-				width,
-			};
-		});
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails },
-		_options: RenderResultOptions,
-		uiTheme: Theme,
-	): Component {
-		const { details } = result;
-		const mdTheme = getMarkdownTheme();
-		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
-		const md = (text: string, width: number) =>
-			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
-
-		if (!details) {
-			const txt = result.content[0];
-			const fallback = txt?.type === "text" && txt.text ? txt.text : "";
-			const header = renderStatusLine({ icon: "warning", title: "Ask" }, uiTheme);
-			const body = fallback ? `\n${uiTheme.fg("dim", fallback)}` : "";
-			return new Text(`${header}${body}`, 0, 0);
-		}
-
-		// Chat redirect: user chose "Chat about this" instead of answering.
-		if (details.chatRedirect) {
-			const header = renderStatusLine({ icon: "info", title: "Ask", meta: ["chat redirect"] }, uiTheme);
-			const questions = details.questions ?? [];
-			return framedBlock(uiTheme, width => ({
-				header,
-				sections: questions.length > 0 ? [{ lines: questions.flatMap(q => md(q, width)) }] : [],
-				state: "warning",
-				borderColor: "borderMuted",
-				width,
-			}));
-		}
-
-		// Multi-part results: one divider-labelled section per question.
-		if (details.results && details.results.length > 0) {
-			const results = details.results;
-			const hasAnySelection = results.some(
-				r =>
-					r.customInput !== undefined ||
-					r.note !== undefined ||
-					(r.selectedOptions && r.selectedOptions.length > 0),
-			);
-			const header = renderStatusLine(
-				{
-					icon: hasAnySelection ? "success" : "warning",
-					title: "Ask",
-					meta: [`${results.length} questions`],
-				},
-				uiTheme,
-			);
-			return framedBlock(uiTheme, width => {
-				const sections = results.map(r => {
-					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-					const lines = [
-						...md(r.question, width),
-						...renderAnswerOptionLines(
-							uiTheme,
-							mdTheme,
-							r.options,
-							r.selectedOptions,
-							r.multi,
-							r.customInput,
-							r.note,
-							width,
-						),
-					];
-					return { label: uiTheme.fg("dim", `[${r.id}]`), lines };
-				});
-				return {
-					header,
-					sections,
-					state: hasAnySelection ? "success" : "warning",
-					borderColor: "borderMuted",
-					width,
-				};
-			});
-		}
-
-		// Single question result
-		if (!details.question) {
-			const txt = result.content[0];
-			const fallback = txt?.type === "text" && txt.text ? txt.text : "";
-			return new Text(fallback, 0, 0);
-		}
-
-		const question = details.question;
-		const hasSelection =
-			details.customInput !== undefined ||
-			details.note !== undefined ||
-			(details.selectedOptions && details.selectedOptions.length > 0);
-		const header = renderStatusLine(
-			hasSelection
-				? { iconOverride: uiTheme.styledSymbol("tool.ask", "accent"), title: "Ask" }
-				: { icon: "warning", title: "Ask" },
-			uiTheme,
-		);
-		const dOptions = details.options;
-		const dSelected = details.selectedOptions;
-		const dMulti = details.multi;
-		const dCustom = details.customInput;
-		const dNote = details.note;
-		const dTimedOut = details.timedOut;
-		return framedBlock(uiTheme, width => {
-			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-			const bodyLines = [
-				...md(question, width),
-				...renderAnswerOptionLines(uiTheme, mdTheme, dOptions, dSelected, dMulti, dCustom, dNote, width),
-			];
-			if (dTimedOut) {
-				// Distinguish auto-selection from a real user choice in the transcript.
-				bodyLines.push(uiTheme.fg("dim", "auto-selected after timeout — not a user choice"));
-			}
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: hasSelection ? "success" : "warning",
-				borderColor: "borderMuted",
-				width,
-			};
-		});
-	},
-};

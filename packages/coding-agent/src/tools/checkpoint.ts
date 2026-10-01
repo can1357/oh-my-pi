@@ -4,8 +4,8 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import checkpointDescription from "../prompts/tools/checkpoint.md" with { type: "text" };
 import rewindDescription from "../prompts/tools/rewind.md" with { type: "text" };
 import type { ToolSession } from ".";
-import type { OutputMeta } from "./output-meta";
-import { ToolError } from "./tool-errors";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 export interface CheckpointState {
@@ -81,13 +81,7 @@ export class CheckpointTool implements AgentTool<typeof checkpointSchema, Checkp
 		}
 		const startedAt = new Date().toISOString();
 		return toolResult<CheckpointToolDetails>({ goal: params.goal, startedAt })
-			.text(
-				[
-					"Checkpoint created.",
-					`Goal: ${params.goal}`,
-					"Run your investigation, then call rewind with a concise report.",
-				].join("\n"),
-			)
+			.text([`Checkpoint: ${params.goal}`, "Finish exploration and formulate findings."].join("\n"))
 			.done();
 	}
 }

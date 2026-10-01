@@ -5,8 +5,8 @@ import { Settings } from "../../../src/config/settings";
 import {
 	CodexResetFireworksController,
 	detectCodexResetFireworks,
-} from "../../../src/modes/components/codex-reset-fireworks";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "../../../src/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 
 type CodexResetFireworksHost = ConstructorParameters<typeof CodexResetFireworksController>[0];
 
@@ -93,14 +93,14 @@ describe("Codex reset fireworks", () => {
 		expect(
 			detectCodexResetFireworks(previous, {
 				observedAt: 2_000,
-				sevenDay: { percent: 2, resetsAt: 10_000 },
+				sevenDay: { percent: 2, resetsAt: 20_000 },
 				savedResets: 0,
 			}),
 		).toEqual({ kind: "unscheduled-weekly-reset" });
 		expect(
 			detectCodexResetFireworks(previous, {
 				observedAt: 2_000,
-				sevenDay: { percent: 0, resetsAt: 10_000 },
+				sevenDay: { percent: 0, resetsAt: 20_000 },
 				savedResets: 2,
 			}),
 		).toEqual({ kind: "saved-reset-banked", added: 2, available: 2 });
@@ -116,6 +116,23 @@ describe("Codex reset fireworks", () => {
 				{
 					observedAt: 2_000,
 					sevenDay: { percent: 0, resetsAt: 10_000 },
+					savedResets: 0,
+				},
+			),
+		).toBeUndefined();
+	});
+
+	it("suppresses a weekly decrease when the quota deadline did not advance", () => {
+		expect(
+			detectCodexResetFireworks(
+				{
+					observedAt: 1_000,
+					sevenDay: { percent: 42, resetsAt: 10_000 },
+					savedResets: 0,
+				},
+				{
+					observedAt: 2_000,
+					sevenDay: { percent: 41, resetsAt: 10_000 },
 					savedResets: 0,
 				},
 			),

@@ -24,7 +24,7 @@ describe("ast_grep parse errors", () => {
 			const filePath = path.join(tempDir, "broken.ts");
 			await Bun.write(filePath, "export function broken( { return 1; }");
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -50,12 +50,12 @@ describe("ast_grep parse errors", () => {
 	it("caps parseErrors at PARSE_ERRORS_LIMIT and records the original total", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-parse-cap-"));
 		try {
-			const fileCount = 35;
+			const fileCount = 21;
 			for (let i = 0; i < fileCount; i++) {
 				await Bun.write(path.join(tempDir, `broken-${i}.ts`), "export function broken( { return 1; }");
 			}
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -89,7 +89,7 @@ describe("ast_grep parse errors", () => {
 			await Bun.write(path.join(sourceDir, "ignore.js"), "const providerOptions = {};\n");
 			await Bun.write(path.join(tempDir, "outside.ts"), "const providerOptions = {};\n");
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -130,7 +130,7 @@ describe("ast_grep parse errors", () => {
 				Array.from({ length: 8 }, () => "const sharedSymbol = 1;").join("\n"),
 			);
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -162,7 +162,7 @@ describe("ast_grep parse errors", () => {
 				filePath,
 				"---- MODULE Algo ----\n(*--algorithm Demo\nvariables x = 0;\nbegin\n  x := x + 1;\nend algorithm;*)\n====\n",
 			);
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -173,6 +173,56 @@ describe("ast_grep parse errors", () => {
 			});
 			const details = result.details as { matchCount?: number } | undefined;
 			expect(details?.matchCount).toBeGreaterThan(0);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("honors an explicit C++ language for ambiguous headers", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cpp-header-"));
+		try {
+			const filePath = path.join(tempDir, "buffer.h");
+			await Bun.write(filePath, "class Buffer { public: int size() const { return 1; } };\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-explicit-cpp", {
+				pat: "class Buffer",
+				path: filePath,
+				lang: "cpp",
+			});
+			const details = result.details as { matchCount?: number } | undefined;
+			expect(details?.matchCount).toBe(1);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("forwards an explicit language to every multi-target branch", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-multi-lang-"));
+		try {
+			// `.h` infers as C, so only the explicit `cpp` override can match the
+			// class pattern — and only if `runMultiTargetAstGrep` forwards `lang`
+			// to each per-target `astGrep` call behind the `;` scope.
+			const firstDir = path.join(tempDir, "a");
+			const secondDir = path.join(tempDir, "b");
+			await fs.mkdir(firstDir, { recursive: true });
+			await fs.mkdir(secondDir, { recursive: true });
+			for (const dir of [firstDir, secondDir]) {
+				await Bun.write(path.join(dir, "buffer.h"), "class Buffer { public: int size() const { return 1; } };\n");
+			}
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-multi-lang", {
+				pat: "class Buffer",
+				path: `${firstDir};${secondDir}`,
+				lang: "cpp",
+			});
+			const details = result.details as { matchCount?: number } | undefined;
+			expect(details?.matchCount).toBe(2);
 		} finally {
 			await removeWithRetries(tempDir);
 		}

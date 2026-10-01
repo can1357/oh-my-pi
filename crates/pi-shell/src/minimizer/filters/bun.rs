@@ -684,7 +684,8 @@ mod tests {
 			"internal command lines must be stripped: {:?}",
 			out.text
 		);
-		// Nonzero exit lines are preserved as evidence (code 0 exits are stripped).
+		// Nonzero exit lines are preserved as evidence (code 0 exits are
+		// stripped).
 		assert!(
 			out.text.contains("Exited with code 1"),
 			"nonzero exit line must survive as evidence: {:?}",

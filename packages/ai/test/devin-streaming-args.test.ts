@@ -1,14 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { create, toBinary } from "@bufbuild/protobuf";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model, ToolCall } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetChatMessageResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
 import {
 	ChatToolCallSchema,
+	GetChatMessageResponseSchema,
+	GetUserJwtResponseSchema,
 	StopReason,
-} from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/codeium_common_pb/codeium_common_pb";
+} from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 function frameConnectMessage(payload: Uint8Array): Uint8Array {
 	const out = new Uint8Array(5 + payload.length);
@@ -44,12 +45,29 @@ const devinModel: Model<"devin-agent"> = buildModel({
 const context: Context = { messages: [{ role: "user", content: "call tool", timestamp: 1 }] };
 
 describe("streamDevin args streaming", () => {
+	it("refuses a finalized truncated argument snapshot", async () => {
+		const raw = '{"agent":"task","note":"initial';
+		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
+		const fetchImpl = (async (input: string | URL | Request) =>
+			String(input).includes("GetUserJwt")
+				? new Response(authPayload)
+				: new Response(toolCallDelta(raw, StopReason.FUNCTION_CALL))) as typeof fetch;
+		const result = await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		const call = result.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+		expect(() =>
+			validateToolArguments({ name: "task", description: "", parameters: { type: "object" } }, call),
+		).toThrow("Tool call arguments are not valid JSON");
+	});
+
 	it("throttles tiny mid-stream arg reparses but flushes final args", async () => {
 		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 		const chunks = [
 			toolCallDelta(`{"agent":"task","note":"initial"`),
 			toolCallDelta(`{"agent":"task","note":"initial","step":1`),
-			toolCallDelta(`{"agent":"task","note":"initial","step":12`, StopReason.FUNCTION_CALL),
+			toolCallDelta(`{"agent":"task","note":"initial","step":12}`, StopReason.FUNCTION_CALL),
 		];
 		const fetchImpl = (async (input: string | URL | Request) => {
 			const url = String(input);

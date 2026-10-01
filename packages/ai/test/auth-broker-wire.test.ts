@@ -77,9 +77,9 @@ describe("auth-broker wire surface", () => {
 		}
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-wire-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
+		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
 		storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		token = "test-bearer";
 		handle = startAuthBroker({
 			storage,
@@ -127,6 +127,23 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
+	test("GET /v1/snapshot orders tied credential blocks by updatedAtMs", async () => {
+		const credentialId = storage!.credentials.snapshot().credentials[0]!.id;
+		const blockedUntilMs = Date.now() + 60_000;
+		const block = { credentialId, providerKey: "anthropic:oauth", blockScope: "", blockedUntilMs };
+		// SQLite's primary key cannot hold this tie, so feed it straight to the
+		// snapshot builder: only the server's sort decides the wire order, and it
+		// must match the client store's canonical order (oldest update first).
+		vi.spyOn(storage!.blocks, "list").mockReturnValue([
+			{ ...block, updatedAtMs: 2_000 },
+			{ ...block, updatedAtMs: 1_000 },
+		]);
+
+		const result = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (result.status !== 200) throw new Error("expected snapshot");
+		expect(credentialBlocks(result.snapshot, credentialId).map(entry => entry.updatedAtMs)).toEqual([1_000, 2_000]);
+	});
+
 	test("preserves an HTTP rejection when the caller aborts while reading its body", async () => {
 		const client = new AuthBrokerClient({
 			url: "http://broker.invalid",
@@ -150,6 +167,42 @@ describe("auth-broker wire surface", () => {
 		} catch (error) {
 			expect(error).toBeInstanceOf(AuthBrokerError);
 			expect(error).toMatchObject({ status: 401 });
+		}
+	});
+
+	test("GET /v1/usage outlives the base timeout for a serialized account batch", async () => {
+		vi.useFakeTimers();
+		const response = Promise.withResolvers<Response>();
+		let usageSignal: AbortSignal | undefined;
+		const fetchImpl: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const signal = init?.signal;
+				if (signal) usageSignal = signal;
+				return response.promise;
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({
+			url: "http://broker.invalid",
+			token,
+			timeoutMs: 10_000,
+			maxRetries: 0,
+			fetchImpl,
+		});
+		try {
+			const usage = client.fetchUsage({ maxAccountsPerProvider: 3 });
+			await Promise.resolve();
+			const baseTimeout = AbortSignal.timeout(10_000);
+			vi.advanceTimersByTime(10_001);
+			await Promise.resolve();
+			expect(baseTimeout.aborted).toBe(true);
+			expect(usageSignal?.aborted).toBe(false);
+
+			const generatedAt = Date.now();
+			response.resolve(Response.json({ generatedAt, reports: [] }));
+			expect(await usage).toEqual({ generatedAt, reports: [] });
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 
@@ -191,7 +244,7 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("ignores external SQLite commits outside auth tables", async () => {
-		const generation = storage!.getGeneration();
+		const generation = storage!.credentials.generation;
 		const db = new Database(path.join(tempDir, "agent.db"));
 		try {
 			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
@@ -200,8 +253,8 @@ describe("auth-broker wire surface", () => {
 			db.close();
 		}
 
-		expect(await storage!.pollExternalChanges()).toBe(false);
-		expect(storage!.getGeneration()).toBe(generation);
+		expect(await storage!.credentials.poll()).toBe(false);
+		expect(storage!.credentials.generation).toBe(generation);
 	});
 
 	test("does not double-bump after a local auth write with an unrelated external commit pending", async () => {
@@ -212,15 +265,15 @@ describe("auth-broker wire surface", () => {
 		} finally {
 			db.close();
 		}
-		storage!.upsertCredential("unit-local", { type: "api_key", key: "local-key" });
-		const generation = storage!.getGeneration();
+		await storage!.credentials.upsert("unit-local", { type: "api_key", key: "local-key" });
+		const generation = storage!.credentials.generation;
 
-		expect(await storage!.pollExternalChanges()).toBe(false);
-		expect(storage!.getGeneration()).toBe(generation);
+		expect(await storage!.credentials.poll()).toBe(false);
+		expect(storage!.credentials.generation).toBe(generation);
 	});
 
 	test("preserves a pending external auth commit while acknowledging local changes", async () => {
-		const generation = storage!.getGeneration();
+		const generation = storage!.credentials.generation;
 		const db = new Database(path.join(tempDir, "agent.db"));
 		try {
 			db.run("UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE provider = 'anthropic'");
@@ -229,26 +282,28 @@ describe("auth-broker wire surface", () => {
 		}
 
 		store!.acknowledgeLocalChanges();
-		expect(await storage!.pollExternalChanges()).toBe(true);
-		expect(storage!.getGeneration()).toBeGreaterThan(generation);
+		expect(await storage!.credentials.poll()).toBe(true);
+		expect(storage!.credentials.generation).toBeGreaterThan(generation);
 	});
 
 	test("projects Codex meter blocks for legacy clients and observes writes from another connection", async () => {
 		await handle!.close();
 		handle = undefined;
-		const credential = storage!.upsertCredential("openai-codex", {
-			...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
-		})[0];
+		const credential = (
+			await storage!.credentials.upsert("openai-codex", {
+				...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
+			})
+		)[0];
 		if (!credential) throw new Error("expected Codex credential");
 		const chatBlockedUntilMs = Date.now() + 60_000;
 		const sparkBlockedUntilMs = Date.now() + 120_000;
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "chat",
 			blockedUntilMs: chatBlockedUntilMs,
 		});
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "spark",
@@ -270,7 +325,7 @@ describe("auth-broker wire surface", () => {
 		} finally {
 			db.close();
 		}
-		await storage!.pollExternalChanges();
+		await storage!.credentials.poll();
 		expect(readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id)).toEqual([
 			{
 				block_scope: "chat",
@@ -337,8 +392,8 @@ describe("auth-broker wire surface", () => {
 		]);
 
 		expect(
-			storage!
-				.listCredentialBlocks([credential.id])
+			storage!.blocks
+				.list([credential.id])
 				.map(block => block.blockScope)
 				.sort(),
 		).toEqual(["chat", "spark"]);
@@ -379,8 +434,8 @@ describe("auth-broker wire surface", () => {
 		if (initial.status !== 200) throw new Error("expected snapshot");
 
 		const pending = client.fetchSnapshot({ ifGenerationGt: initial.generation, waitMs: 1000 });
-		setTimeout(() => {
-			storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+		setTimeout(async () => {
+			await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 		}, 10);
 
 		const changed = await pending;
@@ -542,6 +597,26 @@ describe("auth-broker wire surface", () => {
 		expect(second?.hostname).toBeUndefined();
 		expect(second?.providers[0]).toMatchObject({ provider: "openai-codex", requests: 1 });
 
+		// App-labeled usage lands in its own (install, app, provider) aggregate
+		// row — "what did robomp spend" must not fold into the unlabeled bucket.
+		await client.reportClientUsage({
+			installId: "install-2",
+			app: "robomp",
+			entries: [{ ...entry, provider: "openai-codex", model: "gpt-y", requests: 4, costUsd: 1.5 }],
+		});
+		const withApps = await client.fetchClientUsageSummary();
+		const labeled = withApps.clients.find(c => c.installId === "install-2");
+		expect(labeled?.providers).toHaveLength(2);
+		expect(labeled?.providers.find(p => p.app === "robomp")).toMatchObject({
+			provider: "openai-codex",
+			requests: 4,
+			costUsd: 1.5,
+		});
+		expect(labeled?.providers.find(p => p.app === undefined)).toMatchObject({
+			provider: "openai-codex",
+			requests: 1,
+		});
+
 		// sinceMs beyond the recorded timestamps returns clients with no aggregates.
 		const future = await client.fetchClientUsageSummary({ sinceMs: now + 60_000 });
 		expect(future.clients.every(c => c.providers.length === 0)).toBe(true);
@@ -580,7 +655,7 @@ describe("auth-broker wire surface", () => {
 				expect(first.value.credentials[0].provider).toBe("anthropic");
 			}
 
-			storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+			await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 
 			const next = await nextMatching(iter, event => event.kind === "entry");
 			if (next.kind !== "entry") throw new Error("expected entry frame");
@@ -597,19 +672,21 @@ describe("auth-broker wire surface", () => {
 	});
 
 	test("SSE stream projects Codex meter blocks only for clients without the capability", async () => {
-		const credential = storage!.upsertCredential("openai-codex", {
-			...mintOAuthCredential("codex-stream-scopes", Date.now() + 60_000),
-		})[0];
+		const credential = (
+			await storage!.credentials.upsert("openai-codex", {
+				...mintOAuthCredential("codex-stream-scopes", Date.now() + 60_000),
+			})
+		)[0];
 		if (!credential) throw new Error("expected Codex credential");
 		const chatBlockedUntilMs = Date.now() + 60_000;
 		const sparkBlockedUntilMs = Date.now() + 120_000;
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "chat",
 			blockedUntilMs: chatBlockedUntilMs,
 		});
-		storage!.upsertCredentialBlock({
+		storage!.blocks.upsert({
 			credentialId: credential.id,
 			providerKey: "openai-codex:oauth",
 			blockScope: "spark",
@@ -654,7 +731,7 @@ describe("auth-broker wire surface", () => {
 			]);
 
 			const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
-			storage!.upsertCredentialBlock({
+			storage!.blocks.upsert({
 				credentialId: credential.id,
 				providerKey: "openai-codex:oauth",
 				blockScope: "chat",
@@ -712,7 +789,7 @@ describe("auth-broker wire surface", () => {
 			const first = await iter.next();
 			if (first.done) throw new Error("expected snapshot frame");
 
-			await storage!.refreshCredentialById(id);
+			await storage!.oauth.refresh(id);
 
 			const next = await nextMatching(
 				iter,
@@ -740,7 +817,7 @@ describe("auth-broker wire surface", () => {
 			const first = await iter.next();
 			if (first.done) throw new Error("expected snapshot frame");
 
-			const disabled = storage!.disableCredentialById(id, "revoked by test");
+			const disabled = await storage!.credentials.disable(id, "revoked by test");
 			expect(disabled).toBe(true);
 
 			const next = await nextMatching(iter, event => event.kind === "removed");
@@ -754,9 +831,9 @@ describe("auth-broker wire surface", () => {
 
 	test("SSE stream keepalive comment arrives on cadence", async () => {
 		const localStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "keepalive.db"));
-		localStore.saveOAuth("anthropic", mintOAuthCredential("k", Date.now() + 60_000));
+		await localStore.saveOAuth("anthropic", mintOAuthCredential("k", Date.now() + 60_000));
 		const localStorage = new AuthStorage(localStore);
-		await localStorage.reload();
+		await localStorage.credentials.reload();
 		const localToken = "keepalive-bearer";
 		const localHandle = startAuthBroker({
 			storage: localStorage,
@@ -845,6 +922,87 @@ describe("auth-broker wire surface", () => {
 			await expect(iter.next()).rejects.toThrow(/initial snapshot/);
 		} finally {
 			dummy.stop(true);
+		}
+	});
+});
+
+describe("client_usage app column migration", () => {
+	test("pre-app broker DBs gain the app column; legacy rows stay queryable as unlabeled", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-migrate-"));
+		const dbPath = path.join(dir, "agent.db");
+		// Replicate the pre-app schema exactly as older brokers created it, plus
+		// one recorded legacy row — `CREATE TABLE IF NOT EXISTS` must skip it and
+		// the ALTER-based migration must add the column without losing the row.
+		const legacy = new Database(dbPath);
+		legacy.run(`
+			CREATE TABLE clients (
+				install_id TEXT PRIMARY KEY,
+				hostname TEXT,
+				first_seen INTEGER NOT NULL,
+				last_seen INTEGER NOT NULL
+			);
+			CREATE TABLE client_usage (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				recorded_at INTEGER NOT NULL,
+				install_id TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				model TEXT NOT NULL,
+				requests INTEGER NOT NULL,
+				input_tokens INTEGER NOT NULL,
+				output_tokens INTEGER NOT NULL,
+				cache_read_tokens INTEGER NOT NULL,
+				cache_write_tokens INTEGER NOT NULL,
+				cost_usd REAL NOT NULL DEFAULT 0
+			);
+		`);
+		const now = Date.now();
+		legacy.run("INSERT INTO clients (install_id, hostname, first_seen, last_seen) VALUES (?, ?, ?, ?)", [
+			"legacy-install",
+			"legacy-host",
+			now,
+			now,
+		]);
+		legacy.run(
+			`INSERT INTO client_usage (recorded_at, install_id, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[now, "legacy-install", "anthropic", "claude-x", 5, 100, 50, 10, 5, 2.5],
+		);
+		legacy.close();
+
+		const migrated = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			migrated.recordClientUsage({
+				installId: "legacy-install",
+				app: "robomp",
+				entries: [
+					{
+						at: now,
+						provider: "anthropic",
+						model: "claude-x",
+						requests: 1,
+						inputTokens: 10,
+						outputTokens: 5,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						costUsd: 0.1,
+					},
+				],
+			});
+			const summary = migrated.getClientUsageSummary(0);
+			const client = summary.clients.find(c => c.installId === "legacy-install");
+			expect(client?.providers.find(p => p.app === undefined)).toMatchObject({
+				provider: "anthropic",
+				requests: 5,
+				inputTokens: 100,
+			});
+			expect(client?.providers.find(p => p.app === "robomp")).toMatchObject({
+				provider: "anthropic",
+				requests: 1,
+				inputTokens: 10,
+			});
+		} finally {
+			migrated.close();
+			await removeWithRetries(dir);
 		}
 	});
 });

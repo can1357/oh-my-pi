@@ -1,10 +1,7 @@
-import { isDashscopeCompatibleModeUrl } from "@oh-my-pi/pi-catalog/hosts";
-import { isQwenModelId } from "@oh-my-pi/pi-catalog/identity";
-
-import type { ImageContent, Model, TextContent } from "../types";
+import { $env } from "@oh-my-pi/pi-utils";
+import type { Api, ImageContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
-
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
 	supportsImages: boolean,
@@ -34,21 +31,38 @@ export function joinTextWithImagePlaceholder(text: string, omittedImages: boolea
 }
 
 /**
- * Detect known text-only Qwen models served via Alibaba DashScope's consumer
- * `compatible-mode` endpoint that the upstream chat-completions API rejects
- * multimodal content arrays for. The compatible-mode endpoint also serves
- * multimodal Qwen SKUs without `vl` in the id (e.g. `qwen3.7-plus`), so this
- * guard only covers families verified to be text-only for issue #1859:
- * `qwen*-max` and `qwen*-coder*`.
- *
- * Used as a defensive override in `convertMessages` so a misconfigured custom
- * provider (issue #1859) can't drive the request into an unrecoverable 400.
+ * Evaluates whether an OpenAI-compatible Chat Completions model genuinely
+ * supports multimodal image inputs on the wire. Defensive guards override
+ * misconfigured provider descriptors or user model entries (e.g. text-only
+ * DashScope Qwen SKUs, DeepSeek models) whose endpoints reject `image_url`.
  */
-export function isDashscopeCompatibleModeTextOnlyQwen(model: Model<"openai-completions">): boolean {
-	if (!isDashscopeCompatibleModeUrl(model.baseUrl)) {
-		return false;
-	}
-	const id = model.id.toLowerCase();
-	if (!isQwenModelId(model.id)) return false;
-	return /\bqwen(?:[\d.]+)?-max\b/.test(id) || /\bqwen(?:[\d.]+)?-coder\b/.test(id);
+export function isOpenAICompletionsVisionSupported(model: Model<"openai-completions" | "openrouter">): boolean {
+	if (!model.input.includes("image")) return false;
+	if (model.compat.stripImageInput) return false;
+	return true;
+}
+
+/**
+ * Whether the transport that will carry `model` sends image content on the wire.
+ *
+ * The `pi-native` transport forwards the original context (images included) to
+ * the gateway, which resolves its own model server-side, so the Chat
+ * Completions guard below never runs client-side and the declared input
+ * applies. Otherwise the OpenAI Chat Completions path applies the text-only
+ * guard, as does the OpenRouter chat fallback (`PI_OPENROUTER_RESPONSES=0`,
+ * which dispatches `openrouter` models through `streamOpenAICompletions`);
+ * every other API ships the modalities the model declares. Callers that report
+ * or gate on the wire (for example the `omp models` table) read this
+ * predicate; declared capability reads `model.input`.
+ */
+export function sendsImageInputOnWire(model: Model<Api>): boolean {
+	if (model.transport === "pi-native") return model.input.includes("image");
+	if (isGuardedCompletionsTransport(model)) return isOpenAICompletionsVisionSupported(model);
+	return model.input.includes("image");
+}
+
+/** True for the transports that encode through the Chat Completions guard. */
+function isGuardedCompletionsTransport(model: Model<Api>): model is Model<"openai-completions" | "openrouter"> {
+	if (model.api === "openai-completions") return true;
+	return model.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES === "0";
 }

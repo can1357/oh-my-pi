@@ -5,49 +5,47 @@ description: Optimize the description prompts an AI agent reads to learn its bui
 
 # Tool Prompt Optimization
 
-A tool's description prompt and its parameter schema overlap. Whatever a model can reconstruct from the **schema + tool name + a blank outline** is a *prune candidate* — the schema may already teach it. This skill measures that overlap so you prune with evidence, not vibes. A candidate is never an automatic delete (see caveats — history first).
+Prompt/schema overlap: content reconstructible from `(name, JSON schema, blank outline)` is a *prune candidate*, never an automatic delete. Probe this overlap for evidence, not vibes: predict the prompt body from those inputs. Reliably recovered lines: candidates; no-model recovery: load-bearing — keep.
 
-Core move: give a model only `(name, JSON schema, outline)` and have it predict the prompt body. Lines it predicts reliably are *prune candidates*. Lines it never recovers are *load-bearing* — keep them.
+## Run probe
 
-## Run the probe
-
-`scripts/probe.ts` routes through `@oh-my-pi/pi-ai` (`completeSimple`) so model/auth/provider behavior matches production.
+`scripts/probe.ts`: `@oh-my-pi/pi-ai` `completeSimple`; production-matching model/auth/provider behavior.
 
 ```bash
 bun .omp/skills/tool-prompt-optimization/scripts/probe.ts \
   --schema <file|json> --template <file|text> --name <tool_name>
 ```
 
-- `--schema` and `--template` are the only required inputs (file path or inline value).
-- No `--model` → 3-model panel (`fireworks/kimi-k2.7-code`, `anthropic/claude-opus-4-8`, `openai/gpt-5.5`) × `--samples` (default 3). Needs `FIREWORKS_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
-- `--model p/id,p/id` overrides the panel; `--samples N`, `--max-tokens`, `--json` tune it.
+- Required: `--schema`, `--template` — file path or inline value.
+- No `--model`: panel `fireworks/kimi-k2.7-code`, `anthropic/claude-opus-4-8`, `openai/gpt-5.5` × `--samples` (default 3); requires `FIREWORKS_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
+- `--model p/id,p/id`: override panel. Tune: `--samples N`, `--max-tokens`, `--json`.
 - Programmatic: `import { probe } from "./scripts/probe.ts"` → `{ prompt, results: [{ model, samples: [{ text, stopReason, usage, error }] }] }`.
 
-### Builtin shortcut (preferred for this repo's tools)
+### Builtin shortcut — preferred for this repo
 
-Skip building the two inputs by hand — `scripts/probe-builtin.ts` instantiates the live tool, pulls the EXACT wire schema (`toolWireSchema`) and rendered prompt (`tool.description`), and derives the outline for you:
+`scripts/probe-builtin.ts` instantiates the live tool; gets exact `toolWireSchema`, `tool.description`, and derived outline:
 
 ```bash
 bun .omp/skills/tool-prompt-optimization/scripts/probe-builtin.ts --tool <name> [--no-summary] [--show]
 ```
 
-- `--show` prints the resolved schema + derived outline + real prompt and exits (no API calls) — use it to eyeball inputs before spending tokens.
-- `--no-summary` runs the ablation (blank the summary line) directly.
-- `--samples` / `--model` / `--max-tokens` / `--json` forward to the panel; output ends with the REAL prompt so you can diff in place.
-- It bypasses the settings allowlist via the factory map, so gated tools (`irc`, `github`, …) resolve. If a tool refuses to construct (an availability gate like a missing `gh` CLI), fall back to the manual inputs below.
+- `--show`: resolved schema, derived outline, real prompt; exits without API calls. Inspect before spending tokens.
+- `--no-summary`: direct summary-line-blank ablation.
+- `--samples` / `--model` / `--max-tokens` / `--json`: panel passthrough. Output ends with real prompt for in-place diff.
+- Factory-map bypasses settings allowlist: gated `irc`, `github`, … resolve. Construction availability gate (e.g. missing `gh` CLI) → manual inputs.
 
-## Build the two inputs
+## Inputs
 
-**Schema** — use the *wire* schema the model actually sees, not a hand-sketch. For this repo's arktype tool schemas:
+**Schema:** wire schema the model sees, never hand-sketch. Arktype:
 
 ```ts
 import { arkToWireSchema } from "@oh-my-pi/pi-ai"; // or toolWireSchema(tool)
 JSON.stringify(arkToWireSchema(toolSchema), null, 2);
 ```
 
-Include `required` and `additionalProperties: false` — omitting them makes the model infer looser usage than the real tool.
+Include `required`, `additionalProperties: false`; omission makes usage appear looser than reality.
 
-**Template (outline)** — the real `.md`'s structure with bodies blanked: the one-line summary, then each section tag with `...` inside.
+**Template:** actual `.md` structure with bodies blanked — one-line summary, then each section tag containing `...`.
 
 ```
 Structural code search via native ast-grep AST matching.
@@ -65,54 +63,54 @@ Structural code search via native ast-grep AST matching.
 </critical>
 ```
 
-## Interpret results
+## Interpret
 
-Bucket every line of the real prompt against the predictions:
+Bucket each real-prompt line:
 
-- **Prune candidate** — content that is STABLE across samples AND agrees across models AND restates the schema (param names, types, "required", value examples already in a field `description`, clamp ranges already stated). The schema teaches it; the prompt repeats it.
-- **Keep** — content no model recovers: defaults and their direction (`gitignore` default true), cross-tool routing/escalation ("NEVER shell out to `find`/`fd` → use this tool", "broad exploration → Task subagent"), exact output format (mtime sort, grouping, `artifact://` truncation), worked anti-patterns, and hard constraints invisible to a type (the AST metavariable grammar, C++ trailing `;`).
+- **Prune candidate:** stable across samples **and** models; schema restatement — parameter names/types, `required`, field-description value examples, stated clamp ranges.
+- **Keep:** no model recovers it — defaults/direction (`gitignore` default true); routing/escalation (`NEVER` shell out to `find`/`fd` → use this tool; broad exploration → `Task` subagent); exact output shape (mtime sort, grouping, `artifact://` truncation); worked anti-patterns; type-invisible constraints (AST metavariable grammar, C++ trailing `;`).
 
-A single sample is noise. Only treat overlap that is **stable across samples and models** as a prune *candidate* — and a candidate is not a verdict until its history clears (see caveats). You MUST NOT delete a line on inferability alone.
+One sample: noise. Stable cross-sample/model overlap is only a candidate; history must clear it. MUST NOT delete on inferability alone.
 
-## Caveats — read before deleting anything
+## Caveats — before every deletion
 
-- **`git blame` before cutting — MUST, not SHOULD.** Many prompt lines were added on purpose after a real failure: a model that hallucinated a flag, shelled out, scanned the repo root, fabricated an anchor. They look redundant precisely because they now prevent the mistake. You MUST `git blame` (and read the commit/issue) every line you intend to cut; the history tells you whether it restates the schema or is scar tissue from an incident. Keep scar tissue. Inferability is necessary for pruning, NEVER sufficient.
-- **Memorization ≠ inference.** Public repos (this one included) may be in training data, so a model can *recite* `ast-grep.md` it never *inferred*. Tell: predictions naming repo-specific details absent from the schema (exact tool names, internal URI schemes, the `Task` subagent) are memorized, not derived — discount them.
-- **The outline leaks.** The summary line and section names are themselves hints. To isolate *schema-alone* inferability, run an ablation: a second pass with no summary line and generic section tags. Content that survives only with the summary present is "summary-inferable", not "schema-inferable".
+- **MUST `git blame` each cut line; read its commit/issue.** Many lines are incident scar tissue: hallucinated flag, shell-out, repo-root scan, fabricated anchor. Keep scar tissue. History distinguishes schema restatement from incident prevention. Inferability necessary, NEVER sufficient.
+- **Memorization ≠ inference:** public repos, including this one, may be training data. Repo-specific prediction absent from schema — exact tool names, internal URI schemes, `Task` subagent — is recitation; discount it.
+- **Outline leaks:** summary and section names hint. For schema-alone inference, second pass: no summary, generic section tags. Content surviving only the summary is summary-inferable, not schema-inferable.
 
-## Verdict pattern
+## Verdict
 
-Per tool: predictions reproduce parameter mechanics and generic usage (already in the schema) but miss defaults, output shape, cross-tool routing, anti-patterns, and domain grammar. Prune the first set (after `git blame` clears each line); keep the second. Self-documenting flag tools (e.g. `find`) prune heavily; DSL/capability tools (e.g. `read`, `ast_grep`) barely at all.
+Predictions usually recover schema-covered parameter mechanics/generic usage, not defaults, output shape, routing, anti-patterns, domain grammar. Prune the former only after per-line `git blame`; keep the latter. Self-documenting flag tools (`find`) prune heavily; DSL/capability tools (`read`, `ast_grep`) barely.
 
 ## Tool Prompt Authoring
 
-Tool prompts are not API docs. They teach the agent **when to reach for the tool, what shape its inputs take, and which failure modes are the agent's responsibility**. Everything else — engine internals, recovery heuristics, fallback chains, performance tuning — stays in code.
+Tool prompts are not API docs: teach when to choose a tool, input shape, and agent-owned failures. Engine internals, recovery heuristics, fallback chains, performance tuning: code.
 
-### Describe surface, not machinery
+### Surface, not machinery
 
-The agent picks tools from prose, not source. Tell it WHEN and WHY; NEVER HOW the tool works internally.
+Agents choose from prose, not source: tell WHEN/WHY, NEVER internal HOW.
 
-- `read.md` enumerates every source it covers (file/dir/archive/sqlite/PDF/URL) so the agent stops reaching for `cat`/`curl`/`tar`. It does NOT mention the chunker, the binary sniffer, or the cache layer.
-- `lsp.md`: "You MUST use `lsp` whenever a language server is available — safer than text-based alternatives." No mention of the LSP wire protocol, server lifecycle, or capability negotiation.
-- `ast_edit`: teaches metavariable syntax + workflow ("Loosest existence check: `pat: 'executeBash'` with narrow paths"). Does NOT explain the AST engine, query compilation, or tree-sitter grammar selection.
-- `hashline.md` (this repo): teaches the **patch grammar** (anchors, ops, payloads, ranges) and the **edit shapes** that succeed. Hides `tryRecoverHashlineWithCache`, the fuzz factor, the bigram tables, `findUniqueSuffixMatch`, `untilAborted`, `formatGroupedFiles`. The agent never learns those names — it just sees "the tool resolved your typo" or "the anchor was stale, re-read".
+- `read.md`: every covered source — file/dir/archive/sqlite/PDF/URL — prevents `cat`/`curl`/`tar`; omit chunker, binary sniffer, cache layer.
+- `lsp.md`: "You MUST use `lsp` whenever a language server is available — safer than text-based alternatives." Omit LSP wire protocol, server lifecycle, capability negotiation.
+- `ast_edit`: metavariable syntax/workflow: "Loosest existence check: `pat: 'executeBash'` with narrow paths"; omit AST engine, query compilation, tree-sitter grammar selection.
+- `hashline.md` (this repo): patch grammar — anchors, ops, payloads, ranges — and successful edit shapes. Hide `tryRecoverHashlineWithCache`, fuzz factor, bigram tables, `findUniqueSuffixMatch`, `untilAborted`, `formatGroupedFiles`; agent sees only "the tool resolved your typo" or "the anchor was stale, re-read".
 
-If the agent's behavior shouldn't change based on a detail, the detail does NOT belong in the prompt. Each sentence MUST shift a decision the agent makes.
+If a detail cannot change agent behavior, it does NOT belong. Each sentence MUST shift an agent decision.
 
-### Anatomy of a good tool prompt
+### Good prompt anatomy
 
-1. **One-line purpose.** What problem it solves, in the agent's vocabulary. Not "wraps libfoo with X" — instead "compact, line-anchored edit format".
-2. **Input grammar / surface.** Operators, parameters, selectors. Concrete syntax the agent will emit verbatim.
-3. **Worked examples.** 3–8 patterns covering the common shapes. Each example IS the explanation — don't narrate it twice.
-4. **Failure shapes the agent owns.** Things the agent can fix by changing its input (stale anchors, missing payload prefix, fabricated hash). Skip failures the engine recovers from silently.
-5. **Anti-patterns.** WRONG/RIGHT pairs for the mistakes that cost retries. Drawn from real failures, not imagined ones.
-6. **`<critical>` recap.** 3–6 lines of the load-bearing rules, in case the agent skips the body.
+1. **One-line purpose:** agent-vocabulary problem; not "wraps libfoo with X", but "compact, line-anchored edit format".
+2. **Input grammar/surface:** operators, parameters, selectors; concrete emitted syntax.
+3. **Worked examples:** 3–8 common shapes. Example IS explanation; do not narrate twice.
+4. **Agent-owned failure shapes:** input-fixable stale anchors, missing payload prefix, fabricated hash; omit silently recovered failures.
+5. **Anti-patterns:** real-failure WRONG/RIGHT pairs for retry-causing mistakes, never imagined ones.
+6. **`<critical>` recap:** 3–6 load-bearing lines for agents skipping body.
 
-### What stays out
+### Exclude
 
-- Implementation file names, function names, module layout.
+- Implementation file/function names, module layout.
 - Recovery, retry, normalization, caching, fuzz matching.
-- Performance characteristics ("this is O(n)") unless they change the agent's strategy.
-- Telemetry, logging, debug flags, env vars the agent cannot set.
+- Performance characteristics such as "this is O(n)", unless strategy-changing.
+- Telemetry, logging, debug flags, unsettable env vars.
 - Version history, deprecated parameters, "previously this worked differently".
-- Cross-tool plumbing ("this calls `read` under the hood") unless the agent must coordinate them.
+- Cross-tool plumbing such as "this calls `read` under the hood", unless coordination required.

@@ -3,7 +3,7 @@
  * `getOrFetchIssue` / `getOrFetchPr` wrappers wired into `gh.ts`.
  *
  * Each test isolates `OMP_GITHUB_CACHE_DB` to a temp file and clears
- * `git.github.json` / `git.github.text` mocks between cases.
+ * `github.json` / `github.text` mocks between cases.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -12,7 +12,6 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getOrFetchIssue, getOrFetchPr } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import {
-	clearAll,
 	getCached,
 	getOrFetchView,
 	openDb,
@@ -20,7 +19,7 @@ import {
 	resetForTests as resetCacheForTests,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { ToolAbortError, throwIfAborted } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const TEST_REPO = "owner/example";
@@ -115,31 +114,6 @@ describe("github-cache db layer", () => {
 		expect(rows[0].c).toBe(1);
 	});
 
-	it("keys comments-on and comments-off as separate rows", () => {
-		putCached({
-			repo: TEST_REPO,
-			kind: "issue",
-			number: 9,
-			includeComments: true,
-			payload: issuePayload(9, "with-comments"),
-			rendered: "with-comments-rendering",
-			fetchedAt: 1000,
-		});
-		putCached({
-			repo: TEST_REPO,
-			kind: "issue",
-			number: 9,
-			includeComments: false,
-			payload: issuePayload(9, "no-comments"),
-			rendered: "no-comments-rendering",
-			fetchedAt: 1000,
-		});
-		const withComments = getCached(TEST_REPO, "issue", 9, true);
-		const noComments = getCached(TEST_REPO, "issue", 9, false);
-		expect(withComments?.rendered).toBe("with-comments-rendering");
-		expect(noComments?.rendered).toBe("no-comments-rendering");
-	});
-
 	it("keys rows by GitHub auth identity", () => {
 		putCached({
 			authKey: "identity-a",
@@ -164,22 +138,6 @@ describe("github-cache db layer", () => {
 
 		expect(getCached(TEST_REPO, "issue", 12, true, "identity-a")?.rendered).toBe("from-a");
 		expect(getCached(TEST_REPO, "issue", 12, true, "identity-b")?.rendered).toBe("from-b");
-	});
-
-	it("clearAll wipes every row but the schema survives", () => {
-		putCached({
-			repo: TEST_REPO,
-			kind: "pr",
-			number: 1,
-			includeComments: true,
-			payload: prPayload(1, "x"),
-			rendered: "x",
-			fetchedAt: 1000,
-		});
-		clearAll();
-		expect(getCached(TEST_REPO, "pr", 1, true)).toBeNull();
-		const db = openDb();
-		expect(db).not.toBeNull();
 	});
 
 	it("does not chmod an existing cache parent directory", async () => {
@@ -444,8 +402,11 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(result.status).toBe("stale");
 		expect(result.rendered).toBe("old-diff");
 
-		await Promise.resolve();
-		await Bun.sleep(5);
+		for (let i = 0; i < 100; i++) {
+			const refreshed = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
+			if (refreshed?.payload.refreshed) break;
+			await Bun.sleep(0);
+		}
 
 		expect(fetchFresh).toHaveBeenCalledTimes(1);
 		const updated = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
@@ -552,7 +513,7 @@ describe("getOrFetchView (TTL semantics)", () => {
 
 describe("getOrFetchIssue (gh-wired wrapper)", () => {
 	it("second call within the soft TTL window does not invoke gh", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(123, "body") as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(123, "body") as never);
 
 		const first = await getOrFetchIssue({
 			cwd: "/tmp/test",
@@ -577,7 +538,7 @@ describe("getOrFetchIssue (gh-wired wrapper)", () => {
 	});
 
 	it("derives (repo, number) from a full GitHub issue URL identifier", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(7, "from-url") as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(7, "from-url") as never);
 		const url = `https://github.com/${TEST_REPO}/issues/7`;
 
 		await getOrFetchIssue({ cwd: "/tmp/test", issue: url, cacheAuthKey: TEST_AUTH_KEY });
@@ -591,7 +552,7 @@ describe("getOrFetchIssue (gh-wired wrapper)", () => {
 	});
 
 	it("caches comments-on and comments-off separately", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(5, "no-comments-body") as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(5, "no-comments-body") as never);
 
 		await getOrFetchIssue({
 			cwd: "/tmp/test",
@@ -631,7 +592,7 @@ describe("getOrFetchIssue (gh-wired wrapper)", () => {
 
 describe("getOrFetchPr (gh-wired wrapper)", () => {
 	it("caches PR view by (repo, number) and re-uses on the second call", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(prPayload(77, "pr-body") as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(prPayload(77, "pr-body") as never);
 
 		const first = await getOrFetchPr({
 			cwd: "/tmp/test",

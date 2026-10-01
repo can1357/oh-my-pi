@@ -1,32 +1,37 @@
 /**
  * SQLite-backed credential persistence for AuthStorage.
  *
- * The public AuthCredentialStore interface remains in ../auth-storage so local
- * and remote stores share the same contract.
+ * The AuthCredentialStore contract lives in ./store so local and remote stores
+ * share the same interface.
  */
-import { Database, type Statement } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
-import { getAgentDbPath, getDbBusyTimeoutMs, logger } from "@oh-my-pi/pi-utils";
+import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
+import {
+	getAgentDbPath,
+	getDbBusyTimeoutMs,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	logger,
+	openSqliteDatabase,
+} from "@oh-my-pi/pi-utils";
+import type { AuthCredentialStore, CredentialRefreshLeaseFence } from "./store";
 import type {
 	AuthCredential,
-	AuthCredentialStore,
-	CredentialRefreshLeaseFence,
 	DisabledCredentialSummary,
 	OAuthCredential,
 	StoredAuthCredential,
 	StoredCredentialBlock,
-} from "../auth-storage";
-import * as AIError from "../error";
+} from "./types";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type {
 	ClientProviderUsage,
 	ClientUsageReport,
 	ClientUsageSummary,
-	UsageCostHistoryEntry,
-	UsageCostHistoryQuery,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 } from "../usage";
@@ -83,35 +88,33 @@ type SerializedCredentialRecord = {
 	identityKey: string | null;
 };
 
-const AUTH_SCHEMA_VERSION = 7;
+/** Persisted columns compared to skip rewriting a credential row with identical bytes. */
+type CredentialStateRow = {
+	provider: string;
+	credential_type: string;
+	data: string;
+	identity_key: string | null;
+	disabled_cause: string | null;
+};
+
+function storesSerializedCredential(row: CredentialStateRow, serialized: SerializedCredentialRecord): boolean {
+	return (
+		row.data === serialized.data &&
+		row.credential_type === serialized.credentialType &&
+		(row.identity_key ?? null) === serialized.identityKey
+	);
+}
+
+const AUTH_SCHEMA_VERSION = 8;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
 
-/**
- * SQLite's busy result code family — base `SQLITE_BUSY` plus the extended
- * variants `SQLITE_BUSY_RECOVERY` (concurrent WAL recovery), `SQLITE_BUSY_SNAPSHOT`,
- * and `SQLITE_BUSY_TIMEOUT`. All warrant the same backoff-and-retry treatment.
- */
-export function isSqliteBusyError(err: unknown): boolean {
-	if (err === null || typeof err !== "object") return false;
-	const code = (err as { code?: unknown }).code;
-	return typeof code === "string" && code.startsWith("SQLITE_BUSY");
-}
-
-/**
- * SQLite's unrecoverable-corruption result codes — the `SQLITE_CORRUPT` family
- * (base plus extended variants like `SQLITE_CORRUPT_VTAB` / `SQLITE_CORRUPT_INDEX`)
- * and `SQLITE_NOTADB` (the file header is not a database). Unlike
- * {@link isSqliteBusyError}, these never clear by retrying: the store must be
- * repaired or replaced, so callers latch and stop touching it.
- */
-export function isSqliteCorruptionError(err: unknown): boolean {
-	if (err === null || typeof err !== "object" || !("code" in err)) return false;
-	const code = err.code;
-	return typeof code === "string" && (code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB");
-}
+// SQLite error classifiers live in pi-utils so the credential store and the
+// model cache share one implementation; re-exported here to preserve the
+// pre-existing `@oh-my-pi/pi-ai/auth-storage` surface.
+export { isSqliteBusyError, isSqliteCorruptionError };
 
 function normalizeStoredAccountId(accountId: string | null | undefined): string | null {
 	const normalized = accountId?.trim();
@@ -182,7 +185,7 @@ function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): Store
 
 function resolveProviderCredentialIdentityKey(provider: string, identifiers: string[]): string | null {
 	const emailIdentifier = identifiers.find(identifier => identifier.startsWith("email:"));
-	if (provider === "anthropic" || provider === "openai-codex") {
+	if (authPolicyFor(provider)?.orgScopedIdentity === true) {
 		// One account email can hold several organizations/workspaces (e.g. a
 		// Team seat plus a personal plan), each with its own org-scoped token
 		// and limit pools. Scope identity by org so both subscriptions can be
@@ -230,10 +233,17 @@ function matchesReplacementCredential(
 	if (incoming.type === "api_key") {
 		if (existing.type !== "api_key") return false;
 		if (existing.key === incoming.key) return true;
-		if (provider !== "alibaba-token-plan") return false;
-		const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
-		const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
-		return existingToken !== undefined && existingToken === incomingToken;
+		if (provider === "alibaba-token-plan") {
+			const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
+			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		if (provider === "cloudflare-ai-gateway") {
+			const existingToken = parseCloudflareAiGatewayCredential(existing.key)?.token;
+			const incomingToken = parseCloudflareAiGatewayCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		return false;
 	}
 	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
 	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);
@@ -241,8 +251,8 @@ function matchesReplacementCredential(
 	if (incomingIdentityKey === existingIdentityKey) return true;
 	if (existingIdentityKey === null) return false;
 	// One-way upgrade, applied only when the INCOMING identity key carries the
-	// org qualifier (only anthropic and openai-codex keys do, so other
-	// providers never reach the checks below). An org-scoped login `org:<o>`
+	// org qualifier (only providers with org-scoped identity create such keys,
+	// so other providers never reach the checks below). An org-scoped login `org:<o>`
 	// claims (and re-keys) any existing row that denotes the same subscription:
 	//   - `org:<o>` — org-only row stored when identity recovery failed, claimed
 	//     once a later same-org login recovers a base identity;
@@ -385,10 +395,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#getCredentialRefreshLeaseStmt: Statement;
 	#renewCredentialRefreshLeaseStmt: Statement;
 	#releaseCredentialRefreshLeaseStmt: Statement;
+	#getCredentialStateStmt: Statement;
+	#holdsCredentialRefreshLeaseStmt: Statement;
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	#insertUsageHistoryStmt: Statement;
-	#insertUsageCostStmt: Statement;
-	#listUsageCostsStmt: Statement;
 	#lastUsageHistoryStmt: Statement;
 	#listUsageHistoryStmt: Statement;
 	#updateUsageHistoryStmt: Statement;
@@ -435,7 +445,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				)`,
 		);
 		this.#deleteStmt = this.#db.prepare(
-			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
 		);
 		this.#deleteIfMatchesStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND data = ? AND disabled_cause IS NULL`,
@@ -504,6 +514,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#releaseCredentialRefreshLeaseStmt = this.#db.prepare(
 			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
 		);
+		this.#getCredentialStateStmt = this.#db.prepare(
+			"SELECT provider, credential_type, data, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
+		);
+		this.#holdsCredentialRefreshLeaseStmt = this.#db.prepare(
+			"SELECT 1 FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?",
+		);
 		this.#insertUsageHistoryStmt = this.#db.prepare(
 			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		);
@@ -516,14 +532,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listUsageHistoryStmt = this.#db.prepare(
 			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
-		this.#insertUsageCostStmt = this.#db.prepare(
-			"INSERT INTO usage_cost_history (recorded_at, provider, account_key, cost_usd) VALUES (?, ?, ?, ?)",
-		);
-		this.#listUsageCostsStmt = this.#db.prepare(
-			"SELECT recorded_at, provider, account_key, cost_usd FROM usage_cost_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) AND (? IS NULL OR account_key = ?) ORDER BY recorded_at ASC",
-		);
 	}
 
+	/** Opens credential storage with bounded busy retries and one-shot corruption recovery. */
 	static async open(dbPath: string = getAgentDbPath()): Promise<SqliteAuthCredentialStore> {
 		const dir = path.dirname(dbPath);
 		const dirExists = await fs
@@ -534,23 +545,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		}
 
-		// Concurrent omp startups can race against WAL recovery and the schema
-		// init's first lock-taking statement. Bun's default `busy_timeout` is 0,
-		// so retry the open on `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY` with bounded
-		// exponential backoff before surfacing the failure. See issue #2421.
-		const maxAttempts = 4;
-		const baseDelayMs = 100;
-		let lastBusyError: Error | undefined;
-		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			let db: Database | undefined;
-			try {
-				db = new Database(dbPath);
-				// Install the busy handler BEFORE the first lock-taking statement
-				// on this connection. The leases DDL below and the constructor's
-				// schema init both acquire locks during WAL recovery; without a
-				// non-zero `busy_timeout` they fail immediately with SQLITE_BUSY.
-				// See issue #2421.
-				SqliteAuthCredentialStore.#installBusyTimeout(db);
+		return openSqliteDatabase(
+			dbPath,
+			async db => {
 				try {
 					await fs.chmod(dbPath, 0o600);
 				} catch {
@@ -558,20 +555,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				}
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);
-			} catch (err) {
-				db?.close();
-				if (!isSqliteBusyError(err)) {
-					throw err;
-				}
-				lastBusyError = err instanceof Error ? err : new Error(String(err));
-				if (attempt < maxAttempts - 1) {
-					await Bun.sleep(baseDelayMs * 2 ** attempt);
-				}
-			}
-		}
-		throw new AIError.ConfigurationError(
-			`Failed to open auth database at '${dbPath}' after ${maxAttempts} attempts: ${lastBusyError?.message}`,
-			{ cause: lastBusyError },
+			},
+			{ recoverCorruption: true },
 		);
 	}
 
@@ -634,14 +619,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				resets_at INTEGER
 			);
 			CREATE INDEX IF NOT EXISTS idx_usage_history_series ON usage_history(provider, account_key, limit_id, recorded_at);
-			CREATE TABLE IF NOT EXISTS usage_cost_history (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				recorded_at INTEGER NOT NULL,
-				provider TEXT NOT NULL,
-				account_key TEXT NOT NULL,
-				cost_usd REAL NOT NULL
-			);
-			CREATE INDEX IF NOT EXISTS idx_usage_cost_history_lookup ON usage_cost_history(provider, account_key, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_usage_history_recorded ON usage_history(recorded_at);
 			CREATE TABLE IF NOT EXISTS clients (
 				install_id TEXT PRIMARY KEY,
@@ -653,6 +630,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				recorded_at INTEGER NOT NULL,
 				install_id TEXT NOT NULL,
+				app TEXT NOT NULL DEFAULT '',
 				provider TEXT NOT NULL,
 				model TEXT NOT NULL,
 				requests INTEGER NOT NULL,
@@ -665,6 +643,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
 		`);
+		this.#ensureClientUsageAppColumn();
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -1016,6 +995,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (fromVersion < 7) {
 			this.#migrateAuthSchemaV6ToV7();
 		}
+		if (fromVersion < 8) {
+			this.#migrateAuthSchemaV7ToV8();
+		}
 	}
 
 	#migrateAuthSchemaV0ToV1(): void {
@@ -1187,6 +1169,46 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		migrate.immediate();
 	}
 
+	#migrateAuthSchemaV7ToV8(): void {
+		const migrate = this.#db.transaction(() => {
+			// SingularityAPI split into two providers — the pay-as-you-go universal
+			// gateway and the slot-reserved lanes — and keys stored under the
+			// retired shared id belong to one or the other by format: the gateway
+			// issues `sk-sapi-...` while the lanes issue plain `sk-...` (both
+			// observed live 2026-09-22), and neither key is accepted by the other
+			// host. Route each stored credential to the product that serves it
+			// instead of orphaning it under an id nothing reads anymore.
+			const select = this.#db.prepare(
+				"SELECT id, credential_type, data FROM auth_credentials WHERE provider = 'singularityapi'",
+			);
+			let rows: Array<{ id: number; credential_type: string; data: string }>;
+			try {
+				rows = select.all() as Array<{ id: number; credential_type: string; data: string }>;
+			} finally {
+				select.finalize();
+			}
+			for (const row of rows) {
+				let provider = "singularityapi-tech";
+				try {
+					const parsed = JSON.parse(row.data) as { key?: unknown };
+					if (typeof parsed.key === "string" && parsed.key.startsWith("sk-sapi-")) {
+						provider = "singularityapi-dev";
+					}
+				} catch {
+					// Unparsable payload takes the lane default; whichever product the
+					// key really belongs to then answers 401 and the owner re-logs in.
+				}
+				this.#db.run("UPDATE auth_credentials SET provider = ? WHERE id = ?", [provider, row.id]);
+				this.#db.run(
+					"UPDATE auth_credential_blocks SET provider_key = ? WHERE credential_id = ? AND provider_key = ?",
+					[`${provider}:${row.credential_type}`, row.id, `singularityapi:${row.credential_type}`],
+				);
+			}
+			this.#writeAuthSchemaVersion(8);
+		});
+		migrate.immediate();
+	}
+
 	#backfillCredentialIdentityKeys(): void {
 		const selectRowsStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
@@ -1259,7 +1281,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return results;
 	}
 
-	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
+	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
 		const replace = this.#db.transaction((providerName: string, items: AuthCredential[]) => {
 			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
 			const existing = existingRows.map(row => ({
@@ -1310,7 +1332,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result;
 	}
 
-	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[] {
+	async upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
 		const upsert = this.#db.transaction((providerName: string, item: AuthCredential) => {
 			const serialized = serializeCredential(providerName, item);
 			if (!serialized) return this.listAuthCredentials(providerName);
@@ -1374,11 +1396,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		try {
 			let hasActiveApiKey = false;
 			const activeIdentityKeys = new Set<string>();
+			const activeOAuthCredentials: AuthCredential[] = [];
 			for (const row of activeRows) {
 				if (row.credential.type === "api_key") {
 					hasActiveApiKey = true;
 					continue;
 				}
+				activeOAuthCredentials.push(row.credential);
 				const identityKey = resolveCredentialIdentityKey(provider, row.credential);
 				if (identityKey) activeIdentityKeys.add(identityKey);
 			}
@@ -1393,25 +1417,40 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				const identityKey = resolveRowCredentialIdentityKey(provider, row);
 				if (identityKey && activeIdentityKeys.has(identityKey)) {
 					this.#hardDeleteStmt.run(row.id);
+					continue;
 				}
+				// Exact key equality misses a tombstone whose key predates a format
+				// the active row now uses (pre-org `<b>` vs `<b>|org:<o>`). An active
+				// credential that WOULD have replaced this row had it still been
+				// active supersedes its tombstone too, so mirror the replacement
+				// matcher rather than restating a weaker rule. The one-way upgrade
+				// and shared-workspace guards in matchesReplacementCredential carry
+				// over, so this never over-deletes another member's or subscription's
+				// row.
+				const disabledCredential = deserializeCredential(row);
+				if (disabledCredential === null) continue;
+				const superseded = activeOAuthCredentials.some(active =>
+					matchesReplacementCredential(provider, disabledCredential, identityKey, active),
+				);
+				if (superseded) this.#hardDeleteStmt.run(row.id);
 			}
 		} catch {
 			// Best-effort cleanup; don't let it break the main operation
 		}
 	}
 
+	/**
+	 * Rewrites a row only when its persisted bytes change: an identical write would
+	 * still bump `updated_at` and `auth_change_revision`, making every peer process
+	 * reload credentials for nothing.
+	 */
 	updateAuthCredential(id: number, credential: AuthCredential): void {
 		try {
-			const providerStmt = this.#db.prepare("SELECT provider FROM auth_credentials WHERE id = ?");
-			let providerRow: { provider?: string } | undefined;
-			try {
-				providerRow = providerStmt.get(id) as { provider?: string } | undefined;
-			} finally {
-				providerStmt.finalize();
-			}
-			const provider = providerRow?.provider ?? "";
+			const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+			const provider = row?.provider ?? "";
 			const serialized = serializeCredential(provider, credential);
 			if (!serialized) return;
+			if (row && storesSerializedCredential(row, serialized)) return;
 			this.#updateStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, id);
 			if (provider) {
 				this.#purgeSupersededDisabledRows(provider, this.listAuthCredentials(provider));
@@ -1427,16 +1466,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		credential: AuthCredential,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
-		const providerStmt = this.#db.prepare("SELECT provider FROM auth_credentials WHERE id = ?");
-		let providerRow: { provider?: string } | undefined;
-		try {
-			providerRow = providerStmt.get(id) as { provider?: string } | undefined;
-		} finally {
-			providerStmt.finalize();
-		}
-		const provider = providerRow?.provider ?? "";
+		const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+		const provider = row?.provider ?? "";
 		const serialized = serializeCredential(provider, credential);
 		if (!serialized) return false;
+		if (
+			row &&
+			row.disabled_cause === null &&
+			serialized.data === expectedData &&
+			storesSerializedCredential(row, serialized)
+		) {
+			// The row already holds exactly this credential: the CAS (and lease fence)
+			// matches, but rewriting identical bytes would only churn the revision.
+			return !lease || Boolean(this.#holdsCredentialRefreshLeaseStmt.get(id, lease.owner, lease.nowMs));
+		}
 		const result = lease
 			? (this.#updateIfMatchesWithLeaseStmt.run(
 					serialized.credentialType,
@@ -1462,11 +1505,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
+	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
 		try {
-			this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id);
+			const result = this.#deleteStmt.run(normalizeDisabledCause(disabledCause), id);
+			return result.changes > 0;
 		} catch {
 			// Ignore delete failures
+			return false;
 		}
 	}
 
@@ -1496,7 +1541,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				});
 		return result.changes > 0;
 	}
-	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
+	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		try {
 			this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
 		} catch {
@@ -1752,40 +1797,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return [];
 		}
 	}
-	recordUsageCosts(entries: UsageCostHistoryEntry[]): void {
-		try {
-			for (const entry of entries) {
-				this.#insertUsageCostStmt.run(entry.recordedAt, entry.provider, entry.accountKey, entry.costUsd);
-			}
-		} catch {
-			// Cost history is best-effort; never break request persistence.
-		}
-	}
 
-	listUsageCosts(query?: UsageCostHistoryQuery): UsageCostHistoryEntry[] {
-		try {
-			const provider = query?.provider ?? null;
-			const accountKey = query?.accountKey ?? null;
-			const rows = this.#listUsageCostsStmt.all(
-				query?.sinceMs ?? 0,
-				provider,
-				provider,
-				accountKey,
-				accountKey,
-			) as Array<{
-				recorded_at: number;
-				provider: string;
-				account_key: string;
-				cost_usd: number;
-			}>;
-			return rows.map(row => ({
-				recordedAt: row.recorded_at,
-				provider: row.provider as Provider,
-				accountKey: row.account_key,
-				costUsd: row.cost_usd,
-			}));
-		} catch {
-			return [];
+	/**
+	 * Add the `app` attribution column to `client_usage` tables created before
+	 * it existed. `CREATE TABLE IF NOT EXISTS` skips established broker DBs, so
+	 * the column arrives via ALTER; legacy rows keep the `''` (unlabeled) app.
+	 */
+	#ensureClientUsageAppColumn(): void {
+		const columns = this.#db.query("PRAGMA table_info(client_usage)").all() as Array<{ name: string }>;
+		if (!columns.some(column => column.name === "app")) {
+			this.#db.run("ALTER TABLE client_usage ADD COLUMN app TEXT NOT NULL DEFAULT ''");
 		}
 	}
 
@@ -1797,9 +1818,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				 ON CONFLICT(install_id) DO UPDATE SET hostname = COALESCE(excluded.hostname, hostname), last_seen = excluded.last_seen`,
 			)
 			.run(report.installId, report.hostname ?? null, now, now);
+		const app = report.app?.trim() ?? "";
 		const findBucket = this.#db.query(
 			`SELECT id FROM client_usage
-			 WHERE install_id = ? AND provider = ? AND model = ? AND recorded_at >= ?
+			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
 		);
 		const merge = this.#db.query(
@@ -1808,14 +1830,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				cache_write_tokens = cache_write_tokens + ?, cost_usd = cost_usd + ? WHERE id = ?`,
 		);
 		const insert = this.#db.query(
-			`INSERT INTO client_usage (recorded_at, install_id, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO client_usage (recorded_at, install_id, app, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		for (const entry of report.entries) {
 			// Merge into the newest row of the same (install, provider, model)
 			// bucket so 10s client flushes don't accrete one row apiece forever.
 			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
-			const existing = findBucket.get(report.installId, entry.provider, entry.model, bucketFloor) as {
+			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
 				id: number;
 			} | null;
 			if (existing) {
@@ -1834,6 +1856,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			insert.run(
 				entry.at,
 				report.installId,
+				app,
 				entry.provider,
 				entry.model,
 				entry.requests,
@@ -1852,14 +1875,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			.all() as Array<{ install_id: string; hostname: string | null; first_seen: number; last_seen: number }>;
 		const aggregates = this.#db
 			.query(
-				`SELECT install_id, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
+				`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
 					SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
 					SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
-				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, provider
+				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
 				 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
 			)
 			.all(sinceMs) as Array<{
 			install_id: string;
+			app: string;
 			provider: string;
 			requests: number;
 			input_tokens: number;
@@ -1876,6 +1900,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				providersByInstall.set(row.install_id, list);
 			}
 			list.push({
+				app: row.app === "" ? undefined : row.app,
 				provider: row.provider,
 				requests: row.requests,
 				inputTokens: row.input_tokens,
@@ -1902,9 +1927,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * Save OAuth credentials for a provider.
 	 * Preserves unrelated identities and replaces only the matching credential.
 	 */
-	saveOAuth(provider: string, credentials: OAuthCredentials): void {
+	async saveOAuth(provider: string, credentials: OAuthCredentials): Promise<void> {
 		const credential: AuthCredential = { type: "oauth", ...credentials };
-		this.upsertAuthCredentialForProvider(provider, credential);
+		await this.upsertAuthCredential(provider, credential);
 	}
 
 	/**
@@ -1925,9 +1950,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Save API key for a provider (replaces existing).
 	 */
-	saveApiKey(provider: string, apiKey: string): void {
+	async saveApiKey(provider: string, apiKey: string): Promise<void> {
 		const credential: AuthCredential = { type: "api_key", key: apiKey };
-		this.replaceAuthCredentialsForProvider(provider, [credential]);
+		await this.replaceAuthCredentials(provider, [credential]);
 	}
 
 	/**
@@ -1959,8 +1984,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Delete all credentials for a provider.
 	 */
-	deleteProvider(provider: string): void {
-		this.deleteAuthCredentialsForProvider(provider, "deleted by user");
+	async deleteProvider(provider: string): Promise<void> {
+		await this.deleteAuthCredentials(provider, "deleted by user");
 	}
 
 	/**
@@ -2034,8 +2059,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#lastUsageHistoryStmt.finalize();
 		this.#listUsageHistoryStmt.finalize();
 		this.#updateUsageHistoryStmt.finalize();
-		this.#insertUsageCostStmt.finalize();
-		this.#listUsageCostsStmt.finalize();
 		this.#updateIfMatchesStmt.finalize();
 		this.#updateIfMatchesWithLeaseStmt.finalize();
 		this.#deleteIfMatchesWithLeaseStmt.finalize();
@@ -2044,6 +2067,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#getCredentialRefreshLeaseStmt.finalize();
 		this.#renewCredentialRefreshLeaseStmt.finalize();
 		this.#releaseCredentialRefreshLeaseStmt.finalize();
+		this.#getCredentialStateStmt.finalize();
+		this.#holdsCredentialRefreshLeaseStmt.finalize();
 		this.#db.close();
 	}
 }

@@ -59,7 +59,8 @@ describe("Extension Loader Graph Read Dedup", () => {
 		const extDir = path.join(cwd, "ext");
 		fs.mkdirSync(extDir, { recursive: true });
 
-		const numModules = 120;
+		// Deduplication is depth-independent; a moderate chain catches repeated traversal without making fixture I/O the test.
+		const numModules = 16;
 		for (let i = 0; i < numModules; i++) {
 			const modPath = path.join(extDir, `mod-${i}.ts`);
 			let content = `export const v${i} = ${i};\n`;

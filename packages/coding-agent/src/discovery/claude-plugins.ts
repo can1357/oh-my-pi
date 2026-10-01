@@ -6,16 +6,19 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
-import { registerProvider } from "../capability";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
+	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
 	expandEnvVarsDeep,
@@ -30,6 +33,23 @@ const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
 const PRIORITY = 70; // Below claude.ts (80) so user .claude/ overrides win
 
+/**
+ * Plugin roots this legacy provider may process for a given surface. Roots
+ * whose root `plugin.json` targets the Agent Plugins standard keep their
+ * portable components (skills, MCP) exclusive to the `agent-plugins` provider;
+ * fatally invalid Agent Plugins packages are skipped entirely.
+ */
+async function allowedRoots(
+	ctx: LoadContext,
+	surface: "skills" | "mcp" | "other",
+): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
+	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
+	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
+	return { roots: scopedRoots.filter((_, i) => flags[i]), warnings };
+}
+
 interface ClaudePluginManifest {
 	skills?: string | string[];
 	"slash-commands"?: string | string[];
@@ -39,6 +59,13 @@ interface ClaudePluginManifest {
 interface ResolvedPluginDir {
 	dirs: string[];
 	warnings: string[];
+}
+
+interface ResolvePluginDirOptions {
+	manifestKeys: ReadonlyArray<keyof ClaudePluginManifest>;
+	fallback: string;
+	includeFallback: boolean;
+	marketplaceRootManifest?: ClaudePluginManifest | null;
 }
 
 interface ResolvedMCPConfig {
@@ -69,25 +96,40 @@ async function readPluginManifest(root: ClaudePluginRoot): Promise<ClaudePluginM
 	}
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
+/** Env maps must hold only string values; anything else is malformed. */
+function isStringRecord(value: unknown): value is Record<string, string> {
+	return isRecord(value) && Object.values(value).every(v => typeof v === "string");
 }
 
-async function skillsManifestReplacesFallback(root: ClaudePluginRoot): Promise<boolean> {
-	const raw = await readFile(path.join(root.path, "marketplace.json"));
-	if (raw === null) return false;
+async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<ClaudePluginManifest | null> {
+	const catalogs = await Promise.all(
+		[
+			path.join(root.path, "marketplace.json"),
+			path.join(root.path, ".omp-plugin", "marketplace.json"),
+			path.join(root.path, ".claude-plugin", "marketplace.json"),
+		].map(catalogPath => readFile(catalogPath)),
+	);
 
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (!isRecord(parsed)) return false;
-		const plugins = parsed.plugins;
-		return (
-			Array.isArray(plugins) &&
-			plugins.some(entry => isRecord(entry) && entry.name === root.plugin && entry.source === "./")
-		);
-	} catch {
-		return false;
+	for (const raw of catalogs) {
+		if (raw === null) continue;
+		try {
+			const parsed: unknown = JSON.parse(raw);
+			if (!isRecord(parsed) || !Array.isArray(parsed.plugins)) continue;
+			const entry = parsed.plugins.find(
+				candidate => isRecord(candidate) && candidate.name === root.plugin && candidate.source === "./",
+			);
+			if (!isRecord(entry)) continue;
+
+			if (typeof entry.skills === "string") return { skills: entry.skills };
+			if (Array.isArray(entry.skills)) {
+				return { skills: entry.skills.filter((value): value is string => typeof value === "string") };
+			}
+			return {};
+		} catch {
+			continue;
+		}
 	}
+	return null;
 }
 
 function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
@@ -96,80 +138,65 @@ function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
 }
 
 /**
- * Resolve a manifest-declared directory field to absolute paths within the
- * plugin root.
+ * Resolve manifest-declared component paths within a plugin root.
  *
  * Manifest path fields may be `string` or `string[]`
- * (https://code.claude.com/docs/en/plugins-reference#path-behavior-rules);
- * both shapes are normalized here. The first `manifestKeys` entry that
- * supplies at least one non-empty path wins (later keys are ignored — used for
- * the `commands` > `slash-commands` legacy fallback).
+ * (https://code.claude.com/docs/en/plugins-reference#path-behavior-rules).
+ * The first populated key wins within each manifest, preserving the
+ * `commands` > `slash-commands` legacy fallback.
  *
- * `fallback` is the default subdirectory (e.g. `skills/`, `commands/`) and
- * `includeFallback` controls the Claude-documented merge semantic per field:
- *
- * - `skills` **adds to** the default: `fallback` is always scanned, and any
- *   manifest entries load alongside it. Callers pass `includeFallback: true`.
- * - `commands` / `slash-commands` **replace** the default: an explicit
- *   manifest key means the default `commands/` directory is not scanned.
- *   Callers pass `includeFallback: false` (the manifest itself may still
- *   list `./commands` explicitly to keep it).
- *
- * When no matching key is set, the fallback is used regardless. Entries that
- * resolve outside the plugin root are dropped with a warning so misconfigured
- * manifests remain observable and cannot escape via traversal.
+ * Skills normally add to the default `skills/` directory. For a marketplace
+ * entry whose source is the marketplace root, its listed skill paths and any
+ * plugin-manifest paths are the complete selection, so the shared root
+ * `skills/` directory is not scanned. If neither manifest declares a matching
+ * path, the conventional fallback is still used.
  */
-async function resolvePluginDir(
-	root: ClaudePluginRoot,
-	manifestKeys: ReadonlyArray<keyof ClaudePluginManifest>,
-	fallback: string,
-	includeFallback: boolean,
-): Promise<ResolvedPluginDir> {
-	const manifest = await readPluginManifest(root);
-	const fallbackDir = path.join(root.path, fallback);
+async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDirOptions): Promise<ResolvedPluginDir> {
+	const pluginManifest = await readPluginManifest(root);
+	const manifests = options.marketplaceRootManifest
+		? [pluginManifest, options.marketplaceRootManifest]
+		: [pluginManifest];
+	const fallbackDir = path.join(root.path, options.fallback);
+	const configured: Array<{ entryPath: string; key: keyof ClaudePluginManifest }> = [];
 
-	let configured: string[] | undefined;
-	let matchedKey: keyof ClaudePluginManifest | undefined;
-	for (const key of manifestKeys) {
-		const val = manifest?.[key];
-		const candidates: string[] = [];
-		if (typeof val === "string") {
-			const trimmed = val.trim();
-			if (trimmed) candidates.push(trimmed);
-		} else if (Array.isArray(val)) {
-			for (const entry of val) {
-				if (typeof entry !== "string") continue;
-				const trimmed = entry.trim();
+	for (const manifest of manifests) {
+		if (manifest === null) continue;
+		for (const key of options.manifestKeys) {
+			const val = manifest[key];
+			const candidates: string[] = [];
+			if (typeof val === "string") {
+				const trimmed = val.trim();
 				if (trimmed) candidates.push(trimmed);
+			} else if (Array.isArray(val)) {
+				for (const entry of val) {
+					if (typeof entry !== "string") continue;
+					const trimmed = entry.trim();
+					if (trimmed) candidates.push(trimmed);
+				}
 			}
-		}
-		if (candidates.length > 0) {
-			configured = candidates;
-			matchedKey = key;
-			break;
+			if (candidates.length > 0) {
+				configured.push(...candidates.map(entryPath => ({ entryPath, key })));
+				break;
+			}
 		}
 	}
 
-	if (configured === undefined) {
+	if (configured.length === 0) {
 		return { dirs: [fallbackDir], warnings: [] };
 	}
 
-	// Dedup preserves order: default entry (when included) first, then declared
-	// entries in manifest order. Deduping the paths themselves means a plugin
-	// author can still list `./commands` explicitly when they want the default
-	// alongside extras without producing double-loads.
 	const seen = new Set<string>();
 	const dirs: string[] = [];
 	const warnings: string[] = [];
-	if (includeFallback) {
+	if (options.includeFallback && !options.marketplaceRootManifest) {
 		seen.add(fallbackDir);
 		dirs.push(fallbackDir);
 	}
-	for (const entry of configured) {
-		const resolved = path.resolve(root.path, entry);
+	for (const { entryPath, key } of configured) {
+		const resolved = path.resolve(root.path, entryPath);
 		if (!isWithinPluginRoot(root.path, resolved)) {
 			warnings.push(
-				`[claude-plugins] Ignoring ${String(matchedKey)} path outside plugin root for ${root.id}: ${entry}`,
+				`[claude-plugins] Ignoring ${String(key)} path outside plugin root for ${root.id}: ${entryPath}`,
 			);
 			continue;
 		}
@@ -188,17 +215,17 @@ async function resolvePluginDir(
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "skills");
 	warnings.push(...rootWarnings);
 	const results = await Promise.all(
 		roots.map(async root => {
-			const includeFallback = !(await skillsManifestReplacesFallback(root));
-			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(
-				root,
-				["skills"],
-				"skills",
-				includeFallback,
-			);
+			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
+			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+				manifestKeys: ["skills"],
+				fallback: "skills",
+				includeFallback: true,
+				marketplaceRootManifest,
+			});
 			const scanResults = await Promise.all(
 				skillsDirs.map(dir =>
 					scanSkillsFromDir(ctx, {
@@ -206,6 +233,8 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.scope,
 						includeSelf: true,
+						origin: root.origin,
+						pluginName: root.plugin,
 					}),
 				),
 			);
@@ -228,6 +257,31 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 }
 
 // =============================================================================
+// Rules
+// =============================================================================
+
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
+	const warnings = [...rootWarnings];
+	const results = await Promise.all(
+		roots.map(root =>
+			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
+				extensions: ["md", "mdc"],
+				origin: root.origin,
+				transform: (name, content, filePath, source) =>
+					discoverRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+			}),
+		),
+	);
+	const items: Rule[] = [];
+	for (const result of results) {
+		items.push(...result.items);
+		if (result.warnings) warnings.push(...result.warnings);
+	}
+	return { items, warnings };
+}
+
+// =============================================================================
 // Slash Commands
 // =============================================================================
 
@@ -235,17 +289,16 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const items: SlashCommand[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
 		roots.map(async root => {
-			const { dirs: commandsDirs, warnings: resolveWarnings } = await resolvePluginDir(
-				root,
-				["commands", "slash-commands"],
-				"commands",
-				false,
-			);
+			const { dirs: commandsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+				manifestKeys: ["commands", "slash-commands"],
+				fallback: "commands",
+				includeFallback: false,
+			});
 			const commandResults = await Promise.all(
 				commandsDirs.map(async dir => {
 					try {
@@ -262,7 +315,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 										path: dir,
 										content,
 										level: root.scope,
-										_source: createSourceMeta(PROVIDER_ID, dir, root.scope),
+										_source: createSourceMeta(PROVIDER_ID, dir, root.scope, root.origin),
 									},
 								],
 								warnings: [],
@@ -273,6 +326,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 					}
 					return loadFilesFromDir<SlashCommand>(ctx, dir, PROVIDER_ID, root.scope, {
 						extensions: ["md"],
+						origin: root.origin,
 						transform: (name, content, filePath, source) => {
 							const cmdName = name.replace(/\.md$/, "");
 							return {
@@ -309,7 +363,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 	const items: Hook[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
 	warnings.push(...rootWarnings);
 
 	const hookTypes = ["pre", "post"] as const;
@@ -325,6 +379,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 		loadTasks.map(async ({ root, hookType }) => {
 			const hooksDir = path.join(root.path, "hooks", hookType);
 			return loadFilesFromDir<Hook>(ctx, hooksDir, PROVIDER_ID, root.scope, {
+				origin: root.origin,
 				transform: (name, _content, filePath, source) => {
 					const toolName = name.replace(/\.(sh|bash|zsh|fish)$/, "");
 					return {
@@ -356,15 +411,17 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const items: CustomTool[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
 		roots.map(async root => {
 			const toolsDir = path.join(root.path, "tools");
 			return loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, root.scope, {
+				extensions: ["ts", "js"],
+				origin: root.origin,
 				transform: (name, _content, filePath, source) => {
-					const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+					const toolName = name.replace(/\.(ts|js)$/, "");
 					return {
 						name: toolName,
 						path: filePath,
@@ -478,11 +535,46 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 	};
 }
 
+/**
+ * Split a marketplace stdio env map into final values and legacy values.
+ *
+ * `${VAR}`/`${VAR:-default}` placeholders (and `${CLAUDE_PLUGIN_ROOT}` /
+ * `${OMP_PLUGIN_ROOT}`) are expanded here and recorded as literal keys: the
+ * result is final package data and must never be reinterpreted later as a
+ * bare env name or `!command` (a second resolution would execute expanded
+ * values or substitute ambient variables). Values that contained no
+ * placeholder keep the legacy indirection (bare env-name lookup and
+ * `!command` execution) unresolved, so it only runs when the surviving
+ * enabled server is actually connected.
+ */
+async function resolveMarketplaceEnv(
+	env: Record<string, string>,
+	rootPath: string,
+): Promise<{ env: Record<string, string>; literalKeys: string[] }> {
+	// Null prototype: a `__proto__` env key must become an own property, not
+	// mutate the prototype chain (it would silently vanish before spawn).
+	const resolved: Record<string, string> = Object.create(null);
+	const literalKeys: string[] = [];
+	for (const [key, rawValue] of Object.entries(env)) {
+		// Feed the reserved plugin-root names through extraEnv: expansion then
+		// cannot consume an ambient CLAUDE_PLUGIN_ROOT/OMP_PLUGIN_ROOT, and
+		// the registered root inserted as the value is never re-scanned
+		// for `${...}`.
+		const final = expandEnvVarsDeep(rawValue, {
+			CLAUDE_PLUGIN_ROOT: rootPath,
+			OMP_PLUGIN_ROOT: rootPath,
+		}) as string;
+		if (final !== rawValue) literalKeys.push(key);
+		resolved[key] = final;
+	}
+	return { env: resolved, literalKeys };
+}
+
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "mcp");
 	warnings.push(...rootWarnings);
 
 	for (const root of roots) {
@@ -557,20 +649,36 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command: substitutedCommand, cwd: substitutedCwd }, baseDir);
+			// Malformed env (e.g. `"env": null` in a hand-edited marketplace JSON)
+			// must not throw inside resolveMarketplaceEnv: the capability loader
+			// catches at provider scope and would discard every marketplace
+			// server, not just this entry.
+			if (raw.env !== undefined && !isStringRecord(raw.env)) {
+				warnings.push(`[claude-plugins] Skipping MCP server "${serverName}" in ${sourcePath}: malformed env`);
+				continue;
+			}
+			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
 				...(raw.timeout !== undefined && { timeout: raw.timeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
-				...(raw.env !== undefined && { env: substitutePluginRoot(raw.env, root.path) }),
+				...(resolvedEnv !== undefined && { env: resolvedEnv.env }),
+				// Placeholder-expanded keys are final package data (literal);
+				// raw values keep legacy indirection, resolved by
+				// #resolveAuthConfig only when the server connects.
+				...(resolvedEnv !== undefined &&
+					resolvedEnv.literalKeys.length > 0 && {
+						envLiteralKeys: resolvedEnv.literalKeys,
+					}),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
 				...(raw.url !== undefined && { url: expandEnvVarsDeep(raw.url) }),
 				...(raw.headers !== undefined && { headers: expandEnvVarsDeep(raw.headers) }),
 				...(raw.auth !== undefined && { auth: raw.auth }),
 				...(raw.oauth !== undefined && { oauth: raw.oauth }),
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),
-				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope),
+				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope, root.origin),
 			};
 			items.push(server);
 		}
@@ -589,6 +697,14 @@ registerProvider<Skill>(skillCapability.id, {
 	description: "Load skills from Claude Code marketplace plugins (~/.claude/plugins/cache/)",
 	priority: PRIORITY,
 	load: loadSkills,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from marketplace plugin rules directories",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<SlashCommand>(slashCommandCapability.id, {

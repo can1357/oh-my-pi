@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
@@ -10,22 +10,29 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { withOfficialAnthropicEndpoint } from "./helpers/anthropic-endpoint";
+
+withOfficialAnthropicEndpoint();
 
 describe("/fast targets the current model's service-tier family", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
-	let session: AgentSession;
+	let session: AgentSession | undefined;
 	let modelRegistry: ModelRegistry;
 
-	beforeEach(() => {
+	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-fast-mode-scope-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-		}
-		authStorage?.close();
+		await session?.dispose();
+		session = undefined;
+	});
+
+	afterAll(() => {
+		authStorage.close();
 		tempDir.removeSync();
 	});
 
@@ -41,9 +48,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey(model.provider, "token");
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		authStorage.keys.setRuntime(model.provider, "token");
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -146,5 +151,54 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily.anthropic).toBe("priority");
 		expect(session.toggleFastMode()).toBe(false);
 		expect(session.serviceTierByFamily.anthropic).toBeUndefined();
+	});
+
+	const codexModel = (serviceTiers: string[]) =>
+		buildModel({
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			serviceTiers,
+		});
+
+	it("refuses Ultrafast on a Codex model that does not advertise it", async () => {
+		const session = await createSessionForModel(codexModel(["priority"]));
+		expect(session.setUltrafastMode(true)).toBe(false);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.isUltrafastModeEnabled()).toBe(false);
+	});
+
+	it("refuses /fast on a Codex model whose discovered tiers omit priority", async () => {
+		const session = await createSessionForModel(codexModel(["ultrafast"]));
+		expect(session.setFastMode(true)).toBe(false);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.isFastModeActive()).toBe(false);
+	});
+
+	it("keeps /fast on a Codex model whose discovered tier list is empty", async () => {
+		const session = await createSessionForModel(codexModel([]));
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		expect(session.isFastModeActive()).toBe(true);
+		expect(session.setUltrafastMode(true)).toBe(false);
+	});
+
+	it("selects Ultrafast on an advertising Codex model and clears it with /fast off", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		expect(session.setUltrafastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		expect(session.isUltrafastModeEnabled()).toBe(true);
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(true);
+		session.setFastMode(false);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.isFastModeActive()).toBe(false);
 	});
 });

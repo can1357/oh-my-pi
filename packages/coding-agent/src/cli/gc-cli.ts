@@ -1,22 +1,46 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
+	formatBytes,
 	getAgentDir,
 	getBlobsDir,
+	getConfigRootDir,
+	getCustomSessionFilesDir,
 	getHistoryDbPath,
 	getModelDbPath,
+	getReportsDir,
 	getSessionsDir,
 	getStatsDbPath,
+	getTerminalSessionsDir,
+	hashPath,
+	normalizePathForComparison,
 	readLines,
+	tryAcquireFileLock,
+	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { getDefault } from "../config/settings-schema";
-import { BLOB_HASH_RE } from "../session/blob-store";
+import type { Setting } from "../config/registry";
+
+import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
-import { FileSessionStorage } from "../session/session-storage";
+import { parseTerminalBreadcrumb } from "../session/session-paths";
+import { FileSessionStorage, sessionOwnerLeasePath } from "../session/session-storage";
+import {
+	cfgGcArchive,
+	cfgGcBlobs,
+	cfgGcColdArchiveAfterDays,
+	cfgGcRetainNewestGlobal,
+	cfgGcRetainNewestPerCwd,
+	cfgGcStale,
+	cfgGcStaleRetainDays,
+	cfgGcStaleRetainNewest,
+	cfgGcWal,
+} from "./gc-settings";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
@@ -29,6 +53,13 @@ const GC_WRITE_GRACE_MS = 5 * 60_000;
 const SESSION_SUFFIX = ".jsonl";
 const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
 const GC_LOCK_BREAKER_SUFFIX = ".break";
+/**
+ * Minimum age before a dangling session pointer is pruned. A lazy session's
+ * marker and fresh breadcrumb name a transcript that is not on disk until its
+ * first turn, so an idle-but-open session must keep them well past the
+ * write grace.
+ */
+const STALE_POINTER_GRACE_MS = DAY_MS;
 
 export interface GcCommandFlags {
 	apply?: boolean;
@@ -37,9 +68,12 @@ export interface GcCommandFlags {
 	blobs?: boolean;
 	archive?: boolean;
 	wal?: boolean;
+	stale?: boolean;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
+	staleRetainNewest?: number;
+	staleRetainDays?: number;
 }
 
 export interface GcCommandArgs {
@@ -85,9 +119,25 @@ export interface WalGcResult {
 	checkpointed: boolean;
 }
 
+export interface StaleGcResult {
+	/** Custom-session-file markers whose recorded transcript is gone. */
+	danglingMarkers: number;
+	/** Terminal breadcrumbs whose session file is gone. */
+	staleBreadcrumbs: number;
+	/** Debug report bundles beyond the retention window. */
+	expiredReports: number;
+	/** Collab guest replicas beyond the retention window. */
+	expiredReplicas: number;
+	wouldDelete: number;
+	deleted: number;
+	bytes: number;
+	errors: string[];
+}
+
 export interface GcResult {
 	agentDir: string;
 	apply: boolean;
+	stale?: StaleGcResult;
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
@@ -99,6 +149,17 @@ interface BlobCandidate {
 	paths: string[];
 	bytes: number;
 	mtimeMs: number;
+}
+
+interface BlobStagingFile {
+	path: string;
+	bytes: number;
+	mtimeMs: number;
+}
+
+interface BlobScan {
+	candidates: BlobCandidate[];
+	staging: BlobStagingFile[];
 }
 
 interface ArchiveCandidate {
@@ -114,9 +175,12 @@ interface ResolvedGcOptions {
 	runBlobs: boolean;
 	runArchive: boolean;
 	runWal: boolean;
+	runStale: boolean;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
+	staleRetainNewest: number;
+	staleRetainDays: number;
 }
 
 interface SqliteRunResult {
@@ -150,39 +214,58 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
-	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
+	const selected = flags.blobs === true || flags.archive === true || flags.wal === true || flags.stale === true;
+	const archiveSelected = selected && flags.archive === true;
+	const staleSelected = selected && flags.stale === true;
+	const needsArchiveSettings =
+		archiveSelected &&
+		(flags.coldArchiveAfterDays === undefined ||
+			flags.retainNewestGlobal === undefined ||
+			flags.retainNewestPerCwd === undefined);
+	const needsStaleSettings =
+		staleSelected && (flags.staleRetainNewest === undefined || flags.staleRetainDays === undefined);
 	const settings =
-		flags.apply === true ? await Settings.loadIsolated({ agentDir }) : await Settings.loadReadOnly({ agentDir });
-	const getBoolean = (pathKey: "gc.blobs" | "gc.archive" | "gc.wal") => settings.get(pathKey);
-	const getNumber = (pathKey: "gc.coldArchiveAfterDays" | "gc.retainNewestGlobal" | "gc.retainNewestPerCwd") =>
-		settings.get(pathKey);
+		!selected || needsArchiveSettings || needsStaleSettings
+			? flags.apply === true
+				? await Settings.loadIsolated({ agentDir })
+				: await Settings.loadReadOnly({ agentDir })
+			: undefined;
+	const read = <T>(setting: Setting<T>): T => (settings ? setting.get(settings) : setting.default);
 	return {
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
-		runBlobs: selected ? flags.blobs === true : getBoolean("gc.blobs"),
-		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
-		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
+		runBlobs: selected ? flags.blobs === true : read(cfgGcBlobs),
+		runArchive: selected ? flags.archive === true : read(cfgGcArchive),
+		runWal: selected ? flags.wal === true : read(cfgGcWal),
+		runStale: selected ? flags.stale === true : read(cfgGcStale),
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
-			getNumber("gc.coldArchiveAfterDays"),
-			getDefault("gc.coldArchiveAfterDays"),
+			read(cfgGcColdArchiveAfterDays),
+			cfgGcColdArchiveAfterDays.default,
 		),
 		retainNewestGlobal: numberSetting(
 			flags.retainNewestGlobal,
-			getNumber("gc.retainNewestGlobal"),
-			getDefault("gc.retainNewestGlobal"),
+			read(cfgGcRetainNewestGlobal),
+			cfgGcRetainNewestGlobal.default,
 		),
 		retainNewestPerCwd: numberSetting(
 			flags.retainNewestPerCwd,
-			getNumber("gc.retainNewestPerCwd"),
-			getDefault("gc.retainNewestPerCwd"),
+			read(cfgGcRetainNewestPerCwd),
+			cfgGcRetainNewestPerCwd.default,
 		),
+		staleRetainNewest: numberSetting(
+			flags.staleRetainNewest,
+			read(cfgGcStaleRetainNewest),
+			cfgGcStaleRetainNewest.default,
+		),
+		staleRetainDays: numberSetting(flags.staleRetainDays, read(cfgGcStaleRetainDays), cfgGcStaleRetainDays.default),
 	};
 }
 
 export function collectGcErrors(result: GcResult): string[] {
 	return [
+		...(result.stale?.errors ?? []).map(error => `stale: ${error}`),
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 	];
@@ -221,14 +304,39 @@ async function statIfPresent(target: string) {
 	}
 }
 
+/** Small registry/breadcrumb marker files; a missing file reads as empty. */
 async function readTextIfPresent(file: string): Promise<string> {
 	try {
-		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-			return new TextDecoder().decode(gunzipSync(await Bun.file(file).bytes()));
-		}
 		return await Bun.file(file).text();
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return "";
+		throw error;
+	}
+}
+
+async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
+	// readLines buffers at most the largest record, including malformed records.
+	const scan = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
+		for await (const line of readLines(stream)) onLine(line);
+	};
+	try {
+		const stream = Bun.file(file).stream();
+		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
+			const gunzip = createGunzip();
+			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
+				// Match the native stream's byte budget, not one arbitrary chunk or
+				// a default queue that counts each potentially large chunk as size 1.
+				await scan(
+					Readable.toWeb(source, {
+						strategy: new ByteLengthQueuingStrategy({ highWaterMark: gunzip.readableHighWaterMark }),
+					}),
+				);
+			});
+		} else {
+			await scan(stream);
+		}
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return;
 		throw error;
 	}
 }
@@ -266,57 +374,199 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<string>> {
-	const hashes = new Set<string>();
+async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
+	const files = new Map<string, string>();
+	const decoder = new TextDecoder();
 	for (const root of sessionRoots) {
-		const files = [
+		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
 			...(await collectBackupJsonlFiles(root)),
-		];
-		for (const file of files) {
-			const text = await readTextIfPresent(file);
-			for (const match of text.matchAll(BLOB_REF_RE)) {
+		]) {
+			files.set(normalizePathForComparison(file), file);
+		}
+	}
+	for (const file of exactSessionFiles) {
+		files.set(normalizePathForComparison(file), file);
+	}
+
+	const hashes = new Set<string>();
+	for (const file of files.values()) {
+		// Keep raw-text matching: recoverable malformed records can still own blobs.
+		await scanSessionLinesIfPresent(file, line => {
+			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
 				const hash = match[1]?.toLowerCase();
 				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
 			}
-		}
+		});
 	}
 	return hashes;
 }
 
-async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
+/**
+ * Exact session files recorded in the persistent registry
+ * (`<agentDir>/custom-session-files/*`, one marker per transcript whose
+ * content is its absolute path). Recording files rather than parent
+ * directories preserves `--session` paths outside the root-scan globs,
+ * including names without a `.jsonl` suffix.
+ */
+async function collectRegisteredSessionFiles(registryDir: string): Promise<string[]> {
 	let entries: string[];
 	try {
-		entries = await fs.readdir(blobDir);
+		entries = await fs.readdir(registryDir);
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
 	}
+	const files = new Map<string, string>();
+	for (const entry of entries) {
+		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
+		if (!recorded) continue;
+		const sessionFile = path.resolve(recorded);
+		const stat = await statIfPresent(sessionFile);
+		if (!stat?.isFile()) continue;
+		files.set(normalizePathForComparison(sessionFile), sessionFile);
+	}
+	return [...files.values()];
+}
+
+/**
+ * Exact session files recorded in terminal breadcrumbs. Supplements
+ * {@link collectRegisteredSessionFiles}: a breadcrumb holds only that
+ * terminal's last session, but catches the current transcript even if its
+ * persistent marker write failed.
+ */
+async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(breadcrumbDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+	const files = new Map<string, string>();
+	for (const entry of entries) {
+		const text = await readTextIfPresent(path.join(breadcrumbDir, entry));
+		const lines = text.split("\n");
+		const breadcrumbCwd = lines[0]?.trim();
+		const recordedSessionFile = lines[1]?.trim();
+		if (!breadcrumbCwd || !recordedSessionFile) continue;
+		const sessionFile = path.resolve(breadcrumbCwd, recordedSessionFile);
+		files.set(normalizePathForComparison(sessionFile), sessionFile);
+	}
+	return [...files.values()];
+}
+
+async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(blobDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return { candidates: [], staging: [] };
+		throw error;
+	}
 
 	const byHash = new Map<string, BlobCandidate>();
+	const staging: BlobStagingFile[] = [];
 	for (const entry of entries) {
-		const match = entry.match(BLOB_FILE_RE);
-		const hash = match?.[1];
-		if (!hash) continue;
+		const isStaging = BLOB_STAGING_RE.test(entry);
+		const hash = isStaging ? undefined : entry.match(BLOB_FILE_RE)?.[1];
+		if (!isStaging && !hash) continue;
 		const file = path.join(blobDir, entry);
 		const stat = await statIfPresent(file);
 		if (!stat) continue;
 		if (!stat.isFile()) continue;
+		if (!hash) {
+			staging.push({ path: file, bytes: stat.size, mtimeMs: stat.mtimeMs });
+			continue;
+		}
 		const candidate = byHash.get(hash) ?? { hash, paths: [], bytes: 0, mtimeMs: stat.mtimeMs };
 		candidate.paths.push(file);
 		candidate.bytes += stat.size;
 		candidate.mtimeMs = Math.max(candidate.mtimeMs, stat.mtimeMs);
 		byHash.set(hash, candidate);
 	}
-	return [...byHash.values()].sort((a, b) => a.hash.localeCompare(b.hash));
+	return { candidates: [...byHash.values()].sort((a, b) => a.hash.localeCompare(b.hash)), staging };
+}
+
+async function unlinkBlobFile(file: string, result: BlobGcResult): Promise<void> {
+	try {
+		await fs.unlink(file);
+		result.deleted += 1;
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return;
+		result.errors.push(`${file}: ${errorMessage(error)}`);
+	}
+}
+
+/**
+ * Delete an unreferenced candidate unless a put reused its blob after the
+ * candidate scan. `BlobStore.put` refreshes an old reused blob's mtime before
+ * its new reference reaches a session file, and rewrites the blob when that
+ * touch finds the path gone. The canonical file is therefore moved to a
+ * staging name first: a touch that landed before the move shows on the moved
+ * file, which goes back; one that lands after misses the path, so the put
+ * writes the blob again. Returns whether the candidate was deleted.
+ */
+async function deleteBlobCandidate(
+	candidate: BlobCandidate,
+	deleteBeforeMs: number,
+	result: BlobGcResult,
+): Promise<boolean> {
+	const canonical = candidate.paths.find(file => path.basename(file) === candidate.hash);
+	const files = candidate.paths.filter(file => file !== canonical);
+	if (canonical) {
+		const moved = blobStagingPath(canonical);
+		try {
+			await fs.rename(canonical, moved);
+		} catch (error) {
+			if (codeOf(error) !== "ENOENT") {
+				result.errors.push(`${canonical}: ${errorMessage(error)}`);
+				return false;
+			}
+		}
+		const stat = await statIfPresent(moved);
+		if (stat && stat.mtimeMs > deleteBeforeMs) {
+			await restoreReusedBlob(moved, canonical, result);
+			return false;
+		}
+		if (stat) files.unshift(moved);
+	}
+	for (const file of files) await unlinkBlobFile(file, result);
+	return true;
+}
+
+/** Put a blob reused mid-sweep back; a put that already rewrote it wins (same bytes). */
+async function restoreReusedBlob(moved: string, canonical: string, result: BlobGcResult): Promise<void> {
+	try {
+		await fs.rename(moved, canonical);
+		return;
+	} catch (error) {
+		if (!(await statIfPresent(canonical))) {
+			result.errors.push(`${canonical}: failed to restore reused blob: ${errorMessage(error)}`);
+			return;
+		}
+	}
+	try {
+		await fs.unlink(moved);
+	} catch {
+		// The rewritten canonical blob stands; a leftover staging copy ages out.
+	}
 }
 
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const referenced = await collectReferencedBlobHashes([sessionsRoot, archiveSessionsRoot]);
-	const candidates = await collectBlobCandidates(blobDir);
+	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
+	const exactSessionFiles = new Map<string, string>();
+	for (const file of await collectRegisteredSessionFiles(getCustomSessionFilesDir(options.agentDir))) {
+		exactSessionFiles.set(normalizePathForComparison(file), file);
+	}
+	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
+		exactSessionFiles.set(normalizePathForComparison(file), file);
+	}
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
+	const { candidates, staging } = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
 		candidates: candidates.length,
@@ -330,20 +580,191 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	for (const candidate of candidates) {
 		if (referenced.has(candidate.hash)) continue;
 		if (candidate.mtimeMs > deleteBeforeMs) continue;
+		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
 		result.wouldDelete += candidate.paths.length;
 		result.bytes += candidate.bytes;
-		if (!options.apply) continue;
-		for (const file of candidate.paths) {
+	}
+	// A live write renames its staging file away within milliseconds; one past
+	// the grace was left by a killed or crashed writer and nothing will claim it.
+	for (const file of staging) {
+		if (file.mtimeMs > deleteBeforeMs) continue;
+		result.wouldDelete += 1;
+		result.bytes += file.bytes;
+		if (options.apply) await unlinkBlobFile(file.path, result);
+	}
+	return result;
+}
+
+interface StaleCandidate {
+	kind: "danglingMarkers" | "staleBreadcrumbs" | "expiredReports" | "expiredReplicas";
+	/** Removed together; the first path is the entry itself. */
+	paths: string[];
+	bytes: number;
+	/** Session file whose ownership lease must be free (no running writer) to remove it. */
+	ownedSession?: string;
+}
+
+/**
+ * Config-root stores (`reports/`, `collab/`) live beside the agent dir, not in
+ * it. The default agent dir resolves them through the dirs resolver (XDG-aware);
+ * a custom agent dir named `agent` owns its parent as config root; any other
+ * custom agent dir has no config root for gc to maintain.
+ */
+function resolveConfigRootStores(agentDir: string): { reportsDir: string; collabDir: string } | undefined {
+	const configRoot = getConfigRootDir();
+	if (normalizePathForComparison(agentDir) === normalizePathForComparison(path.join(configRoot, "agent"))) {
+		return { reportsDir: getReportsDir(), collabDir: path.join(configRoot, "collab") };
+	}
+	if (path.basename(agentDir) !== "agent") return undefined;
+	const root = path.dirname(agentDir);
+	return { reportsDir: path.join(root, "reports"), collabDir: path.join(root, "collab") };
+}
+
+async function listFilesIfPresent(dir: string): Promise<string[]> {
+	try {
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		return entries.filter(entry => entry.isFile()).map(entry => path.join(dir, entry.name));
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+}
+
+/** Whether a pointer's target is verifiably gone; unreadable targets count as present. */
+async function sessionFileMissing(sessionFile: string): Promise<boolean> {
+	try {
+		return !(await fs.stat(sessionFile)).isFile();
+	} catch (error) {
+		const code = codeOf(error);
+		return code === "ENOENT" || code === "ENOTDIR";
+	}
+}
+
+/**
+ * Pointer files (custom-session markers, terminal breadcrumbs) past
+ * {@link STALE_POINTER_GRACE_MS} whose recorded session file is gone.
+ * `resolveTarget` returns undefined for unparsable pointers, which are kept.
+ */
+async function collectDanglingPointers(
+	dir: string,
+	kind: StaleCandidate["kind"],
+	resolveTarget: (text: string) => string | undefined,
+): Promise<StaleCandidate[]> {
+	const deleteBeforeMs = Date.now() - STALE_POINTER_GRACE_MS;
+	const candidates: StaleCandidate[] = [];
+	for (const file of await listFilesIfPresent(dir)) {
+		const stat = await statIfPresent(file);
+		if (!stat || stat.mtimeMs > deleteBeforeMs) continue;
+		const target = resolveTarget(await readTextIfPresent(file));
+		if (!target || !(await sessionFileMissing(target))) continue;
+		candidates.push({ kind, paths: [file], bytes: stat.size });
+	}
+	return candidates;
+}
+
+/**
+ * Files beyond the newest `retainNewest` that are also older than
+ * `retainDays` (and never inside the write grace).
+ */
+async function collectExpiredFiles(
+	dir: string,
+	suffix: string,
+	options: ResolvedGcOptions,
+): Promise<Array<{ file: string; bytes: number }>> {
+	const files: Array<{ file: string; bytes: number; mtimeMs: number }> = [];
+	for (const file of await listFilesIfPresent(dir)) {
+		if (!file.endsWith(suffix)) continue;
+		const stat = await statIfPresent(file);
+		if (stat) files.push({ file, bytes: stat.size, mtimeMs: stat.mtimeMs });
+	}
+	files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	const deleteBeforeMs = Date.now() - Math.max(options.staleRetainDays * DAY_MS, GC_WRITE_GRACE_MS);
+	return files.slice(options.staleRetainNewest).filter(entry => entry.mtimeMs < deleteBeforeMs);
+}
+
+async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
+	const markersDir = getCustomSessionFilesDir(options.agentDir);
+	const breadcrumbDir = getTerminalSessionsDir(options.agentDir);
+	const candidates: StaleCandidate[] = [
+		...(await collectDanglingPointers(markersDir, "danglingMarkers", text => {
+			const recorded = text.trim();
+			return recorded ? path.resolve(recorded) : undefined;
+		})),
+		...(await collectDanglingPointers(breadcrumbDir, "staleBreadcrumbs", text => {
+			const crumb = parseTerminalBreadcrumb(text);
+			// A fresh crumb is a lazy `/new` boundary that `--continue` honors
+			// before its transcript exists. It stays until the session materializes
+			// (rewriting it non-fresh) or the terminal's next session replaces it.
+			if (!crumb || crumb.fresh) return undefined;
+			const cwd = crumb.cwd.trim();
+			const sessionFile = crumb.sessionFile.trim();
+			return cwd && sessionFile ? path.resolve(cwd, sessionFile) : undefined;
+		})),
+	];
+	const stores = resolveConfigRootStores(options.agentDir);
+	if (stores) {
+		for (const { file, bytes } of await collectExpiredFiles(stores.reportsDir, ".tar.gz", options)) {
+			candidates.push({ kind: "expiredReports", paths: [file], bytes });
+		}
+		// A replica a terminal's breadcrumb points at is what `--continue` resumes
+		// there; one a running guest holds is skipped at removal (ownership lease).
+		const resumable = new Set(
+			(await collectBreadcrumbSessionFiles(breadcrumbDir)).map(file => normalizePathForComparison(file)),
+		);
+		for (const { file, bytes } of await collectExpiredFiles(stores.collabDir, SESSION_SUFFIX, options)) {
+			if (resumable.has(normalizePathForComparison(file))) continue;
+			candidates.push({
+				kind: "expiredReplicas",
+				// The replica's custom-session marker would only dangle once it is gone.
+				paths: [file, sessionArtifactsPath(file), path.join(markersDir, hashPath(file))],
+				bytes,
+				ownedSession: file,
+			});
+		}
+	}
+
+	const result: StaleGcResult = {
+		danglingMarkers: 0,
+		staleBreadcrumbs: 0,
+		expiredReports: 0,
+		expiredReplicas: 0,
+		wouldDelete: 0,
+		deleted: 0,
+		bytes: 0,
+		errors: [],
+	};
+	for (const candidate of candidates) {
+		const lease = candidate.ownedSession ? tryAcquireSessionLease(candidate.ownedSession) : undefined;
+		if (lease === null) continue;
+		try {
+			result[candidate.kind] += 1;
+			result.wouldDelete += 1;
+			result.bytes += candidate.bytes;
+			if (!options.apply) continue;
 			try {
-				await fs.unlink(file);
+				for (const target of candidate.paths) await fs.rm(target, { recursive: true, force: true });
 				result.deleted += 1;
 			} catch (error) {
-				if (codeOf(error) === "ENOENT") continue;
-				result.errors.push(`${file}: ${errorMessage(error)}`);
+				result.errors.push(`${candidate.paths[0]}: ${errorMessage(error)}`);
 			}
+		} finally {
+			// Held through the removal so a guest cannot reopen the replica mid-delete.
+			lease?.release();
 		}
 	}
 	return result;
+}
+
+/**
+ * Take `sessionFile`'s ownership lease, or null while a running process holds
+ * it (or the lease cannot be probed: an unknown owner is treated as live).
+ */
+function tryAcquireSessionLease(sessionFile: string): FileLockHandle | null {
+	try {
+		return tryAcquireFileLock(sessionOwnerLeasePath(sessionFile));
+	} catch {
+		return null;
+	}
 }
 
 async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> {
@@ -436,11 +857,15 @@ interface SessionLineageHeader {
 	previousSessionFiles: string[];
 }
 
-function sessionLineageHeaderFromText(text: string): SessionLineageHeader | undefined {
-	let sawTitleSlot = false;
-	for (const rawLine of text.split(/\r?\n/)) {
-		const line = rawLine.trim();
-		if (!line) continue;
+class SessionLineageHeaderReader {
+	header: SessionLineageHeader | undefined;
+	done = false;
+	#sawTitleSlot = false;
+
+	read(line: string): void {
+		if (this.done) return;
+		line = line.trim();
+		if (!line) return;
 		try {
 			const record = JSON.parse(line) as {
 				type?: unknown;
@@ -448,12 +873,13 @@ function sessionLineageHeaderFromText(text: string): SessionLineageHeader | unde
 				parentSession?: unknown;
 				previousSessionFiles?: unknown;
 			};
-			if (!sawTitleSlot && record.type === "title") {
-				sawTitleSlot = true;
-				continue;
+			if (!this.#sawTitleSlot && record.type === "title") {
+				this.#sawTitleSlot = true;
+				return;
 			}
-			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return undefined;
-			return {
+			this.done = true;
+			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return;
+			this.header = {
 				id: record.id,
 				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
 				previousSessionFiles: Array.isArray(record.previousSessionFiles)
@@ -464,23 +890,35 @@ function sessionLineageHeaderFromText(text: string): SessionLineageHeader | unde
 					: [],
 			};
 		} catch {
-			return undefined;
+			this.done = true;
 		}
 	}
-	return undefined;
 }
 
 async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
 	const decoder = new TextDecoder();
-	const lines: string[] = [];
+	const reader = new SessionLineageHeaderReader();
 	for await (const line of readLines(Bun.file(file).stream())) {
-		const decoded = decoder.decode(line).trim();
-		if (!decoded) continue;
-		lines.push(decoded);
-		const header = sessionLineageHeaderFromText(lines.join("\n"));
-		if (header || lines.length >= 2) return header;
+		reader.read(decoder.decode(line));
+		if (reader.done) break;
 	}
-	return undefined;
+	return reader.header;
+}
+
+async function scanArchivedSession(
+	file: string,
+	identities?: Record<StatsEntryTable, StatsEntryIdentity[]>,
+): Promise<SessionLineageHeader | undefined> {
+	const decoder = new TextDecoder();
+	const reader = new SessionLineageHeaderReader();
+	// Drain even after the header: a late gzip error must invalidate the archive.
+	await scanSessionLinesIfPresent(file, line => {
+		if (reader.done && !identities) return;
+		const text = decoder.decode(line);
+		reader.read(text);
+		if (identities) addSessionStatsIdentity(text, identities);
+	});
+	return reader.header;
 }
 
 async function gzipSessionFile(source: string, destination: string): Promise<void> {
@@ -488,8 +926,11 @@ async function gzipSessionFile(source: string, destination: string): Promise<voi
 	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
 	let renamed = false;
 	try {
-		const compressed = gzipSync(await Bun.file(source).bytes(), { level: 9 });
-		await Bun.write(tempPath, compressed);
+		await pipeline(
+			Bun.file(source).stream(),
+			createGzip({ level: 9 }),
+			(await fs.open(tempPath, "w")).createWriteStream(),
+		);
 		await fs.rename(tempPath, destination);
 		renamed = true;
 		await fs.unlink(source);
@@ -502,9 +943,15 @@ async function gzipSessionFile(source: string, destination: string): Promise<voi
 
 async function restoreGzipSessionFile(source: string, destination: string): Promise<void> {
 	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const decompressed = gunzipSync(await Bun.file(source).bytes());
-	await Bun.write(destination, decompressed);
-	await fs.unlink(source);
+	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		await pipeline(Bun.file(source).stream(), createGunzip(), (await fs.open(tempPath, "w")).createWriteStream());
+		await fs.rename(tempPath, destination);
+		await fs.unlink(source);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true });
+		throw error;
+	}
 }
 
 async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<void> {
@@ -566,13 +1013,18 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 	const db = new Database(dbPath);
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
-		if (!tableExists(db, "history")) return { deleted: 0, ftsRebuilt: false };
-		if (!historyHasSessionId(db)) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = tableExists(db, "history_fts");
-		const deleteStmt = db.prepare("DELETE FROM history WHERE session_id = ?");
+		const hasHistory = tableExists(db, "history") && historyHasSessionId(db);
+		const hasRecaps = tableExists(db, "session_recaps");
+		if (!hasHistory && !hasRecaps) return { deleted: 0, ftsRebuilt: false };
+		const hasFts = hasHistory && tableExists(db, "history_fts");
+		const deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
+		// Recaps are session-scoped side output with no life beyond their session.
+		const deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
 		let deleted = 0;
 		const tx = db.transaction((ids: string[]) => {
 			for (const id of ids) {
+				deleteRecapsStmt?.run(id);
+				if (!deleteStmt) continue;
 				const result = deleteStmt.run(id) as SqliteRunResult;
 				deleted += sqliteNumber(result.changes);
 			}
@@ -588,7 +1040,7 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]> {
 	const ids = new Set<string>();
 	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
-		const id = sessionLineageHeaderFromText(await readTextIfPresent(file))?.id;
+		const id = (await scanArchivedSession(file))?.id;
 		if (id) ids.add(id);
 	}
 	return [...ids].sort();
@@ -961,12 +1413,6 @@ function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTabl
 	}
 }
 
-function collectSessionStatsIdentitiesFromText(text: string): Record<StatsEntryTable, StatsEntryIdentity[]> {
-	const identities = createStatsIdentities();
-	for (const line of text.split(/\r?\n/)) addSessionStatsIdentity(line, identities);
-	return identities;
-}
-
 async function collectSessionStatsIdentities(
 	sessionPath: string,
 ): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> {
@@ -1126,15 +1572,15 @@ async function collectArchivedStatsSessions(
 		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
 		const sourcePath = path.join(sessionsRoot, relative.slice(0, -".gz".length));
 		try {
-			const text = await readTextIfPresent(file);
-			const header = sessionLineageHeaderFromText(text);
+			const identities = createStatsIdentities();
+			const header = await scanArchivedSession(file, identities);
 			if (!header) throw new Error("archive is missing a valid session header");
 			sessions.push({
 				path: sourcePath,
 				id: header.id,
 				parentSession: header.parentSession,
 				historicalPaths: managedHistoricalSessionPaths(header, sourcePath, sessionsRoot),
-				identities: collectSessionStatsIdentitiesFromText(text),
+				identities,
 			});
 		} catch (error) {
 			onError(file, error);
@@ -1520,15 +1966,15 @@ async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise
 	return result as T;
 }
 
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-}
-
 function renderText(result: GcResult): string {
 	const lines = [`GC ${result.apply ? "applied" : "dry-run"} (${result.agentDir})`];
+	if (result.stale) {
+		const stale = result.stale;
+		lines.push(
+			`stale: ${stale.deleted}/${stale.wouldDelete} entries, ${formatBytes(stale.bytes)} (${stale.danglingMarkers} session markers, ${stale.staleBreadcrumbs} breadcrumbs, ${stale.expiredReports} reports, ${stale.expiredReplicas} collab replicas)`,
+		);
+		if (stale.errors.length > 0) lines.push(`stale errors: ${stale.errors.length}`);
+	}
 	if (result.blobs) {
 		lines.push(
 			`blobs: ${result.blobs.deleted}/${result.blobs.wouldDelete} files, ${formatBytes(result.blobs.bytes)}, ${result.blobs.referenced} refs`,
@@ -1554,6 +2000,8 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Stale state first: pruned collab replicas then release their blobs to this run's sweep.
+		if (options.runStale) next.stale = await runStaleGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);

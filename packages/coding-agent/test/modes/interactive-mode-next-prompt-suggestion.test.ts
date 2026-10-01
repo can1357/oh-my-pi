@@ -2,12 +2,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgSttEnabled } from "@oh-my-pi/pi-coding-agent/stt/settings";
+import { cfgStartupQuiet, cfgNextPromptSuggestionEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
@@ -65,9 +67,20 @@ afterEach(async () => {
 });
 
 describe("InteractiveMode next prompt suggestion lifecycle", () => {
+	it("clears a visible suggestion when its setting changes outside the settings selector", async () => {
+		const { mode } = await createHarness();
+		cfgNextPromptSuggestionEnabled.override(mode.settings, true);
+		await mode.init({ suppressWelcomeIntro: true });
+		mode.editor.setNextPromptSuggestion("Inspect the current result");
+		mode.editor.render(120);
+		cfgNextPromptSuggestionEnabled.override(mode.settings, false);
+		await Promise.resolve();
+		expect(mode.editor.acceptNextPromptSuggestion()).toBe(false);
+		expect(mode.editor.getText()).toBe("");
+	});
 	it("invalidates before STT crosses into its async toggle", async () => {
 		const { mode } = await createHarness();
-		Settings.instance.override("stt.enabled", true);
+		cfgSttEnabled.override(Settings.instance, true);
 		const invalidate = vi.spyOn(mode.nextPromptSuggestionController, "invalidate").mockImplementation(() => {});
 		const toggle = vi.spyOn(STTController.prototype, "toggle").mockImplementation(async () => {
 			expect(invalidate).toHaveBeenCalledTimes(1);
@@ -78,9 +91,22 @@ describe("InteractiveMode next prompt suggestion lifecycle", () => {
 		expect(toggle).toHaveBeenCalledTimes(1);
 	});
 
+	it("invalidates before push-to-talk starts recording into the prompt editor", async () => {
+		const { mode } = await createHarness();
+		cfgSttEnabled.override(Settings.instance, true);
+		const invalidate = vi.spyOn(mode.nextPromptSuggestionController, "invalidate").mockImplementation(() => {});
+		const start = vi.spyOn(STTController.prototype, "start").mockImplementation(async () => {
+			expect(invalidate).toHaveBeenCalledTimes(1);
+		});
+
+		mode.dictationSpaceHold(mode.editor).onStart();
+
+		expect(start).toHaveBeenCalledTimes(1);
+	});
+
 	it("wires the initial and replacement editor callbacks and invalidates before session or editor swaps", async () => {
 		const { mode } = await createHarness();
-		Settings.instance.override("startup.quiet", true);
+		cfgStartupQuiet.override(Settings.instance, true);
 		await mode.init({ suppressWelcomeIntro: true });
 		const invalidate = vi.spyOn(mode.nextPromptSuggestionController, "invalidate").mockImplementation(() => {});
 		const initialEditor = mode.editor;

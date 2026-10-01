@@ -26,6 +26,12 @@ function createContext(opts: { pendingImages: ImageContent[]; pendingImageLinks?
 		getText() {
 			return editorText;
 		},
+		setCollapsedText(text: string) {
+			editorText = text;
+		},
+		composerChips() {
+			return [];
+		},
 		addToHistory: vi.fn(),
 		imageLinks: undefined as (string | undefined)[] | undefined,
 		pendingImages: [...opts.pendingImages],
@@ -67,15 +73,15 @@ describe("InputController focused submit restore-on-error", () => {
 			pendingImages: [image],
 			pendingImageLinks: ["local://draft.png"],
 		});
-		editor.setText("look at this");
+		editor.setText("look at this [Image #1]");
 
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
-		await ctx.editor.onSubmit?.("look at this");
+		await ctx.editor.onSubmit?.("look at this [Image #1]");
 
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledWith("focused dispatch rejected");
-		expect(editor.getText()).toBe("look at this");
+		expect(editor.getText()).toBe("look at this [Image #1]");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
 		expect(ctx.editor.imageLinks).toEqual(["local://draft.png"]);
@@ -84,15 +90,15 @@ describe("InputController focused submit restore-on-error", () => {
 	it("restores image-only drafts when focused prompt rejects", async () => {
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
 		const { ctx, editor, prompt, showError } = createContext({ pendingImages: [image] });
-		editor.setText("");
+		editor.setText("[Image #1]");
 
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
-		await ctx.editor.onSubmit?.("");
+		await ctx.editor.onSubmit?.("[Image #1]");
 
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledWith("focused dispatch rejected");
-		expect(editor.getText()).toBe("");
+		expect(editor.getText()).toBe("[Image #1]");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual([undefined]);
 		expect(ctx.editor.imageLinks).toEqual([undefined]);

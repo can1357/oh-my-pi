@@ -1,11 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { NextPromptSuggestionController } from "@oh-my-pi/pi-coding-agent/modes/controllers/next-prompt-suggestion-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { Loader, TERMINAL } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
  * Models the loader lifecycle InteractiveMode owns: `agent_start` creates the
@@ -14,8 +14,6 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
  */
 function createContext(options?: { flushPendingModelSwitch?: () => Promise<void> }) {
 	const streamState = { isStreaming: false };
-	const loader = { stop: vi.fn() };
-	const ensureLoadingAnimation = vi.fn();
 	let nextPromptSuggestionRevision = 0;
 	const invalidateNextPromptSuggestion = vi.fn(() => {
 		nextPromptSuggestionRevision++;
@@ -28,40 +26,29 @@ function createContext(options?: { flushPendingModelSwitch?: () => Promise<void>
 		invalidate: invalidateNextPromptSuggestion,
 		request: requestNextPromptSuggestion,
 	} as unknown as NextPromptSuggestionController;
-	const ctx = {
-		isInitialized: true,
-		settings: { get: () => false },
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		flushPendingCommandOutput: vi.fn(),
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map<string, unknown>(),
-		hideThinkingBlock: false,
-		setWorkingMessage: vi.fn(),
-		clearPinnedError: vi.fn(),
-		loadingAnimation: undefined,
-		retryLoader: undefined,
-		streamingComponent: undefined,
-		streamingMessage: undefined,
-		statusContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
-		chatContainer: { removeChild: vi.fn() },
+	const ctx = createInteractiveModeContext({
+		nextPromptSuggestionController,
 		flushPendingModelSwitch: vi.fn(options?.flushPendingModelSwitch ?? (async () => {})),
-		editor: { getText: () => "" },
-		sessionManager: { getSessionName: () => "test-session" },
-		ensureLoadingAnimation,
-		ui: { requestRender: vi.fn() },
-		viewSession: { isCompacting: false, getLastAssistantMessage: () => undefined },
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
 			},
-			getToolByName: () => undefined,
 		},
-		nextPromptSuggestionController,
-	} as unknown as InteractiveModeContext;
-	ensureLoadingAnimation.mockImplementation(() => {
-		ctx.loadingAnimation ??= loader as unknown as typeof ctx.loadingAnimation;
+		viewSession: {
+			isCompacting: false,
+			getLastAssistantMessage: () => undefined,
+		},
 	});
+	const loader = new Loader(
+		ctx.ui,
+		text => text,
+		text => text,
+	);
+	vi.spyOn(loader, "stop");
+	const ensureLoadingAnimation = vi.fn(() => {
+		ctx.loadingAnimation ??= loader;
+	});
+	ctx.ensureLoadingAnimation = ensureLoadingAnimation;
 	return {
 		ctx,
 		streamState,
@@ -192,6 +179,26 @@ describe("EventController superseded agent_end", () => {
 		finish.resolve();
 		await ending;
 
+		expect(requestNextPromptSuggestion).not.toHaveBeenCalled();
+	});
+
+	it("preserves a shutdown requested during terminal teardown even when the suggestion is invalidated", async () => {
+		const finish = Promise.withResolvers<void>();
+		const { ctx, invalidateNextPromptSuggestion, requestNextPromptSuggestion } = createContext({
+			flushPendingModelSwitch: () => finish.promise,
+		});
+		const shutdown = vi.fn();
+		ctx.requestShutdown = shutdown;
+		const controller = new EventController(ctx);
+
+		const ending = controller.handleEvent(AGENT_END);
+		await Promise.resolve();
+		ctx.shutdownRequested = true;
+		invalidateNextPromptSuggestion();
+		finish.resolve();
+		await ending;
+
+		expect(shutdown).toHaveBeenCalledTimes(1);
 		expect(requestNextPromptSuggestion).not.toHaveBeenCalled();
 	});
 

@@ -64,7 +64,13 @@ const USAGE_REPORT = {
 		{
 			id: "rolling",
 			label: "Rolling window",
-			scope: { provider: "anthropic", windowId: "rolling", providerExtension: true },
+			scope: {
+				provider: "anthropic",
+				windowId: "rolling",
+				shared: true,
+				sharedGroup: "3p:rolling",
+				providerExtension: true,
+			},
 			window: { id: "rolling", label: "5 hour", durationMs: 18_000_000 },
 			amount: { used: 1, limit: 10, remaining: 9, unit: "tokens", providerExtension: "kept" },
 			status: "ok",
@@ -116,6 +122,7 @@ const schemaNames = [
 	"disabledCredentialSummarySchema",
 	"disabledCredentialsResponseSchema",
 	"credentialBlockRequestSchema",
+	"credentialBlockDeleteRequestSchema",
 	"credentialBlockResponseSchema",
 	"credentialBlocksDeleteResponseSchema",
 	"usageStaleResponseSchema",
@@ -157,7 +164,7 @@ const validSamples: Record<SchemaName, unknown> = {
 			},
 		],
 	},
-	clientUsageReportRequestSchema: { installId: "install", hostname: "host", entries: [OBSERVED_USAGE] },
+	clientUsageReportRequestSchema: { installId: "install", hostname: "host", app: "robomp", entries: [OBSERVED_USAGE] },
 	clientUsageReportResponseSchema: { ok: true },
 	clientUsageSummaryResponseSchema: {
 		generatedAt: 2_000,
@@ -167,7 +174,7 @@ const validSamples: Record<SchemaName, unknown> = {
 				hostname: "host",
 				firstSeen: 1_000,
 				lastSeen: 2_000,
-				providers: [{ ...OBSERVED_USAGE, firstSeen: undefined, at: undefined, model: undefined }],
+				providers: [{ ...OBSERVED_USAGE, app: "robomp", firstSeen: undefined, at: undefined, model: undefined }],
 			},
 		],
 	},
@@ -187,6 +194,7 @@ const validSamples: Record<SchemaName, unknown> = {
 		disabled: [{ id: 7, provider: "anthropic", type: "oauth", cause: "revoked" }],
 	},
 	credentialBlockRequestSchema: BLOCK,
+	credentialBlockDeleteRequestSchema: { providerKey: BLOCK.providerKey, blockScope: BLOCK.blockScope },
 	credentialBlockResponseSchema: { ok: true },
 	credentialBlocksDeleteResponseSchema: { ok: true },
 	usageStaleResponseSchema: { ok: true },
@@ -210,10 +218,9 @@ function reject(schema: unknown, input: unknown): void {
 }
 
 describe("auth-broker public wire schemas", () => {
-	test("exports all 31 real callable ArkType values with canonical behavior", () => {
+	test("exports all 32 real callable ArkType values with canonical behavior", () => {
 		expect(Object.keys(wireSchemas).sort()).toEqual([...schemaNames].sort());
 		for (const name of schemaNames) {
-			// biome-ignore lint/performance/noDynamicNamespaceImportAccess: this contract intentionally verifies the public namespace.
 			const schema = wireSchemas[name];
 			expect(typeof schema).toBe("function");
 			expect(schema).toBeInstanceOf(Type);
@@ -239,6 +246,10 @@ describe("auth-broker public wire schemas", () => {
 			blockScope: "",
 			blockedUntilMs: BLOCK.blockedUntilMs,
 		});
+		// Empty scope addresses the global row; a missing provider key or extra field must not widen the delete.
+		accept(wireSchemas.credentialBlockDeleteRequestSchema, { providerKey: BLOCK.providerKey, blockScope: "" });
+		reject(wireSchemas.credentialBlockDeleteRequestSchema, { providerKey: "", blockScope: "" });
+		reject(wireSchemas.credentialBlockDeleteRequestSchema, { ...BLOCK });
 		accept(wireSchemas.credentialDisableRequestSchema, {});
 		reject(wireSchemas.credentialDisableRequestSchema, { cause: 1 });
 		reject(wireSchemas.credentialDisableRequestSchema, { extra: true });

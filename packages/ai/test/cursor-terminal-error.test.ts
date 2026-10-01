@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
-import { create, toBinary } from "@bufbuild/protobuf";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, CursorToolResultHandler, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
 	ExecServerMessageSchema,
+	CustomErrorDetailsSchema,
+	CursorError,
+	ErrorDetailsSchema,
 	InteractionUpdateSchema,
 	ReadArgsSchema,
 	TextDeltaUpdateSchema,
@@ -15,16 +18,21 @@ import {
 	TurnEndedUpdateSchema,
 	UpdateTodosArgsSchema,
 	UpdateTodosToolCallSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
+	| { kind: "connect-detailed-error-after-turn" }
+	| { kind: "connect-classification-detail-after-turn" }
+	| { kind: "connect-structured-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
+	| { kind: "end-frame-awaits-half-close" }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-hang" }
@@ -72,8 +80,11 @@ function turnEndedFrame(): Buffer {
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
 }
 
-function connectEndErrorFrame(code: string, message: string): Buffer {
-	const payload = Buffer.from(JSON.stringify({ error: { code, message } }), "utf8");
+function connectEndErrorFrame(code: string, message: string, details?: unknown): Buffer {
+	const payload = Buffer.from(
+		JSON.stringify({ error: { code, message, ...(details === undefined ? {} : { details }) } }),
+		"utf8",
+	);
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
 }
 
@@ -234,7 +245,57 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-detailed-error-after-turn") {
+			stream.write(
+				connectEndErrorFrame("invalid_argument", "Error", [
+					{ type: "google.rpc.ErrorInfo", value: "quota exceeded for request field tools" },
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "connect-classification-detail-after-turn") {
+			stream.write(
+				connectEndErrorFrame("invalid_argument", "Error", [
+					{ type: "google.rpc.ErrorInfo", debug: "quota exceeded for this account" },
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "connect-structured-error-after-turn") {
+			const details = create(ErrorDetailsSchema, {
+				error: CursorError.ERROR_RATE_LIMITED,
+				details: create(CustomErrorDetailsSchema, {
+					title: "Capacity reached",
+					detail: "Retry this request shortly",
+					isRetryable: true,
+				}),
+			});
+			stream.write(
+				connectEndErrorFrame("invalid_argument", "Error", [
+					{
+						type: "type.googleapis.com/aiserver.v1.ErrorDetails",
+						value: Buffer.from(toBinary(ErrorDetailsSchema, details)).toString("base64"),
+					},
+				]),
+			);
+			stream.end();
+			return;
+		}
+
 		if (scenario.kind === "hang-after-turn") {
+			return;
+		}
+
+		if (scenario.kind === "end-frame-awaits-half-close") {
+			// Through an HTTP CONNECT proxy the server's Connect end frame is the
+			// last byte until the client half-closes; only then does the HTTP/2
+			// stream end. A client that never ends its request side hangs here.
+			stream.write(frameConnectMessage(Buffer.from("{}"), CONNECT_END_STREAM_FLAG));
+			stream.on("end", () => stream.end());
 			return;
 		}
 
@@ -322,6 +383,14 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
+	it("half-closes its request once the Connect end frame arrives", async () => {
+		scenario = { kind: "end-frame-awaits-half-close" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl), { signal: AbortSignal.timeout(5000) });
+		expect(eventTypes.at(-1)).toBe("done");
+		expect(result.stopReason).toBe("stop");
+	});
+
 	it("surfaces CONNECT end-stream errors that arrive after turnEnded", async () => {
 		scenario = { kind: "connect-error-after-turn" };
 		const baseUrl = await startServer();
@@ -331,6 +400,33 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Connect error unavailable: post-turn connect failure");
+	});
+
+	it("surfaces standard Connect detail values without changing recovery classification", async () => {
+		scenario = { kind: "connect-detailed-error-after-turn" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("google.rpc.ErrorInfo");
+		expect(result.errorMessage).toContain("quota exceeded for request field tools");
+		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
+	});
+
+	it("keeps appended Connect diagnostics out of recovery classification", async () => {
+		scenario = { kind: "connect-classification-detail-after-turn" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.errorMessage).toContain("quota exceeded for this account");
+		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
+	});
+
+	it("maps Cursor ErrorDetails into retryable provider status and message", async () => {
+		scenario = { kind: "connect-structured-error-after-turn" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorMessage).toContain("Cursor RATE_LIMITED: Capacity reached: Retry this request shortly");
 	});
 
 	it("surfaces nonzero gRPC trailers that arrive after turnEnded", async () => {

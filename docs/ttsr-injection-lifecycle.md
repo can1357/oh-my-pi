@@ -4,37 +4,48 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 
 ## Implementation files
 
-- [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
-- [`../src/export/ttsr.ts`](../packages/coding-agent/src/export/ttsr.ts)
-- [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
-- [`../src/session/ttsr-coordinator.ts`](../packages/coding-agent/src/session/ttsr-coordinator.ts)
-- [`../src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
-- [`../src/prompts/system/ttsr-interrupt.md`](../packages/coding-agent/src/prompts/system/ttsr-interrupt.md)
-- [`../src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
-- [`../src/extensibility/extensions/types.ts`](../packages/coding-agent/src/extensibility/extensions/types.ts)
-- [`../src/extensibility/hooks/types.ts`](../packages/coding-agent/src/extensibility/hooks/types.ts)
-- [`../src/extensibility/custom-tools/types.ts`](../packages/coding-agent/src/extensibility/custom-tools/types.ts)
-- [`../src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
+- [`packages/coding-agent/src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
+- [`packages/coding-agent/src/export/ttsr.ts`](../packages/coding-agent/src/export/ttsr.ts)
+- [`packages/coding-agent/src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
+- [`packages/coding-agent/src/session/ttsr-coordinator.ts`](../packages/coding-agent/src/session/ttsr-coordinator.ts)
+- [`packages/coding-agent/src/session/ttsr-outputs.ts`](../packages/coding-agent/src/session/ttsr-outputs.ts)
+- [`packages/coding-agent/src/export/ttsr-settings.ts`](../packages/coding-agent/src/export/ttsr-settings.ts)
+- [`packages/coding-agent/src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
+- [`packages/coding-agent/src/prompts/system/ttsr-interrupt.md`](../packages/coding-agent/src/prompts/system/ttsr-interrupt.md)
+- [`packages/coding-agent/src/prompts/system/ttsr-warning.md`](../packages/coding-agent/src/prompts/system/ttsr-warning.md)
+- [`packages/coding-agent/src/prompts/system/ttsr-tool-reminder.md`](../packages/coding-agent/src/prompts/system/ttsr-tool-reminder.md)
+- [`packages/coding-agent/src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
+- [`packages/coding-agent/src/extensibility/extensions/types.ts`](../packages/coding-agent/src/extensibility/extensions/types.ts)
+- [`packages/coding-agent/src/extensibility/hooks/types.ts`](../packages/coding-agent/src/extensibility/hooks/types.ts)
+- [`packages/coding-agent/src/extensibility/custom-tools/types.ts`](../packages/coding-agent/src/extensibility/custom-tools/types.ts)
+- [`packages/coding-agent/src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
 
 ## 1. Discovery feed and rule registration
 
 At session creation, `createAgentSession()` loads discovered rules, constructs a `TtsrManager`, and buckets rules through `bucketRules(...)`:
 
 ```ts
-const ttsrSettings = settings.getGroup("ttsr");
-const ttsrManager = new TtsrManager(ttsrSettings);
-const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd });
+const ttsrSettings = cfgTtsr.get(settings);
+// Live source: enable/repeat/interrupt/context changes apply on the next check.
+const ttsrManager = new TtsrManager(() => cfgTtsr.get(settings));
+const rulesResult =
+  options.rules !== undefined
+    ? { items: options.rules, warnings: undefined }
+    : await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
 const { rulebookRules, alwaysApplyRules } = bucketRules(
   rulesResult.items,
   ttsrManager,
   {
     builtinRules: ttsrSettings.builtinRules,
     disabledRules: ttsrSettings.disabledRules,
+    agentName: resolvedAgentName,
   },
 );
 ```
 
-`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded `builtin-defaults` rules when `ttsr.builtinRules === false`, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+
+Session-scoped prompt rebuilds re-discover and re-bucket rules (explicit rule sets are only re-bucketed). `replaceRules()` replaces registrations and clears stream buffers, preserving injection records for names still registered. Removed names lose their records; when TTSR is disabled, records are retained for re-enablement. The session-local and top-level active-rule URL snapshots are refreshed too.
 
 ### Pre-registration dedupe behavior
 
@@ -45,7 +56,7 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(
 Registration is skipped when:
 
 - TTSR is disabled (`ttsr.enabled === false`)
-- both `rule.condition` (regex) and `rule.astCondition` (ast-grep patterns) are absent, or every regex condition fails to compile and there are no non-empty AST conditions
+- `rule.condition` (regex), `rule.astCondition` (ast-grep patterns), and `rule.question` (judged) are all absent, or every regex condition fails to compile and there are neither AST conditions nor a question
 - a rule with the same `rule.name` was already registered in this manager
 - the parsed rule scope excludes all monitored streams
 
@@ -55,7 +66,7 @@ With no explicit `scope`, a rule monitors assistant text and all tool arguments,
 
 ### AST conditions (`astCondition`)
 
-AST conditions only evaluate on tool-argument streams for tools that expose a reconstructed `matcherDigest` or per-file `matcherEntries`, and only when a candidate path supplies a usable file extension for language inference. Built-in edit/write tools provide these surfaces, but the coordinator resolves them generically from the active tool.
+AST conditions only evaluate on tool-argument streams for tools that expose a reconstructed `matcherDigest` or per-file `matcherEntries`, and only when a candidate path supplies a usable file extension for language inference. Built-in edit/write tools provide these surfaces, but the coordinator resolves them generically from the active tool. They match against the tool's reconstructed source snapshot — the per-file `matcherEntries` digests when available, else the combined `matcherDigest` — not the raw wire delta; streams without a usable file path (prose, thinking, path-less tool calls) skip AST conditions entirely. A rule may mix `condition` and `astCondition`: the regex paths keep working on every scope while AST paths apply only to those tool streams.
 
 The snapshot is source-bearing payload, not the whole prospective file: pre-existing target content is invisible unless the call repeats it. Current edit modes expose `new_string` for replace, added lines for JSON patch, hashline, and apply-patch forms, and full content for create forms; write exposes its entire `content`. Multi-file hashline/apply-patch calls are split into separate `{ path, digest }` entries, so AST language, path scope/globs, buffers, and matching are evaluated per file. Matching is in-memory through native `astMatch` with Smart strictness.
 
@@ -68,6 +79,7 @@ Manager defaults when a setting is omitted:
 | Setting         | Default                                          |
 | --------------- | ------------------------------------------------ |
 | `enabled`       | `true`                                           |
+| `judge`         | `"auto"` (consumed by the session, not matching) |
 | `contextMode`   | `"discard"`                                      |
 | `interruptMode` | `"always"`                                       |
 | `repeatMode`    | `"once"`                                         |
@@ -85,14 +97,20 @@ On `turn_start`, the stream buffer is reset:
 
 - `ttsrManager.resetBuffer()`
 
+Buffers also reset at each assistant `message_start` and on a later provider `start` that replaces the partial response, preventing content from discarded attempts or retries from combining.
+
 ### During stream (`message_update`)
 
 When assistant updates arrive and rules exist:
 
-- monitor `text_delta`, `thinking_delta`, and `toolcall_delta`
+- monitor `text_delta`, `thinking_delta`, `toolcall_delta`, and finalized `toolcall_end` arguments; final arguments seed the snapshot even when a provider emits no argument deltas
 - isolate buffers by source or tool-call stream key
-- if the active tool exposes per-file `matcherEntries`, replace each file-scoped buffer with its digest and call `checkSnapshot`; otherwise, use a single `matcherDigest` snapshot when available, falling back to appending the raw delta via `checkDelta`
-- when AST rules exist, run `checkAstSnapshot` on the same reconstructed per-file or single snapshot; identical consecutive snapshots for a stream key are skipped
+- the match context's file paths prefer the tool's `matcherPaths(args)` hook — edit strategies surface paths embedded in the wire payload (hashline `[path#TAG]` section headers, apply_patch `*** Add/Update/Delete File:` envelope markers), tolerant of partially streamed buffers — falling back to the generic top-level `path`/`paths` argument scan
+- for tools exposing `matcherEntries(args)`, the streamed payload is projected per touched file into `{ path, digest }` entries (added lines only, same-path sections/hunks merged); each entry is checked in isolation via `checkSnapshot(entry.digest, perFileContext)` under its own file path and stream key (`<toolcall>#<path>`), so a path-scoped rule like `tool:edit(*.ts)` never fires on text belonging to a sibling Markdown hunk in a multi-file payload
+- otherwise, for tools exposing a combined `matcherDigest` (edit/write), replace the scoped buffer with the reconstructed source snapshot and call `checkSnapshot(snapshot, matchContext)`; otherwise append the delta into the scoped manager buffer and call `checkDelta(delta, matchContext)` (synchronous regex matching either way)
+- `checkDelta` skips buffering entirely for text/thinking sources when no registered rule allows that source (`canMatchText`/`canMatchThinking`), so unmatched prose/thinking deltas pay no buffering cost
+
+AST matching does not run in the streaming listener. The awaited `beforeToolCall` hook checks the finalized, validated execution arguments using the same per-file or combined source snapshot. An interrupt blocks the tool before its side effects, marks the assistant turn aborted, and follows the existing TTSR injection/retry path; `never` mode allows execution and attaches its reminder to the result. Streaming regex matching remains synchronous.
 
 `checkDelta()`/`checkSnapshot()` iterate registered rules and return all matching rules that pass scope, global path-glob, regex condition, and repeat policy checks. `checkAstSnapshot()` applies the same scope/path/repeat gates, infers language from the candidate file path, then tests each candidate rule's AST patterns. Regex and AST match arrays feed the same trigger-decision handler.
 
@@ -148,7 +166,7 @@ Pending injections are cleared after content generation.
 
 Non-interrupting matches split by `matchContext.source`:
 
-- **`source === "tool"` (tool-source match).** The rule is bucketed into `TtsrCoordinator.#perToolInjections`, keyed by the matched tool call's `id`, and marked injected in memory immediately. There is **no** deferred follow-up turn and the stream is not aborted. When the tool actually produces a result, the `afterToolCall` hook prepends a rendered `ttsr-tool-reminder.md` block to `ctx.result.content` (a single `text` block inserted ahead of the tool's own content) and persists a `ttsr_injection` entry with the consumed rule names. The template payload is:
+- **`source === "tool"` (tool-source match).** The rule is bucketed into `TtsrCoordinator.#perToolInjections`, keyed by the matched tool call's `id`, and marked injected in memory immediately. There is **no** deferred follow-up turn and the stream is not aborted. When the tool actually produces a result, the `afterToolCall` hook returns a rendered `ttsr-tool-reminder.md` block as passive `additionalContext`; agent-core emits it in a separate developer message after the tool result, never as part of tool output (calls dispatched outside the agent loop are covered by the next bullet). It also persists a `ttsr_injection` entry with the consumed rule names. The template payload is:
 
   ```xml
   <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
@@ -157,15 +175,17 @@ Non-interrupting matches split by `matchContext.source`:
   </system-reminder>
   ```
 
+- **Bridged AgentTool calls (Cursor exec handlers, eval).** These dispatches bypass the agent loop, so `afterToolCall` never runs for them. Finalized inner calls are checked at the `ExtensionToolWrapper` boundary, which passes the call's tool context to `TtsrCoordinator.afterBridgedToolCall`. When that context carries an `addAdditionalContext` sink, the reminder is delivered through it as passive context (the Cursor exec bridge installs a sink whenever the session supplies a tool context, and delivers after its buffered results on the next provider request) and the bridged result stays untouched. A bridged call with no sink has no trusted channel, so the reminder is prepended to its result as a leading text block instead; eval-bridged calls take this fallback today. Prelude host calls (`browser.*`, `computer.*`, `tab.run`) are not AgentTool dispatches and stay outside this path.
+
 - **`source === "text"` / `"thinking"` (prose-source match).** The rule is queued in the pending injections. After a successful non-error, non-aborted assistant message, `TtsrCoordinator` queues the hidden `ttsr-injection` custom message with `agent.followUp()` and schedules continuation after 1ms. These deferred non-interrupting prose matches do not emit `ttsr_triggered`; that event is emitted for actual interrupt paths and for non-interrupting per-tool reminders.
 
-Within a matching batch, each rule is attached to exactly one sibling tool call: if multiple sibling calls would satisfy the same rule, the first claimed bucket wins. Multiple distinct rules can still fold onto one tool call.
+Within a matching batch, each rule is attached to exactly one sibling tool call: if multiple sibling calls would satisfy the same rule, the first claimed bucket wins. Multiple distinct rules can still share one tool call's passive context.
 
 #### Implications for tool authors and transcript readers
 
-- The tool's own `toolResult` content is preserved verbatim; the reminder is **prepended** as an additional leading text block. Renderers that assume `content[0]` is the tool's primary output must scan past any block whose text begins with `<system-reminder reason="rule_violation"` (or filter on the wrapper tag) to find the real payload.
-- The reminder is in-band on the tool result, not a separate `custom_message`/`ttsr-injection` entry. Transcript readers looking for non-interrupting TTSR activity on tool-source rules MUST inspect tool results (and the persisted `ttsr_injection` entry list), not just synthetic injection entries.
-- A single tool result may carry reminders for several rules concatenated with a blank line between rendered templates.
+- The tool's own `toolResult` content is preserved verbatim. Agent-core emits the rendered reminder in a separate developer message after every result in the batch has settled and before the next provider request.
+- Transcript readers looking for non-interrupting TTSR activity on tool-source rules must inspect developer messages that follow tool-result batches (and the persisted `ttsr_injection` entry list), not tool output or synthetic custom-message entries.
+- One developer message may carry reminders for several rules or tool calls, concatenated in assistant call order with a blank line between rendered templates.
 - If the assistant message ends with `stopReason === "aborted"` or `"error"` before the matched tools run, pending per-tool buckets are cleared and no `ttsr_injection` entry is persisted. The match-time in-memory injection record is **not** rolled back: in `once` mode it stays suppressed until session reload; in `after-gap` mode it becomes eligible after the configured number of completed turns. Because the undelivered match was not persisted, reload also makes it eligible again.
 
 ## 5. Repeat policy and gap logic
@@ -226,7 +246,7 @@ Current runtime wiring:
 
 - interrupted injections append a hidden `custom_message` with `customType: "ttsr-injection"` and append a `ttsr_injection` entry
 - deferred non-interrupting prose-source injections are marked/persisted when their queued custom message reaches `message_end`
-- non-interrupting tool-source matches are marked in memory when bucketed, then persisted from `afterToolCall` only when the matched tool's result is produced
+- non-interrupting tool-source matches are marked in memory when bucketed, then persisted from `afterToolCall` (or the bridged-call postflight) only when the matched tool's result is produced
 - `createAgentSession()` restores `existingSession.injectedTtsrRules` into the manager
 
 Injected-rule suppression is therefore restored from the current branch path. Persistence stores names, not the original turn age: `restoreInjected()` records each restored rule at message count zero. In `repeatMode: "after-gap"`, a resumed rule becomes eligible after `repeatGap` newly completed turns, regardless of how many turns elapsed before reload.
@@ -241,7 +261,7 @@ Injected-rule suppression is therefore restored from the current branch path. Pe
 
 ### Multiple matches in same stream window
 
-`checkDelta()` returns all currently matching eligible rules for that scoped buffer. Pending injections are deduplicated by rule name before injection.
+`checkDelta()` returns all currently matching eligible rules for that scoped buffer. Pending injections are deduplicated by rule name before injection. Trigger notifications track rule names per stream key, so a delta match re-confirmed at `toolcall_end` does not announce the same violation twice; this tracking clears at turn end.
 
 ### Between abort and continue
 
@@ -254,9 +274,36 @@ During the timer window, state can change. The retry is guarded by retry token, 
 - Duplicate names at manager layer: second registration is ignored.
 - `ttsr.disabledRules`: listed names are dropped before TTSR registration and are not surfaced through always-apply/rulebook buckets.
 - `ttsr.builtinRules: false`: embedded `builtin-defaults` rules are dropped before TTSR registration; user/project rules still load.
-- `globs` on a TTSR rule require at least one candidate file path matching either its normalized path or basename.
+- `globs` on a TTSR rule require at least one candidate file path matching either its normalized path or basename; for hashline/apply_patch edit streams those paths come from the tool's `matcherPaths` hook, not top-level arguments.
+- Tools without `matcherPaths`/`matcherEntries` keep the generic top-level path scan and combined `matcherDigest` behavior — the per-file hooks are additive.
 - Default scope monitors text and tools, not thinking.
 - `contextMode: "keep"`: partial violating output can remain in context before reminder retry.
-- `interruptMode: "never"`: prose-source matches queue a deferred hidden injection after a successful assistant message; tool-source matches fold an in-band `<system-reminder>` into the matched tool call's `toolResult` content via the `afterToolCall` hook (no mid-stream abort, no separate follow-up turn).
+- `interruptMode: "never"`: prose-source matches queue a deferred hidden injection after a successful assistant message; tool-source matches return an OMP-authored `<system-reminder>` through `afterToolCall.additionalContext`, which agent-core emits as a separate developer message after the matched call's tool result (no tool-output mutation, mid-stream abort, or extra follow-up turn). Bridged calls use their own passive-context sink the same way; only a bridged call without one (eval) folds the reminder into its result.
 - Tool-source non-interrupting buckets are cleared when the parent assistant message ends with `stopReason === "aborted"` or `"error"`. Their match-time in-memory suppression remains until repeat policy permits another trigger (or reload discards the unpersisted record).
 - Repeat-after-gap depends on turn count increments at `turn_end`; after reload, restored injection ages restart at zero.
+- Judged (`question`) rules never appear in `checkDelta`/`checkSnapshot`/`checkAstSnapshot` results; see §10.
+
+## 10. Judged rules (`question`)
+
+A rule with `question` is judged: its natural-language question goes to the `judge` model role after an output completes, never while it streams, so it cannot interrupt.
+
+### When judgment runs
+
+- `ttsr.judge`: `auto` (default) judges only when the judge role resolves to a native System One model (TypeSafe jev); `on` judges with whatever the role resolves to, including the session's chat model; `off` never judges. Question rules still register either way.
+- On `message_end` of an assistant message whose `stopReason` is neither `aborted` nor `error`, `TtsrCoordinator` splits the message into outputs: all text blocks as one `text` output, all thinking blocks as one `thinking` output, and each tool call as a `tool` output. Tools exposing `matcherEntries` yield one output per file, with the `{ path, digest }` digest as content; otherwise the `matcherDigest` or the raw JSON arguments.
+- For each output, `TtsrManager.judgedCandidates()` selects question rules that pass scope, `globs`, the repeat policy, and — when the rule also declares `condition`/`astCondition` — that prefilter against the completed content. No candidates → no request.
+- One judge request per output carries every candidate's question as a `noul` question over a shared state `{ output, content }` (content cut to its longest prefix within 32,000 Jev tokens, counted locally with `Encoding.Jev`, so each branch stays under Jev's ~33k-token limit). Jev bills the state once per request, so rules sharing an output share its cost. Usage is journaled as `model_usage` with purpose `ttsr`.
+
+### Delivery
+
+- A yes-probability ≥ 0.7 flags the rule. Flagged rules pass through `TtsrManager.claim()`, which drops rules another verdict already claimed or that the repeat policy blocks, and marks the rest injected in memory; one rule flagged by several outputs is therefore delivered once.
+- Verdicts arriving after a session replacement (`/new`, session switch) are dropped.
+- Survivors emit `ttsr_triggered` and are rendered with `ttsr-warning.md` into a hidden `ttsr-injection` custom message (`details.rules`), sent with `deliverAs: "aside"`: mid-run it joins the next step without interrupting; on an idle session it starts a turn. Its `message_end` persists the `ttsr_injection` entry.
+- The session's `onBeforeYield` hook awaits in-flight judgments (up to 5s) before the agent loop drains asides and stops, so a warning about the final reply or last tool call lands in the same run. Later verdicts still arrive as asides.
+- Judge failures (no credentials, timeouts, parse errors) are logged and deliver nothing.
+
+### `/omfg` and CLI
+
+`/omfg` generates `condition`, `astCondition`, or `question` rules, instructed to prefer the pattern triggers. It validates candidates against conversation history through the same completed-output view (`TtsrToolInspector.outputs`); a `question` candidate must pass its scope/prefilter and get a yes from the judge on one of the 8 most recent in-scope outputs. With no judge available, the user decides whether to save it unconfirmed.
+
+`omp ttsr list` shows each rule's `question`. `omp ttsr test` never calls the judge, so question rules report as not triggered, with their question shown. `omp ttsr scan` skips question rules: their conditions are prefilters, not violations.

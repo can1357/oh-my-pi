@@ -396,9 +396,8 @@ describe("PluginManager.install with git sources", () => {
 
 	test("drains stdout/stderr concurrently with proc.exited (pipe-buffer deadlock, #4230)", async () => {
 		// Model the OS-pipe semantics that caused the deadlock: `exited` cannot
-		// resolve until both pipes have been read. If PluginManager.install
-		// awaits `exited` before starting to drain either stream, this test
-		// hangs — which we catch with Promise.race + a short timeout.
+		// resolve until both pipes have been read. Awaiting install directly is
+		// sufficient: the test runner's timeout catches a regression.
 		await Bun.write(
 			pluginsPkgJson,
 			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
@@ -445,12 +444,9 @@ describe("PluginManager.install with git sources", () => {
 		}) as typeof Bun.spawn);
 
 		const mgr = new PluginManager(tmpRoot);
-		const installed = await Promise.race([
-			mgr.install("github:foo/bar"),
-			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("install deadlocked")), 2000)),
-		]);
+		const installed = await mgr.install("github:foo/bar");
 		expect(installed.name).toBe("real-name");
-	});
+	}, 2000);
 
 	test("refreshes Bun's cached git clone before updating an existing plugin (#5401)", async () => {
 		const sourceDir = path.join(tmpRoot, "source");
@@ -460,14 +456,24 @@ describe("PluginManager.install with git sources", () => {
 		await fs.mkdir(sourceDir, { recursive: true });
 		await fs.mkdir(path.dirname(remoteDir), { recursive: true });
 		await runCommand(["git", "init", "-b", "main"], sourceDir);
-		await runCommand(["git", "config", "user.name", "Plugin test"], sourceDir);
-		await runCommand(["git", "config", "user.email", "plugin-test@example.com"], sourceDir);
 		await Bun.write(
 			path.join(sourceDir, "package.json"),
 			JSON.stringify({ name: "@test/pi-package", version: "1.0.0" }, null, 2),
 		);
 		await runCommand(["git", "add", "package.json"], sourceDir);
-		await runCommand(["git", "commit", "-m", "version A"], sourceDir);
+		await runCommand(
+			[
+				"git",
+				"-c",
+				"user.name=Plugin test",
+				"-c",
+				"user.email=plugin-test@example.com",
+				"commit",
+				"-m",
+				"version A",
+			],
+			sourceDir,
+		);
 		await runCommand(["git", "clone", "--bare", sourceDir, remoteDir], tmpRoot);
 		await runCommand(["git", "update-server-info"], remoteDir);
 
@@ -506,7 +512,19 @@ describe("PluginManager.install with git sources", () => {
 				JSON.stringify({ name: "@test/pi-package", version: "2.0.0" }, null, 2),
 			);
 			await runCommand(["git", "add", "package.json"], sourceDir);
-			await runCommand(["git", "commit", "-m", "version B"], sourceDir);
+			await runCommand(
+				[
+					"git",
+					"-c",
+					"user.name=Plugin test",
+					"-c",
+					"user.email=plugin-test@example.com",
+					"commit",
+					"-m",
+					"version B",
+				],
+				sourceDir,
+			);
 			await runCommand(["git", "push", remoteDir, "main"], sourceDir);
 			await runCommand(["git", "update-server-info"], remoteDir);
 
@@ -525,5 +543,84 @@ describe("PluginManager.install with git sources", () => {
 	test("still rejects invalid npm names with the original error", async () => {
 		const mgr = new PluginManager(tmpRoot);
 		await expect(mgr.install("Invalid Name With Spaces")).rejects.toThrow(/Invalid (package name|characters)/);
+	});
+
+	test("upgrades a git plugin by bare name from its recorded source, keeping it disabled", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify(
+				{ name: "omp-plugins", private: true, dependencies: { "ida-mcp": "github:HexRaysSA/ida-mcp#latest" } },
+				null,
+				2,
+			),
+		);
+		const seedDir = path.join(pluginsNodeModules, "ida-mcp");
+		await fs.mkdir(seedDir, { recursive: true });
+		await Bun.write(path.join(seedDir, "package.json"), JSON.stringify({ name: "ida-mcp", version: "1.0.0" }));
+		await Bun.write(
+			path.join(tmpRoot, "omp-plugins.lock.json"),
+			JSON.stringify({
+				plugins: { "ida-mcp": { version: "1.0.0", enabledFeatures: null, enabled: false } },
+				settings: {},
+			}),
+		);
+		const cacheDir = path.join(tmpRoot, "bun-cache");
+		await fs.mkdir(cacheDir);
+
+		const spawnedCommands: string[][] = [];
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			spawnedCommands.push([...cmd]);
+			const stdout = cmd[1] === "pm" ? textStream(`${cacheDir}\n`) : emptyStream();
+			const prepare =
+				cmd[1] === "update"
+					? Bun.write(path.join(seedDir, "package.json"), JSON.stringify({ name: "ida-mcp", version: "2.0.0" }))
+					: Promise.resolve(0);
+			return { pid: 1, stdout, stderr: emptyStream(), exited: prepare.then(() => 0) } as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const { from, plugin, changed } = await new PluginManager(tmpRoot).upgrade("ida-mcp");
+
+		expect(from).toBe("1.0.0");
+		expect(plugin.version).toBe("2.0.0");
+		expect(changed).toBe(true);
+		expect(spawnedCommands).toEqual([
+			["bun", "install", "github:HexRaysSA/ida-mcp#latest"],
+			["bun", "pm", "cache"],
+			["bun", "update", "ida-mcp"],
+		]);
+		const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
+		expect(lock.plugins["ida-mcp"]).toEqual({ version: "2.0.0", enabledFeatures: null, enabled: false });
+	});
+
+	test("reports a git plugin on a moving ref as changed when only the bun.lock pin moves", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: { "ida-mcp": "github:foo/ida-mcp#main" } }),
+		);
+		const seedDir = path.join(pluginsNodeModules, "ida-mcp");
+		await fs.mkdir(seedDir, { recursive: true });
+		await Bun.write(path.join(seedDir, "package.json"), JSON.stringify({ name: "ida-mcp", version: "1.0.0" }));
+		const bunLock = path.join(pluginsDir, "bun.lock");
+		const lockAt = (commit: string) =>
+			`{\n  "lockfileVersion": 1,\n  "packages": {\n    "ida-mcp": ["ida-mcp@github:foo/ida-mcp#${commit}", {}, "foo-ida-mcp-${commit}"],\n  },\n}\n`;
+		await Bun.write(bunLock, lockAt("aaaaaaa"));
+		const cacheDir = path.join(tmpRoot, "bun-cache");
+		await fs.mkdir(cacheDir);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			const stdout = cmd[1] === "pm" ? textStream(`${cacheDir}\n`) : emptyStream();
+			const prepare = cmd[1] === "update" ? Bun.write(bunLock, lockAt("bbbbbbb")) : Promise.resolve(0);
+			return { pid: 1, stdout, stderr: emptyStream(), exited: prepare.then(() => 0) } as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const result = await new PluginManager(tmpRoot).upgrade("ida-mcp");
+
+		expect(result.from).toBe("1.0.0");
+		expect(result.plugin.version).toBe("1.0.0");
+		expect(result.changed).toBe(true);
+	});
+
+	test("refuses to upgrade a plugin that is not installed", async () => {
+		await expect(new PluginManager(tmpRoot).upgrade("ida-mcp")).rejects.toThrow(/ida-mcp is not installed/);
 	});
 });

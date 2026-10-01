@@ -1,0 +1,108 @@
+{
+	"source": "packages/hashline/test/file-ops.test.ts",
+	"cases": [
+		{
+			"name": "parses REM and rejects line ops in the same section",
+			"parse": [
+				{
+					"input": "REM",
+					"expect": {
+						"editCount": 0,
+						"fileOp": {
+							"kind": "rem"
+						},
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 1-1:\n+one\nREM",
+					"error": "Error: line 3: `REM` deletes the whole file and takes no body rows or line ops. Issue it alone under the header."
+				}
+			]
+		},
+		{
+			"name": "parses MV with a normalized destination path",
+			"parse": [
+				{
+					"input": "MV src/new.ts",
+					"expect": {
+						"editCount": 0,
+						"fileOp": {
+							"kind": "move",
+							"dest": "src/new.ts"
+						},
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "deletes a tagged file with REM",
+			"parse": [
+				{
+					"input": "REM",
+					"expect": {
+						"editCount": 0,
+						"fileOp": {
+							"kind": "rem"
+						},
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "moves a file without content edits",
+			"parse": [
+				{
+					"input": "MV src/new.ts",
+					"expect": {
+						"editCount": 0,
+						"fileOp": {
+							"kind": "move",
+							"dest": "src/new.ts"
+						},
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "one\ntwo\nthree\n",
+					"input": "MV src/new.ts",
+					"path": "src/old.ts",
+					"expect": {
+						"text": "one\ntwo\nthree\n"
+					}
+				}
+			]
+		},
+		{
+			"name": "applies line edits then moves the updated content",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n+TWO\nMV src/new.ts",
+					"expect": {
+						"editCount": 2,
+						"fileOp": {
+							"kind": "move",
+							"dest": "src/new.ts"
+						},
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "one\ntwo\nthree\n",
+					"input": "PUT 2-2:\n+TWO\nMV src/new.ts",
+					"path": "src/old.ts",
+					"expect": {
+						"text": "one\nTWO\nthree\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		}
+	]
+}

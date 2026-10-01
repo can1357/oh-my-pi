@@ -62,6 +62,104 @@ export declare class DesktopSession {
 }
 
 /**
+ * Incrementally ingests old/new text and computes an exact line diff on a
+ * worker thread once both sides finish.
+ *
+ * Complete lines are observable during ingestion. Only equal leading lines
+ * are declared stable before EOF; future input can change Myers alignment
+ * after the first mismatch.
+ */
+export declare class DiffStream {
+  /** Create an empty two-sided stream. */
+  constructor()
+  /** Append a JavaScript text chunk to one side. */
+  push(side: DiffSide, chunk: string): DiffStreamProgress
+  /** Append a UTF-8 subprocess/file chunk without a JS string conversion. */
+  pushBytes(side: DiffSide, chunk: Uint8Array): DiffStreamProgress
+  /** Mark one side complete; an unfinished final line then becomes visible. */
+  finishSide(side: DiffSide): DiffStreamProgress
+  /** Mark one side too large and complete without further ingestion. */
+  markTooLarge(side: DiffSide): DiffStreamProgress
+  /** Current ingestion state. */
+  progress(): DiffStreamProgress
+  /** Complete display lines from `from`, excluding newline terminators. */
+  lines(side: DiffSide, from: number, limit?: number | undefined | null): Array<string>
+  /** Snapshot all ingested text for one side. */
+  text(side: DiffSide): string
+  /**
+   * Read a filesystem path directly into one side on the native worker pool.
+   *
+   * JavaScript can poll [`DiffStream::progress`] and [`DiffStream::lines`]
+   * while this promise is pending; file bytes never need to cross into JS
+   * and back into the differ.
+   */
+  openFile(side: DiffSide, path: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<DiffStreamProgress>
+  /** Compute exact Myers runs and unified hunks off the JavaScript thread. */
+  finish(context?: number | undefined | null): Promise<DiffStreamResult>
+}
+
+/** One edit tool call's streaming session. */
+export declare class EditSession {
+  /**
+   * Open a session. `onPreview` (optional) receives every settled preview
+   * batch; batches are delivered one at a time, in generation order.
+   * `resolveUrl` (optional) maps an internal URL target to its backing
+   * file; without it such targets fail as unresolved.
+   */
+  constructor(store: EditStore, policy: EditPolicy, onPreview?: ((error: Error | null, batch: EditPreviewBatch) => void) | undefined | null, resolveUrl?: ((error: Error | null, url: string) => Promise<EditUrlResolution>) | undefined | null)
+  /** Append a raw streamed argument fragment. */
+  push(delta: string): void
+  /** Replace the buffer with the complete argument JSON (no-delta path). */
+  setArgsJson(argsJson: string): void
+  /** Arguments are complete; triggers the final untrimmed preview. */
+  finish(): void
+  /**
+   * Stage and apply the finished edit through `writer`. Never rejects for
+   * engine failures: those come back as `isError` outcomes carrying the
+   * model-facing message.
+   */
+  apply(request: EditApplyRequest, writer: (error: Error | null, request: EditWriteRequest) => Promise<EditWriteResponse>): Promise<EditApplyOutcome>
+  /** Stop the preview pump and release buffers. */
+  close(): void
+}
+
+/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
+export declare class EditStore {
+  constructor()
+  /**
+   * Record `text` (any line endings) as the current snapshot of
+   * `absolutePath` and return its 4-hex tag.
+   */
+  recordSnapshot(absolutePath: string, text: string, seenLines?: Array<number> | undefined | null): string
+  /**
+   * Read `absolutePath` from disk and record it; null when the file is
+   * unreadable or larger than 4 MiB.
+   */
+  recordSnapshotFile(absolutePath: string, seenLines?: Array<number> | undefined | null): string | null
+  /** Merge displayed lines into the snapshot tagged `tag`. */
+  recordSeenLines(absolutePath: string, tag: string, lines: Array<number>): void
+  /**
+   * Merge the lines a hashline-formatted `body` displays into the
+   * snapshot tagged `tag`.
+   */
+  recordSeenLinesFromBody(absolutePath: string, tag: string, body: string): void
+  /** Latest recorded text for `absolutePath`. */
+  headText(absolutePath: string): string | null
+  /** Latest recorded tag for `absolutePath`. */
+  headHash(absolutePath: string): string | null
+  /** Recorded text of `absolutePath` tagged `hash`. */
+  byHashText(absolutePath: string, hash: string): string | null
+  /**
+   * Displayed lines recorded for the snapshot tagged `hash`; null when no
+   * provenance was recorded.
+   */
+  seenLines(absolutePath: string, hash: string): Array<number> | null
+  invalidate(absolutePath: string): void
+  relocate(from: string, to: string): void
+  clear(): void
+}
+
+/**
  * Process-owned cross-platform advisory lock.
  *
  * `tryAcquire()` is non-blocking; its returned handle reports whether it won
@@ -75,6 +173,24 @@ export declare class FileLock {
   get acquired(): boolean
   /** Release this handle's ownership without affecting a successor. */
   release(): void
+}
+
+/**
+ * Stateful incremental syntax highlighter for streamed code.
+ *
+ * Carries syntect parser state across [`HighlightStream::push`] calls so
+ * chunked highlighting of a growing buffer is byte-identical to highlighting
+ * the concatenated text in one call. Feed newline-terminated complete lines;
+ * only the final push may omit the trailing newline. An unresolved language
+ * echoes input unchanged.
+ */
+export declare class HighlightStream {
+  /** Create a stream for `lang`; an unknown language yields a passthrough. */
+  constructor(lang: string | undefined | null, colors: HighlightColors)
+  /** Whether the language resolved to a grammar; `false` means passthrough. */
+  get supported(): boolean
+  /** Highlight the next chunk and advance parser state. */
+  push(chunk: string): string
 }
 
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
@@ -119,20 +235,36 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
-/**
- * Long-lived macOS power assertion.
- *
- * On macOS this acquires one or more `IOKit` assertions that prevent the
- * requested sleep modes until the handle is stopped or dropped. On other
- * platforms it is a no-op handle so the caller can keep one cross-platform
- * code path.
- */
-export declare class MacOSPowerAssertion {
+/** A transactional, process-owned native OAuth callback receiver. */
+export declare class NativeOAuthCallback {
+  /** Create a receiver without touching the filesystem or OS registration. */
+  constructor(options: NativeOAuthCallbackOptions)
   /**
-   * Acquire a macOS power assertion. On non-macOS platforms returns a
-   * no-op handle so callers can stay cross-platform.
+   * Register the scheme transactionally. Returns false on unsupported or
+   * remote sessions.
    */
-  static start(options?: MacOSPowerAssertionOptions | undefined | null): MacOSPowerAssertion
+  start(): Promise<boolean>
+  /** Cancel an in-progress start and every pending callback wait. */
+  cancel(): void
+  /** Wait for and atomically claim the callback URL. */
+  waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
+  /** Restore prior OS state and release ownership. Safe to call repeatedly. */
+  dispose(): Promise<undefined>
+}
+
+/**
+ * Long-lived cross-platform power assertion.
+ *
+ * macOS uses `IOKit`, Linux holds login1 and desktop `ScreenSaver` inhibitors,
+ * and Windows holds thread-affine execution state until the handle is stopped
+ * or dropped. Other platforms return a no-op handle.
+ */
+export declare class PowerAssertion {
+  /**
+   * Acquire a power assertion. Unsupported platforms return a no-op handle
+   * so callers can stay cross-platform.
+   */
+  static start(options?: PowerAssertionOptions | undefined | null): PowerAssertion
   /**
    * Release every assertion held by this handle. Safe to call multiple
    * times; subsequent calls are a no-op.
@@ -232,6 +364,301 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
+}
+
+/** One word-completion engine running on its own thread. */
+export declare class TextPredictor {
+  /**
+   * Spawn the engine thread and start opening the engine; load errors
+   * surface from [`TextPredictor::ready`] and every later call.
+   *
+   * # Errors
+   * Returns an error when the engine thread cannot be spawned.
+   */
+  constructor(options: TextPredictorOptions)
+  /**
+   * Resolve once the engine has loaded.
+   *
+   * # Errors
+   * Rejects with the engine's load error (missing weights, corrupt state).
+   */
+  ready(): Promise<void>
+  /**
+   * Ghost text for `prefix` typed after `before`, or `null`.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  complete(before: string, prefix: string): Promise<PredictedWord | null>
+  /**
+   * Learn from submitted prompts, in submission order.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  observe(prompts: Array<string>): Promise<void>
+  /**
+   * Learn from a suggestion the user accepted (`true`) or typed past.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  feedback(before: string, prefix: string, suggestion: string, accepted: boolean): Promise<void>
+  /**
+   * Flush learned state to the state directory.
+   *
+   * # Errors
+   * Rejects when the engine failed to load or the state cannot be written.
+   */
+  persist(): Promise<void>
+}
+
+/**
+ * Dedicated writer thread for one terminal fd.
+ *
+ * `dup(2)`'d at construction and closed on drop. The duplicate keeps the
+ * pump's fd alive if the original is closed or replaced; file-status flags
+ * such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
+ */
+export declare class TtyWriter {
+  /**
+   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
+   * when the descriptor cannot be duplicated.
+   */
+  constructor(fd: number)
+  /**
+   * Enqueue terminal output; never blocks. Returns the total bytes now
+   * pending (including this chunk).
+   *
+   * Reads the JS string as UTF-16 through the thread's scratch arena and
+   * transcodes it with `xutf` straight into the shared back buffer, so a
+   * warm writer costs no per-call heap allocation.
+   */
+  write(data: string): number
+  /** Bytes accepted but not yet written to the terminal. */
+  pending(): number
+  /** True once a write failed (dead PTY); queued output has been dropped. */
+  get dead(): boolean
+  /**
+   * Block the calling thread until the queue drains, the writer dies, or
+   * `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
+   */
+  flushSync(timeoutMs: number): boolean
+  /**
+   * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
+   *
+   * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
+   * cannot be joined without freezing the caller: when the bounded flush
+   * times out the thread is detached instead and its dup'd fd is leaked —
+   * closing it under a blocked write would race kernel fd reuse.
+   */
+  stop(flushTimeoutMs: number): void
+}
+
+/** In-process Git repository handle. */
+export declare class VcsGitRepo {
+  /** Repository metadata. */
+  info(): VcsGitRepoInfo
+  /** Primary checkout root. */
+  primaryRoot(): string
+  /** Linked-worktree metadata. */
+  linkedWorktree(): VcsLinkedWorktree | null
+  /** Resolve HEAD synchronously. */
+  headSync(): VcsHeadState
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Resolve HEAD. */
+  head(signal?: unknown | undefined | null): Promise<VcsHeadState>
+  /** Resolve HEAD SHA. */
+  headSha(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Current branch. */
+  currentBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Default remote branch. */
+  defaultBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Resolve a revision. */
+  resolveRef(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Test revision existence. */
+  refExists(name: string, signal?: unknown | undefined | null): Promise<boolean>
+  /** Tags pointing at a revision. */
+  tagsAt(rev: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List branches. */
+  listBranches(all: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /**
+   * Whether default porcelain status reports a staged, unstaged, or untracked
+   * change.
+   */
+  isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Read config. */
+  configGet(key: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Set config. */
+  configSet(key: string, value: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List remotes. */
+  remoteList(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Remote URL. */
+  remoteUrl(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Add remote. */
+  remoteAdd(name: string, url: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List worktrees. */
+  worktrees(signal?: unknown | undefined | null): Promise<Array<VcsWorktreeEntry>>
+  /** Add worktree. */
+  worktreeAdd(path: string, refName: string, options: VcsWorktreeAddOptions, signal?: unknown | undefined | null): Promise<VcsWorktreeAddResult>
+  /** Remove worktree. */
+  worktreeRemove(path: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Prune worktrees. */
+  worktreePrune(signal?: unknown | undefined | null): Promise<undefined>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commits in a range. */
+  revListRange(base: string, head: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Best common ancestor of two revisions. */
+  mergeBase(a: string, b: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Commits touching a file. */
+  revListTouching(rev: string, file: string, limit: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List index or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List tree paths. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List submodule paths. */
+  submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Read blob bytes. */
+  showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Read commit and patch bytes. */
+  showCommit(rev: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Local LFS media directory. */
+  lfsMediaDir(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a no-index patch between two filesystem paths. */
+  diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Test for a diff. */
+  hasDiff(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Diff two trees. */
+  diffTree(base: string, head: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Stage paths. */
+  stageFiles(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Unstage paths. */
+  unstage(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Stage selected hunks. */
+  stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create commit. */
+  commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Checkout revision. */
+  checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create branch. */
+  createBranch(name: string, start: string, force: boolean, signal?: unknown | undefined | null): Promise<undefined>
+  /** Delete branch. */
+  deleteBranch(name: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Create and checkout branch. */
+  checkoutNewBranch(name: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Restore paths. */
+  restore(options: VcsRestoreOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Reset repository state. */
+  reset(mode: string, target?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Clean untracked paths. */
+  clean(options: VcsCleanOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Read tree into index. */
+  readTree(treeish: string, indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Write index tree. */
+  writeTree(indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
+  /** Apply patch. */
+  applyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Check patch applicability. */
+  canApplyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Cherry-pick commit. */
+  cherryPick(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Abort cherry-pick. */
+  cherryPickAbort(signal?: unknown | undefined | null): Promise<undefined>
+  /** Skip cherry-pick. */
+  cherryPickSkip(signal?: unknown | undefined | null): Promise<undefined>
+  /** Push stash. */
+  stashPush(message?: string | undefined | null, signal?: unknown | undefined | null): Promise<boolean>
+  /** Pop stash if cleanly applicable. */
+  stashTryPop(reinstateIndex: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Push via Git CLI. */
+  push(options: VcsPushOptions, signal?: unknown | undefined | null): Promise<void>
+  /** Fetch a refspec via Git CLI. */
+  fetch(remote: string, source: string, target: string, timeoutMs?: number | undefined | null, signal?: unknown | undefined | null): Promise<void>
+}
+
+/** In-process Jujutsu workspace handle. */
+export declare class VcsJjWorkspace {
+  /** Workspace root. */
+  root(): string
+  /** Shared store directory. */
+  storeDir(): string
+  /** Working-copy label. */
+  workingCopyLabel(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Render working-copy patch. */
+  diffText(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** List changed paths. */
+  changedFiles(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
+/** Backend-agnostic repository handle for portable VCS reads. */
+export declare class VcsRepo {
+  /** Backend kind (`"git"` or `"jj"`). */
+  kind(): string
+  /** Checkout or workspace root. */
+  root(): string
+  /** Primary checkout or default workspace root. */
+  primaryRoot(): string
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Filesystem target to watch for repository-head changes. */
+  watchTarget(): string
+  /** Whether this backend implements a portable feature. */
+  supports(feature: string): boolean
+  /** Git-specific handle when this repository is backed by Git. */
+  asGit(): VcsGitRepo | null
+  /** Jujutsu-specific handle when this repository is backed by Jujutsu. */
+  asJj(): VcsJjWorkspace | null
+  /** Human label for the working copy. */
+  label(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Working-copy commit id. */
+  headId(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Every working-copy change since the last commit. */
+  uncommittedDiff(files: Array<string>, signal?: unknown | undefined | null): Promise<string>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List tracked or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
 }
 
 /**
@@ -262,24 +689,33 @@ export declare class Shell {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
- * Version sentinel — exists solely so the JS loader can prove at load time
- * that the `.node` file on disk is from the same package release as the
- * `index.js` ESM wrapper invoking it.
+ * Release version stamped into this `.node` after linking.
  *
- * The `js_name` is bumped by `scripts/release.ts` to match the new
- * `Cargo.toml` / `package.json` version on every release. The JS loader
- * computes the expected name from `package.json#version` and refuses to use
- * a `.node` that doesn't expose it, turning the silent
- * `<sym> is not a function` crash from a locked-file update (the canonical
- * Windows `bun install -g` failure mode) into a clear load-time error.
- *
- * Bump policy: `__piNativesV{major}_{minor}_{patch}` — non-alphanumerics in
- * the version string are mapped to `_` to keep it a valid JS identifier.
- * MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
- * `packages/natives/native/index.js` (which derives the name from
- * `package.json#version`).
+ * `None` for an unstamped build. The JS loader compares it against
+ * `package.json#version` so a `.node` from another release fails at load time
+ * with an actionable error instead of a later `<sym> is not a function` crash.
  */
-export declare function __piNativesV17_2_10(): void
+export declare function __piNativesBuildVersion(): string | null
+
+/**
+ * Reports whether the on-device model can generate, as an `availability`
+ * event JSON: `{available, reason?, contextSize?, variant?, vision?,
+ * toolCalling?}`.
+ */
+export declare function appleFmAvailability(): Promise<string>
+
+/**
+ * Cancels a generation; its stream then ends with a `cancelled` error event.
+ * Unknown or finished handles are ignored.
+ */
+export declare function appleFmCancel(handle: number): void
+
+/**
+ * Starts one model turn for a JSON request and streams JSON events to
+ * `on_event` until a terminal `done` or `error` event. Returns a handle for
+ * [`apple_fm_cancel`].
+ */
+export declare function appleFmGenerate(request: string, onEvent: (err: null | Error, event: string) => void): number
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -315,7 +751,10 @@ export interface AstFindOptions {
   patterns?: Array<string>
   /** Language override; otherwise inferred from file extension per candidate. */
   lang?: string
-  /** Single file or directory to scan (combined with `glob` when set). */
+  /**
+   * Single file or directory to scan (combined with `glob` when set): a
+   * host path or an absolute `scheme://` URL.
+   */
   path?: string
   /** Optional glob filter relative to the search root. */
   glob?: string
@@ -338,6 +777,11 @@ export interface AstFindOptions {
   signal?: unknown
   /** Wall-clock timeout for the worker task in milliseconds. */
   timeoutMs?: number
+  /**
+   * Filesystem candidates are resolved, walked, and read through (native
+   * when absent).
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Aggregated search statistics and any parse or compile diagnostics. */
@@ -478,7 +922,10 @@ export interface AstReplaceOptions {
    * mixed-language paths rewrite each file in its own language.
    */
   lang?: string
-  /** Single file or directory to rewrite. */
+  /**
+   * Single file or directory to rewrite: a host path or an absolute
+   * `scheme://` URL.
+   */
   path?: string
   /** Optional glob filter within the search root. */
   glob?: string
@@ -498,6 +945,11 @@ export interface AstReplaceOptions {
   signal?: unknown
   /** Wall-clock timeout for the worker task in milliseconds. */
   timeoutMs?: number
+  /**
+   * Filesystem candidates are resolved, walked, read, and written through
+   * (native when absent).
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Summary of an ast-grep rewrite pass, including whether disk writes occurred. */
@@ -630,15 +1082,27 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * Count tokens in `input`.
  *
  * `input` may be a single string or an array of strings; an array returns
- * the sum across all elements (encoded in parallel via rayon when the global
- * pool is available). Always returns a single token total — use this for any
+ * the sum across all elements (counted in parallel when the global rayon pool
+ * is available). Always returns a single token total — use this for any
  * aggregate budget question without paying a per-element napi crossing.
  *
- * Uses ordinary encoding (no special-token handling), which is the right
- * choice for measuring user/model content rather than wire-protocol tokens.
- * Defaults to `o200k_base`; pass `Cl100kBase` for older `OpenAI` models.
+ * Measures user/model content, not wire-protocol tokens: BPE encodings
+ * use ordinary encoding (no special-token handling) and the Claude
+ * encodings count message content without the fixed per-message frame.
+ * Defaults to `o200k_base`; pass a `Claude*` encoding for exact Claude
+ * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM/Jev.
  */
-export declare function countTokens(input: string | Array<string>, encoding?: Encoding | undefined | null): number
+export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
+
+/**
+ * Decode one complete SIXEL control string into a PNG.
+ *
+ * The decoder is deliberately bounded before handing the stream to
+ * `icy_sixel`: raster declarations, repeats, and row advances are scanned
+ * first so hostile dimensions cannot make the dependency allocate its much
+ * larger internal maximum.
+ */
+export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
 
 export interface DesktopCapabilities {
   backend: string
@@ -647,7 +1111,11 @@ export interface DesktopCapabilities {
   input: boolean
   ax: boolean
   backgroundWindowInput: boolean
-  deliveryModes: Array<string>
+  /**
+   * Whether window input accepts `takeover: true` (briefly activate the
+   * target and post real input).
+   */
+  takeover: boolean
   capturePermission: string
   inputPermission: string
   axPermission: string
@@ -702,8 +1170,10 @@ export interface DesktopSessionOptions {
 /** One capturable top-level window in global logical desktop coordinates. */
 export interface DesktopWindow {
   /**
-   * Stable numeric window id, valid as a capture target while the window
-   * lives.
+   * Backend-defined opaque window id, valid as a capture target while the
+   * window lives. Numeric on X11/Win32/macOS; a composite AT-SPI string on
+   * Wayland (e.g. `atspi::1.31:/org/a11y/atspi/accessible/1`). Never parse
+   * it.
    */
   id: string
   /** Window title; may be empty for untitled windows. */
@@ -791,6 +1261,44 @@ export interface DiffRun {
   removed: boolean
 }
 
+/** One side of a streamed line diff. */
+export declare enum DiffSide {
+  /** Original/base text. */
+  Old = 'Old',
+  /** Updated/target text. */
+  New = 'New'
+}
+
+/** Observable ingestion state for [`DiffStream`]. */
+export interface DiffStreamProgress {
+  /** Complete old-side lines available for rendering. */
+  oldLines: number
+  /** Complete new-side lines available for rendering. */
+  newLines: number
+  /** Leading complete lines proven equal on both sides. */
+  stableCommonLines: number
+  /** Whether old-side ingestion has finished. */
+  oldDone: boolean
+  /** Whether new-side ingestion has finished. */
+  newDone: boolean
+  /** Whether either side contains a NUL byte/code unit. */
+  binary: boolean
+  /** Whether either native file exceeded its caller-provided size limit. */
+  tooLarge: boolean
+}
+
+/** Exact line-diff output produced when a [`DiffStream`] finishes. */
+export interface DiffStreamResult {
+  /** Line-token Myers runs used to align the complete files. */
+  runs: Array<DiffRun>
+  /** Unified hunks for the requested context. */
+  hunks: Array<PatchHunk>
+  /** Whether the old text ends in a newline. */
+  oldEndsNewline: boolean
+  /** Whether the new text ends in a newline. */
+  newEndsNewline: boolean
+}
+
 /**
  * Word diff with jsdiff `diffWords(oldText, newText)` semantics (default
  * options).
@@ -799,6 +1307,177 @@ export interface DiffRun {
  * post-pass dedupes whitespace across change boundaries.
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
+
+/**
+ * Whole-call apply outcome. `is_error` carries the model-facing failure in
+ * `text` with no files.
+ */
+export interface EditApplyOutcome {
+  text: string
+  files: Array<EditFileOutcome>
+  isError: boolean
+}
+
+/** Apply-time knobs. */
+export interface EditApplyRequest {
+  lspBatchId?: string
+  lspFlush: boolean
+}
+
+/**
+ * Auto-generated-file guard: the rejection message when `absolutePath`
+ * (displayed as `displayPath`) must not be edited, else null. Missing or
+ * unreadable files are editable.
+ */
+export declare function editAutoGeneratedMessage(absolutePath: string, displayPath: string): string | null
+
+/** Tool description markdown for `mode`. */
+export declare function editDescription(mode: string): string
+
+/** Numbered unified diff plus the first changed line. */
+export interface EditDiffResult {
+  diff: string
+  firstChangedLine?: number
+}
+
+/** Numbered unified diff between two texts (`generateDiffString`). */
+export declare function editDiffString(oldText: string, newText: string, path?: string | undefined | null): EditDiffResult
+
+/** A destructive file operation a payload declares. */
+export interface EditFileOpIntent {
+  /** `delete` | `move`. */
+  kind: string
+  path: string
+  to?: string
+}
+
+/** One file's apply outcome. */
+export interface EditFileOutcome {
+  /** Absolute path. */
+  path: string
+  displayPath: string
+  /** `create` | `update` | `delete`. */
+  op: string
+  moveTo?: string
+  diff: string
+  firstChangedLine?: number
+  oldText?: string
+  newText?: string
+  snapshotsPruned: boolean
+  diagnosticsJson?: string
+  /** Engine warnings (already rendered into `text`). */
+  warnings: Array<string>
+  /** Model-facing text for this file. */
+  text: string
+  /** The file parsed before the edit and no longer does. */
+  parseRegressed: boolean
+}
+
+/** One file's streamed diff preview. */
+export interface EditFilePreview {
+  /** Display path as authored (after suffix recovery). */
+  path: string
+  /** Numbered unified diff; mutually exclusive with `error`. */
+  diff?: string
+  firstChangedLine?: number
+  /** Model-facing error text. */
+  error?: string
+  /** `create` | `update` | `delete`. */
+  op?: string
+  rename?: string
+}
+
+/** Lark grammar for `mode`, when it has a custom wire format. */
+export declare function editGrammar(mode: string): string | null
+
+/**
+ * Inspect `argsJson` (the JSON-serialized, possibly partial tool args)
+ * without touching the filesystem.
+ */
+export declare function editInspect(mode: string, argsJson: string): EditInspection
+
+/**
+ * Static projection of a payload: target paths, per-file digests, and
+ * delete/move intents.
+ */
+export interface EditInspection {
+  paths: Array<string>
+  entries: Array<EditMatcherEntry>
+  fileOps: Array<EditFileOpIntent>
+}
+
+/** `(path, added-lines digest)` for stream matchers. */
+export interface EditMatcherEntry {
+  path: string
+  digest: string
+}
+
+/** Session-wide policy; TypeScript builds it once per tool call. */
+export interface EditPolicy {
+  cwd: string
+  /** `replace` | `patch` | `apply_patch` | `hashline` | `sloppy`. */
+  mode: string
+  allowFuzzy: boolean
+  fuzzyThreshold: number
+  enforceSeenLines: boolean
+  blockAutoGenerated: boolean
+  planActive: boolean
+  /** Registered internal URL schemes (router spec keys). */
+  urlSchemes: Array<string>
+  /**
+   * The `urlSchemes` whose single-slash `scheme:/x` spelling aliases
+   * `scheme://x` (spec `singleSlashAlias`).
+   */
+  urlAliasSchemes: Array<string>
+  /** Plain-path roots writable in plan mode. */
+  planWritableRoots: Array<string>
+  homeDir: string
+  /** The payload is a verbatim custom-format string, not JSON. */
+  rawInput: boolean
+}
+
+/** A batch of previews for one session generation. */
+export interface EditPreviewBatch {
+  /** Monotonically increasing per session. */
+  generation: number
+  /** False for the final untrimmed pass after `finish()`. */
+  streaming: boolean
+  files: Array<EditFilePreview>
+}
+
+/** Host answer for one internal URL (`resolveUrl`). */
+export interface EditUrlResolution {
+  /** Absolute backing file; null when no local file backs the URL. */
+  path?: string
+  /** Model-facing refusal (read-only, disabled…); wins over `path`. */
+  error?: string
+  /** Writable while plan mode is active (sandbox-scoped scheme). */
+  planWritable: boolean
+}
+
+/** Host write request; the host owns the bytes. */
+export interface EditWriteRequest {
+  /** Absolute path. */
+  path: string
+  displayPath: string
+  /** `create` | `update` | `delete` | `move`. */
+  op: string
+  /** Absolute destination for `move` (write `content` there, delete `path`). */
+  moveTo?: string
+  /** Final bytes as text; null for `delete`. */
+  content?: string
+  /** Last write of this call and the LSP batch requested a flush. */
+  flushLsp: boolean
+  lspBatchId?: string
+}
+
+/** Host write response. */
+export interface EditWriteResponse {
+  /** Text actually persisted (a bridge may reformat); empty for deletes. */
+  written: string
+  /** `FileDiagnosticsResult` serialized by the host; opaque here. */
+  diagnosticsJson?: string
+}
 
 /** Ellipsis strategy for [`truncate_to_width`]. */
 export declare enum Ellipsis {
@@ -851,8 +1530,42 @@ export declare enum Encoding {
   /** GPT-4o / o1 / GPT-5 (default). */
   O200kBase = 'O200kBase',
   /** GPT-3.5 / GPT-4 / older. */
-  Cl100kBase = 'Cl100kBase'
+  Cl100kBase = 'Cl100kBase',
+  /** Claude 3 … Opus 4.6 (ctok v3 reconstruction). */
+  ClaudeV3 = 'ClaudeV3',
+  /** Claude Opus 4.7–4.9 (ctok v4.7 reconstruction). */
+  ClaudeV47 = 'ClaudeV47',
+  /** Claude Opus 5+ (ctok v5 reconstruction). */
+  ClaudeV5 = 'ClaudeV5',
+  /** Claude Sonnet/Fable 5+ (live-measured non-opus v5 frame). */
+  ClaudeV5Sonnet = 'ClaudeV5Sonnet',
+  /** Qwen 3.5 / 3.6 / 3.8 (248k vocabulary). */
+  Qwen3 = 'Qwen3',
+  /** `DeepSeek` V3 … V4 (identical base BPE). */
+  DeepSeekV3 = 'DeepSeekV3',
+  /** Kimi K2 … K3. */
+  KimiK2 = 'KimiK2',
+  /** GLM-5.x exact; GLM-4.x near-exact. */
+  Glm5 = 'Glm5',
+  /** `TypeSafe` Jev 1.13 judgment `state` (request frame excluded). */
+  Jev = 'Jev'
 }
+
+/**
+ * Replace the current process image via `execvp(3)`.
+ *
+ * On success this never returns: the kernel tears down every other thread and
+ * the new program takes over this PID, controlling terminal, and inherited
+ * (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
+ * terminal first — no JS or native cleanup runs after a successful call.
+ *
+ * # Errors
+ * Returns an error, leaving the process untouched, when `argv` is empty, an
+ * argument contains an interior NUL byte, or the exec itself fails (e.g.
+ * executable not found). Windows has no exec-replace semantics, so this
+ * always errors there; callers fall back to spawn-and-wait.
+ */
+export declare function execReplace(argv: Array<string>): void
 
 /**
  * Execute a brush shell command.
@@ -862,6 +1575,12 @@ export declare enum Encoding {
  * completes, or flags when cancelled or timed out.
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
+
+/** Expand Windows 8.3 components without resolving symlinks or junctions. */
+export declare function expandWindowsLongPath(path: string): string
+
+/** Locate `*** Edit File: path` payloads the model emitted as plain text. */
+export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
 /**
  * Extract the before/after slices around an overlay region.
@@ -937,6 +1656,9 @@ export interface FuzzyFindResult {
 /** Get list of supported languages. */
 export declare function getSupportedLanguages(): Array<string>
 
+/** Get the existing Windows 8.3 spelling; preserve the input when unavailable. */
+export declare function getWindowsShortPath(path: string): string
+
 /**
  * Get work profile data from the last N seconds.
  *
@@ -978,7 +1700,7 @@ export interface GlobMatch {
 export interface GlobOptions {
   /** Glob pattern to match (e.g., "*.ts"). */
   pattern: string
-  /** Directory to search. */
+  /** Directory to search: a host path or an absolute `scheme://` URL. */
   path: string
   /**
    * Filter by file type: "file", "dir", or "symlink". Symlinks are
@@ -1006,6 +1728,11 @@ export interface GlobOptions {
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
   timeoutMs?: number
+  /**
+   * Filesystem the search root is resolved and walked through (native when
+   * absent).
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Result payload returned by a glob operation. */
@@ -1021,7 +1748,8 @@ export interface GlobResult {
  *
  * # Arguments
  * - `options`: Pattern, path, filters, and output mode.
- * - `on_match`: Optional callback invoked per match/result.
+ * - `on_match`: Optional callback invoked per returned match/result, after the
+ *   search (never called when `options.onMatches` streams instead).
  *
  * # Returns
  * Aggregated results across matching files.
@@ -1050,10 +1778,15 @@ export interface GrepMatch {
 export interface GrepOptions {
   /** Regex pattern to search for. */
   pattern: string
-  /** Directory or file to search. */
+  /** Directory or file to search: a host path or an absolute `scheme://` URL. */
   path: string
   /** Glob filter for filenames (e.g., "*.ts"). */
   glob?: string
+  /**
+   * Match simple glob patterns at any depth (default: true; `*.ts` ->
+   * `**\/*.ts`). Set false when `glob` is already relative to `path`.
+   */
+  recursive?: boolean
   /** Filter by file type (e.g., "js", "py", "rust"). */
   type?: string
   /** Case-insensitive search. */
@@ -1088,6 +1821,22 @@ export interface GrepOptions {
   signal?: unknown
   /** Timeout in milliseconds for the operation. */
   timeoutMs?: number
+  /**
+   * Filesystem every path is stat'ed, walked, and read through (native when
+   * absent).
+   */
+  filesystem?: ShellFilesystem
+  /**
+   * Stream results instead of returning them: called on the JS thread with
+   * batches (at most 1024 entries, files in no particular order) of what
+   * `matches` would hold, while the search runs. A slow callback pauses the
+   * search instead of buffering. Successful completion waits for every
+   * callback and carries counts with empty `matches`; cancellation also
+   * interrupts delivery waits, though already queued callbacks may still run.
+   * A throw rejects the search with it. Incompatible with `maxCount` and
+   * `offset`.
+   */
+  onMatches?: (matches: GrepMatch[]) => void
 }
 
 /** Output mode for [`search`] and [`grep`] (string values match JS callers). */
@@ -1118,6 +1867,33 @@ export interface GrepResult {
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
 }
+
+/**
+ * Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`, …) in
+ * a payload; empty when it carries no hashline ops.
+ */
+export declare function hashlineCountOps(input: string): Array<HashlineOpCount>
+
+/** 4-hex hashline content tag for `text`. */
+export declare function hashlineFileHash(text: string): string
+
+/** `[path#TAG]` section header. */
+export declare function hashlineFormatHeader(path: string, tag: string): string
+
+/** `N:line` numbered display rows starting at `startLine` (default 1). */
+export declare function hashlineFormatNumberedLines(text: string, startLine?: number | undefined | null): string
+
+/** Whether a row is a truncation notice emitted by `read`. */
+export declare function hashlineIsReadTruncationNotice(line: string): boolean
+
+/** Count of one canonical hashline op header shape in a payload. */
+export interface HashlineOpCount {
+  label: string
+  count: number
+}
+
+/** Strip hashline display prefixes (`N:` / `+N:` …) from pasted rows. */
+export declare function hashlineStripPrefixes(lines: Array<string>): Array<string>
 
 /**
  * Quick check if content matches a pattern.
@@ -1190,6 +1966,13 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+}
+
+/** One stray sloppy payload region inside prose (UTF-16 offsets). */
+export interface InlineSloppyRegion {
+  start: number
+  end: number
+  payload: string
 }
 
 /**
@@ -1380,28 +2163,32 @@ export declare enum MacOSAppearance {
 }
 
 /**
- * Options for starting a macOS power assertion.
+ * Return the autocorrection macOS chooses for one completed-word range.
  *
- * Each boolean maps to a `caffeinate(8)` flag and a corresponding `IOKit`
- * `IOPMAssertion` type. Multiple flags can be combined; when set, one
- * assertion is taken per flag and all are released together when the
- * handle is stopped or dropped.
- *
- * If every flag is unset (or omitted), the handle behaves as if `idle`
- * were `true` — preserving the historical default of `caffeinate -i`.
+ * Returns `null` when no confident correction exists or the service is
+ * unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
  */
-export interface MacOSPowerAssertionOptions {
-  /** Human-readable reason shown in macOS power diagnostics. */
-  reason?: string
-  /** `caffeinate -i`: prevent the system from idle-sleeping. */
-  idle?: boolean
-  /** `caffeinate -s`: prevent the system from sleeping (AC power only). */
-  system?: boolean
-  /** `caffeinate -u`: declare the user is active (wakes the display). */
-  user?: boolean
-  /** `caffeinate -d`: prevent the display from idle-sleeping. */
-  display?: boolean
-}
+export declare function macOSAutocorrectWord(text: string, start: number, length: number): Promise<string | null>
+
+/**
+ * Find every misspelled word using the active macOS dictionaries.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the check runs on the dedicated spelling thread.
+ */
+export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/** Whether the host can use Apple's native spelling service. */
+export declare function macOSSpellCheckerAvailable(): boolean
+
+/**
+ * Return macOS replacement guesses for one misspelled-word range.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
+ */
+export declare function macOSSpellingGuesses(text: string, start: number, length: number): Promise<Array<string>>
 
 /** A single match in the content. */
 export interface Match {
@@ -1438,6 +2225,36 @@ export declare function matchesKittySequence(data: string, expectedCodepoint: nu
  * Returns true only when the byte sequence maps to the exact key identifier.
  */
 export declare function matchesLegacySequence(data: string, keyName: string): boolean
+
+/**
+ * Options for [`render_mermaid_ascii`]; every field defaults like the
+ * TypeScript renderer (`useAscii: false`, paddings 5, border padding 1,
+ * `colorMode: "auto"`).
+ */
+export interface MermaidRenderOptions {
+  /** `+-|>` instead of Unicode box-drawing characters. */
+  useAscii?: boolean
+  paddingX?: number
+  paddingY?: number
+  boxBorderPadding?: number
+  /** Force the flowchart/state layout direction. */
+  direction?: 'TD' | 'TB' | 'LR' | 'BT' | 'RL'
+  /** `auto` (or omitted) detects from the terminal environment. */
+  colorMode?: 'none' | 'auto' | 'ansi16' | 'ansi256' | 'truecolor' | 'html'
+  theme?: MermaidTheme
+}
+
+/** Theme colors for [`render_mermaid_ascii`]; hex strings, all optional. */
+export interface MermaidTheme {
+  fg?: string
+  border?: string
+  line?: string
+  arrow?: string
+  accent?: string
+  bg?: string
+  corner?: string
+  junction?: string
+}
 
 /** N-API opt-in handle for the minimizer. */
 export interface MinimizerOptions {
@@ -1531,6 +2348,35 @@ export interface MinimizerResult {
  */
 export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
 
+/** Construction options for [`NativeOAuthCallback`]. */
+export interface NativeOAuthCallbackOptions {
+  /** Custom URL scheme to register. */
+  scheme: string
+}
+
+/**
+ * Named-node chain containing `options.line`, innermost-first, excluding the
+ * whole-file root.
+ *
+ * Single-line nodes beginning on the line (attributes, decorators) come
+ * first, followed by every enclosing construct. ERROR/MISSING recovery nodes
+ * are skipped. Returns `null` when the language is unrecognized, the line is
+ * out of range / blank, or the source fails to parse entirely.
+ */
+export declare function nodeChainAt(options: BlockRangeOptions): Array<NodeSpan> | null
+
+export interface NodeSpan {
+  /** 1-indexed inclusive first line of the node. */
+  startLine: number
+  /** 1-indexed inclusive last content line of the node. */
+  endLine: number
+  /** Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`). */
+  kind: string
+}
+
+/** Decode notebook JSON into the editable cell-marker text. */
+export declare function notebookToEditableText(json: string, displayPath: string): string
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1576,11 +2422,73 @@ export interface PatchHunk {
   lines: Array<string>
 }
 
+/** Markdown and inspection metadata produced from a PDF document. */
+export interface PdfMarkdownResult {
+  /** Extracted document content in Markdown format. */
+  markdown: string
+  /** Document title from PDF metadata, when present. */
+  title?: string
+  /** Total number of pages in the document. */
+  pageCount: number
+  /** One-indexed page numbers whose content requires OCR. */
+  pagesNeedingOcr: Array<number>
+  /** Whether the document contains text encoding problems. */
+  hasEncodingIssues: boolean
+}
+
+/**
+ * Convert an in-memory PDF to Markdown and return its inspection metadata.
+ *
+ * Conversion copies the typed array before dispatch so JavaScript mutation
+ * cannot race the native worker.
+ *
+ * # Errors
+ * Returns an error prefixed with `PDF conversion failed:` when the PDF cannot
+ * be parsed or converted.
+ */
+export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
+
 export interface PointerOptions {
   button?: string
   count?: number
   modifiers?: Array<string>
-  deliveryMode?: string
+  /**
+   * Briefly activate the target window and post real input instead of the
+   * default background delivery.
+   */
+  takeover?: boolean
+}
+
+/**
+ * Options for starting a power assertion.
+ *
+ * Each boolean maps to a `caffeinate(8)` flag and the closest corresponding
+ * platform capability. Multiple flags can be combined; when set, one
+ * assertion is taken per flag and all are released together when the
+ * handle is stopped or dropped.
+ *
+ * If every flag is unset (or omitted), the handle behaves as if `idle`
+ * were `true` — preserving the historical default of `caffeinate -i`.
+ */
+export interface PowerAssertionOptions {
+  /** Human-readable reason shown in platform power diagnostics. */
+  reason?: string
+  /** `caffeinate -i`: prevent the system from idle-sleeping. */
+  idle?: boolean
+  /** `caffeinate -s`: prevent the system from sleeping (AC power only). */
+  system?: boolean
+  /** `caffeinate -u`: declare the user is active (wakes the display). */
+  user?: boolean
+  /** `caffeinate -d`: prevent the display from idle-sleeping. */
+  display?: boolean
+}
+
+/** Ghost text for the word being typed. */
+export interface PredictedWord {
+  /** Characters to paint after the typed prefix. */
+  suffix: string
+  /** Engine-calibrated probability that `suffix` is exactly right. */
+  confidence: number
 }
 
 /** Current state of a process reference. */
@@ -1668,6 +2576,18 @@ export interface PtyStartOptions {
 }
 
 /**
+ * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
+ *
+ * Conversion runs on the native blocking pool so parsing and rendering do not
+ * stall the JavaScript event loop.
+ *
+ * # Errors
+ * Returns an error for invalid SVG data, zero/oversized limits, allocation
+ * failure, or PNG encoding failure.
+ */
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+
+/**
  * Read an image from the system clipboard.
  *
  * Returns `Ok(None)` when no image data is available.
@@ -1676,6 +2596,27 @@ export interface PtyStartOptions {
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
+
+/**
+ * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
+ * xychart) to ASCII/Unicode art. Synchronous: callers render inside the
+ * TUI compositor.
+ *
+ * # Errors
+ * Unparseable flowchart source or an unknown `direction`/`colorMode` value.
+ */
+export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
 
 /**
  * Render one snapcompact frame on a libuv worker: print pre-normalized text
@@ -1768,6 +2709,325 @@ export interface ShellExecuteOptions {
   minimizer?: MinimizerOptions
   /** Abort signal for cancelling the operation. */
   signal?: unknown
+  /** Filesystem backing the command (native when absent). */
+  filesystem?: ShellFilesystem
+}
+
+/** Host filesystem injected into shell sessions. */
+export interface ShellFilesystem {
+  /**
+   * Services every routed operation; failures are returned as `error`
+   * data rather than thrown.
+   */
+  handler: (error: Error | null, request: ShellFsRequest) => Promise<ShellFsResponse>
+  /**
+   * When true, every path without a `scheme://` prefix — and everything
+   * beneath it — is the ordinary host filesystem: operations there run
+   * natively (including recursive traversal and removal) and `handler` is
+   * never consulted, so it cannot intercept any host subtree. Only URL
+   * paths reach `handler`. When false or absent, `handler` is a fully
+   * injected filesystem and receives every path, host paths included.
+   */
+  nativeLocalPaths?: boolean
+}
+
+/** Permissions probed by an `access` request. */
+export interface ShellFsAccess {
+  read: boolean
+  write: boolean
+  execute: boolean
+}
+
+/** One directory entry. */
+export interface ShellFsDirEntry {
+  name: string
+  fileType: ShellFsFileType
+  /** Entry metadata without following a final symlink, when already known. */
+  metadata?: ShellFsMetadata
+}
+
+/** A failed operation, reported as data so its errno identity survives. */
+export interface ShellFsError {
+  /** Errno name such as `ENOENT`, `EACCES`, `EROFS`, `ENOTSUP`. */
+  code: string
+  message?: string
+}
+
+/** File type on the filesystem wire. */
+export declare enum ShellFsFileType {
+  /** Regular file. */
+  File = 'file',
+  /** Directory. */
+  Dir = 'dir',
+  /** Symbolic link. */
+  Symlink = 'symlink',
+  /** Named pipe. */
+  Fifo = 'fifo',
+  /** Unix domain socket. */
+  Socket = 'socket',
+  /** Character device. */
+  Char = 'char',
+  /** Block device. */
+  Block = 'block'
+}
+
+/**
+ * File metadata. Absent optional fields mean the provider has no such value;
+ * they are never fabricated.
+ */
+export interface ShellFsMetadata {
+  fileType: ShellFsFileType
+  size: number | bigint
+  /** Permission bits (`0o7777`). */
+  mode: number
+  /** Modification time, nanoseconds since the Unix epoch. */
+  mtimeNs?: number | bigint
+  /** Access time, nanoseconds since the Unix epoch. */
+  atimeNs?: number | bigint
+  /** Status change time, nanoseconds since the Unix epoch. */
+  ctimeNs?: number | bigint
+  /** Creation time, nanoseconds since the Unix epoch. */
+  birthtimeNs?: number | bigint
+  /** Device id; given together with `ino`. */
+  dev?: number | bigint
+  /** Inode number; given together with `dev`. */
+  ino?: number | bigint
+  nlink?: number | bigint
+  rdev?: number | bigint
+  /** Allocated 512-byte blocks; given together with `blksize`. */
+  blocks?: number | bigint
+  /** Preferred I/O block size; given together with `blocks`. */
+  blksize?: number | bigint
+  /** Owner user id; given together with `gid`. */
+  uid?: number
+  /** Owner group id; given together with `uid`. */
+  gid?: number
+}
+
+/** Which path components `canonicalize` requires to exist. */
+export declare enum ShellFsMissing {
+  /** Every component must exist (`realpath`). */
+  Existing = 'existing',
+  /** Every component but the last must exist. */
+  Normal = 'normal',
+  /** No component needs to exist. */
+  Missing = 'missing'
+}
+
+/** Filesystem operation requested from a host [`ShellFilesystem`]. */
+export declare enum ShellFsOp {
+  /** Metadata of `path`, following symlinks. Answer: `metadata`. */
+  Metadata = 'metadata',
+  /**
+   * Metadata of `path` itself, not following a final symlink. Answer:
+   * `metadata`.
+   */
+  SymlinkMetadata = 'symlinkMetadata',
+  /** Entries of directory `path`. Answer: `entries`. */
+  ReadDir = 'readDir',
+  /** Canonical spelling of `path` per `missing`/`resolve`. Answer: `path`. */
+  Canonicalize = 'canonicalize',
+  /**
+   * Host file or directory backing `path`, for user-facing commands that
+   * print real locations (`realpath`, `readlink -f`). Answer: `path`, or
+   * no `path` when nothing on the host backs it. Grants no access.
+   */
+  BackingPath = 'backingPath',
+  /** Contents of symlink `path`. Answer: `path`. */
+  ReadLink = 'readLink',
+  /** Check `access` permissions on `path` (all false: existence). */
+  Access = 'access',
+  /** Open `path` with `open` flags. Answer: `handle`. */
+  Open = 'open',
+  /**
+   * Read up to `length` bytes of `handle` at `offset`. Answer: `data`
+   * (empty at end of file).
+   */
+  Read = 'read',
+  /**
+   * Write `data` to `handle` at `offset`, or at the end when `offset` is
+   * absent (append handles). Answer: `written`, plus `offset` (end
+   * position after the write) for appends.
+   */
+  Write = 'write',
+  /** Flush buffered writes of `handle`. */
+  Flush = 'flush',
+  /** Release `handle`. Sent exactly once per opened handle. */
+  Close = 'close',
+  /** Metadata of the file behind `handle`. Answer: `metadata`. */
+  FileMetadata = 'fileMetadata',
+  /**
+   * Query whether `handle` has a conflicting advisory write lock. Answer:
+   * `locked`.
+   */
+  IsLocked = 'isLocked',
+  /** Truncate or extend `handle` to `size` bytes. */
+  SetLen = 'setLen',
+  /** Set times of `handle` (`atimeNs`/`mtimeNs`; absent = unchanged). */
+  FileSetTimes = 'fileSetTimes',
+  /** Set permission bits `mode` of `handle`. */
+  FileSetPermissions = 'fileSetPermissions',
+  /** Persist `handle` (`dataOnly`: data without metadata). */
+  Sync = 'sync',
+  /** Create directory `path` (`recursive`, optional `mode`). */
+  CreateDir = 'createDir',
+  /** Remove non-directory `path`. */
+  RemoveFile = 'removeFile',
+  /** Remove empty directory `path`. */
+  RemoveDir = 'removeDir',
+  /** Remove directory `path` and everything below it. */
+  RemoveDirAll = 'removeDirAll',
+  /** Rename `path` to `target`. */
+  Rename = 'rename',
+  /** Create hard link `target` to existing `path`. */
+  HardLink = 'hardLink',
+  /** Create symlink `path` whose contents are `target` (verbatim). */
+  Symlink = 'symlink',
+  /** Set permission bits `mode` of `path` (following symlinks). */
+  SetPermissions = 'setPermissions',
+  /**
+   * Set times of `path` (`atimeNs`/`mtimeNs`; absent = unchanged;
+   * `follow`).
+   */
+  SetTimes = 'setTimes',
+  /** Change owner `uid`/`gid` of `path` (absent = unchanged; `follow`). */
+  Chown = 'chown',
+  /** Statistics of the filesystem holding `path`. Answer: `statFs`. */
+  StatFs = 'statFs',
+  /**
+   * Extended attribute `name` of `path`. Answer: `data`, or no `data`
+   * when the attribute is absent.
+   */
+  GetXattr = 'getXattr',
+  /** Set extended attribute `name` of `path` to `data`. */
+  SetXattr = 'setXattr',
+  /** Extended attribute names of `path`. Answer: `names`. */
+  ListXattr = 'listXattr',
+  /** Remove extended attribute `name` of `path`. */
+  RemoveXattr = 'removeXattr',
+  /**
+   * Create node `path` of `fileType` with `mode` (and `device` for
+   * character/block devices).
+   */
+  Mknod = 'mknod'
+}
+
+/** Open flags for an `open` request (std `OpenOptions` semantics). */
+export interface ShellFsOpenFlags {
+  read: boolean
+  write: boolean
+  append: boolean
+  truncate: boolean
+  create: boolean
+  createNew: boolean
+  /** Permission bits for a newly created file. */
+  mode?: number
+  /** Platform open flags beyond the portable set (`O_*`); absent when none. */
+  customFlags?: number
+}
+
+/** One filesystem request. Only the fields documented for `op` are set. */
+export interface ShellFsRequest {
+  op: ShellFsOp
+  /** Subject path, verbatim (URL spellings keep their authority). */
+  path?: string
+  /** Second path: rename/hard-link destination or symlink contents. */
+  target?: string
+  /** Provider handle id from a previous `open`. */
+  handle?: number
+  /** Byte offset for positional handle I/O. */
+  offset?: bigint
+  /** Maximum bytes to read. */
+  length?: number
+  /** New length for `setLen`. */
+  size?: bigint
+  /** Bytes to write (`write`) or attribute value (`setXattr`). */
+  data?: Buffer
+  open?: ShellFsOpenFlags
+  access?: ShellFsAccess
+  recursive?: boolean
+  /** Permission bits (`0o7777`). */
+  mode?: number
+  /** Whether a final symlink is followed. */
+  follow?: boolean
+  /** Access time in nanoseconds since the Unix epoch. */
+  atimeNs?: bigint
+  /** Modification time in nanoseconds since the Unix epoch. */
+  mtimeNs?: bigint
+  uid?: number
+  gid?: number
+  /** `sync` persists data only, not metadata. */
+  dataOnly?: boolean
+  /** Extended attribute name. */
+  name?: string
+  /** Node type for `mknod`. */
+  fileType?: ShellFsFileType
+  /** Device number for character/block `mknod`. */
+  device?: bigint
+  missing?: ShellFsMissing
+  resolve?: ShellFsResolve
+  /**
+   * Removal of temporary files the shell itself created, issued even after
+   * the run was aborted. Serve it under the same policy, but without the
+   * run's abort signal. Not a retry of a cancelled request.
+   */
+  cleanup?: boolean
+}
+
+/** How `canonicalize` treats symlinks. */
+export declare enum ShellFsResolve {
+  /** Resolve symlinks as encountered. */
+  Physical = 'physical',
+  /** Apply `..` lexically before resolving symlinks. */
+  Logical = 'logical',
+  /** Never resolve symlinks; normalize lexically only. */
+  None = 'none'
+}
+
+/**
+ * Provider answer. Carries `error`, a native redirect (`local` /
+ * `localTarget`), or the op's result fields.
+ */
+export interface ShellFsResponse {
+  error?: ShellFsError
+  /** Run this operation natively on this host path instead. */
+  local?: string
+  /** Native host path replacing `target` (rename/hard-link destination). */
+  localTarget?: string
+  handle?: number
+  /**
+   * With an `open` redirect: the host file backs an immutable mount, so
+   * the opened file refuses every mutation (EROFS), duplicates included.
+   */
+  readonly?: boolean
+  data?: Uint8Array
+  written?: number
+  /** Result of an `isLocked` advisory-lock query. */
+  locked?: boolean
+  /** Handle position after an append write. */
+  offset?: number | bigint
+  path?: string
+  metadata?: ShellFsMetadata
+  entries?: Array<ShellFsDirEntry>
+  names?: Array<string>
+  statFs?: ShellFsStatFs
+}
+
+/** Filesystem statistics. */
+export interface ShellFsStatFs {
+  blockSize: number | bigint
+  /** Optimal transfer size; defaults to `blockSize`. */
+  ioSize?: number | bigint
+  blocks: number | bigint
+  blocksFree: number | bigint
+  blocksAvailable: number | bigint
+  files: number | bigint
+  filesFree: number | bigint
+  /** Filesystem type magic number. */
+  fsType?: number | bigint
+  fsTypeName?: string
+  fsid?: number | bigint
+  nameMax?: number | bigint
 }
 
 /** Options for configuring a persistent shell session. */
@@ -1778,6 +3038,8 @@ export interface ShellOptions {
   snapshotPath?: string
   /** Optional per-command output minimizer configuration. */
   minimizer?: MinimizerOptions
+  /** Filesystem backing every run of this session (native when absent). */
+  filesystem?: ShellFilesystem
 }
 
 /** Options for running a shell command. */
@@ -1792,6 +3054,11 @@ export interface ShellRunOptions {
   timeoutMs?: number
   /** Abort signal for cancelling the operation. */
   signal?: unknown
+  /**
+   * Filesystem for this run only, replacing the session's; the session's
+   * filesystem applies again to later runs.
+   */
+  filesystem?: ShellFilesystem
 }
 
 /** Result of running a shell command. */
@@ -1886,6 +3153,14 @@ export interface SnapcompactRenderOptions {
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
 
+/** A misspelled span measured in JavaScript/UTF-16 code units. */
+export interface SpellingRange {
+  /** Inclusive UTF-16 start offset. */
+  start: number
+  /** UTF-16 length of the misspelled span. */
+  length: number
+}
+
 /**
  * Unified-diff hunks with jsdiff
  * `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`
@@ -1893,7 +3168,21 @@ export declare function snapcompactSupportedChars(font: string, chars: string): 
  */
 export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
 
+/**
+ * Summarize source structure synchronously on the calling thread.
+ *
+ * Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+ * the JS thread for the whole call.
+ */
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
+
+/**
+ * Summarize source structure on libuv's thread pool.
+ *
+ * Same result as [`summarize_code`], but the parse and summary run off the
+ * JS thread; only argument and result marshalling happen on it.
+ */
+export declare function summarizeCodeAsync(options: SummaryOptions): Promise<SummaryResult>
 
 export interface SummaryOptions {
   /** Source code to summarize. */
@@ -1949,12 +3238,226 @@ export interface SummarySegment {
  */
 export declare function supportsLanguage(lang: string): boolean
 
+/** Options for [`TextPredictor::new`]. */
+export interface TextPredictorOptions {
+  /** Engine: `ngram`, `smollm`, or `apple`. */
+  method: string
+  /** Private directory for persisted learned state. */
+  stateDir: string
+  /** Directory holding downloaded model weights (`smollm` only). */
+  modelDir?: string
+  /** Show threshold override; omit for the engine's tuned default. */
+  showThreshold?: number
+}
+
 /**
  * Truncate text to a visible width, preserving ANSI codes.
  *
  * Pads with spaces when requested.
  */
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
+
+/** Patch application options. */
+export interface VcsApplyOptions {
+  cached?: boolean
+  indexPath?: string
+  reverse?: boolean
+  threeWay?: boolean
+}
+
+/** Clean options. */
+export interface VcsCleanOptions {
+  ignoredOnly?: boolean
+  includeIgnored?: boolean
+  paths?: Array<string>
+}
+
+/** Clone options. */
+export interface VcsCloneOptions {
+  refName?: string
+  sha?: string
+  timeoutMs?: number
+}
+
+/** Commit author identity. */
+export interface VcsCommitAuthor {
+  name: string
+  email: string
+  date?: string
+}
+
+/** Commit metadata. */
+export interface VcsCommitDetails {
+  sha: string
+  parents: Array<string>
+  author: VcsCommitAuthor
+  message: string
+}
+
+/** Commit creation options. */
+export interface VcsCommitOptions {
+  author?: VcsCommitAuthor
+  allowEmpty?: boolean
+  amend?: boolean
+  files?: Array<string>
+}
+
+/** Detach copied Git metadata. */
+export declare function vcsDetachGitDir(worktreeRoot: string, sourceCommonDir: string, signal?: unknown | undefined | null): Promise<string>
+
+/** Diff generation options. */
+export interface VcsDiffOptions {
+  cached?: boolean
+  base?: string
+  head?: string
+  files?: Array<string>
+  context?: number
+  binary?: boolean
+  /**
+   * Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+   * this many bytes, instead of buffering an arbitrarily large string.
+   * Carried as a double so a budget past 2^32 reaches the renderer intact
+   * (a `u32` field would wrap it); values beyond `usize` saturate.
+   */
+  maxBytes?: number
+}
+
+/** Discover the repository owning a directory. */
+export declare function vcsDiscover(dir: string): VcsRepo | null
+
+/**
+ * Discover the repository presenting a directory: equal-root jj+git ties
+ * prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+ */
+export declare function vcsDiscoverForDisplay(dir: string): VcsRepo | null
+
+/** Clone a Git repository. */
+export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
+
+/** Discover the Git checkout containing a directory. */
+export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
+
+/** Discover Git metadata without opening the repository. */
+export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
+
+/** Discovered Git repository paths. */
+export interface VcsGitRepoInfo {
+  repoRoot: string
+  gitEntryPath: string
+  gitDir: string
+  commonDir: string
+  headPath: string
+  isReftable: boolean
+}
+
+/** Resolved HEAD state. */
+export interface VcsHeadState {
+  kind: string
+  refName?: string
+  branch?: string
+  commit?: string
+}
+
+/** Selected hunks or line range for a path. */
+export interface VcsHunkSelection {
+  path: string
+  kind: string
+  indices?: Array<number>
+  start?: number
+  end?: number
+}
+
+/** Invalid hunk selection. */
+export interface VcsHunkSelectionError {
+  path: string
+  message: string
+}
+
+/** Test whether a directory is a pure jj workspace. */
+export declare function vcsIsPureJj(dir: string): boolean
+
+/** Discover a Jujutsu workspace. */
+export declare function vcsJjDiscover(dir: string): VcsJjWorkspace | null
+
+/** Join patch fragments. */
+export declare function vcsJoinPatches(parts: Array<string>): string
+
+/** Linked worktree metadata. */
+export interface VcsLinkedWorktree {
+  root: string
+  primaryRoot: string
+}
+
+/** Per-file line counts. */
+export interface VcsNumstatEntry {
+  path: string
+  added?: number
+  removed?: number
+}
+
+/** Push options. */
+export interface VcsPushOptions {
+  remote?: string
+  refspec?: string
+  forceWithLease?: boolean
+}
+
+/** Restore options. */
+export interface VcsRestoreOptions {
+  source?: string
+  staged?: boolean
+  worktree?: boolean
+  files?: Array<string>
+}
+
+/** Bounded object contents. */
+export interface VcsShowResult {
+  data: Buffer
+  truncated: boolean
+}
+
+/** Status query options. */
+export interface VcsStatusOptions {
+  untracked?: string
+  pathspecs?: Array<string>
+  nulTerminated?: boolean
+}
+
+/** Git status counts. */
+export interface VcsStatusSummary {
+  staged: number
+  unstaged: number
+  untracked: number
+}
+
+/** Validate hunk selections. */
+export declare function vcsValidateHunkSelections(rawDiff: string, selections: Array<VcsHunkSelection>): Array<VcsHunkSelectionError>
+
+/** Worktree creation options. */
+export interface VcsWorktreeAddOptions {
+  detach: boolean
+  clone: boolean
+  backend?: IsoBackendKind
+  /**
+   * Carry the source checkout's uncommitted changes into the new worktree
+   * (target must be the source `HEAD`).
+   */
+  keepChanges?: boolean
+}
+
+/** Worktree creation outcome. */
+export interface VcsWorktreeAddResult {
+  clonedWith?: IsoBackendKind
+  cloneError?: string
+}
+
+/** One worktree listing row. */
+export interface VcsWorktreeEntry {
+  path: string
+  head?: string
+  branch?: string
+  detached: boolean
+}
 
 /**
  * Score every row of a normalized `f32` matrix against `query` and return
@@ -1987,6 +3490,12 @@ export interface VectorTopK {
  * Tabs count as a fixed-width cell.
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
+
+/**
+ * Warm syntax grammars, scope matchers, and the regexes of commonly
+ * highlighted languages on the native worker pool.
+ */
+export declare function warmHighlighter(): Promise<undefined>
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

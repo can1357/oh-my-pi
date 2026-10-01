@@ -7,85 +7,55 @@
  * inside its own process; tearing the worker down ran the native destructor
  * in the parent's address space and crashed the CLI on exit.
  *
- * The fix relocates the worker to a child process: `title-client.ts` spawns
- * `process.execPath … __omp_tiny_inference`, `cli.ts` dispatches that flag into
- * `runTinyWorker`, and the parent `SIGKILL`s the child on dispose so the
- * native finalizer never runs in either address space. These tests pin the
- * three pieces of that contract so a future refactor cannot quietly land
- * the original crash again.
+ * The fix relocates the worker to its own process: `title-client.ts` spawns
+ * `process.execPath … __omp_worker_tiny_inference` (detached, owning a
+ * per-model socket), `cli.ts` dispatches that flag into `runTinyWorker`, and
+ * the omp process only ever holds a socket to it — the native finalizer never
+ * runs in an omp address space. These tests pin that contract so a future
+ * refactor cannot quietly land the original crash again.
  */
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
-import { createTinyTitleSubprocess } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import {
+	connectTinyWorker,
+	onnxLaunch,
+	smokeTestTinyTitleWorker,
+	TINY_WORKER_CLOSED,
+} from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
-describe("issue #1606 — tiny model lives in an isolated subprocess", () => {
-	it("ping/pongs through the spawned worker subprocess and tears it down cleanly", async () => {
-		// `smokeTestTinyTitleWorker` is the runtime probe wired into
-		// `omp --smoke-test`. Run it in a child Bun process instead of this
-		// Bun-test worker: the test runner owns its own IPC channel and can
-		// starve nested Bun subprocess IPC on some Bun builds.
-		const repoRoot = path.resolve(import.meta.dir, "../../..");
-		const script =
-			'const { smokeTestTinyTitleWorker } = await import("@oh-my-pi/pi-coding-agent/tiny/title-client"); await smokeTestTinyTitleWorker({ timeoutMs: 15000 });';
-		const proc = Bun.spawn([process.execPath, "-e", script], {
-			cwd: repoRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-		expect(`${stdout}${stderr}`).toBe("");
-		expect(exitCode).toBe(0);
+describe("issue #1606 — tiny model lives in an isolated process", () => {
+	it("ping/pongs through the spawned worker process and tears it down cleanly", async () => {
+		await smokeTestTinyTitleWorker({ timeoutMs: 15_000 });
 	}, 30_000);
 
-	it("surfaces unexpected signal exits so in-flight callers don't await forever", async () => {
-		// If the child dies from a signal we did NOT request — SIGSEGV from a
-		// native crash (the original Windows shutdown bug, now relocated to
-		// the child), an OOM SIGKILL, or an operator `kill -9` — the
-		// subprocess wrapper must fault every in-flight request via the
-		// `errors` channel. The original fix swallowed any `exitCode === null`
-		// exit unconditionally, which left `TinyTitleClient.#pending`
-		// promises hanging forever. Pin the new contract: an external
-		// SIGKILL (no `intentionalExit` flip) MUST surface a worker error.
-		const sub = createTinyTitleSubprocess();
+	it("surfaces the worker going away so in-flight callers don't await forever, but not our own terminate()", async () => {
+		// The worker exits on `shutdown` exactly like an idle exit, an OOM kill,
+		// or an operator `kill -9` would look to us: the socket closes. That MUST
+		// fault callers via the `onError` channel — an earlier fix swallowed
+		// unexpected exits and left `TinyTitleClient.#pending` hanging forever —
+		// while a `terminate()` we issued ourselves MUST NOT.
+		const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tiny-1606-"));
 		try {
-			const { promise, resolve } = Promise.withResolvers<Error>();
-			sub.errors.add(resolve);
-			sub.proc.kill("SIGKILL");
-			const err = await promise;
-			expect(err.message).toMatch(/signal/i);
-		} finally {
-			// Ensure the child is reaped even on assertion failure.
-			try {
-				sub.proc.kill("SIGKILL");
-			} catch {}
-			await sub.proc.exited;
-		}
-	}, 15_000);
+			const launch = onnxLaunch("lfm2.5-230m", {});
+			const quiet = await connectTinyWorker(launch, "lfm2.5-230m", runtimeDir);
+			let quietErrors = 0;
+			quiet.onError(() => {
+				quietErrors += 1;
+			});
+			await quiet.terminate();
 
-	it("does not surface intentional terminate() SIGKILLs as worker errors", async () => {
-		// Inverse of the previous test: a SIGKILL issued by the wrapper's
-		// own `terminate()` MUST NOT fault callers — terminate is the
-		// shutdown path and the worker handle is already torn down by then.
-		// Regression guard against an over-eager fix that surfaces every
-		// signal exit indiscriminately.
-		const sub = createTinyTitleSubprocess();
-		let errored = false;
-		sub.errors.add(() => {
-			errored = true;
-		});
-		// Simulate what `wrapSubprocess.terminate()` does: flip the flag,
-		// then SIGKILL. We test the primitive directly rather than going
-		// through the wrapper to avoid coupling to `WorkerHandle` internals.
-		sub.intentionalExit.value = true;
-		sub.proc.kill("SIGKILL");
-		await sub.proc.exited;
-		// Give onExit a microtask to drain — Bun's exited promise resolves
-		// after onExit fires, but be defensive.
-		await Bun.sleep(20);
-		expect(errored).toBe(false);
-	}, 10_000);
+			const noisy = await connectTinyWorker(launch, "lfm2.5-230m", runtimeDir);
+			const { promise, resolve } = Promise.withResolvers<Error>();
+			noisy.onError(resolve);
+			noisy.send({ type: "shutdown", id: "1" });
+			const error = await promise;
+
+			expect(error.message).toStartWith(TINY_WORKER_CLOSED);
+			expect(quietErrors).toBe(0);
+		} finally {
+			await fs.rm(runtimeDir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });

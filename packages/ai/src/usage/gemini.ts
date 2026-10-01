@@ -1,4 +1,5 @@
-import { getGeminiCliHeaders } from "../providers/google-gemini-cli";
+import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import type {
 	UsageAmount,
 	UsageFetchContext,
@@ -8,33 +9,11 @@ import type {
 	UsageReport,
 	UsageWindow,
 } from "../usage";
+import { parseIsoTimestamp } from "./shared";
 
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
 
 const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
-
-const GEMINI_TIER_MAP: Array<{ tier: string; models: string[] }> = [
-	{
-		tier: "3-Flash",
-		models: ["gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash"],
-	},
-	{
-		tier: "Flash",
-		models: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"],
-	},
-	{
-		tier: "Pro",
-		models: [
-			"gemini-2.5-pro",
-			"gemini-3-pro-preview",
-			"gemini-3.1-pro-preview",
-			"gemini-3-pro",
-			"gemini-3.1-pro",
-			"gemini-pro-agent",
-			"gemini-1.5-pro",
-		],
-	},
-];
 
 interface LoadCodeAssistResponse {
 	cloudaicompanionProject?: string | { id?: string };
@@ -61,15 +40,7 @@ function getProjectId(payload: LoadCodeAssistResponse | undefined): string | und
 }
 
 function getModelTier(modelId: string): string | undefined {
-	for (const entry of GEMINI_TIER_MAP) {
-		if (entry.models.includes(modelId)) {
-			return entry.tier;
-		}
-	}
-	const normalized = modelId.toLowerCase();
-	if (normalized.includes("flash")) return "Flash";
-	if (normalized.includes("pro")) return "Pro";
-	return undefined;
+	return quotaTierFor("google-gemini-cli", modelId);
 }
 
 function parseWindow(resetTime: string | undefined): UsageWindow {
@@ -79,8 +50,8 @@ function parseWindow(resetTime: string | undefined): UsageWindow {
 			label: "Quota window",
 		};
 	}
-	const resetsAt = Date.parse(resetTime);
-	if (Number.isNaN(resetsAt)) {
+	const resetsAt = parseIsoTimestamp(resetTime);
+	if (resetsAt === undefined) {
 		return {
 			id: "quota",
 			label: "Quota window",

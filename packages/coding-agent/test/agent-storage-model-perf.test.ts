@@ -1,18 +1,43 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+const MODEL_PERF_FLUSH_DELAY_MS = 60_000;
+const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
+const AGENT_STORAGE_MODULE = path.resolve(import.meta.dir, "../src/session/agent-storage.ts");
+
+async function runProbe(script: string, env: NodeJS.ProcessEnv): Promise<{ exitCode: number; stderr: string }> {
+	const child = Bun.spawn([process.execPath, "--eval", script], {
+		cwd: REPO_ROOT,
+		env,
+		stdin: "ignore",
+		stdout: "ignore",
+		stderr: "pipe",
+	});
+	const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+	return { exitCode, stderr };
+}
+
+async function flushPerf(...writes: Promise<void>[]): Promise<void> {
+	vi.advanceTimersByTime(MODEL_PERF_FLUSH_DELAY_MS);
+	await Promise.all(writes);
+}
 describe("AgentStorage model perf aggregates", () => {
 	let tempDir: TempDir;
 
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
 	afterEach(async () => {
-		AgentStorage.resetInstance();
+		vi.useRealTimers();
+		AgentStorage.close();
 		if (tempDir) {
-			try {
-				await tempDir.remove();
-			} catch {}
+			await tempDir.remove();
 			tempDir = undefined as unknown as TempDir;
 		}
 	});
@@ -28,8 +53,17 @@ describe("AgentStorage model perf aggregates", () => {
 		// 1000 tokens over 6000ms + 500 tokens over 3000ms → 1500 tokens / 9s → 166.67 t/s
 		// Back-to-back samples join one deferred batch; awaiting the shared flush
 		// promise makes both visible.
-		storage.recordModelPerf("openai/gpt-5", { outputTokens: 1000, durationMs: 6000, ttftMs: 1000 });
-		await storage.recordModelPerf("openai/gpt-5", { outputTokens: 500, durationMs: 3000, ttftMs: 500 });
+		const first = storage.recordModelPerf("openai/gpt-5", {
+			outputTokens: 1000,
+			durationMs: 6000,
+			ttftMs: 1000,
+		});
+		const second = storage.recordModelPerf("openai/gpt-5", {
+			outputTokens: 500,
+			durationMs: 3000,
+			ttftMs: 500,
+		});
+		await flushPerf(first, second);
 
 		const stats = storage.getModelPerf().get("openai/gpt-5");
 		expect(stats).toBeDefined();
@@ -38,11 +72,48 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(stats?.ttftMs).toBeCloseTo(750, 5);
 	});
 
+	it("persists a still-batched sample when the storage closes before the window elapses", async () => {
+		const storage = await openStorage();
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		void storage.recordModelPerf("openai/gpt-5", { outputTokens: 600, durationMs: 3000 });
+
+		AgentStorage.close();
+		const reopened = await AgentStorage.open(dbPath);
+
+		expect(reopened.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(200, 5);
+	});
+
+	it("includes a still-batched sample in an in-process read without waiting for the window", async () => {
+		const storage = await openStorage();
+		void storage.recordModelPerf("openai/gpt-5", { outputTokens: 600, durationMs: 3000 });
+
+		expect(storage.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(200, 5);
+	});
+
+	it("records task subagent samples in the shared model performance aggregate", async () => {
+		tempDir = TempDir.createSync("@omp-subagent-perf-");
+		const parent = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir: tempDir.path() });
+		const subagent = createSubagentSettings(parent);
+
+		const write = subagent.getStorage()!.recordModelPerf("opencode-go/deepseek-v4-flash", {
+			outputTokens: 130,
+			durationMs: 2989.23775,
+			ttftMs: 2324.873,
+		});
+		await flushPerf(write);
+
+		const stats = parent.getStorage()?.getModelPerf().get("opencode-go/deepseek-v4-flash");
+		expect(stats?.samples).toBe(1);
+		expect(stats?.tps).toBeCloseTo(130000 / 2989.23775, 5);
+		expect(stats?.ttftMs).toBeCloseTo(2324.873, 5);
+	});
+
 	it("keeps TTFT null when no sample reported one and uses full duration for TPS", async () => {
 		const storage = await openStorage();
 
 		// No ttft → 1000 tokens / 4s → 250 t/s
-		await storage.recordModelPerf("zai/glm-5", { outputTokens: 1000, durationMs: 4000 });
+		const write = storage.recordModelPerf("zai/glm-5", { outputTokens: 1000, durationMs: 4000 });
+		await flushPerf(write);
 
 		const stats = storage.getModelPerf().get("zai/glm-5");
 		expect(stats?.tps).toBeCloseTo(250, 5);
@@ -55,8 +126,17 @@ describe("AgentStorage model perf aggregates", () => {
 		// Same duration and token count, wildly different TTFT: a provider that
 		// hides reasoning until late (ttft ~ duration) must not report inflated
 		// throughput vs one that streams from the start.
-		storage.recordModelPerf("google/gemini", { outputTokens: 1020, durationMs: 7000, ttftMs: 5700 });
-		await storage.recordModelPerf("google-vertex/gemini", { outputTokens: 1020, durationMs: 7000, ttftMs: 1700 });
+		const hiddenWrite = storage.recordModelPerf("google/gemini", {
+			outputTokens: 1020,
+			durationMs: 7000,
+			ttftMs: 5700,
+		});
+		const streamedWrite = storage.recordModelPerf("google-vertex/gemini", {
+			outputTokens: 1020,
+			durationMs: 7000,
+			ttftMs: 1700,
+		});
+		await flushPerf(hiddenWrite, streamedWrite);
 
 		const hidden = storage.getModelPerf().get("google/gemini");
 		const streamed = storage.getModelPerf().get("google-vertex/gemini");
@@ -78,22 +158,16 @@ describe("AgentStorage model perf aggregates", () => {
 		const storage = await openStorage();
 
 		// ttft >= duration is bogus latency data; the sample still measures TPS.
-		await storage.recordModelPerf("openai/gpt-5", { outputTokens: 1000, durationMs: 4000, ttftMs: 5000 });
+		const write = storage.recordModelPerf("openai/gpt-5", {
+			outputTokens: 1000,
+			durationMs: 4000,
+			ttftMs: 5000,
+		});
+		await flushPerf(write);
 
 		const stats = storage.getModelPerf().get("openai/gpt-5");
 		expect(stats?.tps).toBeCloseTo(250, 5);
 		expect(stats?.ttftMs).toBeNull();
-	});
-
-	it("defers the write off the record path and lands it once the flush promise resolves", async () => {
-		const storage = await openStorage();
-
-		const flushed = storage.recordModelPerf("openai/gpt-5", { outputTokens: 1000, durationMs: 4000 });
-		// Recording is deferred: nothing is visible before the batch flushes.
-		expect(storage.getModelPerf().has("openai/gpt-5")).toBe(false);
-
-		await flushed;
-		expect(storage.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(250, 5);
 	});
 
 	it("backfills perf aggregates from an omp stats database, excluding errored and stale turns", async () => {
@@ -106,7 +180,7 @@ describe("AgentStorage model perf aggregates", () => {
 			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
 			ttft INTEGER, stop_reason TEXT, timestamp INTEGER
 		)`);
-		const insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
 		const now = Date.now();
 		// Two valid turns totaling 1500 tokens over 8.5s, one with ttft missing.
 		insert.run("openai", "gpt-5", 1000, 6000, 1000, "stop", now - 5000);
@@ -141,15 +215,15 @@ describe("AgentStorage model perf aggregates", () => {
 			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
 			ttft INTEGER, stop_reason TEXT, timestamp INTEGER
 		)`);
-		const insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
 		const now = Date.now();
-		// 300 rows: the newest 256 run at 100 t/s, the older 44 at a wild
-		// 10000 t/s. Only the newest 256 may count. One transaction: per-row
-		// implicit transactions fsync 300 times and time out on slow CI disks.
+		// 257 rows are the minimal cap-boundary fixture: the newest 256 run at
+		// 100 t/s and the one excluded oldest row is a wild 10000 t/s outlier.
+		// One transaction avoids per-row implicit transaction fsyncs.
 		statsDb.transaction(() => {
-			for (let i = 0; i < 300; i++) {
-				const fast = i < 44; // smallest timestamps = oldest rows
-				insert.run("openai", "gpt-5", fast ? 10_000 : 100, 1000, null, "stop", now - (300 - i) * 1000);
+			for (let i = 0; i < 257; i++) {
+				const excludedOldest = i === 0;
+				insert.run("openai", "gpt-5", excludedOldest ? 10_000 : 100, 1000, null, "stop", now - (257 - i) * 1000);
 			}
 		})();
 		statsDb.close();
@@ -161,4 +235,99 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(stats?.samples).toBe(256);
 		expect(stats?.tps).toBeCloseTo(100, 5);
 	});
+
+	it("does not start the stats backfill while flushing a live batch on exit", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-exit-backfill-");
+		const homeDir = tempDir.join("home");
+		const agentDir = tempDir.join("agent");
+		const env = {
+			...process.env,
+			HOME: homeDir,
+			USERPROFILE: homeDir,
+			OMP_PROFILE: "",
+			PI_CODING_AGENT_DIR: agentDir,
+			PI_CONFIG_DIR: ".omp",
+			PI_PROFILE: "",
+			XDG_CACHE_HOME: tempDir.join("xdg-cache"),
+			XDG_CONFIG_HOME: tempDir.join("xdg-config"),
+			XDG_DATA_HOME: tempDir.join("xdg-data"),
+			XDG_STATE_HOME: tempDir.join("xdg-state"),
+		};
+		const exiting = await runProbe(
+			[
+				'import { Database } from "bun:sqlite";',
+				'import * as fs from "node:fs";',
+				'import * as path from "node:path";',
+				'import { getStatsDbPath } from "@oh-my-pi/pi-utils";',
+				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
+				"const statsPath = getStatsDbPath();",
+				"fs.mkdirSync(path.dirname(statsPath), { recursive: true });",
+				"const statsDb = new Database(statsPath);",
+				'statsDb.run("CREATE TABLE messages (provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER, ttft INTEGER, stop_reason TEXT, timestamp INTEGER)");',
+				'statsDb.run("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)", ["openai", "repro", 20, 2000, null, "stop", Date.now()]);',
+				"statsDb.close();",
+				"const storage = await AgentStorage.open();",
+				'void storage.recordModelPerf("openai/repro", { outputTokens: 10, durationMs: 1000 });',
+				"process.exit(0);",
+			].join("\n"),
+			env,
+		);
+		expect(exiting.exitCode, exiting.stderr).toBe(0);
+
+		const reopening = await runProbe(
+			[
+				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
+				"const storage = await AgentStorage.open();",
+				"storage.getModelPerf();",
+				"await Promise.resolve();",
+				"AgentStorage.close();",
+			].join("\n"),
+			env,
+		);
+		expect(reopening.exitCode, reopening.stderr).toBe(0);
+
+		const db = new Database(path.join(agentDir, "agent.db"), { readonly: true });
+		try {
+			expect(
+				db
+					.query<{ samples: number; output_tokens: number; gen_ms: number }, []>(
+						"SELECT samples, output_tokens, gen_ms FROM model_perf WHERE model_key = 'openai/repro'",
+					)
+					.get(),
+			).toEqual({ samples: 2, output_tokens: 30, gen_ms: 3000 });
+			expect(
+				db.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get("model_perf_backfill"),
+			).toEqual({ value: "complete" });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("lets a process exit naturally mid-window and still persists the pending batch", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-natural-exit-");
+		const dbPath = tempDir.join("agent.db");
+		const startedAt = Date.now();
+		const exiting = await runProbe(
+			[
+				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
+				`const storage = await AgentStorage.open(${JSON.stringify(dbPath)});`,
+				'void storage.recordModelPerf("openai/natural-exit", { outputTokens: 10, durationMs: 1000 });',
+			].join("\n"),
+			{ ...process.env, HOME: tempDir.path(), USERPROFILE: tempDir.path() },
+		);
+		expect(exiting.exitCode, exiting.stderr).toBe(0);
+		// A referenced batch timer would hold the process open for the whole window.
+		expect(Date.now() - startedAt).toBeLessThan(MODEL_PERF_FLUSH_DELAY_MS / 2);
+
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			expect(
+				db
+					.query<{ samples: number }, []>("SELECT samples FROM model_perf WHERE model_key = 'openai/natural-exit'")
+					.get(),
+			).toEqual({ samples: 1 });
+		} finally {
+			db.close();
+		}
+	}, 30_000);
 });

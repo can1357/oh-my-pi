@@ -13,13 +13,17 @@
  *   session cwd (passed through `ResolveContext`).
  * - `issue://owner/repo/123` / `pr://owner/repo/123` — fully qualified single
  *   item.
+ * - `pr://ghe.example.com/owner/repo/123` — same, on a GitHub Enterprise host;
+ *   any shape above may carry a `<host>/` prefix. A host with no dot (`ghe`) is
+ *   recognized only in this numbered form.
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
  */
-import type { Settings } from "../config/settings";
+import issueDoc from "../prompts/internal-urls/issue.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import {
+	formatRepoRef,
 	getOrFetchIssue,
 	getOrFetchPr,
 	getOrFetchPrDiff,
@@ -29,8 +33,8 @@ import {
 	resolveDefaultRepoMemoized,
 } from "../tools/gh";
 import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
-import * as git from "../utils/git";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
+import { github } from "../utils/github";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
 type Scheme = "issue" | "pr";
 
@@ -102,12 +106,12 @@ function parseListOptions(url: InternalUrl, scheme: Scheme, repo: string | undef
 }
 
 function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
-	const host = url.rawHost || url.hostname;
+	let host = url.rawHost || url.hostname;
 	const rawPath = url.rawPathname ?? url.pathname;
 	// Strip a single leading slash so we can detect empty internal segments
 	// (e.g. `pr://owner//77` → pathname `//77` → stripped `/77` → ["", "77"]).
 	const stripped = rawPath.startsWith("/") ? rawPath.slice(1) : rawPath;
-	const parts: string[] = [];
+	let parts: string[] = [];
 	if (stripped !== "") {
 		for (const seg of stripped.split("/")) {
 			let decoded: string;
@@ -123,7 +127,30 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		}
 	}
 
-	// Shapes:
+	// Detect a leading `<host>/` prefix. A dotted first segment can only be a
+	// host, because GitHub owner names are alphanumeric-plus-hyphen, so dotted
+	// hosts work with every shape below. A single-label host (`ghe`,
+	// `localhost`) is only recognizable from the item number's position, so it
+	// is accepted in the numbered form alone — `<host>/<owner>/<repo>` with no
+	// number is indistinguishable from `<owner>/<repo>/<bad-number>`, and
+	// keeping the latter's error beats guessing.
+	let repoHost: string | undefined;
+	const dottedHost = host.includes(".");
+	if (dottedHost && parts.length < 2) {
+		throw new Error(
+			`Invalid ${scheme}:// URL. Expected ${scheme}://<host>/<owner>/<repo> or ${scheme}://<host>/<owner>/<repo>/<number>`,
+		);
+	}
+	const hostPrefixed = dottedHost
+		? parts.length >= 2
+		: parts.length >= 3 && parsePositiveDecimalInt(parts[2]) !== undefined;
+	if (hostPrefixed) {
+		repoHost = host;
+		host = parts[0] ?? "";
+		parts = parts.slice(1);
+	}
+
+	// Shapes (each optionally prefixed with an enterprise `<host>/`):
 	//   scheme://                    → list default repo
 	//   scheme://N                   → single item, default repo
 	//   scheme://owner/repo          → list specific repo
@@ -150,11 +177,11 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		diffParts = parts;
 	} else if (host && parts.length === 1) {
 		// scheme://owner/repo  → list
-		repo = `${host}/${parts[0]}`;
+		repo = formatRepoRef(repoHost, `${host}/${parts[0]}`);
 		return parseListOptions(url, scheme, repo);
 	} else if (host && parts.length >= 2) {
 		// scheme://owner/repo/N[/diff[/<sub>]]
-		repo = `${host}/${parts[0]}`;
+		repo = formatRepoRef(repoHost, `${host}/${parts[0]}`);
 		numberPart = parts[1];
 		diffParts = parts.slice(2);
 	} else {
@@ -225,13 +252,6 @@ function resolveCwd(context: ResolveContext | undefined): string {
 		if (cwd) return cwd;
 	}
 	return process.cwd();
-}
-
-function settingsFromContext(context: ResolveContext | undefined): Settings | undefined {
-	const raw = context?.settings;
-	if (!raw || typeof raw !== "object") return undefined;
-	if (typeof (raw as { get?: unknown }).get !== "function") return undefined;
-	return raw as Settings;
 }
 
 async function resolveListRepo(
@@ -329,7 +349,7 @@ async function fetchAndRenderList(
 			? await githubIssueJsonWithStateReasonFallback<Array<IssueListItem>>(cwd, args, context?.signal, {
 					repoProvided: true,
 				})
-			: await git.github.json<Array<PrListItem>>(cwd, args, context?.signal, {
+			: await github.json<Array<PrListItem>>(cwd, args, context?.signal, {
 					repoProvided: true,
 				});
 	const header =
@@ -418,7 +438,7 @@ async function fetchAndRenderPrDiff(
 		repo,
 		number: parsed.number,
 		signal: context?.signal,
-		settings: settingsFromContext(context),
+		settings: context?.settings,
 	});
 	const files = lookup.payload.files;
 	const freshness = formatFreshnessNote(lookup.status, lookup.fetchedAt);
@@ -484,7 +504,12 @@ async function fetchAndRenderPrDiff(
  */
 export class IssueProtocolHandler implements ProtocolHandler {
 	readonly scheme = "issue";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = { backing: "remote", selectors: "lines", immutable: true };
+
+	/** Advertised when `gh` is on PATH; the entry documents `pr://` too. */
+	promptDoc(): string | undefined {
+		return github.available() ? issueDoc.trim() : undefined;
+	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		if (context?.signal?.aborted) {
@@ -511,7 +536,7 @@ export class IssueProtocolHandler implements ProtocolHandler {
 				issue: String(parsed.number),
 				includeComments: parsed.comments,
 				signal: context?.signal,
-				settings: settingsFromContext(context),
+				settings: context?.settings,
 			});
 			return buildSingleResource({
 				url,
@@ -533,7 +558,7 @@ export class IssueProtocolHandler implements ProtocolHandler {
  */
 export class PrProtocolHandler implements ProtocolHandler {
 	readonly scheme = "pr";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = { backing: "remote", selectors: "lines", immutable: true };
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		if (context?.signal?.aborted) {
@@ -575,7 +600,7 @@ export class PrProtocolHandler implements ProtocolHandler {
 				number: parsed.number,
 				includeComments: parsed.comments,
 				signal: context?.signal,
-				settings: settingsFromContext(context),
+				settings: context?.settings,
 			});
 			return buildSingleResource({
 				url,

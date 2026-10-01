@@ -44,6 +44,16 @@ export interface MnemopiOptions {
 	readonly llmModel?: string | Model<Api>;
 	readonly llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
 	readonly proactiveLinking?: boolean;
+	/**
+	 * Route `recallEnhanced` through polyphonic recall for this instance. Unset
+	 * defers to `configureRecallFeatures`; `MNEMOPI_POLYPHONIC_RECALL` wins when set.
+	 */
+	readonly polyphonicRecall?: boolean;
+	/**
+	 * Cache `recallEnhanced` results for this instance. Unset defers to
+	 * `configureRecallFeatures`; `MNEMOPI_ENHANCED_RECALL` wins when set.
+	 */
+	readonly enhancedRecall?: boolean;
 	/** Escalate best-effort failure logs (embedding pipeline) from debug to warn. */
 	readonly debug?: boolean;
 	/**
@@ -99,8 +109,10 @@ export interface RememberFacadeOptions {
 	readonly memory_type?: string | null;
 }
 
-export interface RecallFacadeOptions
-	extends Omit<RecallOptions, "temporalHalflife" | "vecWeight" | "ftsWeight" | "importanceWeight"> {
+export interface RecallFacadeOptions extends Omit<
+	RecallOptions,
+	"temporalHalflife" | "vecWeight" | "ftsWeight" | "importanceWeight"
+> {
 	readonly from_date?: string | null;
 	readonly to_date?: string | null;
 	readonly source?: string | null;
@@ -212,7 +224,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		const llmEnabled = hasOwn(options, "llmEnabled")
 			? options.llmEnabled
 			: (nestedLlm?.enabled ??
-					(nestedLlm?.baseUrl !== undefined ||
+				  (nestedLlm?.baseUrl !== undefined ||
 						nestedLlm?.apiKey !== undefined ||
 						nestedLlm?.maxTokens !== undefined ||
 						nestedLlm?.complete !== undefined ||
@@ -396,6 +408,7 @@ export class Mnemopi {
 	constructor(options: MnemopiOptions = {}) {
 		this.sessionId = options.sessionId ?? options.session_id ?? "default";
 		this.bank = options.bank ?? "default";
+
 		this.authorId = options.authorId ?? options.author_id ?? null;
 		this.authorType = options.authorType ?? options.author_type ?? null;
 		this.channelId = options.channelId ?? options.channel_id ?? this.sessionId;
@@ -409,6 +422,8 @@ export class Mnemopi {
 			authorType: this.authorType,
 			channelId: this.channelId,
 			proactiveLinking: options.proactiveLinking,
+			polyphonicRecall: options.polyphonicRecall,
+			enhancedRecall: options.enhancedRecall,
 		});
 		this.#ownsDb = options.db === undefined;
 		if (options.db !== undefined) {

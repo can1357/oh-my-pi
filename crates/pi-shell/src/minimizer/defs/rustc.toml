@@ -10,17 +10,20 @@
 # The intervening snippet/caret/label lines (`  |`, ` 3 | …`, `  = note:`) are
 # dropped: they are recoverable context, not signal, and the kept `-->` pointer
 # already localizes the diagnostic.
+# Query/help output is not a diagnostic stream. Preserve it when no diagnostic
+# line matches, rather than letting the engine turn the meaningful response into
+# a generic success sentinel.
 #
-# DELIBERATELY no on_empty: the on_empty stage is NOT exit-gated
-# (pipeline.rs:330-335), so a failed compile whose error text happened to miss
-# the keep-set would otherwise collapse to a fake "rustc: ok". The engine's
-# ensure_success_visible prints "OK" only on exit 0, which is the correct,
-# exit-gated success sentinel.
+# DELIBERATELY no on_empty: that stage is not exit-gated, so a failed compile
+# whose error text happened to miss the keep-set would otherwise collapse to a
+# fake "rustc: ok". The engine's ensure_success_visible prints "OK" only on
+# exit 0, which is the correct, exit-gated success sentinel.
 
 [filters.rustc]
 description = "Compact rustc output — keep diagnostics, ICE/panic, and failure trailers"
 match_command = "^rustc$"
 strip_ansi = true
+preserve_if_empty = true
 keep_lines_matching = [
 	"^error",
 	"^warning",
@@ -85,3 +88,8 @@ warning: unused variable: `x`
 warning: 1 warning emitted
 """
 expected = "warning: unused variable: `x`\n --> src/lib.rs:2:9\nwarning: 1 warning emitted\n"
+
+[[tests.rustc]]
+name = "query output is preserved instead of collapsed to ok"
+input = "/opt/rust/lib/rustlib\n"
+expected = "/opt/rust/lib/rustlib\n"

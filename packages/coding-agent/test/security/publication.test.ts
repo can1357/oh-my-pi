@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SecurityScanPlan } from "../../src/security";
+import type { SecurityPublishParams, SecurityScanPlan } from "../../src/security";
 import { createSecurityPublicationTool, SecurityStore } from "../../src/security";
 
 let temporaryRoot = "";
@@ -43,6 +43,20 @@ beforeEach(async () => {
 afterEach(async () => {
 	await fs.rm(temporaryRoot, { recursive: true, force: true });
 });
+
+type SecurityFindingInput = SecurityPublishParams["findings"][number];
+
+function publishableFinding(
+	overrides: Partial<SecurityFindingInput> & Pick<SecurityFindingInput, "rule_id" | "title" | "locations">,
+): SecurityFindingInput {
+	return {
+		summary: "Fixture summary",
+		severity: "high",
+		confidence: "high",
+		category: "fixture",
+		...overrides,
+	};
+}
 
 describe("security publication", () => {
 	test("rejects absolute and traversing source locations", async () => {
@@ -143,5 +157,171 @@ describe("security publication", () => {
 		expect(putCalls).toBe(1);
 		releasePut.resolve();
 		await first;
+	});
+
+	test("withholds findings whose cited locations cannot be resolved", async () => {
+		await fs.writeFile(path.join(repositoryRoot, "real.ts"), "one\ntwo\nthree\n");
+		const tool = createSecurityPublicationTool({
+			plan,
+			scanId: "secscan_grounding",
+			store,
+			startedAt: "2026-07-29T00:00:00.000Z",
+		});
+		const result = await tool.execute(
+			"publish",
+			{
+				findings: [
+					publishableFinding({
+						rule_id: "grounded",
+						title: "Cites a real location",
+						locations: [{ path: "real.ts", start_line: 2 }],
+					}),
+					publishableFinding({
+						rule_id: "ghost-file",
+						title: "Cites a file that does not exist",
+						locations: [{ path: "src/does-not-exist.ts", start_line: 42 }],
+					}),
+					publishableFinding({
+						rule_id: "ghost-line",
+						title: "Cites a line past end of file",
+						locations: [{ path: "real.ts", start_line: 9999 }],
+					}),
+					publishableFinding({
+						rule_id: "ghost-end-line",
+						title: "Cites an end line past end of file",
+						locations: [{ path: "real.ts", start_line: 1, end_line: 9999 }],
+					}),
+				],
+				coverage: { completeness: "partial" },
+				report: "# Grounding\n",
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(result.details?.findingCount).toBe(1);
+		expect(result.details?.droppedFindings).toEqual([
+			{
+				ruleId: "ghost-file",
+				title: "Cites a file that does not exist",
+				path: "src/does-not-exist.ts",
+				startLine: 42,
+				reason: "path_absent",
+			},
+			{
+				ruleId: "ghost-line",
+				title: "Cites a line past end of file",
+				path: "real.ts",
+				startLine: 9999,
+				reason: "line_out_of_range",
+			},
+			{
+				ruleId: "ghost-end-line",
+				title: "Cites an end line past end of file",
+				path: "real.ts",
+				startLine: 1,
+				reason: "line_out_of_range",
+			},
+		]);
+		const persisted = await Bun.file(path.join(plan.output.root, "findings.json")).text();
+		expect(persisted).toContain("grounded");
+		expect(persisted).not.toContain("does-not-exist.ts");
+		expect(persisted).not.toContain("ghost-line");
+		expect(persisted).not.toContain("ghost-end-line");
+	});
+
+	test("resolves cited locations against resolutionRoot when provided", async () => {
+		// Simulates a ref_diff scan: the review session reads a detached worktree
+		// whose tree differs from the live repository root.
+		await fs.writeFile(path.join(repositoryRoot, "live-only.ts"), "one\ntwo\n");
+		const worktreeRoot = path.join(temporaryRoot, "worktree");
+		await fs.mkdir(worktreeRoot);
+		await fs.writeFile(path.join(worktreeRoot, "worktree-only.ts"), "one\ntwo\nthree\n");
+		const tool = createSecurityPublicationTool({
+			plan,
+			scanId: "secscan_worktree",
+			store,
+			startedAt: "2026-07-29T00:00:00.000Z",
+			resolutionRoot: worktreeRoot,
+		});
+		const result = await tool.execute(
+			"publish",
+			{
+				findings: [
+					publishableFinding({
+						rule_id: "worktree-grounded",
+						title: "Exists only in the scanned worktree",
+						locations: [{ path: "worktree-only.ts", start_line: 3 }],
+					}),
+					publishableFinding({
+						rule_id: "live-only",
+						title: "Exists only in the live tree",
+						locations: [{ path: "live-only.ts", start_line: 1 }],
+					}),
+				],
+				coverage: { completeness: "partial" },
+				report: "# Worktree grounding\n",
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(result.details?.findingCount).toBe(1);
+		expect(result.details?.droppedFindings).toEqual([
+			{
+				ruleId: "live-only",
+				title: "Exists only in the live tree",
+				path: "live-only.ts",
+				startLine: 1,
+				reason: "path_absent",
+			},
+		]);
+		const persisted = await Bun.file(path.join(plan.output.root, "findings.json")).text();
+		expect(persisted).toContain("worktree-grounded");
+		expect(persisted).not.toContain("live-only.ts");
+	});
+
+	test("withholds findings whose evidence locations cannot be resolved", async () => {
+		await fs.writeFile(path.join(repositoryRoot, "real.ts"), "one\ntwo\nthree\n");
+		const tool = createSecurityPublicationTool({
+			plan,
+			scanId: "secscan_evidence",
+			store,
+			startedAt: "2026-07-29T00:00:00.000Z",
+		});
+		const result = await tool.execute(
+			"publish",
+			{
+				findings: [
+					publishableFinding({
+						rule_id: "ghost-evidence",
+						title: "Grounded location but ghost evidence citation",
+						locations: [{ path: "real.ts", start_line: 1 }],
+						evidence: [
+							{
+								label: "sink",
+								explanation: "cites a missing file",
+								location: { path: "missing-evidence.ts", start_line: 7 },
+							},
+						],
+					}),
+				],
+				coverage: { completeness: "partial" },
+				report: "# Evidence grounding\n",
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(result.details?.findingCount).toBe(0);
+		expect(result.details?.droppedFindings).toEqual([
+			{
+				ruleId: "ghost-evidence",
+				title: "Grounded location but ghost evidence citation",
+				path: "missing-evidence.ts",
+				startLine: 7,
+				reason: "path_absent",
+			},
+		]);
 	});
 });

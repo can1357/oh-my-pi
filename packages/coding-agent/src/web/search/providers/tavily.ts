@@ -5,13 +5,13 @@
  * optional synthesized answer.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, siteHosts, withHardTimeout } from "./utils";
 
 const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 const DEFAULT_NUM_RESULTS = 5;
@@ -34,17 +34,10 @@ export interface TavilySearchParams {
 	fetch?: FetchImpl;
 }
 
-interface TavilySearchResult {
-	title?: string | null;
-	url?: string | null;
-	content?: string | null;
-	published_date?: string | null;
-}
-
 interface TavilySearchResponse {
-	answer?: string | null;
-	results?: TavilySearchResult[];
-	request_id?: string | null;
+	answer?: unknown;
+	results?: unknown;
+	request_id?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -75,7 +68,7 @@ export async function findApiKey(
 	sessionId: string | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
-	return (await authStorage.getApiKey("tavily", sessionId, { signal })) ?? null;
+	return (await authStorage.keys.get("tavily", sessionId, { signal })) ?? null;
 }
 
 /** Exported for testing. Builds the Tavily request body from unified params. */
@@ -141,28 +134,36 @@ async function callTavilySearch(apiKey: string, params: TavilySearchParams): Pro
 		throw new SearchProviderError("tavily", `Tavily API error (${response.status}): ${message}`, response.status);
 	}
 
-	return (await response.json()) as TavilySearchResponse;
+	const payload: unknown = await response.json();
+	return asRecord(payload) ?? {};
 }
 
 function toSearchResponse(response: TavilySearchResponse, numResults: number): SearchResponse {
 	const sources: SearchSource[] = [];
 
-	for (const result of response.results ?? []) {
-		if (!result.url) continue;
-		sources.push({
-			title: result.title ?? result.url,
-			url: result.url,
-			snippet: result.content ?? undefined,
-			publishedDate: result.published_date ?? undefined,
-			ageSeconds: dateToAgeSeconds(result.published_date ?? undefined),
-		});
+	if (Array.isArray(response.results)) {
+		for (const value of response.results) {
+			const result = asRecord(value);
+			if (!result || typeof result.url !== "string" || !result.url) continue;
+			const title = typeof result.title === "string" && result.title ? result.title : result.url;
+			const snippet = typeof result.content === "string" ? result.content : undefined;
+			const publishedDate = typeof result.published_date === "string" ? result.published_date : undefined;
+			sources.push({
+				title,
+				url: result.url,
+				snippet,
+				publishedDate,
+				ageSeconds: dateToAgeSeconds(publishedDate),
+			});
+		}
 	}
 
+	const answer = typeof response.answer === "string" ? response.answer.trim() || undefined : undefined;
 	return {
 		provider: "tavily",
-		answer: response.answer?.trim() || undefined,
+		answer,
 		sources: sources.slice(0, numResults),
-		requestId: response.request_id ?? undefined,
+		requestId: typeof response.request_id === "string" ? response.request_id : undefined,
 		authMode: "api_key",
 	};
 }
@@ -170,16 +171,6 @@ function toSearchResponse(response: TavilySearchResponse, numResults: number): S
 function hasRenderableResponse(response: SearchResponse): boolean {
 	if (response.answer?.trim()) return true;
 	return response.sources.length > 0;
-}
-
-/** Bare hosts from `site:` values (path parts are enforced by the central lenient filter). */
-function siteHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
 }
 
 /** Execute Tavily web search. */
@@ -203,7 +194,7 @@ export async function searchTavily(params: SearchParams): Promise<SearchResponse
 		if (parsed.after) tavilyParams.start_date = parsed.after;
 		if (parsed.before) tavilyParams.end_date = parsed.before;
 	}
-	const keyOrResolver: ApiKey = params.authStorage.resolver("tavily", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("tavily", {
 		sessionId: params.sessionId,
 	});
 
@@ -235,7 +226,7 @@ export class TavilyProvider extends SearchProvider {
 	readonly label = "Tavily";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("tavily") || !!getEnvApiKey("tavily");
+		return authStorage.keys.source("tavily") !== undefined || !!getEnvApiKey("tavily");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

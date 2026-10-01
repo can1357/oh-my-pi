@@ -10,7 +10,7 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
@@ -94,8 +94,8 @@ async function resolveKey(
 	const envKey = asTrimmed($env.MOONSHOT_SEARCH_API_KEY) ?? asTrimmed($env.KIMI_SEARCH_API_KEY);
 	if (envKey) return envKey;
 
-	const stored = await authStorage.getApiKey("kimi-code", sessionId, { signal });
-	if (stored) return authStorage.resolver("kimi-code", { sessionId });
+	const stored = await authStorage.keys.get("kimi-code", sessionId, { signal });
+	if (stored) return authStorage.keys.resolver("kimi-code", { sessionId });
 	return undefined;
 }
 
@@ -200,7 +200,7 @@ export class KimiProvider extends SearchProvider {
 		return (
 			!!asTrimmed($env.MOONSHOT_SEARCH_API_KEY) ||
 			!!asTrimmed($env.KIMI_SEARCH_API_KEY) ||
-			authStorage.hasAuth("kimi-code")
+			authStorage.keys.source("kimi-code") !== undefined
 		);
 	}
 

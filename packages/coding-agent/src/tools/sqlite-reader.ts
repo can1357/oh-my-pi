@@ -1,6 +1,6 @@
-import type { Database, SQLQueryBindings } from "bun:sqlite";
-import { formatBytes, replaceTabs, truncateToWidth } from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const SQLITE_MAGIC = new Uint8Array([
 	0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,
@@ -12,6 +12,49 @@ export function looksLikeSqlite(bytes: Uint8Array): boolean {
 		if (bytes[index] !== byte) return false;
 	}
 	return true;
+}
+function isSqliteCantOpen(error: unknown): boolean {
+	if (!(error instanceof Error) || error.name !== "SQLiteError" || !("code" in error)) return false;
+	return typeof error.code === "string" && error.code.startsWith("SQLITE_CANTOPEN");
+}
+
+async function requiresWalSidecarInitialization(filePath: string): Promise<boolean> {
+	const formatVersions = await Bun.file(filePath).slice(18, 20).bytes();
+	if (formatVersions[0] !== 2 && formatVersions[1] !== 2) return false;
+	const [walExists, shmExists] = await Promise.all([
+		Bun.file(`${filePath}-wal`).exists(),
+		Bun.file(`${filePath}-shm`).exists(),
+	]);
+	return !walExists || !shmExists;
+}
+
+function configureSqliteReadConnection(db: Database): Database {
+	try {
+		db.run("PRAGMA query_only = ON");
+		db.run("PRAGMA busy_timeout = 3000");
+		db.query("SELECT name FROM sqlite_master LIMIT 1").get();
+		return db;
+	} catch (error) {
+		db.close();
+		throw error;
+	}
+}
+
+/**
+ * Opens the query-only connection used by read tools, retrying read-write mode solely to initialize missing WAL sidecars.
+ */
+export async function openSqliteReadConnection(filePath: string): Promise<Database> {
+	if (await requiresWalSidecarInitialization(filePath)) {
+		return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
+	}
+	try {
+		return configureSqliteReadConnection(new Database(filePath, { readonly: true, strict: true }));
+	} catch (error) {
+		if (!isSqliteCantOpen(error)) {
+			throw error;
+		}
+	}
+	return configureSqliteReadConnection(new Database(filePath, { readwrite: true, create: false, strict: true }));
 }
 const SQLITE_PATH_PATTERN = /\.(?:sqlite3?|db3?)(?=(?::|\?|$))/gi;
 const DEFAULT_QUERY_LIMIT = 20;

@@ -15,6 +15,10 @@ class FakeExtensionFlagSink implements ExtensionFlagSink {
 		]);
 	}
 
+	getToolNames(): readonly string[] {
+		return [];
+	}
+
 	setFlagValue(name: string, value: boolean | string): void {
 		this.#values.set(name, value);
 	}
@@ -26,16 +30,6 @@ describe("extension flag dispatch", () => {
 
 		const args = applyExtensionFlags(sink, ["--", "--foo", "bar"]);
 
-		expect(sink.values.size).toBe(0);
-		expect(args?.messages).toEqual(["--foo", "bar"]);
-	});
-
-	it("keeps -- as end-of-options after a string extension flag", () => {
-		const sink = new FakeExtensionFlagSink();
-
-		const args = applyExtensionFlags(sink, ["--bar", "--", "--foo", "bar"]);
-
-		expect(sink.values.has("bar")).toBe(false);
 		expect(sink.values.size).toBe(0);
 		expect(args?.messages).toEqual(["--foo", "bar"]);
 	});

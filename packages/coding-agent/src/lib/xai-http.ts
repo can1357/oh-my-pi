@@ -1,19 +1,14 @@
 // Ported from NousResearch/hermes-agent (MIT) — tools/xai_http.py.
 
+import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-
-const DEFAULT_BASE_URL = "https://api.x.ai/v1";
 
 interface XAICredentials {
 	provider: "xai-oauth" | "xai";
 	apiKey: string;
 	baseURL: string;
-}
-
-export function ohMyPiXAIUserAgent(): string {
-	return "oh-my-pi/xai";
 }
 
 /** xAI provider ids supported by shared HTTP tool transport resolution. */
@@ -28,7 +23,7 @@ export interface XAIHttpTransport {
 /**
  * Resolve the HTTP base URL for an xAI tool call.
  *
- * Precedence:
+ * The registry supplies the configured endpoint:
  *   1. `model.baseUrl` from the registry IF the user pinned a per-model
  *      override — i.e. `merged.baseUrl` differs from the seeded/bundled
  *      default for the (provider, id) pair. Mirrors the chat path's per-model
@@ -40,58 +35,60 @@ export interface XAIHttpTransport {
  *      `applyXAIOAuthCuration` filters out via `XAI_NON_CHAT_PREFIXES`.
  *      Without this leg, a registry-configured proxy is silently bypassed for
  *      image/TTS traffic.
- *   3. `XAI_BASE_URL` env var (legacy global override, preserved).
- *   4. `DEFAULT_BASE_URL = "https://api.x.ai/v1"`.
+ *   3. Otherwise the bundled `https://api.x.ai/v1` endpoint.
  *
- * The override gate at step 1 uses `bundled?.baseUrl ?? DEFAULT_BASE_URL` as
- * the canonical default sentinel. For xai (which has bundled entries) this
- * compares against the bundled value; for xai-oauth (no bundled entries —
- * models.json carries no xai-oauth records when the seed is absent, the
- * picker is seeded statically from `xaiOAuthModelManagerOptions` with
- * `baseUrl: DEFAULT_BASE_URL`) the sentinel falls back to DEFAULT_BASE_URL
- * so the env leg remains reachable. Without that fallback, every xai-oauth
- * model id forces `!bundled === true` and short-circuits XAI_BASE_URL
- * silently. Lookup is scoped to (provider, id); matching by id alone would
- * let xai-oauth entries hijack a xai tool call (or vice versa) when the
- * same model id ships under both descriptors.
+ * The result then goes through {@link resolveXaiBaseUrl}, the rule shared with
+ * chat, image generation, and web search: a custom endpoint from steps 1–2
+ * wins, and `XAI_BASE_URL` redirects only the bundled endpoint and never
+ * receives an `xai-oauth` OAuth access token (`bearer`).
+ *
+ * The step-1 gate uses `bundled?.baseUrl ?? XAI_DEFAULT_BASE_URL` as the
+ * canonical default sentinel: xai-oauth ids have no bundled entries, and
+ * without the fallback every xai-oauth model id would count as pinned and
+ * bypass `XAI_BASE_URL`. Lookup is scoped to (provider, id); matching by id
+ * alone would let xai-oauth entries hijack a xai tool call (or vice versa)
+ * when the same model id ships under both descriptors.
  */
 function resolveXAIBaseURL(
 	modelRegistry: ModelRegistry,
 	provider: XAIHttpProvider,
 	modelId: string | undefined,
+	bearer: string | undefined,
 ): string {
+	let configured: string | undefined;
 	if (modelId) {
 		const merged = modelRegistry.getAll().find(m => m.id === modelId && m.provider === provider);
 		if (merged?.baseUrl) {
 			const bundled = getBundledModels(provider as Parameters<typeof getBundledModels>[0]).find(
 				m => m.id === modelId,
 			);
-			const providerDefault = bundled?.baseUrl ?? DEFAULT_BASE_URL;
-			if (merged.baseUrl !== providerDefault) {
-				return merged.baseUrl.replace(/\/$/, "");
-			}
+			if (merged.baseUrl !== (bundled?.baseUrl ?? XAI_DEFAULT_BASE_URL)) configured = merged.baseUrl;
 		}
 	}
-	const providerBaseUrl = modelRegistry.getProviderBaseUrl(provider);
-	if (providerBaseUrl) {
-		const normalized = providerBaseUrl.replace(/\/$/, "");
-		if (normalized !== DEFAULT_BASE_URL) return normalized;
-	}
-	return ($env.XAI_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, "");
+	configured ||= modelRegistry.getProviderBaseUrl(provider);
+	const baseURL = resolveXaiBaseUrl(provider, configured || XAI_DEFAULT_BASE_URL, bearer) ?? XAI_DEFAULT_BASE_URL;
+	return baseURL.replace(/\/+$/, "");
 }
 /**
  * Resolve an xAI tool endpoint and its provider/model header overrides.
+ *
+ * `apiKey` is the bearer the request will send; when omitted, the provider's
+ * current key is peeked so an `xai-oauth` OAuth token is never routed to
+ * `XAI_BASE_URL`.
  */
-export function resolveXAIHttpTransport(
+export async function resolveXAIHttpTransport(
 	modelRegistry: ModelRegistry,
 	provider: XAIHttpProvider,
 	modelId?: string,
-): XAIHttpTransport {
+	apiKey?: string,
+): Promise<XAIHttpTransport> {
+	const model = modelId ? modelRegistry.find(provider, modelId) : undefined;
+	const bearer = apiKey ?? (await modelRegistry.authStorage.keys.peek(provider));
 	return {
-		baseURL: resolveXAIBaseURL(modelRegistry, provider, modelId),
-		headers:
-			(modelId ? modelRegistry.find(provider, modelId)?.headers : undefined) ??
-			modelRegistry.getProviderHeaders(provider),
+		baseURL: resolveXAIBaseURL(modelRegistry, provider, modelId, bearer),
+		headers: model
+			? await modelRegistry.resolveModelHeaders(model)
+			: await modelRegistry.getProviderHeaders(provider),
 	};
 }
 
@@ -101,7 +98,7 @@ export function resolveXAIHttpTransport(
  * Credential priority:
  *   1. xai-oauth — only when a *dedicated* xai-oauth source exists. Composed
  *      of two checks against the registry layer:
- *        a. `authStorage.hasNonEnvCredential("xai-oauth")` covers stored
+ *        a. `authStorage.keys.source("xai-oauth", { env: "none" })` covers stored
  *           credentials (OAuth or api_key), runtime overrides (CLI
  *           `--api-key` for xai-oauth), config overrides (models.yml
  *           `providers.xai-oauth.apiKey`), and fallback resolvers.
@@ -114,14 +111,14 @@ export function resolveXAIHttpTransport(
  *      overrides for image/TTS traffic. The gate routes the borrow case to
  *      step 2 while preserving every dedicated xai-oauth path.
  *   2. xai (plain API key). Delegates to ModelRegistry.getApiKeyForProvider
- *      which runs AuthStorage.getApiKey's full cascade: runtime override →
+ *      which runs AuthStorage.keys.get's full cascade: runtime override →
  *      models.yml config override → stored api_key credential → OAuth
  *      resolution → XAI_API_KEY env var → custom fallback resolver.
  *
- * baseURL: see `resolveXAIBaseURL` above. Resolved AFTER the credential
- * decision so the scoped (provider, id) lookup is unambiguous. `modelId`
- * is optional; probes / tool-availability checks pass `undefined` and fall
- * through to env/default.
+ * baseURL: see `resolveXAIBaseURL` above, evaluated for the chosen key.
+ * Resolved AFTER the credential decision so the scoped (provider, id) lookup
+ * is unambiguous. `modelId` is optional; probes / tool-availability checks
+ * pass `undefined` and fall through to the provider endpoint.
  *
  * Returns null when neither credential is available. Caller is responsible
  * for surfacing an actionable error message in that case.
@@ -131,18 +128,19 @@ export async function resolveXAIHttpCredentials(
 	modelId?: string,
 ): Promise<XAICredentials | null> {
 	const hasDedicatedXaiOAuth =
-		modelRegistry.authStorage.hasNonEnvCredential("xai-oauth") || Boolean($env.XAI_OAUTH_TOKEN);
+		modelRegistry.authStorage.keys.source("xai-oauth", { env: "none" }) !== undefined ||
+		Boolean($env.XAI_OAUTH_TOKEN);
 	if (hasDedicatedXaiOAuth) {
 		const oauthKey = await modelRegistry.getApiKeyForProvider("xai-oauth");
 		if (oauthKey) {
-			const baseURL = resolveXAIBaseURL(modelRegistry, "xai-oauth", modelId);
+			const baseURL = resolveXAIBaseURL(modelRegistry, "xai-oauth", modelId, oauthKey);
 			return { provider: "xai-oauth", apiKey: oauthKey, baseURL };
 		}
 	}
 
 	const apiKey = await modelRegistry.getApiKeyForProvider("xai");
 	if (apiKey) {
-		const baseURL = resolveXAIBaseURL(modelRegistry, "xai", modelId);
+		const baseURL = resolveXAIBaseURL(modelRegistry, "xai", modelId, apiKey);
 		return { provider: "xai", apiKey, baseURL };
 	}
 

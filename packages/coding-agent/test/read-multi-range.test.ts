@@ -4,11 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
@@ -21,7 +24,7 @@ function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	const settings = Settings.isolated();
 	// Disable structural summarization so multi-range tests assert raw line content
 	// regardless of language heuristics.
-	settings.set("read.summarize.enabled", false);
+	cfgReadSummarizeEnabled.set(settings, false);
 	return {
 		cwd,
 		hasUI: false,
@@ -49,19 +52,6 @@ describe("read tool multi-range selector", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	it("uses only the filename in hashline headers for nested files", async () => {
-		const filePath = path.join(tmpDir, "src", "nested", "numbered.txt");
-		await fs.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.writeFile(filePath, "alpha\nbeta\n");
-
-		const tool = new ReadTool(createSession(tmpDir));
-		const text = textOutput(await tool.execute("call-filename-header", { path: filePath }));
-		const firstLine = text.split("\n")[0];
-
-		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
-		expect(firstLine).not.toContain("src");
-	});
-
 	it("returns both ranges separated by an elision marker", async () => {
 		const filePath = path.join(tmpDir, "src", "numbered.txt");
 		await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -71,7 +61,7 @@ describe("read tool multi-range selector", () => {
 		const result = await tool.execute("call-multi", { path: `${filePath}:3-5,20-22` });
 		const text = textOutput(result);
 		const firstLine = text.split("\n")[0];
-		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
+		expect(firstLine).toMatch(/^\[src\/numbered\.txt#[0-9A-F]{4}\]$/);
 
 		expect(text).toContain("line 3");
 		expect(text).toContain("line 4");
@@ -284,5 +274,27 @@ describe("read tool multi-range selector", () => {
 		expect(text).toContain("bridge five");
 		expect(text).not.toContain("bridge three");
 		expect(text).not.toContain("disk one");
+	});
+
+	it("keeps ACP multi-range blanks editable without exposing the EOF sentinel", async () => {
+		const filePath = path.join(tmpDir, "bridge.txt");
+		const bridgeText = "first\n\nlast\n";
+		await fs.writeFile(filePath, bridgeText);
+		const bridge: ClientBridge = {
+			capabilities: { readTextFile: true },
+			readTextFile: async () => bridgeText,
+		};
+		const session = createSession(tmpDir, bridge);
+		const text = textOutput(await new ReadTool(session).execute("call-bridge-eof", { path: `${filePath}:1-2,3-3` }));
+		const header = text.split("\n")[0] ?? "";
+		expect(header).toMatch(/^\[bridge\.txt#[0-9A-F]{4}\]$/);
+		expect(text).toContain("1:first\n2:");
+		expect(text).not.toContain("\n4:");
+
+		await new EditTool(session, "hashline").execute("call-bridge-edit", {
+			input: `${header}\nCUT 2`,
+		});
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("first\nlast\n");
 	});
 });

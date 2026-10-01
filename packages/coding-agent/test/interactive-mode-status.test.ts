@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
@@ -18,10 +18,10 @@ function renderContainer(container: Container, width = 120): string {
 }
 
 function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: UiHelpers } {
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),
@@ -38,10 +38,13 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		},
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
-		renderSessionContext: (
+		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
+			helpers.renderSessionContext(context, options),
+		renderSessionContextIncrementally: (
 			context: SessionContext,
-			options?: { updateFooter?: boolean; populateHistory?: boolean },
-		) => helpers.renderSessionContext(context, options),
+			options: RenderSessionContextOptions,
+			renderChunk?: () => void,
+		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 		settings: { get: () => false },
 		session: {
@@ -60,7 +63,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		toolOutputExpanded: false,
 		hideThinkingBlock: false,
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, helpers };
 }
 
@@ -82,18 +85,17 @@ describe("InteractiveMode.showStatus", () => {
 				for (const item of items) ctx.chatContainer.addChild(item);
 				ctx.ui.requestRender();
 			},
-			lastStatusSpacer: undefined,
-			lastStatusText: undefined,
+			lastStatus: undefined,
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);
 
 		helpers.showStatus("STATUS_ONE");
-		expect(ctx.chatContainer.children).toHaveLength(2);
+		expect(ctx.chatContainer.children).toHaveLength(1);
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_ONE");
 
 		helpers.showStatus("STATUS_TWO");
-		// second status updates the previous line instead of appending
-		expect(ctx.chatContainer.children).toHaveLength(2);
+		// second status updates the previous notice instead of appending
+		expect(ctx.chatContainer.children).toHaveLength(1);
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_TWO");
 		expect(renderLastLine(ctx.chatContainer)).not.toContain("STATUS_ONE");
 	});
@@ -107,22 +109,22 @@ describe("InteractiveMode.showStatus", () => {
 				for (const item of items) ctx.chatContainer.addChild(item);
 				ctx.ui.requestRender();
 			},
-			lastStatusSpacer: undefined,
-			lastStatusText: undefined,
+			lastStatus: undefined,
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);
 
 		helpers.showStatus("STATUS_ONE");
-		expect(ctx.chatContainer.children).toHaveLength(2);
+		expect(ctx.chatContainer.children).toHaveLength(1);
 
 		// Something else gets added to the chat in between status updates
 		ctx.chatContainer.addChild({ render: () => ["OTHER"], invalidate: () => {} });
-		expect(ctx.chatContainer.children).toHaveLength(3);
+		expect(ctx.chatContainer.children).toHaveLength(2);
 
 		helpers.showStatus("STATUS_TWO");
-		// adds spacer + text
-		expect(ctx.chatContainer.children).toHaveLength(5);
+		// adds a fresh notice rather than rewriting the stale one
+		expect(ctx.chatContainer.children).toHaveLength(3);
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_TWO");
+		expect(ctx.chatContainer.children[0]?.render(120).join("\n")).toContain("STATUS_ONE");
 	});
 
 	test("preserves startup notifications while rendering the initial transcript", async () => {
@@ -131,7 +133,7 @@ describe("InteractiveMode.showStatus", () => {
 			const { ctx, helpers } = createInitialRenderHarness();
 
 			helpers.showWarning("startup notification probe");
-			helpers.renderInitialMessages({ preserveExistingChat: true });
+			await helpers.renderInitialMessages({ preserveExistingChat: true });
 
 			expect(renderContainer(ctx.chatContainer)).toContain("startup notification probe");
 		} finally {

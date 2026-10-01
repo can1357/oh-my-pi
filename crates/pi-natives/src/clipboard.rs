@@ -1,17 +1,18 @@
 //! Clipboard utilities backed by arboard.
 //!
-//! Provides text copy and image read support across Linux, macOS, and Windows.
-//! Performs text copy synchronously so macOS writes run on the caller thread.
+//! Provides text copy, text read, and image read support across Linux, macOS,
+//! and Windows. Performs text copy synchronously so macOS writes run on the
+//! caller thread.
 //! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
 
 use std::io::Cursor;
 
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use image::{DynamicImage, ImageFormat, RgbaImage};
-use napi::bindgen_prelude::*;
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
-use crate::task;
+use crate::{js, task};
 
 /// Clipboard image payload encoded as PNG bytes.
 #[napi(object)]
@@ -127,6 +128,19 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 	(!dib.is_empty()).then_some(dib)
 }
 
+/// Whether the Windows clipboard advertises any bitmap-family format.
+///
+/// `CF_DIB`/`CF_DIBV5`/`CF_BITMAP` synthesize from one another, so a clipboard
+/// holding an image the native decoders cannot read still answers here — the
+/// signal that a slower bridge (`Clipboard.GetImage()`) is worth starting.
+#[cfg(windows)]
+fn clipboard_has_bitmap() -> bool {
+	use clipboard_win::{formats, is_format_avail};
+	[formats::CF_DIB, formats::CF_DIBV5, formats::CF_BITMAP]
+		.into_iter()
+		.any(is_format_avail)
+}
+
 /// Copy plain text to the system clipboard.
 ///
 /// # Parameters
@@ -135,8 +149,8 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 /// # Errors
 /// Returns an error if clipboard access fails.
 #[napi]
-pub fn copy_to_clipboard(text: String) -> Result<()> {
-	set_clipboard_text(text)
+pub fn copy_to_clipboard(text: JsString) -> Result<()> {
+	set_clipboard_text(&js::utf8(text)?)
 }
 
 /// Linux: keep a single `arboard::Clipboard` alive for the whole process.
@@ -153,7 +167,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
 /// (`wl-clipboard-rs` forks its own serving process) but sharing the instance
 /// is harmless there.
 #[cfg(target_os = "linux")]
-fn set_clipboard_text(text: String) -> Result<()> {
+fn set_clipboard_text(text: &str) -> Result<()> {
 	use std::sync::OnceLock;
 
 	use parking_lot::Mutex;
@@ -180,13 +194,33 @@ fn set_clipboard_text(text: String) -> Result<()> {
 /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
 /// macOS.
 #[cfg(not(target_os = "linux"))]
-fn set_clipboard_text(text: String) -> Result<()> {
+fn set_clipboard_text(text: &str) -> Result<()> {
 	let mut clipboard = Clipboard::new()
 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
 	clipboard
 		.set_text(text)
 		.map_err(|err| Error::from_reason(format!("Failed to copy to clipboard: {err}")))?;
 	Ok(())
+}
+
+/// Read plain text from the system clipboard.
+///
+/// Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+/// "empty" from "unreadable" without spawning a shell bridge.
+///
+/// # Errors
+/// Returns an error if clipboard access fails.
+#[napi]
+pub fn read_text_from_clipboard() -> task::Promise<Option<String>> {
+	task::blocking("clipboard.read_text", (), move |_| -> Result<Option<String>> {
+		let mut clipboard = Clipboard::new()
+			.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+		match clipboard.get_text() {
+			Ok(text) => Ok(Some(text)),
+			Err(ClipboardError::ContentNotAvailable) => Ok(None),
+			Err(err) => Err(Error::from_reason(format!("Failed to read clipboard text: {err}"))),
+		}
+	})
 }
 
 /// Read an image from the system clipboard.
@@ -208,7 +242,26 @@ pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
 					mime_type: "image/png".to_string(),
 				}))
 			},
-			Err(ClipboardError::ContentNotAvailable) => Ok(None),
+			Err(ClipboardError::ContentNotAvailable) => {
+				// arboard only probes `PNG` and `CF_DIBV5`. When it finds neither,
+				// still try the raw `CF_DIB`; if a bitmap format is advertised but
+				// nothing here decodes it, surface an error so the caller can
+				// fall back to `Clipboard.GetImage()` (#2430). A clipboard with no
+				// bitmap at all stays `None`, keeping text-only pastes in-process.
+				#[cfg(windows)]
+				if clipboard_has_bitmap() {
+					if let Some(bytes) = read_raw_cf_dib().and_then(|dib| dib_to_png(&dib).ok()) {
+						return Ok(Some(ClipboardImage {
+							data:      Uint8Array::from(bytes),
+							mime_type: "image/png".to_string(),
+						}));
+					}
+					return Err(Error::from_reason(
+						"Clipboard advertises a bitmap the native reader cannot decode",
+					));
+				}
+				Ok(None)
+			},
 			Err(err) => {
 				// arboard rejects the CF_DIBV5 payloads Qt-based screenshot
 				// tools (PixPin, Snipaste, ...) produce; decode the raw CF_DIB

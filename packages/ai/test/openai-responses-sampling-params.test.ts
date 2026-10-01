@@ -33,9 +33,12 @@ const ctx: Context = {
 	messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
 };
 
-async function drain(model: Model<"openai-responses">): Promise<Record<string, unknown>> {
+async function drain(
+	model: Model<"openai-responses">,
+	options: { forceReasoningOff?: boolean } = {},
+): Promise<Record<string, unknown>> {
 	const { fetchMock, captured } = mockSseFetch();
-	const stream = streamSimple(model, ctx, { apiKey: "k", fetch: fetchMock, temperature: 0 });
+	const stream = streamSimple(model, ctx, { apiKey: "k", fetch: fetchMock, temperature: 0, ...options });
 	for await (const event of stream) {
 		if (event.type === "done" || event.type === "error") break;
 	}
@@ -66,5 +69,11 @@ describe("openai-responses sampling-param gating (#5606)", () => {
 		expect(model.compat.supportsSamplingParams).toBe(true);
 		const body = await drain(model);
 		expect(body.temperature).toBe(0);
+	});
+
+	it("disables native reasoning with effort none when an external scratchpad replaces it", async () => {
+		const model = getBundledModel("openai", "gpt-5") as Model<"openai-responses">;
+		const body = await drain(model, { forceReasoningOff: true });
+		expect(body.reasoning).toEqual({ effort: "none" });
 	});
 });

@@ -1,3 +1,4 @@
+import { mathSpanAt } from "@oh-my-pi/pi-utils/math-delimiters";
 import { TERMINAL } from "./terminal-capabilities";
 
 // LaTeX → Unicode/ANSI converter.
@@ -312,29 +313,66 @@ const FONTS: Record<string, FontStyle> = {
 	mathtt: "mono",
 	mathit: "italic",
 	mathbfit: "bolditalic",
-	textbf: "bold",
-	textit: "italic",
-	texttt: "mono",
-	textsf: "sans",
 };
+
+interface ParseStyle {
+	font: FontStyle | null;
+	bold: boolean;
+	italic: boolean;
+}
+
+interface RenderStyle {
+	bold: boolean;
+	italic: boolean;
+	foreground: string | null;
+	background: string | null;
+}
+
+type StyleAttribute = "bold" | "italic";
+
+type RenderEvent =
+	| { kind: "scope-start"; attribute: StyleAttribute }
+	| { kind: "scope-end"; attribute: StyleAttribute; restore: boolean };
+
+interface RenderChunk {
+	text: string;
+	style: RenderStyle;
+	before?: RenderEvent[];
+	after?: RenderEvent[];
+}
+
+type Rendered = RenderChunk[];
+
+const ROOT_STYLE: ParseStyle = { font: null, bold: false, italic: false };
+
+const TEXT_STYLE_COMMANDS: Readonly<Record<string, Partial<Pick<ParseStyle, "bold" | "italic">>>> = {
+	textbf: { bold: true },
+	textit: { italic: true },
+	textsl: { italic: true },
+	emph: { italic: true },
+	textmd: { bold: false },
+	textup: { italic: false },
+	texttt: {},
+	textsf: {},
+};
+
 /**
- * Math font command names (`\mathbf`, `\mathbb`, …) whose single brace argument
- * restyles glyphs. Exported for the display block engine (`latex-block`), which
- * re-wraps inline runs inside these commands when their argument contains 2-D
- * layout (fractions, matrices) so styling survives box boundaries.
+ * Math font and text-style command names whose single brace argument
+ * is rendered with the corresponding style. Exported for the display block
+ * engine, which re-wraps inline runs inside these commands when their argument
+ * contains 2-D layout so styling survives box boundaries.
  */
-export const MATH_FONT_COMMANDS: ReadonlySet<string> = new Set(Object.keys(FONTS));
+export const MATH_FONT_COMMANDS: ReadonlySet<string> = new Set([
+	...Object.keys(FONTS),
+	...Object.keys(TEXT_STYLE_COMMANDS),
+]);
 
 // Text-mode commands whose argument is passed through literally (no math).
 const TEXT_COMMANDS: Record<string, true> = {
 	text: true,
 	textrm: true,
 	textnormal: true,
-	textup: true,
-	textmd: true,
 	textsc: true,
-	textsl: true,
-	emph: true,
 	mathrm: true,
 	mathnormal: true,
 	mbox: true,
@@ -841,22 +879,84 @@ const SYMBOLS: Record<string, string> = {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const ANSI_FG_RESET = "\x1b[39m";
+const ANSI_BG_RESET = "\x1b[49m";
+const ANSI_BOLD_ON = "\x1b[1m";
+const ANSI_BOLD_OFF = "\x1b[22m";
+const ANSI_ITALIC_ON = "\x1b[3m";
+const ANSI_ITALIC_OFF = "\x1b[23m";
+
+const DEFAULT_RENDER_STYLE: RenderStyle = {
+	bold: false,
+	italic: false,
+	foreground: null,
+	background: null,
+};
+
+function renderStyle(style: ParseStyle, foreground: string | null, background: string | null): RenderStyle {
+	return { bold: style.bold, italic: style.italic, foreground, background };
+}
+
+function sameRenderStyle(a: RenderStyle, b: RenderStyle): boolean {
+	return a.bold === b.bold && a.italic === b.italic && a.foreground === b.foreground && a.background === b.background;
+}
+
+function appendRendered(target: Rendered, source: Rendered): void {
+	for (const chunk of source) {
+		if (chunk.text === "") continue;
+		const previous = target[target.length - 1];
+		if (
+			previous !== undefined &&
+			previous.after === undefined &&
+			chunk.before === undefined &&
+			chunk.after === undefined &&
+			sameRenderStyle(previous.style, chunk.style)
+		) {
+			previous.text += chunk.text;
+		} else {
+			target.push({ ...chunk });
+		}
+	}
+}
+
+function concatRendered(...parts: Rendered[]): Rendered {
+	const out: Rendered = [];
+	for (const part of parts) appendRendered(out, part);
+	return out;
+}
+
+function styledText(text: string, style: RenderStyle): Rendered {
+	return text === "" ? [] : [{ text, style }];
+}
+
+function plainText(rendered: Rendered): string {
+	let text = "";
+	for (const chunk of rendered) text += chunk.text;
+	return text;
+}
+
 /** Map every code point of `text` through `table`; null if any is unmappable. */
-function mapAll(text: string, table: Record<string, string>): string | null {
-	let out = "";
-	for (const ch of text) {
-		const mapped = table[ch];
-		if (mapped === undefined) return null;
-		out += mapped;
+function mapAll(text: Rendered, table: Record<string, string>): Rendered | null {
+	const out: Rendered = [];
+	for (const chunk of text) {
+		let mapped = "";
+		for (const ch of chunk.text) {
+			const replacement = table[ch];
+			if (replacement === undefined) return null;
+			mapped += replacement;
+		}
+		appendRendered(out, [{ ...chunk, text: mapped }]);
 	}
 	return out;
 }
 
-/** Number of Unicode code points (not UTF-16 units) in `s`. */
-function codePointLength(s: string): number {
-	let n = 0;
-	for (const _ of s) n++;
-	return n;
+/** Number of Unicode code points (not UTF-16 units) in rendered glyph text. */
+function codePointLength(text: Rendered): number {
+	let length = 0;
+	for (const chunk of text) {
+		for (const _ of chunk.text) length++;
+	}
+	return length;
 }
 
 /** Style a single ASCII letter/digit via the math alphanumeric block. */
@@ -872,27 +972,120 @@ function styleAlnum(ch: string, style: FontStyle): string {
 }
 
 /** Identity, or math-alphanumeric styling when a font style is active. */
-function styleChar(ch: string, style: FontStyle | null): string {
-	if (style === null) return ch;
+function styleChar(ch: string, style: ParseStyle): string {
+	if (style.font === null) return ch;
 	const code = ch.charCodeAt(0);
 	const isAlnum = (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57);
-	return isAlnum ? styleAlnum(ch, style) : ch;
+	return isAlnum ? styleAlnum(ch, style.font) : ch;
+}
+function surroundRendered(text: Rendered, left: string, right: string, fallback: RenderStyle): Rendered {
+	return concatRendered(styledText(left, fallback), text, styledText(right, fallback));
+}
+function trimRendered(text: Rendered): Rendered {
+	const out = text.map(chunk => ({ ...chunk }));
+	while (out.length > 0) {
+		const first = out[0];
+		if (first === undefined) break;
+		first.text = first.text.trimStart();
+		if (first.text !== "") break;
+		out.shift();
+	}
+	while (out.length > 0) {
+		const lastIndex = out.length - 1;
+		const last = out[lastIndex];
+		if (last === undefined) break;
+		last.text = last.text.trimEnd();
+		if (last.text !== "") break;
+		out.pop();
+	}
+	return out;
+}
+function scopeRendered(text: Rendered, attribute: StyleAttribute, parentActive: boolean): Rendered {
+	if (!parentActive || text.length === 0) return text;
+	const out = text.map(chunk => ({ ...chunk }));
+	const first = out[0];
+	const last = out[out.length - 1];
+	if (first?.style[attribute]) {
+		first.before = [...(first.before ?? []), { kind: "scope-start", attribute }];
+	}
+	if (last?.style[attribute]) {
+		last.after = [...(last.after ?? []), { kind: "scope-end", attribute, restore: true }];
+	}
+	return out;
 }
 
-/** Append a combining mark after each non-space base glyph (accents/radicals). */
-function applyCombining(text: string, mark: string): string {
-	let out = "";
-	for (const ch of text) out += ch === " " ? ch : ch + mark;
+/** Append a combining mark after each non-space base glyph. */
+function applyCombining(text: Rendered, mark: string): Rendered {
+	const out: Rendered = [];
+	for (const chunk of text) {
+		let mapped = "";
+		for (const ch of chunk.text) mapped += ch === " " ? ch : ch + mark;
+		appendRendered(out, [{ ...chunk, text: mapped }]);
+	}
 	return out;
+}
+
+function emitStyleTransition(out: string[], from: RenderStyle, to: RenderStyle): void {
+	if (from.bold && !to.bold) out.push(ANSI_BOLD_OFF);
+	if (from.italic && !to.italic) out.push(ANSI_ITALIC_OFF);
+	const foregroundChanged = from.foreground !== to.foreground;
+	const backgroundChanged = from.background !== to.background;
+	if (foregroundChanged && backgroundChanged) {
+		if (to.background === null) {
+			out.push(to.background ?? ANSI_BG_RESET);
+			out.push(to.foreground ?? ANSI_FG_RESET);
+		} else {
+			out.push(to.foreground ?? ANSI_FG_RESET);
+			out.push(to.background ?? ANSI_BG_RESET);
+		}
+	} else {
+		if (foregroundChanged) out.push(to.foreground ?? ANSI_FG_RESET);
+		if (backgroundChanged) out.push(to.background ?? ANSI_BG_RESET);
+	}
+	if (!from.bold && to.bold) out.push(ANSI_BOLD_ON);
+	if (!from.italic && to.italic) out.push(ANSI_ITALIC_ON);
+}
+
+function emitStyleEvent(out: string[], event: RenderEvent, active: RenderStyle): RenderStyle {
+	if (event.kind === "scope-start") {
+		out.push(event.attribute === "bold" ? ANSI_BOLD_ON : ANSI_ITALIC_ON);
+		return { ...active, [event.attribute]: true };
+	}
+	if (active[event.attribute]) out.push(event.attribute === "bold" ? ANSI_BOLD_OFF : ANSI_ITALIC_OFF);
+	if (event.restore) out.push(event.attribute === "bold" ? ANSI_BOLD_ON : ANSI_ITALIC_ON);
+	return { ...active, [event.attribute]: event.restore };
+}
+
+/** Materialize terminal attributes only after all glyph transforms are complete. */
+function renderAnsi(text: Rendered): string {
+	let out = "";
+	let active = DEFAULT_RENDER_STYLE;
+	for (const chunk of text) {
+		const transitions: string[] = [];
+		emitStyleTransition(transitions, active, chunk.style);
+		out += transitions.join("");
+		active = chunk.style;
+		for (const event of chunk.before ?? []) {
+			const events: string[] = [];
+			active = emitStyleEvent(events, event, active);
+			out += events.join("");
+		}
+		out += chunk.text;
+		for (const event of chunk.after ?? []) {
+			const events: string[] = [];
+			active = emitStyleEvent(events, event, active);
+			out += events.join("");
+		}
+	}
+	const transitions: string[] = [];
+	emitStyleTransition(transitions, active, DEFAULT_RENDER_STYLE);
+	return out + transitions.join("");
 }
 
 /** Light unescape for text-mode content (`\&` → `&`, `~` → space). */
 function unescapeText(s: string): string {
 	return s.replace(/\\([&%$#_{}\s])/g, "$1").replace(/~/g, " ");
 }
-
-const ANSI_FG_RESET = "\x1b[39m";
-const ANSI_BG_RESET = "\x1b[49m";
 
 type AnsiColorFormat = "ansi-16m" | "ansi-256";
 
@@ -1159,30 +1352,18 @@ export function latexColorScope(model: string | null, spec: string): ((text: str
 	return text => foreground + text.replaceAll(ANSI_FG_RESET, foreground) + ANSI_FG_RESET;
 }
 
-function restoreAnsi(
-	text: string,
-	fromForeground: string | null,
-	toForeground: string | null,
-	fromBackground: string | null,
-	toBackground: string | null,
-): string {
-	if (fromForeground !== toForeground && fromForeground !== null) text += toForeground ?? ANSI_FG_RESET;
-	if (fromBackground !== toBackground && fromBackground !== null) text += toBackground ?? ANSI_BG_RESET;
-	return text;
-}
-
-function toSuperscript(text: string, group: boolean): string {
-	if (text === "") return "";
+function toSuperscript(text: Rendered, group: boolean, fallback: RenderStyle): Rendered {
+	if (text.length === 0) return [];
 	const mapped = mapAll(text, SUPERSCRIPT);
 	if (mapped !== null) return mapped;
-	return group ? `^(${text})` : `^${text}`;
+	return concatRendered(styledText(group ? "^(" : "^", fallback), text, styledText(group ? ")" : "", fallback));
 }
 
-function toSubscript(text: string, group: boolean): string {
-	if (text === "") return "";
+function toSubscript(text: Rendered, group: boolean, fallback: RenderStyle): Rendered {
+	if (text.length === 0) return [];
 	const mapped = mapAll(text, SUBSCRIPT);
 	if (mapped !== null) return mapped;
-	return group ? `_(${text})` : `_${text}`;
+	return concatRendered(styledText(group ? "_(" : "_", fallback), text, styledText(group ? ")" : "", fallback));
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,7 +1371,7 @@ function toSubscript(text: string, group: boolean): string {
 // ---------------------------------------------------------------------------
 
 interface Argument {
-	text: string;
+	text: Rendered;
 	/** True when the argument came from a `{…}` group (affects fraction/script parens). */
 	group: boolean;
 }
@@ -1228,12 +1409,12 @@ class LatexParser {
 	}
 
 	render(): string {
-		return restoreAnsi(this.parse(null, false), this.#foreground, null, this.#background, null);
+		return renderAnsi(this.parse(ROOT_STYLE, false));
 	}
 
 	/** Parse a run until end-of-input, or until `}` when `stopAtBrace`. */
-	parse(style: FontStyle | null, stopAtBrace: boolean): string {
-		let out = "";
+	parse(style: ParseStyle, stopAtBrace: boolean): Rendered {
+		const out: Rendered = [];
 		while (this.#i < this.#s.length) {
 			const c = this.#s[this.#i];
 			if (c === "}") {
@@ -1241,12 +1422,16 @@ class LatexParser {
 				this.#i++; // stray close brace
 				continue;
 			}
-			out += this.#node(style);
+			appendRendered(out, this.#node(style));
 		}
 		return out;
 	}
 
-	#node(style: FontStyle | null): string {
+	#renderStyle(style: ParseStyle): RenderStyle {
+		return renderStyle(style, this.#foreground, this.#background);
+	}
+
+	#node(style: ParseStyle): Rendered {
 		const c = this.#s[this.#i];
 		switch (c) {
 			case "\\":
@@ -1261,41 +1446,41 @@ class LatexParser {
 				return this.#script(style, false);
 			case "$":
 				this.#i++;
-				return ""; // stray delimiter
+				return []; // stray delimiter
 			case "~":
 				this.#i++;
-				return " "; // non-breaking space
+				return styledText(" ", this.#renderStyle(style)); // non-breaking space
 			case "&":
 				this.#i++;
-				return "  "; // column separator
+				return styledText("  ", this.#renderStyle(style)); // column separator
 			case "'": {
 				let k = 0;
 				while (this.#s[this.#i] === "'") {
 					k++;
 					this.#i++;
 				}
-				return k <= 4 ? PRIMES[k] : PRIMES[1].repeat(k);
+				return styledText(k <= 4 ? PRIMES[k] : PRIMES[1].repeat(k), this.#renderStyle(style));
 			}
 			case "%": {
 				const nl = this.#s.indexOf("\n", this.#i);
 				this.#i = nl === -1 ? this.#s.length : nl + 1;
-				return "";
+				return [];
 			}
 			default:
 				this.#i++;
-				return styleChar(c, style);
+				return styledText(styleChar(c, style), this.#renderStyle(style));
 		}
 	}
 
-	#command(style: FontStyle | null): string {
+	#command(style: ParseStyle): Rendered {
 		this.#i++; // past backslash
-		if (this.#i >= this.#s.length) return "";
+		if (this.#i >= this.#s.length) return [];
 		const c = this.#s[this.#i];
 		if (!/[A-Za-z]/.test(c)) {
 			this.#i++;
 			switch (c) {
 				case "\\":
-					return "\n"; // row break
+					return styledText("\n", this.#renderStyle(style)); // row break
 				case "{":
 				case "}":
 				case "$":
@@ -1305,25 +1490,25 @@ class LatexParser {
 				case "_":
 				case " ":
 				case ".":
-					return c;
+					return styledText(c, this.#renderStyle(style));
 				case ",":
 				case ":":
 				case ";":
 				case ">":
-					return " "; // spacing
+					return styledText(" ", this.#renderStyle(style)); // spacing
 				case "!":
-					return ""; // negative thin space
+					return []; // negative thin space
 				case "/":
-					return ""; // italic correction
+					return []; // italic correction
 				case "|":
-					return "‖";
+					return styledText("‖", this.#renderStyle(style));
 				case "(":
 				case ")":
 				case "[":
 				case "]":
-					return ""; // bare math delimiters that slipped through
+					return []; // bare math delimiters that slipped through
 				default:
-					return c;
+					return styledText(c, this.#renderStyle(style));
 			}
 		}
 		let name = "";
@@ -1335,26 +1520,32 @@ class LatexParser {
 		return this.#applyCommand(name, style);
 	}
 
-	#applyCommand(name: string, style: FontStyle | null): string {
-		// Fonts: reparse the argument under the requested style.
+	#applyCommand(name: string, style: ParseStyle): Rendered {
+		const current = this.#renderStyle(style);
 		const font = FONTS[name];
-		if (font) return this.#argument(font).text;
+		if (font) return this.#argument({ ...style, font }).text;
 
-		if (TEXT_COMMANDS[name]) return unescapeText(this.#rawArgument());
-
-		if (name === "operatorname") {
-			const fn = unescapeText(this.#rawArgument());
-			return fn + this.#spaceBeforeArg();
+		const textStyle = TEXT_STYLE_COMMANDS[name];
+		if (textStyle !== undefined) {
+			const text = this.#argument({ ...style, ...textStyle }).text;
+			const attribute = textStyle.bold === true ? "bold" : textStyle.italic === true ? "italic" : null;
+			return attribute === null ? text : scopeRendered(text, attribute, style[attribute]);
 		}
 
-		// Accents → combining marks over each glyph.
+		if (TEXT_COMMANDS[name]) return styledText(unescapeText(this.#rawArgument()), current);
+		if (name === "operatorname") {
+			const fn = unescapeText(this.#rawArgument());
+			return styledText(fn + this.#spaceBeforeArg(), current);
+		}
+
+		// Accents operate on glyph chunks, never on terminal escape sequences.
 		const accent = ACCENTS[name];
 		if (accent) return applyCombining(this.#argument(style).text, accent);
 
 		if (name === "frac" || name === "dfrac" || name === "tfrac" || name === "cfrac") {
 			const num = this.#argument(style);
 			const den = this.#argument(style);
-			return this.#fraction(num, den);
+			return this.#fraction(num, den, current);
 		}
 
 		if (name === "genfrac") {
@@ -1364,20 +1555,29 @@ class LatexParser {
 			this.#rawArgument(); // math style
 			const num = this.#argument(style);
 			const den = this.#argument(style);
-			return left + this.#fraction(num, den) + right;
+			return concatRendered(left, this.#fraction(num, den, current), right);
 		}
 
 		if (name === "binom" || name === "dbinom" || name === "tbinom") {
 			const n = this.#argument(style);
 			const k = this.#argument(style);
-			return `C(${n.text}, ${k.text})`;
+			return concatRendered(
+				styledText("C(", current),
+				n.text,
+				styledText(", ", current),
+				k.text,
+				styledText(")", current),
+			);
 		}
 
 		if (name === "sqrt") return this.#sqrt(style);
 
 		if (name === "not") {
 			const arg = this.#argument(style);
-			return NOT_MAP[arg.text] ?? applyCombining(arg.text, "\u0338");
+			const mapped = NOT_MAP[plainText(arg.text)];
+			return mapped === undefined
+				? applyCombining(arg.text, "\u0338")
+				: styledText(mapped, arg.text[0]?.style ?? current);
 		}
 
 		if (name === "overset" || name === "stackrel") return this.#scriptedAbove(style);
@@ -1387,18 +1587,21 @@ class LatexParser {
 		const arrow = EXTENSIBLE_ARROWS[name];
 		if (arrow !== undefined) return this.#extensibleArrow(style, arrow);
 
-		if (name === "boxed" || name === "fbox") return `[${this.#argument(style).text}]`;
-		if (name === "overbrace") return `⏞(${this.#argument(style).text})`;
-		if (name === "underbrace") return `⏟(${this.#argument(style).text})`;
-		if (name === "overbracket") return `⎴(${this.#argument(style).text})`;
-		if (name === "underbracket") return `⎵(${this.#argument(style).text})`;
-		if (name === "overparen") return `⏜(${this.#argument(style).text})`;
-		if (name === "underparen") return `⏝(${this.#argument(style).text})`;
+		if (name === "boxed" || name === "fbox") return surroundRendered(this.#argument(style).text, "[", "]", current);
+		if (name === "overbrace") return surroundRendered(this.#argument(style).text, "⏞(", ")", current);
+		if (name === "underbrace") return surroundRendered(this.#argument(style).text, "⏟(", ")", current);
+		if (name === "overbracket") return surroundRendered(this.#argument(style).text, "⎴(", ")", current);
+		if (name === "underbracket") return surroundRendered(this.#argument(style).text, "⎵(", ")", current);
+		if (name === "overparen") return surroundRendered(this.#argument(style).text, "⏜(", ")", current);
+		if (name === "underparen") return surroundRendered(this.#argument(style).text, "⏝(", ")", current);
 		if (name === "cancel") return applyCombining(this.#argument(style).text, "\u0338");
 		if (name === "bcancel") return applyCombining(this.#argument(style).text, "\u20E5");
 		if (name === "xcancel") return applyCombining(applyCombining(this.#argument(style).text, "\u0338"), "\u20E5");
 		if (name === "sout") return applyCombining(this.#argument(style).text, "\u0336");
-		if (name === "substack") return this.#argument(style).text.replace(NEWLINES, ",");
+		if (name === "substack") {
+			const arg = this.#argument(style).text;
+			return arg.map(chunk => ({ ...chunk, text: chunk.text.replace(NEWLINES, ",") }));
+		}
 
 		if (name === "left" || name === "right" || name === "middle") return this.#delimiter(style);
 
@@ -1407,19 +1610,19 @@ class LatexParser {
 		if (name === "begin") return this.#environment(style);
 		if (name === "end") {
 			this.#rawArgument();
-			return "";
+			return [];
 		}
 
-		if (name === "bmod") return " mod ";
-		if (name === "pmod") return `(mod ${this.#argument(style).text})`;
-		if (name === "pod") return `(${this.#argument(style).text})`;
-		if (name === "tag") return `(${this.#argument(style).text})`;
+		if (name === "bmod") return styledText(" mod ", current);
+		if (name === "pmod") return surroundRendered(this.#argument(style).text, "(mod ", ")", current);
+		if (name === "pod") return surroundRendered(this.#argument(style).text, "(", ")", current);
+		if (name === "tag") return surroundRendered(this.#argument(style).text, "(", ")", current);
 		if (name === "label") {
 			this.#rawArgument();
-			return "";
+			return [];
 		}
-		if (name === "ref" || name === "eqref") return `(${unescapeText(this.#rawArgument())})`;
-		if (name === "url") return unescapeText(this.#rawArgument());
+		if (name === "ref" || name === "eqref") return styledText(`(${unescapeText(this.#rawArgument())})`, current);
+		if (name === "url") return styledText(unescapeText(this.#rawArgument()), current);
 		if (name === "href") {
 			this.#rawArgument();
 			return this.#argument(style).text;
@@ -1429,22 +1632,22 @@ class LatexParser {
 		if (name === "fcolorbox") return this.#fcolorbox(style);
 		if (name === "color") return this.#setForeground();
 		if (name === "normalcolor") {
-			const previous = this.#foreground;
 			this.#foreground = null;
-			return previous === null ? "" : ANSI_FG_RESET;
+			return [];
 		}
 		if (name === "phantom" || name === "hphantom") {
-			return " ".repeat(codePointLength(this.#argument(style).text));
+			const arg = this.#argument(style).text;
+			return styledText(" ".repeat(codePointLength(arg)), current);
 		}
 		if (name === "vphantom") {
 			this.#argument(style);
-			return "";
+			return [];
 		}
 
-		if (FUNCTIONS[name]) return name + this.#spaceBeforeArg();
+		if (FUNCTIONS[name]) return styledText(name + this.#spaceBeforeArg(), current);
 
 		const symbol = SYMBOLS[name];
-		if (symbol !== undefined) return symbol;
+		if (symbol !== undefined) return styledText(symbol, current);
 
 		// Layout-only commands that carry no visible glyph.
 		switch (name) {
@@ -1457,36 +1660,34 @@ class LatexParser {
 			case "nonumber":
 			case "notag":
 			case "quad":
-				return name === "quad" ? "  " : "";
+				return styledText(name === "quad" ? "  " : "", current);
 			case "qquad":
-				return "    ";
+				return styledText("    ", current);
 			case "thinspace":
 			case "enspace":
 			case "medspace":
 			case "thickspace":
 			case "space":
-				return " ";
+				return styledText(" ", current);
 			case "negthinspace":
 			case "negmedspace":
 			case "negthickspace":
-				return "";
+				return [];
 		}
 
 		// Unknown command: surface the bare name rather than dropping it silently.
-		return name;
+		return styledText(name, current);
 	}
 
-	#group(style: FontStyle | null): string {
+	#group(style: ParseStyle): Rendered {
 		this.#i++;
 		const outerForeground = this.#foreground;
 		const outerBackground = this.#background;
 		const inner = this.parse(style, true);
-		const innerForeground = this.#foreground;
-		const innerBackground = this.#background;
 		if (this.#s[this.#i] === "}") this.#i++;
 		this.#foreground = outerForeground;
 		this.#background = outerBackground;
-		return restoreAnsi(inner, innerForeground, outerForeground, innerBackground, outerBackground);
+		return inner;
 	}
 
 	#readAnsiColor(): AnsiColor | null {
@@ -1494,48 +1695,45 @@ class LatexParser {
 		return ansiColor(model, this.#rawArgument());
 	}
 
-	#setForeground(): string {
+	#setForeground(): Rendered {
 		const color = this.#readAnsiColor();
-		if (color === null) return "";
-		this.#foreground = color.foreground;
-		return color.foreground;
+		if (color !== null) this.#foreground = color.foreground;
+		return [];
 	}
 
-	#scopedForeground(color: AnsiColor | null, style: FontStyle | null): string {
+	#scopedForeground(color: AnsiColor | null, style: ParseStyle): Rendered {
 		const outerForeground = this.#foreground;
 		if (color === null) return this.#argument(style).text;
 		this.#foreground = color.foreground;
 		const arg = this.#argument(style).text;
-		const innerForeground = this.#foreground;
 		this.#foreground = outerForeground;
-		return color.foreground + restoreAnsi(arg, innerForeground, outerForeground, this.#background, this.#background);
+		return arg;
 	}
 
-	#scopedBackground(color: AnsiColor | null, style: FontStyle | null): string {
+	#scopedBackground(color: AnsiColor | null, style: ParseStyle): Rendered {
 		const outerBackground = this.#background;
 		if (color === null) return this.#argument(style).text;
 		this.#background = color.background;
 		const arg = this.#argument(style).text;
-		const innerBackground = this.#background;
 		this.#background = outerBackground;
-		return color.background + restoreAnsi(arg, this.#foreground, this.#foreground, innerBackground, outerBackground);
+		return arg;
 	}
 
-	#fcolorbox(style: FontStyle | null): string {
+	#fcolorbox(style: ParseStyle): Rendered {
 		const frameModel = this.#optionalRawArgument();
 		const frame = ansiColor(frameModel, this.#rawArgument());
 		const backgroundModel = this.#optionalRawArgument() ?? frameModel;
 		const background = ansiColor(backgroundModel, this.#rawArgument());
 		const body = this.#scopedBackground(background, style);
-		if (frame === null) return `[${body}]`;
-		return `${frame.foreground}[${this.#foreground ?? ANSI_FG_RESET}${body}${frame.foreground}]${this.#foreground ?? ANSI_FG_RESET}`;
+		const frameStyle = renderStyle(style, frame?.foreground ?? this.#foreground, this.#background);
+		return concatRendered(styledText("[", frameStyle), body, styledText("]", frameStyle));
 	}
 
 	/** Read one argument: a `{…}` group, a single command, or a single char. */
-	#argument(style: FontStyle | null): Argument {
+	#argument(style: ParseStyle): Argument {
 		while (this.#s[this.#i] === " ") this.#i++;
 		const c = this.#s[this.#i];
-		if (c === undefined) return { text: "", group: false };
+		if (c === undefined) return { text: [], group: false };
 		if (c === "{") {
 			this.#i++;
 			const inner = this.parse(style, true);
@@ -1549,7 +1747,7 @@ class LatexParser {
 			return { text: this.#script(style, c === "^"), group: false };
 		}
 		this.#i++;
-		return { text: styleChar(c, style), group: false };
+		return { text: styledText(styleChar(c, style), this.#renderStyle(style)), group: false };
 	}
 
 	/** Read a raw (unparsed) argument, returning its literal source text. */
@@ -1599,74 +1797,89 @@ class LatexParser {
 		return out;
 	}
 
-	#script(style: FontStyle | null, sup: boolean): string {
+	#script(style: ParseStyle, sup: boolean): Rendered {
+		const current = this.#renderStyle(style);
 		const arg = this.#argument(style);
-		return sup ? toSuperscript(arg.text, arg.group) : toSubscript(arg.text, arg.group);
+		return sup ? toSuperscript(arg.text, arg.group, current) : toSubscript(arg.text, arg.group, current);
 	}
 
-	#wrapFrac(arg: Argument): string {
-		return arg.group && codePointLength(arg.text) > 1 ? `(${arg.text})` : arg.text;
+	#wrapFrac(arg: Argument, fallback: RenderStyle): Rendered {
+		if (!arg.group || codePointLength(arg.text) <= 1) return arg.text;
+		return surroundRendered(arg.text, "(", ")", fallback);
 	}
 
-	#fraction(num: Argument, den: Argument): string {
-		const vulgar = VULGAR[`${num.text}/${den.text}`];
-		if (vulgar) return vulgar;
-		return `${this.#wrapFrac(num)}/${this.#wrapFrac(den)}`;
+	#fraction(num: Argument, den: Argument, fallback: RenderStyle): Rendered {
+		const numText = plainText(num.text);
+		const denText = plainText(den.text);
+		const first = num.text[0]?.style ?? fallback;
+		const same = [...num.text, ...den.text].every(chunk => sameRenderStyle(chunk.style, first));
+		const vulgar = VULGAR[`${numText}/${denText}`];
+		if (vulgar && same) return styledText(vulgar, first);
+		return concatRendered(this.#wrapFrac(num, fallback), styledText("/", fallback), this.#wrapFrac(den, fallback));
 	}
 
-	#scriptedAbove(style: FontStyle | null): string {
+	#scriptedAbove(style: ParseStyle): Rendered {
+		const current = this.#renderStyle(style);
 		const above = this.#argument(style);
 		const base = this.#argument(style);
-		return base.text + toSuperscript(above.text, true);
+		return concatRendered(base.text, toSuperscript(above.text, true, current));
 	}
 
-	#scriptedBelow(style: FontStyle | null): string {
+	#scriptedBelow(style: ParseStyle): Rendered {
+		const current = this.#renderStyle(style);
 		const below = this.#argument(style);
 		const base = this.#argument(style);
-		return base.text + toSubscript(below.text, true);
+		return concatRendered(base.text, toSubscript(below.text, true, current));
 	}
 
-	#prescript(style: FontStyle | null): string {
+	#prescript(style: ParseStyle): Rendered {
+		const current = this.#renderStyle(style);
 		const sup = this.#argument(style);
 		const sub = this.#argument(style);
 		const base = this.#argument(style);
-		return toSuperscript(sup.text, true) + toSubscript(sub.text, true) + base.text;
+		return concatRendered(toSuperscript(sup.text, true, current), toSubscript(sub.text, true, current), base.text);
 	}
 
-	#extensibleArrow(style: FontStyle | null, arrow: string): string {
+	#extensibleArrow(style: ParseStyle, arrow: string): Rendered {
+		const current = this.#renderStyle(style);
 		const below = this.#optionalArgument(style);
 		const above = this.#argument(style);
-		return arrow + toSuperscript(above.text, true) + (below ? toSubscript(below.text, true) : "");
+		return concatRendered(
+			styledText(arrow, current),
+			toSuperscript(above.text, true, current),
+			below === null ? [] : toSubscript(below.text, true, current),
+		);
 	}
 
-	#delimiter(style: FontStyle | null): string {
+	#delimiter(style: ParseStyle): Rendered {
 		while (this.#s[this.#i] === " ") this.#i++;
 		const c = this.#s[this.#i];
-		if (c === undefined) return "";
+		const current = this.#renderStyle(style);
+		if (c === undefined) return [];
 		if (c === ".") {
 			this.#i++;
-			return "";
+			return [];
 		}
 		if (c !== "\\") {
 			this.#i++;
-			return styleChar(c, style);
+			return styledText(styleChar(c, style), current);
 		}
 		this.#i++;
-		if (this.#i >= this.#s.length) return "";
+		if (this.#i >= this.#s.length) return [];
 		const d = this.#s[this.#i];
 		if (!/[A-Za-z]/.test(d)) {
 			this.#i++;
 			switch (d) {
 				case ".":
-					return "";
+					return [];
 				case "{":
-					return "{";
+					return styledText("{", current);
 				case "}":
-					return "}";
+					return styledText("}", current);
 				case "|":
-					return "‖";
+					return styledText("‖", current);
 				default:
-					return d;
+					return styledText(d, current);
 			}
 		}
 		let name = "";
@@ -1674,10 +1887,10 @@ class LatexParser {
 			name += this.#s[this.#i];
 			this.#i++;
 		}
-		return SYMBOLS[name] ?? name;
+		return styledText(SYMBOLS[name] ?? name, current);
 	}
 
-	#optionalArgument(style: FontStyle | null): Argument | null {
+	#optionalArgument(style: ParseStyle): Argument | null {
 		const source = this.#optionalRawArgument();
 		if (source === null) return null;
 		return { text: new LatexParser(source).parse(style, false), group: true };
@@ -1713,18 +1926,30 @@ class LatexParser {
 		return out;
 	}
 
-	#sqrt(style: FontStyle | null): string {
+	#sqrt(style: ParseStyle): Rendered {
 		while (this.#s[this.#i] === " ") this.#i++;
-		let radical = "√";
-		const index = this.#optionalArgument(style)?.text;
-		if (index !== undefined) {
-			radical = index === "2" ? "√" : index === "3" ? "∛" : index === "4" ? "∜" : `${toSuperscript(index, true)}√`;
+		const current = this.#renderStyle(style);
+		let radical = styledText("√", current);
+		const index = this.#optionalArgument(style);
+		if (index !== null) {
+			const indexText = plainText(index.text);
+			radical =
+				indexText === "2"
+					? styledText("√", current)
+					: indexText === "3"
+						? styledText("∛", current)
+						: indexText === "4"
+							? styledText("∜", current)
+							: concatRendered(toSuperscript(index.text, true, current), styledText("√", current));
 		}
 		const radicand = this.#argument(style).text;
-		return radical + (codePointLength(radicand) > 1 ? `(${radicand})` : radicand);
+		return concatRendered(
+			radical,
+			codePointLength(radicand) > 1 ? surroundRendered(radicand, "(", ")", current) : radicand,
+		);
 	}
 
-	#environment(style: FontStyle | null): string {
+	#environment(style: ParseStyle): Rendered {
 		const env = this.#rawArgument().trim();
 		if (env === "array" || env === "tabular" || env === "array*" || env === "tabular*") {
 			this.#optionalRawArgument();
@@ -1739,16 +1964,16 @@ class LatexParser {
 			this.#optionalRawArgument();
 			if (this.#s[this.#i] === "{") this.#rawArgument(); // column count
 		}
-		let body = "";
+		const body: Rendered = [];
 		while (this.#i < this.#s.length) {
 			if (this.#s.startsWith("\\end", this.#i)) {
 				this.#i += 4;
 				this.#rawArgument();
 				break;
 			}
-			body += this.#node(style);
+			appendRendered(body, this.#node(style));
 		}
-		body = body.trim();
+		let renderedBody = trimRendered(body);
 		if (
 			env === "cases" ||
 			env === "cases*" ||
@@ -1757,10 +1982,15 @@ class LatexParser {
 			env === "rcases" ||
 			env === "drcases"
 		) {
-			body = body.replace(/[ \t]*\n+[ \t]*/g, "; ").replace(/ {3,}/g, "  ");
+			renderedBody = renderedBody.map(chunk => ({
+				...chunk,
+				text: chunk.text.replace(/[ \t]*\n+[ \t]*/g, "; ").replace(/ {3,}/g, "  "),
+			}));
 		}
 		const delims = ENV_DELIMS[env];
-		return delims ? delims[0] + body + delims[1] : body;
+		if (!delims) return renderedBody;
+		const current = this.#renderStyle(style);
+		return concatRendered(styledText(delims[0], current), renderedBody, styledText(delims[1], current));
 	}
 
 	/** A separator space when the next glyph is alphanumeric or a command. */
@@ -1787,7 +2017,7 @@ export function latexToUnicode(src: string): string {
 
 const NEWLINES = /\n+/g;
 const BARE_MATH_LINE_COMMAND =
-	/\\(?:operatorname|frac|dfrac|tfrac|cfrac|genfrac|sqrt|sum|prod|coprod|int|iint|iiint|lim|alpha|beta|gamma|delta|epsilon|varepsilon|theta|lambda|mu|sigma|phi|varphi|pi|omega|infty|partial|nabla|forall|exists|mathbb|mathcal|mathscr|mathbf|mathrm|left|right|begin|phantom|hphantom|vphantom|cdots|ldots|dots|to|rightarrow|leftarrow|leq|geq|neq|times|cdot|overline|underline|vec|hat|bar|textcolor|color|normalcolor|colorbox|fcolorbox)\b/;
+	/\\(?:operatorname|frac|dfrac|tfrac|cfrac|genfrac|sqrt|sum|prod|coprod|int|iint|iiint|lim|alpha|beta|gamma|delta|epsilon|varepsilon|theta|lambda|mu|sigma|phi|varphi|pi|omega|infty|partial|nabla|forall|exists|mathbb|mathcal|mathscr|mathbf|mathrm|left|right|begin|phantom|hphantom|vphantom|cdots|ldots|dots|to|rightarrow|leftarrow|leq|geq|neq|times|cdot|overline|underline|vec|hat|bar|textbf|textit|textsl|emph|textmd|textup|texttt|textsf|textcolor|color|normalcolor|colorbox|fcolorbox)\b/;
 
 // Display-math environments eligible for delimiter-less ("bare") rendering in
 // prose. Deliberately excludes text-mode table/list/float environments
@@ -1934,23 +2164,16 @@ export function renderMathInText(text: string): string {
 				i += 2;
 				continue;
 			}
-			if (d === "(") {
-				const close = text.indexOf("\\)", i + 2);
-				if (close !== -1) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-			} else if (d === "[") {
-				const close = text.indexOf("\\]", i + 2);
-				if (close !== -1) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-			} else if (d === "$") {
+			if (d === "$") {
 				out += "$";
 				i += 2;
+				continue;
+			}
+			// `i` as the escape bound: the walk above already consumed `\\` and `\$`.
+			const span = mathSpanAt(text, i, i);
+			if (span) {
+				out += conv(span.body);
+				i = span.end;
 				continue;
 			}
 			out += c;
@@ -1958,21 +2181,15 @@ export function renderMathInText(text: string): string {
 			continue;
 		}
 		if (c === "$") {
-			if (text[i + 1] === "$") {
-				const close = text.indexOf("$$", i + 2);
-				if (close !== -1 && text.slice(i + 2, close).trim().length > 0) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-				out += "$$";
-				i += 2;
+			const span = mathSpanAt(text, i, i);
+			if (span) {
+				out += conv(span.body);
+				i = span.end;
 				continue;
 			}
-			const close = inlineMathSpanEnd(text, i);
-			if (close !== -1) {
-				out += conv(text.slice(i + 1, close));
-				i = close + 1;
+			if (text[i + 1] === "$") {
+				out += "$$";
+				i += 2;
 				continue;
 			}
 			out += "$";
@@ -1983,35 +2200,4 @@ export function renderMathInText(text: string): string {
 		i++;
 	}
 	return renderBareMathInText(out);
-}
-
-/**
- * Index of the `$` that closes an inline math span opened at `open` (the index
- * of the opening `$`), or -1 when the run is not inline math. Applies pandoc's
- * anti-currency heuristics: the opener must not be followed by whitespace, the
- * closer must not be preceded by whitespace nor followed by a digit, `\$` is a
- * literal dollar, and the span may not span a newline. Shared by
- * `renderMathInText` and the markdown math tokenizer so the rule has one home.
- */
-export function inlineMathSpanEnd(text: string, open: number): number {
-	const after = text[open + 1];
-	if (after === undefined || after === " " || after === "\t" || after === "\n" || after === "$") {
-		return -1;
-	}
-	for (let j = open + 1; j < text.length; j++) {
-		const ch = text[j];
-		if (ch === "\\") {
-			j++;
-			continue;
-		}
-		if (ch === "\n") return -1;
-		if (ch === "$") {
-			const prev = text[j - 1];
-			if (prev === " " || prev === "\t") return -1;
-			const next = text[j + 1];
-			if (next !== undefined && next >= "0" && next <= "9") continue; // currency: keep scanning
-			return text.slice(open + 1, j).trim().length > 0 ? j : -1;
-		}
-	}
-	return -1;
 }

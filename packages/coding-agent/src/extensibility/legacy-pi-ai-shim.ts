@@ -28,8 +28,9 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	calculateCost,
 	getBundledModel,
@@ -89,6 +90,20 @@ export function clampThinkingLevel<TApi extends Api>(model: Model<TApi>, level: 
 }
 
 /**
+ * Enumerate the thinking levels a model supports, mirroring historical pi-ai's
+ * `getSupportedThinkingLevels` (`@earendil-works/pi-ai` `models.ts`). Upstream
+ * returns `["off"]` for non-reasoning models and, for reasoning models, `off`
+ * followed by each selectable effort in canonical order; OMP's baked
+ * `getSupportedEfforts` supplies that effort ladder directly. Legacy `/thinking`
+ * menus (e.g. `@companion-ai/feynman`) call this to list the levels a user may
+ * pick for the active model.
+ */
+export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): (Effort | "off")[] {
+	if (!model.reasoning) return ["off"];
+	return ["off", ...getSupportedEfforts(model)];
+}
+
+/**
  * Provider-error classification patterns ported verbatim from historical pi-ai
  * (`@earendil-works/pi-ai` `utils/retry.ts`). Legacy extensions call
  * {@link isRetryableAssistantError} to decide whether to restart a failed
@@ -129,11 +144,29 @@ export { calculateCost, getBundledModel, getBundledModels, getBundledProviders, 
 export const getModel = getBundledModel;
 export const getModels = getBundledModels;
 
+const ANTHROPIC_MESSAGES_API = {
+	stream: streamAnthropic,
+	streamSimple: (model: Model<"anthropic-messages">, context: Context, options?: SimpleStreamOptions) =>
+		streamSimple(model, context, options),
+};
+
+/**
+ * Expose OMP's Anthropic transport through the legacy `/compat` provider
+ * factory used by extensions such as `pi-background-tasks`.
+ */
+export function anthropicMessagesApi() {
+	return ANTHROPIC_MESSAGES_API;
+}
+
 /**
  * Stream OpenAI Responses through the historical simple-options contract.
  *
  * Legacy `/compat` callers pass {@link SimpleStreamOptions}; routing through
  * `streamSimple` preserves option normalization before provider dispatch.
+ *
+ * Transient-failure retry (overload, rate-limit, 5xx) is the **caller's
+ * responsibility**. Oneshot callers that collect the full result before acting
+ * should wrap with `retryTransientCompletion` from `@oh-my-pi/pi-ai`.
  */
 export function streamSimpleOpenAIResponses(
 	model: Model<"openai-responses">,

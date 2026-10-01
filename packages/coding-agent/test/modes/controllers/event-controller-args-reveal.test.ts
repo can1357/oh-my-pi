@@ -6,15 +6,19 @@
  * how assistant text snaps at message_end.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { STREAMING_REVEAL_FRAME_MS } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+
+import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(async () => {
 	await initTheme();
@@ -40,28 +44,29 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 	};
 }
 
-function createFixture(streamingMessage: AssistantMessage) {
+function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 	const pendingTools = new Map<string, ToolExecutionComponent>();
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		settings,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		streamingComponent: { updateContent: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
+	let approvalWaiter: ((toolCallId: string) => Promise<void>) | undefined;
+	const extensionRunner = {
+		setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
+			approvalWaiter = waiter;
+			return () => {
+				if (approvalWaiter === waiter) approvalWaiter = undefined;
+			};
+		},
+	};
+	const ctx = createInteractiveModeContext({
+		streamingComponent: new AssistantMessageComponent(),
 		streamingMessage,
-		transcriptMessageComponents: new WeakMap(),
 		pendingTools,
-		noteDisplayableThinkingContent: vi.fn(() => false),
-		chatContainer: { addChild: vi.fn() },
-		toolOutputExpanded: false,
-		session: { getToolByName: () => undefined },
-		viewSession: { getToolByName: () => undefined },
-		sessionManager: { getCwd: () => process.cwd() },
-	} as unknown as InteractiveModeContext;
+		session: { getToolByName: () => tool, extensionRunner },
+	});
 
-	return { controller: new EventController(ctx), pendingTools };
+	return {
+		controller: new EventController(ctx),
+		pendingTools,
+		getApprovalWaiter: () => approvalWaiter,
+	};
 }
 
 async function dispatch(controller: EventController, message: AssistantMessage) {
@@ -156,7 +161,7 @@ describe("EventController paces streamed tool args", () => {
 
 	it("streams the full target through unpaced when smoothing is disabled", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.smoothStreaming", false);
+		cfgDisplaySmoothStreaming.set(settings, false);
 		vi.useFakeTimers();
 		const updateArgsSpy = vi.spyOn(ToolExecutionComponent.prototype, "updateArgs");
 		const target = `{"path":"/tmp/a.ts","content":"abc"}`;
@@ -214,5 +219,68 @@ describe("EventController paces streamed tool args", () => {
 		// back to a streaming prefix.
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
 		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
+	});
+	it("holds approval until the native final edit preview is ready", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const args = {
+			path: "/tmp/approval.ts",
+			old_string: "old",
+			new_string: "ISSUE_7957_PROPOSED_EDIT",
+		};
+		const streaming = makeStreamingMessage([{ type: "toolCall", id: "tc-approval", name: "edit", arguments: args }]);
+		const tool = { mode: "replace" } as unknown as AgentTool;
+		const { controller, pendingTools, getApprovalWaiter } = createFixture(streaming, tool);
+
+		await controller.handleEvent({
+			type: "tool_stream_update",
+			toolCallId: "tc-approval",
+			toolName: "edit",
+			update: {
+				generation: 1,
+				streaming: true,
+				files: [
+					{
+						path: "/tmp/approval.ts",
+						diff: "@@ -1 +1 @@\n-old\n+ISSUE_7957_PROPOSED_EDIT",
+						firstChangedLine: 1,
+					},
+				],
+			},
+		});
+		await dispatch(controller, streaming);
+
+		const waiter = getApprovalWaiter();
+		if (!waiter) throw new Error("expected the TUI approval-preview waiter");
+		let approvalReady = false;
+		const waiting = waiter("tc-approval").then(() => {
+			approvalReady = true;
+		});
+		await dispatchToolStart(controller, {
+			toolCallId: "tc-approval",
+			toolName: "edit",
+			args,
+		});
+		await Promise.resolve();
+		expect(approvalReady).toBe(false);
+
+		await controller.handleEvent({
+			type: "tool_stream_update",
+			toolCallId: "tc-approval",
+			toolName: "edit",
+			update: {
+				generation: 2,
+				streaming: false,
+				files: [
+					{
+						path: "/tmp/approval.ts",
+						diff: "@@ -1 +1 @@\n-old\n+ISSUE_7957_PROPOSED_EDIT",
+						firstChangedLine: 1,
+					},
+				],
+			},
+		});
+		await waiting;
+		const rendered = pendingTools.get("tc-approval")?.render(100).join("\n") ?? "";
+		expect(Bun.stripANSI(rendered)).toContain("ISSUE_7957_PROPOSED_EDIT");
 	});
 });

@@ -8,9 +8,10 @@
 - Key collaborators:
   - `packages/coding-agent/src/tools/index.ts` — registers tool, exposes session hooks, gates availability.
   - `packages/coding-agent/src/modes/controllers/event-controller.ts` — updates the visible todo UI on tool completion.
-  - `packages/coding-agent/src/session/agent-session.ts` — stores cached phases, strips done/dropped tasks on session resume, emits failure reminders.
+  - `packages/coding-agent/src/session/todo-tracker.ts` — owns canonical phases, restores branch snapshots, and manages completion reminders.
+  - `packages/coding-agent/src/session/agent-session.ts` — exposes todo state hooks and emits failure reminders.
   - `packages/coding-agent/src/modes/controllers/todo-command-controller.ts` — `/todo` command path, custom-entry persistence, transcript reminder injection.
-  - `packages/coding-agent/src/tools/render-utils.ts` — collapsed-preview cap for renderer trees.
+  - `packages/tui/src/render/render-utils.ts` — collapsed-preview cap for renderer trees.
 
 ## Inputs
 
@@ -33,7 +34,7 @@ The params object **is** a single op — the discriminator and its fields live a
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `op` | `"init" \| "start" \| "done" \| "rm" \| "drop" \| "block" \| "unblock" \| "append" \| "view"` | Yes in the schema | Operation discriminator. At execution time, an omitted op is repaired only for unambiguous `list`/`items` payloads (see Flow). |
-| `list` | `{ phase: string; items: string[] }[]` | For `init` (unless a flat `items` list is given) | Full replacement payload. Each `items` array has `minItems: 1`. |
+| `list` | `{ phase: string; items: string[] }[]` | For `init` (unless a flat `items` list is given) | Full replacement payload. Each phase's `items` has `minItems: 1`; an explicit `list: []` clears all phases. |
 | `task` | `string` | For `start`; for task-targeted `done`/`drop`/`block`/`unblock`/`rm` | Exact task content match. |
 | `phase` | `string` | For `append`; for phase-targeted `done`/`drop`/`block`/`unblock`/`rm`; optional for a flat `init` | Exact phase name match, except `append` lazily creates a missing phase and a flat `init` synthesizes one (default `Tasks`). |
 | `items` | `string[]` | For `append`; or as a flat `init` payload | Tasks to append, or the full task list for a flat `init`. Op-specific validation requires at least one item; a stray empty array on an unrelated op is schema-valid and ignored. |
@@ -45,7 +46,7 @@ The tool returns a single-shot `AgentToolResult`:
 - `content`: one text part containing the summary from `formatSummary(...)`.
   - Empty final state with no errors: `Todo list cleared.` (`Todo list is empty.` for a pure-`view` call).
   - Non-empty final state: remaining-item list, current phase progress, then a per-phase tree.
-  - If the op produced validation/runtime errors, the summary starts with `Errors: ...` and the result is marked `isError: true`; the mutation is discarded — the returned and persisted state stay at the pre-call list.
+  - Op-specific errors prefix the summary with `Errors: ...`; schema failures instead return `Invalid todo arguments: ...`. Both set `isError: true` and leave returned/persisted phases at their pre-call state.
 - `details`:
   - `phases: TodoPhase[]`
   - `storage: "session" | "memory"`
@@ -61,7 +62,7 @@ The TUI renderer (`todoToolRenderer`) merges call and result into one transcript
 
 ## Flow
 1. `TodoTool.execute(...)` clones the current cached phases from `session.getTodoPhases?.() ?? []` (`packages/coding-agent/src/tools/todo.ts`).
-2. `resolveTodoParams(...)` validates the raw single-op payload. Because the tool enables `lenientArgValidation`, it may repair a missing `op` only when the shape is unambiguous: non-empty `list` means `init`; non-empty `items` plus `phase` means `append`; bare non-empty `items` means `init` only when no phases exist. Ambiguous targeting fields and all other schema failures return `Invalid todo arguments: ...`.
+2. `resolveTodoParams(...)` validates the raw single-op payload. With `lenientArgValidation`, an omitted `op` can be inferred from non-empty `list` (`init`), non-empty `items` plus a non-empty `phase` (`append`), or non-empty `items` without that phase when no phases exist (`init`). Targeting fields alone cannot infer an op. Other schema failures return `Invalid todo arguments: ...`.
 3. `applyParams(...)` applies the resolved op with `applyEntry(...)`.
 4. Each op mutates the working phase array:
    - `initPhases(...)` rebuilds the list from scratch.
@@ -115,22 +116,24 @@ The same file also exposes non-tool helpers used by `/todo`:
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - Mutates the session todo cache through `setTodoPhases`.
   - `storage` reports whether the session has a backing session file, but the tool does not append a custom session entry itself.
-  - Successful tool-result messages carry `details.phases`; `getLatestTodoPhasesFromEntries(...)` can reconstruct state later from those transcript entries.
+  - Successful state-changing tool-result messages carry `details.phases`; `getLatestTodoPhasesFromEntries(...)` restores the latest canonical snapshot. Failed and pure-`view` results are skipped.
+  - Eval callers use `committedTodoPhases(...)` to persist mutations separately when there is no direct `todo` tool-result entry.
   - Failed `todo` results cause `agent-session` to enqueue a hidden next-turn reminder (`customType: "todo-error-reminder"`).
 - User-visible prompts / interactive UI
   - Transcript block is rendered by `todoToolRenderer` and merged with the call line.
   - `event-controller` updates the visible todo panel from successful results.
   - On error, `event-controller` shows `Todo update failed...`; the visible panel may stay stale until a later successful call.
+  - `/todo expand` shows every phase and task in the sticky HUD; `/todo collapse` restores its bounded preview. Both are display-only and leave todo state unchanged.
 - Background work / cancellation
-  - Session-level auto-clear of `completed`/`abandoned` tasks was removed (the timer mutated canonical phases between tool calls); the TUI todo widget still clears closed entries after `tasks.todoClearDelay` (display-only, `packages/coding-agent/src/modes/interactive-mode.ts`).
+  - When every task is `completed` or `abandoned`, the TUI hides the HUD after `tasks.todoClearDelay`. Canonical phases are not removed. The dismissal is persisted as a `todo_hud_state` custom entry tied to the exact canonical snapshot (`packages/coding-agent/src/modes/interactive-mode.ts`).
 
 ## Limits & Caps
 - `init.list`: applies to a single op (`todoSchema`). The params object carries exactly one op.
 - `init.list[*].items`: schema-level `minItems: 1`.
 - Flat `init.items` and `append.items`: the shared schema allows any array length, but op-specific execution rejects missing/empty lists.
-- Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/coding-agent/src/tools/render-utils.ts`).
+- Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/tui/src/render/render-utils.ts`).
 - Execution-time repair: an omitted `op` is inferred only for the unambiguous payloads described above; the schema itself still requires `op`.
-- Auto-clear delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables auto-clear, `0` clears immediately. Display-only — applied by the TUI widget (`packages/coding-agent/src/modes/interactive-mode.ts`); the setting is inert at the session level.
+- HUD auto-hide delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables hiding, `0` hides immediately. Applies only when all tasks are closed; blocked or pending work keeps the HUD visible. Canonical state survives the display change and session resume.
 - Tool execution mode: `concurrency = "exclusive"`, `strict = true`, `loadMode = "discoverable"`.
 
 ## Errors
@@ -152,7 +155,7 @@ The same file also exposes non-tool helpers used by `/todo`:
 - Idempotency is op-specific:
   - `init` is a full replacement; replaying the same payload yields the same state.
   - `start`, `done`, `drop`, `block`, and `unblock` are effectively idempotent on an existing target state, though `start` also demotes another active task and a repeated `block` can update its reason.
-  - `rm` is not idempotent for targeted removals: the second call errors because the task or phase is gone.
+  - Task-targeted `rm` is not idempotent: the second call errors because the task is gone. Phase-targeted `rm` only empties the phase, so repeating it succeeds; untargeted `rm` similarly clears task lists without removing phase objects.
   - `append` is not idempotent: duplicate task content is rejected with `Task "..." already exists`; the `append` op validates up front, so an op with any duplicate appends nothing.
 
 ## Notes
@@ -163,6 +166,6 @@ The same file also exposes non-tool helpers used by `/todo`:
 - Reload persistence differs by path:
   - plain `todo` calls survive in transcript tool-result details;
   - `/todo` command edits additionally append `customType: "user_todo_edit"` entries and inject a visible-to-model `<system-reminder>` developer message describing the manual edit.
-- On session resume, `AgentSession.#syncTodoPhasesFromBranch()` strips `completed` and `abandoned` tasks before restoring the cached list. The `/todo` command works around that by reading the latest transcript/custom-entry state so historical done/dropped tasks still appear to the user.
+- On resume, rewind, fork, or branch rehydration, `TodoTracker.syncFromBranch()` restores the latest successful mutation/custom-entry snapshot, including completed and abandoned tasks. Pure `view` results do not replace canonical state.
 - Tool availability is gated by `todo.enabled`, and the registry excludes it when `includeYield` is enabled unless the session is prewalk-armed (`packages/coding-agent/src/tools/index.ts`).
 - Subagents do not inherit `todo`; `packages/coding-agent/src/task/executor.ts` also filters it from the active set as a parent-owned tool. Exception (both layers): prewalk-armed subagents keep it — the prewalk plan nudge and todo gate require the child to commit its own todo list before the hand-off.

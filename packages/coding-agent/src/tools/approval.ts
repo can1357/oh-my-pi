@@ -7,13 +7,80 @@
  * - format the generic approval prompt body.
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type { Settings } from "../config/settings";
+
+import { cfgToolsApproval, cfgToolsApprovalMode } from "./settings";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
-type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
+/** The slice of `AgentToolContext` that approval resolution actually reads. */
+export type ApprovalContextSource = {
+	autoApprove?: boolean;
+	settings?: Settings;
+};
+
+export interface ResolvedExecuteTimeApproval {
+	approvalMode: ApprovalMode;
+	userPolicies: Record<string, unknown>;
+}
+
+type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails"> & {
+	/**
+	 * Previous public name of this tool, when a rename changed how it mints.
+	 * MCP tools minted before digits were kept carry their digit-stripped name
+	 * here so user `deny`/`prompt` policies written against it still apply
+	 * (`allow` is deliberately not inherited — see resolveApproval).
+	 */
+	readonly legacyName?: string;
+};
+
+const APPROVAL_MODES: ReadonlySet<ApprovalMode> = new Set(["always-ask", "write", "yolo"]);
+
+function isApprovalMode(value: unknown): value is ApprovalMode {
+	return typeof value === "string" && APPROVAL_MODES.has(value as ApprovalMode);
+}
+
+function asPolicyMap(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+/**
+ * Resolve approval mode and per-tool user policies from the execute-time
+ * `AgentToolContext`.
+ *
+ * Missing context (or context with no settings and no `--auto-approve`) is
+ * fail-closed: `always-ask` with an empty policy map — no user grant. When
+ * settings are present, the configured `tools.approvalMode` is used (schema
+ * default remains `yolo`). `--auto-approve` still forces `yolo`.
+ *
+ * Shared by `ExtensionToolWrapper.execute`, `refuseByWritePolicy`,
+ * `mcpApprovalPreflight`, and eval prelude host calls so those sites cannot
+ * drift. `ExtensionToolWrapper.execute` still inherits the runner's session
+ * settings when the caller omits context, so a live session keeps its
+ * configured (schema-default `yolo`) grant.
+ */
+export function resolveApprovalFromContext(context?: ApprovalContextSource | null): ResolvedExecuteTimeApproval {
+	if (context?.autoApprove === true) {
+		return {
+			approvalMode: "yolo",
+			userPolicies: context.settings ? asPolicyMap(cfgToolsApproval.get(context.settings)) : {},
+		};
+	}
+	const settings = context?.settings;
+	if (!settings) {
+		return { approvalMode: "always-ask", userPolicies: {} };
+	}
+	const configured: unknown = cfgToolsApprovalMode.get(settings);
+	return {
+		approvalMode: isApprovalMode(configured) ? configured : "yolo",
+		userPolicies: asPolicyMap(cfgToolsApproval.get(settings)),
+	};
+}
 
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;
@@ -21,16 +88,34 @@ export interface ResolvedApproval {
 	reason?: string;
 	override: boolean;
 	source?: "tool" | "user" | "mode";
+	/** User-policy key that produced `source: "user"` (defaults to the tool name). */
+	policyKey?: string;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
 const TIER_VALUES: ReadonlySet<ToolTier> = new Set(["read", "write", "exec"]);
 
-const TIER_RANK: Record<ToolTier, number> = {
+/** Ordering of capability tiers, least to most privileged. */
+export const TIER_RANK: Readonly<Record<ToolTier, number>> = {
 	read: 0,
 	write: 1,
 	exec: 2,
 };
+
+/**
+ * Fold the per-target decisions of a multi-target write tool (`edit`, `ast_edit`): the first
+ * `policy: "deny"` decision wins with its reason (a read-only URL target); otherwise the highest
+ * tier, starting from "read".
+ */
+export function strictestApproval(decisions: Iterable<ToolApprovalDecision>): ToolApprovalDecision {
+	let tier: ToolTier = "read";
+	for (const decision of decisions) {
+		if (typeof decision !== "string" && decision.policy === "deny") return decision;
+		const decisionTier = typeof decision === "string" ? decision : decision.tier;
+		if (TIER_RANK[decisionTier] > TIER_RANK[tier]) tier = decisionTier;
+	}
+	return tier;
+}
 
 const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 	"always-ask": "read",
@@ -61,11 +146,14 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
 		const policy = normalizePolicy(record.policy);
+		const policyKey =
+			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
 			tier,
 			override: record.override === true,
 			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
+			...(policyKey ? { policyKey } : {}),
 		};
 	}
 
@@ -101,6 +189,11 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  *
  * Resolution order:
  *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
+ *     A decision may carry a `policyKey` — `tools.approval.<policyKey>` is then
+ *     the user override consulted instead of `tools.approval.<tool.name>`, with
+ *     the invoking tool's own policy as the fallback when the user set none for
+ *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
+ *     policy still honors `tools.approval.write`).
  *  2. User per-tool override, if set and valid.
  *  3. Active mode tier comparison.
  *
@@ -114,7 +207,30 @@ export function resolveApproval(
 	userConfig: Record<string, unknown> = {},
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
-	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
+	const policyKey = decision.policyKey ?? tool.name;
+	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
+	const fallbackPolicy =
+		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
+			? normalizePolicy(userConfig[tool.name])
+			: undefined;
+	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
+	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
+
+	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
+	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a
+	// forgotten restrictive policy keeps protecting the renamed tool, while a
+	// stale `allow` cannot mask a `deny` another user sets under the new name.
+	const legacyPolicy =
+		effectiveUserPolicy === undefined &&
+		typeof tool.legacyName === "string" &&
+		tool.legacyName !== tool.name &&
+		Object.hasOwn(userConfig, tool.legacyName)
+			? normalizePolicy(userConfig[tool.legacyName])
+			: undefined;
+	const inheritedPolicy = legacyPolicy === "deny" || legacyPolicy === "prompt" ? legacyPolicy : undefined;
+	const inheritedPolicyKey = inheritedPolicy !== undefined ? tool.legacyName : undefined;
+	const combinedUserPolicy = effectiveUserPolicy ?? inheritedPolicy;
+	const combinedUserPolicyKey = effectiveUserPolicy !== undefined ? userPolicyKey : inheritedPolicyKey;
 
 	if (decision.policy === "deny") {
 		return {
@@ -122,11 +238,18 @@ export function resolveApproval(
 			tier: decision.tier,
 			override: decision.override,
 			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
-	if (userPolicy === "deny") {
-		return { policy: "deny", tier: decision.tier, override: decision.override, source: "user" };
+	if (combinedUserPolicy === "deny") {
+		return {
+			policy: "deny",
+			tier: decision.tier,
+			override: decision.override,
+			source: "user",
+			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+		};
 	}
 
 	if (mode === "yolo") {
@@ -136,14 +259,16 @@ export function resolveApproval(
 				tier: decision.tier,
 				override: false,
 				source: "tool",
+				...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 				...(decision.reason ? { reason: decision.reason } : {}),
 			};
 		}
 		return {
-			policy: userPolicy ?? "allow",
+			policy: combinedUserPolicy ?? "allow",
 			tier: decision.tier,
 			override: false,
-			source: userPolicy ? "user" : "mode",
+			source: combinedUserPolicy ? "user" : "mode",
+			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
 		};
 	}
 
@@ -153,6 +278,7 @@ export function resolveApproval(
 			tier: decision.tier,
 			override: true,
 			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
@@ -163,12 +289,19 @@ export function resolveApproval(
 			tier: decision.tier,
 			override: false,
 			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
 
-	if (userPolicy) {
-		return { policy: userPolicy, tier: decision.tier, override: false, source: "user" };
+	if (combinedUserPolicy) {
+		return {
+			policy: combinedUserPolicy,
+			tier: decision.tier,
+			override: false,
+			source: "user",
+			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
+		};
 	}
 
 	if (modeApprovesTier(mode, decision.tier)) {
@@ -185,6 +318,20 @@ export function resolveApproval(
 }
 
 /**
+ * Error for a resolved deny. Distinguishes tool-owned policy from user config.
+ */
+export function denyError(resolved: ResolvedApproval, toolName: string): Error {
+	const { source, reason, policyKey } = resolved;
+	if (source === "tool") {
+		return new Error(`Tool "${toolName}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
+	}
+	return new Error(
+		`Tool "${policyKey ?? toolName}" is blocked by user policy.\n` +
+			`To allow: remove "tools.approval.${policyKey ?? toolName}: deny" from config.`,
+	);
+}
+
+/**
  * Check if a tool call requires user approval.
  *
  * @throws Error if policy is 'deny'
@@ -196,16 +343,11 @@ export function requiresApproval(
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
 ): { required: boolean; reason?: string } {
-	const { policy, reason, source } = resolveApproval(tool, args, mode, userConfig);
+	const resolved = resolveApproval(tool, args, mode, userConfig);
+	const { policy, reason } = resolved;
 
 	if (policy === "deny") {
-		if (source === "tool") {
-			throw new Error(`Tool "${tool.name}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
-		}
-		throw new Error(
-			`Tool "${tool.name}" is blocked by user policy.\n` +
-				`To allow: remove "tools.approval.${tool.name}: deny" from config.`,
-		);
+		throw denyError(resolved, tool.name);
 	}
 
 	if (policy === "prompt") return { required: true, reason };

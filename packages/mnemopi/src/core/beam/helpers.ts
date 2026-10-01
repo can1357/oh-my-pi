@@ -1,17 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { logger } from "@oh-my-pi/pi-utils";
 import { generateId as generateTimedId, sha256Hex16, stableMemoryId } from "../../util/ids";
-import {
-	cjkFtsTerms,
-	containsSpacelessCjk,
-	FACT_MATCH_STOPWORDS,
-	factMatchTokens,
-	ftsQueryTerms,
-	hasCjk,
-	isCjkChar,
-	RECALL_SYNONYMS,
-	recallTokens,
-} from "../../util/regex";
+import { cjkFtsTerms, containsSpacelessCjk, ftsQueryTerms, hasCjk, isCjkChar, recallTokens } from "../../util/regex";
 import { currentEmbeddingModel, embed } from "../embeddings";
 import { getMnemopiRuntimeOptions, mnemopiDebugEnabled, withMnemopiRuntimeOptions } from "../runtime-options";
 import { buildExactVectorIndex, searchExactVectorIndex } from "../vector-index";
@@ -46,7 +36,6 @@ const DEFAULT_WEIGHTS: HybridWeights = [0.5, 0.3, 0.2];
 const TS_CACHE_MAX = 2000;
 const moduleTimestampCache = new Map<string, Date>();
 
-const SPLIT_TOKEN_RE = /[_:/.-]+/g;
 const WORD_RE = /[\p{L}\p{N}_]+/gu;
 function envNumber(name: string, fallback: number): number {
 	const raw = process.env[name];
@@ -187,68 +176,6 @@ export function temporalBoost(
 	return Math.exp(-hoursDelta / halflife);
 }
 
-export function lexicalRelevance(queryTokens: readonly string[], content: string, queryLower = ""): number {
-	const contentLower = content.toLowerCase();
-	const queryCjk = new Set(Array.from(queryLower).filter(isCjkChar));
-	if (queryTokens.length === 0 && queryCjk.size === 0) return 0;
-
-	const contentTokens = new Set(recallTokens(contentLower));
-	for (const token of Array.from(contentTokens)) {
-		for (const part of token.split(SPLIT_TOKEN_RE)) {
-			if (part.length >= 3 && !FACT_MATCH_STOPWORDS.has(part) && !/^\d+$/.test(part)) contentTokens.add(part);
-		}
-	}
-	if (contentTokens.size === 0 && queryCjk.size === 0) return 0;
-
-	let exact = 0;
-	let partial = 0;
-	for (const token of queryTokens) {
-		if (contentTokens.has(token)) {
-			exact += 1;
-			continue;
-		}
-		const synonyms = RECALL_SYNONYMS[token] ?? [];
-		if (synonyms.some(syn => contentTokens.has(syn))) {
-			partial += 0.75;
-			continue;
-		}
-		if (
-			token.length >= 4 &&
-			Array.from(contentTokens).some(
-				contentToken => contentToken.length >= 4 && (token.includes(contentToken) || contentToken.includes(token)),
-			)
-		) {
-			partial += 0.4;
-		}
-	}
-
-	const fullMatch = queryLower !== "" && contentLower.includes(queryLower) ? 1 : 0;
-	let score = (exact + partial + fullMatch) / Math.max(queryTokens.length, 1);
-	if (score === 0 && queryCjk.size > 0) {
-		const contentCjk = new Set(Array.from(contentLower).filter(isCjkChar));
-		let overlap = 0;
-		for (const ch of queryCjk) if (contentCjk.has(ch)) overlap += 1;
-		score = overlap / queryCjk.size;
-	}
-	return Math.min(score, 1);
-}
-
-export function strictFactMatches(query: string, factText: string): boolean {
-	const queryLower = query.toLowerCase().trim();
-	const factLower = factText.toLowerCase().trim();
-	if (!queryLower || !factLower) return false;
-	if (factLower.includes(queryLower)) return true;
-	const queryTokens = factMatchTokens(queryLower);
-	const factTokens = factMatchTokens(factLower);
-	if (queryTokens.size === 0 || factTokens.size === 0) return false;
-	const overlap = Array.from(queryTokens).filter(token => factTokens.has(token));
-	if (overlap.length >= 2) return true;
-	const token = overlap[0];
-	if (token === undefined) return false;
-	if (token.length >= 8 && /[./:_-]/.test(token)) return true;
-	return token.length >= 5;
-}
-
 export function buildFtsQuery(query: string): string {
 	return ftsQueryTerms(query).join(" OR ");
 }
@@ -270,8 +197,9 @@ export function cjkLikeSearch(
 	const conditions = cjkChars.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
 	try {
 		const rows = db
-			.query(`SELECT ${idColumn}, content FROM ${table} WHERE ${conditions} LIMIT ?`)
-			.all(...cjkChars.map(ch => `%${ch}%`), k * 5) as Record<string, unknown>[];
+			.query(`SELECT ${idColumn}, content FROM ${table} WHERE superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)
+				   AND (${conditions}) LIMIT ?`)
+			.all(new Date().toISOString(), ...cjkChars.map(ch => `%${ch}%`), k * 5) as Record<string, unknown>[];
 		const scored: Array<{ id: string | number; score: number }> = [];
 		for (const row of rows) {
 			const content = String(row.content ?? "");
@@ -296,8 +224,12 @@ export function ftsSearch(db: Database, query: string, k = 20): FtsRankResult[] 
 	if (!ftsQuery) return hasCjk(query) ? (cjkLikeSearch(db, query, k, false) as FtsRankResult[]) : [];
 	try {
 		const rows = db
-			.query("SELECT rowid, rank FROM fts_episodes WHERE fts_episodes MATCH ? ORDER BY rank, rowid LIMIT ?")
-			.all(ftsQuery, k) as Record<string, unknown>[];
+			.query(`SELECT f.rowid, f.rank FROM fts_episodes f
+				 WHERE f.fts_episodes MATCH ?
+				   AND EXISTS (SELECT 1 FROM episodic_memory e WHERE e.rowid = f.rowid AND e.superseded_by IS NULL
+			       AND (e.valid_until IS NULL OR e.valid_until > ?))
+				 ORDER BY f.rank, f.rowid LIMIT ?`)
+			.all(ftsQuery, new Date().toISOString(), k) as Record<string, unknown>[];
 		if (rows.length === 0 && hasCjk(query)) return cjkLikeSearch(db, query, k, false) as FtsRankResult[];
 		return rows.map(row => ({ rowid: Number(row.rowid), rank: Number(row.rank) }));
 	} catch {
@@ -310,8 +242,12 @@ export function ftsSearchWorking(db: Database, query: string, k = 20): WorkingFt
 	if (!ftsQuery) return hasCjk(query) ? (cjkLikeSearch(db, query, k, true) as WorkingFtsRankResult[]) : [];
 	try {
 		const rows = db
-			.query("SELECT id, rank FROM fts_working WHERE fts_working MATCH ? ORDER BY rank, id LIMIT ?")
-			.all(ftsQuery, k) as Record<string, unknown>[];
+			.query(`SELECT f.id, f.rank FROM fts_working f
+				 WHERE f.fts_working MATCH ?
+				   AND EXISTS (SELECT 1 FROM working_memory w WHERE w.id = f.id AND w.superseded_by IS NULL
+				       AND (w.valid_until IS NULL OR w.valid_until > ?))
+				 ORDER BY f.rank, f.id LIMIT ?`)
+			.all(ftsQuery, new Date().toISOString(), k) as Record<string, unknown>[];
 		if (rows.length === 0 && hasCjk(query)) return cjkLikeSearch(db, query, k, true) as WorkingFtsRankResult[];
 		return rows.map(row => ({ id: String(row.id), rank: Number(row.rank) }));
 	} catch {
@@ -343,19 +279,29 @@ export function vecAvailable(db: Database): boolean {
 	return tableExists(db, "vec_episodes");
 }
 
+// Per-Database memo for the vec table shape: schema is fixed at open, so
+// probing sqlite_master on every insert/search is pure overhead. WeakMap
+// keeps no Database alive.
+const vecTypeMemo = new WeakMap<Database, "float32" | "int8" | "bit">();
+
 export function effectiveVecType(db: Database): "float32" | "int8" | "bit" {
-	if (!vecAvailable(db)) return "float32";
-	try {
-		const row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'").get() as {
-			sql?: string;
-		} | null;
-		const sql = row?.sql ?? "";
-		if (sql.includes("int8")) return "int8";
-		if (sql.includes("bit")) return "bit";
-	} catch {
-		return "float32";
+	const cached = vecTypeMemo.get(db);
+	if (cached !== undefined) return cached;
+	let resolved: "float32" | "int8" | "bit" = "float32";
+	if (vecAvailable(db)) {
+		try {
+			const row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'").get() as {
+				sql?: string;
+			} | null;
+			const sql = row?.sql ?? "";
+			if (sql.includes("int8")) resolved = "int8";
+			else if (sql.includes("bit")) resolved = "bit";
+		} catch {
+			resolved = "float32";
+		}
 	}
-	return "float32";
+	vecTypeMemo.set(db, resolved);
+	return resolved;
 }
 
 export function vecInsert(db: Database, rowid: number, embedding: readonly number[]): void {
@@ -785,15 +731,25 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 		using insertEmbedding = beam.db.prepare(
 			"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
 		);
+		let committed = 0;
 		const insertMany = beam.db.transaction((rows: readonly EmbedItem[]) => {
 			for (let i = 0; i < rows.length; i += 1) {
 				const vector = matrix[i];
 				const item = rows[i];
 				if (vector === undefined || item === undefined) continue;
 				insertEmbedding.run(item.memoryId, JSON.stringify(Array.from(vector)), model);
+				committed += 1;
 			}
 		});
 		insertMany(items);
+		// A recall taken while these vectors were still generating cached an FTS-only ranking, and
+		// committing vectors changes what recall returns -- so that cache must be dropped, or the
+		// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
+		// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
+		// and invalidating there would only discard a still-valid cache. Only the query cache is
+		// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
+		// batch never touches.
+		if (committed > 0) beam.caches.queryCache?.invalidate();
 	} catch (error) {
 		// Background embedding generation is best-effort: a failing provider, a closed DB
 		// during shutdown, or a transient API error must never disrupt the synchronous
