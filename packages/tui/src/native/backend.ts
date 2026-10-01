@@ -38,7 +38,7 @@ import {
 	type NativeThemePalette,
 	setNativeSymbolPreset,
 } from "../theme/theme";
-import type { Component, OverlayOptions } from "../tui";
+import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
 import { getNativeBlob } from "./blobs";
 import { node } from "./describe";
@@ -64,6 +64,18 @@ export interface NativeHost {
 	overlays(): readonly NativeOverlay[];
 	/** Component receiving keyboard input. */
 	focused(): Component | null;
+	/**
+	 * The user clicked into a node described by `owners[0]` (then the
+	 * components containing it, innermost first): move keyboard focus there.
+	 * `field` is the outermost owner that takes keys and whose focus target is
+	 * the clicked `editor`/`input`, if any; `sheet` tells the overlays that
+	 * don't hold the keys while the user works beside them.
+	 */
+	focusFromPointer(
+		owners: readonly Component[],
+		field: Component | null,
+		sheet: (overlay: Component) => boolean,
+	): void;
 	requestRender(): void;
 	/** The terminal switched appearance. */
 	appearanceChanged(dark: boolean): void;
@@ -80,13 +92,29 @@ export interface NativeBackendOptions {
 	readonly recordPath?: string;
 	/** Log the `rows` fallback count per frame. Defaults to `PI_TUI_NATIVE_STATS=1`. */
 	readonly stats?: boolean;
-	readonly now?: () => number;
+	/** Clock and timers (stall wake-up); defaults to `Date.now` and unref'd `setTimeout`. */
+	readonly scheduler?: RenderScheduler;
 }
+
+/** Real clock and timers that never keep the process alive on their own. */
+const DEFAULT_SCHEDULER: RenderScheduler = {
+	now: () => Date.now(),
+	scheduleImmediate: callback => {
+		setImmediate(callback);
+	},
+	scheduleRender: (callback, delayMs) => {
+		const timer = setTimeout(callback, delayMs);
+		timer.unref();
+		return { cancel: () => clearTimeout(timer) };
+	},
+};
 
 /** Frames kept for the debug `tsp` op. */
 const RECENT_FRAMES = 64;
 /** An unanswered frame older than this no longer holds rendering back. */
 const STALLED_ACK_MS = 5000;
+/** Role of the session's surfaces; a screen page may name its own. */
+const SESSION_ROLE = "omp.session";
 
 class NativeContext implements DescribeContext {
 	cols: number;
@@ -148,6 +176,8 @@ export function assumedTspHello(terminal: Terminal): TspHello {
 class Surface {
 	readonly id: string;
 	readonly mode: "inline" | "screen";
+	/** The `o` role: `omp.session`, or a screen page's own (`NativeScreen.role`). */
+	readonly role: string;
 	readonly reconciler: Reconciler;
 	readonly doc: TspDocument | null;
 	seq = 0;
@@ -158,9 +188,10 @@ class Surface {
 	focus: string | null = null;
 	dirty = false;
 
-	constructor(id: string, mode: "inline" | "screen", mirror: boolean) {
+	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
 		this.id = id;
 		this.mode = mode;
+		this.role = role;
 		this.reconciler = new Reconciler(id);
 		this.doc = mirror ? new TspDocument(id) : null;
 	}
@@ -211,7 +242,9 @@ export class NativeBackend {
 	#mirror: boolean;
 	#recordPath: string | undefined;
 	#stats: boolean;
-	#now: () => number;
+	#scheduler: RenderScheduler;
+	/** Wakes a render when the oldest unacked frame of a credit-blocked surface turns stalled. */
+	#stallTimer: RenderTimer | undefined;
 	#recent: TspFrame[] = [];
 	#sawResize = false;
 	#live = false;
@@ -232,7 +265,7 @@ export class NativeBackend {
 		this.#mirror = options.mirror === true;
 		this.#recordPath = options.recordPath ?? (Bun.env.PI_TUI_TSP_RECORD || undefined);
 		this.#stats = options.stats ?? Bun.env.PI_TUI_NATIVE_STATS === "1";
-		this.#now = options.now ?? Date.now;
+		this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
 		this.#inline = this.#newSurface("inline");
 	}
 
@@ -333,6 +366,7 @@ export class NativeBackend {
 		this.#unbindTheme?.();
 		this.#unbindTheme = undefined;
 		this.#useNerdSymbols(false);
+		this.#clearStallTimer();
 	}
 
 	/**
@@ -353,7 +387,7 @@ export class NativeBackend {
 		surface.acked = surface.seq;
 		surface.focus = null;
 		surface.dirty = false;
-		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: "omp.session", adopt: true });
+		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
 		this.#sendPalette(surface);
 		// After the `o`, as in `start()`.
 		setNativeRendering(true);
@@ -408,13 +442,18 @@ export class NativeBackend {
 		let dock: readonly NativeChild[];
 		let layer: NativeChild[];
 		if (fullscreen >= 0) {
-			if (!this.#screen) {
-				this.#screen = this.#newSurface("screen");
+			const component = overlays[fullscreen]!.component;
+			const page = component.describeScreen?.(this.#cx);
+			const role = page?.role ?? SESSION_ROLE;
+			if (this.#screen?.role !== role) {
+				// A page with another role is another surface: its styling keys off the `o`.
+				if (this.#screen) this.#close(this.#screen, false);
+				this.#screen = this.#newSurface("screen", role);
 				this.#open(this.#screen);
 			}
 			surface = this.#screen;
-			main = [overlays[fullscreen]!.component];
-			dock = [];
+			main = page?.main ?? [component];
+			dock = page?.dock ?? [];
 			layer = overlays.slice(fullscreen + 1).map(overlay => this.#overlayNode(overlay));
 		} else {
 			if (this.#screen) {
@@ -430,6 +469,7 @@ export class NativeBackend {
 		this.#pruneOverlayNodes(overlays);
 		if (!this.#hasCredit(surface)) {
 			surface.dirty = true;
+			this.#armStallTimer(surface);
 			return;
 		}
 		surface.dirty = false;
@@ -478,12 +518,12 @@ export class NativeBackend {
 		this.#sawResize = false;
 	}
 
-	#newSurface(mode: "inline" | "screen"): Surface {
-		return new Surface(`s:${this.#nextSurface++}`, mode, this.#mirror);
+	#newSurface(mode: "inline" | "screen", role = SESSION_ROLE): Surface {
+		return new Surface(`s:${this.#nextSurface++}`, mode, role, this.#mirror);
 	}
 
 	#open(surface: Surface): void {
-		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: "omp.session" });
+		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: surface.role });
 		this.#sendPalette(surface);
 	}
 
@@ -494,7 +534,7 @@ export class NativeBackend {
 	#hasCredit(surface: Surface): boolean {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
-		if (this.#now() - oldest < STALLED_ACK_MS) return false;
+		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
 		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
 			sf: surface.id,
 			s: surface.seq,
@@ -505,9 +545,27 @@ export class NativeBackend {
 		return true;
 	}
 
+	/** Render again once `surface`'s oldest unacked frame counts as stalled, in case no ack ever arrives. */
+	#armStallTimer(surface: Surface): void {
+		if (this.#stallTimer) return;
+		const delay = surface.unacked[0]! + STALLED_ACK_MS - this.#scheduler.now();
+		this.#stallTimer = this.#scheduler.scheduleRender(
+			() => {
+				this.#stallTimer = undefined;
+				this.#host.requestRender();
+			},
+			Math.max(0, delay),
+		);
+	}
+
+	#clearStallTimer(): void {
+		this.#stallTimer?.cancel();
+		this.#stallTimer = undefined;
+	}
+
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
 		surface.seq++;
-		surface.unacked.push(this.#now());
+		surface.unacked.push(this.#scheduler.now());
 		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
@@ -553,7 +611,7 @@ export class NativeBackend {
 			}
 		}
 		try {
-			fs.appendFileSync(path, `${JSON.stringify({ t: this.#now(), dir, verb, params, body: payload })}\n`);
+			fs.appendFileSync(path, `${JSON.stringify({ t: this.#scheduler.now(), dir, verb, params, body: payload })}\n`);
 		} catch (error) {
 			logger.warn("TSP: recording failed; disabling", { path, error: String(error) });
 			this.#recordPath = undefined;
@@ -573,6 +631,7 @@ export class NativeBackend {
 				const newly = Math.min(event.s, surface.seq) - surface.acked;
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
+				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
 				return;
 			}
@@ -611,12 +670,25 @@ export class NativeBackend {
 			case "activate":
 			case "action":
 			case "change":
+			case "edit":
 				this.#routeUiEvent(event);
 				return;
+			case "focus": {
+				const reconciler = this.#surfaceFor(event.sf)?.reconciler;
+				const owners = reconciler?.owners(event.id) ?? [];
+				if (!reconciler || owners.length === 0) return;
+				const field =
+					owners.findLast(owner => owner.handleInput && reconciler.focusTarget(owner) === event.id) ?? null;
+				this.#host.focusFromPointer(owners, field, overlay => overlay.nativeSheet?.(this.#cx) === true);
+				this.#host.requestRender();
+				return;
+			}
 		}
 	}
 
-	#routeUiEvent(event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" }>): void {
+	#routeUiEvent(
+		event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" }>,
+	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
 		const target = reconciler?.target(event.id);
 		if (!reconciler || !target?.component.handleNativeEvent) return;
@@ -644,6 +716,11 @@ export class NativeBackend {
 			case "change":
 				ui = { type: "change", key: target.keypath, item: event.item, value: event.value };
 				break;
+			case "edit": {
+				const { from, to, text, cursor, len } = event;
+				ui = { type: "edit", key: target.keypath, from, to, text, cursor, len };
+				break;
+			}
 		}
 		target.component.handleNativeEvent(ui);
 		this.#host.requestRender();

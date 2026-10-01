@@ -256,10 +256,14 @@ export function installGlobalProxyFetch(): void {
 		NO_PROXY: Bun.env.NO_PROXY || Bun.env.no_proxy,
 	};
 	if (!proxyUrl) {
-		logger.debug("global proxy fetch not installed", {
-			reason: "PI_PROXY unset",
-			env,
-		});
+		// Without any proxy variable there is nothing to diagnose; skip the
+		// per-process line. When some are set, record why none was installed.
+		if (Object.values(env).some(value => value !== undefined && value !== "")) {
+			logger.debug("global proxy fetch not installed", {
+				reason: "PI_PROXY unset",
+				env,
+			});
+		}
 		return;
 	}
 	globalProxyFetchInstalled = true;

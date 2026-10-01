@@ -19,7 +19,7 @@
 | Field | Type | Required | Description |
 |---|---|---:|---|
 | `action` | `"create" \| "update" \| "delete"` | Yes | Managed-skill mutation. |
-| `name` | `string` | Yes | Kebab-case managed skill name. |
+| `name` | `string` | Yes | Managed skill name; trimmed and lowercased before path resolution, then validated against `[a-z0-9][a-z0-9-]{0,63}`. |
 | `description` | `string` | Create/update | One-line description used for skill discovery. |
 | `body` | `string` | Create/update | Markdown body for `SKILL.md`; do not include frontmatter. |
 
@@ -27,6 +27,7 @@
 - `delete`: `content[0].text = "Deleted managed skill \"<name>\"."`, `details = { action: "delete", name }`
 - `create`: `content[0].text = "Created managed skill \"<name>\" (managed-skills/<name>/SKILL.md)."`, `details = { action: "create", name }`
 - `update`: `content[0].text = "Updated managed skill \"<name>\" (managed-skills/<name>/SKILL.md)."`, `details = { action: "update", name }`
+- Result names echo the supplied `name`; create/update paths use its normalized on-disk spelling.
 - Authored-skill shadowing on create returns `isError: true` with `details = { action: "create", name, shadowed: true }`.
 
 ## Flow
@@ -36,9 +37,10 @@
 4. `create` normalizes the name and checks whether an active authored skill already owns it; if yes, it returns an error result without writing.
 5. `create` / `update` call `writeManagedSkill(...)`, which normalizes/validates the name, sanitizes generated frontmatter, serializes same-name in-process writes, and writes `SKILL.md` under the managed-skills root.
 6. After a successful create/update, the tool refreshes active skills when the callback exists, so an interactive session can discover the change immediately.
+   A refresh failure propagates after the filesystem mutation; it does not roll the skill back.
 
 ## Modes / Variants
-- `create`: atomically creates `SKILL.md` with exclusive-create semantics; fails if it already exists.
+- `create`: creates `SKILL.md` with exclusive-create (`wx`) semantics; fails if it already exists. Creation is exclusive, not a temp-file/rename transaction.
 - `update`: overwrites an existing regular, single-link managed `SKILL.md`; fails if it does not exist.
 - `delete`: recursively removes an existing managed skill directory; fails if it does not exist.
 - Mutations of the same normalized name are serialized in-process in submission order; different names may proceed in parallel. Cross-process races are not serialized.

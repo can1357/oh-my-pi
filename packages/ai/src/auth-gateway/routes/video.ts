@@ -1,5 +1,6 @@
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ResolvedApiKey } from "../../auth-retry";
 import { classifyGatewayError } from "../../error/gateway";
 import * as videoServer from "../../providers/video-server";
 import { downloadVideo, pollVideo, submitVideo } from "../../video";
@@ -17,7 +18,7 @@ interface ResolvedVideoRequest {
 	model: Model<Api>;
 	upstreamId: string;
 	sessionId: string;
-	apiKey: string;
+	apiKey: ResolvedApiKey;
 	controller: AbortController;
 }
 
@@ -58,7 +59,7 @@ async function resolveVideoJob(
 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	return { model, upstreamId: identity.upstreamId, sessionId, apiKey, controller };
 }
 
@@ -141,7 +142,7 @@ export async function handleVideoSubmit(
 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "video-submit",

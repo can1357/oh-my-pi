@@ -15,19 +15,21 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 
 const COLLAB_PROMPT_TYPE = "collab-prompt";
 const IMAGE_SOURCE_PATH = "/tmp/private-project/screenshot.png";
@@ -381,6 +383,23 @@ describe("AgentSession queued steer delivery", () => {
 		expect(delivered).toContain(IMAGE_SOURCE_PATH);
 		expect(delivered).toContain("What is in [Image #1]?");
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("keeps a path-pasted image's source path with a prompt sent as an aside mid-stream", async () => {
+		const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["image answer"] }]);
+		let injected = false;
+		session.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			await session.prompt("What is in [Image #1]?", { images: [PATH_PASTED_IMAGE], streamingBehavior: "aside" });
+		});
+
+		await session.prompt("start");
+		await session.waitForIdle();
+
+		const delivered = JSON.stringify(mock.calls.at(-1)?.context.messages);
+		expect(delivered).toContain("What is in [Image #1]?");
+		expect(delivered).toContain(IMAGE_SOURCE_PATH);
 	});
 
 	it("a fresh user prompt delivers queued steer and follow-up work", async () => {
@@ -754,5 +773,501 @@ describe("AgentSession queued steer delivery", () => {
 				expect.objectContaining({ role: "user", content: [{ type: "text", text: "start" }] }),
 			]);
 		});
+	});
+
+	describe("promoteQueuedMessage", () => {
+		it("promotes a skill queued through RPC by its original invocation and delivers it once", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["skill response"] }]);
+			const skillPath = path.join(tempDir, "SKILL.md");
+			await Bun.write(
+				skillPath,
+				"---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code.\n",
+			);
+			const invocation = "/skill:reviewer  focus on risks\nand correctness";
+			let injected = false;
+			let promoted: boolean | undefined;
+			let promotedAgain: boolean | undefined;
+			let queueAfterPromotion: { steering: readonly string[]; followUp: readonly string[] } | undefined;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				const queued = Promise.withResolvers<void>();
+				void tryRunRpcSkillCommand(
+					{
+						skillsSettings: { enableSkillCommands: true },
+						skills: [
+							{
+								name: "reviewer",
+								description: "Review code",
+								filePath: skillPath,
+								baseDir: tempDir,
+								source: "project",
+							},
+						],
+						async promptCustomMessage(message, options) {
+							const result = await session.promptCustomMessage(message, options);
+							queued.resolve();
+							return result;
+						},
+					},
+					invocation,
+					"followUp",
+				).catch(error => queued.reject(error));
+				await withTimeout(queued.promise, 2_000, "Skill did not reach the native queue");
+				promoted = session.promoteQueuedMessage(invocation);
+				queueAfterPromotion = session.getQueuedMessages();
+				promotedAgain = session.promoteQueuedMessage(invocation);
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toBe(true);
+			expect(queueAfterPromotion).toEqual({ steering: [invocation], followUp: [] });
+			expect(promotedAgain).toBe(false);
+			const delivered = session.messages.filter(
+				(message): message is CustomMessage => message.role === "custom" && message.attribution === "user",
+			);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0].content).toContain("Review the supplied code.");
+			expect(delivered[0].content).toContain("focus on risks\nand correctness");
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("Review the supplied code.");
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("moves the first duplicate behind existing steering and delivers every queued occurrence once", async () => {
+			const { session } = await createSession([
+				{ content: ["initial"] },
+				{ content: ["steered"] },
+				{ content: ["followed up"] },
+			]);
+			session.setSteeringMode("all");
+			session.setFollowUpMode("all");
+			let promoted: boolean | undefined;
+			let queued: object | undefined;
+			let injected = false;
+			let first: AgentMessage | undefined;
+			let second: AgentMessage | undefined;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await session.steer("existing");
+				await session.followUp("duplicate");
+				await session.followUp("unrelated");
+				await session.followUp("duplicate");
+				[first, , second] = session.agent.peekFollowUpQueue();
+				first!.timestamp = 1_000;
+				second!.timestamp = 2_000;
+				promoted = session.promoteQueuedMessage("duplicate");
+				queued = session.getQueuedMessages();
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toBe(true);
+			expect(queued).toEqual({ steering: ["existing", "duplicate"], followUp: ["unrelated", "duplicate"] });
+			const delivered = session.messages.filter(message => message.role === "user");
+			expect(delivered.map(message => message.content)).toEqual(
+				["start", "existing", "duplicate", "unrelated", "duplicate"].map(text => [{ type: "text", text }]),
+			);
+			expect(delivered[2]).toMatchObject({ timestamp: first!.timestamp, steering: true });
+			expect<AgentMessage | undefined>(delivered[4]).toEqual(second);
+			expect(delivered[4]).not.toHaveProperty("steering");
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("leaves both queues untouched when only agent-authored or hidden messages match", async () => {
+			const { session } = await createSession([]);
+			session.agent.steer({ role: "user", content: "existing", timestamp: 1 });
+			session.agent.followUp({
+				role: "custom",
+				customType: "advisor",
+				content: "target",
+				attribution: "agent",
+				display: true,
+				timestamp: 2,
+			});
+			// An agent handoff is a user-role turn but not user input; it must never be promotable.
+			session.agent.followUp({ role: "user", content: "target", attribution: "agent", timestamp: 2 });
+			session.agent.followUp({
+				role: "custom",
+				customType: "ultrathink-notice",
+				content: "target",
+				attribution: "user",
+				display: false,
+				timestamp: 3,
+			});
+			const steering = structuredClone(session.agent.peekSteeringQueue());
+			const followUp = structuredClone(session.agent.peekFollowUpQueue());
+
+			expect(session.promoteQueuedMessage("target")).toBe(false);
+			expect(session.promoteQueuedMessage("absent")).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toEqual(steering);
+			expect(session.agent.peekFollowUpQueue()).toEqual(followUp);
+		});
+
+		it("matches raw and expanded template chips without expanding a queued prompt again", async () => {
+			const { session } = await createSession(
+				[{ content: ["initial"] }, { content: ["steered"] }],
+				[{ name: "review", description: "Review", content: "Review $1", source: "(test)" }],
+			);
+			session.setSteeringMode("all");
+			let promoted: boolean[] = [];
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await session.followUp("/review raw", undefined, { expandPromptTemplates: false });
+				await session.followUp("/review expanded");
+				await session.followUp("/review chip");
+				promoted = [
+					session.promoteQueuedMessage("/review raw"),
+					session.promoteQueuedMessage("/review expanded"),
+					session.promoteQueuedMessage("Review chip"),
+				];
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toEqual([true, true, true]);
+			expect(session.messages.filter(message => message.role === "user").map(message => message.content)).toEqual(
+				["start", "/review raw", "Review expanded", "Review chip"].map(text => [{ type: "text", text }]),
+			);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("promotes a queued file-based slash command by its raw invocation, then removes it from steering", async () => {
+			const { session } = await createSession([]);
+			session.setSlashCommands([{ name: "cmd", description: "Test", content: "Expanded $1", source: "(test)" }]);
+
+			// #dispatchPrompt's slash-command rewrite only runs on prompt(); force
+			// the busy-session queueing branch without a real turn.
+			session.agent.state.isStreaming = true;
+			try {
+				const queued = await session.prompt("/cmd args", { streamingBehavior: "followUp" });
+				expect(queued).toBe(true);
+				expect(session.getQueuedMessages().followUp).toEqual(["Expanded args"]);
+
+				// Promotion moves the same message object into the steering queue; its
+				// raw-text record must follow so the caller can still remove it by the
+				// exact "/cmd args" it originally submitted.
+				expect(session.promoteQueuedMessage("/cmd args")).toBe(true);
+				expect(session.getQueuedMessages()).toEqual({ steering: ["Expanded args"], followUp: [] });
+
+				expect(session.removeQueuedMessage("/cmd args", "steering")).toBe(true);
+				expect(session.getQueuedMessages().steering).toEqual([]);
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+		});
+
+		it("delivers each promoted companion group in one model turn in one-at-a-time mode", async () => {
+			const { session, sessionManager, mock } = await createSession([
+				{ content: ["initial"] },
+				{ content: ["steered"] },
+				{ content: ["custom prompt"] },
+				{ content: ["followed up"] },
+			]);
+			session.setSteeringMode("one-at-a-time");
+			session.setFollowUpMode("one-at-a-time");
+			const companion: AgentMessage = {
+				role: "custom",
+				customType: "image-attachment-description",
+				content: "The attached image contains a diagram.",
+				attribution: "user",
+				display: false,
+				timestamp: 10,
+			};
+			const keywordNotice: AgentMessage = {
+				...companion,
+				customType: "ultrathink-notice",
+				content: "Use extended reasoning for this request.",
+				timestamp: 9,
+			};
+			const videoNotice: AgentMessage = {
+				...companion,
+				customType: "video-attachment",
+				content: "Video source: /tmp/clip.mp4",
+				timestamp: 8,
+			};
+			const image = {
+				type: "image" as const,
+				mimeType: "image/png",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			};
+			const imagePrompt: AgentMessage = {
+				role: "user",
+				content: [image],
+				attribution: "user",
+				timestamp: 11,
+			};
+			const customPrompt: AgentMessage = {
+				role: "custom",
+				customType: COLLAB_PROMPT_TYPE,
+				content: "Expanded guest request",
+				attribution: "user",
+				display: true,
+				details: { from: "guest", __queueChipText: "/guest request", nested: { preserve: true } },
+				timestamp: 12,
+			};
+			const otherCompanion: AgentMessage = { ...companion, content: "Other image description", timestamp: 13 };
+			const otherPrompt: AgentMessage = { role: "user", content: "Other request", timestamp: 14 };
+			let promoted: boolean[] = [];
+			let injected = false;
+			session.subscribe(event => {
+				if (event.type !== "turn_end" || injected) return;
+				injected = true;
+				session.agent.replaceQueues(
+					[],
+					[videoNotice, keywordNotice, companion, imagePrompt, customPrompt, otherCompanion, otherPrompt],
+				);
+				promoted = [session.promoteQueuedMessage("[Image]"), session.promoteQueuedMessage("/guest request")];
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toEqual([true, true]);
+			const delivered = session.messages.filter(message => message.role === "custom" || message.role === "user");
+			expect(delivered.slice(1)).toEqual([
+				videoNotice,
+				keywordNotice,
+				companion,
+				{ ...imagePrompt, steering: true },
+				customPrompt,
+				otherCompanion,
+				otherPrompt,
+			]);
+			expect(
+				mock.calls[1].context.messages.some(
+					message =>
+						message.role === "user" &&
+						Array.isArray(message.content) &&
+						message.content.some(part => part.type === "image" && part.data === image.data),
+				),
+			).toBe(true);
+			const firstSteeredContext = JSON.stringify(mock.calls[1].context.messages);
+			expect(firstSteeredContext).toContain(companion.content as string);
+			expect(firstSteeredContext).toContain(keywordNotice.content as string);
+			expect(firstSteeredContext).toContain(videoNotice.content as string);
+			expect(firstSteeredContext).not.toContain(customPrompt.content as string);
+			expect(firstSteeredContext).not.toContain(otherPrompt.content as string);
+			expect(JSON.stringify(mock.calls[2].context.messages)).toContain(customPrompt.content as string);
+			expect(JSON.stringify(mock.calls[2].context.messages)).not.toContain(otherCompanion.content as string);
+			expect(mock.calls).toHaveLength(4);
+			expect(
+				sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "custom_message" && entry.customType === COLLAB_PROMPT_TYPE),
+			).toMatchObject([
+				{ content: customPrompt.content, details: { from: "guest", nested: { preserve: true } }, display: true },
+			]);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("promotes a file-backed image prompt together with its hidden source-path notice", async () => {
+			const { session } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+			let promoted = false;
+			let steering: AgentMessage[] = [];
+			let followUp: AgentMessage[] = [];
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await session.followUp("Inspect [Image #1]", [PATH_PASTED_IMAGE]);
+				promoted = session.promoteQueuedMessage("Inspect [Image #1]");
+				steering = [...session.agent.peekSteeringQueue()];
+				followUp = [...session.agent.peekFollowUpQueue()];
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toBe(true);
+			expect(followUp).toEqual([]);
+			expect(steering.map(message => (message.role === "custom" ? message.customType : message.role))).toEqual([
+				"image-attachment",
+				"user",
+			]);
+			expect(JSON.stringify(steering[0])).toContain(IMAGE_SOURCE_PATH);
+		});
+
+		it("enqueues live keyword companion groups synchronously during streaming in one-at-a-time mode", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			session.setSteeringMode("one-at-a-time");
+			const image = {
+				type: "image" as const,
+				mimeType: "image/png",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			};
+
+			let steerPromise: Promise<boolean> | undefined;
+			session.agent.setOnBeforeYield(async () => {
+				if (steerPromise) return;
+				steerPromise = session.prompt("review this ?ultrathink", {
+					images: [image],
+					streamingBehavior: "steer",
+				});
+			});
+
+			await session.prompt("start");
+			await steerPromise;
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			const steeredContext = JSON.stringify(mock.calls[1].context.messages);
+			expect(steeredContext).toContain("Multi-step reasoning");
+			expect(steeredContext).toContain("review this ?ultrathink");
+			// The early streaming branch queues before normalization runs; its
+			// notice-only metadata must not be mistaken for prepared attachments,
+			// or the attachment never reaches the model.
+			expect(
+				mock.calls[1].context.messages.some(
+					message =>
+						message.role === "user" &&
+						Array.isArray(message.content) &&
+						message.content.some(part => part.type === "text" && part.text.includes("review this")) &&
+						message.content.some(part => part.type === "image"),
+				),
+			).toBe(true);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+			const ultrathinkMessage = session.messages.find(
+				message => message.role === "custom" && message.customType === "ultrathink-notice",
+			);
+			expect(ultrathinkMessage).toBeDefined();
+		});
+
+		it("promotes live keyword companion groups queued as follow-ups into steering atomically", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			session.setSteeringMode("one-at-a-time");
+
+			let followUpPromise: Promise<boolean> | undefined;
+			let promoted = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (followUpPromise) return;
+				followUpPromise = session.prompt("follow-up with ?ultrathink", {
+					streamingBehavior: "followUp",
+				});
+				await followUpPromise;
+				promoted = session.promoteQueuedMessage("follow-up with ?ultrathink");
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(promoted).toBe(true);
+			expect(mock.calls).toHaveLength(2);
+			const steeredContext = JSON.stringify(mock.calls[1].context.messages);
+			expect(steeredContext).toContain("Multi-step reasoning");
+			expect(steeredContext).toContain("follow-up with ?ultrathink");
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		});
+
+		it("wakes an idle follow-up and rejects a stale promotion without replaying it", async () => {
+			const { session, mock } = await createSession([{ content: ["delivered"] }]);
+			await session.followUp("wake me");
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["wake me"] });
+			const delivered = nextUserMessage(session, "wake me");
+
+			expect(session.promoteQueuedMessage("wake me")).toBe(true);
+			await delivered;
+			await session.waitForIdle();
+
+			expect(session.promoteQueuedMessage("wake me")).toBe(false);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+			expect(mock.calls).toHaveLength(1);
+			expect(session.messages.filter(message => message.role === "user")).toHaveLength(1);
+		});
+
+		it("reports a promotion as one queue_update that never shows the message missing", async () => {
+			const { session } = await createSession([{ content: ["delivered"] }]);
+			await session.followUp("keep me visible");
+			const updates: Array<{ steering: string[]; followUp: string[] }> = [];
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "queue_update") updates.push({ steering: event.steering, followUp: event.followUp });
+			});
+			try {
+				expect(session.promoteQueuedMessage("keep me visible")).toBe(true);
+				// Synchronous snapshot: the idle drain has not dequeued it yet.
+				expect(updates).toEqual([{ steering: ["keep me visible"], followUp: [] }]);
+			} finally {
+				unsubscribe();
+			}
+			await session.waitForIdle();
+		});
+
+		for (const mode of ["immediate", "wait"] as const) {
+			it(`honors ${mode} interruption when promoting during an interruptible tool`, async () => {
+				const { session } = await createSession([
+					{
+						content: [
+							{ type: "toolCall", id: "first", name: "pause", arguments: { value: "first" } },
+							{ type: "toolCall", id: "second", name: "pause", arguments: { value: "second" } },
+						],
+					},
+					{ content: ["steered"] },
+				]);
+				const started = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const interrupted = Promise.withResolvers<void>();
+				const executed: string[] = [];
+				const schema = type({ value: "string" });
+				const tool: AgentTool<typeof schema> = {
+					name: "pause",
+					label: "Pause",
+					description: "Wait for release",
+					parameters: schema,
+					concurrency: "exclusive",
+					// "wait" mode spares only side-effecting work; interruptible
+					// waits are cut short in either mode.
+					interruptible: mode === "immediate",
+					async execute(_id, params, signal) {
+						executed.push(params.value);
+						if (params.value === "first") {
+							const onAbort = () => interrupted.resolve();
+							signal?.addEventListener("abort", onAbort, { once: true });
+							started.resolve();
+							try {
+								await Promise.race([release.promise, interrupted.promise]);
+							} finally {
+								signal?.removeEventListener("abort", onAbort);
+							}
+						}
+						return { content: [{ type: "text", text: params.value }], details: {} };
+					},
+				};
+				session.agent.setTools([tool]);
+				session.setInterruptMode(mode);
+				session.setSteeringMode("one-at-a-time");
+				session.setFollowUpMode("one-at-a-time");
+				const prompt = session.prompt("start");
+				try {
+					await withTimeout(started.promise, 2_000, "The first tool did not start");
+					await session.followUp("change direction");
+					expect(session.promoteQueuedMessage("change direction")).toBe(true);
+					if (mode === "immediate")
+						await withTimeout(interrupted.promise, 2_000, "Promotion did not wake the tool interrupt");
+				} finally {
+					release.resolve();
+					await prompt;
+				}
+				await session.waitForIdle();
+
+				expect(executed).toEqual(mode === "immediate" ? ["first"] : ["first", "second"]);
+				expect(session.interruptMode).toBe(mode);
+				expect(session.steeringMode).toBe("one-at-a-time");
+				expect(session.followUpMode).toBe("one-at-a-time");
+				expect(session.messages.filter(message => message.role === "user").map(message => message.content)).toEqual(
+					["start", "change direction"].map(text => [{ type: "text", text }]),
+				);
+				expect(session.agent.hasQueuedMessages()).toBe(false);
+			});
+		}
 	});
 });
