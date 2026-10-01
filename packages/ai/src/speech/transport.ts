@@ -24,7 +24,8 @@ export async function postSpeechRequest(
 	const label = `${model.provider}/${model.id}`;
 	const audio = await withAuth(
 		options.apiKey,
-		async (key, configuredHeaders) => {
+		async key => {
+			const configuredHeaders = model.resolveHeaders ? await model.resolveHeaders(signal) : model.headers;
 			const response = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}${path}`, {
 				method: "POST",
 				headers: {
@@ -48,7 +49,7 @@ export async function postSpeechRequest(
 			}
 			return new Uint8Array(await response.arrayBuffer());
 		},
-		{ signal, headerResolver: model },
+		{ signal },
 	);
 	// Speech endpoints return only audio bytes. OpenRouter exposes a generation id,
 	// but neither it nor the OpenAI/xAI wires report token or billable-unit usage.

@@ -408,7 +408,11 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 			400,
 		);
 	}
-	const customEndpoint = params.model.baseUrl.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
+	const transport: XAIHttpTransport = {
+		baseURL: params.model.baseUrl,
+		headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+	};
+	const customEndpoint = transport.baseURL.replace(/\/+$/, "") !== XAI_DEFAULT_BASE_URL;
 	const credentialOrigin = params.authStorage.keys.source(params.model.provider);
 	const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
 	const officialOAuthCredential =
@@ -418,27 +422,26 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 	if (customEndpoint && officialOAuthCredential) {
 		throw new SearchProviderError(
 			"xai",
-			`Refusing to send official xAI OAuth credentials to custom endpoint ${params.model.baseUrl}. Configure an API key for provider "xai-oauth".`,
+			`Refusing to send official xAI OAuth credentials to custom endpoint ${transport.baseURL}. Configure an API key for provider "xai-oauth".`,
 		);
 	}
 	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	const resultCap = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 	const response = await withAuth(
 		keyOrResolver,
-		async (key, headers) => {
+		async key => {
 			const requestTransport: XAIHttpTransport = {
 				// XAI_BASE_URL never receives official OAuth credentials: neither an OAuth-origin
 				// credential nor an OAuth access-token bearer leaves the bundled endpoint.
 				baseURL: officialOAuthCredential
 					? params.model.baseUrl
 					: (resolveXaiBaseUrl(params.model.provider, params.model.baseUrl, key) ?? params.model.baseUrl),
-				headers,
+				headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
 			};
 			return callXAIResponses(key, params, requestTransport);
 		},
 		{
 			signal: params.signal,
-			headerResolver: params.model,
 			missingKeyMessage: `xAI credentials not found for selected provider "${params.model.provider}".`,
 		},
 	);

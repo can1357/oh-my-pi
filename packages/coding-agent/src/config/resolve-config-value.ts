@@ -1,29 +1,22 @@
 import { executeShell } from "@oh-my-pi/pi-natives";
-import {
-	type CommandCredentialRejector,
-	getCommandHeaderCredentials,
-	setCommandHeaderCredentials,
-	type SentHeaderCommandCredential,
-} from "@oh-my-pi/pi-ai/auth-retry";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
 const COMMAND_TIMEOUT_MS = 10_000;
 const COMMAND_FAILURE_RETRY_MS = 30_000;
 const INITIAL_MINT_ATTEMPTS = 2;
-const MAX_REJECTED_VALUE_DIGESTS = 256;
-/** Last stdout each command printed on success; a failed run never replaces it. */
+/** lastGood: stdout of each command's last successful run; a failed run never replaces it. */
 const commandResultCache = new Map<string, string>();
-/** Failed runs wait before attempting another mint, preventing a credential-helper storm. */
+/** Failed runs wait this long before another run, preventing a credential-helper storm. */
 const commandFailureRetryAt = new Map<string, number>();
 /** Why the latest run failed, without retaining command stdout. */
 const commandFailure = new Map<string, string>();
-/** Commands an explicit refresh asked to mint once their backoff permits. */
+/** Commands an ordinary or explicit refresh asked to run; lastGood stays servable if that run fails. */
 const commandRefreshPending = new Set<string>();
-/** SHA-256 digests of 401-rejected values, bounded FIFO per command. */
-const commandRejectedValueDigests = new Map<string, string[]>();
-/** Commands that reached the digest cap and fail closed rather than evict a rejected value. */
-const commandRejectedValueOverflow = new Set<string>();
+/** Commands whose cached value a 401 marked: it is not served again until a run succeeds. */
+const commandRecoveryPending = new Set<string>();
+/** The single shared run per command. */
 const commandInFlight = new Map<string, Promise<string | undefined>>();
+/** Explicit-invalidation epoch; a run that started under an older generation does not update state. */
 const commandGeneration = new Map<string, number>();
 
 type CommandRun = { ok: true; value: string } | { ok: false; failure: string };
@@ -48,27 +41,9 @@ function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
-function valueDigest(value: string): string {
-	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
-}
-
-function valueIsRejected(command: string, value: string | undefined): boolean {
-	return (
-		value !== undefined &&
-		(commandRejectedValueOverflow.has(command) ||
-			commandRejectedValueDigests.get(command)?.includes(valueDigest(value)) === true)
-	);
-}
-
+/** Withhold a command's cached value while a 401 mark awaits a successful run. */
 function handOutValue(command: string, value: string | undefined): string | undefined {
-	return valueIsRejected(command, value) ? undefined : value;
-}
-
-/** True when this command configuration produced the value currently being dispatched. */
-export function commandConfigMatchesValue(valueConfig: string | undefined, value: string): boolean {
-	if (!isCommandConfigValue(valueConfig)) return false;
-	const command = commandKey(valueConfig);
-	return handOutValue(command, commandResultCache.get(command)) === value;
+	return commandRecoveryPending.has(command) && value === commandResultCache.get(command) ? undefined : value;
 }
 
 /** Invalidate one command-backed value for an ordinary refresh. */
@@ -81,35 +56,14 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 }
 
-/**
- * Mark the exact command-backed bearer rejected by a 401 without disturbing a
- * shared mint. Omitting `rejectedValue` asks for an ordinary refresh only.
- */
-export function rejectCommandConfig(valueConfig: string | undefined, rejectedValue?: string): void {
+/** Mark a command's cached value unservable until a run succeeds. With `sentValue`, only when it is still the cached value. */
+export function markCommandConfigForRecovery(valueConfig: string | undefined, sentValue?: string): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
-	if (rejectedValue !== undefined) {
-		const digests = commandRejectedValueDigests.get(command) ?? [];
-		const digest = valueDigest(rejectedValue);
-		if (!digests.includes(digest)) {
-			if (digests.length === MAX_REJECTED_VALUE_DIGESTS) {
-				commandRejectedValueOverflow.add(command);
-				commandFailure.set(command, "rejected too many keys");
-			} else {
-				digests.push(digest);
-				commandRejectedValueDigests.set(command, digests);
-			}
-		}
-	}
-	if (handOutValue(command, commandResultCache.get(command)) === undefined) {
-		commandRefreshPending.add(command);
-	}
-	commandFailureRetryAt.delete(command);
+	const cached = commandResultCache.get(command);
+	if (cached === undefined || (sentValue !== undefined && sentValue !== cached)) return;
+	commandRecoveryPending.add(command);
 }
-
-/** Rejector attached to every config-materialized header record; auth drivers call it on 401. */
-const rejectHeaderCredential: CommandCredentialRejector = credential =>
-	rejectCommandConfig(credential.config, credential.value);
 
 /** Invalidate every command-backed value without cancelling shared in-flight processes. */
 export function invalidateAllCommandConfigs(): void {
@@ -117,7 +71,6 @@ export function invalidateAllCommandConfigs(): void {
 		...commandResultCache.keys(),
 		...commandFailureRetryAt.keys(),
 		...commandInFlight.keys(),
-		...commandRejectedValueDigests.keys(),
 	])) {
 		commandRefreshPending.add(command);
 		commandFailureRetryAt.delete(command);
@@ -142,10 +95,7 @@ export function describeCommandConfigFailure(valueConfig: string | undefined): s
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
-	if (commandRejectedValueOverflow.has(command)) {
-		commandFailure.set(command, "rejected too many keys");
-		return undefined;
-	}
+
 	const cached = commandResultCache.get(command);
 	if (handOutValue(command, cached) !== undefined && !commandRefreshPending.has(command)) return cached;
 	const retryAt = commandFailureRetryAt.get(command);
@@ -160,16 +110,18 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 		let attempts = handOutValue(command, cached) === undefined ? INITIAL_MINT_ATTEMPTS : 1;
 		for (let attempt = 0; attempt < attempts; attempt++) {
 			run = await runInProjectDir(command);
-			if (run.ok && handOutValue(command, run.value) !== undefined) {
+			if (run.ok) {
+				// The helper is authoritative: a successful run clears a 401 mark even
+				// when it prints the value that mark withheld.
 				if ((commandGeneration.get(command) ?? 0) === generation) {
 					commandResultCache.set(command, run.value);
 					commandFailureRetryAt.delete(command);
 					commandFailure.delete(command);
 					commandRefreshPending.delete(command);
+					commandRecoveryPending.delete(command);
 				}
-				return handOutValue(command, run.value);
+				return run.value;
 			}
-			if (run.ok) run = { ok: false, failure: "returned a value rejected by a 401" };
 			// A 401 may arrive while this mint was in flight. Re-evaluate the
 			// state now, then spend one shared replacement attempt if needed.
 			if (attempt === 0 && handOutValue(command, commandResultCache.get(command)) === undefined) {
@@ -182,7 +134,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 		logger.warn("config: !command value resolution failed", {
 			failure: run.failure,
 			keptPreviousValue: sendableLastGood !== undefined,
-			rejected: lastGood !== undefined && sendableLastGood === undefined,
+			awaitingRecovery: lastGood !== undefined && sendableLastGood === undefined,
 		});
 		if ((commandGeneration.get(command) ?? 0) === generation) {
 			commandFailure.set(command, run.failure);
@@ -199,8 +151,9 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 
 /**
  * Resolve a configuration value. Command values execute asynchronously and
- * cache only successful stdout. A failed ordinary refresh serves the prior
- * stdout through a short backoff; a 401-rejected value never falls back.
+ * cache only successful stdout. A failed run serves the prior stdout through a
+ * short backoff; a 401-marked value is not served until the command runs again
+ * and succeeds.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
 	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
@@ -286,17 +239,14 @@ export async function resolveConfigHeaders(
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
-	const commandCredentials: SentHeaderCommandCredential[] = [];
+	let hasResolved = false;
 	for (const key in headers) {
-		const config = headers[key];
-		const next = await untilAborted(signal, () => resolveConfigValue(config));
+		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
 		if (!next) continue;
 		resolved[key] = next;
-		if (isCommandConfigValue(config)) commandCredentials.push({ header: key, config, value: next });
+		hasResolved = true;
 	}
-	return Object.keys(resolved).length > 0
-		? setCommandHeaderCredentials(resolved, commandCredentials, rejectHeaderCredential)
-		: undefined;
+	return hasResolved ? resolved : undefined;
 }
 
 /**
@@ -313,7 +263,7 @@ export function createConfigHeaderResolver(
 	return async signal => {
 		signal?.throwIfAborted();
 		const resolved: Record<string, string> = {};
-		const commandCredentialsByHeader = new Map<string, SentHeaderCommandCredential>();
+		let hasResolved = false;
 		for (const source of active) {
 			const next =
 				typeof source === "function"
@@ -323,26 +273,18 @@ export function createConfigHeaderResolver(
 			if (!next) continue;
 			for (const key in next) {
 				resolved[key] = next[key];
-				commandCredentialsByHeader.delete(key);
-			}
-			for (const credential of getCommandHeaderCredentials(next)) {
-				commandCredentialsByHeader.set(credential.header, credential);
+				hasResolved = true;
 			}
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
-			const config = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(config));
+			const keyConfig = options.apiKeyConfig;
+			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
-				commandCredentialsByHeader.delete("Authorization");
-				if (isCommandConfigValue(config)) {
-					commandCredentialsByHeader.set("Authorization", { header: "Authorization", config, value: apiKey });
-				}
+				hasResolved = true;
 			}
 		}
-		return Object.keys(resolved).length > 0
-			? setCommandHeaderCredentials(resolved, [...commandCredentialsByHeader.values()], rejectHeaderCredential)
-			: undefined;
+		return hasResolved ? resolved : undefined;
 	};
 }
 
@@ -353,6 +295,5 @@ export function clearConfigValueCache(): void {
 	commandFailureRetryAt.clear();
 	commandFailure.clear();
 	commandRefreshPending.clear();
-	commandRejectedValueDigests.clear();
-	commandRejectedValueOverflow.clear();
+	commandRecoveryPending.clear();
 }

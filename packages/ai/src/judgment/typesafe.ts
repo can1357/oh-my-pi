@@ -16,7 +16,7 @@
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
-import { type ApiKey, type AuthHeaderResolver, withAuth } from "../auth-retry";
+import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import {
@@ -68,8 +68,6 @@ export interface TypeSafeJudgeOptions {
 	model?: string;
 	/** Static headers attached to judgment requests (e.g. proxy routing, gateway auth). */
 	headers?: Record<string, string>;
-	/** Per-attempt header source used by registry-backed judgment models. */
-	headerResolver?: AuthHeaderResolver;
 	fetch?: FetchImpl;
 	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
 	timeoutMs?: number;
@@ -106,7 +104,7 @@ export class TypeSafeJudge implements Judge {
 	readonly model: string;
 	readonly baseUrl: string;
 	readonly #apiKey: ApiKey;
-	readonly #headerResolver: AuthHeaderResolver;
+	readonly #headers: Record<string, string> | undefined;
 	readonly #fetch: FetchImpl;
 	readonly #timeoutMs: number;
 
@@ -116,7 +114,7 @@ export class TypeSafeJudge implements Judge {
 		this.provider = options.provider ?? TYPESAFE_PROVIDER;
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
-		this.#headerResolver = options.headerResolver ?? (() => options.headers);
+		this.#headers = options.headers;
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.label = `${this.provider}/${this.model}`;
@@ -127,8 +125,8 @@ export class TypeSafeJudge implements Judge {
 		const signal = options?.signal;
 		const response = await withAuth(
 			this.#apiKey,
-			(key, headers) => this.#attempt<SystemOneResponse>(JUDGMENT_ROUTES[this.api], body, key, headers, signal),
-			{ signal, headerResolver: this.#headerResolver },
+			key => this.#attempt<SystemOneResponse>(JUDGMENT_ROUTES[this.api], body, key, signal),
+			{ signal },
 		);
 		for (const id in request.questions) {
 			const answer = response.answers[id];
@@ -148,16 +146,10 @@ export class TypeSafeJudge implements Judge {
 		};
 	}
 
-	async #attempt<T>(
-		path: string,
-		body: string,
-		key: string,
-		configuredHeaders: Record<string, string> | undefined,
-		signal: AbortSignal | undefined,
-	): Promise<T> {
+	async #attempt<T>(path: string, body: string, key: string, signal: AbortSignal | undefined): Promise<T> {
 		const url = `${this.baseUrl}${path}`;
 		const headers: Record<string, string> = {
-			...configuredHeaders,
+			...this.#headers,
 			Authorization: `Bearer ${key}`,
 			Accept: "application/json",
 			"Content-Type": "application/json",

@@ -36,6 +36,10 @@ export function imageBaseUrl(model: Model): string {
 	return model.baseUrl.replace(/\/+$/, "");
 }
 
+export async function modelHeaders(model: Model, signal?: AbortSignal): Promise<Record<string, string>> {
+	return { ...model.headers, ...(await model.resolveHeaders?.(signal)) };
+}
+
 export function errorMessage(rawText: string): string {
 	try {
 		const parsed = JSON.parse(rawText) as { detail?: string; error?: { message?: string } };
@@ -78,12 +82,12 @@ export async function postJson(options: {
 }): Promise<unknown> {
 	return withAuth(
 		options.apiKey,
-		async (key, headers) => {
+		async key => {
 			const url = typeof options.url === "string" ? options.url : options.url(key);
 			const response = await options.fetch(url, {
 				method: "POST",
 				headers: {
-					...headers,
+					...(await modelHeaders(options.model, options.signal)),
 					Authorization: `Bearer ${key}`,
 					"Content-Type": "application/json",
 					"User-Agent": USER_AGENT,
@@ -93,7 +97,7 @@ export async function postJson(options: {
 			});
 			return parseImageApiResponse(options.model, response);
 		},
-		{ signal: options.signal, headerResolver: options.model },
+		{ signal: options.signal },
 	);
 }
 
@@ -107,12 +111,12 @@ export async function postMultipart(options: {
 }): Promise<unknown> {
 	return withAuth(
 		options.apiKey,
-		async (key, headers) => {
+		async key => {
 			const url = typeof options.url === "string" ? options.url : options.url(key);
 			const response = await options.fetch(url, {
 				method: "POST",
 				headers: {
-					...headers,
+					...(await modelHeaders(options.model, options.signal)),
 					Authorization: `Bearer ${key}`,
 					"User-Agent": USER_AGENT,
 				},
@@ -121,7 +125,7 @@ export async function postMultipart(options: {
 			});
 			return parseImageApiResponse(options.model, response);
 		},
-		{ signal: options.signal, headerResolver: options.model },
+		{ signal: options.signal },
 	);
 }
 

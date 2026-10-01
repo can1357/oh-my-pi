@@ -17,17 +17,7 @@ import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import {
-	copyHeadersWithCommandCredentials,
-	createAuthRetryKeyState,
-	getCommandHeaderCredentials,
-	isApiKeyResolver,
-	resolvedApiKeyBearer,
-	rejectCommandHeaderCredentials,
-	resolveNextAuthRetryKey,
-	type ApiKeyResolution,
-	type AuthRetryKeyState,
-} from "./auth-retry";
+import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
@@ -944,17 +934,9 @@ export function listProvidersWithEnvKey(): string[] {
 	return Object.keys(serviceProviderMap);
 }
 
-const resolvedHeaderResolvers = new WeakMap<object, NonNullable<Model<Api>["resolveHeaders"]>>();
-
-/** Lower-cased header names a caller's `StreamOptions.headers` override; those model values never reach the wire. */
-function overriddenHeaderNames(callerHeaders: Record<string, string> | undefined): ReadonlySet<string> {
-	return new Set(Object.keys(callerHeaders ?? {}).map(header => header.toLowerCase()));
-}
-
 function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
-	callerHeaders: Record<string, string> | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	const resolveHeaders = model.resolveHeaders;
@@ -965,19 +947,8 @@ function withResolvedModelHeaders<TApi extends Api>(
 		try {
 			const headers = await untilAborted(signal, () => resolveHeaders(signal));
 			signal?.throwIfAborted();
-			const resolvedModel = {
-				...model,
-				resolveHeaders: undefined,
-				headers: copyHeadersWithCommandCredentials(headers),
-			};
-			resolvedHeaderResolvers.set(resolvedModel, resolveHeaders);
-			const inner = run(resolvedModel);
+			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
 			for await (const event of inner) {
-				// The terminal 401 of a static-key request, or of the last retry,
-				// retires the command-backed headers that request sent.
-				if (event.type === "error" && extractStatusFromAssistantError(event.error) === 401) {
-					rejectCommandHeaderCredentials(resolvedModel.headers, overriddenHeaderNames(callerHeaders));
-				}
 				outer.push(event);
 				if (outer.done) return;
 			}
@@ -995,9 +966,7 @@ export function stream<TApi extends Api>(
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, options?.signal, options?.headers, resolvedModel =>
-			stream(resolvedModel, context, options),
-		);
+		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
@@ -1345,18 +1314,10 @@ function streamSimpleRequest<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
 
-	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, requestOptions.signal, requestOptions.headers, resolvedModel =>
-			streamSimpleRequest(resolvedModel, context, requestOptions),
-		);
-	}
-
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
-	let retryState: AuthRetryKeyState | undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
-		const maskedHeaderNames = overriddenHeaderNames(requestOptions.headers);
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
@@ -1364,8 +1325,6 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
-			resolvedCredentials?: ApiKeyResolution,
-			refreshHeaders = false,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1375,27 +1334,6 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				if (refreshHeaders) {
-					const resolveHeaders = resolvedHeaderResolvers.get(model);
-					if (resolveHeaders) {
-						const headers = await untilAborted(signal, () => resolveHeaders(signal));
-						model.headers = copyHeadersWithCommandCredentials(headers);
-					}
-				}
-				if (retryState && apiKey !== undefined) {
-					const sentHeaderCredentials = getCommandHeaderCredentials(model.headers).filter(
-						credential => !maskedHeaderNames.has(credential.header.toLowerCase()),
-					);
-					retryState.lastSentCredentials = {
-						apiKey,
-						commandCredentials: [
-							...(typeof resolvedCredentials === "string"
-								? []
-								: (resolvedCredentials?.commandCredentials ?? [])),
-							...sentHeaderCredentials,
-						],
-					};
-				}
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
@@ -1418,9 +1356,6 @@ function streamSimpleRequest<TApi extends Api>(
 							event.error.errorMessage,
 						)
 					) {
-						if (extractStatusFromAssistantError(event.error) === 401) {
-							rejectCommandHeaderCredentials(model.headers, maskedHeaderNames);
-						}
 						return {
 							error: contextualizeAuthRetryError(model, createAssistantAuthError(event.error)),
 							bufferedEvents,
@@ -1448,7 +1383,6 @@ function streamSimpleRequest<TApi extends Api>(
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					if (AIError.status(error) === 401) rejectCommandHeaderCredentials(model.headers, maskedHeaderNames);
 					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
 				}
 				flushBuffered();
@@ -1466,19 +1400,14 @@ function streamSimpleRequest<TApi extends Api>(
 		};
 
 		void (async () => {
-			let initialResolved: ApiKeyResolution;
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
-				initialResolved = await apiKeyResolver({
-					lastChance: false,
-					error: undefined,
-					signal,
-				});
-				lastKey = resolvedApiKeyBearer(initialResolved);
-				credentialId = typeof initialResolved === "string" ? undefined : initialResolved?.credentialId;
-				oauthIdentity = typeof initialResolved === "string" ? undefined : initialResolved?.oauthIdentity;
+				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				lastKey = resolvedApiKeyBearer(resolved);
+				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1499,8 +1428,8 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			retryState = createAuthRetryKeyState(lastKey, initialResolved);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, initialResolved);
+			const retryState = createAuthRetryKeyState(lastKey);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1508,26 +1437,30 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				let nextResolved: ApiKeyResolution = undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
 					signal,
 					resolved => {
-						nextResolved = resolved;
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextResolved, true);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
 			emitFailure(failure);
 		})();
 		return outer;
+	}
+
+	if (model.resolveHeaders) {
+		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
+			streamSimpleRequest(resolvedModel, context, requestOptions),
+		);
 	}
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:

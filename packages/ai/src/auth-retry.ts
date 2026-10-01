@@ -1,19 +1,3 @@
-/**
- * Central auth-retry drivers: {@link withAuth}, {@link withOAuthAccess}, and
- * the streaming driver in `stream.ts`.
- *
- * No-resend invariant: a command-backed credential that an attempt dispatched,
- * and that the attempt's response rejected with 401, is never dispatched again,
- * neither by a refresh, a rotation, nor a later logical operation. Drivers learn
- * what they dispatched from provenance: an {@link ApiKeyResolver} reports its
- * command-backed bearer in {@link ResolvedApiKey.commandCredentials}, and every
- * model-header record carries its command provenance and the rejector that
- * retires it. Drivers therefore materialize model headers themselves, once per
- * attempt, and reject that record's command values on a 401 before resolving
- * the next attempt. A raw string key has no provenance; a caller needing the
- * guarantee for a command-backed key passes its resolver instead.
- */
-import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
@@ -46,137 +30,8 @@ export interface ApiKeyResolveContext {
 	error: unknown;
 	/** Bearer used by the failed attempt, when the caller can expose it. */
 	previousKey?: string;
-	/** Exact command-backed credentials dispatched by the failed attempt. */
-	previousSentCredentials?: SentCredentialSet;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
-}
-
-/** One command-backed credential that the transport actually dispatched. */
-export interface SentCommandCredential {
-	config: string;
-	value: string;
-}
-
-/** Exact command-backed header credential with its dispatched header name. */
-export interface SentHeaderCommandCredential extends SentCommandCredential {
-	header: string;
-}
-
-/** Exact bearer and command-backed values dispatched by one request attempt. */
-export interface SentCredentialSet {
-	apiKey: string;
-	commandCredentials: readonly SentCommandCredential[];
-}
-
-/** Retires one command-backed value after a response rejected it with 401. */
-export type CommandCredentialRejector = (credential: SentCommandCredential) => void;
-
-interface CommandHeaderProvenance {
-	credentials: readonly SentHeaderCommandCredential[];
-	reject: CommandCredentialRejector;
-}
-
-const commandHeaderProvenance = Symbol("commandHeaderProvenance");
-
-type HeadersWithCommandProvenance = Record<string, string> & {
-	[commandHeaderProvenance]?: CommandHeaderProvenance;
-};
-
-/** Attach command provenance, and the rejector that retires it, to a materialized header record. */
-export function setCommandHeaderCredentials(
-	headers: Record<string, string>,
-	credentials: readonly SentHeaderCommandCredential[],
-	reject: CommandCredentialRejector,
-): Record<string, string> {
-	if (credentials.length > 0) {
-		Object.defineProperty(headers, commandHeaderProvenance, { value: { credentials, reject } });
-	}
-	return headers;
-}
-
-/** Copy materialized headers without exposing command provenance on the wire. */
-export function copyHeadersWithCommandCredentials(
-	headers: Readonly<Record<string, string>> | undefined,
-): Record<string, string> | undefined {
-	if (!headers) return undefined;
-	const copy = { ...headers };
-	const provenance = (headers as HeadersWithCommandProvenance)[commandHeaderProvenance];
-	if (provenance) Object.defineProperty(copy, commandHeaderProvenance, { value: provenance });
-	return copy;
-}
-
-/** Read command provenance recorded during this header record's materialization. */
-export function getCommandHeaderCredentials(
-	headers: Readonly<Record<string, string>> | undefined,
-): readonly SentHeaderCommandCredential[] {
-	return (headers as HeadersWithCommandProvenance | undefined)?.[commandHeaderProvenance]?.credentials ?? [];
-}
-
-/**
- * Retire the command-backed values a 401 attempt dispatched from this header
- * record. Lower-cased names in `maskedHeaderNames` were overridden by the
- * caller and never reached the wire, so they stay sendable.
- */
-export function rejectCommandHeaderCredentials(
-	headers: Readonly<Record<string, string>> | undefined,
-	maskedHeaderNames?: ReadonlySet<string>,
-): void {
-	const provenance = (headers as HeadersWithCommandProvenance | undefined)?.[commandHeaderProvenance];
-	if (!provenance) return;
-	for (const credential of provenance.credentials) {
-		if (!maskedHeaderNames?.has(credential.header.toLowerCase())) provenance.reject(credential);
-	}
-}
-
-/**
- * Source for model headers dispatched by {@link withAuth} and
- * {@link withOAuthAccess}. A model's resolver is re-run for every request
- * attempt; a function is useful when the caller owns equivalent
- * registry-backed materialization.
- */
-export type AuthHeaderResolver =
-	| Model
-	| ((signal?: AbortSignal) => Promise<Record<string, string> | undefined> | Record<string, string> | undefined);
-
-async function resolveAuthHeaders(
-	headerResolver: AuthHeaderResolver | undefined,
-	signal: AbortSignal | undefined,
-): Promise<Record<string, string> | undefined> {
-	if (!headerResolver) return undefined;
-	const headers =
-		typeof headerResolver === "function"
-			? await headerResolver(signal)
-			: headerResolver.resolveHeaders
-				? await headerResolver.resolveHeaders(signal)
-				: headerResolver.headers;
-	return copyHeadersWithCommandCredentials(headers);
-}
-
-type AuthAttemptOutcome<T> = { ok: true; result: T } | { ok: false; error: unknown };
-
-/**
- * Dispatch one auth attempt with model headers the driver materialized for it.
- * Materialization runs outside auth classification: nothing was sent, so its
- * failure propagates unchanged and never consumes a credential retry. A 401
- * retires the command-backed header values this attempt sent before the driver
- * resolves another attempt; other auth-classified failures return to the retry
- * policy, and everything else propagates.
- */
-async function dispatchAuthAttempt<T>(
-	headerResolver: AuthHeaderResolver | undefined,
-	signal: AbortSignal | undefined,
-	isAuthError: (error: unknown) => boolean,
-	dispatch: (headers: Record<string, string> | undefined) => Promise<T>,
-): Promise<AuthAttemptOutcome<T>> {
-	const headers = await resolveAuthHeaders(headerResolver, signal);
-	try {
-		return { ok: true, result: await dispatch(headers) };
-	} catch (error) {
-		if (AIError.status(error) === 401) rejectCommandHeaderCredentials(headers);
-		if (!isAuthError(error)) throw error;
-		return { ok: false, error };
-	}
 }
 
 /**
@@ -185,8 +40,6 @@ async function dispatchAuthAttempt<T>(
  */
 export interface ResolvedApiKey {
 	apiKey: string;
-	/** Command-backed values the resolver materialized for this bearer. */
-	commandCredentials?: readonly SentCommandCredential[];
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
 	/**
@@ -240,12 +93,12 @@ export async function resolveApiKeyOnce(
 	key: ApiKey | undefined,
 	signal?: AbortSignal,
 	onResolved?: (resolved: ApiKeyResolution) => void,
-): Promise<ApiKeyResolution> {
+): Promise<string | undefined> {
 	if (key === undefined) return undefined;
 	if (isApiKeyResolver(key)) {
 		const resolved = await key({ lastChance: false, error: undefined, signal });
 		onResolved?.(resolved);
-		return resolved;
+		return resolvedApiKeyBearer(resolved);
 	}
 	return key;
 }
@@ -304,19 +157,12 @@ export async function resolveRetryKey(
 	signal?: AbortSignal,
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
-	previousSentCredentials?: SentCredentialSet,
-): Promise<ApiKeyResolution> {
+): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		const resolved = await resolver({
-			lastChance: rotateSibling,
-			error,
-			signal,
-			previousKey,
-			previousSentCredentials,
-		});
+		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
 		onResolved?.(resolved);
-		return resolved;
+		return resolvedApiKeyBearer(resolved);
 	} catch {
 		return undefined;
 	}
@@ -327,8 +173,6 @@ export interface AuthRetryKeyState {
 	attemptedKeys: Set<string>;
 	/** Bearer used by the most recent failed attempt. */
 	lastKey: string;
-	/** Exact credential set dispatched by the most recent request attempt. */
-	lastSentCredentials: SentCredentialSet;
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
 	/** Whether this operation already replayed once after an explicit token-refresh request. */
@@ -337,18 +181,10 @@ export interface AuthRetryKeyState {
 	attempts: number;
 }
 
-export function sentCredentialSet(resolved: ApiKeyResolution, apiKey: string): SentCredentialSet {
-	return {
-		apiKey,
-		commandCredentials: typeof resolved === "string" ? [] : (resolved?.commandCredentials ?? []),
-	};
-}
-
-export function createAuthRetryKeyState(initialKey: string, initialResolved: ApiKeyResolution): AuthRetryKeyState {
+export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
 	return {
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
-		lastSentCredentials: sentCredentialSet(initialResolved, initialKey),
 		refreshedCurrent: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
@@ -357,22 +193,16 @@ export function createAuthRetryKeyState(initialKey: string, initialResolved: Api
 
 function acceptRetryKey(
 	state: AuthRetryKeyState,
-	resolved: ApiKeyResolution,
+	key: string,
 	refreshedCurrent: boolean,
 	afterSiblingWait = false,
 ): string | undefined {
-	const key = resolvedApiKeyBearer(resolved);
-	if (
-		key === undefined ||
-		(!afterSiblingWait && state.attemptedKeys.has(key)) ||
-		state.attempts >= AUTH_RETRY_MAX_ATTEMPTS
-	) {
+	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
 		return undefined;
 	}
 	state.attemptedKeys.add(key);
 	state.attempts += 1;
 	state.lastKey = key;
-	state.lastSentCredentials = sentCredentialSet(resolved, key);
 	state.refreshedCurrent = refreshedCurrent;
 	return key;
 }
@@ -389,15 +219,7 @@ export async function resolveNextAuthRetryKey(
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
-		const refreshed = await resolveRetryKey(
-			resolver,
-			false,
-			error,
-			signal,
-			state.lastKey,
-			onResolved,
-			state.lastSentCredentials,
-		);
+		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
 		return acceptRetryKey(state, refreshed, true);
@@ -405,15 +227,7 @@ export async function resolveNextAuthRetryKey(
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(
-				resolver,
-				false,
-				error,
-				signal,
-				state.lastKey,
-				onResolved,
-				state.lastSentCredentials,
-			);
+			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
@@ -425,24 +239,29 @@ export async function resolveNextAuthRetryKey(
 
 	if (signal?.aborted) return undefined;
 	let afterSiblingWait = false;
-	const rotated = await resolveRetryKey(
-		resolver,
-		true,
-		error,
-		signal,
-		state.lastKey,
-		resolved => {
-			afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
-			onResolved?.(resolved);
-		},
-		state.lastSentCredentials,
-	);
+	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, resolved => {
+		afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
+		onResolved?.(resolved);
+	});
 	if (signal?.aborted || rotated === undefined) return undefined;
 	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
 }
 
 function oauthCredentialIdentity(access: OAuthAccess): string {
 	return access.credentialId !== undefined ? `credential:${access.credentialId}` : `bearer:${access.accessToken}`;
+}
+
+async function runOAuthAttempt<T>(
+	access: OAuthAccess,
+	attempt: (access: OAuthAccess) => Promise<T>,
+	isAuthError: (error: unknown) => boolean,
+): Promise<{ ok: true; result: T } | { ok: false; error: unknown }> {
+	try {
+		return { ok: true, result: await attempt(access) };
+	} catch (error) {
+		if (!isAuthError(error)) throw error;
+		return { ok: false, error };
+	}
 }
 
 /**
@@ -464,60 +283,45 @@ function oauthCredentialIdentity(access: OAuthAccess): string {
  */
 export async function withAuth<T>(
 	key: ApiKey | undefined,
-	attempt: (key: string, headers: Record<string, string> | undefined) => Promise<T>,
-	opts?: {
-		isAuthError?: (error: unknown) => boolean;
-		signal?: AbortSignal;
-		missingKeyMessage?: string;
-		headerResolver?: AuthHeaderResolver;
-	},
+	attempt: (key: string) => Promise<T>,
+	opts?: { isAuthError?: (error: unknown) => boolean; signal?: AbortSignal; missingKeyMessage?: string },
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
-	const signal = opts?.signal;
 	const missingKey = (): Error => new AIError.MissingApiKeyError(undefined, opts?.missingKeyMessage);
 
 	if (!isApiKeyResolver(key)) {
 		if (key === undefined) throw missingKey();
-		const outcome = await dispatchAuthAttempt(opts?.headerResolver, signal, isAuthError, headers =>
-			attempt(key, headers),
-		);
-		if (outcome.ok) return outcome.result;
-		throw outcome.error;
+		return attempt(key);
 	}
 
 	const resolver = key;
-	let initialResolved: ApiKeyResolution;
+	const signal = opts?.signal;
+	let initialKey: string | undefined;
 	try {
-		initialResolved = await resolver({ lastChance: false, error: undefined, signal, previousKey: undefined });
+		initialKey = resolvedApiKeyBearer(await resolver({ lastChance: false, error: undefined, signal }));
 	} catch (error) {
 		if (error instanceof AIError.CommandConfigResolutionError) throw error;
-		initialResolved = undefined;
 	}
-	const initialKey = resolvedApiKeyBearer(initialResolved);
 	if (initialKey === undefined) throw missingKey();
 
-	const state = createAuthRetryKeyState(initialKey, initialResolved);
-	const runAttempt = (apiKey: string): Promise<AuthAttemptOutcome<T>> =>
-		dispatchAuthAttempt(opts?.headerResolver, signal, isAuthError, headers => {
-			state.lastSentCredentials = {
-				apiKey,
-				commandCredentials: [
-					...state.lastSentCredentials.commandCredentials,
-					...getCommandHeaderCredentials(headers),
-				],
-			};
-			return attempt(apiKey, headers);
-		});
-	let outcome = await runAttempt(initialKey);
-	if (outcome.ok) return outcome.result;
-	let lastError = outcome.error;
+	const state = createAuthRetryKeyState(initialKey);
+	let lastError: unknown;
+	try {
+		return await attempt(initialKey);
+	} catch (error) {
+		if (!isAuthError(error)) throw error;
+		lastError = error;
+	}
 
 	while (true) {
 		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
 		if (nextKey === undefined) break;
-		outcome = await runAttempt(nextKey);
-		if (outcome.ok) return outcome.result;
-		lastError = outcome.error;
+		try {
+			return await attempt(nextKey);
+		} catch (error) {
+			if (!isAuthError(error)) throw error;
+			lastError = error;
+		}
 	}
 
 	throw lastError;
@@ -546,8 +350,6 @@ export interface WithOAuthAccessOptions {
 	 */
 	seed?: OAuthAccess;
 	missingAccessMessage?: string;
-	/** Model headers materialized for, and retired by a 401 on, each attempt. */
-	headerResolver?: AuthHeaderResolver;
 }
 
 /**
@@ -574,13 +376,11 @@ export interface WithOAuthAccessOptions {
 export async function withOAuthAccess<T>(
 	storage: OAuthAccessSource,
 	provider: string,
-	attempt: (access: OAuthAccess, headers: Record<string, string> | undefined) => Promise<T>,
+	attempt: (access: OAuthAccess) => Promise<T>,
 	opts?: WithOAuthAccessOptions,
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const { sessionId, signal } = opts ?? {};
-	const runAttempt = (access: OAuthAccess): Promise<AuthAttemptOutcome<T>> =>
-		dispatchAuthAttempt(opts?.headerResolver, signal, isAuthError, headers => attempt(access, headers));
 
 	let lastAccess = opts?.seed ?? (await storage.oauth.access(provider, sessionId, { signal }));
 	if (!lastAccess) {
@@ -595,7 +395,7 @@ export async function withOAuthAccess<T>(
 	let attemptCount = 1;
 	let refreshedCurrent = false;
 	let tokenRefreshReplayUsed = false;
-	let attemptResult = await runAttempt(lastAccess);
+	let attemptResult = await runOAuthAttempt(lastAccess, attempt, isAuthError);
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
@@ -619,7 +419,7 @@ export async function withOAuthAccess<T>(
 			attemptedBearers.add(bearer);
 			attemptCount += 1;
 			lastAccess = next;
-			attemptResult = await runAttempt(next);
+			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
 			continue;
@@ -646,7 +446,7 @@ export async function withOAuthAccess<T>(
 						attemptedBearers.add(bearer);
 						attemptCount += 1;
 						lastAccess = next;
-						attemptResult = await runAttempt(next);
+						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
 						continue;
@@ -684,7 +484,7 @@ export async function withOAuthAccess<T>(
 		attemptCount += 1;
 		lastAccess = next;
 		refreshedCurrent = !directRotation;
-		attemptResult = await runAttempt(next);
+		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
 	}

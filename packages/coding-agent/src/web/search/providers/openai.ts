@@ -227,7 +227,8 @@ export async function searchOpenAIResponses(params: SearchParams): Promise<Searc
 	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	return withAuth(
 		keyOrResolver,
-		async (apiKey, configuredHeaders) => {
+		async apiKey => {
+			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 			const headers = new Headers(configuredHeaders);
 			headers.set("Authorization", `Bearer ${apiKey}`);
 			headers.set("Content-Type", "application/json");
@@ -248,7 +249,6 @@ export async function searchOpenAIResponses(params: SearchParams): Promise<Searc
 		},
 		{
 			signal: params.signal,
-			headerResolver: params.model,
 			missingKeyMessage: `OpenAI API credentials not found for selected provider "${params.model.provider}".`,
 		},
 	);

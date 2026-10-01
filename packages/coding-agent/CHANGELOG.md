@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A failing or empty `!command` API key or header preserves its previous value through a short retry backoff, while a 401-rejected value is never sent again; first-mint failures name the command and exit status instead of appearing as a missing API key
+- A failing, empty, or timed-out `!command` API key or header keeps its previous value through a 30-second retry backoff instead of becoming an empty key; after a 401 the command runs again before its value is reused, and a first mint that fails names the command and exit status
 
 ## [18.4.6] - 2026-10-01
 

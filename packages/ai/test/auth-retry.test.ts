@@ -8,7 +8,6 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { setCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	classify,
 	CommandConfigResolutionError,
@@ -545,63 +544,6 @@ describe("withAuth", () => {
 		expect(result).toBe("ok");
 		expect(keys).toEqual(["k0", "k1"]);
 	});
-	it("materializes command headers for the attempt and retires them on 401", async () => {
-		const contexts: ApiKeyResolveContext[] = [];
-		const dispatchedHeaders: Array<string | undefined> = [];
-		const retired: string[] = [];
-		await expect(
-			withAuth(
-				ctx => {
-					contexts.push(ctx);
-					return ctx.error === undefined ? { apiKey: "static-key", commandCredentials: [] } : undefined;
-				},
-				async (_key, headers) => {
-					dispatchedHeaders.push(headers?.["x-tenant"]);
-					throw authError();
-				},
-				{
-					headerResolver: () =>
-						setCommandHeaderCredentials(
-							{ "x-tenant": "stale-tenant" },
-							[{ header: "x-tenant", config: "!tenant-command", value: "stale-tenant" }],
-							credential => retired.push(credential.value),
-						),
-				},
-			),
-		).rejects.toThrow("401 authentication_error");
-
-		expect(dispatchedHeaders).toEqual(["stale-tenant"]);
-		expect(retired).toEqual(["stale-tenant"]);
-		const sentCredential = contexts[1]?.previousSentCredentials?.commandCredentials[0];
-		expect(sentCredential).toMatchObject({ config: "!tenant-command", value: "stale-tenant" });
-		expect((sentCredential as { header?: string } | undefined)?.header).toBe("x-tenant");
-	});
-
-	it("propagates a header materialization failure without spending a credential retry", async () => {
-		const contexts: ApiKeyResolveContext[] = [];
-		const headerFailure = Object.assign(new Error("token service unauthorized"), { status: 401 });
-		let dispatched = false;
-		await expect(
-			withAuth(
-				ctx => {
-					contexts.push(ctx);
-					return "good-key";
-				},
-				async () => {
-					dispatched = true;
-					return "never";
-				},
-				{
-					headerResolver: () => {
-						throw headerFailure;
-					},
-				},
-			),
-		).rejects.toBe(headerFailure);
-		expect(dispatched).toBe(false);
-		// Only the initial resolve ran: nothing was sent, so no 401 recovery may retire the key.
-		expect(contexts).toHaveLength(1);
-	});
 });
 
 describe("withOAuthAccess", () => {
@@ -666,36 +608,6 @@ describe("withOAuthAccess", () => {
 		expect(result).toBe("proj-2");
 		expect(attempts.map(a => a.accessToken)).toEqual(["stale", "fresh"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
-	});
-
-	it("re-materializes command headers per attempt and retires the set a 401 rejected", async () => {
-		const storage = fakeStorage({ initial: access("stale"), forced: access("fresh") });
-		const retired = new Set<string>();
-		const dispatched: Array<string | undefined> = [];
-		const result = await withOAuthAccess(
-			storage,
-			"prov",
-			async (a, headers) => {
-				dispatched.push(headers?.["x-tenant"]);
-				if (a.accessToken === "stale") throw authError();
-				return "ok";
-			},
-			{
-				headerResolver: () => {
-					const value = ["tenant-1", "tenant-2"].find(tenant => !retired.has(tenant));
-					return value === undefined
-						? undefined
-						: setCommandHeaderCredentials(
-								{ "x-tenant": value },
-								[{ header: "x-tenant", config: "!tenant-command", value }],
-								credential => retired.add(credential.value),
-							);
-				},
-			},
-		);
-		expect(result).toBe("ok");
-		expect(dispatched).toEqual(["tenant-1", "tenant-2"]);
-		expect([...retired]).toEqual(["tenant-1"]);
 	});
 
 	it("allows one token-refresh replay without rotating to a sibling", async () => {

@@ -2,36 +2,12 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { generateImage } from "@oh-my-pi/pi-ai/images";
-import {
-	type CompactionPreparation,
-	compact,
-	createFileOps,
-	DEFAULT_COMPACTION_SETTINGS,
-} from "@oh-my-pi/pi-agent-core/compaction";
-import { TypeSafeJudge } from "@oh-my-pi/pi-ai/judgment";
-import { synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { streamSimple } from "@oh-my-pi/pi-ai";
+import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
-	type ApiKey,
-	getCommandHeaderCredentials,
-	resolveApiKeyOnce,
-	seedApiKeyResolver,
-	setCommandHeaderCredentials,
-	type ApiKeyResolveContext,
-	withAuth,
-} from "@oh-my-pi/pi-ai/auth-retry";
-import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
-import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
-import { searchOpenAIResponses } from "@oh-my-pi/pi-coding-agent/web/search/providers/openai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
-import {
-	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
-	rejectCommandConfig,
-	resolveConfigHeaders,
 	resolveConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -41,112 +17,16 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function stdoutCommand(value: string): string {
-	if (process.platform !== "win32") return `printf %s ${shellQuote(value)}`;
-	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write(${JSON.stringify(value)})`)}`;
-}
-
-function trackedTokenCommand(tokenFile: string, counterFile: string): string {
-	if (process.platform !== "win32") {
-		return `IFS= read -r token < ${shellQuote(tokenFile)}; printf 1 >> ${shellQuote(counterFile)}; [ "$token" = FAIL ] && exit 1; printf %s "$token"`;
-	}
-	const script = `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");const token=fs.readFileSync(${JSON.stringify(tokenFile)}, "utf8").trim();if(token==="FAIL")process.exit(1);process.stdout.write(token);`;
-	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-}
-
-/** Command whose first run exits 1 with no output; later runs print `<key>-<run number>`. */
-function failOnceCommand(counterFile: string, key: string): string {
-	if (process.platform !== "win32") {
-		return `printf 1 >> ${shellQuote(counterFile)}; n=$(wc -c < ${shellQuote(counterFile)}); [ $n -le 1 ] && exit 1; printf %s ${shellQuote(key)}-$n`;
-	}
-	const script = `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");const n=fs.readFileSync(${JSON.stringify(counterFile)}, "utf8").length;if(n<=1)process.exit(1);process.stdout.write(${JSON.stringify(key)}+"-"+n);`;
-	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-}
-
-/** Command that records every run, exits nonzero, and never prints stdout. */
-function failedTrackingCommand(counterFile: string): string {
-	if (process.platform !== "win32") return `printf 1 >> ${shellQuote(counterFile)}; exit 1`;
-	const script = `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");process.exit(1);`;
-	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-}
-
-/** Integration gate: the child waits for a file the test creates; no elapsed-time assumption. */
-function gatedTokenCommand(tokenFile: string, counterFile: string, startedFile: string, releaseFile: string): string {
-	return `printf 1 >> ${shellQuote(counterFile)}; : > ${shellQuote(startedFile)}; until [ -f ${shellQuote(releaseFile)} ]; do sleep 0.01; done; IFS= read -r token < ${shellQuote(tokenFile)}; printf %s "$token"`;
-}
-
-async function waitForFile(file: string): Promise<void> {
-	if (await Bun.file(file).exists()) return;
-	const done = Promise.withResolvers<void>();
-	const watcher = fs.watch(path.dirname(file), (_event, name) => {
-		if (name === path.basename(file)) {
-			watcher.close();
-			done.resolve();
-		}
-	});
-	await done.promise;
-}
-
-/** Command emits a file's synthetic stdout before failing; callers must never surface it. */
-function noisyFailedCommand(stdoutFile: string): string {
-	if (process.platform !== "win32") return `cat ${shellQuote(stdoutFile)}; exit 1`;
-	const script = `const fs=require("node:fs");process.stdout.write(fs.readFileSync(${JSON.stringify(stdoutFile)}, "utf8"));process.exit(1);`;
-	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-}
-
-/** Command that prints the *current* trimmed contents of `file` on each run. */
-function stdoutFileCommand(file: string): string {
-	if (process.platform !== "win32") return `IFS= read -r t < ${shellQuote(file)}; printf %s "$t"`;
-	const script = `const fs=require("node:fs");process.stdout.write(fs.readFileSync(${JSON.stringify(file)}, "utf8").trim());`;
-	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-}
-
-/** Minimal successful chat-completions SSE stream for the openai-completions provider. */
-function okChatCompletionStream(): Response {
-	const chunks = [
-		JSON.stringify({
-			id: "cmpl",
-			object: "chat.completion.chunk",
-			choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }],
-		}),
-		JSON.stringify({
-			id: "cmpl",
-			object: "chat.completion.chunk",
-			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-		}),
-		"[DONE]",
-	];
-	return new Response(chunks.map(c => `data: ${c}\n\n`).join(""), {
-		status: 200,
-		headers: { "Content-Type": "text/event-stream" },
-	});
-}
-
-/**
- * Fetch that records each request's credential headers, 401s until BOTH the
- * bearer and the tenant header carry their refreshed values, then streams a
- * successful completion.
- */
-function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): FetchImpl {
-	return async (_url, init) => {
-		const headers = (init?.headers ?? {}) as Record<string, string>;
-		const auth = headers.Authorization;
-		const tenant = headers["x-tenant-token"];
-		seen.push({ auth, tenant });
-		if (auth !== "Bearer fresh-bearer" || tenant !== "fresh-tenant") {
-			return new Response(JSON.stringify({ error: { message: "invalid api key", type: "authentication_error" } }), {
-				status: 401,
-				headers: { "Content-Type": "application/json" },
-			});
-		}
-		return okChatCompletionStream();
-	};
-}
+import {
+	failedTrackingCommand,
+	failOnceCommand,
+	noisyFailedCommand,
+	okChatCompletionStream,
+	refreshGateFetch,
+	stdoutCommand,
+	stdoutFileCommand,
+	trackedTokenCommand,
+} from "./helpers/command-config";
 
 describe("ModelRegistry command-resolved models.yml values", () => {
 	test("does not run a command-backed value outside an enterable project", async () => {
@@ -206,11 +86,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(headers?.["X-Api-Key"]).toBe("cmd-header");
 		}
 		expect(await registry.getApiKey(models[0])).toBe("cmd-api-key");
-	});
-
-	test("materialized command headers remain valid Fetch headers", async () => {
-		const headers = await resolveConfigHeaders({ "x-command-token": `!${stdoutCommand("synthetic-header")}` });
-		expect(new Headers(headers).get("x-command-token")).toBe("synthetic-header");
 	});
 
 	test("modelOverrides headers resolve from command stdout", async () => {
@@ -313,6 +188,47 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer fresh-key");
 	});
 
+	test("failed 401 refresh discards the rejected command-backed key", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		fs.writeFileSync(tokenFile, "FAIL");
+
+		const refreshed = await registry.resolver(model)({
+			lastChance: false,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+			previousKey: "stale-key",
+		});
+
+		expect(refreshed).toBeUndefined();
+		// The 401 left nothing servable, so the replacement mint gets two attempts.
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
+	});
+
 	test("a failed ordinary refresh keeps the previous key through its failure backoff", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
@@ -345,15 +261,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBe("previous-key");
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer previous-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-	});
-
-	test("fails closed after the bounded rejected-digest ledger fills", async () => {
-		const config = `!${stdoutCommand("would-be-accepted")}`;
-		for (let index = 0; index <= 256; index++) {
-			rejectCommandConfig(config, `rejected-${index}`);
-		}
-		expect(await resolveConfigValue(config)).toBeUndefined();
-		expect(describeCommandConfigFailure(config)).toContain("rejected too many keys");
 	});
 
 	test("a first mint retries once, then shares its failure backoff across lookups", async () => {
@@ -458,299 +365,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	}, 20_000);
 
-	test("a 401-rejected command key is never sent on the next turn when re-minting fails", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "rejected-key");
-		fs.writeFileSync(counterFile, "");
-		const command = trackedTokenCommand(tokenFile, counterFile);
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						authHeader: true,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBe("rejected-key");
-		fs.writeFileSync(tokenFile, "FAIL");
-		const sent: string[] = [];
-		const reject = async (key: string) => {
-			sent.push(key);
-			throw Object.assign(new Error("401 authentication_error"), { status: 401 });
-		};
-
-		await expect(withAuth(registry.resolver(model), reject)).rejects.toMatchObject({ status: 401 });
-		let nextTurnFailure: unknown;
-		try {
-			await withAuth(registry.resolver(model), reject);
-		} catch (error) {
-			nextTurnFailure = error;
-		}
-		expect(nextTurnFailure).toBeInstanceOf(Error);
-		expect((nextTurnFailure as Error).message).toContain(command);
-		expect((nextTurnFailure as Error).message).toContain("status 1");
-		expect(sent).toEqual(["rejected-key"]);
-		expect(await registry.getApiKey(model)).toBeUndefined();
-	});
-
-	test("a replacement mint that repeats a 401-rejected key is never sent on the next turn", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "bad-key");
-		fs.writeFileSync(counterFile, "");
-		const command = trackedTokenCommand(tokenFile, counterFile);
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBe("bad-key");
-		const sent: string[] = [];
-		const reject = async (key: string) => {
-			sent.push(key);
-			throw Object.assign(new Error("401 authentication_error"), { status: 401 });
-		};
-
-		await expect(withAuth(registry.resolver(model), reject)).rejects.toMatchObject({ status: 401 });
-		await expect(withAuth(registry.resolver(model), reject)).rejects.toThrow(command);
-		expect(sent).toEqual(["bad-key"]);
-	});
-
-	test("a second 401 rejects the refreshed key before last-chance rotation", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "stale-key");
-		fs.writeFileSync(counterFile, "");
-		const command = trackedTokenCommand(tokenFile, counterFile);
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBe("stale-key");
-		fs.writeFileSync(tokenFile, "fresh-1");
-		const attempts: string[] = [];
-		const result = await withAuth(registry.resolver(model), async key => {
-			attempts.push(key);
-			if (key === "stale-key") throw Object.assign(new Error("401 authentication_error"), { status: 401 });
-			if (key === "fresh-1") {
-				fs.writeFileSync(tokenFile, "fresh-2");
-				throw Object.assign(new Error("401 authentication_error"), { status: 401 });
-			}
-			return key;
-		});
-		expect(result).toBe("fresh-2");
-		const nextTurn = await withAuth(registry.resolver(model), async key => key);
-		expect(nextTurn).toBe("fresh-2");
-		expect(attempts).toEqual(["stale-key", "fresh-1", "fresh-2"]);
-	});
-
-	test("concurrent 401 recoveries share one replacement command run", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "stale-key");
-		fs.writeFileSync(counterFile, "");
-		const command = trackedTokenCommand(tokenFile, counterFile);
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBe("stale-key");
-		fs.writeFileSync(tokenFile, "fresh-key");
-		const requests = await Promise.all(
-			Array.from({ length: 5 }, () =>
-				withAuth(registry.resolver(model), async key => {
-					if (key === "stale-key") throw Object.assign(new Error("401 authentication_error"), { status: 401 });
-					return key;
-				}),
-			),
-		);
-		expect(requests).toEqual(["fresh-key", "fresh-key", "fresh-key", "fresh-key", "fresh-key"]);
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-	});
-
-	test("a 401 only rejects command headers on the requested model", async () => {
-		const tokenB = path.join(tempDir, "model-b-token.txt");
-		const counterB = path.join(tempDir, "model-b-counter.txt");
-		fs.writeFileSync(tokenB, "b-good");
-		fs.writeFileSync(counterB, "");
-		const commandB = trackedTokenCommand(tokenB, counterB);
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: "provider-key",
-						models: [
-							{ id: "model-a", name: "Model A" },
-							{ id: "model-b", name: "Model B", headers: { "x-b-token": `!${commandB}` } },
-						],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const modelA = registry.find("custom-proxy", "model-a");
-		const modelB = registry.find("custom-proxy", "model-b");
-		if (!modelA || !modelB) throw new Error("Expected custom models");
-		expect((await registry.resolveModelHeaders(modelB))?.["x-b-token"]).toBe("b-good");
-		fs.writeFileSync(tokenB, "FAIL");
-
-		await registry.resolver(modelA)({
-			lastChance: false,
-			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-		});
-		expect((await registry.resolveModelHeaders(modelB))?.["x-b-token"]).toBe("b-good");
-		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
-	});
-
-	test("a late 401 rejects the bearer it sent instead of a peer's fresh replacement", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "stale-key");
-		fs.writeFileSync(counterFile, "");
-		const command = trackedTokenCommand(tokenFile, counterFile);
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		const resolver = registry.resolver(model);
-		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "stale-key" });
-		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "stale-key" });
-		fs.writeFileSync(tokenFile, "fresh-key");
-		const firstRecovery = await resolver({
-			lastChance: false,
-			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: "stale-key",
-			previousSentCredentials: {
-				apiKey: "stale-key",
-				commandCredentials: [{ config: `!${command}`, value: "stale-key" }],
-			},
-		});
-		expect(firstRecovery).toMatchObject({ apiKey: "fresh-key" });
-		const lateRecovery = await resolver({
-			lastChance: false,
-			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: "stale-key",
-			previousSentCredentials: {
-				apiKey: "stale-key",
-				commandCredentials: [{ config: `!${command}`, value: "stale-key" }],
-			},
-		});
-		expect(lateRecovery).toMatchObject({ apiKey: "fresh-key" });
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-	});
-
-	test.skipIf(process.platform === "win32")(
-		"a 401 arriving during a mint makes every waiter reject the stale bearer",
-		async () => {
-			const tokenFile = path.join(tempDir, "token.txt");
-			const counterFile = path.join(tempDir, "counter.txt");
-			const startedFile = path.join(tempDir, "mint-started");
-			const releaseFile = path.join(tempDir, "mint-release");
-			fs.writeFileSync(tokenFile, "bad-key");
-			fs.writeFileSync(counterFile, "");
-			fs.writeFileSync(releaseFile, "");
-			const command = gatedTokenCommand(tokenFile, counterFile, startedFile, releaseFile);
-			fs.writeFileSync(
-				modelsPath,
-				JSON.stringify({
-					providers: {
-						"custom-proxy": {
-							baseUrl: "https://custom-proxy.example.com/v1",
-							api: "openai-completions",
-							apiKey: `!${command}`,
-							models: [{ id: "custom-model", name: "Custom Model" }],
-						},
-					},
-				}),
-			);
-			const registry = new ModelRegistry(authStorage, modelsPath);
-			const model = registry.find("custom-proxy", "custom-model");
-			if (!model) throw new Error("Expected custom model");
-			const resolver = registry.resolver(model);
-			expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "bad-key" });
-			fs.rmSync(startedFile);
-			fs.rmSync(releaseFile);
-			invalidateCommandConfig(`!${command}`);
-			const waitingRequest = resolver({ lastChance: false, error: undefined });
-			await waitForFile(startedFile);
-			const recovery = resolver({
-				lastChance: false,
-				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-				previousKey: "bad-key",
-				previousSentCredentials: {
-					apiKey: "bad-key",
-					commandCredentials: [{ config: `!${command}`, value: "bad-key" }],
-				},
-			});
-			fs.writeFileSync(releaseFile, "");
-			await expect(waitingRequest).rejects.toThrow("returned a value rejected by a 401");
-			expect(await recovery).toBeUndefined();
-			expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
-		},
-		20_000,
-	);
-
 	test("401 refreshes a command-backed provider header and retries with the fresh value", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");
 		const tenantFile = path.join(tempDir, "tenant.txt");
@@ -800,108 +414,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer stale-bearer", tenant: "stale-tenant" },
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
-	});
-
-	test("a 401 rejects the sent command-backed header instead of resending its last-good value", async () => {
-		const bearerFile = path.join(tempDir, "bearer.txt");
-		const tenantFile = path.join(tempDir, "tenant.txt");
-		fs.writeFileSync(bearerFile, "stale-bearer");
-		fs.writeFileSync(tenantFile, "stale-tenant");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${stdoutFileCommand(bearerFile)}`,
-						headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		const seen: Array<{ auth?: string; tenant?: string }> = [];
-		const fetch: FetchImpl = async (_url, init) => {
-			const headers = (init?.headers ?? {}) as Record<string, string>;
-			seen.push({ auth: headers.Authorization, tenant: headers["x-tenant-token"] });
-			if (seen.length === 1) {
-				fs.writeFileSync(bearerFile, "fresh-bearer");
-				fs.writeFileSync(tenantFile, "");
-			}
-			return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
-		};
-		const streamHandle = streamSimple(
-			model,
-			{ systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{ apiKey: registry.resolver(model), fetch, maxTokens: 16 },
-		);
-		for await (const _event of streamHandle) {
-			// drain
-		}
-		const result = await streamHandle.result();
-		expect(result.stopReason).toBe("error");
-		expect(seen[0]).toEqual({ auth: "Bearer stale-bearer", tenant: "stale-tenant" });
-		expect(seen.slice(1).every(request => request.tenant !== "stale-tenant")).toBe(true);
-	});
-
-	test("a caller header override does not reject the masked command header", async () => {
-		const bearerFile = path.join(tempDir, "bearer.txt");
-		const tenantFile = path.join(tempDir, "tenant.txt");
-		const tenantCounter = path.join(tempDir, "tenant-counter.txt");
-		fs.writeFileSync(bearerFile, "stale-bearer");
-		fs.writeFileSync(tenantFile, "stale-tenant");
-		fs.writeFileSync(tenantCounter, "");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${stdoutFileCommand(bearerFile)}`,
-						headers: { "x-tenant-token": `!${trackedTokenCommand(tenantFile, tenantCounter)}` },
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		const seen: Array<{ auth?: string; tenant?: string }> = [];
-		const fetch: FetchImpl = async (_url, init) => {
-			const headers = (init?.headers ?? {}) as Record<string, string>;
-			seen.push({ auth: headers.Authorization, tenant: headers["x-tenant-token"] });
-			if (seen.length === 1) {
-				fs.writeFileSync(bearerFile, "fresh-bearer");
-				fs.writeFileSync(tenantFile, "FAIL");
-				return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
-			}
-			return okChatCompletionStream();
-		};
-		const streamHandle = streamSimple(
-			model,
-			{ systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			{
-				apiKey: registry.resolver(model),
-				fetch,
-				headers: { "x-tenant-token": "caller-token" },
-				maxTokens: 16,
-			},
-		);
-		for await (const _event of streamHandle) {
-			// drain
-		}
-		expect((await streamHandle.result()).stopReason).not.toBe("error");
-		expect(seen).toEqual([
-			{ auth: "Bearer stale-bearer", tenant: "caller-token" },
-			{ auth: "Bearer fresh-bearer", tenant: "caller-token" },
-		]);
-		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
 	});
 
 	test("401 refreshes a command-backed custom model header and retries with the fresh value", async () => {
@@ -1078,6 +590,46 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		const refreshed = registry.find("custom-proxy", "custom-model");
 		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.Authorization).toBe("Bearer fresh-key");
+	});
+
+	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		// A first mint with no previous output gets two bounded attempts.
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+		// Helper is healthy again, but the 30s failure backoff would still block
+		// getApiKey until process restart — unless online refresh clears it.
+		fs.writeFileSync(tokenFile, "recovered-key");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+		await registry.refresh("online", { refreshCommandCredentials: true });
+		expect(await registry.getApiKey(model)).toBe("recovered-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
 	});
 
 	test("refreshProvider('online') without refreshCommandCredentials leaves command cache intact", async () => {
@@ -1305,649 +857,4 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
 	});
-	type AdapterEntryPoint = {
-		name: string;
-		api: Model["api"];
-		success: () => Response;
-		run: (model: Model, registry: ModelRegistry, fetch: FetchImpl) => Promise<unknown>;
-	};
-
-	function codexSearchSuccess(): Response {
-		return new Response(
-			[
-				`data: ${JSON.stringify({ type: "response.web_search_call.completed", item_id: "search" })}`,
-				"",
-				`data: ${JSON.stringify({
-					type: "response.output_item.done",
-					item: { type: "message", content: [{ type: "output_text", text: "Synthetic answer" }] },
-				})}`,
-				"",
-				`data: ${JSON.stringify({
-					type: "response.completed",
-					response: { id: "search", model: "adapter-model" },
-				})}`,
-				"",
-			].join("\n"),
-			{ headers: { "Content-Type": "text/event-stream" } },
-		);
-	}
-
-	/** One logical streaming operation; an error result rejects with its provider status. */
-	async function streamOnce(model: Model, apiKey: ApiKey, fetch: FetchImpl): Promise<void> {
-		const handle = streamSimple(
-			model,
-			{ messages: [{ role: "user", content: "synthetic", timestamp: 0 }] },
-			{ apiKey, fetch, maxTokens: 16 },
-		);
-		for await (const _event of handle) {
-			// Drain the public stream.
-		}
-		const result = await handle.result();
-		if (result.stopReason === "error") {
-			throw Object.assign(new Error(result.errorMessage), { status: result.errorStatus });
-		}
-	}
-
-	const adapterEntryPoints: readonly AdapterEntryPoint[] = [
-		{
-			name: "image generation",
-			api: "openai-images",
-			success: () => Response.json({ data: [{ b64_json: Buffer.from("image").toString("base64") }] }),
-			run: (model, registry, fetch) =>
-				generateImage(model, { prompt: "synthetic image" }, { apiKey: registry.resolver(model), fetch }),
-		},
-		{
-			name: "TypeSafe judge",
-			api: "typesafe",
-			success: () =>
-				Response.json({
-					model: "adapter-model",
-					answers: { accepted: { type: "noul", noul: 1 } },
-					usage: {},
-				}),
-			run: async (model, registry, fetch) =>
-				new TypeSafeJudge({
-					api: "typesafe",
-					apiKey: registry.resolver(model),
-					headerResolver: signal => registry.resolveModelHeaders(model, signal),
-					fetch,
-				}).judge({ state: "synthetic", questions: { accepted: { type: "noul", instructions: "accept?" } } }),
-		},
-		{
-			name: "Codex custom-endpoint search",
-			api: "openai-codex-responses",
-			success: codexSearchSuccess,
-			run: (model, registry, fetch) =>
-				searchCodex({
-					query: "synthetic query",
-					systemPrompt: "synthetic prompt",
-					authStorage,
-					model,
-					modelRegistry: registry,
-					fetch,
-				}),
-		},
-		{
-			name: "OpenAI web search",
-			api: "openai-responses",
-			success: () =>
-				Response.json({
-					model: "adapter-model",
-					output: [
-						{
-							type: "web_search_call",
-							status: "completed",
-							action: { type: "search", sources: [{ url: "https://example.test", title: "Example" }] },
-						},
-					],
-				}),
-			run: (model, registry, fetch) =>
-				searchOpenAIResponses({
-					query: "synthetic query",
-					systemPrompt: "synthetic prompt",
-					authStorage,
-					model,
-					modelRegistry: registry,
-					fetch,
-				}),
-		},
-		{
-			name: "speech",
-			api: "openai-speech",
-			success: () => new Response(new Uint8Array([1]), { headers: { "Content-Type": "audio/mpeg" } }),
-			run: (model, registry, fetch) =>
-				synthesizeSpeech(
-					model,
-					{ text: "synthetic speech", format: "mp3" },
-					{ apiKey: registry.resolver(model), fetch },
-				),
-		},
-		{
-			name: "image generation with a static key",
-			api: "openai-images",
-			success: () => Response.json({ data: [{ b64_json: Buffer.from("image").toString("base64") }] }),
-			run: (model, _registry, fetch) =>
-				generateImage(model, { prompt: "synthetic image" }, { apiKey: "static-api-key", fetch }),
-		},
-		{
-			name: "speech with a non-registry key resolver",
-			api: "openai-speech",
-			success: () => new Response(new Uint8Array([1]), { headers: { "Content-Type": "audio/mpeg" } }),
-			run: (model, _registry, fetch) =>
-				synthesizeSpeech(
-					model,
-					{ text: "synthetic speech", format: "mp3" },
-					{ apiKey: () => "resolver-key", fetch },
-				),
-		},
-		{
-			name: "Codex OAuth search",
-			api: "openai-codex-responses",
-			success: codexSearchSuccess,
-			run: async (model, registry, fetch) => {
-				const access = spyOn(authStorage.oauth, "access").mockResolvedValue({ accessToken: "oauth-access-token" });
-				try {
-					return await searchCodex({
-						query: "synthetic query",
-						systemPrompt: "synthetic prompt",
-						authStorage,
-						model: { ...model, baseUrl: CODEX_BASE_URL },
-						modelRegistry: registry,
-						fetch,
-					});
-				} finally {
-					access.mockRestore();
-				}
-			},
-		},
-		{
-			name: "streamSimple with a static key",
-			api: "openai-completions",
-			success: okChatCompletionStream,
-			run: (model, _registry, fetch) => streamOnce(model, "static-api-key", fetch),
-		},
-		{
-			name: "streamSimple with a non-registry key resolver",
-			api: "openai-completions",
-			success: okChatCompletionStream,
-			run: (model, _registry, fetch) => streamOnce(model, () => "resolver-key", fetch),
-		},
-	];
-
-	async function assertRejectedHeaderIsNotResent(adapter: AdapterEntryPoint): Promise<void> {
-		const tenantFile = path.join(tempDir, `${adapter.api}-tenant.txt`);
-		fs.writeFileSync(tenantFile, "stale-tenant");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"adapter-proxy": {
-						baseUrl: "https://adapter-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: "static-api-key",
-						headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
-						models: [{ id: "adapter-model", name: "Adapter model" }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const configuredModel = registry.find("adapter-proxy", "adapter-model");
-		if (!configuredModel) throw new Error(`Expected ${adapter.name} model`);
-		const model: Model = { ...configuredModel, api: adapter.api };
-		const sentHeaders: Array<string | null> = [];
-		const fetch: FetchImpl = async (_url, init) => {
-			const tenant = new Headers(init?.headers).get("x-tenant-token");
-			sentHeaders.push(tenant);
-			if (sentHeaders.length === 1) {
-				fs.writeFileSync(tenantFile, "");
-				return new Response(JSON.stringify({ error: { message: "synthetic unauthorized" } }), { status: 401 });
-			}
-			return adapter.success();
-		};
-
-		await expect(adapter.run(model, registry, fetch)).rejects.toMatchObject({ status: 401 });
-		await adapter.run(model, registry, fetch);
-
-		expect(sentHeaders[0]).toBe("stale-tenant");
-		expect(sentHeaders.slice(1)).not.toContain("stale-tenant");
-	}
-
-	for (const adapter of adapterEntryPoints) {
-		test(`never re-dispatches a rejected command header through ${adapter.name}`, () =>
-			assertRejectedHeaderIsNotResent(adapter));
-	}
-
-	/** Provider whose `!command` tenant header prints `stale-tenant` until the first request is rejected. */
-	function writeRotatingTenantProvider(provider: Record<string, unknown>): string {
-		const tenantFile = path.join(tempDir, "tenant.txt");
-		fs.writeFileSync(tenantFile, "stale-tenant");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"adapter-proxy": {
-						apiKey: "static-api-key",
-						headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
-						models: [{ id: "adapter-model", name: "Adapter model" }],
-						...provider,
-					},
-				},
-			}),
-		);
-		return tenantFile;
-	}
-
-	test("a 401 on Bedrock remote compaction re-mints the command header it sent", async () => {
-		const tenantFile = writeRotatingTenantProvider({
-			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
-			api: "openai-responses",
-		});
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("adapter-proxy", "adapter-model");
-		if (!model) throw new Error("Expected Bedrock compaction model");
-		const sent: Array<string | null> = [];
-		const fetch: FetchImpl = async (_url, init) => {
-			sent.push(new Headers(init?.headers).get("x-tenant-token"));
-			if (sent.length === 1) {
-				fs.writeFileSync(tenantFile, "fresh-tenant");
-				return new Response("authentication failed", { status: 401, statusText: "Unauthorized" });
-			}
-			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
-		};
-		const preparation: CompactionPreparation = {
-			firstKeptEntryId: "kept-1",
-			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
-			turnPrefixMessages: [],
-			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
-			isSplitTurn: false,
-			tokensBefore: 100_000,
-			fileOps: createFileOps(),
-			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
-		};
-
-		await expect(
-			compact(preparation, model, registry.resolver(model), undefined, undefined, { fetch }),
-		).rejects.toMatchObject({ cause: { status: 401 } });
-		await compact(preparation, model, registry.resolver(model), undefined, undefined, { fetch });
-
-		expect(sent).toEqual(["stale-tenant", "fresh-tenant"]);
-	});
-
-	test("a 401 on authenticated model discovery re-mints the command header it sent", async () => {
-		const tenantFile = writeRotatingTenantProvider({
-			baseUrl: "http://127.0.0.1:8080",
-			api: "openai-completions",
-			discovery: { type: "llama.cpp" },
-		});
-		const sent: Array<string | null> = [];
-		const fetch: FetchImpl = async (input, init) => {
-			if (String(input) !== "http://127.0.0.1:8080/models") return Response.json({}, { status: 404 });
-			sent.push(new Headers(init?.headers).get("x-tenant-token"));
-			if (sent.length === 1) {
-				fs.writeFileSync(tenantFile, "fresh-tenant");
-				return new Response("authentication failed", { status: 401 });
-			}
-			return Response.json({ data: [{ id: "discovered-model" }] });
-		};
-		const registry = new ModelRegistry(authStorage, modelsPath, { fetch });
-
-		await registry.refreshProvider("adapter-proxy", "online");
-		await registry.refreshProvider("adapter-proxy", "online");
-
-		expect(sent).toEqual(["stale-tenant", "fresh-tenant"]);
-		expect(registry.find("adapter-proxy", "discovered-model")).toBeDefined();
-	});
-
-	test("a 401 re-mints provider header commands a consumer resolved without reporting them", async () => {
-		const tenantFile = writeRotatingTenantProvider({
-			baseUrl: "https://adapter-proxy.example.com/v1",
-			api: "openai-completions",
-		});
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("adapter-proxy", "adapter-model");
-		if (!model) throw new Error("Expected adapter model");
-		const sent: Array<string | undefined> = [];
-		// An SDK consumer that materializes registry headers itself instead of
-		// handing them to withAuth: the driver cannot know what it sent.
-		const unreportedAttempt = async () => {
-			const headers = await registry.resolveModelHeaders(model);
-			sent.push(headers?.["x-tenant-token"]);
-			if (sent.length === 1) {
-				fs.writeFileSync(tenantFile, "fresh-tenant");
-				throw Object.assign(new Error("401 authentication_error"), { status: 401 });
-			}
-			return "ok";
-		};
-
-		await expect(withAuth(registry.resolver(model), unreportedAttempt)).rejects.toMatchObject({ status: 401 });
-		expect(await withAuth(registry.resolver(model), unreportedAttempt)).toBe("ok");
-
-		expect(sent).toEqual(["stale-tenant", "fresh-tenant"]);
-	});
-
-	type MatrixCredentialType = "apiKey only" | "header only" | "both";
-	type MatrixOutcome = "success" | "final failure";
-	type MatrixRetryPath = "normal force-refresh" | "lastChance" | "sibling rotation";
-	type MatrixRemint = "fresh value" | "reprint rejected value" | "failure";
-	type MatrixEntryPoint = "streamSimple" | "withAuth" | "preflightThenSeed";
-
-	interface MatrixCommandCredential {
-		config: string;
-		value: string;
-	}
-
-	interface MatrixSentCredentials {
-		apiKey: string;
-		commandCredentials: readonly MatrixCommandCredential[];
-	}
-
-	interface MatrixResolution {
-		apiKey: string;
-		commandCredentials: readonly MatrixCommandCredential[];
-		afterSiblingWait?: boolean;
-	}
-
-	type MatrixResolveContext = ApiKeyResolveContext & {
-		previousSentCredentials?: MatrixSentCredentials;
-	};
-
-	/**
-	 * Synthetic command authority used by the retry matrix. Its received
-	 * credential set is the transport's only source of command-backed values.
-	 */
-	class MatrixCommandAuthority {
-		#stage = 0;
-		#current: MatrixResolution | undefined;
-		#lastDispatched: MatrixSentCredentials | undefined;
-		#lastRejectedCredentials: string | undefined;
-		#sent: MatrixSentCredentials[] = [];
-		#rejected = new Set<string>();
-		#contexts: Array<{ lastChance: boolean; hadError: boolean }> = [];
-		#forcedLastChance = false;
-		#usedSiblingRotation = false;
-		#rejectionCount = 0;
-		#turnCommandRuns = 0;
-		#contractFailure: string | undefined;
-
-		constructor(
-			readonly credentialType: MatrixCredentialType,
-			readonly consecutive401s: number,
-			readonly outcome: MatrixOutcome,
-			readonly retryPath: MatrixRetryPath,
-			readonly remint: MatrixRemint,
-		) {}
-
-		#commands(): readonly ("apiKey" | "header")[] {
-			if (this.credentialType === "apiKey only") return ["apiKey"];
-			if (this.credentialType === "header only") return ["header"];
-			return ["apiKey", "header"];
-		}
-
-		#commandValue(kind: "apiKey" | "header"): string | undefined {
-			if (this.#stage > 0 && this.remint === "failure") return undefined;
-			return this.remint === "fresh value" ? `${kind}-synthetic-${this.#stage}` : `${kind}-synthetic-0`;
-		}
-
-		#isRejected(credential: MatrixCommandCredential): boolean {
-			return this.#rejected.has(`${credential.config}\u0000${credential.value}`);
-		}
-
-		#resolution(): MatrixResolution | undefined {
-			this.#turnCommandRuns += this.#commands().length;
-			const commandCredentials = this.#commands().flatMap(kind => {
-				const value = this.#commandValue(kind);
-				return value === undefined
-					? []
-					: [{ config: `!matrix-${kind}-command`, value } satisfies MatrixCommandCredential];
-			});
-			const apiKeyCredentials = commandCredentials.filter(
-				credential => credential.config === "!matrix-apiKey-command",
-			);
-			if (apiKeyCredentials.some(credential => this.#isRejected(credential))) return undefined;
-			return {
-				apiKey: apiKeyCredentials[0]?.value ?? `carrier-${this.#stage}`,
-				commandCredentials: apiKeyCredentials,
-				...(this.retryPath === "sibling rotation" && this.#contexts.at(-1)?.lastChance
-					? { afterSiblingWait: true }
-					: {}),
-			};
-		}
-
-		headers(): Record<string, string> | undefined {
-			if (this.credentialType === "apiKey only") return undefined;
-			const value = this.#commandValue("header");
-			if (!value) return undefined;
-			const credential = { header: "x-matrix-header", config: "!matrix-header-command", value };
-			return this.#isRejected(credential)
-				? undefined
-				: setCommandHeaderCredentials({ "x-matrix-header": value }, [credential], rejected =>
-						this.#rejected.add(`${rejected.config}\u0000${rejected.value}`),
-					);
-		}
-
-		beginTurn(): void {
-			const maximumRuns = this.#commands().length * (this.consecutive401s * 2 + 1);
-			if (this.#turnCommandRuns > maximumRuns) {
-				this.#contractFailure ??= `command mint budget exceeded (${this.#turnCommandRuns} > ${maximumRuns})`;
-			}
-			this.#turnCommandRuns = 0;
-		}
-
-		async resolve(context: ApiKeyResolveContext): Promise<MatrixResolution | undefined> {
-			this.#contexts.push({ lastChance: context.lastChance, hadError: context.error !== undefined });
-			if (context.error !== undefined) {
-				const previous = (context as MatrixResolveContext).previousSentCredentials;
-				if (!previous) {
-					this.#contractFailure ??= "the retry driver did not return the dispatched credential set";
-					return undefined;
-				}
-				if (
-					!this.#lastDispatched ||
-					previous.apiKey !== this.#lastDispatched.apiKey ||
-					JSON.stringify(previous.commandCredentials) !== JSON.stringify(this.#lastDispatched.commandCredentials)
-				) {
-					this.#contractFailure ??= "the retry driver returned credentials from a different attempt";
-					return undefined;
-				}
-				const serializedCredentials = JSON.stringify(previous.commandCredentials);
-				if (serializedCredentials !== this.#lastRejectedCredentials) {
-					for (const credential of previous.commandCredentials) {
-						this.#rejected.add(`${credential.config}\u0000${credential.value}`);
-					}
-					this.#lastRejectedCredentials = serializedCredentials;
-					this.#rejectionCount += 1;
-					this.#stage += 1;
-				}
-				if (context.lastChance && this.retryPath === "sibling rotation") this.#usedSiblingRotation = true;
-				if (this.retryPath !== "normal force-refresh" && !context.lastChance && !this.#forcedLastChance) {
-					this.#forcedLastChance = true;
-					return { apiKey: previous.apiKey, commandCredentials: [] };
-				}
-				if (this.outcome === "final failure" && this.#stage >= this.consecutive401s) return undefined;
-			}
-			this.#current = this.#resolution();
-			return this.#current;
-		}
-
-		dispatch(apiKey: string, headers?: Record<string, string> | Headers): MatrixSentCredentials {
-			const current = this.#current;
-			if (!current || current.apiKey !== apiKey) {
-				throw new Error("the transport received a credential that was not materialized");
-			}
-			const provenanceHeaders = headers instanceof Headers ? this.headers() : headers;
-			const sent = {
-				apiKey,
-				commandCredentials: [...current.commandCredentials, ...getCommandHeaderCredentials(provenanceHeaders)],
-			};
-			if (sent.commandCredentials.some(credential => this.#isRejected(credential))) {
-				throw new Error("the transport received a command value previously rejected by a 401");
-			}
-			this.#lastDispatched = sent;
-			this.#sent.push(sent);
-			return sent;
-		}
-
-		assertInvariants(): void {
-			this.beginTurn();
-			if (this.#contractFailure) throw new Error(this.#contractFailure);
-			const sentValues = new Set(
-				this.#sent.flatMap(sent =>
-					sent.commandCredentials.map(credential => `${credential.config}\u0000${credential.value}`),
-				),
-			);
-			for (const rejected of this.#rejected) {
-				if (!sentValues.has(rejected)) throw new Error("a credential not sent by the transport was rejected");
-			}
-			if (!this.#contexts[0] || this.#contexts[0].hadError || this.#contexts[0].lastChance) {
-				throw new Error("the initial resolution did not use the normal retry context");
-			}
-			if (this.retryPath !== "normal force-refresh" && this.#rejectionCount > 0 && !this.#forcedLastChance) {
-				throw new Error("the requested lastChance path was not exercised");
-			}
-			if (this.retryPath === "sibling rotation" && this.#rejectionCount > 0 && !this.#usedSiblingRotation) {
-				throw new Error("the requested sibling rotation path was not exercised");
-			}
-			if (
-				this.remint === "fresh value" &&
-				this.outcome === "success" &&
-				this.consecutive401s > 0 &&
-				!this.#sent.some(sent => sent.commandCredentials.some(credential => credential.value.endsWith("-1")))
-			) {
-				throw new Error("a fresh non-rejected command value was not dispatched");
-			}
-		}
-	}
-
-	async function runMatrixOperation(
-		entryPoint: MatrixEntryPoint,
-		authority: MatrixCommandAuthority,
-		remaining401s: number,
-	): Promise<void> {
-		let requests = 0;
-		const rejectOrSucceed = (apiKey: string, headers?: Record<string, string> | Headers): Promise<"ok"> => {
-			authority.dispatch(apiKey, headers);
-			requests += 1;
-			if (requests <= remaining401s) {
-				return Promise.reject(Object.assign(new Error("synthetic 401"), { status: 401 }));
-			}
-			return Promise.resolve("ok");
-		};
-		authority.beginTurn();
-		if (entryPoint === "withAuth" || entryPoint === "preflightThenSeed") {
-			try {
-				const resolver =
-					entryPoint === "preflightThenSeed"
-						? seedApiKeyResolver(
-								await resolveApiKeyOnce(authority.resolve.bind(authority)),
-								authority.resolve.bind(authority),
-							)
-						: authority.resolve.bind(authority);
-				await withAuth(resolver, (apiKey, headers) => rejectOrSucceed(apiKey, headers), {
-					headerResolver: () => authority.headers(),
-				});
-			} catch {
-				// The matrix intentionally includes final 401 and command-mint failures.
-			}
-			return;
-		}
-
-		const model = {
-			...buildModel({
-				id: "matrix-model",
-				name: "Matrix model",
-				api: "openai-completions",
-				provider: "matrix-provider",
-				baseUrl: "https://matrix.invalid/v1",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 4096,
-				maxTokens: 16,
-			} satisfies ModelSpec<"openai-completions">),
-			resolveHeaders: async () => authority.headers(),
-		};
-		const fetch: FetchImpl = async (_url, init) => {
-			try {
-				await rejectOrSucceed(
-					new Headers(init?.headers).get("Authorization")?.replace(/^Bearer /, "") ?? "",
-					new Headers(init?.headers),
-				);
-				return okChatCompletionStream();
-			} catch {
-				return new Response(JSON.stringify({ error: { message: "synthetic 401", type: "authentication_error" } }), {
-					status: 401,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-		};
-		const stream = streamSimple(
-			model,
-			{ messages: [{ role: "user", content: "matrix", timestamp: 0 }] },
-			{
-				apiKey: authority.resolve.bind(authority),
-				fetch,
-				maxTokens: 16,
-			},
-		);
-		try {
-			for await (const _event of stream) {
-				// Drain the retrying public stream.
-			}
-			await stream.result();
-		} catch {
-			// The matrix intentionally includes final 401 and command-mint failures.
-		}
-	}
-
-	test("never re-dispatches a 401-rejected command credential across the auth retry matrix", async () => {
-		const credentialTypes: readonly MatrixCredentialType[] = ["apiKey only", "header only", "both"];
-		const sequences = [1, 2, 3] as const;
-		const outcomes: readonly MatrixOutcome[] = ["success", "final failure"];
-		const retryPaths: readonly MatrixRetryPath[] = ["normal force-refresh", "lastChance", "sibling rotation"];
-		const remints: readonly MatrixRemint[] = ["fresh value", "reprint rejected value", "failure"];
-		const entryPoints: readonly MatrixEntryPoint[] = ["streamSimple", "withAuth", "preflightThenSeed"];
-		const failures: string[] = [];
-		let combinations = 0;
-
-		for (const credentialType of credentialTypes) {
-			for (const consecutive401s of sequences) {
-				for (const outcome of outcomes) {
-					for (const retryPath of retryPaths) {
-						for (const remint of remints) {
-							for (const entryPoint of entryPoints) {
-								combinations += 1;
-								const label = [
-									`credentials=${credentialType}`,
-									`401s=${consecutive401s}`,
-									`outcome=${outcome}`,
-									`path=${retryPath}`,
-									`remint=${remint}`,
-									`entry=${entryPoint}`,
-								].join("; ");
-								const authority = new MatrixCommandAuthority(
-									credentialType,
-									consecutive401s,
-									outcome,
-									retryPath,
-									remint,
-								);
-								try {
-									await runMatrixOperation(entryPoint, authority, consecutive401s);
-									await runMatrixOperation(entryPoint, authority, 0);
-									authority.assertInvariants();
-								} catch (error) {
-									failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		expect(combinations).toBe(486);
-		if (failures.length > 0)
-			throw new Error(`Failed ${failures.length} of ${combinations} matrix combinations:\n${failures.join("\n")}`);
-	}, 60_000);
 });

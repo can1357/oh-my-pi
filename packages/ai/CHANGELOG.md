@@ -4,12 +4,7 @@
 
 ### Added
 
-- `withAuth` now surfaces a typed `CommandConfigResolutionError` when an initial `!command` credential mint fails, preserving the command diagnostic while leaving other resolver failures as missing-key errors
-- `withAuth` and `withOAuthAccess` accept a `headerResolver` and hand each attempt the model headers they materialized for it
-
-### Fixed
-
-- Command-backed model headers rejected by a 401 response are no longer resent by streaming, image, judgment, web-search, or speech requests, including OAuth-login and static-key requests.
+- `CommandConfigResolutionError`, which `withAuth` rethrows from the initial key resolution so a failing `!command` credential reports its command and exit status; other resolver failures still map to missing-key errors
 
 ## [18.4.6] - 2026-10-01
 

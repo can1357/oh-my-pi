@@ -23,7 +23,7 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { resolvedApiKeyBearer, resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -4896,11 +4896,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				void (async () => {
 					try {
 						const codexPrewarmApiKey = options.getApiKey
-							? resolvedApiKeyBearer(
-									// `getApiKey` returns a value-or-promise union; unwrap the promise,
-									// then resolve the result if it is itself an ApiKeyResolver.
-									await resolveApiKeyOnce(await options.getApiKey(codexModel)),
-								)
+							? // `getApiKey` returns a value-or-promise union; unwrap the promise,
+								// then resolve the result if it is itself an ApiKeyResolver.
+								await resolveApiKeyOnce(await options.getApiKey(codexModel))
 							: await modelRegistry.getApiKey(codexModel, providerSessionId);
 						if (!codexPrewarmApiKey) return;
 						await logger.time("prewarmOpenAICodexResponses", prewarmOpenAICodexResponses, codexModel, {

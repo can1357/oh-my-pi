@@ -1,11 +1,6 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import {
-	copyHeadersWithCommandCredentials,
-	resolvedApiKeyBearer,
-	type SentCommandCredential,
-	type SentCredentialSet,
-} from "@oh-my-pi/pi-ai/auth-retry";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
@@ -68,13 +63,12 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
-	commandConfigMatchesValue,
 	createConfigHeaderResolver,
 	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
-	rejectCommandConfig,
+	markCommandConfigForRecovery,
 	resolveConfigHeaders,
 	resolveConfigValue,
 } from "./resolve-config-value";
@@ -266,10 +260,12 @@ export class ModelRegistry {
 	#fullKindSnapshotSource: Model<Api>[] | undefined;
 	#fullKindSnapshots: Partial<Record<ModelKind, Model<Api>[]>> = {};
 	#customProviderApiKeys: Map<string, string> = new Map();
-	// Provider-level command-backed values (apiKey and provider headers).
+	// Provider-level command-backed values (apiKey and provider headers). The 401
+	// refresh step marks these commands for a fresh run, so header credentials are
+	// re-minted with the key rather than pinned to their stale value (#9760).
 	#commandConfigsByProvider: Map<string, Set<string>> = new Map();
-	// Model/modelOverride header commands, rejected only when that model's request
-	// receives the 401 that proves the materialized value is bad.
+	// Model/modelOverride header commands, marked only when that model's request
+	// receives the 401.
 	#commandConfigsByProviderModel: Map<string, Map<string, Set<string>>> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
@@ -302,7 +298,7 @@ export class ModelRegistry {
 	#runtimeProviderApiKeys: Map<string, { keyConfig: string; fallback: boolean }> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
 	// Runtime provider-level commands and model header commands mirror the
-	// static indexes above so one model's 401 cannot reject another's header.
+	// static indexes above so one model's 401 cannot mark another model's header.
 	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
 	#runtimeCommandConfigsByProviderModel: Map<string, Map<string, Set<string>>> = new Map();
 	// Credential-aware model projections registered via
@@ -352,59 +348,33 @@ export class ModelRegistry {
 		}
 	}
 
-	/** Reject only the command-backed values dispatched by the failed request. */
-	#rejectSentCredentials(sentCredentials: SentCredentialSet): void {
-		for (const credential of sentCredentials.commandCredentials) {
-			rejectCommandConfig(credential.config, credential.value);
-		}
-	}
-
 	/**
-	 * Re-mint, without rejecting, the provider-level and current-model header
-	 * commands a failed request did not report sending. A consumer that dispatches
-	 * model headers outside an auth driver still sees a fresh value after a 401.
+	 * On a 401 refresh step, mark the provider's command-backed API key (only
+	 * while it still holds the bearer that failed) and its provider-level and
+	 * current-model header commands, so none of their cached output is sent
+	 * again until a run succeeds.
 	 */
-	#invalidateUnsentHeaderCommands(
+	#markCommandConfigsForRecovery(
 		provider: string,
 		modelId: string | undefined,
-		sentCredentials: SentCredentialSet,
+		previousKey: string | undefined,
 	): void {
-		const skipped = new Set<string | undefined>([
-			...sentCredentials.commandCredentials.map(credential => credential.config),
+		const keyConfigs = new Set([
 			this.#customProviderApiKeys.get(provider),
 			this.#runtimeProviderApiKeys.get(provider)?.keyConfig,
 		]);
-		const configs = [
+		for (const config of keyConfigs) markCommandConfigForRecovery(config, previousKey);
+		const headerConfigs = new Set([
 			...(this.#commandConfigsByProvider.get(provider) ?? []),
 			...(this.#runtimeCommandConfigsByProvider.get(provider) ?? []),
 			...(modelId === undefined ? [] : (this.#commandConfigsByProviderModel.get(provider)?.get(modelId) ?? [])),
 			...(modelId === undefined
 				? []
 				: (this.#runtimeCommandConfigsByProviderModel.get(provider)?.get(modelId) ?? [])),
-		];
-		for (const config of new Set(configs)) {
-			if (!skipped.has(config)) invalidateCommandConfig(config);
+		]);
+		for (const config of headerConfigs) {
+			if (!keyConfigs.has(config)) markCommandConfigForRecovery(config);
 		}
-	}
-
-	/** Tag the active command-backed API-key config with its dispatched bearer. */
-	#apiKeyCommandCredentials(provider: string, apiKey: string): readonly SentCommandCredential[] {
-		const configs = [
-			this.#customProviderApiKeys.get(provider),
-			this.#runtimeProviderApiKeys.get(provider)?.keyConfig,
-		];
-		const credentials: SentCommandCredential[] = [];
-		for (const config of configs) {
-			if (
-				!isCommandConfigValue(config) ||
-				!commandConfigMatchesValue(config, apiKey) ||
-				credentials.some(credential => credential.config === config)
-			) {
-				continue;
-			}
-			credentials.push({ config, value: apiKey });
-		}
-		return credentials;
 	}
 
 	/** Invalidate command-backed values for an explicit, non-auth refresh. */
@@ -1933,11 +1903,7 @@ export class ModelRegistry {
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
 				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
-				const requestConfig = {
-					...providerConfig,
-					headers: resolvedHeaders,
-					resolveHeaders: (signal?: AbortSignal) => resolveConfigHeaders(providerConfig.headers, signal),
-				};
+				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
 				const models = this.#applyProviderModelOverrides(
 					providerId,
 					await discoverModelsByProviderType(requestConfig, this.#discoveryContext()),
@@ -2917,9 +2883,8 @@ export class ModelRegistry {
 
 	/** Materialize a model's complete configured header chain for one request. */
 	async resolveModelHeaders(model: Model<Api>, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
-		return model.resolveHeaders
-			? await model.resolveHeaders(signal)
-			: copyHeadersWithCommandCredentials(model.headers);
+		if (model.resolveHeaders) return await model.resolveHeaders(signal);
+		return model.headers ? { ...model.headers } : undefined;
 	}
 
 	#isKeylessProvider(provider: string): boolean {
@@ -3024,30 +2989,15 @@ export class ModelRegistry {
 						modelId: target.id,
 					});
 		return async context => {
-			if (AIError.status(context.error) === 401 && context.previousSentCredentials) {
-				this.#rejectSentCredentials(context.previousSentCredentials);
-				this.#invalidateUnsentHeaderCommands(
+			if (context.error !== undefined && !context.lastChance && AIError.status(context.error) === 401) {
+				this.#markCommandConfigsForRecovery(
 					provider,
 					typeof target === "string" ? options?.modelId : target.id,
-					context.previousSentCredentials,
+					context.previousKey,
 				);
 			}
 			const resolved = await resolve(context);
-			const apiKey = resolvedApiKeyBearer(resolved);
-			if (apiKey !== undefined) {
-				const commandCredentials = this.#apiKeyCommandCredentials(provider, apiKey);
-				if (commandCredentials.length > 0) {
-					return typeof resolved === "string"
-						? { apiKey, commandCredentials }
-						: {
-								...resolved,
-								apiKey,
-								commandCredentials: [...(resolved?.commandCredentials ?? []), ...commandCredentials],
-							};
-				}
-				return resolved;
-			}
-			if (context.error !== undefined) return resolved;
+			if (resolvedApiKeyBearer(resolved) !== undefined || context.error !== undefined) return resolved;
 			const failure = describeCommandConfigFailure(this.#customProviderApiKeys.get(provider));
 			if (failure) throw new AIError.CommandConfigResolutionError(`API key command ${failure}`);
 			return resolved;

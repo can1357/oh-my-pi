@@ -329,8 +329,9 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 	const plan = planQuery(params.query, parsed);
 	const response = await withAuth(
 		keyOrResolver,
-		async (key, configuredHeaders) => {
+		async key => {
 			const auth = buildAnthropicAuthConfig(key, params.model.baseUrl);
+			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 			// Mirror the main Messages path: OAuth requests need a Claude-Code-shaped
 			// metadata.user_id (`{session_id, account_uuid?, device_id}`) so the
 			// CC billing header + system fingerprint installed by
@@ -359,7 +360,6 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 		},
 		{
 			signal: params.signal,
-			headerResolver: params.model,
 			missingKeyMessage: `Anthropic credentials not found for selected provider "${params.model.provider}".`,
 		},
 	);

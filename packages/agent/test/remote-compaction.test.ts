@@ -2896,19 +2896,16 @@ describe("Amazon Bedrock compaction request preparation", () => {
 			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
 		};
 
-		for (const remoteStreamingV2Enabled of [false, true]) {
-			const preparation: CompactionPreparation = {
-				firstKeptEntryId: "kept-1",
-				messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
-				turnPrefixMessages: [],
-				recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
-				isSplitTurn: false,
-				tokensBefore: 100_000,
-				fileOps: createFileOps(),
-				settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled },
-			};
-			await compact(preparation, model, NO_AUTH_SENTINEL, undefined, undefined, { fetch: fetchMock });
-		}
+		await requestOpenAiRemoteCompaction(model, NO_AUTH_SENTINEL, nativeInput, "instructions", undefined, {
+			fetch: fetchMock,
+		});
+		await requestCompactionV2Streaming(
+			model,
+			NO_AUTH_SENTINEL,
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
 
 		expect(authorizations).toEqual(["Bearer lazy-token", "Bearer lazy-token"]);
 	});

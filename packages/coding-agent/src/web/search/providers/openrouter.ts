@@ -176,7 +176,8 @@ export async function searchOpenRouterGrounded(params: SearchParams): Promise<Se
 	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	const response = await withAuth(
 		keyOrResolver,
-		async (apiKey, configuredHeaders) => {
+		async apiKey => {
+			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 			const httpResponse = await (params.fetch ?? fetch)(
 				`${params.model.baseUrl.replace(/\/+$/, "")}/chat/completions`,
 				{
@@ -218,7 +219,6 @@ export async function searchOpenRouterGrounded(params: SearchParams): Promise<Se
 		},
 		{
 			signal: params.signal,
-			headerResolver: params.model,
 			missingKeyMessage: `OpenRouter credentials not found for selected provider "${params.model.provider}".`,
 		},
 	);

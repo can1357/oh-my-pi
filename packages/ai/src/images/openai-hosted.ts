@@ -10,7 +10,7 @@ import {
 import { parseImageMetadata, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
-import { errorMessage, ImageApiError, resolveOpenAIImageSize, toDataUrl, usageFromWire } from "./shared";
+import { errorMessage, ImageApiError, modelHeaders, resolveOpenAIImageSize, toDataUrl, usageFromWire } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -56,13 +56,13 @@ function responsesUrl(model: Model<Api>): string {
 		.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES);
 }
 
-function headers(
+async function headers(
 	carrier: Model<Api>,
 	key: string,
 	sessionId: string | undefined,
-	configuredHeaders: Record<string, string> | undefined,
-): Headers {
-	const result = new Headers(configuredHeaders);
+	signal?: AbortSignal,
+): Promise<Headers> {
+	const result = new Headers(await modelHeaders(carrier, signal));
 	result.set("Content-Type", "application/json");
 	result.set("Authorization", `Bearer ${key}`);
 	if (carrier.api === "openai-codex-responses" || carrier.provider === "openai-codex") {
@@ -171,10 +171,10 @@ export async function generateHostedImage(
 	const fetchImpl = options.fetch ?? fetch;
 	return withAuth(
 		options.apiKey,
-		async (key, configuredHeaders) => {
+		async key => {
 			const response = await fetchImpl(responsesUrl(carrier), {
 				method: "POST",
-				headers: headers(carrier, key, options.sessionId, configuredHeaders),
+				headers: await headers(carrier, key, options.sessionId, options.signal),
 				body: JSON.stringify(body),
 				signal: options.signal,
 			});
@@ -198,6 +198,6 @@ export async function generateHostedImage(
 			}
 			return collectResponse(value);
 		},
-		{ signal: options.signal, headerResolver: carrier },
+		{ signal: options.signal },
 	);
 }

@@ -273,8 +273,10 @@ function extractTextSources(text: string): SearchSource[] {
 	return sources;
 }
 
-function codexSearchTransport(baseUrl: string, headers: Record<string, string> | undefined): CodexSearchTransport {
+async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
+	const baseUrl = params.model.baseUrl;
 	const url = resolveCodexResponsesUrl(baseUrl);
+	const headers = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 	return {
 		baseUrl,
 		url,
@@ -552,7 +554,7 @@ async function callCodexSearch(
 
 /** Execute web search through the selected Codex model and transport. */
 export async function searchCodex(params: SearchParams): Promise<SearchResponse> {
-	const transport = codexSearchTransport(params.model.baseUrl, undefined);
+	const transport = await resolveCodexSearchTransport(params);
 	// The ChatGPT-backend Codex endpoint speaks the undocumented codex-rs
 	// request shape (responses-lite moves tools into an `additional_tools`
 	// developer item), so the documented `web_search.filters.allowed_domains`
@@ -580,8 +582,8 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 		result = await withAuth(
 			keyOrResolver,
-			async (accessToken, headers) => {
-				const requestTransport = codexSearchTransport(params.model.baseUrl, headers);
+			async accessToken => {
+				const requestTransport = await resolveCodexSearchTransport(params);
 				return callCodexSearch({ accessToken }, query, {
 					signal: params.signal,
 					timeoutMs: params.timeoutMs,
@@ -594,7 +596,6 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 			},
 			{
 				signal: params.signal,
-				headerResolver: params.model,
 				missingKeyMessage: `Codex credentials not found for selected provider "${params.model.provider}".`,
 			},
 		);
@@ -609,11 +610,11 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		result = await withOAuthAccess(
 			params.authStorage,
 			params.model.provider,
-			async (access, headers) => {
+			async access => {
 				// A refreshed/rotated credential can carry a different bearer and
 				// ChatGPT account id than the seed used to select the first attempt.
 				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				const requestTransport = codexSearchTransport(params.model.baseUrl, headers);
+				const requestTransport = await resolveCodexSearchTransport(params);
 				return callCodexSearch({ accessToken: access.accessToken, accountId }, query, {
 					signal: params.signal,
 					timeoutMs: params.timeoutMs,
@@ -624,7 +625,7 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 					transport: requestTransport,
 				});
 			},
-			{ sessionId: params.sessionId, signal: params.signal, seed, headerResolver: params.model },
+			{ sessionId: params.sessionId, signal: params.signal, seed },
 		);
 	}
 
