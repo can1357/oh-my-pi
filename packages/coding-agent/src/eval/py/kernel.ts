@@ -61,6 +61,7 @@ const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	AgentHandle: true,
 	CompletionHandle: true,
 	JudgmentBatch: true,
+	JudgmentHandle: true,
 	JudgmentItem: true,
 	WorkPool: true,
 	agent: true,

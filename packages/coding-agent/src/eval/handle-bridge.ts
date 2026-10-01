@@ -14,7 +14,8 @@ export const EVAL_STATUS_BRIDGE_NAME = "__status__";
 /** Synthetic bridge name reserved for cancelling an eval handle. */
 export const EVAL_CANCEL_BRIDGE_NAME = "__cancel__";
 
-export type EvalHandleKind = "agent" | "completion";
+/** `judgment` handles live in the completion-handle registry alongside `completion` ones. */
+export type EvalHandleKind = "agent" | "completion" | "judgment";
 export type EvalHandleState = "running" | "completed" | "failed" | "cancelled";
 
 /** Stable process-local reference sent by eval runtimes. */
@@ -48,8 +49,12 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
 function parseRef(value: unknown): EvalHandleRef {
 	if (!isUnknownRecord(value)) throw new ToolError("handle must be an object with kind and id");
 	const { kind, id } = value;
-	if ((kind !== "agent" && kind !== "completion") || typeof id !== "string" || id.length === 0) {
-		throw new ToolError("handle must contain kind agent|completion and a non-empty id");
+	if (
+		(kind !== "agent" && kind !== "completion" && kind !== "judgment") ||
+		typeof id !== "string" ||
+		id.length === 0
+	) {
+		throw new ToolError("handle must contain kind agent|completion|judgment and a non-empty id");
 	}
 	return { kind, id };
 }
@@ -83,7 +88,7 @@ function resolveHandle(ref: EvalHandleRef, options: EvalHandleBridgeOptions): Re
 	}
 	const completion = getCompletionHandle(ref.id);
 	if (!completion || completion.ownerId !== ownerId) {
-		throw new ToolError(`unknown completion handle ${ref.id}; result expired`);
+		throw new ToolError(`unknown ${ref.kind} handle ${ref.id}; result expired`);
 	}
 	return { ref, completion };
 }
@@ -203,7 +208,7 @@ async function waitForSettlement(
 	}
 }
 
-/** Wait for agent/completion handles and consume settled agent job deliveries. */
+/** Wait for agent/completion/judgment handles and consume settled agent job deliveries. */
 export async function runEvalWait(
 	args: unknown,
 	options: EvalHandleBridgeOptions,

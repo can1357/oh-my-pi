@@ -1,6 +1,6 @@
 ```
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → handle; `.wait()` returns text (parsed with `schema`). Stateless, no tools/history.
-await judge(state, questions) → `{id: answer}`
+judge(state, questions) → handle, returns immediately; `.wait()`, `await h`, or `wait(handles)` → `{id: answer}` (`{{#if py}}raise_errors=False{{else}}{ raiseErrors: false }{{/if}}` keeps a failure in its slot)
     Typed judgment over one `state` (str | JSON object | JSON array). Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking. Two or more states → `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, never a loop of `judge()`.
     `questions`: `{id: q}` where q is one of
       `{type: "choice", instructions, criteria: {label: rubric | None, …}}` → `{choice, probabilities: {label: p}, confidence}` (≥2 labels)

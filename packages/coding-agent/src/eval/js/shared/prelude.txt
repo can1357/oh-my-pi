@@ -184,6 +184,16 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	}
 
+	class JudgmentHandle extends EvalHandle {
+		constructor(id) {
+			super("judgment", id);
+		}
+
+		toString() {
+			return `<judgment ${this.id}>`;
+		}
+	}
+
 	// Immediate-return wrapper for the async `completion()`/`agent()` factories.
 	// JS cannot hand back a handle synchronously — the bridge allocates the id
 	// over an async round-trip — so the factory returns this thenable instead:
@@ -233,6 +243,24 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	}
 
+	// `judge()` result: same immediate-handle methods, but awaiting it yields the
+	// `{id: answer}` result rather than the handle, so `await judge(...)` and
+	// `await Promise.all(judges)` read answers directly. `wait()` unwraps `_promise`
+	// instead of awaiting it, so the handle (and its failure slot) is kept.
+	class PendingJudgment extends PendingHandle {
+		then(onFulfilled, onRejected) {
+			return this.wait().then(onFulfilled, onRejected);
+		}
+
+		catch(onRejected) {
+			return this.wait().catch(onRejected);
+		}
+
+		finally(onFinally) {
+			return this.wait().finally(onFinally);
+		}
+	}
+
 	const resolveHandleSnapshot = (handle, snapshot) => {
 		const status = snapshot?.status ?? "failed";
 		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
@@ -251,9 +279,9 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
 		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
-		const items = await Promise.all(raw);
+		const items = await Promise.all(raw.map(value => (value instanceof PendingHandle ? value._promise : value)));
 		for (const handle of items) {
-			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
+			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent, completion, or judgment handles");
 		}
 		const results = new Array(items.length);
 		const pending = [];
@@ -306,11 +334,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	};
 
-	const judge = async (state, questions) => {
-		checkQuestions(questions);
-		const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
-		if (!result || !isPlainObject(result.answers)) throw new Error("judge() did not return answers");
-		return result.answers;
+	const judge = (state, questions) => {
+		const promise = (async () => {
+			checkQuestions(questions);
+			const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
+			if (!result || typeof result.id !== "string") throw new Error("judge() did not return a handle");
+			return new JudgmentHandle(result.id);
+		})();
+		return new PendingJudgment(promise);
 	};
 
 	// One settled judgeBatch item: `answers` on success, else `error`.
@@ -617,6 +648,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.wait = wait;
 	globalThis.AgentHandle = AgentHandle;
 	globalThis.CompletionHandle = CompletionHandle;
+	globalThis.JudgmentHandle = JudgmentHandle;
 	globalThis.judge = judge;
 	globalThis.judgeBatch = judgeBatch;
 	globalThis.JudgmentBatch = JudgmentBatch;

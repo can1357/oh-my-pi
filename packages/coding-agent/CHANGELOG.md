@@ -22,6 +22,7 @@
 - Fixed session saves rewriting every already-stored image blob on each save, which multiplied disk writes on sessions with many images ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
 - Fixed omp freezing for seconds at a time and silently no longer saving the session after another omp process wrote to the same session file; omp now stops retrying, leaves the other process's file untouched, and tells you this session's further changes are not being saved to it ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
 - Fixed writing to a session that another running omp process already has open giving no sign that both write to the same file; omp now warns once when it first writes to it ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+- Fixed eval `judge()` returning a bare coroutine in Python and a plain promise in JavaScript, so the documented `judge(...).wait()` and `wait(handles, raise_errors=False)` failed; `judge()` now returns a handle that starts at once, works with `.wait()`, `wait()`, and `await`, and keeps a failed judgment in its slot. Awaiting a Python `completion()` or `agent()` handle no longer fails with `Missing session/run/name`
 
 ## [18.4.6] - 2026-10-01
 

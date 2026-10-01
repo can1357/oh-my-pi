@@ -1,12 +1,14 @@
 /**
  * Host-side handler for the eval `judge()` helper.
  *
- * Cell code awaits `judge(state, questions)`; the prelude forwards
+ * Cell code calls `judge(state, questions)`; the prelude forwards
  * `{ state, questions }` through {@link EVAL_JUDGMENT_BRIDGE_NAME} and this
- * module answers every question with the session's resolved {@link Judge}
- * role chain (see `../judgment`), returning the typed answers directly. Bulk
- * classification goes through `judge_batch()` (`./judgment-batch-bridge`),
- * which reuses the parsers and answer shaping exported here.
+ * module starts answering every question with the session's resolved
+ * {@link Judge} role chain (see `../judgment`) under a retained `judgment`
+ * handle, returning its id at once. The cell resolves it like a `completion()`
+ * handle: `.wait()`, `wait(handles)`, or `await`. Bulk classification goes
+ * through `judge_batch()` (`./judgment-batch-bridge`), which reuses the parsers
+ * and answer shaping exported here.
  *
  * Cell code sees the yes/no kind as `bool` (`{ type: "bool", bool: P(yes) }`);
  * the library's `noul` name stays internal.
@@ -31,8 +33,11 @@ import {
 	sharedJudgmentCache,
 } from "../judgment";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { withBridgeTimeoutPause } from "./bridge-timeout";
-import { type EvalCompletionBridgeOptions, evalRequestSlots } from "./completion-bridge";
+import {
+	type EvalCompletionBridgeOptions,
+	type EvalCompletionHandleResult,
+	retainCompletionHandle,
+} from "./completion-bridge";
 
 /** Synthetic bridge name reserved for the `judge()` helper across both runtimes. */
 export const EVAL_JUDGMENT_BRIDGE_NAME = "__judge__";
@@ -197,22 +202,14 @@ export function sessionJudge(
 	});
 }
 
-/** Answer one typed judgment; the cell awaits the answers directly. */
-export async function runEvalJudgment(
-	args: unknown,
-	options: EvalCompletionBridgeOptions,
-): Promise<EvalJudgmentResult> {
+/** Start one typed judgment and return its `judgment` handle immediately; the answers settle as `data`. */
+export function runEvalJudgment(args: unknown, options: EvalCompletionBridgeOptions): EvalCompletionHandleResult {
 	if (!isRecord(args)) throw invalid("expected { state, questions }");
 	const state = parseState(args.state);
 	const questions = parseQuestions(args.questions);
 	const judge = sessionJudge(options, "judge");
-	const signal = options.signal;
-	return withBridgeTimeoutPause(options.emitStatus, async () => {
-		await evalRequestSlots.acquire(signal);
-		try {
-			return toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
-		} finally {
-			evalRequestSlots.release();
-		}
+	return retainCompletionHandle("jdg", options, async signal => {
+		const { answers, model } = toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
+		return { text: "", data: answers, details: { model, structured: true } };
 	});
 }

@@ -25,7 +25,7 @@ Any list of ≥ ~20 homogeneous items with a bucket/yes-no/score question: commi
 </workflow>
 
 <judge>
-`judge(state, questions) → JudgmentHandle`; returns immediately; `.wait()` → `{id: answer}`.
+`judge(state, questions) → JudgmentHandle`; returns immediately; `.wait()` (or `await h`) → `{id: answer}`.
 - `state`: `str` | JSON object | JSON array. Every question sees the same state.
 - `{type: "choice", instructions, criteria: {label: rubric, …}}` → `{choice, probabilities, confidence}`.
 - `{type: "bool", instructions, criteria?: {true, false}}` → `{bool: P(yes)}`.

@@ -700,7 +700,7 @@ if "__omp_prelude_loaded__" not in globals():
     _HANDLE_UNSET = object()
 
     class _Handle:
-        """Shared process-local agent/completion handle behavior."""
+        """Shared process-local agent/completion/judgment handle behavior."""
 
         __slots__ = ("id", "_schema", "_result")
 
@@ -735,10 +735,9 @@ if "__omp_prelude_loaded__" not in globals():
             return bool(result.get("cancelled")) if isinstance(result, dict) else False
 
         def __await__(self):
-            return asyncio.get_running_loop().run_in_executor(
-                None,
-                self.wait,
-            ).__await__()
+            # `to_thread` copies the current context, so the bridge call in the
+            # worker thread still sees this cell's run id.
+            return asyncio.to_thread(self.wait).__await__()
 
     class AgentHandle(_Handle):
         """Background subagent handle returned by ``agent()``."""
@@ -776,6 +775,15 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<completion {self.id}>"
 
+    class JudgmentHandle(_Handle):
+        """Background typed judgment handle returned by ``judge()``; resolves to ``{id: answer}``."""
+
+        __slots__ = ()
+        kind = "judgment"
+
+        def __repr__(self):
+            return f"<judgment {self.id}>"
+
     def _handle_value(handle, snapshot):
         status = snapshot.get("status") if isinstance(snapshot, dict) else "failed"
         if status == "running":
@@ -796,11 +804,11 @@ if "__omp_prelude_loaded__" not in globals():
         return value
 
     def wait(handles, timeout=None, *, raise_errors=True):
-        """Wait for agent/completion handles in input order."""
+        """Wait for agent/completion/judgment handles in input order."""
         items = [handles] if isinstance(handles, _Handle) else list(handles)
         for handle in items:
             if not isinstance(handle, _Handle):
-                raise TypeError("wait() expects agent or completion handles")
+                raise TypeError("wait() expects agent, completion, or judgment handles")
         results = [None] * len(items)
         pending = []
         pending_indexes = []
@@ -849,15 +857,13 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(questions, dict):
             raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
 
-    async def judge(state, questions):
-        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score)."""
+    def judge(state, questions):
+        """Start a typed judgment over one ``state``; returns a ``JudgmentHandle`` resolving to ``{id: answer}`` (choice/bool/score)."""
         _check_questions(questions)
-        result = await asyncio.to_thread(
-            _bridge_call, "__judge__", {"state": state, "questions": questions}
-        )
-        if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-            raise RuntimeError("judge() did not return answers")
-        return result["answers"]
+        result = _bridge_call("__judge__", {"state": state, "questions": questions})
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            raise RuntimeError("judge() did not return a handle")
+        return JudgmentHandle(result["id"])
 
     class JudgmentItem:
         """One settled ``judge_batch`` item: ``answers`` on success, else ``error``."""

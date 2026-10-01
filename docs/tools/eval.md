@@ -147,7 +147,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
 - `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
-- `wait(...)` for agent/completion handles
+- `wait(...)` for agent/completion/judgment handles
 - `agent(...)`, `workpool(...)` when spawning is allowed
 - `log(message)`, `phase(title)`, `budget`
 
@@ -159,7 +159,7 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 
 ### `judge()` and judgment batches
 
-`await judge(state, questions)` returns answers keyed by question id. State is a nonempty string, JSON object, or JSON array. Questions have `type: "choice"`, `"bool"`, or `"score"` plus nonempty `instructions`: choice needs at least two label/rubric entries; score needs at least two ordered level descriptions; bool returns a probability in `.bool`, not a boolean. The session's `judge` role resolves the backend.
+`judge(state, questions)` starts one judgment and returns a judgment handle immediately; `.wait()`, `await`, or `wait(handles)` resolves it to answers keyed by question id, and `wait(..., raise_errors=False)` / `{ raiseErrors: false }` keeps a failed judgment in its slot. In JS, `await judge(...)` resolves to the answers rather than the handle. State is a nonempty string, JSON object, or JSON array. Questions have `type: "choice"`, `"bool"`, or `"score"` plus nonempty `instructions`: choice needs at least two label/rubric entries; score needs at least two ordered level descriptions; bool returns a probability in `.bool`, not a boolean. The session's `judge` role resolves the backend.
 
 For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
 
