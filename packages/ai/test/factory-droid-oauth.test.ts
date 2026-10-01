@@ -252,6 +252,28 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.region).toBe("eu");
 	});
 
+	it("fails the login when the WorkOS token carries no organization and whoami cannot bind one", async () => {
+		// Real-world shape: WorkOS authenticate returns a token without `external_org_id`
+		// and /api/cli/whoami answers 401 "User not affiliated with an organization".
+		// The login must not resolve into an org-less credential: every Factory endpoint
+		// requires an organization, so the credential would 401 on every request.
+		const access = makeJwt({ sub: "user_401", email: "dev@example.com", exp: Math.floor(Date.now() / 1000) + 3600 });
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) {
+				return jsonResponse(401, {
+					detail: "User not affiliated with an organization",
+					status: 401,
+					title: "Unauthorized",
+					requestId: "sfo1::test",
+				});
+			}
+			return jsonResponse(200, { access_token: access, refresh_token: "refresh-401" });
+		};
+
+		await expect(loginViaRegistry({ fetch: fetchImpl })).rejects.toThrow(/User not affiliated with an organization/);
+	});
+
 	it("rejects a device token response without a refresh grant", async () => {
 		const access = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
 		let whoamiCalled = false;

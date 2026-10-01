@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Factory Droid logins whose WorkOS token carries no `external_org_id` claim no longer resolve silently into an unusable credential: `factory-droid` login now fails with the whoami server error ("User not affiliated with an organization") instead of storing an org-less token that 401s on every request ([#14033](https://github.com/can1357/oh-my-pi/pull/14033) by [@thomaszdxsn](https://github.com/thomaszdxsn))
 - Tool calls whose final argument JSON is cut off or followed by trailing text are no longer executed from an auto-closed preview. OpenAI Completions, Anthropic, Bedrock, Responses, Codex, Devin, Ollama, Apple, Cursor, GitLab Duo, and the in-band JSON dialects now give such a call the existing parse-error arguments, so the tool is not run and the model receives the parse error and can resend the call ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.4.9] - 2026-10-01

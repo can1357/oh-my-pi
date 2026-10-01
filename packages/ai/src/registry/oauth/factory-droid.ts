@@ -1,6 +1,7 @@
 import { factoryDroidApiBaseUrl, resolveFactoryDroidInferenceRegion } from "@oh-my-pi/pi-catalog/wire/factory-droid";
 import * as AIError from "../../error";
 import { isRecord } from "../../utils";
+import type { OAuthCredentials } from "../oauth/types";
 import type { AfterExchangeHook } from "../hooks/types";
 
 /** Resolve canonical Factory identity; residency chooses the host, inference scope chooses eligible routes. */
@@ -30,6 +31,9 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 	};
 	const timeout = AbortSignal.timeout(15_000);
 	const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
+	let whoamiStatus: number | undefined;
+	let whoamiDetail: string | undefined;
+	let resolved: OAuthCredentials | undefined;
 	try {
 		const response = await context.fetch(`${factoryDroidApiBaseUrl(identity.region)}/api/cli/whoami`, {
 			headers: {
@@ -50,7 +54,15 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 					body.inferenceRegion === "global" || body.inferenceRegion === "eu" || body.inferenceRegion === "us"
 						? body.inferenceRegion
 						: resolveFactoryDroidInferenceRegion({ region, inferenceRegion: carried?.inferenceRegion });
-				return { ...identity, orgId, region, inferenceRegion };
+				resolved = { ...identity, orgId, region, inferenceRegion };
+			}
+		} else {
+			whoamiStatus = response.status;
+			try {
+				const body: unknown = await response.json();
+				if (isRecord(body) && typeof body.detail === "string") whoamiDetail = body.detail;
+			} catch {
+				// Non-JSON error body; the status alone is reported below.
 			}
 		}
 	} catch {
@@ -58,5 +70,21 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 		// Preserve identity only when this is still the same selected organization.
 	}
 	if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
-	return identity;
+	// A fresh login that ends without an organization binding is unusable: every
+	// Factory endpoint rejects org-less tokens with 401, so failing here surfaces
+	// the server's reason instead of storing a credential that 401s on each turn.
+	if (context.phase === "login" && (resolved ?? identity).orgId === undefined) {
+		const reason =
+			whoamiDetail ??
+			(whoamiStatus !== undefined
+				? `whoami returned HTTP ${whoamiStatus}`
+				: "whoami did not return an organization");
+		throw new AIError.OAuthError(
+			`Factory Droid login did not resolve an organization: ${reason}. ` +
+				`The WorkOS token carries no external_org_id claim, and Factory's API requires an organization-bound token. ` +
+				`Sign in with an account that belongs to a Factory organization, or retry once the token exchange returns one.`,
+			{ kind: "validation", status: whoamiStatus },
+		);
+	}
+	return resolved ?? identity;
 };
