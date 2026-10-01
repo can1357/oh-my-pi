@@ -2,11 +2,16 @@ import { describe, expect, it } from "bun:test";
 import {
 	type Component,
 	CURSOR_MARKER,
+	type HistoryFlushOptions,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
 	TUI,
+	type TUIStopOptions,
 	type ViewportSize,
 } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Text } from "@oh-my-pi/pi-tui/components/text";
+import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -146,12 +151,15 @@ class HeightReplayProvider implements TerminalFrameProvider {
 
 class FlushProvider implements TerminalFrameProvider {
 	#nextId = 1;
-	#pending = ["final one", "final two"];
+	readonly pending = ["final one", "final two"];
 	#flushing = false;
 	readonly acknowledged: number[] = [];
+	/** Flush lifecycle calls and offered history rows, in order. */
+	readonly events: unknown[][] = [];
 
 	renderFrame(): TerminalFramePlan {
-		const row = this.#flushing ? this.#pending[0] : undefined;
+		const row = this.#flushing ? this.pending[0] : undefined;
+		if (row !== undefined) this.events.push(["history", row]);
 		return {
 			history: row === undefined ? undefined : { id: this.#nextId, rows: [row] },
 			viewport: ["editor"],
@@ -159,20 +167,52 @@ class FlushProvider implements TerminalFrameProvider {
 	}
 
 	acknowledgeHistory(id: number): void {
-		if (id !== this.#nextId || this.#pending.length === 0) return;
+		if (id !== this.#nextId || this.pending.length === 0) return;
 		this.acknowledged.push(id);
 		this.#nextId++;
-		this.#pending.shift();
+		this.pending.shift();
 	}
 
-	beginHistoryFlush(): void {
+	beginHistoryFlush(options?: HistoryFlushOptions): void {
+		this.events.push(["begin", options]);
 		this.#flushing = true;
+	}
+
+	endHistoryFlush(): void {
+		this.events.push(["end"]);
+		this.#flushing = false;
 	}
 }
 
 function plainBuffer(terminal: VirtualTerminal): string[] {
 	return terminal.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
 }
+/**
+ * A Composer with 30 one-row blocks, added under a fullscreen overlay when
+ * `overlay`, then stopped. Renders are deferred to `renderScheduler.settle()`,
+ * as in production, so none re-enters `stop()`.
+ */
+async function stopWithTranscript(overlay: boolean, options: TUIStopOptions | undefined) {
+	const terminal = new VirtualTerminal(40, 10);
+	const renderScheduler = new VirtualRenderScheduler();
+	const composer = new Composer({
+		terminal,
+		tuiOptions: { renderScheduler },
+		preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+	});
+	const transcript = new TranscriptContainer();
+	composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+	composer.start({ playWelcomeIntro: false });
+	await renderScheduler.settle(terminal);
+	const shown = overlay ? composer.ui.showOverlay(new FullscreenOverlay(), { fullscreen: true }) : undefined;
+	await renderScheduler.settle(terminal);
+	for (let i = 0; i < 30; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+	composer.ui.requestRender();
+	await renderScheduler.settle(terminal);
+	composer.ui.stop(options);
+	return { terminal, composer, transcript, shown, renderScheduler };
+}
+
 /** Models tmux's preserved clear: a full-screen ED0/ED2 scrolls the live
  *  screen into pane history before blanking, unlike xterm-family discard. */
 class TmuxPreservedClearTerminal extends VirtualTerminal {
@@ -425,6 +465,141 @@ describe("terminal frame plans", () => {
 		expect(provider.acknowledged).toEqual([1, 2]);
 		expect(plainBuffer(terminal)).toContain("final one");
 		expect(plainBuffer(terminal)).toContain("final two");
+	});
+
+	it("ends the history flush after its last batch, so the TUI no longer flushes after start() resumes", () => {
+		const terminal = new VirtualTerminal(20, 3);
+		const provider = new FlushProvider();
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		tui.stop();
+		expect(provider.events).toEqual([["begin", {}], ["history", "final one"], ["history", "final two"], ["end"]]);
+
+		provider.pending.push("after handoff");
+		tui.start();
+		tui.requestRender(true);
+		expect(provider.events).toHaveLength(4);
+		expect(plainBuffer(terminal)).not.toContain("after handoff");
+		tui.stop();
+	});
+
+	it("flushes an exiting stop without options, such as Ctrl+D, as the owner's exit flush provider says", async () => {
+		for (const [flush, written] of [
+			[{}, 30],
+			[{ maxRows: 10 }, 5],
+		] as const) {
+			const terminal = new VirtualTerminal(40, 10);
+			const renderScheduler = new VirtualRenderScheduler();
+			const composer = new Composer({
+				terminal,
+				exit: () => {},
+				tuiOptions: { renderScheduler },
+				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			});
+			composer.ui.setExitFlushProvider(() => flush);
+			const transcript = new TranscriptContainer();
+			composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+			composer.start({ playWelcomeIntro: false });
+			await renderScheduler.settle(terminal);
+			composer.ui.showOverlay(new FullscreenOverlay(), { fullscreen: true });
+			await renderScheduler.settle(terminal);
+			for (let i = 0; i < 30; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+			composer.ui.requestRender();
+			await renderScheduler.settle(terminal);
+			// Ctrl+D on the composer before InteractiveMode installs its own handlers.
+			composer.editor.onExit!();
+			expect(plainBuffer(terminal).filter(row => row.startsWith("row-"))).toHaveLength(written);
+		}
+	});
+
+	it("retires by pressure again after a handoff stop resumes", () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Text("before handoff", 0, 0));
+		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+		composer.start({ playWelcomeIntro: false });
+
+		// A suspend or external-editor handoff: the full flush commits the block.
+		composer.ui.stop({ resuming: true });
+		expect(transcript.blockStates()).toEqual(["committed"]);
+
+		composer.ui.start();
+		transcript.addChild(new Text("after handoff", 0, 0));
+		composer.ui.requestRender(true);
+		// The screen has room, so pressure keeps the new block live.
+		expect(transcript.blockStates()).toEqual(["committed", "settled"]);
+		composer.ui.stop();
+	});
+
+	it("flushes nothing at a resuming stop under a fullscreen overlay, then retires the same rows once it closes", async () => {
+		const handoff = await stopWithTranscript(true, { resuming: true });
+		expect(handoff.transcript.blockStates().some(state => state === "committed")).toBe(false);
+		expect(plainBuffer(handoff.terminal).some(row => row.startsWith("row-"))).toBe(false);
+		const full = await stopWithTranscript(true, undefined);
+
+		for (const { terminal, composer, shown, renderScheduler } of [handoff, full]) {
+			composer.ui.start();
+			await renderScheduler.settle(terminal);
+			shown!.hide();
+			await renderScheduler.settle(terminal);
+		}
+		expect(plainBuffer(handoff.terminal).filter(Boolean)).toEqual(plainBuffer(full.terminal).filter(Boolean));
+		handoff.composer.ui.stop();
+		full.composer.ui.stop();
+	});
+
+	it("still flushes in full under a fullscreen overlay when the stop is not resuming", async () => {
+		const quit = await stopWithTranscript(true, undefined);
+		expect(quit.transcript.blockStates().every(state => state === "committed")).toBe(true);
+		expect(plainBuffer(quit.terminal).filter(row => row.startsWith("row-"))).toHaveLength(30);
+	});
+
+	it("flushes in full at a resuming stop without a fullscreen overlay", async () => {
+		const handoff = await stopWithTranscript(false, { resuming: true });
+		expect(handoff.transcript.blockStates().every(state => state === "committed")).toBe(true);
+		expect(plainBuffer(handoff.terminal).filter(row => row.startsWith("row-"))).toHaveLength(30);
+		handoff.composer.ui.start();
+		handoff.composer.ui.stop();
+	});
+
+	it("keeps a clearing repaint queued under a fullscreen overlay across a resuming stop, so each row lands once", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const renderScheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+		composer.start({ playWelcomeIntro: false });
+		for (let i = 0; i < 30; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+		composer.ui.requestRender();
+		await renderScheduler.settle(terminal);
+		// Pressure has already written the older blocks to scrollback.
+		expect(transcript.blockStates().filter(state => state === "committed")).toHaveLength(25);
+
+		const shown = composer.ui.showOverlay(new FullscreenOverlay(), { fullscreen: true });
+		await renderScheduler.settle(terminal);
+		// A clearing repaint (compaction, /clear, a settings change) under the overlay.
+		composer.ui.resetDisplay();
+		composer.ui.stop({ resuming: true });
+		composer.ui.start();
+		await renderScheduler.settle(terminal);
+		shown.hide();
+		await renderScheduler.settle(terminal);
+
+		expect(plainBuffer(terminal).filter(Boolean)).toEqual([
+			...Array.from({ length: 30 }, (_, i) => `row-${i}`),
+			"editor",
+		]);
+		composer.ui.stop();
 	});
 
 	it("keeps visible history above the anchored viewport while room remains", () => {

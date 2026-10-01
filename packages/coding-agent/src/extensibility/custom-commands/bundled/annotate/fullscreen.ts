@@ -20,7 +20,7 @@ const ANNOTATION_OVERLAY_OPTIONS = {
 async function editAnnotationDraft(tui: TUI, draft: string, commit: (text: string | null) => void): Promise<void> {
 	const editor = getEditorCommand();
 	if (!editor) throw new Error("Set $VISUAL or $EDITOR to edit an annotation externally.");
-	tui.stop();
+	tui.stop({ resuming: true });
 	try {
 		commit(await openInEditor(editor, draft, { extension: ".md" }));
 	} finally {

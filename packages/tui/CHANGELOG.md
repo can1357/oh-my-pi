@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `TUI.setExitFlushProvider()`, which decides how an exiting stop (`stop()` without options, or a postmortem restore other than a signal) flushes history ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `TUI.stop(options)` with `TUIStopOptions`: `{ maxRows }` caps an exiting stop's history flush, and `{ resuming: true }` marks a handoff that resumes with `start()` ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `HistoryFlushOptions`, the flush shape a frame provider's `beginHistoryFlush()` receives ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `EXIT_FLUSH_MAX_ROWS` (2,000), the row cap for an exiting stop's history flush ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Added `TerminalFrameProvider.endHistoryFlush()`, which ends the stop-time flush so frames after `start()` retire by pressure again ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed quitting a session with a long un-retired transcript (for example after a fullscreen overlay held the screen) rendering the whole history before exit: `TUI.stop({ maxRows })` writes only the newest whole blocks that fit, or the newest block whole when it alone is taller ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Fixed finished messages moving into terminal scrollback immediately, instead of staying live until the screen fills, after returning from a suspend or an external editor ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed opening the external editor or suspending from a fullscreen view, such as `/annotate`, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed a long streamed reply being glued to the next message in scrollback ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+- Fixed quitting with more inline images than the image budget allows writing the newest ones to scrollback as text instead of the oldest ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.4.9] - 2026-10-01
 
 ### Added

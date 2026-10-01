@@ -93,7 +93,7 @@ interface TranscriptEntry {
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
-	| { batch: HistoryBatch; kind: "commit"; end: number }
+	| { batch: HistoryBatch; kind: "commit"; start: number; end: number }
 	| { batch: HistoryBatch; kind: "replay" };
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
@@ -158,6 +158,11 @@ export function trimBlankEdges(rows: readonly string[]): readonly string[] {
 	return start === 0 && end === rows.length ? rows : rows.slice(start, end);
 }
 
+/** `rows` opened with the blank a batch owes; a batch that writes no row writes no blank. */
+function withLeadingBlank(rows: readonly string[], lead: boolean): readonly string[] {
+	return lead && rows.length > 0 ? ["", ...rows] : rows;
+}
+
 /** One live block's row span in the last `renderViewport` output (half-open `[start, end)`). */
 export interface TranscriptViewportSpan {
 	component: Component;
@@ -169,6 +174,12 @@ export interface TranscriptViewportSpan {
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
+	/**
+	 * The entry whose rows end native scrollback without the blank that follows
+	 * a block: a head progressive append emitted into it. A batch that writes a
+	 * row from any other entry opens with that blank.
+	 */
+	#openEntry: TranscriptEntry | undefined;
 	#nextBatchId = 1;
 	#offered: Offered | undefined;
 	#replayPending = false;
@@ -235,6 +246,7 @@ export class TranscriptContainer extends Container {
 		super.clear();
 		this.#entries = [];
 		this.#frontier = 0;
+		this.#openEntry = undefined;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
 		this.#pinnedFrontier = undefined;
@@ -267,6 +279,7 @@ export class TranscriptContainer extends Container {
 	resetStableEmission(): void {
 		this.#syncEntries();
 		if (this.#offered?.kind === "append") this.#offered = undefined;
+		this.#openEntry = undefined;
 		for (const entry of this.#entries) {
 			entry.emitted = 0;
 			entry.stableRows = EMPTY_STABLE_ROWS;
@@ -569,9 +582,16 @@ export class TranscriptContainer extends Container {
 		return batch;
 	}
 
-	/** Offers the complete currently eligible prefix for graceful shutdown. */
-	peekFlushBatch(width: number): HistoryBatch | undefined {
-		return this.#peekBatch(width, 0, "flush");
+	/**
+	 * Offers the currently eligible prefix for shutdown. With `maxRows`, the
+	 * batch holds only that prefix's newest whole blocks that fit in `maxRows`
+	 * rows, trailing blank included, and never part of a block (see
+	 * #flushTail); acknowledging it still retires the whole prefix, and the
+	 * older blocks it skipped never render, apart from the frontier head and the
+	 * one block measured to find it does not fit.
+	 */
+	peekFlushBatch(width: number, maxRows?: number): HistoryBatch | undefined {
+		return this.#peekBatch(width, 0, "flush", maxRows);
 	}
 
 	/** Recompose the unacknowledged batch so a discarded TUI frame can be rendered again. */
@@ -584,9 +604,19 @@ export class TranscriptContainer extends Container {
 			if (entry === undefined) return undefined;
 			const before = this.#renderStablePrefix(entry, entry.emitted, width);
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
-			rows = after.slice(before.length);
+			rows = withLeadingBlank(after.slice(before.length), this.#opensWithBlank(offered.entry));
 		} else if (offered.kind === "commit") {
-			rows = this.#renderRange(this.#frontier, offered.end, width, true).rows;
+			// A capped #peekBatch measured the frontier head and the block the cap
+			// left out, neither of them in the batch; measure them again so an
+			// image-budget retry counts the images the first pass did.
+			if (offered.start > this.#frontier) {
+				this.#measuredRows(this.#entries[this.#frontier]!, width);
+				this.#measuredRows(this.#entries[offered.start - 1]!, width);
+			}
+			rows = withLeadingBlank(
+				this.#renderRange(offered.start, offered.end, width, true).rows,
+				this.#opensWithBlank(offered.start),
+			);
 		} else {
 			rows = this.#renderReplay(width);
 		}
@@ -594,7 +624,7 @@ export class TranscriptContainer extends Container {
 		return offered.batch;
 	}
 
-	#peekBatch(width: number, capacity: number, policy: RetirementPolicy): HistoryBatch | undefined {
+	#peekBatch(width: number, capacity: number, policy: RetirementPolicy, maxRows?: number): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
 		if (this.#offered !== undefined) return this.#offered.batch;
@@ -664,7 +694,7 @@ export class TranscriptContainer extends Container {
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
-					rows,
+					rows: withLeadingBlank(rows, this.#opensWithBlank(this.#frontier)),
 					kind: "append",
 				};
 				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
@@ -688,26 +718,26 @@ export class TranscriptContainer extends Container {
 		}
 		this.#pinnedFrontier = undefined;
 		pushLoopPhase("ui.transcript-retire");
+		let start: number;
 		let retirement: { rows: readonly string[]; end: number };
 		try {
-			// Shutdown must hand over the full prefix; a live frame stops at the
-			// budget and offers the rest on the next frames.
-			retirement = this.#renderRange(
-				this.#frontier,
-				end,
-				width,
-				true,
-				policy === "flush" ? undefined : RETIREMENT_BUDGET_MS,
-			);
+			// Shutdown hands over the whole eligible prefix, or under a cap its
+			// newest whole blocks; a live frame stops at the budget and offers the
+			// rest on the next frames.
+			start = maxRows === undefined ? this.#frontier : this.#flushTail(end, width, maxRows);
+			retirement = this.#renderRange(start, end, width, true, policy === "flush" ? undefined : RETIREMENT_BUDGET_MS);
 		} finally {
 			popLoopPhase();
 		}
+		if (start > this.#frontier) {
+			logger.debug("Capped history flush skipped older blocks", { skippedBlocks: start - this.#frontier });
+		}
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: retirement.rows,
+			rows: withLeadingBlank(retirement.rows, this.#opensWithBlank(start)),
 			kind: "append",
 		};
-		this.#offered = { batch, end: retirement.end, kind: "commit" };
+		this.#offered = { batch, kind: "commit", start, end: retirement.end };
 		return batch;
 	}
 
@@ -722,11 +752,19 @@ export class TranscriptContainer extends Container {
 			// zero with the offer still live) must not move it backwards.
 			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd <= entry.emitted) return;
 			entry.emitted = offered.emittedEnd;
+			this.#openEntry = entry;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {
 				this.#retireEntry(this.#entries[index]!);
 			}
 			this.#frontier = offered.end;
+			// A batch that wrote a row ends with the blank after its last block.
+			if (offered.batch.rows.length > 0) this.#openEntry = undefined;
+		} else {
+			// A replay rewrites the committed ledger with every separator, then
+			// the head's emitted rows.
+			const head = this.#entries[this.#frontier];
+			this.#openEntry = head !== undefined && head.emitted > 0 ? head : undefined;
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
@@ -960,6 +998,38 @@ export class TranscriptContainer extends Container {
 			mode: entry.mode,
 			liveBlocks: this.#liveCount(),
 		});
+	}
+
+	/**
+	 * Where a capped flush of `[frontier, end)` starts: at the oldest block from
+	 * which every block through `end`, each with the blank after it, fits in
+	 * `maxRows` rows. The batch never starts inside a block, because a block's
+	 * rows may depend on the rows above them: a direct-placement image draws from
+	 * its last row, moving the cursor up over the rows it reserved, and cut off
+	 * from them it would paint over whatever precedes the batch. The newest
+	 * non-empty block stays whole even when it alone passes `maxRows`: dropping
+	 * it would leave scrollback without the last message. The blank the batch
+	 * opens with (see #opensWithBlank) counts against `maxRows`. The walk
+	 * measures newest-first and stops at the first block that does not fit, so
+	 * the only older block it renders is that one.
+	 */
+	#flushTail(end: number, width: number, maxRows: number): number {
+		let rows = 0;
+		for (let index = end - 1; index >= this.#frontier; index--) {
+			const height = this.#liveBlockRows(this.#entries[index]!, index, width).length;
+			if (height === 0) continue;
+			// A block adds its rows and the blank after it; as the oldest block of
+			// the batch it also brings the blank the batch opens with.
+			const lead = this.#opensWithBlank(index) ? 1 : 0;
+			if (rows > 0 && rows + height + 1 + lead > maxRows) return index + 1;
+			rows += height + 1;
+		}
+		return this.#frontier;
+	}
+
+	/** Whether a batch starting at `index` opens with a blank: native scrollback ends inside another entry. */
+	#opensWithBlank(index: number): boolean {
+		return this.#openEntry !== undefined && this.#openEntry !== this.#entries[index];
 	}
 
 	/**
