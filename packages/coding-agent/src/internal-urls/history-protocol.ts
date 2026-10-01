@@ -23,8 +23,9 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
+import { AgentRegistry, isLocalSession, isMessageablePeer } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { remoteNamespaceOf } from "../registry/remote-id";
 import {
 	renderTranscriptMessages,
 	TRANSCRIPT_KINDS,
@@ -147,10 +148,17 @@ function parseTurns(text: string): number | [number, number] {
 /** Registry lookup for a `history://<id>` URL, bound to the caller's root. */
 interface RefLookup {
 	ref?: AgentRef;
-	/** Registered, non-advisor refs. */
+	/** Registered messageable peers (local sessions plus remote proxies; advisors excluded). */
 	visible: AgentRef[];
 	/** Caller root's artifact dir, scanned first by on-disk fallbacks. */
 	preferredArtifactDir?: string;
+}
+
+/** Model-facing explanation for a `history://@ns/name` read: bridged peers have no local transcript. */
+function remotePeerHasNoTranscript(agentId: string): Error {
+	return new Error(
+		`${agentId} is a bridged peer: it runs behind an extension's bridge and has no local transcript. Message it with \`write agent://${agentId}\`; list peers with \`read history://\`.`,
+	);
 }
 
 /**
@@ -391,7 +399,13 @@ export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[])
  */
 export class HistoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "history";
-	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: false, linkable: true };
+	readonly spec: SchemeSpec = {
+		backing: "virtual",
+		selectors: "lines",
+		agentIdAuthority: true,
+		immutable: false,
+		linkable: true,
+	};
 
 	promptDoc(): string {
 		return historyPromptDoc.trim();
@@ -406,7 +420,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const current = currentRoute(url);
 		if (current === "full") return null;
 		const agentId = url.rawHost || url.hostname;
-		if (!agentId) return null;
+		if (!agentId || remoteNamespaceOf(agentId) !== undefined) return null;
 		const { ref, preferredArtifactDir } = await this.#lookup(agentId, context);
 		if (!ref && current === "bare") return null;
 		if (ref?.sessionFile) return ref.sessionFile;
@@ -432,9 +446,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// same-named transcript restored by another root's scan never shadows
 		// this caller's own on-disk transcript.
 		const preferredArtifactDir = rootSessionFile?.slice(0, -".jsonl".length);
-		// Advisor transcripts are observability-only, and remote proxies (murmur-q00p) have no local
-		// transcript — neither belongs in the agent-facing history. Hide both from index/lookup/completions.
-		const visible = registry.list().filter(ref => isLocalSession(ref.kind));
+		// Advisor transcripts are observability-only and never listed. Bridged peers' proxies (murmur-q00p)
+		// are listed so a caller can discover and spell them, but they have no local transcript: `ref`
+		// resolves local sessions only (an `@ns/name` id is rejected before lookup).
+		const visible = registry.list().filter(ref => isMessageablePeer(ref.kind));
 		return { visible, preferredArtifactDir };
 	}
 
@@ -489,6 +504,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				size: Buffer.byteLength(content, "utf-8"),
 			};
 		}
+		// Prefix-authoritative, like IrcBus routing: an `@ns/name` id is remote whether or not a proxy
+		// ref is registered, so never fall through to the local transcript/disk lookups.
+		if (remoteNamespaceOf(agentId) !== undefined) throw remotePeerHasNoTranscript(agentId);
 
 		const { ref, visible, preferredArtifactDir } = await this.#lookup(agentId, context);
 		// No agent is named `current`: the caller means its own session's history.
@@ -617,10 +635,16 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		for (const entry of entries) {
 			lines.push(`| ${entry.id} | ${entry.status} | ${entry.kind} | ${entry.parent} | ${entry.lastActivity} |`);
 		}
-		lines.push("", "Read a transcript with `read history://<id>`.");
+		lines.push("", "Read a transcript with `read history://<id>`. Message an agent with `write agent://<id>`.");
+		if (refs.some(ref => ref.kind === "remote")) {
+			lines.push(
+				"`remote` rows are bridged peers (reached through an extension's bridge, possibly on another host), addressed as `@<namespace>/<name>`; they have no local transcript.",
+			);
+		}
 		return `${lines.join("\n")}\n`;
 	}
 
+	/** Readable transcripts only: bridged peers complete under agent:// (write targets), not here. */
 	async complete(): Promise<UrlCompletion[]> {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
