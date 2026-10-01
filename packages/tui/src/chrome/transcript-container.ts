@@ -4,6 +4,7 @@ import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { col } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { isNativeSettled, settleNative } from "../native/settle";
+import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -284,6 +285,10 @@ export class TranscriptContainer extends Container {
 		this.#syncEntries();
 		const index = this.#entries.findIndex(entry => entry.component === component);
 		if (index < 0) return false;
+		// A turn's metrics describe the preceding content. Keep that content
+		// when removing it would leave a standalone usage-only turn (#12248).
+		const next = this.children[index + 1];
+		if (next && isUsageRowBlock(next)) return false;
 		const entry = this.#entries[index]!;
 		if (entry.state === "committed" || entry.emitted > 0) return false;
 		if (this.#offered?.kind === "commit" && index < this.#offered.end) return false;

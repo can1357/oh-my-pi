@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Keep still-running wait snapshots visible beside their turn usage when sealing or rebuilding the transcript ([#13978](https://github.com/can1357/oh-my-pi/pull/13978) by [@Dante-dan](https://github.com/Dante-dan)); fixes [#12248](https://github.com/can1357/oh-my-pi/issues/12248).
 - Hidden thinking blocks no longer leave a faint "Thought for Ns" row in Tern's native transcript; only the live "Thinking…" indicator shows while the model reasons.
 
 ## [18.4.9] - 2026-10-01
