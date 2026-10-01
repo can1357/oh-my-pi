@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/tutorial` (and `omp tutorial [<id>]`): short interactive lessons (`basics`, `btw`, `jevify`, `ttsr`) you practise in a real session on a throwaway repo under `~/.omp/tutorials/`, with a lesson card above the composer that checks each step from what actually happened; `/tutorial exit` returns to the session you came from
 - Added the RPC `cancel_subagent` command (and `RpcClient.cancelSubagent()`) to hard-kill one running subagent, foreground or background, without aborting the session ([#13481](https://github.com/can1357/oh-my-pi/pull/13481) by [@andrebrait](https://github.com/andrebrait)); supersedes [#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)
 - Added the RPC `steer_subagent` command (and `RpcClient.steerSubagent()`) to message a running subagent as its user, like Agent Hub chat ([#13482](https://github.com/can1357/oh-my-pi/pull/13482) by [@andrebrait](https://github.com/andrebrait)); ported from [#10427](https://github.com/can1357/oh-my-pi/pull/10427) by [@agenticfreedom](https://github.com/agenticfreedom)
 - Added `predict_word` and `predict_word_feedback` RPC commands so hosts with their own composer (web and IDE clients) can show the same ghost-text word completion as the terminal editor, using the `spelling.autocomplete` engine and its prose gates ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))

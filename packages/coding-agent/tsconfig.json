@@ -4,5 +4,9 @@
 		"src",
 		"test",
 		"scripts"
+	],
+	"exclude": [
+		"src/tutorials/*/fixture",
+		"src/tutorials/*/commits"
 	]
 }

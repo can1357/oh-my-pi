@@ -530,6 +530,8 @@
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
+		"gen:tutorials": "bun scripts/generate-tutorial-fixtures.ts --generate",
+		"gen:tutorials:reset": "bun scripts/generate-tutorial-fixtures.ts --reset",
 		"gen:native": "bun --cwd=../natives run gen:native",
 		"gen:native:reset": "bun --cwd=../natives run gen:native:reset",
 		"prepack": "bun run gen:tool-views && bun run gen:bundle",

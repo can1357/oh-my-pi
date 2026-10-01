@@ -22,6 +22,7 @@ export class UsageCounter<Name extends string = string> {
 	#counts: Record<string, number> = {};
 	#storage: AgentStorage | undefined;
 	#loadPromise: Promise<void> | undefined;
+	readonly #listeners = new Set<(name: Name) => void>();
 
 	constructor(readonly kind: UsageKind) {}
 
@@ -50,6 +51,13 @@ export class UsageCounter<Name extends string = string> {
 	record(name: Name): void {
 		this.#counts[name] = (this.#counts[name] ?? 0) + 1;
 		this.#storage?.recordUsage(this.kind, name);
+		for (const listener of this.#listeners) listener(name);
+	}
+
+	/** Observe every {@link record} call (e.g. `/tutorial` `command:` checks); returns the unsubscriber. */
+	onRecord(listener: (name: Name) => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
 	}
 }
 

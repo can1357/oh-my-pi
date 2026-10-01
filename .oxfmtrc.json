@@ -23,6 +23,8 @@
 		"packages/catalog/src/discovery/cursor-proto.ts",
 		"packages/catalog/src/discovery/devin-proto.ts",
 		".worktrees/**/*",
-		".wt/**/*"
+		".wt/**/*",
+		"packages/coding-agent/src/tutorials/*/fixture/**/*",
+		"packages/coding-agent/src/tutorials/*/commits/**/*"
 	]
 }

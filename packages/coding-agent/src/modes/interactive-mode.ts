@@ -70,6 +70,7 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
+import { TutorialController } from "../tutorials/controller";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
@@ -283,7 +284,7 @@ import {
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
-import { hintUsage } from "../utils/usage-counter";
+import { commandUsage, hintUsage } from "../utils/usage-counter";
 import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
@@ -1480,6 +1481,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly collabController: CollabController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
+	/** `/tutorial` lessons: pinned card, step checks, sandbox session park/resume. */
+	readonly tutorialController: TutorialController;
 	collabGuest?: CollabGuestLink;
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
@@ -1923,6 +1926,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
+		this.tutorialController = new TutorialController(this);
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
@@ -2397,8 +2401,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#syncConfigWarningHeader();
 				}
 				void this.#handleGoalSessionEvent(event);
+				this.tutorialController.onSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
+			// Every submitted known slash command is recorded here; lessons check `command:` steps against it.
+			commandUsage.onRecord(name => this.tutorialController.noteCommand(name)),
 		);
 		// Resync the welcome banner to the live model: init-time reconciliations
 		// (#reconcileModeFromSession, #enterPlanMode for plan.defaultOnStartup)
@@ -2408,6 +2415,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Config warnings can change during the same pre-subscription window; the
 		// event is not replayed, so rebuild from the live array once here too.
 		this.#syncConfigWarningHeader();
+		void this.tutorialController.init();
 		this.#eventBusUnsubscribers.push(
 			cfgModelRoles.listen(this.settings, () => this.#reapplyPlanModeModelOnRoleChange()),
 		);
@@ -7194,6 +7202,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
+		this.tutorialController.syncCard();
 	}
 
 	showStatus(message: string, options?: { dim?: boolean }): void {
@@ -7497,6 +7506,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}): Promise<void> {
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
+		this.tutorialController.syncCard();
 	}
 	/**
 	 * Reconcile the idle "F5 to Retry" status row with the transcript tail:

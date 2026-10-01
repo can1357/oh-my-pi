@@ -64,6 +64,8 @@ export interface Args {
 	fork?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
+	/** Lesson to start at startup (set by the `tutorial` subcommand; no CLI flag). */
+	tutorial?: string;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;

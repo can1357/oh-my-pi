@@ -1,0 +1,14 @@
+import { orders, type Order } from "../db";
+import { log } from "../log";
+
+export const hot = new Map<string, Order>();
+
+export function warmCache(ids: string[]): number {
+	for (const id of ids) {
+		const order = orders.get(id);
+		if (order) hot.set(id, order);
+		else log.debug("warmCache: missing order", { id });
+	}
+	log.info("cache warmed", { size: hot.size });
+	return hot.size;
+}

@@ -86,6 +86,8 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
 	// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 	try {
+		// Same placeholder contract for the tutorial lesson trees (src/tutorials/fixtures.ts).
+		await runCommand(["bun", "run", "gen:tutorials"]);
 		const docsPayload = await buildDocsIndexPayload();
 		// Build in-process: the docs embed payload is far larger than Linux's
 		// 128KiB per-argv-string cap, so it can never be passed as a CLI
@@ -114,6 +116,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 		await ensureShebang(cliPath);
 		await Bun.write(path.join(outDir, "docs-index.generated.txt"), docsPayload.payload);
 	} finally {
+		await runCommand(["bun", "run", "gen:tutorials:reset"]);
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}
 	const stat = await fs.stat(cliPath);

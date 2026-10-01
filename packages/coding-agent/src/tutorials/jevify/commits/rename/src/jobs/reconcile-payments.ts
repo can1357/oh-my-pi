@@ -1,0 +1,12 @@
+import { orders } from "../db";
+import { logger } from "../log";
+
+export function reconcilePayments(ledger: Map<string, number>): string[] {
+	const mismatched: string[] = [];
+	for (const order of orders.values()) {
+		if (order.status !== "paid") continue;
+		if (ledger.get(order.id) !== order.total) mismatched.push(order.id);
+	}
+	if (mismatched.length > 0) logger.error("payment mismatches", { count: mismatched.length });
+	return mismatched;
+}
