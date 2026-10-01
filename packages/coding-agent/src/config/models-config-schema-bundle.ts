@@ -302,7 +302,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const DiscoveryPricingSchema = type({
 		input: "string",
 		output: "string",
-		cacheRead: "string",
+		"cacheRead?": "string",
 		"cacheWrite?": "string",
 		"unit?": '"per-1m" | "per-token"',
 	}).narrow((value, ctx) => {

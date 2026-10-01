@@ -155,11 +155,26 @@ override matching model tags. These fields do not configure the Anthropic Messag
     pricing:
       input: "pricing.input_per_1m_usd"
       output: "pricing.output_per_1m_usd"
-      cacheRead: "pricing.cache_read_input_per_1m_usd"
-      cacheWrite: "pricing.cache_creation_input_per_1m_usd" # optional
+      cacheRead: "pricing.cache_read_input_per_1m_usd" # optional; defaults to 0
+      cacheWrite: "pricing.cache_creation_input_per_1m_usd" # optional; defaults to 0
       unit: "per-1m" # optional: "per-1m" (default) or "per-token"
   ```
-  Paths are dot-separated keys walked against each raw model entry in `data[]`. When `unit` is `"per-token"`, rates are converted to USD per 1M tokens by multiplying by 1,000,000. Missing, non-numeric, or negative numbers resolve to `0`. When `cacheWrite` is omitted, it defaults to `0`.
+  Paths are dot-separated keys walked against each raw model entry in `data[]`. `input` and `output` are required; `cacheRead` and `cacheWrite` mappings are optional and default to `0`. When `unit` is `"per-token"`, rates are converted to USD per 1M tokens by multiplying by 1,000,000. Missing, non-numeric, or negative values resolve to `0`.
+
+  For Infron, configure its top-level minimum-price fields explicitly:
+  ```yaml
+  providers:
+    infron:
+      baseUrl: https://llm.onerouter.pro/v1
+      api: openai-completions
+      discovery:
+        type: openai-models-list
+        pricing:
+          input: min_prompt_price
+          output: min_completion_price
+          unit: per-1m
+  ```
+  These are minimum per-route prices, not accurate per-request totals when Infron routes to a dearer tier. The `per-1m` choice follows observed rates, not an official documented guarantee; the fields are not auto-detected. Add credentials as needed using the [provider-level fields](#provider-level-fields) and [API key resolution instructions](#auth-and-api-key-resolution-order).
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, and `glm5`. Omit it to use catalog identity policy; unknown models retain the fast local estimate.

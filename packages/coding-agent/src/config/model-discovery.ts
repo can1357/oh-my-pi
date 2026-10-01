@@ -845,7 +845,10 @@ function resolveOpenAIModelsListCost(
 		return {
 			input: sanitizePricingValue(resolveDotPath(item, pricingConfig.input), unit),
 			output: sanitizePricingValue(resolveDotPath(item, pricingConfig.output), unit),
-			cacheRead: sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheRead), unit),
+			cacheRead:
+				pricingConfig.cacheRead !== undefined
+					? sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheRead), unit)
+					: 0,
 			cacheWrite:
 				pricingConfig.cacheWrite !== undefined
 					? sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheWrite), unit)

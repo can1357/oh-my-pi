@@ -1750,13 +1750,13 @@ describe("ModelRegistry runtime discovery", () => {
 			}),
 		).toBe(false);
 
-		// Missing required field
+		// cacheRead is optional.
 		expect(
 			ProviderDiscoverySchema.allows({
 				type: "openai-models-list",
 				pricing: { input: "pricing.input", output: "pricing.output" },
 			}),
-		).toBe(false);
+		).toBe(true);
 
 		// Pricing on other discovery types rejected
 		expect(ProviderDiscoverySchema.allows({ type: "lm-studio", pricing: validPricing })).toBe(false);
@@ -2659,6 +2659,12 @@ describe("ModelRegistry runtime discovery", () => {
 			maxTokens: null,
 			supportsTools: false,
 		});
+		expect(registry.find("openai-test", "openrouter/openai/text-embedding-3-small")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 		expect(registry.find("openai-test", "bare-embedder")?.kind).toBe("embedding");
 		expect(registry.find("openai-test", "image-generator")).toMatchObject({
 			kind: "image",
@@ -2772,6 +2778,80 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		expect(registry.find("lm-studio-test", "local-vlm")?.input).toEqual(["text", "image"]);
+	});
+
+	test("openai-models-list maps Infron minimum prices only when explicitly configured", async () => {
+		const modelId = "openai/gpt-6-luna";
+		const infronRow = {
+			id: modelId,
+			min_prompt_price: 0.05,
+			min_completion_price: 0.25,
+			providers: [{ provider_slug: "openai", service_tier: "standard", prompt_price: 0.1, completion_price: 0.5 }],
+		};
+		writeRawModelsJson({
+			infron: {
+				baseUrl: "https://llm.onerouter.pro/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: {
+					type: "openai-models-list",
+					pricing: {
+						input: "min_prompt_price",
+						output: "min_completion_price",
+						unit: "per-1m",
+					},
+				},
+			},
+			"infron-with-override": {
+				baseUrl: "https://llm.onerouter.pro/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: {
+					type: "openai-models-list",
+					pricing: {
+						input: "min_prompt_price",
+						output: "min_completion_price",
+						unit: "per-1m",
+					},
+				},
+				modelOverrides: { [modelId]: { cost: { input: 9 } } },
+			},
+			"infron-no-pricing": {
+				baseUrl: "https://llm.onerouter.pro/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "https://llm.onerouter.pro/v1/models") {
+				return Response.json({ data: [infronRow] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(registry.find("infron", modelId)?.cost).toEqual({
+			input: 0.05,
+			output: 0.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+		expect(registry.find("infron-no-pricing", modelId)?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		expect(registry.find("infron-with-override", modelId)?.cost).toEqual({
+			input: 9,
+			output: 0.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 	});
 
 	test("openai-models-list extracts pricing from configured dot-paths with per-1m and per-token scaling", async () => {
