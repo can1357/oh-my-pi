@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed tool descriptions that misdescribed runtime behaviour: `read` ranges add 1 line before and 3 after unless `:raw`, non-`pty` `bash` calls move to the background after 60 s by default, eval Python is not IPython (no `get_ipython()`), the replace edit prompt suggested the uninstalled `sd` instead of the built-in `sed`, and `goal` `drop` removes the goal tool so a new goal can't be created afterwards ([#13998](https://github.com/can1357/oh-my-pi/pull/13998))
 - Fixed `/wt` on filesystems without copy-on-write cloning (e.g. NTFS): the new worktree no longer lists unchanged files as modified under `core.autocrlf`, and staged-only edits, additions, and deletions now carry over with the right file contents instead of reverting to `HEAD` ([#13987](https://github.com/can1357/oh-my-pi/pull/13987) by [@H4vC](https://github.com/H4vC))
 - Fixed Ctrl+V on Windows taking about a second to paste text: omp no longer starts PowerShell to check for an image or read the text, and only uses it when the built-in clipboard read fails ([#13991](https://github.com/can1357/oh-my-pi/pull/13991) by [@H4vC](https://github.com/H4vC))
 - Fixed `local://` paths written with the working directory in front (`/repo/local://notes.md`) creating a literal `local:` directory in the project; `read`, `write`, and search tools now treat them as the `local://` URL ([#13977](https://github.com/can1357/oh-my-pi/pull/13977) by [@radkawar](https://github.com/radkawar))

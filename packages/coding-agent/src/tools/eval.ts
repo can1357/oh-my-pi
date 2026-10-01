@@ -65,7 +65,7 @@ import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./setti
 export type EvalLanguageToken = "py" | "js";
 const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
 const EVAL_LANGUAGE_RUNTIME: Record<EvalLanguageToken, string> = {
-	py: '"py": IPython',
+	py: '"py": Python with IPython-style magics (not IPython)',
 	js: '"js": Bun',
 };
 const EVAL_LANGUAGE_NAME: Record<EvalLanguageToken, string> = {
