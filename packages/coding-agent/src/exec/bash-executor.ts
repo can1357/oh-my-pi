@@ -54,6 +54,12 @@ export interface BashExecutorOptions {
 	 * `cwd` included). External shells and processes never see it.
 	 */
 	filesystem?: ShellFilesystem;
+	/**
+	 * Invoked once the embedded shell starts the command, with a probe of the
+	 * live pids it spawned (empty once the run ends). Not called on the
+	 * user-shell paths.
+	 */
+	onStart?: (pids: () => readonly number[]) => void;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -692,6 +698,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				}
 			},
 		);
+		options?.onStart?.(() => executionShell.pids());
 
 		const ey = new ExponentialYield();
 		const winner = await ey.race<

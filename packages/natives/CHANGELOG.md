@@ -5,6 +5,7 @@
 ### Added
 
 - Added `readTextFromClipboard()` to read plain clipboard text without starting a subprocess ([#13991](https://github.com/can1357/oh-my-pi/pull/13991) by [@H4vC](https://github.com/H4vC))
+- Added `Shell.pids()`, which returns the pids of the processes the in-flight `run` spawned that are still alive
 
 ## [18.4.7] - 2026-10-01
 

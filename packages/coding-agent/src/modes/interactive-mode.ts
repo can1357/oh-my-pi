@@ -1179,6 +1179,9 @@ export function renderSubagentHudLines(
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
+/** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
+const JOBS_SHEET_REFRESH_MS = 250;
+
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
@@ -1544,6 +1547,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#jobsSheetHandle: OverlayHandle | undefined;
+	/** Re-renders the open jobs sheet so output tails and pids stay live. */
+	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -3730,7 +3735,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** What the TSP composer shows: the draft's shell mode, the effort chip, and send vs Stop. */
+	/**
+	 * What the TSP composer shows: the draft's shell mode, the effort chip
+	 * (the viewed agent's, like the model chip beside it), and send vs Stop.
+	 */
 	#composerNativeState(): ComposerNativeState {
 		const draft = this.editor.getText().trimStart();
 		return {
@@ -3739,7 +3747,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				: this.isPythonMode
 					? { kind: "python", excluded: draft.startsWith("$$") }
 					: undefined,
-			thinking: thinkingLevelWord(this.session),
+			thinking: thinkingLevelWord(this.viewSession),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
 			viewing: this.#viewingLineage(),
 		};
@@ -6744,6 +6752,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
+		clearInterval(this.#jobsSheetTimer);
+		this.#jobsSheetTimer = undefined;
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;
@@ -7138,11 +7148,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		const sheet = new JobsSheet(
-			() => this.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
-			() => this.#hideJobsSheet(),
-		);
+		const sheet = new JobsSheet({
+			load: () => this.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
+			inspect: id => this.session.inspectAsyncJob(id),
+			cancel: id => {
+				this.session.cancelAsyncJob(id);
+				this.ui.requestRender();
+			},
+			close: () => this.#hideJobsSheet(),
+		});
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
 		this.ui.requestRender();
 	}
@@ -7150,6 +7166,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#hideJobsSheet(): void {
 		const handle = this.#jobsSheetHandle;
 		this.#jobsSheetHandle = undefined;
+		clearInterval(this.#jobsSheetTimer);
+		this.#jobsSheetTimer = undefined;
 		if (!handle) return;
 		handle.hide();
 		this.#selectorController.focusActiveEditorArea();

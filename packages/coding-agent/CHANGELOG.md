@@ -9,9 +9,12 @@
 - Added `predict_word` and `predict_word_feedback` RPC commands so hosts with their own composer (web and IDE clients) can show the same ghost-text word completion as the terminal editor, using the `spelling.autocomplete` engine and its prose gates ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
 - Added an opt-in RPC ask dialog: after `set_ask_dialog` enables it, the `ask` tool sends all its questions in one `ask` extension UI request and takes the answers back in one `answers` response, so hosts can render every question with checkboxes or radio buttons and submit them together; hosts that don't opt in keep the one-`select`-per-choice prompts ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 - Added `SessionManager.onPersistenceNotice()` for SDK hosts: it reports a session moving to a new file (with the old and new paths) without going through the `onPersistenceError` failure channel ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+- Added `AgentSession.inspectAsyncJob()` (command, cwd, live pids, exit code, output tail, full-output artifact of one async job) and `AgentSession.cancelAsyncJob()`; the Background jobs sheet uses them to inspect and cancel jobs
 
 ### Changed
 
+- Migrated `omp predict` compare view to a native UI component featuring interactive table rows, an action bar, and improved status visualization
+- Enhanced MCP authorization prompts with clickable links, native context menus for copying/opening, and improved URL layout
 - RPC mode now sends a `cancel` extension UI request (with `targetId`) when omp's own dialog timeout elapses, for `select`, `confirm`, `input`, and `ask` dialogs, so hosts can close stale dialogs ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 - Saved output of bash, python, and js eval tool calls is now capped at 16 MB per artifact file (the beginning and the most recent output around a truncation notice) instead of growing without limit, and the output notice for a capped file says it holds a head/tail sample instead of offering it as full output; set `tools.artifactMaxBytes` (MB) to raise the cap, or `0` for unlimited ([#14012](https://github.com/can1357/oh-my-pi/pull/14012) by [@H4vC](https://github.com/H4vC))
 
@@ -32,6 +35,10 @@
 - Fixed session saves rewriting every already-stored image blob on each save, which multiplied disk writes on sessions with many images ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
 - Fixed omp freezing for seconds at a time and silently no longer saving the session after another process wrote to the same session file; omp now keeps that process's entries and saves normally, and if that process keeps writing through every retry, omp leaves the file to it and continues in a new file next to it ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
 - Fixed two omp processes writing the same session (for example after resuming it while an orphaned omp still had it open) mixing their turns into one file; the process that wrote it first keeps it, and the other continues in a new file next to it and shows you the new path ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+### Fixed
+
+- Fixed the native composer's effort chip showing the main session's thinking level while viewing a subagent
+- Fixed `omp predict`'s compare view and the MCP authorization link prompt drawing as pre-rendered `rows` fallback grids in Tern; both now describe themselves natively (the link opens or copies on click)
 
 ## [18.4.6] - 2026-10-01
 

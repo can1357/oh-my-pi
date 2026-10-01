@@ -261,6 +261,7 @@ import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-sessi
 import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
+	AsyncJobInspection,
 	AsyncJobSnapshot,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
@@ -2634,6 +2635,43 @@ export class AgentSession implements SettingsScope {
 		}));
 		const delivery = manager.getDeliveryState(ownerFilter);
 		return { running, recent, delivery };
+	}
+
+	/**
+	 * Inspect one async job this session owns: its command, live pids, exit
+	 * status and output. Undefined when the job is unknown, owned by another
+	 * agent, or evicted.
+	 */
+	inspectAsyncJob(id: string): AsyncJobInspection | undefined {
+		const job = this.#ownedAsyncJob(id);
+		if (!job) return undefined;
+		const details = job.latestDetails;
+		const reported = typeof details?.exitCode === "number" ? details.exitCode : undefined;
+		// Bash reports only non-zero exits; a completed command exited 0.
+		const exitCode = reported ?? (job.type === "bash" && job.status === "completed" ? 0 : undefined);
+		const output =
+			job.status === "running" ? job.progressText : (job.resultText ?? job.errorText ?? job.progressText);
+		return {
+			command: job.process?.command,
+			cwd: job.process?.cwd,
+			pids: job.status === "running" ? (job.process?.pids() ?? []) : [],
+			exitCode,
+			output,
+			artifactId: details?.meta?.truncation?.artifactId,
+		};
+	}
+
+	/** Cancel a running async job this session owns; false when there is none by that id. */
+	cancelAsyncJob(id: string): boolean {
+		const job = this.#ownedAsyncJob(id);
+		return job !== undefined && this.#asyncJobManager?.cancel(id, { ownerId: job.ownerId }) === true;
+	}
+
+	/** A listed job by id, under the same owner scope as {@link getAsyncJobSnapshot}. */
+	#ownedAsyncJob(id: string): AsyncJob | undefined {
+		const job = this.#asyncJobManager?.getJob(id);
+		if (!job || job.foreground) return undefined;
+		return !this.#agentId || job.ownerId === this.#agentId ? job : undefined;
 	}
 
 	/**

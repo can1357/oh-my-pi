@@ -364,6 +364,15 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
 }
 
 /** One word-completion engine running on its own thread. */
