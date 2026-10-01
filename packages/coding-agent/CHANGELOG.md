@@ -13,6 +13,10 @@
 
 - RPC mode now sends a `cancel` extension UI request (with `targetId`) when omp's own dialog timeout elapses, for `select`, `confirm`, `input`, and `ask` dialogs, so hosts can close stale dialogs ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 
+### Fixed
+
+- Subagent model requests, agent overrides, and frontmatter selections now respect the active `enabledModels` scope, including parent-model auth fallback ([#12345](https://github.com/can1357/oh-my-pi/pull/12345) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
