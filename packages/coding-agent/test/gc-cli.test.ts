@@ -9,6 +9,7 @@ import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cl
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -16,6 +17,7 @@ import {
 	getHistoryDbPath,
 	getSessionsDir,
 	getTerminalSessionsDir,
+	hashPath,
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
@@ -2322,5 +2324,117 @@ describe("runGcCommand lock handling", () => {
 		);
 		expect(await Bun.file(lockPath).exists()).toBe(true);
 		expect(await Bun.file(breakerPath).exists()).toBe(true);
+	});
+});
+
+describe("runGcCommand stale state", () => {
+	const staleFlags = { stale: true, staleRetainNewest: 20, staleRetainDays: 30 };
+
+	async function writeAged(dir: string, name: string, content: string, ageDays?: number): Promise<string> {
+		const file = path.join(dir, name);
+		await Bun.write(file, content);
+		if (ageDays !== undefined) await agePath(file, ageDays);
+		return file;
+	}
+
+	test("prunes dangling session markers and gone-session breadcrumbs only with --apply, keeping live and fresh-lazy ones", async () => {
+		const projectDir = path.join(root, "project");
+		const liveSession = path.join(projectDir, "live.jsonl");
+		await Bun.write(liveSession, "{}\n");
+		const goneSession = path.join(projectDir, "deleted.jsonl");
+		const markers = getCustomSessionFilesDir(root);
+		const crumbs = getTerminalSessionsDir(root);
+		const danglingMarker = await writeAged(markers, "dangling", goneSession, 2);
+		const liveMarker = await writeAged(markers, "live", liveSession, 2);
+		// A lazy session records its marker before the transcript exists.
+		const lazyMarker = await writeAged(markers, "lazy", path.join(projectDir, "lazy.jsonl"));
+		const goneCrumb = await writeAged(crumbs, "tty-gone", `${projectDir}\ndeleted.jsonl\n`, 2);
+		const liveCrumb = await writeAged(crumbs, "tty-live", `${projectDir}\n${liveSession}\n`, 2);
+		// A fresh `/new` boundary is honored by `--continue` before its transcript
+		// exists, however long the terminal idles.
+		const freshCrumb = await writeAged(crumbs, "tty-fresh", `${projectDir}\nlazy.jsonl\nfresh\n`, 2);
+
+		const dryRun = await runGcCommand({ flags: { agentDir: root, ...staleFlags } });
+		expect(dryRun.stale).toMatchObject({ danglingMarkers: 1, staleBreadcrumbs: 1, wouldDelete: 2, deleted: 0 });
+		expect(await Bun.file(danglingMarker).exists()).toBe(true);
+		expect(await Bun.file(goneCrumb).exists()).toBe(true);
+
+		const applied = await runGcCommand({ flags: { agentDir: root, ...staleFlags, apply: true } });
+		expect(applied.stale).toMatchObject({ wouldDelete: 2, deleted: 2, errors: [] });
+		expect(await Bun.file(danglingMarker).exists()).toBe(false);
+		expect(await Bun.file(goneCrumb).exists()).toBe(false);
+		for (const kept of [liveMarker, lazyMarker, liveCrumb, freshCrumb]) {
+			expect(await Bun.file(kept).exists()).toBe(true);
+		}
+	});
+
+	test("--apply expires reports and collab replicas beyond both the newest-count and age limits", async () => {
+		// A custom agent dir named `agent` owns its parent as config root.
+		const agentDir = path.join(root, "agent");
+		const reportsDir = path.join(root, "reports");
+		const collabDir = path.join(root, "collab");
+		const newestReport = await writeAged(reportsDir, "omp-report-newest.tar.gz", "r", 10);
+		const youngReport = await writeAged(reportsDir, "omp-report-young.tar.gz", "r", 20);
+		const oldReports = [
+			await writeAged(reportsDir, "omp-report-old.tar.gz", "r", 40),
+			await writeAged(reportsDir, "omp-report-older.tar.gz", "r", 50),
+		];
+		const unrelated = await writeAged(reportsDir, "notes.txt", "keep", 100);
+		const liveReplica = await writeAged(collabDir, "room-live.jsonl", "{}\n", 1);
+		const oldReplica = await writeAged(collabDir, "room-old.jsonl", "{}\n", 60);
+		const oldReplicaArtifact = await writeAged(path.join(collabDir, "room-old"), "1.bash.log", "out");
+		const oldReplicaMarker = await writeAged(getCustomSessionFilesDir(agentDir), hashPath(oldReplica), oldReplica);
+
+		const result = await runGcCommand({
+			flags: { agentDir, stale: true, staleRetainNewest: 1, staleRetainDays: 30, apply: true },
+		});
+
+		expect(result.stale).toMatchObject({ expiredReports: 2, expiredReplicas: 1, deleted: 3, errors: [] });
+		for (const removed of [...oldReports, oldReplica, oldReplicaArtifact, oldReplicaMarker]) {
+			expect(await Bun.file(removed).exists()).toBe(false);
+		}
+		for (const kept of [newestReport, youngReport, unrelated, liveReplica]) {
+			expect(await Bun.file(kept).exists()).toBe(true);
+		}
+	});
+
+	test("--apply keeps old collab replicas a terminal resumes or a running guest holds open", async () => {
+		const agentDir = path.join(root, "agent");
+		const collabDir = path.join(root, "collab");
+		const resumed = await writeAged(collabDir, "room-resumed.jsonl", "{}\n", 60);
+		const held = await writeAged(collabDir, "room-held.jsonl", "{}\n", 60);
+		const idle = await writeAged(collabDir, "room-idle.jsonl", "{}\n", 60);
+		// `--continue` in this terminal reopens the replica it last switched to.
+		await writeAged(getTerminalSessionsDir(agentDir), "tty-guest", `${root}\n${resumed}\n`);
+		// A live guest writing its replica holds the session ownership lease.
+		const release = new FileSessionStorage().claimSessionFile(held);
+		if (!release) throw new Error("Expected to claim the replica lease");
+		let result: GcResult;
+		try {
+			result = await runGcCommand({
+				flags: { agentDir, stale: true, staleRetainNewest: 0, staleRetainDays: 30, apply: true },
+			});
+		} finally {
+			release();
+		}
+
+		expect(result.stale).toMatchObject({ expiredReplicas: 1, deleted: 1, errors: [] });
+		expect(await Bun.file(idle).exists()).toBe(false);
+		expect(await Bun.file(resumed).exists()).toBe(true);
+		expect(await Bun.file(held).exists()).toBe(true);
+	});
+
+	test("an unqualified run leaves stale state alone unless gc.stale is enabled", async () => {
+		await writeConfig(root, ["gc:", "  blobs: false", "  archive: false", "  wal: false", ""].join("\n"));
+
+		const unqualified = await runGcCommand({ flags: { agentDir: root } });
+		expect(unqualified.stale).toBeUndefined();
+
+		await writeConfig(
+			root,
+			["gc:", "  blobs: false", "  archive: false", "  wal: false", "  stale: true", ""].join("\n"),
+		);
+		const enabled = await runGcCommand({ flags: { agentDir: root } });
+		expect(enabled.stale?.wouldDelete).toBe(0);
 	});
 });

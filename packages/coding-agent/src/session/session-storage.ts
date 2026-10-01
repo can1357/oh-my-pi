@@ -458,6 +458,15 @@ function isPidAlive(pid: number): boolean {
  */
 const sessionFileLeases = new Map<string, { lease: FileLockHandle; holders: number }>();
 
+/**
+ * Lock name of a session file's ownership lease: a process writing the session
+ * holds it (see `FileSessionStorage.claimSessionFile`) until it exits.
+ */
+export function sessionOwnerLeasePath(sessionPath: string): string {
+	const resolved = path.resolve(sessionPath);
+	return path.join(path.dirname(resolved), `.${path.basename(resolved)}.owner`);
+}
+
 export class FileSessionStorage implements SessionStorage {
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
@@ -995,7 +1004,7 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				// Like the publish lock: the directory may not exist before the first write.
 				this.ensureDirSync(path.dirname(key));
-				lease = tryAcquireFileLock(path.join(path.dirname(key), `.${path.basename(key)}.owner`));
+				lease = tryAcquireFileLock(sessionOwnerLeasePath(key));
 			} catch (err) {
 				logger.debug("Session ownership lease unavailable", { sessionFile: key, error: toError(err).message });
 				return () => {};
