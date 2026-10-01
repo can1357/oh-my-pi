@@ -51,6 +51,23 @@ function failedTrackingCommand(counterFile: string): string {
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
 
+/** Integration gate: the child waits for a file the test creates; no elapsed-time assumption. */
+function gatedTokenCommand(tokenFile: string, counterFile: string, startedFile: string, releaseFile: string): string {
+	return `printf 1 >> ${shellQuote(counterFile)}; : > ${shellQuote(startedFile)}; until [ -f ${shellQuote(releaseFile)} ]; do sleep 0.01; done; IFS= read -r token < ${shellQuote(tokenFile)}; printf %s "$token"`;
+}
+
+async function waitForFile(file: string): Promise<void> {
+	if (await Bun.file(file).exists()) return;
+	const done = Promise.withResolvers<void>();
+	const watcher = fs.watch(path.dirname(file), (_event, name) => {
+		if (name === path.basename(file)) {
+			watcher.close();
+			done.resolve();
+		}
+	});
+	await done.promise;
+}
+
 /** Command emits a file's synthetic stdout before failing; callers must never surface it. */
 function noisyFailedCommand(stdoutFile: string): string {
 	if (process.platform !== "win32") return `cat ${shellQuote(stdoutFile)}; exit 1`;
@@ -555,6 +572,94 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect((await registry.resolveModelHeaders(modelB))?.["x-b-token"]).toBe("b-good");
 		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
 	});
+
+	test("a late 401 rejects the bearer it sent instead of a peer's fresh replacement", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		const resolver = registry.resolver(model);
+		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "stale-key" });
+		expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "stale-key" });
+		fs.writeFileSync(tokenFile, "fresh-key");
+		const firstRecovery = await resolver({
+			lastChance: false,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+			previousKey: "stale-key",
+		});
+		expect(firstRecovery).toMatchObject({ apiKey: "fresh-key" });
+		const lateRecovery = await resolver({
+			lastChance: false,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+			previousKey: "stale-key",
+		});
+		expect(lateRecovery).toMatchObject({ apiKey: "fresh-key" });
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+
+	test.skipIf(process.platform === "win32")(
+		"a 401 arriving during a mint makes every waiter reject the stale bearer",
+		async () => {
+			const tokenFile = path.join(tempDir, "token.txt");
+			const counterFile = path.join(tempDir, "counter.txt");
+			const startedFile = path.join(tempDir, "mint-started");
+			const releaseFile = path.join(tempDir, "mint-release");
+			fs.writeFileSync(tokenFile, "bad-key");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(releaseFile, "");
+			const command = gatedTokenCommand(tokenFile, counterFile, startedFile, releaseFile);
+			fs.writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						"custom-proxy": {
+							baseUrl: "https://custom-proxy.example.com/v1",
+							api: "openai-completions",
+							apiKey: `!${command}`,
+							models: [{ id: "custom-model", name: "Custom Model" }],
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			const resolver = registry.resolver(model);
+			expect(await resolver({ lastChance: false, error: undefined })).toMatchObject({ apiKey: "bad-key" });
+			fs.rmSync(startedFile);
+			fs.rmSync(releaseFile);
+			invalidateCommandConfig(`!${command}`);
+			const waitingRequest = resolver({ lastChance: false, error: undefined });
+			await waitForFile(startedFile);
+			const recovery = resolver({
+				lastChance: false,
+				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+				previousKey: "bad-key",
+			});
+			fs.writeFileSync(releaseFile, "");
+			await expect(waitingRequest).rejects.toThrow("returned a value rejected by a 401");
+			expect(await recovery).toBeUndefined();
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
+		},
+		20_000,
+	);
 
 	test("401 refreshes a command-backed provider header and retries with the fresh value", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");

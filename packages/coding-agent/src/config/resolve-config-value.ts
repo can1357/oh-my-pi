@@ -4,6 +4,7 @@ import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAbo
 const COMMAND_TIMEOUT_MS = 10_000;
 const COMMAND_FAILURE_RETRY_MS = 30_000;
 const INITIAL_MINT_ATTEMPTS = 2;
+const MAX_REJECTED_VALUE_DIGESTS = 16;
 /** Last stdout each command printed on success; a failed run never replaces it. */
 const commandResultCache = new Map<string, string>();
 /** Failed runs wait before attempting another mint, preventing a credential-helper storm. */
@@ -12,8 +13,8 @@ const commandFailureRetryAt = new Map<string, number>();
 const commandFailure = new Map<string, string>();
 /** Commands an explicit refresh asked to mint once their backoff permits. */
 const commandRefreshPending = new Set<string>();
-/** Bearers rejected by a 401, retained per command so they can never be sent again. */
-const commandRejectedValues = new Map<string, Set<string>>();
+/** SHA-256 digests of 401-rejected values, bounded FIFO per command. */
+const commandRejectedValueDigests = new Map<string, string[]>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
 
@@ -39,6 +40,18 @@ function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
+function valueDigest(value: string): string {
+	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+function valueIsRejected(command: string, value: string | undefined): boolean {
+	return value !== undefined && commandRejectedValueDigests.get(command)?.includes(valueDigest(value)) === true;
+}
+
+function handOutValue(command: string, value: string | undefined): string | undefined {
+	return valueIsRejected(command, value) ? undefined : value;
+}
+
 /** Invalidate one command-backed value for an ordinary refresh. */
 export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	if (!isCommandConfigValue(valueConfig)) return;
@@ -49,17 +62,25 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 }
 
-/** Mark the current command-backed credential rejected by a 401 without disturbing a shared mint. */
-export function rejectCommandConfig(valueConfig: string | undefined): void {
+/**
+ * Mark the exact command-backed bearer rejected by a 401 without disturbing a
+ * shared mint. Omitting `rejectedValue` asks for an ordinary refresh only.
+ */
+export function rejectCommandConfig(valueConfig: string | undefined, rejectedValue?: string): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
-	const value = commandResultCache.get(command);
-	if (value !== undefined) {
-		const rejected = commandRejectedValues.get(command) ?? new Set<string>();
-		rejected.add(value);
-		commandRejectedValues.set(command, rejected);
+	if (rejectedValue !== undefined) {
+		const digests = commandRejectedValueDigests.get(command) ?? [];
+		const digest = valueDigest(rejectedValue);
+		if (!digests.includes(digest)) {
+			digests.push(digest);
+			if (digests.length > MAX_REJECTED_VALUE_DIGESTS) digests.shift();
+			commandRejectedValueDigests.set(command, digests);
+		}
 	}
-	commandRefreshPending.add(command);
+	if (handOutValue(command, commandResultCache.get(command)) === undefined) {
+		commandRefreshPending.add(command);
+	}
 	commandFailureRetryAt.delete(command);
 }
 
@@ -69,7 +90,7 @@ export function invalidateAllCommandConfigs(): void {
 		...commandResultCache.keys(),
 		...commandFailureRetryAt.keys(),
 		...commandInFlight.keys(),
-		...commandRejectedValues.keys(),
+		...commandRejectedValueDigests.keys(),
 	])) {
 		commandRefreshPending.add(command);
 		commandFailureRetryAt.delete(command);
@@ -88,58 +109,61 @@ export function describeCommandConfigFailure(valueConfig: string | undefined): s
 	const command = commandKey(valueConfig);
 	const failure = commandFailure.get(command);
 	if (failure === undefined) return undefined;
-	const cached = commandResultCache.get(command);
-	if (cached !== undefined && !commandRejectedValues.get(command)?.has(cached)) return undefined;
+	if (handOutValue(command, commandResultCache.get(command)) !== undefined) return undefined;
 	return `\`${command}\` ${failure}`;
 }
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
 	const cached = commandResultCache.get(command);
-	const cachedRejected = cached !== undefined && commandRejectedValues.get(command)?.has(cached) === true;
-	if (cached !== undefined && !cachedRejected && !commandRefreshPending.has(command)) return cached;
+	if (handOutValue(command, cached) !== undefined && !commandRefreshPending.has(command)) return cached;
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && Date.now() < retryAt) return cachedRejected ? undefined : cached;
+	if (retryAt !== undefined && Date.now() < retryAt) return handOutValue(command, commandResultCache.get(command));
 
 	const existing = commandInFlight.get(command);
-	if (existing) return await existing;
+	if (existing) return handOutValue(command, await existing);
 
 	const generation = commandGeneration.get(command) ?? 0;
 	const promise: Promise<string | undefined> = (async () => {
 		let run: CommandRun = { ok: false, failure: "was not run" };
-		const attempts = cached === undefined || cachedRejected ? INITIAL_MINT_ATTEMPTS : 1;
+		let attempts = handOutValue(command, cached) === undefined ? INITIAL_MINT_ATTEMPTS : 1;
 		for (let attempt = 0; attempt < attempts; attempt++) {
 			run = await runInProjectDir(command);
-			if (run.ok && !commandRejectedValues.get(command)?.has(run.value)) break;
-			if (run.ok) run = { ok: false, failure: "returned a value rejected by a 401" };
-		}
-		const current = (commandGeneration.get(command) ?? 0) === generation;
-		if (run.ok) {
-			if (current) {
-				commandResultCache.set(command, run.value);
-				commandFailureRetryAt.delete(command);
-				commandFailure.delete(command);
-				commandRefreshPending.delete(command);
+			if (run.ok && handOutValue(command, run.value) !== undefined) {
+				if ((commandGeneration.get(command) ?? 0) === generation) {
+					commandResultCache.set(command, run.value);
+					commandFailureRetryAt.delete(command);
+					commandFailure.delete(command);
+					commandRefreshPending.delete(command);
+				}
+				return handOutValue(command, run.value);
 			}
-			return run.value;
+			if (run.ok) run = { ok: false, failure: "returned a value rejected by a 401" };
+			// A 401 may arrive while this mint was in flight. Re-evaluate the
+			// state now, then spend one shared replacement attempt if needed.
+			if (attempt === 0 && handOutValue(command, commandResultCache.get(command)) === undefined) {
+				attempts = INITIAL_MINT_ATTEMPTS;
+			}
 		}
 
+		const lastGood = commandResultCache.get(command);
+		const sendableLastGood = handOutValue(command, lastGood);
 		logger.warn("config: !command value resolution failed", {
 			failure: run.failure,
-			keptPreviousValue: cached !== undefined && !cachedRejected,
-			rejected: cachedRejected,
+			keptPreviousValue: sendableLastGood !== undefined,
+			rejected: lastGood !== undefined && sendableLastGood === undefined,
 		});
-		if (current) {
+		if ((commandGeneration.get(command) ?? 0) === generation) {
 			commandFailure.set(command, run.failure);
 			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 		}
-		return cachedRejected ? undefined : cached;
+		return sendableLastGood;
 	})().finally(() => {
 		if (commandInFlight.get(command) === promise) commandInFlight.delete(command);
 	});
 
 	commandInFlight.set(command, promise);
-	return await promise;
+	return handOutValue(command, await promise);
 }
 
 /**
@@ -287,5 +311,5 @@ export function clearConfigValueCache(): void {
 	commandFailureRetryAt.clear();
 	commandFailure.clear();
 	commandRefreshPending.clear();
-	commandRejectedValues.clear();
+	commandRejectedValueDigests.clear();
 }

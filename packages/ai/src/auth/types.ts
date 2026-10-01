@@ -487,6 +487,8 @@ export type AuthApiKeyOptions = {
 	forceRefresh?: boolean;
 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
 	refreshReason?: OAuthRefreshReason;
+	/** Bearer that received the 401 which triggered this command-backed refresh. */
+	rejectedApiKey?: string;
 };
 
 /** Non-secret identity bound to the OAuth credential selected for one request attempt. */

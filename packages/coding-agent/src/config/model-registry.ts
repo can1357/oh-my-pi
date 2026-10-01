@@ -351,12 +351,28 @@ export class ModelRegistry {
 	 * credentials plus only the model headers that were materialized for the
 	 * failed request; unrelated model headers keep their last-good value.
 	 */
-	#invalidateProviderCommandConfigs(provider: string, rejected = false, modelId?: string): void {
-		const invalidate = rejected ? rejectCommandConfig : invalidateCommandConfig;
-		invalidate(this.#customProviderApiKeys.get(provider));
+	#invalidateProviderCommandConfigs(
+		provider: string,
+		rejected = false,
+		modelId?: string,
+		rejectedApiKey?: string,
+	): void {
+		const apiKeyConfig = this.#customProviderApiKeys.get(provider);
+		const runtimeApiKeyConfig = this.#runtimeProviderApiKeys.get(provider)?.keyConfig;
+		if (rejected) {
+			// Only the bearer handed to the failed request is proven rejected.
+			rejectCommandConfig(apiKeyConfig, rejectedApiKey);
+			rejectCommandConfig(runtimeApiKeyConfig, rejectedApiKey);
+		} else {
+			invalidateCommandConfig(apiKeyConfig);
+			invalidateCommandConfig(runtimeApiKeyConfig);
+		}
+		const refreshHeader = (config: string) => {
+			if (config !== apiKeyConfig && config !== runtimeApiKeyConfig) invalidateCommandConfig(config);
+		};
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidate(config);
+			for (const config of configs) refreshHeader(config);
 		}
 		const modelCommandSets =
 			rejected && modelId !== undefined
@@ -364,11 +380,11 @@ export class ModelRegistry {
 				: [...(this.#commandConfigsByProviderModel.get(provider)?.values() ?? [])];
 		for (const modelConfigs of modelCommandSets) {
 			if (!modelConfigs) continue;
-			for (const config of modelConfigs) invalidate(config);
+			for (const config of modelConfigs) refreshHeader(config);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (runtimeConfigs) {
-			for (const config of runtimeConfigs) invalidate(config);
+			for (const config of runtimeConfigs) refreshHeader(config);
 		}
 		const runtimeModelCommandSets =
 			rejected && modelId !== undefined
@@ -376,7 +392,7 @@ export class ModelRegistry {
 				: [...(this.#runtimeCommandConfigsByProviderModel.get(provider)?.values() ?? [])];
 		for (const runtimeModelConfigs of runtimeModelCommandSets) {
 			if (!runtimeModelConfigs) continue;
-			for (const config of runtimeModelConfigs) invalidate(config);
+			for (const config of runtimeModelConfigs) refreshHeader(config);
 		}
 	}
 
@@ -2937,7 +2953,12 @@ export class ModelRegistry {
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		if (options?.forceRefresh) {
-			this.#invalidateProviderCommandConfigs(provider, options.refreshReason === "auth-recovery", options.modelId);
+			this.#invalidateProviderCommandConfigs(
+				provider,
+				options.refreshReason === "auth-recovery",
+				options.modelId,
+				options.rejectedApiKey,
+			);
 		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };

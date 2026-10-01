@@ -59,6 +59,7 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
+		rejectedApiKey?: string,
 	): Promise<ApiKeyResolution> =>
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
@@ -66,6 +67,7 @@ export function createApiKeyResolver(
 			forceRefresh,
 			signal,
 			refreshReason,
+			rejectedApiKey,
 		});
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
@@ -95,6 +97,11 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
+		return resolveKey(
+			true,
+			signal,
+			AIError.status(error) === 401 ? "auth-recovery" : undefined,
+			AIError.status(error) === 401 ? previousKey : undefined,
+		);
 	};
 }
