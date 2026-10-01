@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced the time to rebuild a long session's transcript on resume when it contains repeated `wait` polls or todo updates ([#13767](https://github.com/can1357/oh-my-pi/pull/13767) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.4.9] - 2026-10-01
 
 ### Added

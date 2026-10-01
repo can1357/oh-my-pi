@@ -223,10 +223,15 @@ export class TranscriptContainer extends Container {
 		this.#entriesUnverified = true;
 	}
 
+	/** Removes `component` if {@link canRemoveBlock} allows it; otherwise does nothing. */
 	override removeChild(component: Component): void {
-		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
-		super.removeChild(component);
-		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
+		const index = this.#removableIndex(component);
+		if (index < 0) return;
+		// #removableIndex synced entries, which now mirror children index for
+		// index. This class renders through its own entries, never Container's
+		// memoized render, so splicing children directly is the whole removal.
+		this.children.splice(index, 1);
+		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
 	}
@@ -281,14 +286,24 @@ export class TranscriptContainer extends Container {
 
 	/** Whether a transient block may be discarded without leaving tape history. */
 	canRemoveBlock(component: Component): boolean {
+		return this.#removableIndex(component) >= 0;
+	}
+
+	/**
+	 * Syncs entries, then returns `component`'s index if it can be discarded
+	 * without leaving tape history (not committed, not emitted, not in an
+	 * offered batch), else -1.
+	 */
+	#removableIndex(component: Component): number {
 		this.#syncEntries();
-		const index = this.#entries.findIndex(entry => entry.component === component);
-		if (index < 0) return false;
+		// Removable blocks are transient ones near the live tail, so search from there.
+		const index = this.#entries.findLastIndex(entry => entry.component === component);
+		if (index < 0) return -1;
 		const entry = this.#entries[index]!;
-		if (entry.state === "committed" || entry.emitted > 0) return false;
-		if (this.#offered?.kind === "commit" && index < this.#offered.end) return false;
-		if (this.#offered?.kind === "append" && index === this.#offered.entry) return false;
-		return true;
+		if (entry.state === "committed" || entry.emitted > 0) return -1;
+		if (this.#offered?.kind === "commit" && index < this.#offered.end) return -1;
+		if (this.#offered?.kind === "append" && index === this.#offered.entry) return -1;
+		return index;
 	}
 
 	/** Lifecycle state per block in transcript order (diagnostics and tests). */
