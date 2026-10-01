@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createReportBundle } from "@oh-my-pi/pi-coding-agent/debug/report-bundle";
-import { getConfigRootDir, getLogsDir, localDay, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getLogsDir, localDay, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalXdgStateHome = process.env.XDG_STATE_HOME;
@@ -74,5 +74,27 @@ describe("report bundle logs", () => {
 		expect(logsText).toContain("later invocation");
 		expect(logsText.indexOf(crashedName)).toBeLessThan(logsText.indexOf(currentName));
 		if (staleUtcName) expect(logsText).not.toContain(staleUtcName);
+	});
+
+	it("includes this process's records still buffered by the batching file transport", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-buffered-"));
+		const xdgStateHome = path.join(cleanupRoot, "state");
+		await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
+		process.env.XDG_STATE_HOME = xdgStateHome;
+		setAgentDir(fallbackAgentDir);
+		const logsDir = getLogsDir();
+		logger.setTransports({ console: false, file: logsDir });
+		const marker = `report-buffered-${crypto.randomUUID()}`;
+		logger.debug("report bundle buffered probe", { marker });
+
+		const result = await createReportBundle({ sessionFile: undefined }).finally(() =>
+			logger.setTransports({ file: true }),
+		);
+
+		const archive = new Bun.Archive(await Bun.file(result.path).bytes());
+		const logsText = (await (await archive.files()).get("logs.txt")?.text()) ?? "";
+		await fs.rm(result.path, { force: true });
+		expect(logsText).toContain(`omp.${localDay(new Date())}.${process.pid}.log`);
+		expect(logsText).toContain(marker);
 	});
 });

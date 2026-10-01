@@ -33,7 +33,7 @@ describe("CfgProtocolHandler", () => {
 		const settings = Settings.isolated({ "advisor.syncBacklog": "3" });
 
 		const namespace = await read("cfg://advisor", settings);
-		expect(namespace.content).toContain('syncBacklog: "3"  # off|1|3|5 · default "off"');
+		expect(namespace.content).toContain('syncBacklog: "3"  # off|1|3|5|strict · default "off"');
 		expect(namespace.content).not.toContain("advisor:");
 		expect(namespace.details?.cfg).toMatchObject({ path: "advisor", modified: 1 });
 

@@ -870,14 +870,17 @@ export class Settings {
 		}
 		if (layer === "override") this.#softPins.delete(setting);
 		const prev = setting.get(this);
+		// Re-setting the persisted global value is a no-op for config.yml: staging it would still
+		// queue a full re-read, rewrite, fsync, and rename of the file.
+		const persistGlobal = layer === "global" && !this.#globalWriteIsNoop(setting.segments, value);
 		if (layer === "global") {
-			this.#stageGlobal(setting.segments, value);
+			if (persistGlobal) this.#stageGlobal(setting.segments, value);
 			this.#releaseSoftPin(setting);
 		} else {
 			setByPath(this.#overrides, setting.segments, value);
 		}
 		this.#rebuildMerged();
-		if (layer === "global") this.#queueSave();
+		if (persistGlobal) this.#queueSave();
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -909,7 +912,11 @@ export class Settings {
 		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
 		if (value !== undefined) setting.assertWritable({ [key]: value });
 		const record = getByPath(this.#global, setting.segments);
-		const staged = value !== undefined || (isRecord(record) && Object.hasOwn(record, key));
+		// An entry re-set to its persisted value stages nothing (no config.yml rewrite).
+		const staged =
+			value !== undefined
+				? !this.#globalWriteIsNoop([...setting.segments, key], value)
+				: isRecord(record) && Object.hasOwn(record, key);
 		if (!staged && !this.#softPins.has(setting)) return;
 		const prev = setting.get(this);
 		this.#releaseSoftPin(setting);
@@ -1653,22 +1660,26 @@ export class Settings {
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
 		const prev = cfgModelRoles.get(this);
-		const current = this.#modelRolesFromLayer(this.#global);
-		this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
-		if (modelId === undefined) {
-			delete current[role];
-		} else {
-			current[role] = modelId;
+		// Re-setting the persisted role (or clearing an absent one) stages no config.yml rewrite;
+		// the runtime-override sync below still applies.
+		if (!this.#globalWriteIsNoop(["modelRoles", role], modelId)) {
+			const current = this.#modelRolesFromLayer(this.#global);
+			this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
+			if (modelId === undefined) {
+				delete current[role];
+			} else {
+				current[role] = modelId;
+			}
+			// Persist per-role rather than marking the whole `modelRoles` path
+			// modified: #saveNow merges only the changed role into the re-read
+			// file, so a concurrent external edit to a sibling role is not
+			// clobbered by this process's stale in-memory snapshot.
+			setByPath(this.#global, ["modelRoles"], current);
+			this.#modifiedGlobalModelRoles.add(role);
+			this.#persistedMutationGeneration++;
+			this.#rebuildMerged();
+			this.#queueSave();
 		}
-		// Persist per-role rather than marking the whole `modelRoles` path
-		// modified: #saveNow merges only the changed role into the re-read
-		// file, so a concurrent external edit to a sibling role is not
-		// clobbered by this process's stale in-memory snapshot.
-		setByPath(this.#global, ["modelRoles"], current);
-		this.#modifiedGlobalModelRoles.add(role);
-		this.#persistedMutationGeneration++;
-		this.#rebuildMerged();
-		this.#queueSave();
 		this.#fireIfChanged(cfgModelRoles, prev);
 		if (this.isProjectModelRoleRuntimeOverrideActive(role)) {
 			return;
@@ -1897,6 +1908,29 @@ export class Settings {
 			generation: this.#readYamlGeneration(this.#configPath),
 			baseValue: structuredClone(baseValue),
 		});
+	}
+
+	/**
+	 * Whether a global write of `value` at `segments` would leave config.yml unchanged: the global
+	 * layer already holds it and so does the file on disk (unparseable, legacy-shaped, or externally
+	 * edited files report false, so the write is staged and the save re-reads and merges as usual).
+	 */
+	#globalWriteIsNoop(segments: readonly string[], value: unknown): boolean {
+		if (!settingValuesEqual(getByPath(this.#global, segments), value)) return false;
+		if (!this.#persist || !this.#configPath) return true;
+		let source: string;
+		try {
+			source = fs.readFileSync(this.#configPath, "utf8");
+		} catch (error) {
+			return isEnoent(error) && value === undefined;
+		}
+		let onDisk: unknown;
+		try {
+			onDisk = YAML.parse(source);
+		} catch {
+			return false;
+		}
+		return settingValuesEqual(isRecord(onDisk) ? getByPath(onDisk, segments) : undefined, value);
 	}
 
 	async #loadYaml(filePath: string): Promise<RawSettings> {
@@ -2451,7 +2485,7 @@ export class Settings {
 
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
-				await this.#writeYamlAtomically(this.#configPath, settings);
+				await this.#writeYamlAtomically(this.#configPath, stringifyYamlConfig(settings));
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
 			} catch (error) {
 				logger.warn("Settings: failed to write migrated config.yml", {
@@ -3419,14 +3453,14 @@ export class Settings {
 	// Saving
 	// ─────────────────────────────────────────────────────────────────────────
 
-	async #writeYamlAtomically(filePath: string, settings: RawSettings): Promise<void> {
+	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
 		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		let removeTemp = false;
 		try {
 			const handle = await fs.promises.open(tempPath, "wx", 0o600);
 			removeTemp = true;
 			try {
-				await handle.writeFile(stringifyYamlConfig(settings), "utf8");
+				await handle.writeFile(content, "utf8");
 				await handle.sync();
 			} finally {
 				await handle.close();
@@ -3564,7 +3598,12 @@ export class Settings {
 				}
 
 				if (shouldWrite) {
-					await this.#writeYamlAtomically(writePath, current);
+					// Merging pending changes can reproduce the file exactly (a change reverted before the
+					// debounce fired, an external edit that already holds the value): leave it untouched.
+					const content = stringifyYamlConfig(current);
+					if (loaded.generation.kind !== "content" || loaded.generation.source !== content) {
+						await this.#writeYamlAtomically(writePath, content);
+					}
 				}
 				this.#quarantinedYamlTargets.delete(configPath);
 				// This write changed the file only at `writtenPaths`. A change staged after this save's snapshot at
@@ -3711,7 +3750,7 @@ export class Settings {
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
 
-				await this.#writeYamlAtomically(writePath, projectSettings);
+				await this.#writeYamlAtomically(writePath, stringifyYamlConfig(projectSettings));
 				this.#projectFileSettings = structuredClone(projectSettings);
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
 			});

@@ -13,16 +13,10 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import {
-	$flag,
-	fetchWithRetry,
-	logger,
-	parseStreamingJson,
-	parseStreamingJsonThrottled,
-	USER_AGENT,
-} from "@oh-my-pi/pi-utils";
+import { $flag, fetchWithRetry, logger, parseStreamingJsonThrottled, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { resolveAwsBearerToken } from "../registry/aws";
 import type {
 	Api,
@@ -459,14 +453,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
 				: undefined;
 
-			// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
-			// thinking cannot be disabled, so downgrade its forced choice instead.
-			if (toolConfig?.toolChoice && additionalModelRequestFields) {
-				const tc = toolConfig.toolChoice;
-				if (tc.any || tc.tool) {
-					if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
-					else additionalModelRequestFields = undefined;
-				}
+			// Some models (Opus/Sonnet 5.5) reject forced tool use outright; keep the
+			// tools offered under `auto` and leave thinking intact.
+			const forcedChoice = toolConfig?.toolChoice?.any || toolConfig?.toolChoice?.tool;
+			if (toolConfig && forcedChoice && !model.compat.supportsForcedToolChoice) {
+				toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+			} else if (toolConfig && forcedChoice && additionalModelRequestFields) {
+				// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
+				// thinking cannot be disabled, so downgrade its forced choice instead.
+				if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+				else additionalModelRequestFields = undefined;
 			}
 			if (prefixMismatchBehavior) {
 				additionalModelRequestFields = applyBedrockThinkingBinding(
@@ -750,6 +746,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				throw new AIError.BedrockApiError(output.errorMessage ?? "An unknown error occurred", 0);
 			}
 
+			for (const [contentBlockIndex, index] of contentIndexByBlockIndex) {
+				const block = blocks[index];
+				if (block?.type === "toolCall" && block[kStreamingPartialJson] !== undefined) {
+					handleContentBlockStop({ contentBlockIndex }, blocks, contentIndexByBlockIndex, output, stream);
+				}
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -955,7 +957,7 @@ function handleContentBlockStop(
 			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
 			break;
 		case "toolCall":
-			block.arguments = parseStreamingJson(block[kStreamingPartialJson]);
+			block.arguments = parseToolCallArguments(block[kStreamingPartialJson]);
 			clearStreamingPartialJson(block);
 			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
 			break;

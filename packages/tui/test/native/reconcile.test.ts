@@ -190,6 +190,36 @@ describe("Reconciler", () => {
 		expect(ops).toEqual([["text", nativeComponentId(comp), "append", ", wörld"]]);
 	});
 
+	it("sends a scroll op only when a node's scroll request changes, and only to terminals with the feature", () => {
+		const comp = new Described();
+		const stream = (n?: number): NativeNode => ({
+			...node("ansi", { text: "log" }),
+			scroll: n === undefined ? undefined : { by: n % 2 ? "page-up" : "end", n },
+		});
+		const scrolls = (ops: readonly TspOp[]) => ops.filter(op => op[0] === "scroll");
+		const reconciler = new Reconciler("s:t");
+		const doc = new TspDocument("s:t");
+		const regions = { main: [comp], dock: [], layer: [] };
+		comp.current = stream(1);
+		const added = reconciler.reconcile(regions, cx);
+		apply(doc, 1, added);
+		// A fresh node starts where it is; a request belongs to the node it was made for.
+		expect(scrolls(added)).toEqual([]);
+		comp.current = stream(2);
+		const id = nativeComponentId(comp);
+		expect(scrolls(reconciler.reconcile(regions, cx))).toEqual([["scroll", id, "end"]]);
+		comp.current = { ...node("ansi", { text: "log 2" }), scroll: { by: "end", n: 2 } };
+		expect(scrolls(reconciler.reconcile(regions, cx))).toEqual([]);
+		// Two presses before the next frame: two steps.
+		comp.current = { ...node("ansi", { text: "log 2" }), scroll: { by: "page-up", n: 4 } };
+		expect(scrolls(reconciler.reconcile(regions, cx))).toEqual([
+			["scroll", id, "page-up"],
+			["scroll", id, "page-up"],
+		]);
+		comp.current = stream(5);
+		expect(scrolls(reconciler.reconcile(regions, { ...cx, feature: () => false }))).toEqual([]);
+	});
+
 	it("moves a component to a new parent instead of re-adding it", () => {
 		const child = new Described();
 		child.current = node("text", { text: "kept" });

@@ -2,6 +2,7 @@ import {
 	type ClipboardImage,
 	copyToClipboard as nativeCopyToClipboard,
 	readImageFromClipboard as nativeReadImageFromClipboard,
+	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -322,10 +323,12 @@ async function readTextFromX11Clipboard(): Promise<string> {
  * Read an image from the system clipboard.
  *
  * Returns null on Termux (no image clipboard support) or when no display
- * server is available (headless/SSH without forwarding). Under native Windows
- * and WSL, the Windows clipboard is also reached through `powershell.exe`
- * because terminal clipboard paths can leave image payloads invisible to the
- * native bridge.
+ * server is available (headless/SSH without forwarding). Native Windows trusts
+ * the native reader's "no image" answer — it returns null only when no bitmap
+ * format is on the clipboard, and throws when one is present but undecodable —
+ * so `powershell.exe` starts only after a throw and a text-only clipboard never
+ * waits on a cold PowerShell start. WSL reaches the host clipboard through
+ * `powershell.exe`.
  *
  * @returns A supported image payload or null when no image is available.
  */
@@ -344,12 +347,11 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 
 	if (process.platform === "win32") {
 		try {
-			const image = await nativeReadImageFromClipboard();
-			if (image) return image;
+			return (await nativeReadImageFromClipboard()) ?? null;
 		} catch (err) {
 			logger.warn("clipboard: native Windows image read failed", { error: String(err) });
+			return await readImageViaPowerShell();
 		}
-		return await readImageViaPowerShell();
 	}
 
 	if (process.platform === "linux" && process.env.WAYLAND_DISPLAY) {
@@ -384,6 +386,9 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 
 /**
  * Read plain text from the system clipboard.
+ *
+ * Native Windows reads through the native addon and only falls back to
+ * `powershell.exe` when that read throws.
  */
 export async function readTextFromClipboard(): Promise<string> {
 	try {
@@ -392,7 +397,12 @@ export async function readTextFromClipboard(): Promise<string> {
 			return await spawnCapture(["pbpaste"]);
 		}
 		if (p === "win32") {
-			return (await readTextViaPowerShell()) ?? "";
+			try {
+				return ((await nativeReadTextFromClipboard()) ?? "").replaceAll("\r\n", "\n");
+			} catch (err) {
+				logger.warn("clipboard: native Windows text read failed", { error: String(err) });
+				return (await readTextViaPowerShell()) ?? "";
+			}
 		}
 		if (process.env.TERMUX_VERSION) {
 			return await spawnCapture(["termux-clipboard-get"]);

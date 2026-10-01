@@ -87,5 +87,15 @@
 		"pageBg": "#F3F7F1",
 		"cardBg": "#FAFDF8",
 		"infoBg": "#E8EFE4"
+	},
+	"terminal": {
+		"background": "meadowBg",
+		"foreground": "#2f3a30",
+		"chrome": "meadowPanel",
+		"widget": "meadowSurface",
+		"ansi": [
+			"#2a332b", "errorRed", "grassGreen", "#9c6c06", "#3f6fa8", "wildflowerPurple", "skyTeal", "meadowBorder",
+			"mutedText", "#d06a5e", "#4d9859", "#b67f0f", "#4f86c6", "#9a6fcf", "#3d968e", "meadowPanel"
+		]
 	}
 }
