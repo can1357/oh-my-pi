@@ -14,7 +14,6 @@ import type { Api } from "../types";
 import type { ModelManagerOptions } from "../model-manager";
 import type { ModelManagerConfig, ProviderDescriptor } from "./descriptor-types";
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
-import { kenariModelManagerOptions } from "./kenari";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	abliterationModelManagerOptions,
@@ -40,6 +39,7 @@ import {
 	groqModelManagerOptions,
 	helmcodeModelManagerOptions,
 	huggingfaceModelManagerOptions,
+	kenariModelManagerOptions,
 	kiloModelManagerOptions,
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
