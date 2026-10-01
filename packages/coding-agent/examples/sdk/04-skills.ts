@@ -40,4 +40,5 @@ console.log(`Session created with ${filteredSkills.length + 1} skills`);
 // discoverSkills(process.cwd(), undefined, {
 //   ignoredSkills: ["browser-tools"],  // glob patterns to exclude
 //   includeSkills: ["brave-*"],        // glob patterns to include (empty = all)
+//   optInSkills: ["browser-*"],        // glob patterns kept loaded but hidden from the model prompt
 // })
