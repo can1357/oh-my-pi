@@ -300,6 +300,8 @@ export function* walkGroupedOutput(lines: readonly string[]): Generator<GroupedO
 
 /** `*12│text`, ` 12|text`, `*12:text`: optional match marker, line number, gutter, content. */
 const GROUPED_NUMBERED_LINE_RE = /^\s*(\*?)(\d+)(?:│|[:|])(.*)$/;
+/** `    │...`: grep's gap between non-adjacent context runs (drawn as {@link numberedCode}'s `…` row). */
+const GROUPED_GAP_LINE_RE = /^\s*│\.\.\.$/;
 
 /** One source line for {@link numberedCode}: its number (`null` for an elision marker), text and match mark. */
 export interface NumberedLine {
@@ -398,6 +400,10 @@ export function describeGroupedOutput(
 			flushFile();
 			if (options.maxFiles !== undefined && files.length >= options.maxFiles) break;
 			if (event.kind === "file") current = { path: event.path, suffix: event.suffix, children: [], marks: 0 };
+			continue;
+		}
+		if (GROUPED_GAP_LINE_RE.test(event.text)) {
+			numbered.push({ n: null, text: "" });
 			continue;
 		}
 		const match = GROUPED_NUMBERED_LINE_RE.exec(event.text);

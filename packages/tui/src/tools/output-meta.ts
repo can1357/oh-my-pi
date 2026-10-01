@@ -25,6 +25,8 @@ export interface TruncationMeta {
 	elidedLines?: number;
 	/** Artifact ID if full output was saved */
 	artifactId?: string;
+	/** Bytes the artifact cap dropped from the saved file's middle; the artifact is then a head/tail sample. */
+	artifactElidedBytes?: number;
 	/** Next offset for pagination (head truncation only) */
 	nextOffset?: number;
 	/**
@@ -62,7 +64,7 @@ export interface LimitsMeta {
 	resultLimit?: { reached: number; suggestion?: number };
 	headLimit?: { reached: number; suggestion: number };
 	/** `unit` may be absent in sessions persisted before it was recorded. */
-	columnTruncated?: { maxColumn: number; unit?: "bytes" | "chars"; artifactId?: string };
+	columnTruncated?: { maxColumn: number; unit?: "bytes" | "chars"; artifactId?: string; artifactElidedBytes?: number };
 }
 
 /**
@@ -130,8 +132,14 @@ export function formatGroupedDiagnosticMessages(messages: string[]): string {
 	return lines.join("\n");
 }
 
-/** Format a recoverable output artifact link. */
-export function formatFullOutputReference(artifactId: string): string {
+/**
+ * Format a recoverable output artifact link. An artifact the size cap cut
+ * (`artifactElidedBytes > 0`) is labeled as the head/tail sample it holds.
+ */
+export function formatFullOutputReference(artifactId: string, artifactElidedBytes?: number): string {
+	if (artifactElidedBytes !== undefined && artifactElidedBytes > 0) {
+		return `Read artifact://${artifactId} for a head/tail sample of the output; ${formatBytes(artifactElidedBytes)} from its middle was not saved`;
+	}
 	return `Read artifact://${artifactId} for full output`;
 }
 
@@ -206,7 +214,7 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta, source?: 
 			? undefined
 			: source?.type === "report"
 				? `Read artifact://${truncation.artifactId} for full report (${source.value})`
-				: formatFullOutputReference(truncation.artifactId);
+				: formatFullOutputReference(truncation.artifactId, truncation.artifactElidedBytes);
 
 	if (truncation.direction === "middle") {
 		const head = truncation.headRange;
@@ -322,7 +330,7 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		// stops matching the persisted "… 768 chars" text.
 		let columnNotice = `Some lines truncated to ${c.maxColumn} ${c.unit ?? "chars"}`;
 		if (c.artifactId != null) {
-			columnNotice += `. ${formatFullOutputReference(c.artifactId)}`;
+			columnNotice += `. ${formatFullOutputReference(c.artifactId, c.artifactElidedBytes)}`;
 		}
 		parts.push(columnNotice);
 	}

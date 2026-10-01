@@ -179,11 +179,12 @@ import {
 	isRecord,
 	logger,
 	parseJsonWithRepair,
-	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
+import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
@@ -4442,7 +4443,7 @@ export function flushOpenToolCalls(
 		const idx = output.content.indexOf(block);
 		const partialJson = block[kStreamingPartialJson];
 		if (partialJson !== undefined) {
-			block.arguments = parseStreamingJson(partialJson);
+			block.arguments = parseToolCallArguments(partialJson);
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
@@ -5188,13 +5189,22 @@ export function processInteractionUpdate(
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
 				const partial = settled[kStreamingPartialJson];
 				if (partial) {
-					settled.arguments = parseStreamingJson(partial);
+					settled.arguments = parseToolCallArguments(partial);
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
-				settled.arguments = mergeCursorMcpToolCallArgs(
-					settled.arguments as Record<string, unknown> | undefined,
-					decodedArgs,
-				);
+				if (!isRecord(settled.arguments) || !("__parseError" in settled.arguments)) {
+					settled.arguments = mergeCursorMcpToolCallArgs(settled.arguments, decodedArgs);
+				} else if (
+					decodedArgs &&
+					Object.keys(decodedArgs).length > 0 &&
+					classifyJsonPrefix(partial ?? "") !== "prefix"
+				) {
+					// A buffer that is not a cut-off prefix (e.g. a rewritten snapshot appended
+					// as `{...}{...}`) still has an authoritative completion frame: use it alone,
+					// and let validation reject any oversized key it omitted (#2615). A cut-off
+					// buffer stays refused, since the frame may omit or share its truncation.
+					settled.arguments = decodedArgs;
+				}
 			} else if (settled[kStreamingBlockKind] === "connect-scm") {
 				// The authoritative outcome arrives only here, on the completion's
 				// `ConnectScmResult` oneof. The block was stamped resolved at start,

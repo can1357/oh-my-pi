@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,7 +14,33 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
-import { cfgProvidersCacheWarming, cfgRetryEnabled } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersCacheRetention,
+	cfgProvidersCacheWarming,
+	cfgRetryEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
+
+function makeConverseModel(): Model {
+	return buildModel({
+		id: "us.anthropic.claude-opus-5-5",
+		name: "Claude Opus 5.5",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		promptCache: { short: 300, long: 3600 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+		compat: {
+			promptCacheMode: "explicit",
+			supportsLongPromptCacheRetention: true,
+			promptCacheMinimumTokens: 0,
+			promptCacheMaximumCheckpoints: 2,
+		},
+	});
+}
 
 /**
  * Regression guard for #11431: `set_auto_compaction`/`set_auto_retry` (which drive
@@ -22,7 +49,7 @@ import { cfgProvidersCacheWarming, cfgRetryEnabled } from "@oh-my-pi/pi-coding-a
  * explicit `persist` flag — used by the TUI settings panel — is the only path that
  * mutates durable global state.
  */
-describe("AgentSession auto-maintenance controls are session-scoped by default", () => {
+describe("AgentSession auto-maintenance controls and cache-warming retention", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let settings: Settings;
@@ -125,6 +152,63 @@ describe("AgentSession auto-maintenance controls are session-scoped by default",
 		});
 		const onDisk = await Bun.file(configPath).text();
 		expect(onDisk).toContain("enabled: true");
+	});
+
+	it("schedules Converse warming from configured long retention", () => {
+		vi.useFakeTimers();
+		model = makeConverseModel();
+		session.agent.setModel(model);
+		cfgProvidersCacheRetention.override(settings, "long");
+
+		session.startCacheWarming(model, { messages: [] }, {});
+
+		expect(warmer.status.state).toBe("scheduled");
+		expect(warmer.status.nextWarmAt! - Date.now()).toBe(54 * 60_000);
+	});
+
+	it("does not replay requests when retention is configured as none", async () => {
+		vi.useFakeTimers();
+		model = makeConverseModel();
+		session.agent.setModel(model);
+		cfgProvidersCacheRetention.override(settings, "none");
+
+		session.startCacheWarming(model, { messages: [] }, {});
+		expect(warmer.status).toMatchObject({ state: "inactive", reason: "request disabled prompt caching" });
+
+		vi.advanceTimersByTime(60 * 60_000);
+		await Promise.resolve();
+		expect(refreshCount).toBe(0);
+	});
+
+	it("lets explicit per-request short retention override the long setting", () => {
+		vi.useFakeTimers();
+		model = makeConverseModel();
+		session.agent.setModel(model);
+		cfgProvidersCacheRetention.override(settings, "long");
+
+		session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
+
+		expect(warmer.status.state).toBe("scheduled");
+		expect(warmer.status.nextWarmAt! - Date.now()).toBe(4.5 * 60_000);
+	});
+
+	it("leaves auto retention unset so PI_CACHE_RETENTION remains authoritative", () => {
+		const savedRetention = process.env.PI_CACHE_RETENTION;
+		process.env.PI_CACHE_RETENTION = "long";
+		try {
+			vi.useFakeTimers();
+			model = makeConverseModel();
+			session.agent.setModel(model);
+			cfgProvidersCacheRetention.override(settings, "auto");
+
+			session.startCacheWarming(model, { messages: [] }, {});
+
+			expect(warmer.status.state).toBe("scheduled");
+			expect(warmer.status.nextWarmAt! - Date.now()).toBe(54 * 60_000);
+		} finally {
+			if (savedRetention === undefined) delete process.env.PI_CACHE_RETENTION;
+			else process.env.PI_CACHE_RETENTION = savedRetention;
+		}
 	});
 
 	it("disabling cache warming cancels the live timer through the settings override", async () => {

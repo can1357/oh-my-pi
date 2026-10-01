@@ -284,15 +284,24 @@ export function reportPromptResult(input: {
 		});
 }
 
-/** Start a prompt under extension-message tracking and report its `prompt_result`. */
+/**
+ * Start a prompt under extension-message tracking and report its `prompt_result`.
+ *
+ * `startPrompt` receives an admission callback to forward as
+ * `PromptOptions.onPromptAdmitted`. The returned promise resolves once the
+ * prompt is admitted, or once it settles without ever being admitted; it never
+ * rejects, since a failure is already routed to `onError` and the failed
+ * `prompt_result`. Await it to acknowledge the command only after admission.
+ */
 export function watchAndReportPromptResult(input: {
 	ticket: RpcPromptTicket;
-	startPrompt: () => Promise<boolean>;
+	startPrompt: (onPromptAdmitted: () => void) => Promise<boolean>;
 	results: RpcPromptResults;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): void {
-	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
+}): Promise<void> {
+	const admitted = Promise.withResolvers<void>();
+	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(() => input.startPrompt(admitted.resolve));
 	reportPromptResult({
 		ticket: input.ticket,
 		prompt: trackedPrompt.prompt,
@@ -301,4 +310,7 @@ export function watchAndReportPromptResult(input: {
 		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
 		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
 	});
+	const settled = () => admitted.resolve();
+	void trackedPrompt.prompt.then(settled, settled);
+	return admitted.promise;
 }

@@ -292,7 +292,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"stream-first-event-timeout-ms": wire("streamFirstEventTimeoutMs", [...OAI, "google"]),
 	"stream-idle-timeout-ms": wire("streamIdleTimeoutMs", [...OAI, "anthropic", "bedrock", "google"]),
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
-	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic"]),
+	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
 	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic"]),
 	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
 		"gemini",

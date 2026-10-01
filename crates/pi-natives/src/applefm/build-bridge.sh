@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the Apple Foundation Models bridge static library for pi-natives.
+# Builds the Apple Foundation Models bridge dylib that pi-natives embeds.
 # Shared by build.rs and the Bazel `applefm_bridge` genrule/repository rule.
 #
 #   build-bridge.sh detect
@@ -11,10 +11,15 @@
 #       against a different SDK than the rest of the addon. Probes versions
 #       only; never compiles.
 #
-#   build-bridge.sh build <out.a> <arch> [<swiftc> <sdk>]
-#       Compiles bridge.swift into <out.a> with the given toolchain. Without a
-#       toolchain, or for a non-arm64 <arch> (Foundation Models needs Apple
-#       silicon), compiles stub.c instead, which reports the bridge as not built.
+#   build-bridge.sh build <out.dylib> <arch> [<swiftc> <sdk>]
+#       Compiles bridge.swift into a standalone <out.dylib> with the given
+#       toolchain. Without a toolchain, or for a non-arm64 <arch> (Foundation
+#       Models needs Apple silicon), writes an empty <out.dylib>, which the
+#       addon reports as not built.
+#
+# The bridge is never linked into the addon: the addon embeds these bytes and
+# dlopens them only on macOS 27+, so the Swift runtime and FoundationModels
+# never load on older systems (linking them in crashed every launch there).
 #
 # Swift module caches live in $OMP_APPLEFM_MODULE_CACHE (default: under
 # $TMPDIR) so repeated builds skip re-importing the SDK.
@@ -65,19 +70,16 @@ build() {
 	rm -f "$out"
 	if [ "$arch" = arm64 ] && [ -n "$swiftc" ]; then
 		cache=${OMP_APPLEFM_MODULE_CACHE:-${TMPDIR:-/tmp}/omp-applefm-module-cache}
-		# FoundationModels is weak-linked by the addon link step instead of
-		# autolinked, so the addon still loads on macOS releases without it.
-		"$swiftc" -emit-library -static -parse-as-library -module-name OmpAppleFm \
-			-sdk "$sdk" -target arm64-apple-macos12.0 -swift-version 6 -O \
+		# Loaded only on macOS 27+, so it targets 27 and needs no Swift
+		# back-deployment runtime.
+		"$swiftc" -emit-library -parse-as-library -module-name OmpAppleFm \
+			-sdk "$sdk" -target arm64-apple-macos27.0 -swift-version 6 -O \
 			-module-cache-path "$cache" \
-			-Xfrontend -disable-autolink-framework -Xfrontend FoundationModels \
+			-Xlinker -install_name -Xlinker @rpath/libomp_applefm.dylib \
 			"$here/bridge.swift" -o "$out"
 		return
 	fi
-	objects=$(mktemp -d)
-	trap 'rm -rf "$objects"' EXIT
-	/usr/bin/xcrun clang -c -O2 -arch "$arch" -mmacosx-version-min=11.0 "$here/stub.c" -o "$objects/stub.o"
-	/usr/bin/xcrun libtool -static -o "$out" "$objects/stub.o"
+	: >"$out"
 }
 
 case "${1:-}" in
@@ -87,7 +89,7 @@ build)
 	build "$@"
 	;;
 *)
-	echo "usage: $0 detect | build <out.a> <arch> [<swiftc> <sdk>]" >&2
+	echo "usage: $0 detect | build <out.dylib> <arch> [<swiftc> <sdk>]" >&2
 	exit 2
 	;;
 esac

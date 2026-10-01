@@ -75,7 +75,26 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
 	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId"
->;
+> & {
+	/** Full command line of a job that runs a process; `label` is cut to 120 characters. */
+	command?: string;
+};
+
+/** One async job as a job inspector (the jobs sheet) shows it beyond its snapshot row. */
+export interface AsyncJobInspection {
+	/** Full command line of a job that runs a process. */
+	command?: string;
+	/** Directory that command started in. */
+	cwd?: string;
+	/** Live pids the job's command spawned. */
+	pids: readonly number[];
+	/** Exit status of a settled command. */
+	exitCode?: number;
+	/** Output tail while running; the final result or error text once settled. */
+	output?: string;
+	/** Artifact holding the full output when `output` is cut. */
+	artifactId?: string;
+}
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {
@@ -384,6 +403,17 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
 	solutionSpace?: string;
+	/**
+	 * Called synchronously once this prompt is admitted: idle, at the start of
+	 * #promptWithMessage's own turn setup (before preflight, image
+	 * normalization, or provider dispatch); while streaming, once the message
+	 * is pushed onto its steer/follow-up/aside queue (after image
+	 * normalization and vision-description preprocessing for that prompt); or
+	 * is routed to an extension command, before its handler runs. Admission is
+	 * not proof that a model call will occur. A prompt dropped, cancelled, or
+	 * failed before admission still only settles through the returned promise.
+	 */
+	onPromptAdmitted?: () => void;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

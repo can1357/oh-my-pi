@@ -941,7 +941,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const rebuildHud = vi.spyOn(mode.subagentContainer, "clear");
+		const mountHud = vi.spyOn(mode.subagentContainer, "addChild");
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
 		vi.useFakeTimers();
 
 		for (let index = 0; index < 6; index++) {
@@ -960,7 +961,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("BurstAgent2: Burst job 2");
 		expect(hud).not.toContain("BurstAgent3: Burst job 3");
 		expect(hud).toContain("3 more — expand");
-		expect(rebuildHud).toHaveBeenCalledTimes(1);
+		expect(mountHud.mock.calls.length + updateHud.mock.calls.length).toBe(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 

@@ -171,10 +171,35 @@ pub struct ShellExecuteOptions {
 
 pub type ShellExecuteResult = ShellRunResult;
 
+/// Spawn registry of the run currently executing on a [`Shell`], if any.
+///
+/// Kept apart from the session mutex (held for the whole command) so
+/// [`Shell::pids`] can read it while the run is in flight.
+type ActiveSpawns = Arc<parking_lot::Mutex<Option<Arc<process::SpawnRegistry>>>>;
+
+/// Publishes a run's registry in [`ActiveSpawns`] for as long as it lives;
+/// dropping it (normal return, error, cancellation, or task abort) clears the
+/// slot.
+struct ActiveSpawnsGuard(ActiveSpawns);
+
+impl ActiveSpawnsGuard {
+	fn publish(slot: &ActiveSpawns, registry: Arc<process::SpawnRegistry>) -> Self {
+		*slot.lock() = Some(registry);
+		Self(slot.clone())
+	}
+}
+
+impl Drop for ActiveSpawnsGuard {
+	fn drop(&mut self) {
+		*self.0.lock() = None;
+	}
+}
+
 pub struct Shell {
-	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state: ShellAbortState,
-	config:      ShellConfig,
+	session:       Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:   ShellAbortState,
+	config:        ShellConfig,
+	active_spawns: ActiveSpawns,
 }
 
 impl Shell {
@@ -204,6 +229,7 @@ impl Shell {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
 			config,
+			active_spawns: ActiveSpawns::default(),
 		}
 	}
 
@@ -223,6 +249,7 @@ impl Shell {
 		run_shell_session(
 			self.session.clone(),
 			self.abort_state.clone(),
+			self.active_spawns.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -233,6 +260,19 @@ impl Shell {
 
 	pub async fn abort(&self) {
 		self.abort_state.abort().await;
+	}
+
+	/// Pids of the processes spawned by the in-flight [`Shell::run`] that are
+	/// still alive, in spawn order. Covers every external child the run
+	/// started — foreground commands, pipeline stages, and `&` background
+	/// jobs — but not builtins, which run in-process. Empty when no run is
+	/// executing (including one still waiting for a previous run to release
+	/// the session). Never blocks on the session lock held by a running
+	/// command.
+	#[must_use]
+	pub fn pids(&self) -> Vec<i32> {
+		let registry = self.active_spawns.lock().clone();
+		registry.map_or_else(Vec::new, |registry| registry.live_pids())
 	}
 
 	/// Number of live background jobs (running `&`/`nohup` children) tracked by
@@ -346,6 +386,7 @@ const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
+	active_spawns: ActiveSpawns,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
@@ -370,6 +411,10 @@ async fn run_shell_session(
 		let spawn_registry = spawn_registry.clone();
 		async move {
 			let mut session_guard = session.lock().await;
+			// Published only once this run owns the session, so a run queued
+			// behind another never shadows the executing run's pids. Declared
+			// after `session_guard`, so it clears before the lock is released.
+			let _active_spawns = ActiveSpawnsGuard::publish(&active_spawns, spawn_registry.clone());
 
 			let session = match &mut *session_guard {
 				Some(session) => session,
@@ -5562,6 +5607,59 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;
+	}
+
+	/// `Shell::pids` reports the in-flight run's live external children without
+	/// waiting on the session lock that the running command holds, and goes
+	/// empty once the run returns — including through cancellation.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pids_reports_in_flight_children_until_run_returns() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Arc::new(Shell::new(None));
+		assert!(shell.pids().is_empty(), "no run in flight");
+
+		// The bare `sleep` builtin runs in-process; use the external binary.
+		let sleep = test_executable("sleep");
+		let run = tokio::spawn({
+			let shell = shell.clone();
+			async move {
+				shell
+					.run(
+						ShellRunOptions {
+							command: format!("'{}' 30", sleep.display()),
+							..Default::default()
+						},
+						None,
+						CancelToken::default(),
+					)
+					.await
+			}
+		});
+
+		let pids = time::timeout(Duration::from_secs(5), async {
+			loop {
+				let pids = shell.pids();
+				if !pids.is_empty() {
+					break pids;
+				}
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("in-flight run never reported a pid");
+		assert_eq!(pids.len(), 1, "exactly the sleep child: {pids:?}");
+		let child = process::Process::from_pid(pids[0]).expect("reported pid is alive");
+		assert_eq!(child.status(), process::ProcessStatus::Running);
+
+		shell.abort().await;
+		let result = time::timeout(Duration::from_secs(5), run)
+			.await
+			.expect("aborted run returns")
+			.expect("run task")
+			.expect("run result");
+		assert!(result.cancelled, "run was aborted");
+		assert!(shell.pids().is_empty(), "pids cleared once the run returns");
 	}
 
 	#[cfg(unix)]
