@@ -96,7 +96,7 @@ describe("native composer", () => {
 		expect(byRole(idle, "omp.composer.stop")).toBeUndefined();
 		const chip = byRole(idle, "omp.composer.effort")!;
 		expect(chip.p).toMatchObject({ actions: { click: "thinking.cycle" } });
-		expect(nodes(chip).find(n => n.k === "meter")?.p).toMatchObject({ value: 0.75, style: "blocks", steps: 4 });
+		expect(nodes(chip).find(n => n.k === "effort")?.p).toEqual({ level: "high" });
 		expect(nodes(chip).find(n => n.k === "text")?.p).toMatchObject({ text: "high" });
 
 		running = true;
@@ -111,6 +111,30 @@ describe("native composer", () => {
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
+		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
+
+		const editor = composer({ running: false, viewing: ["AckAudit", "Scout"] });
+		const focused: string[] = [];
+		editor.onFocusAgent = id => focused.push(id);
+		const root = editor.describe(cx);
+		const header = byRole(root, "omp.composer.focus")!;
+		const lead = (root.c ?? []).filter(isNode);
+		expect(lead.indexOf(header)).toBeLessThan(lead.indexOf(byRole(root, "omp.composer.line")!));
+		expect(byRole(header, "omp.composer.agent")?.p).toMatchObject({ text: "Scout" });
+		expect(nodes(root).find(n => n.k === "editor")?.p).toMatchObject({ placeholder: "Message Scout" });
+		expect(byRole(header, "omp.composer.crumb")?.p).toMatchObject({
+			text: "AckAudit",
+			actions: { click: "focus:AckAudit" },
+		});
+		expect(byRole(header, "omp.composer.exit")?.p).toMatchObject({ actions: { click: "focus:Main" } });
+
+		for (const act of ["focus:AckAudit", "focus:Main"]) {
+			editor.handleNativeEvent({ type: "action", key: "focus", act, mods: [] });
+		}
+		expect(focused).toEqual(["AckAudit", "Main"]);
+	});
+
 	it("submits the draft on a send click like Enter", () => {
 		const editor = composer({ running: false });
 		const submitted: string[] = [];
@@ -122,11 +146,38 @@ describe("native composer", () => {
 		expect(submitted).toEqual(["hello"]);
 	});
 
-	it("keeps the effort chip at `off` with an empty meter so a click can turn thinking back on", () => {
+	it("keeps the effort chip at `off` with an empty glyph so a click can turn thinking back on", () => {
 		const chip = byRole(composer({ running: false, thinking: "off" }).describe(cx), "omp.composer.effort")!;
 		expect(chip.p).toMatchObject({ actions: { click: "thinking.cycle" } });
-		expect(nodes(chip).find(n => n.k === "meter")?.p).toMatchObject({ value: 0 });
+		expect(nodes(chip).find(n => n.k === "effort")?.p).toEqual({ level: "off" });
 		expect(nodes(chip).find(n => n.k === "text")?.p).toMatchObject({ text: "off" });
+	});
+
+	it("sends an unresolved `auto` level through to the effort glyph", () => {
+		const chip = byRole(composer({ running: false, thinking: "auto" }).describe(cx), "omp.composer.effort")!;
+		expect(nodes(chip).map(n => n.k)).toEqual(["row", "effort", "text"]);
+		expect(nodes(chip)[1]!.p).toEqual({ level: "auto" });
+	});
+
+	it("falls back to a four-step blocks meter where the terminal lacks the effort kind", () => {
+		const legacy = context(["row", "text", "icon", "meter", "editor", "kbd"]);
+		const chipFor = (thinking: string) =>
+			byRole(composer({ running: false, thinking }).describe(legacy), "omp.composer.effort")!;
+		expect(nodes(chipFor("high")).some(n => n.k === "effort")).toBe(false);
+		expect(nodes(chipFor("high")).find(n => n.k === "meter")?.p).toMatchObject({
+			value: 0.75,
+			style: "blocks",
+			steps: 4,
+		});
+		expect(nodes(chipFor("off")).find(n => n.k === "meter")?.p).toMatchObject({ value: 0 });
+		expect(nodes(chipFor("auto")).find(n => n.k === "meter")?.p).toMatchObject({ value: null });
+	});
+
+	it("rebuilds the effort chip when the effort capability changes", () => {
+		const editor = composer({ running: false, thinking: "max" });
+		const kinds = (root: NativeNode) => nodes(byRole(root, "omp.composer.effort")!).map(n => n.k);
+		expect(kinds(editor.describe(context(["row", "text", "meter"])))).toContain("meter");
+		expect(kinds(editor.describe(cx))).toContain("effort");
 	});
 
 	it("omits the effort chip when the model has no thinking", () => {
@@ -255,7 +306,10 @@ describe("native composer without a status strip", () => {
 
 			// The context hairline leads the composer; the bar closes it.
 			const [first] = (described.c ?? []).filter(isNode);
-			expect(first).toMatchObject({ k: "meter", p: { role: "omp.composer.context", style: "bar" } });
+			expect(first).toMatchObject({
+				k: "meter",
+				p: { role: "omp.composer.context", style: "bar", actions: { click: "status.context" } },
+			});
 			const bar = byRole(described, "omp.composer.bar")!;
 			expect(
 				(bar.c ?? []).filter(isNode).map(n => (n.p !== undefined && "role" in n.p ? n.p.role : undefined)),
@@ -272,7 +326,7 @@ describe("native composer without a status strip", () => {
 			// Path and branch belong to Tern's pane header; the rest stays as a fact.
 			const extras = byRole(bar, "omp.composer.extras")!;
 			expect((extras.c ?? []).filter(isNode).map(n => n.key)).toEqual(["hostname"]);
-			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.context" } });
+			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.cost" } });
 		} finally {
 			composer.stop();
 		}

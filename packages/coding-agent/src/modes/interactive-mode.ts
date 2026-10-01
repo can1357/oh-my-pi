@@ -118,6 +118,9 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { AgentMetrics } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -236,6 +239,7 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -278,6 +282,7 @@ import {
 } from "./loop-limit";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import { formatPersistenceNotice } from "./persistence-failure";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
 import { hintUsage } from "../utils/usage-counter";
 import {
@@ -444,6 +449,8 @@ type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
+/** Startup emits several status-bar changes within a second; persist only the settled one. */
+const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
 const DEFAULT_WORKING_MESSAGE = "Working…";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
@@ -679,9 +686,9 @@ class HudPillsRow implements Component {
 		return this.mode.describeHudPills();
 	}
 
-	/** A click on the jobs pill opens `/jobs`. */
+	/** A click on the jobs pill opens the jobs sheet. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "jobs.open") void this.mode.handleJobsCommand();
+		if (event.type === "action" && event.act === "jobs.open") this.mode.showJobsSheet();
 	}
 }
 
@@ -813,9 +820,10 @@ function isHudSubagent(session: ObservableSession): boolean {
 export class SubagentHudComponent implements Component {
 	readonly #text: Text;
 	#lines: readonly string[];
-	readonly #order: readonly string[];
-	readonly #toggleLine: number | undefined;
-	readonly #native: SubagentHudNative | undefined;
+	#order: readonly string[];
+	#toggleLine: number | undefined;
+	#node: NativeNode;
+	readonly #onOpen: (() => void) | undefined;
 	#physicalOwner?: (string | undefined)[];
 	#renderedWidth?: number;
 	#renderedRows = 0;
@@ -825,28 +833,29 @@ export class SubagentHudComponent implements Component {
 		this.#lines = lines;
 		this.#order = order;
 		this.#toggleLine = toggleRow;
-		this.#native = native;
+		this.#node = native?.node ?? EMPTY_HUD;
+		this.#onOpen = native?.onOpen;
 	}
 
 	describe(): NativeNode {
-		return this.#native?.node ?? EMPTY_HUD;
+		return this.#node;
 	}
 
 	/** A click on the pill opens the agent hub, as the hub key does. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "agents.open") this.#native?.onOpen();
+		if (event.type === "action" && event.act === "agents.open") this.#onOpen?.();
 	}
-	/** Same agents and expander row as `order`/`toggleRow`, so `setLines` can repaint in place. */
-	hasLayout(order: readonly string[], toggleRow: number | undefined): boolean {
-		return (
-			this.#toggleLine === toggleRow &&
-			this.#order.length === order.length &&
-			this.#order.every((id, index) => id === order[index])
-		);
-	}
-	/** Repaint rows in place (keeps component identity for the HUD memo); the click map rebuilds lazily. */
-	setLines(lines: readonly string[]): void {
-		if (!this.#text.setText(lines.join("\n"))) return;
+	/**
+	 * Repaint in place with a new view. Keeping the instance keeps its native
+	 * wire id, so the dock pill stays mounted (a fresh component would be
+	 * removed and re-added, replaying its entrance) and the HUD memo holds.
+	 * The click map rebuilds lazily.
+	 */
+	update(lines: readonly string[], order: readonly string[], toggleRow: number | undefined, node: NativeNode): void {
+		this.#node = node;
+		this.#order = order;
+		this.#toggleLine = toggleRow;
+		this.#text.setText(lines.join("\n"));
 		this.#lines = lines;
 		this.#physicalOwner = undefined;
 	}
@@ -1170,6 +1179,9 @@ export function renderSubagentHudLines(
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
+/** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
+const JOBS_SHEET_REFRESH_MS = 250;
+
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
@@ -1233,6 +1245,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
+	#composerStatusPersistTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
 	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
@@ -1533,6 +1546,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
+	#jobsSheetHandle: OverlayHandle | undefined;
+	/** Re-renders the open jobs sheet so output tails and pids stay live. */
+	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -1675,6 +1691,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
+	#subagentSessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+	#subagentCostHydratedRoot?: string;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -2260,6 +2278,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					`Session persistence failed: ${detail}. Unsaved entries remain in memory; persistence will retry on the next entry.`,
 				);
 			}),
+			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
@@ -3572,8 +3591,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setPreferences({ composerShape: shape });
 		this.statusLine.attachToEditor(this.editor, style);
 		this.updateEditorBorderColor();
-		this.#persistComposerStatus();
+		this.#scheduleComposerStatusPersist();
 		this.ui.requestRender();
+	}
+
+	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
+	#scheduleComposerStatusPersist(): void {
+		if (this.#composerStatusPersistTimer) return;
+		this.#composerStatusPersistTimer = setTimeout(() => {
+			this.#composerStatusPersistTimer = undefined;
+			this.#persistComposerStatus();
+		}, COMPOSER_STATUS_PERSIST_DELAY_MS);
+		this.#composerStatusPersistTimer.unref();
 	}
 
 	/**
@@ -3656,7 +3685,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	/** Refresh the running-subagents status badge from the active local or collab registry. */
+	/**
+	 * Refresh the running-subagents status badge from the active local or collab
+	 * registry, and the cost segment's subagent-tree spend (local sessions only:
+	 * a collab guest's registry mirrors host transcripts outside this root).
+	 */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
@@ -3669,10 +3702,43 @@ export class InteractiveMode implements InteractiveModeContext {
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
 		this.statusLine.setRunningSubagents(agentIds);
+		if (this.collabGuest) {
+			this.statusLine.setSubagentTreeCost(0);
+		} else {
+			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
+			this.#hydratePersistedSubagentCosts(rootSessionFile);
+			this.statusLine.setSubagentTreeCost(
+				sumSubagentTreeCost({
+					refs: AgentRegistry.global().list(),
+					observers: this.#observerRegistry,
+					rootSessionFile,
+					sessionMetrics: this.#subagentSessionMetrics,
+				}),
+			);
+		}
 		if (options.requestRender !== false) this.ui.requestRender();
 	}
 
-	/** What the TSP composer shows: the draft's shell mode, the effort chip, and send vs Stop. */
+	/**
+	 * Register a resumed session's persisted subagent transcripts (with usage
+	 * history) so the status line's tree cost matches the Agent Hub without it
+	 * being opened first. Once per on-disk root; registry changes re-sync the cost.
+	 */
+	#hydratePersistedSubagentCosts(rootSessionFile: string | undefined): void {
+		if (!rootSessionFile || this.#subagentCostHydratedRoot === rootSessionFile) return;
+		if (!this.sessionManager.isSessionOnDisk()) return;
+		this.#subagentCostHydratedRoot = rootSessionFile;
+		registerPersistedSubagents(AgentRegistry.global(), rootSessionFile, {
+			shouldContinue: () => this.sessionManager.getSessionFile() === rootSessionFile,
+		}).catch(error => {
+			logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
+		});
+	}
+
+	/**
+	 * What the TSP composer shows: the draft's shell mode, the effort chip
+	 * (the viewed agent's, like the model chip beside it), and send vs Stop.
+	 */
 	#composerNativeState(): ComposerNativeState {
 		const draft = this.editor.getText().trimStart();
 		return {
@@ -3681,9 +3747,26 @@ export class InteractiveMode implements InteractiveModeContext {
 				: this.isPythonMode
 					? { kind: "python", excluded: draft.startsWith("$$") }
 					: undefined,
-			thinking: thinkingLevelWord(this.session),
+			thinking: thinkingLevelWord(this.viewSession),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
+			viewing: this.#viewingLineage(),
 		};
+	}
+
+	/** The focused subagent and its live ancestors below main, outermost first; undefined on the main session. */
+	#viewingLineage(): string[] | undefined {
+		const id = this.focusedAgentId;
+		if (!id) return undefined;
+		const registry = AgentRegistry.global();
+		const lineage = [id];
+		for (
+			let parent = registry.get(id)?.parentId;
+			parent && parent !== MAIN_AGENT_ID && !lineage.includes(parent) && registry.get(parent);
+			parent = registry.get(parent)?.parentId
+		) {
+			lineage.unshift(parent);
+		}
+		return lineage;
 	}
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
@@ -4368,15 +4451,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#renderSubagentList(): void {
 		this.#cancelSubagentPreviewTick();
-		this.subagentContainer.clear();
 		const view = this.#buildSubagentHudView();
-		if (!view) return;
-		this.subagentContainer.addChild(
-			new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
-				node: describeSubagentHud(view.sessions),
-				onOpen: () => this.showAgentHub(),
-			}),
-		);
+		if (!view) {
+			this.subagentContainer.clear();
+			return;
+		}
+		const node = describeSubagentHud(view.sessions);
+		const hud = this.subagentContainer.children[0];
+		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow, node);
+		else {
+			this.subagentContainer.addChild(
+				new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
+					node,
+					onOpen: () => this.showAgentHub(),
+				}),
+			);
+		}
 		this.#armSubagentPreviewTick(view.tickMs);
 	}
 
@@ -4410,26 +4500,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (tickMs === undefined) return;
 		this.#subagentPreviewTickTimer = setTimeout(() => {
 			this.#subagentPreviewTickTimer = undefined;
-			this.#tickSubagentPreview();
+			this.#renderSubagentList();
+			this.ui.requestRender();
 		}, tickMs);
 		this.#subagentPreviewTickTimer.unref?.();
-	}
-
-	/**
-	 * Elapsed-marker tick: with the same agents listed, repaint the existing HUD
-	 * in place so the native HUD memo and component identity survive; any
-	 * layout change falls back to a full rebuild.
-	 */
-	#tickSubagentPreview(): void {
-		const hud = this.subagentContainer.children[0];
-		const view = this.#buildSubagentHudView();
-		if (view && hud instanceof SubagentHudComponent && hud.hasLayout(view.order, view.toggleRow)) {
-			hud.setLines(view.lines);
-			this.#armSubagentPreviewTick(view.tickMs);
-		} else {
-			this.#renderSubagentList();
-		}
-		this.ui.requestRender();
 	}
 
 	#cancelSubagentPreviewTick(): void {
@@ -6661,6 +6735,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#recorder?.stop();
 		this.#recorder = undefined;
 		// Last chance to refresh the startup status placeholder for the next launch.
+		clearTimeout(this.#composerStatusPersistTimer);
+		this.#composerStatusPersistTimer = undefined;
 		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
@@ -6676,6 +6752,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
+		clearInterval(this.#jobsSheetTimer);
+		this.#jobsSheetTimer = undefined;
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;
@@ -7025,9 +7103,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * which is why the earlier `showStatus` acknowledgment was reverted. An
 	 * anchored container is cleared and rebuilt in place without adding history
 	 * rows — the same reason the ctrl+p role-cycle track lives there.
+	 *
+	 * A Tern Surface Protocol surface has no append-only scrollback to
+	 * duplicate into, so there the panel mounts in the transcript at once.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void {
-		if (!this.session.isStreaming) {
+		if (!this.session.isStreaming || this.ui.nativeRendering) {
 			this.present(content);
 			return;
 		}
@@ -7053,6 +7134,43 @@ export class InteractiveMode implements InteractiveModeContext {
 			margin: 0,
 		});
 		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The jobs pill's sheet: live background jobs in a dismissable overlay.
+	 * Unlike `/jobs` it adds nothing to the transcript, so a click mid-turn
+	 * leaves no deferred command preview above the editor.
+	 */
+	showJobsSheet(): void {
+		if (this.#jobsSheetHandle) return;
+		if (!this.session.getAsyncJobSnapshot()) {
+			this.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+		const sheet = new JobsSheet({
+			load: () => this.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
+			inspect: id => this.session.inspectAsyncJob(id),
+			cancel: id => {
+				this.session.cancelAsyncJob(id);
+				this.ui.requestRender();
+			},
+			close: () => this.#hideJobsSheet(),
+		});
+		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
+		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	#hideJobsSheet(): void {
+		const handle = this.#jobsSheetHandle;
+		this.#jobsSheetHandle = undefined;
+		clearInterval(this.#jobsSheetTimer);
+		this.#jobsSheetTimer = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
 	}
 
@@ -7131,7 +7249,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	showPinnedError(message: string): void {
 		this.#dismissPlanReview();
 		this.errorBannerContainer.clear();
-		this.errorBannerContainer.addChild(new ErrorBannerComponent(message));
+		this.errorBannerContainer.addChild(new ErrorBannerComponent(message, () => this.clearPinnedError()));
 		this.ui.requestRender();
 	}
 
@@ -7184,7 +7302,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const providerName = this.session.model?.provider ?? "Unknown";
 		this.composer.updateWelcome({ modelName, providerName });
 		this.#persistComposerWelcome(modelName, providerName);
-		this.#persistComposerStatus();
+		this.#scheduleComposerStatusPersist();
 	}
 
 	#syncConfigWarningHeader(): void {
@@ -7498,8 +7616,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleAdvisorStatusCommand();
 	}
 
-	handleJobsCommand(): Promise<void> {
-		return this.#commandController.handleJobsCommand();
+	handleJobsCommand(options?: { full?: boolean }): Promise<void> {
+		return this.#commandController.handleJobsCommand(options);
 	}
 
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {

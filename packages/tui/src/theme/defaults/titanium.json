@@ -86,5 +86,15 @@
 		"pageBg": "brushedTitanium",
 		"cardBg": "darkTitanium",
 		"infoBg": "subtleGray"
+	},
+	"terminal": {
+		"background": "brushedTitanium",
+		"foreground": "brightAluminum",
+		"chrome": "darkTitanium",
+		"widget": "#1c2029",
+		"ansi": [
+			"#3b424d", "alertRed", "readoutGreen", "#f0c040", "electricBlue", "#d06fed", "#13d1cd", "#c3c9d3",
+			"#6b7280", "#ff7b86", "#6bffb0", "#fddb72", "#6ec9ff", "#e69dfc", "#75efea", "#f7f9fc"
+		]
 	}
 }

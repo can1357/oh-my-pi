@@ -18,6 +18,7 @@ import {
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	AnthropicCompactionPayload,
@@ -2391,26 +2392,12 @@ const streamAnthropicOnce = (
 						block[kStreamingPartialJson].length > 0
 							? block[kStreamingPartialJson]
 							: JSON.stringify(block.arguments ?? {});
-					try {
-						block.arguments = parseJsonWithRepair(finalJson) as ToolCall["arguments"];
-					} catch (parseError) {
-						// Non-fatal: keep the best-effort arguments recovered by the throttled streaming
-						// parser instead of failing the turn on malformed/truncated tool-argument JSON.
+					// Keep malformed calls non-fatal, but never execute their auto-closed previews.
+					block.arguments = parseToolCallArguments(finalJson);
+					if (isRecord(block.arguments) && "__parseError" in block.arguments) {
 						reportAnthropicEnvelopeAnomaly(
-							`tool_use ${block.id} arguments are not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+							`tool_use ${block.id} arguments are not valid JSON: ${block.arguments.__parseError}`,
 						);
-						const recoveredKeys = Object.keys(block.arguments ?? {});
-						if (recoveredKeys.length === 0) {
-							const maxLen = 512;
-							const truncatedJson =
-								finalJson.length <= maxLen
-									? finalJson
-									: `${finalJson.slice(0, maxLen)}… [truncated ${finalJson.length - maxLen} chars]`;
-							block.arguments = {
-								__parseError: parseError instanceof Error ? parseError.message : String(parseError),
-								__rawJson: truncatedJson,
-							};
-						}
 					}
 					clearStreamingPartialJson(block);
 					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });

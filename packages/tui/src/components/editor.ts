@@ -18,7 +18,14 @@ import type { TspEditorDecoration, TspEditorProps, TspTone } from "@oh-my-pi/pi-
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
-import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import {
+	type DescribeContext,
+	type NativeChild,
+	type NativeNode,
+	type NativeTextEdit,
+	type NativeUiEvent,
+	resolveTextEdit,
+} from "../native/node";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import {
@@ -614,11 +621,12 @@ export class Editor implements Component, Focusable {
 	 * TSP chrome around the `editor` node (the prompt composer's chips, mode
 	 * chip, send/stop): the root role, the children with `input` placed where
 	 * the layout wants it, and the input's keypath for the caret-anchored
-	 * autocomplete. Unset: a plain `omp.editor` column over the input.
+	 * autocomplete. Unset: a plain `omp.field` column over the input (a
+	 * dialog's text field; only the prompt composer claims `omp.editor`).
 	 */
 	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
 	/** TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints. */
-	nativePlaceholder: string | undefined;
+	describePlaceholder: (() => string) | undefined;
 	#promptGutter: string | undefined;
 	/** Bumped by {@link invalidate}: host-side decoration inputs (spelling results, settings) changed. */
 	#nativeGeneration = 0;
@@ -629,6 +637,14 @@ export class Editor implements Component, Focusable {
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
+	/**
+	 * Width the caret's rows wrap at for Up/Down and paging: the painted layout width in
+	 * text mode. Natively it is unbounded (rows are logical lines): the terminal wraps with
+	 * its own font and moves the caret between the rows it drew itself, handing over only
+	 * Up on the first row and Down on the last (TSP §8.5, native editing), which are then
+	 * on the first and last logical line.
+	 */
+	#caretRowWidth: number = 80;
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
@@ -1025,13 +1041,13 @@ export class Editor implements Component, Focusable {
 	}
 
 	#isOnFirstVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		return currentVisualLine === 0;
 	}
 
 	#isOnLastVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		return currentVisualLine === visualLines.length - 1;
 	}
@@ -1321,6 +1337,7 @@ export class Editor implements Component, Focusable {
 		const contentAreaWidth = this.#getContentWidth(width, paddingX);
 		const layoutWidth = this.#getLayoutWidth(width, paddingX);
 		this.#lastLayoutWidth = layoutWidth;
+		this.#caretRowWidth = layoutWidth;
 
 		const box = this.#theme.symbols.boxRound;
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
@@ -1619,9 +1636,10 @@ export class Editor implements Component, Focusable {
 	 * caret moves change only `text` and `cursor` on the same node.
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		// Vertical caret motion walks visual rows; the terminal owns the real
-		// wrap, so the surface width is the closest available layout width.
+		// The terminal owns the wrap: the surface width only estimates whether a
+		// recalled history entry spans rows, and caret rows are logical lines.
 		this.#lastLayoutWidth = Math.max(1, cx.cols);
+		this.#caretRowWidth = Number.POSITIVE_INFINITY;
 		const { lines, cursorLine, cursorCol } = this.#state;
 		const text = lines.join("\n");
 		let offset = 0;
@@ -1646,8 +1664,8 @@ export class Editor implements Component, Focusable {
 
 		const placeholder = this.#getPlaceholder();
 		const nativePlaceholder =
-			this.nativePlaceholder !== undefined && !this.#autocompleteState && this.#isEditorEmpty()
-				? this.nativePlaceholder
+			this.describePlaceholder !== undefined && !this.#autocompleteState && this.#isEditorEmpty()
+				? this.describePlaceholder()
 				: placeholder && plainText(placeholder).trim();
 		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
 		const ghost = nativePlaceholder || !atLineEnd ? null : this.#getInlineHint();
@@ -1665,7 +1683,7 @@ export class Editor implements Component, Focusable {
 				anchor = anchorOffset + vim.anchor.col;
 			}
 		}
-		const prompt = this.#promptGutter === undefined ? "" : plainText(this.#promptGutter);
+		// The prompt gutter (`> `) is terminal chrome: native hosts draw their own field, so it stays out.
 		const props: TspEditorProps = {
 			text,
 			cursor,
@@ -1673,7 +1691,6 @@ export class Editor implements Component, Focusable {
 			decor: decor.decor,
 			ghost: ghost ? plainText(ghost) : undefined,
 			placeholder: nativePlaceholder || undefined,
-			prompt: prompt || undefined,
 			mode: vim ? VIM_MODE_LABELS[vim.mode] : undefined,
 			lang: this.describeLanguage?.(),
 			maxLines: this.#maxHeight,
@@ -1685,7 +1702,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		const layout = this.describeLayout?.(editor.node, cx) ?? {
-			role: "omp.editor",
+			role: "omp.field",
 			children: [editor.node],
 			caret: "input",
 		};
@@ -2845,6 +2862,63 @@ export class Editor implements Component, Focusable {
 		this.#insertTextAtCursor(text);
 	}
 
+	/** Terminal-side selection edits on the `editor` node (see {@link applyHostEdit}). */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "edit") this.applyHostEdit(event);
+	}
+
+	/**
+	 * Apply an edit the terminal made over its own selection (TSP `edit`):
+	 * replace `[from, to)` of the described text with `text` and put the caret
+	 * at `cursor`, as one undo unit that leaves history browsing and updates
+	 * autocomplete like typing. A range cutting through an atomic placeholder
+	 * token takes the whole token. Stale edits (`len` no longer the text's
+	 * length) are dropped; a pure caret move only moves the caret.
+	 */
+	applyHostEdit(edit: NativeTextEdit): void {
+		const current = this.getText();
+		const resolved = resolveTextEdit(
+			current,
+			edit,
+			text => this.#sanitizePastedText(text),
+			(from, to) => this.#widenOverAtomicTokens(current, from, to),
+		);
+		if (!resolved) return;
+		this.#resetKillSequence();
+		if (resolved.changed) {
+			this.#historyIndex = -1;
+			this.#recordUndoState();
+			this.#state.lines = resolved.text.split("\n");
+		}
+		const lines = this.#state.lines;
+		let line = 0;
+		let col = resolved.cursor;
+		while (line < lines.length - 1 && col > lines[line]!.length) col -= lines[line++]!.length + 1;
+		this.#state.cursorLine = line;
+		this.#setCursorCol(col);
+		if (!resolved.changed) return;
+		this.#notifyChange(resolved.text);
+		this.#retriggerAutocompleteAtCursor();
+	}
+
+	/** Widen `[from, to)` of `text` so neither end cuts through an atomic placeholder token. */
+	#widenOverAtomicTokens(text: string, from: number, to: number): { from: number; to: number } {
+		const fromLine = from === 0 ? 0 : text.lastIndexOf("\n", from - 1) + 1;
+		const fromEnd = text.indexOf("\n", from);
+		const fromToken = this.#atomicTokenAt(
+			text.slice(fromLine, fromEnd === -1 ? text.length : fromEnd),
+			from - fromLine,
+		);
+		if (fromToken !== undefined) from = fromLine + fromToken.start;
+		const toLine = to === 0 ? 0 : text.lastIndexOf("\n", to - 1) + 1;
+		if (to > toLine) {
+			const toEnd = text.indexOf("\n", to);
+			const toToken = this.#atomicTokenAt(text.slice(toLine, toEnd === -1 ? text.length : toEnd), to - toLine - 1);
+			if (toToken !== undefined) to = toLine + toToken.end;
+		}
+		return { from, to };
+	}
+
 	/** Delete up to `count` characters immediately before the cursor on the current line.
 	 *  Used to "track back" the auto-repeat spaces that the space-hold push-to-talk gesture
 	 *  optimistically inserts before it recognizes the hold. Capped at the cursor column so it
@@ -3972,7 +4046,7 @@ export class Editor implements Component, Focusable {
 
 	#moveCursor(deltaLine: number, deltaCol: number): void {
 		this.#resetKillSequence();
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 
 		if (deltaLine !== 0) {
@@ -4024,7 +4098,7 @@ export class Editor implements Component, Focusable {
 
 	#pageScroll(direction: -1 | 1): void {
 		this.#resetKillSequence();
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		const step = this.#getPageScrollStep(visualLines.length);
 		const targetVisualLine = Math.max(0, Math.min(visualLines.length - 1, currentVisualLine + direction * step));

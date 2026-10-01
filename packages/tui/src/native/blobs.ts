@@ -48,7 +48,7 @@ export function getNativeBlob(id: string): NativeBlob | undefined {
 export function base64ImageNode(
 	data: string,
 	mimeType: string,
-	p?: Omit<TspProps<"image">, "blob" | "w" | "h">,
+	p?: Omit<TspProps<"image">, "blob" | "builtin" | "w" | "h">,
 	key?: string,
 ): NativeNode {
 	const blob = registerNativeBlob(Buffer.from(data, "base64"), mimeType);

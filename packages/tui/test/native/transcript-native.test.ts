@@ -137,6 +137,22 @@ describe("native transcript", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("keeps a streaming write open until it settles, then folds it like a finished thought", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const content = Array.from({ length: 40 }, (_, i) => `const v${i} = ${i};`).join("\n");
+		const tool = new ToolExecutionComponent("write", { path: "src/a.ts", content }, {}, undefined, ui);
+		try {
+			expect(tool.describe().p).toMatchObject({ status: "pending", collapsible: true, collapsed: false });
+			tool.setArgsComplete("call-1");
+			tool.setExecutionStarted("call-1");
+			expect(tool.describe().p).toMatchObject({ status: "running", collapsed: false });
+			tool.updateResult({ content: [{ type: "text", text: "Wrote 40 lines" }], isError: false });
+			expect(tool.describe().p).toMatchObject({ status: "done", collapsed: true });
+		} finally {
+			tool.dispose();
+		}
+	});
+
 	it("describes a custom tool (MCP) through the tool's own describe hooks", async () => {
 		const tool = {
 			name: "mcp__demo_lookup",

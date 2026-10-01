@@ -87,5 +87,15 @@
 		"pageBg": "#F1F5F3",
 		"cardBg": "#F8FBF9",
 		"infoBg": "#E6EEEA"
+	},
+	"terminal": {
+		"background": "wetlandBg",
+		"foreground": "#2c3a34",
+		"chrome": "wetlandElevated",
+		"widget": "wetlandSurface",
+		"ansi": [
+			"#2c3a34", "errorRed", "#317a45", "#95761a", "heronBlue", "#884b75", "#2e7c7c", "wetlandBorder",
+			"dimText", "#e24947", "#4b9767", "#a88424", "#4c83c0", "#af6297", "#3b9696", "wetlandSurface"
+		]
 	}
 }

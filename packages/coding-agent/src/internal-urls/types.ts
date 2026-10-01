@@ -122,7 +122,7 @@ export interface SchemeSpec {
 	compactTranscript?: boolean;
 	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
 	imageQuestion?: true;
-	/** The single-slash `scheme:/x` spelling is an alias of `scheme://x` (local:/). */
+	/** Mistyped spellings are aliases of `scheme://x`: single-slash `scheme:/x` and a path-prefixed `/cwd/scheme://x` (local://). */
 	singleSlashAlias?: true;
 	write?: SchemeWritePolicy;
 }
