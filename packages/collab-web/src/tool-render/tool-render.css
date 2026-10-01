@@ -85,8 +85,8 @@
 	width: 9px;
 	height: 9px;
 	border-radius: 50%;
-	border: 1.5px solid color-mix(in oklch, var(--tv-faint) 50%, transparent);
-	border-top-color: var(--tv-accent);
+	border: 1.5px solid color-mix(in oklch, var(--tv-faint, var(--fg-faint)) 50%, transparent);
+	border-top-color: var(--tv-accent, var(--accent));
 	animation: tv-rot 0.7s linear infinite;
 }
 
@@ -542,6 +542,76 @@
 	border: 1px solid var(--tv-border);
 	cursor: zoom-in;
 	background: var(--tv-inset);
+}
+
+/* ---- trimmed collab values ----
+ * Also used by the collab transcript outside `.tv-card`, hence the fallbacks. */
+
+.tv-load {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 2px 8px;
+}
+
+.tv-load-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--tv-faint, var(--fg-faint));
+	font-family: var(--tv-mono, var(--font-mono));
+}
+
+.tv-load-btn:disabled {
+	cursor: default;
+	text-decoration: none;
+}
+
+.tv-load-err {
+	font-family: var(--tv-mono, var(--font-mono));
+	font-size: 10.5px;
+	color: var(--tv-err, var(--err));
+}
+
+.tv-img-tile {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+	max-width: 100%;
+	padding: 10px 12px;
+	border: 1px dashed var(--tv-border, var(--border));
+	border-radius: 4px;
+	background: var(--tv-inset, var(--bg-inset));
+	font-family: var(--tv-mono, var(--font-mono));
+	font-size: 11px;
+	text-align: left;
+	color: var(--tv-muted, var(--fg-muted));
+	cursor: pointer;
+}
+
+.tv-img-tile:hover:not(:disabled) {
+	border-color: var(--tv-accent, var(--accent));
+}
+
+.tv-img-tile:disabled {
+	cursor: default;
+}
+
+.tv-img-tile:focus-visible {
+	outline: 2px solid var(--tv-ring, var(--ring));
+	outline-offset: 1px;
+}
+
+.tv-img-tile-text {
+	overflow-wrap: anywhere;
+}
+
+.tv-img-tile-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--tv-accent, var(--accent));
 }
 
 /* ---- markdown-ish prose (plain text bodies) ---- */

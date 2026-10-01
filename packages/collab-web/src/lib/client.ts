@@ -11,6 +11,7 @@
 import type {
 	AgentSnapshot,
 	AssistantMessage,
+	CollabElided,
 	CollabUiRequest,
 	CollabUiResponseValue,
 	HostFrame,
@@ -21,6 +22,7 @@ import type {
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
+import { applyElidedValue, sameElided } from "./elided";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
 
@@ -40,6 +42,18 @@ export interface Notice {
 	level: "info" | "warning" | "error";
 	message: string;
 	at: number;
+}
+
+/** Paging state for a guest the host joined with a tail (`welcome.history`). */
+export interface HistoryState {
+	/** First entry id held; the `before` cursor of the next page. */
+	startId: string | null;
+	/** The host's active branch has entries before `startId`. */
+	hasEarlier: boolean;
+	/** A page request is in flight. */
+	loading: boolean;
+	/** Why the last page request failed; cleared when a page lands. */
+	error: string | null;
 }
 
 export interface GuestSnapshot {
@@ -67,14 +81,23 @@ export interface GuestSnapshot {
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
 	loading: { received: number; total: number } | null;
+	/** Set when the host sent a tail instead of the full session; `null` for a full snapshot. */
+	history: HistoryState | null;
 }
 
 const MAX_NOTICES = 50;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
-/** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
+/**
+ * Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk
+ * must make progress. History pages use the same per-frame budget.
+ */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+/** Byte budget of the join tail; the host fills it with whole turns and earlier turns page in on demand. */
+export const TAIL_BYTES = 1024 * 1024;
+/** Byte budget of each "load earlier" page. */
+export const PAGE_BYTES = 1024 * 1024;
 
 /**
  * One fetch-transcript round trip.
@@ -90,6 +113,31 @@ interface PendingTranscript {
 	timer: Timer;
 }
 
+/** The in-flight fetch-history request; its page accumulates across `history` frames. */
+interface PendingHistory {
+	reqId: number;
+	entries: SessionEntry[];
+	timer: Timer;
+}
+
+/** Outcome of {@link GuestClient.fetchValue}: the parsed original, or why it could not be fetched. */
+export type ValueResult = { kind: "value"; value: unknown } | { kind: "error"; message: string };
+
+/** Shown when the host's copy of a trimmed value changed after it was sent. */
+export const STALE_VALUE_MESSAGE = "content changed on the host; reload the session";
+
+/** One fetch-value transfer. Every slice is its own request, continuing at `offset`. */
+interface PendingValue {
+	entryId: string;
+	path: (string | number)[];
+	hash: string;
+	/** Slices so far; `offset` is their length in UTF-16 units. */
+	slices: string[];
+	offset: number;
+	timer: Timer | undefined;
+	resolve: (result: ValueResult) => void;
+}
+
 export class GuestClient {
 	readonly #socket: CollabSocket;
 	readonly #name: string;
@@ -97,12 +145,19 @@ export class GuestClient {
 	readonly #writeToken: string | undefined;
 	readonly #listeners = new Set<() => void>();
 	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
+	/** Keyed by the reqId of the slice in flight. */
+	readonly #pendingValues = new Map<number, PendingValue>();
 	#reqSeq = 0;
 	#noticeSeq = 0;
 	#everConnected = false;
 	#welcomed = false;
+	/** Welcomed at least once: later opens are reconnects, each with its own welcome wait. */
+	#joined = false;
+	/** A live replica re-sent hello after a stale history cursor and awaits the fresh welcome. */
+	#rejoining = false;
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
+	#pendingHistory: PendingHistory | null = null;
 
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
@@ -125,10 +180,11 @@ export class GuestClient {
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#notices: readonly Notice[] = [];
+	#history: HistoryState | null = null;
 	#snapshot: GuestSnapshot;
 	/**
 	 * Published entries array, cached across commits: rebuilt only when
-	 * `#entries` is mutated (welcome/snapshot-chunk/entry frames). Every
+	 * `#entries` is mutated (welcome/snapshot-chunk/entry/history frames). Every
 	 * other frame (streaming message_update, state, bus, agents) reuses the
 	 * same reference, so entry-identity consumers (Transcript memo,
 	 * useSyncExternalStore) skip their O(n) scans per token.
@@ -155,12 +211,7 @@ export class GuestClient {
 			this.#commit();
 		}
 		this.#socket.connect();
-		if (!this.#welcomed && this.#welcomeTimer === null) {
-			this.#welcomeTimer = setTimeout(() => {
-				this.#welcomeTimer = null;
-				if (!this.#welcomed) this.#end("timed out waiting for the host's welcome");
-			}, WELCOME_TIMEOUT_MS);
-		}
+		if (!this.#welcomed && this.#welcomeTimer === null) this.#armWelcomeTimer();
 	}
 
 	close(): void {
@@ -218,23 +269,118 @@ export class GuestClient {
 		return promise;
 	}
 
+	/**
+	 * Request the page of history just before the oldest entry held. A no-op
+	 * unless the host joined this guest with a tail that has earlier entries,
+	 * the replica is live, and no page is already in flight. The outcome lands
+	 * in {@link GuestSnapshot.history}; the page is prepended in one commit.
+	 */
+	fetchHistory(): void {
+		const history = this.#history;
+		if (
+			history === null ||
+			!history.hasEarlier ||
+			history.startId === null ||
+			history.loading ||
+			this.#pendingSnapshot !== null ||
+			this.#phase !== "live"
+		) {
+			return;
+		}
+		const reqId = ++this.#reqSeq;
+		const pending: PendingHistory = { reqId, entries: [], timer: this.#historyTimer(reqId) };
+		this.#pendingHistory = pending;
+		// Any previous error stays until this page lands, so the control keeps its height.
+		this.#history = { ...history, loading: true };
+		this.#socket.send({ t: "fetch-history", reqId, before: history.startId, maxBytes: PAGE_BYTES });
+		this.#commit();
+	}
+
+	/**
+	 * The original of a value the host trimmed, reassembled from as many
+	 * `value` slices as it takes. Only for a host that advertised
+	 * `welcome.history`. Resolves an error for a host refusal
+	 * ("stale" resolves {@link STALE_VALUE_MESSAGE} and posts it as a notice),
+	 * a stalled slice, or a lost connection; nothing is retried.
+	 */
+	fetchValue(entryId: string, path: (string | number)[], hash: string): Promise<ValueResult> {
+		if (this.#history === null || this.#phase !== "live") {
+			return Promise.resolve({ kind: "error", message: "the host can't send trimmed values right now" });
+		}
+		const { promise, resolve } = Promise.withResolvers<ValueResult>();
+		this.#requestValueSlice({ entryId, path, hash, slices: [], offset: 0, timer: undefined, resolve });
+		return promise;
+	}
+
+	/**
+	 * Fetch the original behind `elided`, one of entry `entryId`'s
+	 * `collabElided` records, and swap the patched entry into the replica.
+	 * Resolves `null` once loaded, or when nothing is left to load (loaded
+	 * already, or the entry is gone); else the reason, ready to show.
+	 */
+	async loadFull(entryId: string, elided: CollabElided): Promise<string | null> {
+		const held = this.#entries.find(entry => entry.id === entryId);
+		if (!held?.collabElided?.some(record => sameElided(record, elided))) return null;
+		const result = await this.fetchValue(entryId, elided.path, elided.hash);
+		if (result.kind === "error") return result.message;
+		// The replica may have moved on while the value was in flight.
+		const index = this.#entries.findIndex(entry => entry.id === entryId);
+		const entry = this.#entries[index];
+		const record = entry?.collabElided?.find(other => sameElided(other, elided));
+		if (entry === undefined || record === undefined) return null;
+		let patched: SessionEntry;
+		try {
+			patched = applyElidedValue(entry, record, result.value);
+		} catch (err) {
+			return `couldn't show the loaded value: ${err instanceof Error ? err.message : String(err)}`;
+		}
+		this.#entries[index] = patched;
+		this.#publishedEntries = [...this.#entries];
+		this.#commit();
+		return null;
+	}
+
 	/** Test seam: apply a synthetic host frame through the real apply path. */
 	applyFrameForTest(frame: HostFrame): void {
 		this.#applyFrameSafe(frame);
 	}
 
 	#handleOpen(): void {
-		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#welcomed = false;
+		// A first join keeps the single deadline `connect()` armed.
+		if (this.#joined) this.#armWelcomeTimer();
+		this.#sendHello();
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
 	}
 
+	/** (Re)introduce this guest; the host answers with a fresh welcome and snapshot train. */
+	#sendHello(): void {
+		this.#socket.send({
+			t: "hello",
+			proto: COLLAB_PROTO,
+			name: this.#name,
+			writeToken: this.#writeToken,
+			snapshot: { mode: "tail", maxBytes: TAIL_BYTES },
+		});
+	}
+
 	#handleClose(reason: string, willReconnect: boolean): void {
 		this.#clearSnapshotProgressTimer();
+		// The host discards this peer's queued replies with the connection.
+		this.#dropPendingHistory(null);
+		this.#failPendingValues("connection lost; try again");
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
+			// After a welcome, only an open socket awaits one; the next open
+			// re-arms the timer. Otherwise a retry backoff past the timeout (a
+			// host restart, a laptop sleep) would end a guest that should just
+			// keep retrying.
+			if (this.#joined) this.#clearWelcomeTimer();
+			// The next open's hello supersedes an in-session rejoin.
+			this.#rejoining = false;
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#pendingSnapshot = null;
 			this.#commit();
@@ -250,14 +396,30 @@ export class GuestClient {
 		this.#phase = "ended";
 		this.#endedReason = reason;
 		this.#pendingSnapshot = null;
-		for (const [, pending] of this.#pendingTranscripts) {
-			clearTimeout(pending.timer);
-			pending.resolve(null);
-		}
-		this.#pendingTranscripts.clear();
+		this.#failPendingTranscripts();
+		this.#dropPendingHistory(null);
+		this.#failPendingValues("the session ended");
 		this.#clearUiRequests();
 		this.#commit();
 		this.#socket.close();
+	}
+
+	#armWelcomeTimer(): void {
+		this.#clearWelcomeTimer();
+		this.#welcomeTimer = setTimeout(() => {
+			this.#welcomeTimer = null;
+			if (this.#rejoining) {
+				// The replica is still live; only its history cursor is stale. A
+				// retry re-requests the page, and its "stale" reply rejoins again.
+				this.#rejoining = false;
+				if (this.#history !== null) {
+					this.#history = { ...this.#history, loading: false, error: "timed out reloading the latest messages" };
+				}
+				this.#commit();
+				return;
+			}
+			if (!this.#welcomed) this.#end("timed out waiting for the host's welcome");
+		}, WELCOME_TIMEOUT_MS);
 	}
 
 	#clearWelcomeTimer(): void {
@@ -265,6 +427,65 @@ export class GuestClient {
 			clearTimeout(this.#welcomeTimer);
 			this.#welcomeTimer = null;
 		}
+	}
+
+	/** Idle timer for page `reqId`: re-armed by every `history` frame that makes progress. */
+	#historyTimer(reqId: number): Timer {
+		return setTimeout(() => {
+			if (this.#pendingHistory?.reqId !== reqId) return;
+			this.#dropPendingHistory("timed out loading earlier messages");
+			this.#commit();
+		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
+	}
+
+	/**
+	 * Forget the in-flight page request, if any; replies still on the wire
+	 * are then ignored by reqId. `error` is surfaced, `null` clears it.
+	 * Callers commit.
+	 */
+	#dropPendingHistory(error: string | null): void {
+		const pending = this.#pendingHistory;
+		if (pending === null) return;
+		clearTimeout(pending.timer);
+		this.#pendingHistory = null;
+		if (this.#history !== null) this.#history = { ...this.#history, loading: false, error };
+	}
+
+	/** Send the next slice request of `pending`, from its `offset`, under a fresh reqId and idle timer. */
+	#requestValueSlice(pending: PendingValue): void {
+		const reqId = ++this.#reqSeq;
+		pending.timer = setTimeout(() => {
+			if (this.#pendingValues.get(reqId) !== pending) return;
+			this.#pendingValues.delete(reqId);
+			pending.resolve({ kind: "error", message: "timed out loading the full value" });
+		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
+		this.#pendingValues.set(reqId, pending);
+		this.#socket.send({
+			t: "fetch-value",
+			reqId,
+			entryId: pending.entryId,
+			path: pending.path,
+			hash: pending.hash,
+			offset: pending.offset,
+		});
+	}
+
+	/** Resolve every value transfer in flight with `message`; late slices are then ignored. */
+	#failPendingValues(message: string): void {
+		for (const pending of this.#pendingValues.values()) {
+			clearTimeout(pending.timer);
+			pending.resolve({ kind: "error", message });
+		}
+		this.#pendingValues.clear();
+	}
+
+	/** Resolve every transcript read in flight as transient (`null`), so its poller retries. */
+	#failPendingTranscripts(): void {
+		for (const pending of this.#pendingTranscripts.values()) {
+			clearTimeout(pending.timer);
+			pending.resolve(null);
+		}
+		this.#pendingTranscripts.clear();
 	}
 
 	#armSnapshotProgressTimer(): void {
@@ -311,6 +532,21 @@ export class GuestClient {
 				} else {
 					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
 				}
+				// Pages requested before this welcome describe the old replica.
+				this.#dropPendingHistory(null);
+				// So are values and transcripts: the host dropped their queued
+				// replies with the old join.
+				this.#failPendingValues("the session reloaded; try again");
+				this.#failPendingTranscripts();
+				// Tail join: `history` pages in what the tail left out.
+				this.#history = frame.history
+					? {
+							startId: frame.history.startId,
+							hasEarlier: frame.history.hasEarlier,
+							loading: false,
+							error: null,
+						}
+					: null;
 				this.#state = frame.state;
 				this.#agents = [...frame.agents];
 				this.#stream = null;
@@ -322,6 +558,8 @@ export class GuestClient {
 				this.#readOnly = frame.readOnly === true;
 				this.#clearUiRequests();
 				this.#welcomed = true;
+				this.#joined = true;
+				this.#rejoining = false;
 				this.#clearWelcomeTimer();
 				if (frame.entryCount === 0) {
 					this.#clearSnapshotProgressTimer();
@@ -399,6 +637,58 @@ export class GuestClient {
 					this.#lifecycle = new Map(this.#lifecycle).set(payload.id, payload);
 				}
 				break;
+			case "history": {
+				const pending = this.#pendingHistory;
+				// A reply to a request dropped by a timeout, close or re-welcome.
+				if (pending?.reqId !== frame.reqId) return;
+				if (frame.error !== undefined) {
+					if (frame.error === "stale") {
+						// The cursor left the host's active branch (tree navigation,
+						// a discarded entry), so this replica is no longer a suffix of
+						// the host's: join again for the current tail. The previous
+						// entries, and the spinner, stay up until it lands, and the
+						// replica stays live: errors meanwhile are notices, not a
+						// refused join.
+						this.#dropPendingHistory(null);
+						if (this.#history !== null) this.#history = { ...this.#history, loading: true };
+						this.#pushNotice("info", "the host's history changed; reloaded the latest messages");
+						this.#rejoining = true;
+						this.#armWelcomeTimer();
+						this.#sendHello();
+					} else {
+						this.#dropPendingHistory(frame.error);
+					}
+					break;
+				}
+				pending.entries.push(...frame.entries);
+				if (!frame.final) {
+					clearTimeout(pending.timer);
+					pending.timer = this.#historyTimer(pending.reqId);
+					return;
+				}
+				// A conforming host never repeats rows the guest holds, nor answers
+				// "more to come" with nothing: drop overlap so ids stay unique, and
+				// treat a page that adds nothing as an error, so the near-top
+				// loader stops instead of re-requesting the same cursor forever.
+				const held = new Set(this.#entries.map(entry => entry.id));
+				const page = pending.entries.filter(entry => !held.has(entry.id));
+				if (page.length === 0 && frame.hasEarlier === true) {
+					this.#dropPendingHistory("the host sent no earlier messages");
+					break;
+				}
+				this.#dropPendingHistory(null);
+				this.#entries = [...page, ...this.#entries];
+				this.#publishedEntries = [...this.#entries];
+				if (this.#history !== null) {
+					this.#history = {
+						startId: page[0]?.id ?? this.#history.startId,
+						hasEarlier: frame.hasEarlier === true,
+						loading: false,
+						error: null,
+					};
+				}
+				break;
+			}
 			case "ui-request":
 				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
 				else this.#uiRequest = frame.request;
@@ -407,6 +697,38 @@ export class GuestClient {
 				if (this.#uiRequest?.reqId === frame.reqId) this.#showNextUiRequest();
 				else this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
 				break;
+			case "value": {
+				const pending = this.#pendingValues.get(frame.reqId);
+				// A reply to a slice that already failed (timeout, close, re-welcome).
+				if (pending === undefined) return;
+				this.#pendingValues.delete(frame.reqId);
+				clearTimeout(pending.timer);
+				if (frame.error !== undefined) {
+					if (frame.error !== "stale") {
+						pending.resolve({ kind: "error", message: frame.error });
+						return;
+					}
+					this.#pushNotice("warning", STALE_VALUE_MESSAGE);
+					pending.resolve({ kind: "error", message: STALE_VALUE_MESSAGE });
+					break;
+				}
+				if (frame.offset !== pending.offset || (!frame.final && frame.data.length === 0)) {
+					pending.resolve({ kind: "error", message: "malformed value reply" });
+					return;
+				}
+				pending.slices.push(frame.data);
+				pending.offset += frame.data.length;
+				if (!frame.final) {
+					this.#requestValueSlice(pending);
+					return;
+				}
+				try {
+					pending.resolve({ kind: "value", value: JSON.parse(pending.slices.join("")) });
+				} catch {
+					pending.resolve({ kind: "error", message: "the loaded value is not valid JSON" });
+				}
+				return;
+			}
 			case "transcript": {
 				const pending = this.#pendingTranscripts.get(frame.reqId);
 				if (pending) {
@@ -566,6 +888,7 @@ export class GuestClient {
 				received: this.#pendingSnapshot.entries.length,
 				total: this.#pendingSnapshot.total,
 			},
+			history: this.#history,
 		};
 	}
 

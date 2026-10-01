@@ -19,6 +19,14 @@
 - Describing an attached image for a text-only model now gives up after 20 seconds and stops when you abort; the image stays saved and the model is told its description is unavailable ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
 - The status line's cost segment shows the session's own spend followed by subagent spend in parentheses, e.g. `$0.38 (+1.27)`. The subagent figure includes nested subagents, running and background agents, and subagents restored with a resumed session, and it matches the Agent Hub's cost total. The `$` or subscription mark is printed once, so advisor spend billed the same way shows as a bare amount ([#13944](https://github.com/can1357/oh-my-pi/pull/13944) by [@H4vC](https://github.com/H4vC))
 - Per-tool TTSR reminders now reach the model as a separate developer message instead of being prepended to tool output, including for Cursor-bridged calls; calls made from eval still receive the reminder as a leading block in their result ([#13266](https://github.com/can1357/oh-my-pi/pull/13266) by [@andrebrait](https://github.com/andrebrait)).
+- Added a `telemetry.otlpExportEnabled` setting (`/settings` → Providers → Privacy) that stops OMP from exporting OTLP traces, logs, and metrics even when `OTEL_*` endpoints are set in its environment; export stays enabled by default ([#13444](https://github.com/can1357/oh-my-pi/pull/13444) by [@krizh-p](https://github.com/krizh-p))
+- Added a first-launch warning when Python eval is enabled but no working Python interpreter is found, pointing to `python.interpreter` and `omp setup python --check` ([#13529](https://github.com/can1357/oh-my-pi/pull/13529) by [@H4vC](https://github.com/H4vC))
+- Added tail-first collab joins: guests that ask receive only the latest turns, then fetch earlier history and trimmed content on demand ([#9469](https://github.com/can1357/oh-my-pi/issues/9469), [#9328](https://github.com/can1357/oh-my-pi/issues/9328), [#11859](https://github.com/can1357/oh-my-pi/issues/11859), [#13389](https://github.com/can1357/oh-my-pi/pull/13389) by [@andrewleech](https://github.com/andrewleech))
+
+### Changed
+
+- The `eval` tool description now notes that the kernel may be shared with the parent session and concurrent `task` subagents ([#13521](https://github.com/can1357/oh-my-pi/pull/13521) by [@radkawar](https://github.com/radkawar))
+- Collab guests now get an `[image <type>, <size> not sent]` placeholder, loadable on demand, where an oversized snapshot or entry drops an image; previously the image was removed or its data clipped ([#13389](https://github.com/can1357/oh-my-pi/pull/13389) by [@andrewleech](https://github.com/andrewleech))
 
 ### Fixed
 
