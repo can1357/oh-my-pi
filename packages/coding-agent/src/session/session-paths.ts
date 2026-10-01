@@ -267,6 +267,22 @@ function parseBreadcrumbExtras(lines: string[]): {
 	return { fresh, cwdIdentity };
 }
 
+/** A terminal breadcrumb's recorded fields, before any check against the filesystem. */
+export interface ParsedTerminalBreadcrumb {
+	cwd: string;
+	/** As recorded; a relative path resolves against `cwd`. */
+	sessionFile: string;
+	fresh: boolean;
+	cwdIdentity: CwdIdentity | undefined;
+}
+
+/** Parse breadcrumb file content; null when it lacks the cwd and session lines. */
+export function parseTerminalBreadcrumb(content: string): ParsedTerminalBreadcrumb | null {
+	const lines = content.trim().split("\n");
+	if (lines.length < 2) return null;
+	return { cwd: lines[0], sessionFile: lines[1], ...parseBreadcrumbExtras(lines) };
+}
+
 /**
  * Storage facts about the writing session manager that decide whether the
  * custom-files registry can usefully record its transcript.
@@ -400,13 +416,9 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 	try {
 		const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
-		const content = await Bun.file(breadcrumbFile).text();
-		const lines = content.trim().split("\n");
-		if (lines.length < 2) return null;
-
-		const breadcrumbCwd = lines[0];
-		const sessionFile = lines[1];
-		const { fresh, cwdIdentity } = parseBreadcrumbExtras(lines);
+		const parsed = parseTerminalBreadcrumb(await Bun.file(breadcrumbFile).text());
+		if (!parsed) return null;
+		const { cwd: breadcrumbCwd, sessionFile, fresh, cwdIdentity } = parsed;
 
 		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
 		const exists = stat?.isFile() === true;
