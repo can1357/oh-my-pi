@@ -110,6 +110,31 @@ function readSessionMetrics(session: NonNullable<AgentRecordLike["session"]>): A
 	}
 }
 
+/** Live session whose own messages back a row's metrics when no observer progress exists. */
+export function hubFallbackStatsSession<TRecord extends AgentRecordLike>(
+	ref: TRecord,
+	observed: ObservableSession | undefined,
+): NonNullable<TRecord["session"]> | undefined {
+	if (observed?.progress) return undefined;
+	const session = ref.session;
+	return session && typeof session.getSessionStats === "function" ? session : undefined;
+}
+
+/**
+ * One roster row's usage: live observer progress, then persisted history, then
+ * the cached fallback read of a live session (populated by {@link aggregateMetrics}).
+ */
+export function hubRowMetrics<TRecord extends AgentRecordLike>(
+	ref: TRecord,
+	observed: ObservableSession | undefined,
+	sessionMetrics: WeakMap<object, { metrics: AgentMetrics | undefined }>,
+): AgentMetrics | undefined {
+	if (observed?.progress) return progressMetrics(observed);
+	if (ref.history?.metrics) return ref.history.metrics;
+	const session = hubFallbackStatsSession(ref, observed);
+	return session ? sessionMetrics.get(session)?.metrics : undefined;
+}
+
 export function aggregateMetrics<TRecord extends AgentRecordLike>(args: {
 	rows: readonly TRecord[];
 	observedById: ReadonlyMap<string, ObservableSession>;

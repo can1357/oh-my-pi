@@ -100,5 +100,15 @@
 		"pageBg": "#1a1f2b",
 		"cardBg": "#242933",
 		"infoBg": "#353a48"
+	},
+	"terminal": {
+		"background": "#1a1f2b",
+		"foreground": "snowStorm0",
+		"chrome": "#1a1f2b",
+		"widget": "deepPolar",
+		"ansi": [
+			"polarNight1", "auroraRed", "auroraGreen", "auroraYellow", "frost2", "auroraPurple", "frost1", "snowStorm1",
+			"#616e88", "auroraRed", "auroraGreen", "auroraYellow", "frost2", "auroraPurple", "frost0", "snowStorm2"
+		]
 	}
 }

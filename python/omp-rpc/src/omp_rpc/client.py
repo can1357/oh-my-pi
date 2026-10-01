@@ -44,6 +44,7 @@ from .protocol import (
     ModelCycleResult,
     ModelInfo,
     OpenSessionResult,
+    PromoteQueuedMessageResult,
     PromptResultEvent,
     QueuedMessageQueue,
     QueueUpdateEvent,
@@ -85,6 +86,7 @@ from .protocol import (
     parse_model_info,
     parse_notification,
     parse_open_session_result,
+    parse_promote_queued_message_result,
     parse_remove_queued_message_result,
     parse_session_state,
     parse_session_stats,
@@ -1258,6 +1260,12 @@ class RpcClient:
         """Remove one queued prompt; inspect the returned result's ``removed`` flag."""
         return parse_remove_queued_message_result(
             self._request("remove_queued_message", message=message, queue=queue)
+        )
+
+    def promote_queued_message(self, message: str) -> PromoteQueuedMessageResult:
+        """Move one queued follow-up to steering; inspect the result's ``promoted`` flag."""
+        return parse_promote_queued_message_result(
+            self._request("promote_queued_message", message=message)
         )
 
     def abort(self) -> None:
