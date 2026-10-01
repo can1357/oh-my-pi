@@ -345,3 +345,7 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+## Completion Verification
+
+For any task that edits code, scripts, tests, changelog, docs, or package metadata: before reporting done, you MUST read `.omp/skills/completion-gates/SKILL.md` and run every gate matching the task type. A failed gate blocks completion.

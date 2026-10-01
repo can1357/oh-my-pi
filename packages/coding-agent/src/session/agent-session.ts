@@ -154,6 +154,7 @@ import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-temp
 import { isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
+import { getDakeraSessionState, setDakeraSessionState, type DakeraSessionState } from "../dakera/state";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
@@ -3727,6 +3728,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	getDakeraSessionState(): DakeraSessionState | undefined {
+		return getDakeraSessionState(this);
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -7329,6 +7334,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
+		// Dakera holds the only copy of a retain, so an in-flight transcript write
+		// must settle before the exit path tears the socket down (print mode).
+		const dakeraState = setDakeraSessionState(this, undefined);
 		// Bound the wait for a just-fired sharpshooter extraction before dropping
 		// its subscriptions, so print-mode exits don't cut queued-delta writes.
 		const sharpshooterFlushed = flushSharpshooterExtraction(this, options.mnemopiConsolidateTimeoutMs);
@@ -7354,6 +7362,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+			// Dakera: drain in-flight retains BEFORE closing the session row —
+			// a concurrent close could seal the row before the final write lands.
+			(async () => {
+				if (!dakeraState) return;
+				await dakeraState.awaitPending();
+				// Always end the row: an aborted or crashed session has no
+				// assistant summary, and skipping the end leaks the row open
+				// in the Dakera UI. endSessionWithSummary no-ops when nothing
+				// was ever registered server-side.
+				const summary = dakeraState.buildClosingSummary();
+				await dakeraState.endSessionWithSummary(summary ?? "omp: session ended");
+			})(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 			sharpshooterFlushed,
 		]);
@@ -7372,6 +7392,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#maintenance.cancelSpeculation();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
+		dakeraState?.dispose();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the

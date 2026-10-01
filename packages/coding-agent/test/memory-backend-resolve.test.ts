@@ -18,6 +18,13 @@ describe("resolveMemoryBackend", () => {
 		expect((await resolveMemoryBackend(b)).id).toBe("hindsight");
 	});
 
+	// `MemoryBackendId` is a closed union, so a backend that is not in the
+	// selector silently degrades to `off` while settings still say `dakera`.
+	it("returns the dakera backend for memory.backend=dakera independently of the other backends", async () => {
+		const settings = Settings.isolated({ "memory.backend": "dakera", "memories.enabled": false });
+		expect((await resolveMemoryBackend(settings)).id).toBe("dakera");
+	});
+
 	it("exposes inactive status when no session is available", async () => {
 		const memory = createMemoryRuntimeContext({ agentDir: "/tmp/agent", cwd: "/tmp/project" });
 

@@ -23,9 +23,31 @@ export interface RecallResultLike {
 }
 
 const MEMORIES_REGEX = /<memories>[\s\S]*?<\/memories>/g;
+const MEMORY_DELTA_REGEX = /<memory_delta>[\s\S]*?<\/memory_delta>/g;
 const LEGACY_HINDSIGHT_MEMORIES_REGEX = /<hindsight_memories>[\s\S]*?<\/hindsight_memories>/g;
 const LEGACY_RELEVANT_MEMORIES_REGEX = /<relevant_memories>[\s\S]*?<\/relevant_memories>/g;
 const MENTAL_MODELS_REGEX = /<mental_models>[\s\S]*?<\/mental_models>/g;
+
+// Envelope vocabulary, shared by the pair regexes above and the shear below —
+// a wrapper the stripper does not know lets injected content leak into retain
+// and query composition; one the shear does not know can break an envelope.
+const WRAPPER_TAG_PATTERN = String.raw`<\/?(?:memories|memory_delta|mental_models|hindsight_memories|relevant_memories|profile)\b[^>]*>`;
+const WRAPPER_TAG_TEST_REGEX = new RegExp(WRAPPER_TAG_PATTERN, "i");
+const WRAPPER_TAG_SHEAR_REGEX = new RegExp(WRAPPER_TAG_PATTERN, "gi");
+
+/** True when `text` carries an envelope wrapper tag (open or close). */
+export function containsWrapperTag(text: string): boolean {
+	return WRAPPER_TAG_TEST_REGEX.test(text);
+}
+
+/**
+ * Neutralize envelope wrapper tags in recalled row content: the payload stays
+ * visible (`‹memories›`) but can neither close nor open our injected wrappers,
+ * so one hostile row cannot shear the envelope or forge structure inside it.
+ */
+export function shearMemoryContent(text: string): string {
+	return text.replace(WRAPPER_TAG_SHEAR_REGEX, tag => tag.replaceAll("<", "‹").replaceAll(">", "›"));
+}
 
 const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0-9]+:end|timestamp:\s+.+)\]$/;
 /**
@@ -41,6 +63,7 @@ const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0
 export function stripMemoryTags(content: string): string {
 	return content
 		.replace(MEMORIES_REGEX, "")
+		.replace(MEMORY_DELTA_REGEX, "")
 		.replace(MENTAL_MODELS_REGEX, "")
 		.replace(LEGACY_HINDSIGHT_MEMORIES_REGEX, "")
 		.replace(LEGACY_RELEVANT_MEMORIES_REGEX, "");
