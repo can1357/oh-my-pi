@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tui.showLinkUrls` (default on). Turning it off renders a Markdown link as its text alone, without the trailing destination; links with nothing clickable keep their suffix.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

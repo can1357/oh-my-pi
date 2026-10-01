@@ -305,6 +305,7 @@ import {
 	onTerminalAppearanceChange,
 	onThemeChange,
 	setMarkdownMermaidRendering,
+	setMarkdownShowLinkUrls,
 	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
 	theme,
@@ -364,6 +365,7 @@ import {
 	cfgTuiMouse,
 	cfgTuiRenderMermaid,
 	cfgTuiResizeScrollback,
+	cfgTuiShowLinkUrls,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -424,6 +426,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
+	"tui.showLinkUrls": cfgTuiShowLinkUrls,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
@@ -1778,6 +1781,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
+		setMarkdownShowLinkUrls(cfgTuiShowLinkUrls.get(settings));
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
 		applyHyperlinkSetting();
@@ -3509,8 +3513,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			rebuildChat = true;
 		}
-		if (any("tui.renderMermaid")) {
+		if (any("tui.renderMermaid", "tui.showLinkUrls")) {
 			setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(this.settings));
+			setMarkdownShowLinkUrls(cfgTuiShowLinkUrls.get(this.settings));
 			rebuildChat = true;
 		}
 		if (any("tui.textSizing")) {

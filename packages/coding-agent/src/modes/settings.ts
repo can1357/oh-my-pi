@@ -18,6 +18,7 @@ import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { setMarkdownShowLinkUrls } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -424,6 +425,22 @@ export const cfgTuiRenderMermaid = register({
 		description: "Render Mermaid fenced code blocks as ASCII diagrams",
 	},
 });
+
+export const cfgTuiShowLinkUrls = register({
+	id: "tui.showLinkUrls",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Show Link URLs",
+		description:
+			"Append the destination after Markdown link text in the transcript. Off renders clickable links as their text alone",
+	},
+});
+// Applied process-wide so renderers outside the interactive TUI (`omp commit`, embedded hosts)
+// honor the setting too; the interactive session re-applies it from its own settings scope.
+effect(cfgTuiShowLinkUrls, setMarkdownShowLinkUrls);
 
 export const cfgTuiReactions = register({
 	id: "tui.reactions",
