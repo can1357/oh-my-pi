@@ -303,7 +303,7 @@ export async function withAuth<T>(
 		initialResolverError = error;
 	});
 	if (initialKey === undefined) {
-		if (initialResolverError !== undefined) throw initialResolverError;
+		if (initialResolverError instanceof AIError.CommandConfigResolutionError) throw initialResolverError;
 		throw missingKey();
 	}
 

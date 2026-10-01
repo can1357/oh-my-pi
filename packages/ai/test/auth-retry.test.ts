@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -137,6 +137,17 @@ describe("withAuth", () => {
 		await expect(withAuth(undefined, async () => "never", { missingKeyMessage: "no key for foo" })).rejects.toThrow(
 			"no key for foo",
 		);
+	});
+
+	it("maps a generic initial resolver failure to MissingApiKeyError", async () => {
+		await expect(
+			withAuth(
+				() => {
+					throw new Error("synthetic resolver failure");
+				},
+				async () => "never",
+			),
+		).rejects.toBeInstanceOf(MissingApiKeyError);
 	});
 
 	it("refreshes the same account, then switches, in order", async () => {

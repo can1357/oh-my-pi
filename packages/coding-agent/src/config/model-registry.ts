@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
+import { CommandConfigResolutionError } from "@oh-my-pi/pi-ai/error";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -2945,7 +2946,7 @@ export class ModelRegistry {
 			const resolved = await resolve(context);
 			if (context.error !== undefined || resolvedApiKeyBearer(resolved) !== undefined) return resolved;
 			const failure = describeCommandConfigFailure(this.#customProviderApiKeys.get(provider));
-			if (failure) throw new Error(`API key command ${failure}`);
+			if (failure) throw new CommandConfigResolutionError(`API key command ${failure}`);
 			return resolved;
 		};
 	}

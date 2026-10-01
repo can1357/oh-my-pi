@@ -19,6 +19,14 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/** A configured `!command` credential could not mint a safe API key. */
+export class CommandConfigResolutionError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CommandConfigResolutionError";
+	}
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {
