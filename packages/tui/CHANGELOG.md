@@ -6,6 +6,10 @@
 
 - Added contextual next-prompt ghost text to `Editor`; Tab accepts it only while visible and inserts it without submitting, while autocomplete retains precedence ([#6863](https://github.com/can1357/oh-my-pi/pull/6863) by [@everton-dgn](https://github.com/everton-dgn)).
 
+### Fixed
+
+- Hidden thinking blocks no longer leave a faint "Thought for Ns" row in Tern's native transcript; only the live "Thinking…" indicator shows while the model reasons.
+
 ## [18.4.9] - 2026-10-01
 
 ### Added
