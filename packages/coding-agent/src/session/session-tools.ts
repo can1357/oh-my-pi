@@ -21,6 +21,7 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import { TaskTool } from "../task";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
@@ -544,11 +545,11 @@ export class SessionTools {
 	}
 
 	#visibleSessionAgents(): readonly AgentDefinition[] {
+		const enabled = this.getEnabledToolNames();
+		if (!enabled.includes("task") && !enabled.includes("eval")) return [];
 		const agents = this.#host.sessionAgents();
-		const task = this.#toolRegistry.get("task") as
-			| (AgentTool & { filterSessionAgents?: (agents: readonly AgentDefinition[]) => AgentDefinition[] })
-			| undefined;
-		return task?.filterSessionAgents?.(agents) ?? agents;
+		const task = this.#toolRegistry.get("task");
+		return task instanceof TaskTool ? task.filterSessionAgents(agents) : agents;
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
 	clearAcpPermissionDecisions(): void {

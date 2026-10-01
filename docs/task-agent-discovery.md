@@ -114,6 +114,10 @@ frozen until the next base-prompt rebuild, preserving the provider cache prefix.
 Dispatch checks the live pool, so a removed automatic agent cannot be launched
 merely because an older description listed it.
 
+Sessions only advertise model agents and emit these notices while `task` or `eval`
+is enabled, including tools exposed through Code Mode or `xd://`. Registering a
+tool without enabling it does not make delegation available.
+
 Nested sessions inherit the parent's live automatic model pool rather than
 expanding to their own unscoped registry. Explicit `m<N>` aliases remain a
 snapshot taken when the child starts, so later parent tags or rewinds cannot

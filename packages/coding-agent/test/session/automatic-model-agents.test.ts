@@ -18,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 
 function model(provider: string, id: string, name = id): Model {
 	return buildModel({
@@ -264,19 +265,23 @@ function sessionAgentNotices(agent: Agent): CustomMessage[] {
 }
 
 describe("automatic model agents: session prompt lifecycle", () => {
-	test("pool changes keep the frozen description and arrive as next-turn notices", async () => {
+	test.each(["task", "eval"])("pool changes arrive as next-turn notices through %s", async route => {
 		available = [ax];
+		const toolContext = toolSession();
+		const taskTool = (route === "task" ? await TaskTool.create(toolContext) : new EvalTool(toolContext)) as AgentTool;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: ax, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["one"] }, { content: ["two"] }, { content: ["three"] }] })
-				.stream,
+			initialState: { model: ax, systemPrompt: ["Test"], tools: [taskTool], messages: [] },
+			streamFn: createMockModel({
+				responses: [{ content: ["one"] }, { content: ["two"] }, { content: ["three"] }, { content: ["four"] }],
+			}).stream,
 		});
 		const agentSession = new AgentSession({
 			agent,
 			sessionManager: session,
 			modelRegistry: registry,
 			settings: Settings.isolated({ "compaction.enabled": false }),
+			toolRegistry: new Map([[route, taskTool]]),
 		});
 		try {
 			expect(names(automatic(agentSession.getAdvertisedSessionAgents()))).toEqual(["a/x"]);
@@ -300,9 +305,40 @@ describe("automatic model agents: session prompt lifecycle", () => {
 			]);
 			expect(names(automatic(agentSession.getAdvertisedSessionAgents()))).toEqual(["a/x"]);
 
-			// A stable pool emits nothing further.
-			await agentSession.prompt("steady");
-			expect(sessionAgentNotices(agent)).toHaveLength(2);
+			// Explicit tags are announced once, independently of the automatic selector.
+			await agentSession.prompt("steady ^b/y");
+			expect(sessionAgentNotices(agent).map(notice => notice.details)).toEqual([
+				{ added: ["b/y"], removed: [] },
+				{ added: [], removed: ["a/x"] },
+				{ added: ["m1"], removed: [] },
+			]);
+			await agentSession.prompt("steady ^b/y");
+			expect(sessionAgentNotices(agent)).toHaveLength(3);
+		} finally {
+			await agentSession.dispose();
+		}
+	});
+
+	test.each([false, true])("no delegation route announces no agents (registered task: %s)", async registered => {
+		available = [ax];
+		const taskTool = (await TaskTool.create(toolSession())) as AgentTool;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: ax, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["one"] }] }).stream,
+		});
+		const agentSession = new AgentSession({
+			agent,
+			sessionManager: session,
+			modelRegistry: registry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			toolRegistry: registered ? new Map([["task", taskTool]]) : undefined,
+		});
+		try {
+			expect(agentSession.getAdvertisedSessionAgents()).toEqual([]);
+			available = [ax, by];
+			await agentSession.prompt("continue ^b/y");
+			expect(sessionAgentNotices(agent)).toEqual([]);
 		} finally {
 			await agentSession.dispose();
 		}
