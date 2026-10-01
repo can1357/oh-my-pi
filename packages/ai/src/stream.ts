@@ -17,7 +17,13 @@ import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+	type AuthRetryKeyState,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
@@ -1324,6 +1330,7 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
+	let retryState: AuthRetryKeyState | undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
@@ -1350,6 +1357,10 @@ function streamSimpleRequest<TApi extends Api>(
 						const headers = await untilAborted(signal, () => resolveHeaders(signal));
 						model.headers = headers ? { ...headers } : undefined;
 					}
+				}
+				if (retryState && apiKey !== undefined) {
+					retryState.lastHeaders = model.headers ? { ...model.headers } : undefined;
+					retryState.lastSentCredentials = { apiKey, headers: retryState.lastHeaders };
 				}
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
@@ -1450,7 +1461,7 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey, model.headers);
+			retryState = createAuthRetryKeyState(lastKey, model.headers);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {

@@ -36,6 +36,12 @@ export interface ApiKeyResolveContext {
 	previousHeaders?: Readonly<Record<string, string>>;
 }
 
+/** Exact bearer and headers dispatched by one request attempt. */
+export interface SentCredentialSet {
+	apiKey: string;
+	headers?: Readonly<Record<string, string>>;
+}
+
 /**
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
@@ -184,6 +190,8 @@ export interface AuthRetryKeyState {
 	attempts: number;
 	/** Headers sent with the last failed attempt. */
 	lastHeaders?: Readonly<Record<string, string>>;
+	/** Exact credential set dispatched by the most recent request attempt. */
+	lastSentCredentials?: SentCredentialSet;
 }
 
 export function createAuthRetryKeyState(
@@ -194,6 +202,7 @@ export function createAuthRetryKeyState(
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
 		lastHeaders: initialHeaders,
+		lastSentCredentials: { apiKey: initialKey, headers: initialHeaders },
 		refreshedCurrent: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
