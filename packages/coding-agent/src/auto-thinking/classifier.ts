@@ -4,7 +4,10 @@
  * Asks one {@link ChoiceQuestion} about the user's request — or, for
  * task-spawned turns, about the delegator's `solutionSpace` description alone —
  * and maps the chosen level to a concrete {@link Effort}, clamped into the active model's
- * supported range (never below {@link Effort.Low}). The judge comes from the
+ * supported range between the Auto Thinking Floor and Ceiling (never below
+ * {@link Effort.Low}). When every possible answer clamps to the same tier the
+ * judge is skipped.
+ * The judge comes from the
  * live `judge` role chain. A local on-device candidate gets the coarser
  * `trivial|moderate|hard` question (3-class is more reliable
  * than 4-way ordinal on sub-2B models), mapped to `low|high|xhigh`.
@@ -21,11 +24,11 @@ import levelQuestionTemplate from "../prompts/system/auto-thinking-level-questio
 import solutionSpaceQuestionTemplate from "../prompts/system/auto-thinking-solution-space-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
-import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
+import { clampAutoThinkingEffort, parseEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 import { prompt } from "@oh-my-pi/pi-utils";
 
-import { cfgProvidersAutoThinkingMaxEffort } from "../session/settings";
+import { cfgProvidersAutoThinkingMaxEffort, cfgProvidersAutoThinkingMinEffort } from "../session/settings";
 
 type Level = "low" | "medium" | "high" | "xhigh" | "max";
 type Bucket = "trivial" | "moderate" | "hard";
@@ -126,6 +129,16 @@ function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
 }
 
 /**
+ * The effort every answer resolves to under `ceiling` and `floor`, or `null`
+ * when answers can still differ. The clamp is monotonic in the request, so the
+ * lowest and highest askable answers bound every outcome.
+ */
+function forcedEffort(model: Model, ceiling: Effort, floor: Effort): Effort | undefined | null {
+	const lowest = clampAutoThinkingEffort(model, Effort.Low, ceiling, floor);
+	return lowest === clampAutoThinkingEffort(model, ceiling, ceiling, floor) ? lowest : null;
+}
+
+/**
  * Classify `input` and return a concrete effort clamped to `deps.model`,
  * or `undefined` when the model has no controllable effort surface (auto has
  * nothing to pick — the caller leaves the prior reasoning level in place).
@@ -135,6 +148,17 @@ export async function classifyDifficulty(
 	input: DifficultyInput,
 	deps: ClassifyDifficultyDeps,
 ): Promise<Effort | undefined> {
+	const floor = parseEffort(cfgProvidersAutoThinkingMinEffort.get(deps.settings)) ?? Effort.Low;
+	const remoteCeiling = autoEffortCeiling(deps);
+	// Settled for every candidate kind (the local judge is capped at xhigh): no
+	// judge needed at all, not even a resolvable one.
+	const forced = forcedEffort(deps.model, remoteCeiling, floor);
+	if (
+		forced !== null &&
+		(remoteCeiling === Effort.XHigh || forced === forcedEffort(deps.model, Effort.XHigh, floor))
+	) {
+		return forced;
+	}
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
@@ -152,21 +176,25 @@ export async function classifyDifficulty(
 		: { request: preprocessTinyMessage(input.request) };
 	const questions = solutionSpace ? SOLUTION_SPACE_QUESTIONS : REQUEST_QUESTIONS;
 	const options = { signal: deps.signal };
-	const classified = await judge.withCandidate(async (candidate, kind) => {
+	return judge.withCandidate(async (candidate, kind) => {
 		// The 3-bucket local question cannot select `max`, so its ceiling stays at
 		// XHigh whatever the setting says — otherwise a sparse ladder would snap its
 		// `hard` bucket up to a tier it never chose.
+		const ceiling = kind === "local" ? Effort.XHigh : remoteCeiling;
+		const candidateForced = forcedEffort(deps.model, ceiling, floor);
+		if (candidateForced !== null) return candidateForced;
+		let effort: Effort;
 		if (kind === "local") {
 			const { answers } = await candidate.judge({ state, questions: { bucket: questions.bucket } }, options);
-			return { effort: BUCKET_EFFORT[answers.bucket.choice], ceiling: Effort.XHigh };
+			effort = BUCKET_EFFORT[answers.bucket.choice];
+		} else {
+			const level = ceiling === Effort.Max ? questions.levelWithMax : questions.level;
+			const { answers } = await candidate.judge({ state, questions: { level } }, options);
+			effort = LEVEL_EFFORT[answers.level.choice];
 		}
-		const ceiling = autoEffortCeiling(deps);
-		const level = ceiling === Effort.Max ? questions.levelWithMax : questions.level;
-		const { answers } = await candidate.judge({ state, questions: { level } }, options);
-		return { effort: LEVEL_EFFORT[answers.level.choice], ceiling };
+		// The candidate's ceiling goes into the clamp itself: capping the request
+		// alone is not enough, because a sparse ladder snaps an excluded request
+		// back up.
+		return clampAutoThinkingEffort(deps.model, effort, ceiling, floor);
 	}, options);
-	// The successful branch's ceiling goes into the clamp itself: capping the
-	// request alone is not enough, because a sparse ladder snaps an excluded
-	// request back up.
-	return clampAutoThinkingEffort(deps.model, classified.effort, classified.ceiling);
 }

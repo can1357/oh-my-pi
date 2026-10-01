@@ -1008,6 +1008,27 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 	},
 });
 
+export const cfgProvidersAutoThinkingMinEffort = register({
+	id: "providers.autoThinkingMinEffort",
+	type: "enum",
+	values: ["low", "medium", "high", "xhigh"] as const,
+	default: "low",
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Auto Thinking Floor",
+		description:
+			"Lowest effort the `auto` classifier may resolve, in the main session and in subagents. Models without that tier use the next one up, or their top tier. A task `effort` hint or a failed classification is not floored.",
+		condition: "autoThinkingActive",
+		options: [
+			{ value: "low", label: "low", description: "No floor beyond the classifier's own minimum (default)" },
+			{ value: "medium", label: "medium", description: "Classifier resolves at least medium" },
+			{ value: "high", label: "high", description: "Classifier resolves at least high" },
+			{ value: "xhigh", label: "xhigh", description: "Every classified turn runs at xhigh or the model's top tier" },
+		],
+	},
+});
+
 export const cfgFeaturesUnexpectedStopDetection = register({
 	id: "features.unexpectedStopDetection",
 	type: "enum",

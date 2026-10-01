@@ -183,12 +183,18 @@ describe("auto thinking classifier helpers", () => {
 		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
-	function createOnlineFixture(targetModel: Model, answer: string, maxEffort: "xhigh" | "max" = "xhigh") {
+	function createOnlineFixture(
+		targetModel: Model,
+		answer: string,
+		maxEffort: "xhigh" | "max" = "xhigh",
+		minEffort: "low" | "medium" | "high" | "xhigh" = "low",
+	) {
 		const classifierModel = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!classifierModel) throw new Error("Expected bundled Claude Sonnet 4.6 model");
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${classifierModel.provider}/${classifierModel.id}` },
 			"providers.autoThinkingMaxEffort": maxEffort,
+			"providers.autoThinkingMinEffort": minEffort,
 		});
 		const registry = createRegistry([classifierModel], { [classifierModel.provider]: "test-key" });
 		const usage = {
@@ -341,6 +347,72 @@ describe("auto thinking classifier helpers", () => {
 	it("stops at the highest tier under the ceiling on a sparse ladder", async () => {
 		const fixture = createOnlineFixture(buildLadderModel("mock-hm", [Effort.High, Effort.Max]), "xhigh");
 		expect(await classifyDifficulty({ request: "cut over the storage layer" }, fixture.deps)).toBe(Effort.High);
+	});
+
+	it("raises a below-floor answer to the next supported tier, or the model's top tier", async () => {
+		const sparse = createOnlineFixture(
+			buildLadderModel("mock-lh", [Effort.Low, Effort.High]),
+			"low",
+			"xhigh",
+			"medium",
+		);
+		expect(await classifyDifficulty({ request: "rename a helper" }, sparse.deps)).toBe(Effort.High);
+
+		vi.restoreAllMocks();
+
+		const short = createOnlineFixture(
+			buildLadderModel("mock-lmh", [Effort.Low, Effort.Medium, Effort.High]),
+			"low",
+			"max",
+			"xhigh",
+		);
+		expect(await classifyDifficulty({ request: "rename a helper" }, short.deps)).toBe(Effort.High);
+	});
+
+	it("skips the judge only when every answer resolves to the same tier", async () => {
+		// Ceiling `max` on a ladder without max is effectively xhigh: no judge call.
+		const pinned = createOnlineFixture(buildLadderModel("mock-xhigh", XHIGH_LADDER), "low", "max", "xhigh");
+		expect(await classifyDifficulty({ request: "rename a helper" }, pinned.deps)).toBe(Effort.XHigh);
+		expect(pinned.completeSimpleMock).not.toHaveBeenCalled();
+
+		vi.restoreAllMocks();
+
+		// The same floor under a reachable `max` ceiling still asks the judge.
+		const open = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "max", "max", "xhigh");
+		expect(await classifyDifficulty({ request: "cut over the storage layer" }, open.deps)).toBe(Effort.Max);
+		expect(open.completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("skips the judge when the floor leaves the sparse ladder one tier", async () => {
+		// `low|high` with floor high: every answer from low to xhigh lands on high.
+		const fixture = createOnlineFixture(
+			buildLadderModel("mock-lh", [Effort.Low, Effort.High]),
+			"low",
+			"xhigh",
+			"high",
+		);
+		expect(await classifyDifficulty({ request: "rename a helper" }, fixture.deps)).toBe(Effort.High);
+		expect(fixture.completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("skips the local judge when its xhigh cap meets the floor under a max ceiling", async () => {
+		const judge = getBundledModel("local", "qwen3-1.7b");
+		if (!judge) throw new Error("Expected bundled local judge qwen3-1.7b");
+		const complete = vi.spyOn(tinyModelClient, "complete").mockResolvedValue("trivial");
+		const effort = await classifyDifficulty(
+			{ request: "rename a helper" },
+			{
+				settings: Settings.isolated({
+					modelRoles: { judge: "local/qwen3-1.7b" },
+					"providers.autoThinkingMaxEffort": "max",
+					"providers.autoThinkingMinEffort": "xhigh",
+				}),
+				registry: createRegistry([judge]),
+				model: buildLadderModel("mock-max", MAX_LADDER),
+			},
+		);
+		expect(effort).toBe(Effort.XHigh);
+		expect(complete).not.toHaveBeenCalled();
 	});
 
 	it("keeps the provisional auto level below max even when the model defaults to it", () => {

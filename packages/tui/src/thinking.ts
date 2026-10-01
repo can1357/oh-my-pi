@@ -240,6 +240,10 @@ export function parseCliThinkingLevel(value: string | null | undefined): Configu
  * there is nothing legal to pick (`undefined`), not a licence to fall through
  * to a sub-Low tier the model happens to expose.
  *
+ * `floor` (the Auto Thinking Floor) bounds the result from below within that
+ * pool, snapping up: a request under it resolves to the lowest pool tier at or
+ * above the floor, or the pool's top tier when the model has nothing that high.
+ *
  * Returns `undefined` for reasoning-capable models without a controllable
  * effort surface (`thinking.efforts` empty — e.g. devin-agent models, where
  * Cascade selects effort by routing to sibling model ids). Matches
@@ -251,6 +255,7 @@ export function clampAutoThinkingEffort(
 	model: Model | undefined,
 	effort: Effort,
 	ceiling: Effort = Effort.Max,
+	floor?: Effort,
 ): Effort | undefined {
 	const supported = model ? getSupportedEfforts(model) : THINKING_EFFORTS;
 	if (supported.length === 0) return undefined;
@@ -260,9 +265,15 @@ export function clampAutoThinkingEffort(
 	const floored = atOrAboveLow.length > 0 ? atOrAboveLow : supported;
 	const pool = floored.filter(level => THINKING_EFFORTS.indexOf(level) <= ceilingIndex);
 	if (pool.length === 0) return undefined;
+	let candidates = pool;
+	if (floor !== undefined) {
+		const floorIndex = THINKING_EFFORTS.indexOf(floor);
+		const atOrAboveFloor = pool.filter(level => THINKING_EFFORTS.indexOf(level) >= floorIndex);
+		candidates = atOrAboveFloor.length > 0 ? atOrAboveFloor : pool.slice(-1);
+	}
 	const requestedIndex = THINKING_EFFORTS.indexOf(effort);
-	let chosen = pool[0];
-	for (const candidate of pool) {
+	let chosen = candidates[0];
+	for (const candidate of candidates) {
 		if (THINKING_EFFORTS.indexOf(candidate) > requestedIndex) break;
 		chosen = candidate;
 	}
