@@ -514,9 +514,7 @@ export class Container implements Component {
 
 	addChild(component: Component): void {
 		this.children.push(component);
-		if (this.#ignoreTight) {
-			component.setIgnoreTight?.(true);
-		}
+		if (this.#ignoreTight) component.setIgnoreTight?.(true);
 		this.#memoLines = undefined;
 	}
 

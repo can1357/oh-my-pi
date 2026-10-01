@@ -3,6 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, TUI } from "@oh-my-pi/pi-tui";
 import type { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
+import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -111,6 +112,7 @@ export interface AgentHubOpenOptions {
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
+	composer: Composer;
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
@@ -366,7 +368,7 @@ export interface InteractiveModeContext {
 	 * delivery error should leave the signature set untouched.
 	 */
 	withLocalSubmission<T>(text: string, fn: () => Promise<T>, options?: { imageCount?: number }): Promise<T>;
-	/** Clears bookkeeping for an optimistic local user message once the matching session event arrives. */
+	/** Stops tracking an optimistic user bubble and finalizes it if still mounted. */
 	clearOptimisticUserMessage(): void;
 	/** Replaces the raw optimistic user render with the canonical message emitted by the session. */
 	replaceOptimisticUserMessage(

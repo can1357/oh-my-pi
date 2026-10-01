@@ -155,6 +155,7 @@ import {
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
+	cfgTuiStickyPrompt,
 	cfgUpdateChannel,
 } from "./modes/settings";
 import {
@@ -1897,6 +1898,7 @@ export async function runRootCommand(
 			quiet: cfgStartupQuiet.get(settingsInstance),
 			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),
+			stickyPrompt: cfgTuiStickyPrompt.get(settingsInstance),
 			maxInlineImages: cfgTuiMaxInlineImages.get(settingsInstance),
 			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),

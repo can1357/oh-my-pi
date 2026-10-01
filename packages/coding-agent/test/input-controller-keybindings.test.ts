@@ -3,7 +3,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -12,7 +12,9 @@ import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
+import type { StickyPromptPresentation } from "@oh-my-pi/pi-tui/prompt/composer";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 type FakeEditor = {
@@ -88,6 +90,19 @@ async function createContext() {
 	const resetDisplay = vi.fn();
 	const clearInlineImages = vi.fn();
 	const showModelSelector = vi.fn();
+	let stickyPrompt: StickyPromptPresentation = "off";
+	const composer = {
+		get stickyPrompt(): StickyPromptPresentation {
+			return stickyPrompt;
+		},
+		set stickyPrompt(mode: StickyPromptPresentation) {
+			stickyPrompt = mode;
+		},
+		page: vi.fn((_direction: -1 | 1) => false),
+		toStart: vi.fn(() => false),
+		toEnd: vi.fn(() => false),
+		scrollTranscriptRows: vi.fn((_rows: number) => false),
+	};
 	const requestRender = vi.fn();
 	const showError = vi.fn();
 	let focused: unknown;
@@ -163,6 +178,7 @@ async function createContext() {
 	};
 	focused = editor;
 	const ctx = {
+		composer: composer as unknown as InteractiveModeContext["composer"],
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		resetDisplayAfterAppearanceRefresh,
 		ui: {
@@ -254,6 +270,7 @@ async function createContext() {
 		InputController,
 		ctx,
 		editor,
+		composer,
 		customHandlers,
 		setFocused(target: unknown) {
 			focused = target;
@@ -1005,6 +1022,118 @@ describe("InputController image paste into an image-accepting prompt", () => {
 	});
 });
 
+describe("InputController sticky viewport navigation", () => {
+	const PAGE_UP = "\x1b[5~";
+	const PAGE_DOWN = "\x1b[6~";
+	const HOME = "\x1b[H";
+	const END = "\x1b[F";
+
+	async function setup() {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		return { ...context, listeners: registeredInputListeners(context.spies.addInputListener) };
+	}
+
+	function rebindTranscriptNavigation(setKeybinding: (action: string, keys: KeyId[]) => void): void {
+		setKeybinding("app.transcript.pageUp", ["alt+p"]);
+		setKeybinding("app.transcript.pageDown", ["alt+n"]);
+		setKeybinding("app.transcript.start", ["alt+g"]);
+		setKeybinding("app.transcript.end", ["alt+shift+g"]);
+	}
+
+	it("leaves native editor navigation keys untouched while editing a draft", async () => {
+		const { composer, listeners, editor } = await setup();
+		composer.stickyPrompt = "viewport";
+		editor.setText("draft with a preserved caret");
+
+		for (const key of [PAGE_UP, PAGE_DOWN, HOME, END]) {
+			expect(dispatchInput(listeners, key)).toBeUndefined();
+		}
+		expect(composer.page).not.toHaveBeenCalled();
+		expect(composer.toStart).not.toHaveBeenCalled();
+		expect(composer.toEnd).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft with a preserved caret");
+	});
+
+	it("routes rebindable transcript shortcuts without changing a nonempty draft", async () => {
+		const context = await setup();
+		const { composer, listeners, editor } = context;
+		composer.stickyPrompt = "viewport";
+		composer.page.mockReturnValue(true);
+		composer.toStart.mockReturnValue(true);
+		composer.toEnd.mockReturnValue(true);
+		rebindTranscriptNavigation(context.setKeybinding);
+		editor.setText("draft remains editable");
+
+		expect(dispatchInput(listeners, "\x1bp")).toEqual({ consume: true });
+		expect(dispatchInput(listeners, "\x1bn")).toEqual({ consume: true });
+		expect(dispatchInput(listeners, "\x1bg")).toEqual({ consume: true });
+		expect(dispatchInput(listeners, "\x1bG")).toEqual({ consume: true });
+		expect(composer.page.mock.calls).toEqual([[-1], [1]]);
+		expect(composer.toStart).toHaveBeenCalledTimes(1);
+		expect(composer.toEnd).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("draft remains editable");
+	});
+
+	it("leaves rebound transcript shortcuts unconsumed when the viewport does not move", async () => {
+		const context = await setup();
+		const { composer, listeners } = context;
+		composer.stickyPrompt = "viewport";
+		rebindTranscriptNavigation(context.setKeybinding);
+
+		expect(dispatchInput(listeners, "\x1bp")).toBeUndefined();
+		expect(composer.page.mock.calls).toEqual([[-1]]);
+		expect(composer.toStart).not.toHaveBeenCalled();
+		expect(composer.toEnd).not.toHaveBeenCalled();
+	});
+
+	it("does not route transcript shortcuts outside viewport presentation", async () => {
+		const context = await setup();
+		const { composer, listeners } = context;
+		composer.stickyPrompt = "terminal";
+		rebindTranscriptNavigation(context.setKeybinding);
+
+		for (const key of ["\x1bp", "\x1bn", "\x1bg", "\x1bG"]) {
+			expect(dispatchInput(listeners, key)).toBeUndefined();
+		}
+		expect(composer.page).not.toHaveBeenCalled();
+		expect(composer.toStart).not.toHaveBeenCalled();
+		expect(composer.toEnd).not.toHaveBeenCalled();
+	});
+
+	it("defers transcript shortcuts to overlays and non-editor focus", async () => {
+		const overlay = await setup();
+		overlay.composer.stickyPrompt = "viewport";
+		rebindTranscriptNavigation(overlay.setKeybinding);
+		overlay.setOverlayVisible(true);
+		expect(dispatchInput(overlay.listeners, "\x1bp")).toBeUndefined();
+		expect(overlay.composer.page).not.toHaveBeenCalled();
+
+		const focused = await setup();
+		focused.composer.stickyPrompt = "viewport";
+		rebindTranscriptNavigation(focused.setKeybinding);
+		focused.setFocused({ handleInput() {} });
+		expect(dispatchInput(focused.listeners, "\x1bn")).toBeUndefined();
+		expect(focused.composer.page).not.toHaveBeenCalled();
+	});
+
+	it("routes viewport wheel input with clickable mouse capture disabled", async () => {
+		await Settings.init({ inMemory: true });
+		cfgTuiMouse.set(settings, false);
+		try {
+			const { composer, listeners } = await setup();
+			composer.stickyPrompt = "viewport";
+			composer.scrollTranscriptRows.mockReturnValue(true);
+
+			expect(dispatchInput(listeners, "\x1b[<64;1;1M")).toEqual({ consume: true });
+			expect(composer.scrollTranscriptRows.mock.calls).toEqual([[-3]]);
+			expect(composer.page).not.toHaveBeenCalled();
+		} finally {
+			resetSettingsForTest();
+		}
+	});
+});
 describe("InputController global editor actions", () => {
 	const CTRL_T = "\x14";
 	const CTRL_R = "\x12";

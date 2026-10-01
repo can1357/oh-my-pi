@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+
+let testSettings: Settings;
 
 function buildContext(): InteractiveModeContext {
 	const chatContainer = new TranscriptContainer();
@@ -15,7 +18,7 @@ function buildContext(): InteractiveModeContext {
 			sessionManager: { putBlobSync: () => "unused" },
 		},
 		ui: { requestRender: vi.fn(), imageBudget: undefined },
-		settings: { get: vi.fn(() => false) },
+		settings: testSettings,
 		effectiveHideThinkingBlock: false,
 		proseOnlyThinking: true,
 		editor: { addToHistory: vi.fn() },
@@ -23,7 +26,12 @@ function buildContext(): InteractiveModeContext {
 }
 
 beforeAll(async () => {
+	testSettings = await Settings.init({ inMemory: true });
 	await initTheme(false);
+});
+
+afterAll(() => {
+	resetSettingsForTest();
 });
 
 describe("post-compaction transcript reuse", () => {

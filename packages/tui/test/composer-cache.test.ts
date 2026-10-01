@@ -39,7 +39,12 @@ describe("composer startup cache", () => {
 	it("round-trips per-project speculation and serves settings-derived rows to projects without their own", () => {
 		const project = path.join(root, "project");
 		const other = path.join(root, "other");
-		const preferences = { ...COMPOSER_DEFAULTS, composerShape: "rail", autocompleteMaxVisible: 7 };
+		const preferences = {
+			...COMPOSER_DEFAULTS,
+			stickyPrompt: "viewport" as const,
+			composerShape: "rail",
+			autocompleteMaxVisible: 7,
+		};
 		const theme = { symbolPreset: "ascii" as const, colorBlindMode: true, darkTheme: "dark", lightTheme: "light" };
 		const sessions = ["a", "b", "c", "d", "e"].map(name => ({ name, timeAgo: "3m ago" }));
 		const lspServers = [{ name: "rust-analyzer", status: "connecting" as const, fileTypes: [".rs"] }];
@@ -76,6 +81,29 @@ describe("composer startup cache", () => {
 		// Disabling LSP must replace the cached rows so the next prepaint hides the section.
 		reader.writeLspServers(project, null);
 		expect(reader.read(project).lspServers).toBeNull();
+		reader.close();
+	});
+
+	it("defaults cached UI payloads without sticky presentation to off", () => {
+		const project = path.join(root, "legacy-project");
+		const writer = ComposerCache.open(dbPath);
+		writer.writeUi(project, COMPOSER_DEFAULTS, {});
+		writer.close();
+
+		const database = new Database(dbPath);
+		const row = database
+			.prepare<{ value: string }, [string, string]>("SELECT value FROM entries WHERE project = ? AND kind = ?")
+			.get(project, "ui");
+		expect(row).toBeDefined();
+		const payload = JSON.parse(row!.value) as { preferences: Record<string, unknown> };
+		delete payload.preferences.stickyPrompt;
+		database
+			.prepare("UPDATE entries SET value = ? WHERE project = ? AND kind = ?")
+			.run(JSON.stringify(payload), project, "ui");
+		database.close();
+
+		const reader = ComposerCache.open(dbPath);
+		expect(reader.read(project).preferences?.stickyPrompt).toBe("off");
 		reader.close();
 	});
 

@@ -387,6 +387,39 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
+export const cfgTuiStickyPrompt = register({
+	id: "tui.stickyPrompt",
+	type: "enum",
+	values: ["off", "terminal", "viewport"] as const,
+	default: "off",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Sticky Prompt Headers",
+		description:
+			"Choose how sticky prompt headers are presented: terminal mode uses OSC 133 with native scrollback and requires terminal support; viewport mode uses OMP-owned scrolling; off adds no sticky grouping.",
+		options: [
+			{
+				value: "off",
+				label: "Off",
+				description: "Do not add sticky grouping to prompts and responses.",
+			},
+			{
+				value: "terminal",
+				label: "Terminal",
+				description:
+					"Group prompts and responses with OSC 133 in native scrollback; requires terminal support for sticky scroll.",
+			},
+			{
+				value: "viewport",
+				label: "Viewport",
+				description:
+					"Keep prompt headers visible with OMP-owned scrolling; works in terminals such as Ghostty. Captures the mouse wheel even when tui.mouse is false, so hold a modifier for native text selection. Archived viewport rows enter native scrollback only during normal shutdown; they are not retained after a crash.",
+			},
+		],
+	},
+});
+
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",

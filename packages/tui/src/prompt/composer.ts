@@ -20,15 +20,27 @@ import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../nativ
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
-import type { WordCompletionMethod } from "./word-completion";
-import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
+import {
+	type AnimationFrame,
+	TranscriptContainer,
+	TranscriptProjectionRenderContext,
+	type ScrollableTranscriptProjection,
+	type TranscriptViewportCursor,
+	type TurnPromptBlock,
+} from "../chrome/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./welcome";
+import type { WordCompletionMethod } from "./word-completion";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
+const MAX_STICKY_PROMPT_CONVERGENCE_PASSES = 8;
+
+/** Sticky prompt behavior supplied by the terminal or projected into the TUI viewport. */
+export type StickyPromptPresentation = "off" | "terminal" | "viewport";
 
 /** Live settings that affect the composer before and after session adoption. */
 export interface ComposerPreferences {
+	readonly stickyPrompt: StickyPromptPresentation;
 	readonly quiet: boolean;
 	readonly composerShape: string;
 	readonly showHardwareCursor: boolean;
@@ -43,6 +55,7 @@ export interface ComposerPreferences {
 
 /** Settings-schema-compatible defaults used when constructing a dependency-free composer. */
 export const COMPOSER_DEFAULTS: ComposerPreferences = {
+	stickyPrompt: "off",
 	quiet: false,
 	composerShape: "band",
 	showHardwareCursor: true,
@@ -223,6 +236,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#nativeDock: readonly Component[] | undefined;
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
+	#transcriptCursor: TranscriptViewportCursor = { offsetFromTail: 0, measuredRows: 0, width: 0 };
+	#transcriptViewportCapacity = 0;
+	#transcriptMaxOffset = 0;
+	#transcriptMaxOffsetExact = false;
+	#transcriptStartRequested = false;
 	#runtimeMounted = false;
 	// Composer-owned history id space. Transcript batch ids restart across
 	// container clears/swaps; the composer translates them into one monotonic
@@ -385,15 +403,38 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// editor drifts up above a band of blank rows (#11007).
 		this.#transientChromeFloor = Math.min(this.#transientChromeFloor ?? transientRows, transientRows);
 		const belowFloor = after.length - transientRows + this.#transientChromeFloor;
+		const viewportMode = this.#preferences.stickyPrompt === "viewport" && !this.#historyFlush;
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
-		// Retirement measures the same live blocks the viewport lays out below;
-		// one open frame renders each of them once for both.
-		transcript.beginFrame(frame);
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
+		if (!viewportMode) {
+			// Retirement measures the same live blocks the viewport lays out below;
+			// one open frame renders each of them once for both.
+			transcript.beginFrame(frame);
+		}
+		const history = viewportMode
+			? this.#offerViewportHistory(transcript, width, rows, preRoots.length + belowFloor)
+			: this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
+		// Keep finalized entries in the pressure count until the header retires;
+		// archiving them first would make later header checks see only the live tail.
+		if (viewportMode && (this.#headerRetired || this.#offeredHistory?.source === "header")) {
+			transcript.archiveFinalizedForViewport();
+		}
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
+		if (viewportMode) {
+			const viewportRows = this.#renderScrollableViewportRows(
+				transcript,
+				width,
+				rows,
+				frame,
+				before,
+				after,
+				afterSpans,
+				history !== undefined && this.#offeredHistory?.source === "header" ? history.rows.length : 0,
+			);
+			return { history, viewport: viewportRows };
+		}
 		// The live tail is laid out against the same baseline retirement is
 		// billed against, so its compaction allocator (one row per block, no
 		// inter-block blanks) engages only when a block genuinely cannot retire.
@@ -429,6 +470,157 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
 		return { history, viewport: this.#paintHoverBand(mutable, spans) };
+	}
+
+	/**
+	 * Reserve a header only for a prompt scrolled out of the selected window.
+	 * Project again with the reduced capacity so the sticky row never hides
+	 * transcript content; a bounded convergence loop handles turn boundaries.
+	 * Native scrollback is restored by the explicit shutdown flush.
+	 */
+	#renderScrollableViewportRows(
+		transcript: TranscriptContainer,
+		width: number,
+		rows: number,
+		frame: AnimationFrame,
+		before: readonly string[],
+		after: readonly string[],
+		afterSpans: readonly ViewportClickSpan[],
+		retiredHeaderRows = 0,
+	): string[] {
+		const availableRows = Math.max(0, rows - before.length - after.length);
+		let cursor = this.#transcriptCursor;
+		if (cursor.width !== width) cursor = { ...cursor, measuredRows: 0 };
+		if (this.#transcriptStartRequested) {
+			cursor = { ...cursor, offsetFromTail: Number.MAX_SAFE_INTEGER };
+		}
+		const stickyRowLimit = Math.min(4, Math.max(1, Math.floor(availableRows / 3)));
+		const renderPromptRows = (prompt: TurnPromptBlock, maxRows: number): readonly string[] => {
+			if (maxRows !== 1) return prompt.renderStickyPrompt(width, maxRows);
+			const contentRow = prompt.renderStickyPrompt(width, 2).find(row => Bun.stripANSI(row).trim().length > 0);
+			return contentRow === undefined ? [] : [contentRow];
+		};
+		const selectPrompt = (projection: ScrollableTranscriptProjection, maxRows = stickyRowLimit) => {
+			const prompt = projection.prompt;
+			if (prompt === undefined || projection.promptVisible || availableRows <= 1) {
+				return { prompt: undefined, rows: [] as readonly string[] };
+			}
+			return { prompt, rows: renderPromptRows(prompt, maxRows) };
+		};
+		const projectionContext = new TranscriptProjectionRenderContext(width, frame);
+		let projectionCapacity = availableRows;
+		let projection = transcript.renderScrollableViewport(width, projectionCapacity, frame, cursor, projectionContext);
+		let stickyPrompt = selectPrompt(projection);
+		let reservedRows = 0;
+		let converged = stickyPrompt.rows.length === reservedRows;
+		let cycleFallback:
+			| {
+					projection: ScrollableTranscriptProjection;
+					capacity: number;
+					reservedRows: number;
+					prompt: TurnPromptBlock;
+					rows: readonly string[];
+			  }
+			| undefined;
+		const seenSelections: Array<{
+			prompt: TurnPromptBlock | undefined;
+			promptVisible: boolean;
+			reservedRows: number;
+			desiredRows: number;
+		}> = [];
+		for (let pass = 0; !converged && pass < MAX_STICKY_PROMPT_CONVERGENCE_PASSES; pass++) {
+			const repeatedSelection = seenSelections.some(
+				selection =>
+					selection.prompt === projection.prompt &&
+					selection.promptVisible === projection.promptVisible &&
+					selection.reservedRows === reservedRows &&
+					selection.desiredRows === stickyPrompt.rows.length,
+			);
+			if (repeatedSelection) break;
+			seenSelections.push({
+				prompt: projection.prompt,
+				promptVisible: projection.promptVisible,
+				reservedRows,
+				desiredRows: stickyPrompt.rows.length,
+			});
+			reservedRows = stickyPrompt.rows.length;
+			projectionCapacity = Math.max(0, availableRows - reservedRows);
+			projection = transcript.renderScrollableViewport(width, projectionCapacity, frame, cursor, projectionContext);
+			stickyPrompt = selectPrompt(projection);
+			if (reservedRows > 0 && stickyPrompt.prompt !== undefined) {
+				const rows = renderPromptRows(stickyPrompt.prompt, reservedRows);
+				if (rows.length > 0) {
+					cycleFallback = {
+						projection,
+						capacity: projectionCapacity,
+						reservedRows,
+						prompt: stickyPrompt.prompt,
+						rows,
+					};
+				}
+			}
+			converged = stickyPrompt.rows.length === reservedRows;
+		}
+		if (!converged) {
+			if (cycleFallback !== undefined) {
+				// Keep the latest hidden prompt selected under a real reservation. A
+				// cycle can change header height, so pad its chrome to that reserved
+				// height to keep the final owner and projection budget in agreement.
+				projection = cycleFallback.projection;
+				projectionCapacity = cycleFallback.capacity;
+				const rows = cycleFallback.rows.slice(0, cycleFallback.reservedRows);
+				while (rows.length < cycleFallback.reservedRows) rows.push("");
+				stickyPrompt = { prompt: cycleFallback.prompt, rows };
+			} else {
+				// No hidden prompt survived a reservation pass; leave the transcript
+				// at full capacity instead of painting a stale header.
+				projectionCapacity = availableRows;
+				projection = transcript.renderScrollableViewport(
+					width,
+					projectionCapacity,
+					frame,
+					cursor,
+					projectionContext,
+				);
+				stickyPrompt = { prompt: undefined, rows: [] };
+			}
+		}
+		this.#transcriptCursor = projection.cursor;
+		this.#transcriptViewportCapacity = projectionCapacity;
+		this.#transcriptMaxOffset = projection.maxOffset;
+		this.#transcriptMaxOffsetExact = projection.maxOffsetExact;
+		this.#transcriptStartRequested = false;
+
+		const activeSpans: ViewportClickSpan[] = [];
+		for (const span of projection.spans) {
+			const ids = (span.component as Partial<{ getClickFocusAgentIds(): string[] }>).getClickFocusAgentIds?.();
+			if (!ids || ids.length === 0) continue;
+			activeSpans.push({ start: span.start, end: span.end, candidates: () => ids });
+		}
+		const allRows = [...before, ...stickyPrompt.rows, ...projection.rows, ...after];
+		const drop = Math.max(0, allRows.length - rows);
+		const mutable = allRows.slice(drop);
+		const viewportLength = mutable.length;
+		const spans: ViewportClickSpan[] = [];
+		const shift = (span: ViewportClickSpan, base: number): void => {
+			const start = span.start + base;
+			const end = Math.min(span.end + base, viewportLength);
+			const clamped = Math.max(0, start);
+			if (end > clamped) {
+				const skew = clamped - start;
+				spans.push({ start: clamped, end, candidates: (local: number) => span.candidates(local + skew) });
+			}
+		};
+		for (const span of activeSpans) shift(span, before.length + stickyPrompt.rows.length - drop);
+		for (const span of afterSpans) {
+			shift(span, before.length + stickyPrompt.rows.length + projection.rows.length - drop);
+		}
+		this.#lastClickSpans = spans;
+		if (retiredHeaderRows > 0) {
+			const visibleHeaderRows = Math.max(0, rows - allRows.length);
+			this.#retiredHeaderStart = Math.max(0, retiredHeaderRows - visibleHeaderRows);
+		}
+		return this.#paintHoverBand(mutable, spans);
 	}
 
 	/**
@@ -578,11 +770,47 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 	}
 
-	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
+	/** Render the native history tail or OMP's selected viewport during resize. */
 	renderResizeFrame(viewport: ViewportSize): readonly string[] {
 		if (!this.#started || this.#stopped) return [];
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
+		const viewportMode = this.#runtimeMounted && this.#preferences.stickyPrompt === "viewport" && !this.#historyFlush;
+		if (viewportMode) {
+			const roots = [...this.#runtimeChildren, this.#statusHost];
+			const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
+			if (transcriptIndex >= 0) {
+				const transcript = roots[transcriptIndex] as TranscriptContainer;
+				let header: readonly string[];
+				if (this.#headerRetired) {
+					this.#resizeRetiredHeaderStart ??= Math.max(
+						0,
+						this.#retiredHeaderStart - Math.max(0, rows - this.#lastNormalRows),
+					);
+					header = this.#reflowRetiredHeader(width, this.#resizeRetiredHeaderStart);
+				} else {
+					header = this.#header.render(width);
+				}
+				transcript.archiveFinalizedForViewport();
+				const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
+				const after: string[] = [];
+				const afterSpans: ViewportClickSpan[] = [];
+				for (const root of roots.slice(transcriptIndex + 1)) {
+					this.#renderBelowRoot(root, width, after, afterSpans);
+				}
+				const now = performance.now();
+				const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
+				return this.#renderScrollableViewportRows(
+					transcript,
+					width,
+					rows,
+					frame,
+					[...header, ...preRoots],
+					after,
+					afterSpans,
+				);
+			}
+		}
 		const tail = this.#runtimeMounted
 			? this.#renderResizeTail(width, rows)
 			: this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
@@ -611,6 +839,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/** Forces every currently eligible finalized prefix to retire before stop. */
 	beginHistoryFlush(): void {
+		const startingFlush = !this.#historyFlush;
 		this.#historyFlush = true;
 		// A pending replay would re-render and re-stream the entire committed
 		// ledger during shutdown; the terminal already holds that history, so
@@ -619,7 +848,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#historyReplayRequested = false;
 		this.#headerReplayPending = false;
 		for (const child of this.#runtimeChildren) {
-			if (child instanceof TranscriptContainer) child.cancelReplay();
+			if (!(child instanceof TranscriptContainer)) continue;
+			if (startingFlush) child.releaseViewportArchiveForFlush();
+			child.cancelReplay();
 		}
 	}
 
@@ -631,6 +862,55 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 	}
 
+	/** Viewport mode retires the header only; explicit replay and pending offers still flow. */
+	#offerViewportHistory(
+		transcript: TranscriptContainer,
+		width: number,
+		rows: number,
+		chromeRows: number,
+	): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
+		const offered = this.#reuseOfferedHistory(width);
+		if (offered !== undefined) return offered;
+		if (this.#headerReplayPending) return this.#offerHistory(transcript, width, rows, chromeRows);
+		return this.#offerHeader(transcript, width, rows, chromeRows);
+	}
+
+	#reuseOfferedHistory(width: number): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
+		const offered = this.#offeredHistory;
+		if (offered === undefined) return undefined;
+		this.#rerenderOfferedHistory(width);
+		return { id: offered.id, rows: offered.rows, kind: offered.kind };
+	}
+
+	#offerHeader(
+		transcript: TranscriptContainer,
+		width: number,
+		rows: number,
+		chromeRows: number,
+	): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
+		if (this.#headerRetired) return undefined;
+		const welcome = this.#welcome;
+		if (welcome !== undefined && !welcome.isTranscriptBlockFinalized()) return undefined;
+		// Keep the header live viewport chrome until capacity pressure requires it
+		// to retire before the transcript's native history.
+		const renderedHeader = this.#header.render(width);
+		if (renderedHeader.length === 0) {
+			this.#headerRetired = true;
+			this.#retiredHeaderRows = [];
+			return undefined;
+		}
+		// Only the comparison below reads the height, so stop once the viewport budget is exceeded.
+		const liveRows = transcript.liveRowCount(width, Math.max(0, rows - renderedHeader.length - chromeRows));
+		if (!this.#historyFlush && renderedHeader.length + chromeRows + liveRows <= rows) return undefined;
+		this.#offeredHistory = {
+			id: this.#nextHistoryId++,
+			rows: [...renderedHeader, ""],
+			kind: "append",
+			source: "header",
+		};
+		return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows, kind: this.#offeredHistory.kind };
+	}
+
 	/** Header retires first; replay coalesces it with the complete transcript ledger. */
 	#offerHistory(
 		transcript: TranscriptContainer,
@@ -638,14 +918,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		rows: number,
 		chromeRows: number,
 	): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
-		if (this.#offeredHistory !== undefined) {
-			this.#rerenderOfferedHistory(width);
-			return {
-				id: this.#offeredHistory.id,
-				rows: this.#offeredHistory.rows,
-				kind: this.#offeredHistory.kind,
-			};
-		}
+		const offered = this.#reuseOfferedHistory(width);
+		if (offered !== undefined) return offered;
 		if (this.#headerReplayPending) {
 			const transcriptReplay = transcript.peekReplayBatch(width);
 			// A replay follows a scrollback clear, so the header recomposes at
@@ -671,32 +945,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				kind: this.#offeredHistory.kind,
 			};
 		}
-		if (!this.#headerRetired) {
-			const welcome = this.#welcome;
-			if (welcome !== undefined && !welcome.isTranscriptBlockFinalized()) return undefined;
-			// The header stays live viewport chrome until the screen fills; then it
-			// retires first so transcript prefixes can follow in order.
-			const renderedHeader = this.#header.render(width);
-			if (renderedHeader.length > 0) {
-				// Only the comparison below reads the height, so the walk stops at
-				// the budget instead of rendering every replayed block (#12933).
-				const liveRows = transcript.liveRowCount(width, Math.max(0, rows - renderedHeader.length - chromeRows));
-				if (!this.#historyFlush && renderedHeader.length + chromeRows + liveRows <= rows) return undefined;
-				this.#offeredHistory = {
-					id: this.#nextHistoryId++,
-					rows: [...renderedHeader, ""],
-					kind: "append",
-					source: "header",
-				};
-				return {
-					id: this.#offeredHistory.id,
-					rows: this.#offeredHistory.rows,
-					kind: this.#offeredHistory.kind,
-				};
-			}
-			this.#headerRetired = true;
-			this.#retiredHeaderRows = [];
-		}
+		const headerOffer = this.#offerHeader(transcript, width, rows, chromeRows);
+		if (headerOffer !== undefined) return headerOffer;
 		const batch = this.#historyFlush
 			? transcript.peekFlushBatch(width)
 			: transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows));
@@ -789,6 +1039,62 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	get welcome(): WelcomeComponent | undefined {
 		return this.#welcome;
 	}
+	/** Current sticky-prompt presentation mode. */
+	get stickyPrompt(): StickyPromptPresentation {
+		return this.#preferences.stickyPrompt;
+	}
+
+	/** Scroll transcript rows; positive deltas move toward newer output. */
+	scrollTranscriptRows(delta: number): boolean {
+		if (this.#preferences.stickyPrompt !== "viewport" || !Number.isFinite(delta)) return false;
+		const rows = Math.trunc(delta);
+		if (rows === 0) return false;
+		const requestedOffset = Math.max(
+			0,
+			Math.min(Number.MAX_SAFE_INTEGER, this.#transcriptCursor.offsetFromTail - rows),
+		);
+		const offsetFromTail = this.#transcriptMaxOffsetExact
+			? Math.min(this.#transcriptMaxOffset, requestedOffset)
+			: requestedOffset;
+		if (offsetFromTail === this.#transcriptCursor.offsetFromTail && !this.#transcriptStartRequested) return false;
+		this.#transcriptStartRequested = false;
+		if (offsetFromTail === this.#transcriptCursor.offsetFromTail) {
+			this.ui.requestRender();
+			return true;
+		}
+		this.#transcriptCursor = { ...this.#transcriptCursor, offsetFromTail };
+		this.ui.requestRender();
+		return true;
+	}
+
+	/** Move by one transcript viewport; -1 is older and 1 is newer. */
+	page(direction: -1 | 1): boolean {
+		return this.scrollTranscriptRows(direction * Math.max(1, this.#transcriptViewportCapacity));
+	}
+
+	/** Scroll to the oldest transcript rows, discovering the full prefix lazily. */
+	toStart(): boolean {
+		if (this.#preferences.stickyPrompt !== "viewport") return false;
+		if (this.#transcriptStartRequested) return true;
+		if (this.#transcriptMaxOffsetExact && this.#transcriptCursor.offsetFromTail >= this.#transcriptMaxOffset) {
+			return false;
+		}
+		this.#transcriptStartRequested = true;
+		this.ui.requestRender();
+		return true;
+	}
+
+	/** Resume following the newest transcript rows. */
+	toEnd(): boolean {
+		if (this.#preferences.stickyPrompt !== "viewport") return false;
+		if (!this.#transcriptStartRequested && this.#transcriptCursor.offsetFromTail === 0) return false;
+		this.#transcriptStartRequested = false;
+		if (this.#transcriptCursor.offsetFromTail !== 0) {
+			this.#transcriptCursor = { ...this.#transcriptCursor, offsetFromTail: 0 };
+		}
+		this.ui.requestRender();
+		return true;
+	}
 
 	/** Whether this composer already owns the terminal render/input loop. */
 	get started(): boolean {
@@ -816,7 +1122,22 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	setPreferences(update: Partial<ComposerPreferences>): void {
 		if (this.#stopped) return;
 		const wasQuiet = this.#preferences.quiet;
+		const wasViewport = this.#preferences.stickyPrompt === "viewport";
 		this.#preferences = { ...this.#preferences, ...update };
+		const isViewport = this.#preferences.stickyPrompt === "viewport";
+		if (wasViewport !== isViewport) {
+			this.#transcriptCursor = { offsetFromTail: 0, measuredRows: 0, width: 0 };
+			this.#transcriptViewportCapacity = 0;
+			this.#transcriptMaxOffset = 0;
+			this.#transcriptMaxOffsetExact = false;
+			this.#transcriptStartRequested = false;
+			if (wasViewport) {
+				// Return archived rows to the native history path when leaving projection mode.
+				for (const child of this.#runtimeChildren) {
+					if (child instanceof TranscriptContainer) child.releaseViewportArchiveForFlush();
+				}
+			}
+		}
 		this.editor.setTheme(getEditorTheme());
 		try {
 			this.editor.setBorderStyle(this.#preferences.composerShape);

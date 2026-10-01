@@ -1,4 +1,4 @@
-import { applyBackgroundToLine, padding, visibleWidth } from "../utils";
+import { applyBackgroundToLine, Ellipsis, padding, truncateToWidth, visibleWidth } from "../utils";
 import { type Component, Container } from "../tui";
 import { Disclosure } from "../components/disclosure";
 import { Markdown } from "../components/markdown";
@@ -38,16 +38,18 @@ import { Memo } from "../native/memo";
 // synthesized arrow keys on omp's pty, slamming the editor caret to column 0
 // (#8030, #6115).
 //
-// `133;C` is therefore emitted immediately followed by `133;D;0` at the end of
-// the bubble. That clears the input state without reintroducing the grouping
-// problem the marker was originally omitted to avoid: the command zone opens
-// and finishes inside this component, so later assistant/tool output can never
-// be grouped under the first submitted prompt.
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_COMMAND_START = "\x1b]133;C\x07";
+// Disabled bubbles close their own `B → C → D;0` lifecycle, so later output
+// cannot be grouped beneath the prompt. Grouped bubbles instead start `D;0 →
+// A → B` before the visible prompt and end with `C`: model output remains in
+// that command zone until the next grouped prompt closes it. Both paths emit
+// `C` in the same render as every `B`, preventing terminal input semantics
+// from latching while model output renders.
+const OSC133_PROMPT_START = "\x1b]133;A\x07";
+const OSC133_COMMAND_START = "\x1b]133;B\x07";
+const OSC133_OUTPUT_START = "\x1b]133;C\x07";
 const OSC133_COMMAND_DONE = "\x1b]133;D;0\x07";
-const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAND_DONE;
+const OSC133_TURN_START = OSC133_COMMAND_DONE + OSC133_PROMPT_START + OSC133_COMMAND_START;
+const OSC133_DISABLED_TURN_CLOSE = OSC133_COMMAND_START + OSC133_OUTPUT_START + OSC133_COMMAND_DONE;
 
 /** How a user bubble styles its prose and chips (see {@link userBubbleColor}). */
 export interface UserBubbleOptions {
@@ -59,6 +61,8 @@ export interface UserBubbleOptions {
 	synthetic?: boolean;
 	/** Delivered into the response that was streaming; marked `*` at the bubble's top-left. */
 	liveSteered?: boolean;
+	/** Group the following transcript output with this user bubble through OSC 133. */
+	semanticResponseGrouping?: boolean;
 	/** SKILL.md path for a skill chip by name; `undefined` leaves the chip unlinked. */
 	skillPath?: (name: string) => string | undefined;
 	/** When the message was sent (ms); shown beside the native hover toolbar. */
@@ -125,6 +129,12 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	// never mutates the container's cached array.
 	#zoneSource: readonly string[] | undefined;
 	#zoneLines: string[] | undefined;
+	#bubbleSource: readonly string[] | undefined;
+	#bubbleRows: readonly string[] | undefined;
+	#stickyPromptSource: readonly string[] | undefined;
+	#stickyPromptWidth: number | undefined;
+	#stickyPromptRowLimit: number | undefined;
+	#stickyPromptResult: readonly string[] | undefined;
 	readonly #bgColor: (value: string) => string;
 	readonly #liveSteered: boolean;
 	readonly #synthetic: boolean;
@@ -135,12 +145,17 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	readonly #text: string;
 	/** Matches the composer tokens in {@link #text} (chips, skills, this message's mentions). */
 	readonly #tokens: RegExp;
+	readonly #semanticResponseGrouping: boolean;
+	/** Whether this bubble begins an interactive response turn rather than synthetic input. */
+	readonly initiatesResponseTurn: boolean;
 	#reaction: string | undefined;
 	#native: NativeNode | undefined;
+	#transcriptBlockPending = false;
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
 		super();
 		ensureThemeSync();
+		this.initiatesResponseTurn = options.synthetic !== true;
 		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
@@ -161,6 +176,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		this.#imageLinks = options.imageLinks;
 		this.#text = text;
 		this.#tokens = composerTokenRegex(mentionLabels);
+		this.#semanticResponseGrouping = options.semanticResponseGrouping === true;
 		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,
 			color: userBubbleColor(options, this.#tokens),
@@ -168,11 +184,27 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		markdown.setIgnoreTight(true);
 		this.addChild(markdown);
 	}
+	/** Whether this bubble may retire into native history. */
+	isTranscriptBlockFinalized(): boolean {
+		return !this.#transcriptBlockPending;
+	}
+
+	/** Keep an optimistic user bubble removable until its canonical event arrives. */
+	markTranscriptBlockPending(): void {
+		this.#transcriptBlockPending = true;
+	}
+
+	/** Allow an adopted user bubble to retire after its canonical event arrives. */
+	markTranscriptBlockFinalized(): void {
+		this.#transcriptBlockPending = false;
+	}
 
 	setReaction(emoji: string): void {
 		if (this.#reaction === emoji) return;
 		this.#reaction = emoji;
+		this.#bubbleRows = undefined;
 		this.#zoneLines = undefined;
+		this.#stickyPromptResult = undefined;
 		this.#native = undefined;
 	}
 
@@ -270,6 +302,44 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		return applyBackgroundToLine(` ${marker}${padding(gap)}${emoji}`, width, this.#bgColor);
 	}
 
+	#renderBubbleRows(lines: readonly string[], width: number): readonly string[] {
+		if (lines.length === 0) return lines;
+		if (this.#bubbleSource === lines && this.#bubbleRows !== undefined) return this.#bubbleRows;
+
+		let bubbleRows = lines;
+		if (this.#reaction !== undefined || this.#liveSteered) {
+			const adjustedRows = lines.slice();
+			adjustedRows[0] = this.#badgeRow(width);
+			bubbleRows = adjustedRows;
+		}
+		this.#bubbleSource = lines;
+		this.#bubbleRows = bubbleRows;
+		return bubbleRows;
+	}
+
+	#fitStickyRows(rows: readonly string[], width: number, rowLimit: number): readonly string[] {
+		const clipped = rows.length > rowLimit;
+		const visibleRows = Math.min(rows.length, rowLimit);
+		let fittedRows: string[] | undefined = clipped ? rows.slice(0, visibleRows) : undefined;
+		for (let index = 0; index < visibleRows; index++) {
+			const line = rows[index]!;
+			if (clipped && index === visibleRows - 1) {
+				fittedRows![index] = this.#clippedStickyRow(line, width);
+			} else if (visibleWidth(line) > width) {
+				fittedRows ??= rows.slice(0, visibleRows);
+				fittedRows[index] = truncateToWidth(line, width, Ellipsis.Omit);
+			}
+		}
+		return fittedRows ?? rows;
+	}
+
+	#clippedStickyRow(line: string, width: number): string {
+		const content = truncateToWidth(line, Math.max(0, width - 1), Ellipsis.Omit);
+		const spacer = padding(Math.max(0, width - visibleWidth(content) - 1));
+		const ellipsis = theme.fgOnBg("userMessageText", "userMessageBg", "…");
+		return applyBackgroundToLine(`${content}${spacer}${ellipsis}`, width, this.#bgColor);
+	}
+
 	override render(width: number): readonly string[] {
 		const lines = super.render(width);
 		if (lines.length === 0) {
@@ -278,13 +348,38 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		if (this.#zoneSource === lines && this.#zoneLines !== undefined) {
 			return this.#zoneLines;
 		}
-		const wrapped = lines.slice();
-		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
-		wrapped[0] = OSC133_ZONE_START + wrapped[0];
-		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		const wrapped = this.#renderBubbleRows(lines, width).slice();
+		wrapped[0] = (this.#semanticResponseGrouping ? OSC133_TURN_START : OSC133_PROMPT_START) + wrapped[0];
+		wrapped[wrapped.length - 1] += this.#semanticResponseGrouping ? OSC133_OUTPUT_START : OSC133_DISABLED_TURN_CLOSE;
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
 		return wrapped;
+	}
+
+	/** Render marker-free bubble rows for a display-only sticky prompt header. */
+	renderStickyPrompt(width: number, maxRows: number): readonly string[] {
+		const rowLimit = Number.isFinite(maxRows) ? Math.max(0, Math.trunc(maxRows)) : 0;
+		if (rowLimit === 0 || width <= 0) return [];
+
+		const lines = super.render(width);
+		if (lines.length === 0) return lines;
+
+		const bubbleRows = this.#renderBubbleRows(lines, width);
+		if (
+			this.#stickyPromptSource === bubbleRows &&
+			this.#stickyPromptWidth === width &&
+			this.#stickyPromptRowLimit === rowLimit &&
+			this.#stickyPromptResult !== undefined
+		) {
+			return this.#stickyPromptResult;
+		}
+
+		const stickyRows = this.#fitStickyRows(bubbleRows, width, rowLimit);
+		this.#stickyPromptSource = bubbleRows;
+		this.#stickyPromptWidth = width;
+		this.#stickyPromptRowLimit = rowLimit;
+		this.#stickyPromptResult = stickyRows;
+		return stickyRows;
 	}
 }
 

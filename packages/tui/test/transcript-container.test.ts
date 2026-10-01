@@ -1,13 +1,16 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import {
 	TranscriptContainer,
+	type ScrollableTranscriptProjection,
 	type TranscriptStableRow,
+	type TranscriptViewportCursor,
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, HistoryBatch } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -24,6 +27,10 @@ class Block implements Component {
 		this.#finalized = true;
 	}
 
+	replace(rows: string[]): void {
+		this.#rows = rows;
+	}
+
 	isTranscriptBlockFinalized(): boolean {
 		return this.#finalized;
 	}
@@ -32,8 +39,23 @@ class Block implements Component {
 		this.allocations.push(rows);
 	}
 
-	render(): readonly string[] {
+	render(_width?: number): readonly string[] {
 		return this.#rows;
+	}
+}
+
+class FinalizationCountingBlock extends Block {
+	finalizationChecks = 0;
+	renderCalls = 0;
+
+	override isTranscriptBlockFinalized(): boolean {
+		this.finalizationChecks++;
+		return super.isTranscriptBlockFinalized();
+	}
+
+	override render(width?: number): readonly string[] {
+		this.renderCalls++;
+		return super.render(width);
 	}
 }
 
@@ -182,10 +204,9 @@ describe("TranscriptContainer", () => {
 		transcript.children.splice(1, 2, second, first);
 		expect(transcript.renderViewport(80, 10, frame)).toEqual(["second", "", "first"]);
 		const replacement = new Block(["replacement"], false);
-		const external = [archived, second, replacement];
-		transcript.children = external;
+		transcript.children = [archived, second, replacement];
 		expect(transcript.renderViewport(80, 10, frame)).toEqual(["second", "", "replacement"]);
-		external[1] = first;
+		transcript.children[1] = first;
 		first.finalize(["first done"]);
 		replacement.finalize(["replacement done"]);
 		const final = transcript.peekFlushBatch(80);
@@ -838,5 +859,524 @@ describe("TranscriptContainer viewport click spans", () => {
 		transcript.renderViewport(80, 10, frame);
 		transcript.clear();
 		expect(transcript.getLastViewportSpans()).toEqual([]);
+	});
+});
+
+class ProjectionCountingBlock extends Block {
+	renderCalls = 0;
+
+	override render(width?: number): readonly string[] {
+		this.renderCalls++;
+		return super.render(width);
+	}
+}
+
+class CountingUserMessageComponent extends UserMessageComponent {
+	renderCalls = 0;
+
+	override render(width: number): readonly string[] {
+		this.renderCalls++;
+		return super.render(width);
+	}
+}
+
+function cursor(offsetFromTail: number, measuredRows: number, width: number): TranscriptViewportCursor {
+	return { offsetFromTail, measuredRows, width };
+}
+
+function createTwoTurnTranscript() {
+	const transcript = new TranscriptContainer();
+	const firstPrompt = new UserMessageComponent("first prompt\nfirst prompt details");
+	const firstResponse = new Block(["first response", "first response detail"], true);
+	const secondPrompt = new UserMessageComponent("second prompt\nsecond prompt details");
+	const secondResponse = new Block(["second response", "second response detail"], true);
+	transcript.addChild(firstPrompt);
+	transcript.addChild(firstResponse);
+	transcript.addChild(secondPrompt);
+	transcript.addChild(secondResponse);
+	return { transcript, firstPrompt, firstResponse, secondPrompt, secondResponse };
+}
+
+function projectionAtRow(
+	transcript: TranscriptContainer,
+	width: number,
+	measuredRows: number,
+	rowIndex: number,
+): ScrollableTranscriptProjection {
+	return transcript.renderScrollableViewport(
+		width,
+		1,
+		frame,
+		cursor(measuredRows - rowIndex - 1, measuredRows, width),
+	);
+}
+
+describe("TranscriptContainer scrollable viewport projection", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("projects a response-only window with its initiating prompt", () => {
+		const { transcript, firstPrompt, firstResponse } = createTwoTurnTranscript();
+		const full = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const responseSpan = full.spans.find(span => span.component === firstResponse);
+		if (!responseSpan) throw new Error("Expected the first response span");
+		const promptSpan = full.spans.find(span => span.component === firstPrompt);
+		if (!promptSpan) throw new Error("Expected the first prompt span");
+
+		const response = projectionAtRow(transcript, 80, full.cursor.measuredRows, responseSpan.start);
+		expect(response.rows).toEqual(["first response"]);
+		expect(response.prompt).toBe(firstPrompt);
+		expect(response.promptVisible).toBe(false);
+		expect(response.spans).toEqual([{ component: firstResponse, start: 0, end: 1 }]);
+		expect(responseSpan.start - promptSpan.end).toBe(1);
+	});
+
+	it("projects a response under a structurally declared prompt block", () => {
+		const transcript = new TranscriptContainer();
+		const prompt = Object.assign(new Block(["custom prompt"], true), {
+			initiatesResponseTurn: true as const,
+			renderStickyPrompt: (_width: number, _maxRows: number) => ["custom prompt"],
+		});
+		const response = new Block(["custom answer"], true);
+		transcript.addChild(prompt);
+		transcript.addChild(response);
+		const full = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const span = full.spans.find(item => item.component === response);
+		if (!span) throw new Error("Expected the response span");
+		const projected = projectionAtRow(transcript, 80, full.cursor.measuredRows, span.start);
+		expect(projected.prompt).toBe(prompt);
+		expect(projected.promptVisible).toBe(false);
+	});
+
+	it("changes prompt ownership when the projected window crosses a turn boundary", () => {
+		const { transcript, firstPrompt, firstResponse, secondPrompt, secondResponse } = createTwoTurnTranscript();
+		const full = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const firstSpan = full.spans.find(span => span.component === firstResponse);
+		const secondSpan = full.spans.find(span => span.component === secondResponse);
+		if (!firstSpan || !secondSpan) throw new Error("Expected both response spans");
+
+		expect(projectionAtRow(transcript, 80, full.cursor.measuredRows, firstSpan.start).prompt).toBe(firstPrompt);
+		expect(projectionAtRow(transcript, 80, full.cursor.measuredRows, secondSpan.start).prompt).toBe(secondPrompt);
+	});
+
+	it("recomputes prompt ownership after transcript children are reordered and replaced", () => {
+		const { transcript, firstPrompt, firstResponse, secondPrompt, secondResponse } = createTwoTurnTranscript();
+		transcript.children = [secondPrompt, secondResponse, firstPrompt, firstResponse];
+		const reordered = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const reorderedSpan = reordered.spans.find(span => span.component === secondResponse);
+		if (!reorderedSpan) throw new Error("Expected the reordered response span");
+		expect(projectionAtRow(transcript, 80, reordered.cursor.measuredRows, reorderedSpan.start).prompt).toBe(
+			secondPrompt,
+		);
+
+		const replacementPrompt = new UserMessageComponent("replacement prompt");
+		transcript.children = [replacementPrompt, secondResponse, firstPrompt, firstResponse];
+		const replaced = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const replacedSpan = replaced.spans.find(span => span.component === secondResponse);
+		if (!replacedSpan) throw new Error("Expected the replacement response span");
+		expect(projectionAtRow(transcript, 80, replaced.cursor.measuredRows, replacedSpan.start).prompt).toBe(
+			replacementPrompt,
+		);
+	});
+
+	it("recomputes prompt ownership after an in-place child reorder", () => {
+		const { transcript, firstResponse, secondPrompt } = createTwoTurnTranscript();
+		transcript.children.splice(1, 2, secondPrompt, firstResponse);
+		const reordered = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const responseSpan = reordered.spans.find(span => span.component === firstResponse);
+		if (!responseSpan) throw new Error("Expected the reordered response span");
+
+		expect(projectionAtRow(transcript, 80, reordered.cursor.measuredRows, responseSpan.start).prompt).toBe(
+			secondPrompt,
+		);
+	});
+
+	it("reports a visible initiating prompt in its projected window", () => {
+		const { transcript, secondPrompt } = createTwoTurnTranscript();
+		const full = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const promptSpan = full.spans.find(span => span.component === secondPrompt);
+		if (!promptSpan) throw new Error("Expected the second prompt span");
+
+		const promptTextRow = full.rows.findIndex(
+			(row, rowIndex) =>
+				rowIndex >= promptSpan.start && rowIndex < promptSpan.end && Bun.stripANSI(row).trim().length > 0,
+		);
+		if (promptTextRow < 0) throw new Error("Expected a visible prompt text row");
+		const promptWindow = projectionAtRow(transcript, 80, full.cursor.measuredRows, promptTextRow);
+		expect(promptWindow.prompt).toBe(secondPrompt);
+		expect(promptWindow.promptVisible).toBe(true);
+	});
+
+	it("does not treat bubble padding alone as visible prompt text", () => {
+		const transcript = new TranscriptContainer();
+		const prompt = new UserMessageComponent("prompt text");
+		transcript.addChild(prompt);
+		transcript.addChild(new Block(["response row"], true));
+		const full = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const promptSpan = full.spans.find(span => span.component === prompt);
+		if (!promptSpan) throw new Error("Expected the prompt span");
+		const paddingRow = promptSpan.end - 1;
+		expect(Bun.stripANSI(full.rows[paddingRow] ?? "").trim()).toBe("");
+		const paddingWindow = transcript.renderScrollableViewport(
+			80,
+			1,
+			frame,
+			cursor(full.cursor.measuredRows - promptSpan.end, full.cursor.measuredRows, 80),
+		);
+		expect(paddingWindow.prompt).toBe(prompt);
+		expect(paddingWindow.promptVisible).toBe(false);
+	});
+
+	it("refreshes a visible historical prompt row after its reaction changes", () => {
+		const transcript = new TranscriptContainer();
+		const prompt = new UserMessageComponent("reactive prompt");
+		transcript.addChild(prompt);
+		transcript.addChild(new Block(["response row"], true));
+		const full = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const promptSpan = full.spans.find(span => span.component === prompt);
+		if (!promptSpan) throw new Error("Expected the prompt span");
+		const before = projectionAtRow(transcript, 80, full.cursor.measuredRows, promptSpan.start);
+
+		prompt.setReaction("👍");
+		const after = projectionAtRow(transcript, 80, full.cursor.measuredRows, promptSpan.start);
+		expect(after.rows[0]).not.toBe(before.rows[0]);
+	});
+
+	it("recomputes a projected range when a refreshed historical entry changes row count", () => {
+		const transcript = new TranscriptContainer();
+		const changing = new ProjectionCountingBlock(["row 1", "row 2", "row 3", "row 4"], true);
+		transcript.addChild(changing);
+		transcript.addChild(new Block(["tail"], true));
+		const measured = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const middle = transcript.renderScrollableViewport(80, 2, frame, cursor(2, measured.cursor.measuredRows, 80));
+		expect(middle.rows).toEqual(["row 3", "row 4"]);
+
+		changing.replace(["row 1", "row 2", "row 3", "row 4", "row 5"]);
+		const reflowed = transcript.renderScrollableViewport(80, 2, frame, middle.cursor);
+		expect(reflowed.cursor.measuredRows).toBe(measured.cursor.measuredRows + 1);
+		expect(reflowed.cursor.offsetFromTail).toBe(middle.cursor.offsetFromTail + 1);
+		expect(reflowed.rows).toEqual(middle.rows);
+	});
+
+	it("anchors a suspended cursor when an archived tail finalizes with different rows", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["history row"], true));
+		const tail = new Block(["partial tail"], false);
+		transcript.addChild(tail);
+
+		const full = transcript.renderScrollableViewport(80, 10, frame, cursor(0, 0, 80));
+		const suspended = transcript.renderScrollableViewport(80, 1, frame, cursor(2, full.cursor.measuredRows, 80));
+		expect(suspended.rows).toEqual(["history row"]);
+
+		tail.finalize(["final row 1", "final row 2", "final row 3"]);
+		transcript.archiveFinalizedForViewport();
+		const finalized = transcript.renderScrollableViewport(80, 1, frame, suspended.cursor);
+
+		expect(finalized.cursor.measuredRows).toBe(full.cursor.measuredRows + 2);
+		expect(finalized.cursor.offsetFromTail).toBe(suspended.cursor.offsetFromTail + 2);
+		expect(finalized.rows).toEqual(suspended.rows);
+	});
+
+	it("does not offset-anchor growth before a suspended separator", () => {
+		const transcript = new TranscriptContainer();
+		const active = new Block(["partial row"], false);
+		transcript.addChild(active);
+		transcript.addChild(new Block(["following row"], true));
+
+		const full = transcript.renderScrollableViewport(80, 10, frame, cursor(0, 0, 80));
+		const separator = transcript.renderScrollableViewport(80, 1, frame, cursor(1, full.cursor.measuredRows, 80));
+		expect(separator.rows).toEqual([""]);
+
+		active.finalize(["final row 1", "final row 2", "final row 3"]);
+		transcript.archiveFinalizedForViewport();
+		const after = transcript.renderScrollableViewport(80, 1, frame, separator.cursor);
+
+		expect(after.rows).toEqual(separator.rows);
+		expect(after.cursor.offsetFromTail).toBe(separator.cursor.offsetFromTail);
+		expect(after.cursor.measuredRows).toBe(full.cursor.measuredRows + 2);
+		const intoBlock = transcript.renderScrollableViewport(
+			80,
+			1,
+			frame,
+			cursor(after.cursor.offsetFromTail + 1, after.cursor.measuredRows, 80),
+		);
+		expect(intoBlock.rows).toEqual(["final row 3"]);
+		expect(intoBlock.cursor.offsetFromTail).toBe(after.cursor.offsetFromTail + 1);
+	});
+
+	it("refreshes active growth before a suspended separator without shifting later seeks", () => {
+		const transcript = new TranscriptContainer();
+		const active = new Block(["partial row"], false);
+		transcript.addChild(active);
+		transcript.addChild(new Block(["following row"], true));
+
+		const full = transcript.renderScrollableViewport(80, 10, frame, cursor(0, 0, 80));
+		const separator = transcript.renderScrollableViewport(80, 1, frame, cursor(1, full.cursor.measuredRows, 80));
+		expect(separator.rows).toEqual([""]);
+
+		active.replace(["active row 1", "active row 2", "active row 3"]);
+		const after = transcript.renderScrollableViewport(80, 1, frame, separator.cursor);
+		expect(after.rows).toEqual(separator.rows);
+		expect(after.cursor.offsetFromTail).toBe(separator.cursor.offsetFromTail);
+		expect(after.cursor.measuredRows).toBe(full.cursor.measuredRows + 2);
+
+		const intoBlock = transcript.renderScrollableViewport(
+			80,
+			1,
+			frame,
+			cursor(after.cursor.offsetFromTail + 1, after.cursor.measuredRows, 80),
+		);
+		expect(intoBlock.rows).toEqual(["active row 3"]);
+		expect(intoBlock.cursor.offsetFromTail).toBe(after.cursor.offsetFromTail + 1);
+	});
+
+	it("anchors suspended cursors on append and keeps tail-following cursors at the tail", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new UserMessageComponent("append anchor prompt"));
+		const response = new Block(["r1", "r2", "r3", "r4", "r5"], false);
+		transcript.addChild(response);
+		const measured = transcript.renderScrollableViewport(80, 100, frame, cursor(0, 0, 80));
+		const suspended = transcript.renderScrollableViewport(80, 3, frame, cursor(2, measured.cursor.measuredRows, 80));
+		const following = transcript.renderScrollableViewport(80, 3, frame, cursor(0, measured.cursor.measuredRows, 80));
+
+		response.replace(["r1", "r2", "r3", "r4", "r5", "r6"]);
+		const anchored = transcript.renderScrollableViewport(80, 3, frame, suspended.cursor);
+		const tail = transcript.renderScrollableViewport(80, 3, frame, following.cursor);
+		expect(anchored.cursor.offsetFromTail).toBe(suspended.cursor.offsetFromTail + 1);
+		expect(anchored.rows).toEqual(suspended.rows);
+		expect(tail.cursor.offsetFromTail).toBe(0);
+		expect(tail.rows.slice(-1)).toEqual(["r6"]);
+		const reflowed = transcript.renderScrollableViewport(40, 3, frame, suspended.cursor);
+		expect(reflowed.cursor.offsetFromTail).toBe(Math.min(suspended.cursor.offsetFromTail, reflowed.maxOffset));
+	});
+
+	it("clamps non-finite and negative dimensions and cursor measurements safely", () => {
+		const { transcript } = createTwoTurnTranscript();
+		const projection = transcript.renderScrollableViewport(
+			Number.POSITIVE_INFINITY,
+			Number.NaN,
+			frame,
+			cursor(Number.POSITIVE_INFINITY, Number.NaN, Number.NEGATIVE_INFINITY),
+		);
+
+		expect(projection.rows).toEqual([]);
+		expect(projection.cursor.width).toBe(1);
+		expect(projection.cursor.offsetFromTail).toBe(0);
+		expect(Number.isFinite(projection.cursor.measuredRows)).toBe(true);
+		expect(Number.isFinite(projection.maxOffset)).toBe(true);
+		const negative = transcript.renderScrollableViewport(-10, -3, frame, cursor(1, 0, 80));
+		expect(negative.rows).toEqual([]);
+		expect(negative.cursor.width).toBe(1);
+		expect(Number.isFinite(negative.maxOffset)).toBe(true);
+	});
+
+	it("leaves unrelated old entries unrendered until incremental scrolling reaches them", () => {
+		const transcript = new TranscriptContainer();
+		const entries: ProjectionCountingBlock[] = [];
+		for (let index = 0; index < 20; index++) {
+			const entry = new ProjectionCountingBlock([`historical row ${index}`], true);
+			entries.push(entry);
+			transcript.addChild(entry);
+		}
+
+		const tail = transcript.renderScrollableViewport(80, 1, frame, cursor(0, 0, 80));
+		expect(tail.rows).toEqual(["historical row 19"]);
+		expect(entries.at(-1)!.renderCalls).toBe(1);
+		expect(entries.slice(0, -1).every(entry => entry.renderCalls === 0)).toBe(true);
+
+		const boundary = transcript.renderScrollableViewport(80, 1, frame, cursor(1, tail.cursor.measuredRows, 80));
+		expect(boundary.rows).toEqual([""]);
+		expect(entries[18]!.renderCalls).toBe(1);
+		expect(entries[17]!.renderCalls).toBe(0);
+		const older = transcript.renderScrollableViewport(80, 1, frame, cursor(2, boundary.cursor.measuredRows, 80));
+		expect(older.rows).toEqual(["historical row 18"]);
+		expect(entries[17]!.renderCalls).toBe(0);
+	});
+
+	it("reuses cached historical rows outside nearby projected windows", () => {
+		const transcript = new TranscriptContainer();
+		const entries: ProjectionCountingBlock[] = [];
+		const prompts: CountingUserMessageComponent[] = [];
+		for (let index = 0; index < 12; index++) {
+			const prompt = new CountingUserMessageComponent(`prompt ${index}`);
+			const response = new ProjectionCountingBlock([`response ${index} row 1`, `response ${index} row 2`], true);
+			prompts.push(prompt);
+			entries.push(response);
+			transcript.addChild(prompt);
+			transcript.addChild(response);
+		}
+		const full = transcript.renderScrollableViewport(80, 1000, frame, cursor(0, 0, 80));
+		const last = full.spans.find(span => span.component === entries.at(-1));
+		if (!last) throw new Error("Expected the last response span");
+		const farPromptRenders = prompts[0]!.renderCalls;
+		const farResponseRenders = entries[0]!.renderCalls;
+		const nearbyPromptRenders = prompts.at(-1)!.renderCalls;
+		const lastResponseRenders = entries.at(-1)!.renderCalls;
+		projectionAtRow(transcript, 80, full.cursor.measuredRows, last.start);
+		expect(entries.at(-1)!.renderCalls).toBe(lastResponseRenders + 1);
+		projectionAtRow(transcript, 80, full.cursor.measuredRows, last.start + 1);
+		expect(entries.at(-1)!.renderCalls).toBe(lastResponseRenders + 2);
+		expect(prompts[0]!.renderCalls).toBe(farPromptRenders);
+		expect(entries[0]!.renderCalls).toBe(farResponseRenders);
+		expect(prompts.at(-1)!.renderCalls).toBe(nearbyPromptRenders);
+	});
+	it("seeks warm deep windows without inspecting the history between the tail and selection", () => {
+		const transcript = new TranscriptContainer();
+		const entries: ProjectionCountingBlock[] = [];
+		for (let index = 0; index < 128; index++) {
+			const entry = new ProjectionCountingBlock([`history ${index}`], true);
+			entries.push(entry);
+			transcript.addChild(entry);
+		}
+		const full = transcript.renderScrollableViewport(80, 1000, frame, cursor(0, 0, 80));
+		const target = entries[12]!;
+		const targetSpan = full.spans.find(span => span.component === target);
+		if (!targetSpan) throw new Error("Expected the selected historical block span");
+		const selected = projectionAtRow(transcript, 80, full.cursor.measuredRows, targetSpan.start);
+		expect(selected.spans).toEqual([{ component: target, start: 0, end: 1 }]);
+
+		const appended = new ProjectionCountingBlock(["new tail"], true);
+		transcript.addChild(appended);
+		const tail = transcript.renderScrollableViewport(80, 1, frame, cursor(0, full.cursor.measuredRows, 80));
+		const targetOffset = full.cursor.measuredRows + 2 - targetSpan.start - 1;
+		const deepCursor = cursor(targetOffset, tail.cursor.measuredRows, 80);
+		const deep = transcript.renderScrollableViewport(80, 1, frame, deepCursor);
+		expect(deep.rows).toEqual(["history 12"]);
+		expect(deep.spans).toEqual([{ component: target, start: 0, end: 1 }]);
+
+		const historicalEntries = new Set<Component>(entries);
+		const originalGet = Map.prototype.get;
+		let inspectedHistoricalEntries = 0;
+		Map.prototype.get = function <K, V>(this: Map<K, V>, key: K): V | undefined {
+			if (historicalEntries.has(key as unknown as Component)) inspectedHistoricalEntries++;
+			return originalGet.call(this, key);
+		};
+		try {
+			const repeated = transcript.renderScrollableViewport(80, 1, frame, deep.cursor);
+			expect(repeated.rows).toEqual(deep.rows);
+		} finally {
+			Map.prototype.get = originalGet;
+		}
+		expect(inspectedHistoricalEntries).toBeLessThan(8);
+	});
+
+	it("clears cached historical rows on a presentation reset", () => {
+		const transcript = new TranscriptContainer();
+		const block = new ProjectionCountingBlock(["before reset"], true);
+		transcript.addChild(block);
+		const first = transcript.renderScrollableViewport(80, 1, frame, cursor(0, 0, 80));
+		expect(first.cursor.measuredRows).toBe(1);
+		expect(block.renderCalls).toBe(1);
+
+		block.replace(["after reset"]);
+		transcript.resetStableEmission();
+		transcript.renderScrollableViewport(80, 1, frame, first.cursor);
+		expect(block.renderCalls).toBe(2);
+	});
+
+	it("bounds cached historical rows to recent width epochs", () => {
+		const transcript = new TranscriptContainer();
+		const block = new ProjectionCountingBlock(["stable row"], true);
+		transcript.addChild(block);
+		for (const width of [10, 20, 30]) {
+			transcript.renderScrollableViewport(width, 1, frame, cursor(0, 0, width));
+		}
+		transcript.renderScrollableViewport(10, 1, frame, cursor(0, 0, 10));
+		expect(block.renderCalls).toBe(4);
+	});
+
+	it("archives finalized rows without a history offer and flushes each exactly once after release", () => {
+		const transcript = new TranscriptContainer();
+		const expected: string[] = [];
+		const entries: Block[] = [];
+		for (let index = 0; index < 300; index++) {
+			const row = `archived row ${index}`;
+			expected.push(row);
+			const entry = new Block([row], true);
+			entries.push(entry);
+			transcript.addChild(entry);
+		}
+
+		transcript.archiveFinalizedForViewport();
+		expect(transcript.blockStates()).toEqual(Array.from({ length: 300 }, () => "archived"));
+		expect(transcript.canAdmit(1)).toBe(true);
+		expect(transcript.canRemoveBlock(entries[0]!)).toBe(false);
+		expect(transcript.renderScrollableViewport(80, 1, frame, cursor(0, 0, 80)).rows).toEqual(["archived row 299"]);
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+
+		transcript.releaseViewportArchiveForFlush();
+		const flushed: string[] = [];
+		let batch: HistoryBatch | undefined;
+		while ((batch = transcript.peekFlushBatch(80)) !== undefined) {
+			flushed.push(...batch.rows.filter(row => row.startsWith("archived row ")));
+			transcript.acknowledgeFinalizedBatch(batch.id);
+		}
+		expect(flushed).toEqual(expected);
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+	});
+
+	it("does not revisit archived entries during repeated viewport archival", () => {
+		const transcript = new TranscriptContainer();
+		const entries: FinalizationCountingBlock[] = [];
+		for (let index = 0; index < 300; index++) {
+			const entry = new FinalizationCountingBlock([`history ${index}`], true);
+			entries.push(entry);
+			transcript.addChild(entry);
+		}
+
+		let childIndexReads = 0;
+		transcript.children = new Proxy(transcript.children, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^(0|[1-9]\d*)$/.test(property) && Number(property) < 300)
+					childIndexReads++;
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		transcript.archiveFinalizedForViewport();
+		const checksAfterArchive = entries.map(entry => entry.finalizationChecks);
+		childIndexReads = 0;
+		for (let iteration = 0; iteration < 5; iteration++) transcript.archiveFinalizedForViewport();
+
+		expect(entries.map(entry => entry.finalizationChecks)).toEqual(checksAfterArchive);
+		expect(childIndexReads).toBe(0);
+	});
+
+	it("keeps viewport and pressure polling on the active tail after archival", () => {
+		const transcript = new TranscriptContainer();
+		const historical: FinalizationCountingBlock[] = [];
+		for (let index = 0; index < 300; index++) {
+			const entry = new FinalizationCountingBlock([`history ${index}`], true);
+			historical.push(entry);
+			transcript.addChild(entry);
+		}
+
+		let childIndexReads = 0;
+		transcript.children = new Proxy(transcript.children, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^(0|[1-9]\d*)$/.test(property) && Number(property) < 300)
+					childIndexReads++;
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		transcript.archiveFinalizedForViewport();
+		for (const entry of historical) {
+			entry.finalizationChecks = 0;
+			entry.renderCalls = 0;
+		}
+
+		const tail = new ProjectionCountingBlock(["active tail"], false);
+		transcript.addChild(tail);
+		childIndexReads = 0;
+		for (let frameIndex = 0; frameIndex < 5; frameIndex++) {
+			expect(transcript.liveRowCount(80)).toBe(1);
+			expect(transcript.peekFinalizedBatch(80, 10)).toBeUndefined();
+			expect(transcript.renderViewport(80, 10, frame)).toEqual(["active tail"]);
+		}
+
+		expect(historical.map(entry => entry.finalizationChecks)).toEqual(Array.from({ length: 300 }, () => 0));
+		expect(historical.map(entry => entry.renderCalls)).toEqual(Array.from({ length: 300 }, () => 0));
+		expect(childIndexReads).toBe(0);
+		expect(tail.renderCalls).toBeGreaterThan(0);
 	});
 });

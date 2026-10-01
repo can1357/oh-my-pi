@@ -140,6 +140,7 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	const pending = pendingComposer;
 	if (!pending) return;
 	const preferences: ComposerPreferences = {
+		stickyPrompt: update.stickyPrompt,
 		quiet: update.quiet,
 		composerShape: update.composerShape,
 		showHardwareCursor: update.showHardwareCursor,

@@ -282,6 +282,7 @@ describe("Composer prepaint", () => {
 		await initTheme();
 		settings = await Settings.init({ inMemory: true });
 		config = {
+			stickyPrompt: "off",
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings) ?? "box",
 			showHardwareCursor: cfgShowHardwareCursor.get(settings),
@@ -764,6 +765,7 @@ describe("Composer prepaint", () => {
 		).toContain("Welcome back!");
 
 		applyStartupComposerPreferences({
+			stickyPrompt: config.stickyPrompt,
 			quiet: true,
 			composerShape: "box",
 			showHardwareCursor: config.showHardwareCursor,

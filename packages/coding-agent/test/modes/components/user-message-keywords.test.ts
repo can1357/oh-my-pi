@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -14,7 +14,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { Container } from "@oh-my-pi/pi-tui";
 
-import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTuiHyperlinks, cfgTuiStickyPrompt } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -30,8 +30,34 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
+afterEach(() => {
+	cfgTuiStickyPrompt.set(Settings.instance, "off");
+});
+
 function render(text: string): string {
 	return new UserMessageComponent(text).render(80).join("\n");
+}
+
+function renderThroughUiHelpers(text: string, synthetic = false): string {
+	const chatContainer = new Container();
+	const sessionManagerMock = { putBlobSync: () => undefined };
+	const helpers = new UiHelpers({
+		chatContainer,
+		sessionManager: sessionManagerMock,
+		viewSession: { sessionManager: sessionManagerMock },
+		transcriptMessageComponents: new WeakMap(),
+		settings: Settings.instance,
+	} as unknown as InteractiveModeContext);
+	helpers.addMessageToChat({
+		role: "user",
+		content: [{ type: "text", text }],
+		attribution: "user",
+		synthetic,
+		timestamp: Date.now(),
+	});
+	const component = chatContainer.children.at(-1);
+	if (!component) throw new Error("Expected user message component to be appended");
+	return component.render(80).join("\n");
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -47,6 +73,38 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		// and the word no longer survives as a contiguous run in the rendered bytes.
 		expect(raw).toContain("\x1b[38");
 		expect(raw).not.toContain("orchestrate");
+	});
+
+	it("marks only non-synthetic user bubbles as response-turn initiators", () => {
+		expect(new UserMessageComponent("user prompt").initiatesResponseTurn).toBe(true);
+		expect(new UserMessageComponent("agent input", { synthetic: true }).initiatesResponseTurn).toBe(false);
+	});
+
+	it("renders a bounded, marker-free sticky prompt with a styled ellipsis when clipped", () => {
+		const component = new UserMessageComponent(`visible first line ${"continued prompt ".repeat(8)}`, {
+			semanticResponseGrouping: true,
+		});
+		const rows = component.renderStickyPrompt(24, 3);
+		expect(component.renderStickyPrompt(24, 3)).toBe(rows);
+		const visible = Bun.stripANSI(rows.join("\n"));
+
+		expect(rows.length).toBeLessThanOrEqual(3);
+		expect(rows.every(row => Bun.stringWidth(Bun.stripANSI(row)) <= 24)).toBe(true);
+		expect(visible).toContain("visible first line");
+		expect(visible.endsWith("…")).toBe(true);
+		expect(rows.join("\n")).not.toContain("\x1b]133;");
+		expect(rows.at(-1)).toContain(theme.getBgAnsi("userMessageBg"));
+		expect(component.renderStickyPrompt(80, 0)).toEqual([]);
+		expect(component.renderStickyPrompt(80, -1)).toEqual([]);
+		const renderedRows = component.render(24);
+		expect(component.render(24)).toBe(renderedRows);
+	});
+
+	it("bounds a live-steered sticky prompt row at width one", () => {
+		const rows = new UserMessageComponent("prompt", { liveSteered: true }).renderStickyPrompt(1, 100);
+		expect(rows.length).toBeGreaterThan(0);
+		expect(rows.every(row => Bun.stringWidth(Bun.stripANSI(row)) <= 1)).toBe(true);
+		expect(rows.join("\n")).not.toContain("\x1b]133;");
 	});
 
 	it("does not paint a keyword inside an inline code span", () => {
@@ -86,6 +144,84 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		expect(raw.endsWith("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07")).toBe(true);
 		expect(countOccurrences(raw, "\x1b]133;C\x07")).toBe(1);
 		expect(countOccurrences(raw, "\x1b]133;D;0\x07")).toBe(1);
+	});
+
+	it("groups a multiline prompt with its following response when enabled", () => {
+		const raw = new UserMessageComponent("first line\nsecond line", { semanticResponseGrouping: true })
+			.render(80)
+			.join("\n");
+		const done = "\x1b]133;D;0\x07";
+		const prompt = "\x1b]133;A\x07";
+		const command = "\x1b]133;B\x07";
+		const output = "\x1b]133;C\x07";
+		expect(raw.indexOf(done)).toBeLessThan(raw.indexOf(prompt));
+		expect(raw.indexOf(prompt)).toBeLessThan(raw.indexOf(command));
+		expect(raw.indexOf(command)).toBeLessThan(raw.indexOf("first line"));
+		expect(raw.indexOf("second line")).toBeLessThan(raw.indexOf(output));
+		expect(raw.indexOf(done, raw.indexOf(output) + output.length)).toBe(-1);
+	});
+
+	it("closes a grouped response when the next prompt begins", () => {
+		const first = new UserMessageComponent("first prompt", { semanticResponseGrouping: true }).render(80).join("\n");
+		const response = "representative assistant and tool output";
+		const second = new UserMessageComponent("second prompt", { semanticResponseGrouping: true })
+			.render(80)
+			.join("\n");
+		const stream = first + response + second;
+		const output = "\x1b]133;C\x07";
+		const done = "\x1b]133;D;0\x07";
+		const secondPrompt = "\x1b]133;A\x07";
+		expect(stream.indexOf(output)).toBeLessThan(stream.indexOf(response));
+		const close = stream.indexOf(done, stream.indexOf(response) + response.length);
+		expect(close).toBeGreaterThan(stream.indexOf(response));
+		expect(close).toBeLessThan(stream.indexOf(secondPrompt, close));
+	});
+
+	it("uses terminal sticky prompt mode through UiHelpers", () => {
+		cfgTuiStickyPrompt.set(Settings.instance, "terminal");
+		const raw = renderThroughUiHelpers("terminal prompt");
+		const done = "\x1b]133;D;0\x07";
+		const prompt = "\x1b]133;A\x07";
+		const command = "\x1b]133;B\x07";
+		const output = "\x1b]133;C\x07";
+		expect(raw.startsWith(done + prompt + command)).toBe(true);
+		expect(raw.endsWith(output)).toBe(true);
+	});
+
+	it("keeps viewport sticky prompt mode inside its OSC 133 prompt envelope", () => {
+		cfgTuiStickyPrompt.set(Settings.instance, "viewport");
+		const raw = renderThroughUiHelpers("viewport prompt");
+		const prompt = "\x1b]133;A\x07";
+		const command = "\x1b]133;B\x07";
+		const output = "\x1b]133;C\x07";
+		const done = "\x1b]133;D;0\x07";
+		expect(raw.startsWith(prompt)).toBe(true);
+		expect(raw.indexOf("viewport prompt")).toBeLessThan(raw.indexOf(command));
+		expect(raw.endsWith(command + output + done)).toBe(true);
+	});
+
+	it("keeps synthetic prompts out of terminal response grouping", () => {
+		cfgTuiStickyPrompt.set(Settings.instance, "terminal");
+		const synthetic = renderThroughUiHelpers("agent instruction", true);
+		const user = renderThroughUiHelpers("real user prompt");
+		const response = "real assistant response";
+		const done = "\x1b]133;D;0\x07";
+		const prompt = "\x1b]133;A\x07";
+		const command = "\x1b]133;B\x07";
+		const output = "\x1b]133;C\x07";
+
+		// Synthetic/developer bubbles retain their self-contained legacy envelope;
+		// only the actual user prompt opens the semantic zone containing the answer.
+		expect(synthetic.startsWith(prompt)).toBe(true);
+		expect(synthetic.startsWith(done + prompt)).toBe(false);
+		expect(synthetic.endsWith(command + output + done)).toBe(true);
+		expect(user.startsWith(done + prompt + command)).toBe(true);
+		expect(user.endsWith(output)).toBe(true);
+
+		const stream = synthetic + user + response;
+		const userOutput = stream.indexOf(output, synthetic.length);
+		expect(userOutput).toBeLessThan(stream.indexOf(response));
+		expect(stream.indexOf(done, userOutput + output.length)).toBe(-1);
 	});
 
 	it("collapses image markers to identity-colored chip tokens in the rendered bubble", () => {
@@ -161,6 +297,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 			sessionManager: sessionManagerMock,
 			viewSession: { sessionManager: sessionManagerMock },
 			transcriptMessageComponents: new WeakMap(),
+			settings: Settings.instance,
 		} as unknown as InteractiveModeContext);
 		const message: AgentMessage = {
 			role: "user",

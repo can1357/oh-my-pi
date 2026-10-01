@@ -142,6 +142,7 @@ function parseUiState(
 	if (!isRecord(value) || !isRecord(value.preferences) || !isRecord(value.theme)) return undefined;
 	const {
 		quiet,
+		stickyPrompt,
 		composerShape,
 		showHardwareCursor,
 		maxInlineImages,
@@ -154,6 +155,10 @@ function parseUiState(
 	} = value.preferences;
 	if (
 		typeof quiet !== "boolean" ||
+		(stickyPrompt !== undefined &&
+			stickyPrompt !== "off" &&
+			stickyPrompt !== "terminal" &&
+			stickyPrompt !== "viewport") ||
 		typeof composerShape !== "string" ||
 		typeof showHardwareCursor !== "boolean" ||
 		typeof maxInlineImages !== "number" ||
@@ -183,6 +188,7 @@ function parseUiState(
 	}
 	return {
 		preferences: {
+			stickyPrompt: stickyPrompt === "terminal" || stickyPrompt === "viewport" ? stickyPrompt : "off",
 			quiet,
 			composerShape,
 			showHardwareCursor,

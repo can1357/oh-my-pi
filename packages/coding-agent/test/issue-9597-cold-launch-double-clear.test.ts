@@ -57,6 +57,7 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		await initTheme();
 		settings = await Settings.init({ inMemory: true });
 		config = {
+			stickyPrompt: "off",
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings) ?? "box",
 			showHardwareCursor: cfgShowHardwareCursor.get(settings),

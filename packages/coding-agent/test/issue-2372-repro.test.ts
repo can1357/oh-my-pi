@@ -4,6 +4,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { cfgTuiStickyPrompt } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -59,6 +61,7 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		mode.locallySubmittedUserSignatures.clear();
 		mode.optimisticUserMessageSignature = undefined;
 		mode.isInitialized = false;
+		mode.composer.setPreferences({ stickyPrompt: "off" });
 	});
 
 	afterEach(() => {
@@ -101,22 +104,26 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		expect(mode.chatContainer.children.length).toBeGreaterThan(0);
 	});
 
-	it("does not duplicate the user message once message_start has cleared the optimistic signature", () => {
-		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
-
+	it("finalizes the optimistic user bubble when message_start adopts its matching signature", async () => {
+		mode.isInitialized = true;
+		const controller = new EventController(mode);
 		mode.startPendingSubmission({ text: "hello again" });
-		expect(addMessageSpy).toHaveBeenCalledTimes(1);
+		expect(mode.chatContainer.blockStates()).toEqual(["active"]);
 
-		// Simulate EventController#handleMessageStart having confirmed the user
-		// message: signature is cleared, real session entry exists in the
-		// transcript path. `#pendingSubmittedInput` may still be alive (we are
-		// streaming) but the replay must NOT trigger.
-		mode.optimisticUserMessageSignature = undefined;
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "hello again" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
 
-		mode.rebuildChatFromMessages();
-
-		// Only the initial optimistic add — no replay duplication.
-		expect(addMessageSpy).toHaveBeenCalledTimes(1);
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+		expect(mode.chatContainer.children).toHaveLength(1);
+		mode.chatContainer.liveRowCount(80);
+		expect(mode.chatContainer.blockStates()).toEqual(["settled"]);
 	});
 
 	it("replaces raw slash optimistic text when message_start carries expanded content", async () => {
@@ -149,6 +156,46 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		expect(mode.chatContainer.children).toHaveLength(1);
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 		expect(mode.locallySubmittedUserSignatures.has("/jira-task\u00000")).toBe(false);
+	});
+	it("replaces a pending prompt after its immediate viewport render when canonical text differs", async () => {
+		mode.composer.setPreferences({ stickyPrompt: "viewport" });
+		mode.composer.setRuntimeChildren([mode.chatContainer]);
+		mode.composer.start({ playWelcomeIntro: false });
+		mode.isInitialized = true;
+		const controller = new EventController(mode);
+
+		mode.startPendingSubmission({ text: "raw optimistic viewport prompt" });
+		mode.ui.renderNow();
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "canonical viewport prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(mode.chatContainer.children).toHaveLength(1);
+		expect(mode.chatContainer.children[0]).toBeInstanceOf(UserMessageComponent);
+		const rendered = mode.chatContainer.children.map(child => Bun.stripANSI(child.render(80).join("\n"))).join("\n");
+		expect(rendered).toContain("canonical viewport prompt");
+		expect(rendered).not.toContain("raw optimistic viewport prompt");
+	});
+
+	it("finalizes a failed preflight bubble so later transcript blocks can archive", () => {
+		const submission = mode.startPendingSubmission({ text: "preflight failed before a message event" });
+		const optimistic = mode.chatContainer.children[0];
+		expect(optimistic).toBeInstanceOf(UserMessageComponent);
+		if (!(optimistic instanceof UserMessageComponent)) throw new Error("Expected an optimistic user bubble");
+		expect(optimistic.isTranscriptBlockFinalized()).toBe(false);
+
+		mode.finishPendingSubmission(submission);
+		expect(optimistic.isTranscriptBlockFinalized()).toBe(true);
+		expect(mode.locallySubmittedUserSignatures.has("preflight failed before a message event\u00000")).toBe(false);
+		mode.chatContainer.addChild(new UserMessageComponent("later transcript block"));
+		mode.chatContainer.archiveFinalizedForViewport();
+		expect(mode.chatContainer.blockStates()).toEqual(["archived", "archived"]);
 	});
 
 	it("does not replace a pending optimistic prompt with another local user event", async () => {
@@ -228,5 +275,27 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		expect(mode.editor.getExpandedText()).toBe("first [Image #1]\nlater [Image #2]");
 		expect(mode.editor.pendingImages).toEqual([submittedImage, laterImage]);
 		expect(mode.editor.pendingImageLinks).toEqual(["file:///first.png", "file:///later.png"]);
+	});
+
+	it("switches sticky presentation and rebuilds once without dropping the optimistic prompt", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		mode.startPendingSubmission({ text: "optimistic sticky prompt" });
+		expect(mode.optimisticUserMessageSignature).toBe("optimistic sticky prompt\u00000");
+
+		const rebuildChat = vi.spyOn(mode, "rebuildChatFromMessages");
+		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
+		const setPreferences = vi.spyOn(mode.composer, "setPreferences");
+		cfgTuiStickyPrompt.set(session.settings, "viewport");
+		await Promise.resolve();
+
+		expect(setPreferences).toHaveBeenCalledTimes(1);
+		expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ stickyPrompt: "viewport" }));
+		expect(rebuildChat).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(mode.optimisticUserMessageSignature).toBe("optimistic sticky prompt\u00000");
+		expect(mode.chatContainer.children).toHaveLength(1);
+		expect(mode.chatContainer.children[0]).toBeInstanceOf(UserMessageComponent);
+		const renderedPrompt = mode.chatContainer.children.flatMap(child => child.render(80)).join("\n");
+		expect(Bun.stripANSI(renderedPrompt)).toContain("optimistic sticky prompt");
 	});
 });

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -16,7 +16,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
-import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTuiMouse, cfgTuiStickyPrompt } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => Bun.stripANSI(row).trimEnd());
@@ -114,6 +114,21 @@ describe("inline click-to-focus geometry", () => {
 
 		// Chrome rows (the status line at the bottom) name no agent.
 		expect(mode.resolveViewportClickCandidates(viewport.length - 1 - top)).toEqual([]);
+	});
+
+	it("enables wheel reporting in viewport mode when clickable mouse capture is off", async () => {
+		cfgTuiMouse.set(mode.settings, false);
+		cfgTuiStickyPrompt.set(session.settings, "viewport");
+		mode.composer.setPreferences({ stickyPrompt: "viewport" });
+		const write = vi.spyOn(term, "write");
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			void mode.getUserInput();
+			await term.waitForRender();
+			expect(write.mock.calls.some(([data]) => data.includes("\x1b[?1000h\x1b[?1003h\x1b[?1006h"))).toBe(true);
+		} finally {
+			write.mockRestore();
+		}
 	});
 
 	it("bands the hovered live card and clears it off-target", async () => {
