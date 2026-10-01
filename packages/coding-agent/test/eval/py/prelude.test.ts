@@ -185,3 +185,37 @@ describe("python prelude", () => {
 		}
 	});
 });
+
+describe("python workpool model selection", () => {
+	it("forwards model arrays and preserves omission through the real Python bridge", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({ ok: true, value: { name: "chosen", agent: "scout", limit: 2 } });
+			},
+		});
+		try {
+			const result = await runPrelude('workpool("scout", model=["@smol", "p/backup"])\nworkpool("scout")', {
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
+			expect(result.stderr).toBe("");
+			expect(result.exitCode).toBe(0);
+			expect(requests).toEqual([
+				{
+					session: "test-session",
+					run: null,
+					name: "__workpool__",
+					args: { op: "create", agent: "scout", model: ["@smol", "p/backup"] },
+				},
+				{ session: "test-session", run: null, name: "__workpool__", args: { op: "create", agent: "scout" } },
+			]);
+		} finally {
+			server.stop(true);
+		}
+	});
+});
