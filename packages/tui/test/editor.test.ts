@@ -245,6 +245,27 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("prompt from the second context");
 		});
 
+		it("clears the buffer when a re-seed retires the entry the editor is browsing", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "prompt from the first context" }],
+				second: [],
+			};
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+
+			// The browse pointer is the editor's claim on the buffer, so a re-seed that drops
+			// the entry under it must hand the buffer back empty rather than leave the retired
+			// prompt on screen, where both arrows degrade to cursor motion and the leftover
+			// could be submitted as a prompt of the context the user is in now.
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the first context");
+
+			key = "second";
+			editor.addToHistory("a fresh submission");
+			expect(editor.getText()).toBe("");
+		});
+
 		it("keeps a submitted entry out of the list while the re-seed failed", () => {
 			const byKey: Record<string, { prompt: string }[]> = {
 				A: [{ prompt: "persisted in A" }],

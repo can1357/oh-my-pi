@@ -86,11 +86,23 @@ describe("HistorySearchComponent", () => {
 			prompt => selected.push(prompt),
 			() => {},
 		);
+		// The hint renders the Tab glyph, never the word "tab", so assert on ⇥ and cover
+		// both directions: absent with a single source, naming the next one otherwise.
 		expect(
 			render(component)
 				.split("\n")
 				.find(line => line.includes("navigate")),
-		).not.toContain("tab");
+		).not.toContain("⇥");
+		const cycling = new HistorySearchComponent(
+			[source("folder", ["release"]), source("conversation", ["release"])],
+			() => {},
+			() => {},
+		);
+		expect(
+			render(cycling)
+				.split("\n")
+				.find(line => line.includes("navigate")),
+		).toContain("⇥");
 		component.handleInput("\t");
 		component.handleInput("\r");
 		expect(selected).toEqual(["release"]);

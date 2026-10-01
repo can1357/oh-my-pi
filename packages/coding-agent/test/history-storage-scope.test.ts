@@ -158,8 +158,11 @@ describe("HistoryStorage scope filtering", () => {
 		const fixtures = createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
+		// The newest row overall belongs to another session, so scoping after the limit
+		// would return nothing while scoping before it returns the newest s1 prompt.
+		await storage.add("iota newest but s2", fixtures.repoB, "s2");
 
-		// Six later rows belong to other scopes; the newest s1 prompt must still win.
+		expect(storage.getRecent(1).map(entry => entry.prompt)).toEqual(["iota newest but s2"]);
 		expect(storage.getRecent(1, { kind: "session", value: "s1" }).map(entry => entry.prompt)).toEqual([
 			"theta ghost cwd",
 		]);
