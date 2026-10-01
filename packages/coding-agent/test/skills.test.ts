@@ -7,6 +7,7 @@ import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-cod
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
+	type LoadSkillsOptions,
 	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
@@ -480,8 +481,15 @@ enabled: false
 			await removeWithRetries(tempSkillsDir);
 		});
 
-		async function observeSkills(optInSkills?: string[]) {
-			const skillsSettings: NonNullable<Parameters<typeof loadSkills>[0]> = {
+		interface ObservedSkills {
+			prompt: string;
+			discoveredSkillNames: string[];
+			skillCommands: string[];
+			manualSkillContent: string;
+		}
+
+		async function observeSkills(optInSkills?: string[]): Promise<ObservedSkills> {
+			const skillsSettings: LoadSkillsOptions = {
 				...DISABLE_ALL_BUILTIN_SKILLS,
 				customDirectories: [tempSkillsDir],
 				enableSkillCommands: true,
@@ -542,7 +550,7 @@ enabled: false
 		it("preserves current prompt and explicit access behavior for an empty opt-in array", async () => {
 			const withoutOptInSetting = await observeSkills();
 			const withEmptyOptInSetting = await observeSkills([]);
-			const summarize = (observed: Awaited<ReturnType<typeof observeSkills>>) => ({
+			const summarize = (observed: ObservedSkills) => ({
 				visibleInPrompt: observed.prompt.includes("visible-skill"),
 				manualInPrompt: observed.prompt.includes("manual-skill"),
 				discoveredSkillNames: observed.discoveredSkillNames,
@@ -557,7 +565,6 @@ enabled: false
 			});
 		});
 	});
-
 
 	it("should expand ~ in customDirectories", async () => {
 		const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-home-"));
