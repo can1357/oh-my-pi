@@ -16,6 +16,16 @@ export interface ApiKeyResolverOptions {
 	modelId?: string;
 }
 
+/** Registry key options; `previousKey` stays in coding-agent and never reaches pi-ai's auth storage. */
+export interface RegistryApiKeyOptions extends AuthApiKeyOptions {
+	/**
+	 * Bearer the failed attempt sent. On the `"auth-recovery"` refresh step the
+	 * registry requires a fresh run of a command-backed key only while that key
+	 * still holds this bearer.
+	 */
+	previousKey?: string;
+}
+
 /**
  * Minimal slice of `ModelRegistry` the resolver needs. Typed structurally so
  * narrower registry shells (e.g. the commit pipeline's `CommitModelRegistry`)
@@ -27,7 +37,7 @@ export interface ApiKeyResolverRegistry {
 	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		options?: RegistryApiKeyOptions,
 	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
@@ -59,6 +69,7 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
+		previousKey?: string,
 	): Promise<ApiKeyResolution> =>
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
@@ -66,6 +77,7 @@ export function createApiKeyResolver(
 			forceRefresh,
 			signal,
 			refreshReason,
+			previousKey,
 		});
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
@@ -95,6 +107,6 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
+		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, previousKey);
 	};
 }

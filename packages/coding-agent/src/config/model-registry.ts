@@ -51,7 +51,12 @@ import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
-import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
+import {
+	type ApiKeyResolverModel,
+	type ApiKeyResolverOptions,
+	createApiKeyResolver,
+	type RegistryApiKeyOptions,
+} from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
 	buildCustomModelOverlay,
@@ -2943,14 +2948,25 @@ export class ModelRegistry {
 		return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
 	}
 
+	/**
+	 * {@link getApiKeyForProvider} plus the durable credential identity. A forced
+	 * refresh re-runs the provider's command-backed credentials: the 401 refresh
+	 * step (`refreshReason: "auth-recovery"`) withholds their cached output until a
+	 * run succeeds, and any other forced refresh is an ordinary refresh that keeps
+	 * the cached output servable if the run fails.
+	 */
 	async getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		options?: RegistryApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh && options.refreshReason !== "auth-recovery") {
-			this.#invalidateProviderCommandConfigs(provider);
+		if (options?.forceRefresh) {
+			if (options.refreshReason === "auth-recovery") {
+				this.#markCommandConfigsForRecovery(provider, options.modelId, options.previousKey);
+			} else {
+				this.#invalidateProviderCommandConfigs(provider);
+			}
 		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
@@ -2971,9 +2987,10 @@ export class ModelRegistry {
 	 * policy. Accepts a provider id with options, or a model with an optional
 	 * session id (`resolver(model, sessionId)`) which derives `baseUrl`/`modelId`
 	 * from the model. Callers that need the initial key for a guard can call
-	 * `resolveApiKeyOnce(resolver)`. When the initial resolve finds no key because
-	 * the provider's `!command` API key has never succeeded, it throws an error
-	 * naming the command and how its latest run failed.
+	 * `resolveApiKeyOnce(resolver)`. When the initial resolve finds no servable
+	 * `!command` key, it throws a `CommandConfigResolutionError` (a
+	 * `MissingApiKeyError`) naming the provider, the command's program and how its
+	 * latest run failed.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
@@ -2989,13 +3006,6 @@ export class ModelRegistry {
 						modelId: target.id,
 					});
 		return async context => {
-			if (context.error !== undefined && !context.lastChance && AIError.status(context.error) === 401) {
-				this.#markCommandConfigsForRecovery(
-					provider,
-					typeof target === "string" ? options?.modelId : target.id,
-					context.previousKey,
-				);
-			}
 			const resolved = await resolve(context);
 			if (resolvedApiKeyBearer(resolved) !== undefined || context.error !== undefined) return resolved;
 			const failure = describeCommandConfigFailure(this.#customProviderApiKeys.get(provider));
