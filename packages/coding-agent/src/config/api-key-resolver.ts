@@ -59,8 +59,6 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
-		rejectedApiKey?: string,
-		rejectedHeaders?: Readonly<Record<string, string>>,
 	): Promise<ApiKeyResolution> =>
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
@@ -68,19 +66,12 @@ export function createApiKeyResolver(
 			forceRefresh,
 			signal,
 			refreshReason,
-			rejectedApiKey,
-			rejectedHeaders,
 		});
-	return async ({ lastChance, error, signal, previousKey, previousHeaders }) => {
+	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}
 		if (lastChance) {
-			if (AIError.status(error) === 401) {
-				// A second (or later) 401 proves this exact bearer/header set is
-				// rejected too, before rotation considers any sibling or reuses cache.
-				await resolveKey(true, signal, "auth-recovery", previousKey, previousHeaders);
-			}
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor the failed account's retry-after
 			// here — if a sibling exists we switch immediately, and `rotate` itself
@@ -104,12 +95,6 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(
-			true,
-			signal,
-			AIError.status(error) === 401 ? "auth-recovery" : undefined,
-			AIError.status(error) === 401 ? previousKey : undefined,
-			AIError.status(error) === 401 ? previousHeaders : undefined,
-		);
+		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
 	};
 }

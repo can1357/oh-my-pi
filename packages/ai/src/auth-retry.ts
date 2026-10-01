@@ -30,16 +30,54 @@ export interface ApiKeyResolveContext {
 	error: unknown;
 	/** Bearer used by the failed attempt, when the caller can expose it. */
 	previousKey?: string;
+	/** Exact command-backed credentials dispatched by the failed attempt. */
+	previousSentCredentials?: SentCredentialSet;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
-	/** Headers sent with the failed request, when command-backed header recovery needs their exact values. */
-	previousHeaders?: Readonly<Record<string, string>>;
 }
 
-/** Exact bearer and headers dispatched by one request attempt. */
+/** One command-backed credential that the transport actually dispatched. */
+export interface SentCommandCredential {
+	config: string;
+	value: string;
+}
+
+/** Exact command-backed header credential with its dispatched header name. */
+export interface SentHeaderCommandCredential extends SentCommandCredential {
+	header: string;
+}
+
+/** Exact bearer and command-backed values dispatched by one request attempt. */
 export interface SentCredentialSet {
 	apiKey: string;
-	headers?: Readonly<Record<string, string>>;
+	commandCredentials: readonly SentCommandCredential[];
+}
+
+const commandHeaderCredentials = Symbol("commandHeaderCredentials");
+
+type HeadersWithCommandCredentials = Record<string, string> & {
+	[commandHeaderCredentials]?: readonly SentHeaderCommandCredential[];
+};
+
+/** Attach command provenance to a materialized request-header record. */
+export function setCommandHeaderCredentials(
+	headers: Record<string, string>,
+	credentials: readonly SentHeaderCommandCredential[],
+): Record<string, string> {
+	if (credentials.length > 0) {
+		Object.defineProperty(headers, commandHeaderCredentials, {
+			enumerable: true,
+			value: credentials,
+		});
+	}
+	return headers;
+}
+
+/** Read command provenance recorded during this header record's materialization. */
+export function getCommandHeaderCredentials(
+	headers: Readonly<Record<string, string>> | undefined,
+): readonly SentHeaderCommandCredential[] {
+	return (headers as HeadersWithCommandCredentials | undefined)?.[commandHeaderCredentials] ?? [];
 }
 
 /**
@@ -48,6 +86,8 @@ export interface SentCredentialSet {
  */
 export interface ResolvedApiKey {
 	apiKey: string;
+	/** Command-backed values the resolver materialized for this bearer. */
+	commandCredentials?: readonly SentCommandCredential[];
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
 	/**
@@ -165,13 +205,19 @@ export async function resolveRetryKey(
 	signal?: AbortSignal,
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
-	previousHeaders?: Readonly<Record<string, string>>,
-): Promise<string | undefined> {
+	previousSentCredentials?: SentCredentialSet,
+): Promise<ApiKeyResolution> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey, previousHeaders });
+		const resolved = await resolver({
+			lastChance: rotateSibling,
+			error,
+			signal,
+			previousKey,
+			previousSentCredentials,
+		});
 		onResolved?.(resolved);
-		return resolvedApiKeyBearer(resolved);
+		return resolved;
 	} catch {
 		return undefined;
 	}
@@ -182,27 +228,28 @@ export interface AuthRetryKeyState {
 	attemptedKeys: Set<string>;
 	/** Bearer used by the most recent failed attempt. */
 	lastKey: string;
+	/** Exact credential set dispatched by the most recent request attempt. */
+	lastSentCredentials: SentCredentialSet;
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
 	/** Whether this operation already replayed once after an explicit token-refresh request. */
 	tokenRefreshReplayUsed?: boolean;
 	/** Total outbound attempts accepted for this logical operation, including the initial request. */
 	attempts: number;
-	/** Headers sent with the last failed attempt. */
-	lastHeaders?: Readonly<Record<string, string>>;
-	/** Exact credential set dispatched by the most recent request attempt. */
-	lastSentCredentials?: SentCredentialSet;
 }
 
-export function createAuthRetryKeyState(
-	initialKey: string,
-	initialHeaders?: Readonly<Record<string, string>>,
-): AuthRetryKeyState {
+export function sentCredentialSet(resolved: ApiKeyResolution, apiKey: string): SentCredentialSet {
+	return {
+		apiKey,
+		commandCredentials: typeof resolved === "string" ? [] : (resolved?.commandCredentials ?? []),
+	};
+}
+
+export function createAuthRetryKeyState(initialKey: string, initialResolved: ApiKeyResolution): AuthRetryKeyState {
 	return {
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
-		lastHeaders: initialHeaders,
-		lastSentCredentials: { apiKey: initialKey, headers: initialHeaders },
+		lastSentCredentials: sentCredentialSet(initialResolved, initialKey),
 		refreshedCurrent: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
@@ -211,16 +258,22 @@ export function createAuthRetryKeyState(
 
 function acceptRetryKey(
 	state: AuthRetryKeyState,
-	key: string,
+	resolved: ApiKeyResolution,
 	refreshedCurrent: boolean,
 	afterSiblingWait = false,
 ): string | undefined {
-	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
+	const key = resolvedApiKeyBearer(resolved);
+	if (
+		key === undefined ||
+		(!afterSiblingWait && state.attemptedKeys.has(key)) ||
+		state.attempts >= AUTH_RETRY_MAX_ATTEMPTS
+	) {
 		return undefined;
 	}
 	state.attemptedKeys.add(key);
 	state.attempts += 1;
 	state.lastKey = key;
+	state.lastSentCredentials = sentCredentialSet(resolved, key);
 	state.refreshedCurrent = refreshedCurrent;
 	return key;
 }
@@ -244,7 +297,7 @@ export async function resolveNextAuthRetryKey(
 			signal,
 			state.lastKey,
 			onResolved,
-			state.lastHeaders,
+			state.lastSentCredentials,
 		);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
@@ -260,7 +313,7 @@ export async function resolveNextAuthRetryKey(
 				signal,
 				state.lastKey,
 				onResolved,
-				state.lastHeaders,
+				state.lastSentCredentials,
 			);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
@@ -283,7 +336,7 @@ export async function resolveNextAuthRetryKey(
 			afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
 			onResolved?.(resolved);
 		},
-		state.lastHeaders,
+		state.lastSentCredentials,
 	);
 	if (signal?.aborted || rotated === undefined) return undefined;
 	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
@@ -338,16 +391,17 @@ export async function withAuth<T>(
 
 	const resolver = key;
 	const signal = opts?.signal;
-	let initialKey: string | undefined;
+	let initialResolved: ApiKeyResolution;
 	try {
-		const resolved = await resolver({ lastChance: false, error: undefined, signal, previousKey: undefined });
-		initialKey = resolvedApiKeyBearer(resolved);
+		initialResolved = await resolver({ lastChance: false, error: undefined, signal, previousKey: undefined });
 	} catch (error) {
 		if (error instanceof AIError.CommandConfigResolutionError) throw error;
+		initialResolved = undefined;
 	}
+	const initialKey = resolvedApiKeyBearer(initialResolved);
 	if (initialKey === undefined) throw missingKey();
 
-	const state = createAuthRetryKeyState(initialKey);
+	const state = createAuthRetryKeyState(initialKey, initialResolved);
 	let lastError: unknown;
 	try {
 		return await attempt(initialKey);

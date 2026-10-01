@@ -1,4 +1,9 @@
 import { executeShell } from "@oh-my-pi/pi-natives";
+import {
+	getCommandHeaderCredentials,
+	setCommandHeaderCredentials,
+	type SentHeaderCommandCredential,
+} from "@oh-my-pi/pi-ai/auth-retry";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
 const COMMAND_TIMEOUT_MS = 10_000;
@@ -56,6 +61,13 @@ function valueIsRejected(command: string, value: string | undefined): boolean {
 
 function handOutValue(command: string, value: string | undefined): string | undefined {
 	return valueIsRejected(command, value) ? undefined : value;
+}
+
+/** True when this command configuration produced the value currently being dispatched. */
+export function commandConfigMatchesValue(valueConfig: string | undefined, value: string): boolean {
+	if (!isCommandConfigValue(valueConfig)) return false;
+	const command = commandKey(valueConfig);
+	return handOutValue(command, commandResultCache.get(command)) === value;
 }
 
 /** Invalidate one command-backed value for an ordinary refresh. */
@@ -269,14 +281,15 @@ export async function resolveConfigHeaders(
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
-	let hasResolved = false;
+	const commandCredentials: SentHeaderCommandCredential[] = [];
 	for (const key in headers) {
-		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		const config = headers[key];
+		const next = await untilAborted(signal, () => resolveConfigValue(config));
 		if (!next) continue;
 		resolved[key] = next;
-		hasResolved = true;
+		if (isCommandConfigValue(config)) commandCredentials.push({ header: key, config, value: next });
 	}
-	return hasResolved ? resolved : undefined;
+	return Object.keys(resolved).length > 0 ? setCommandHeaderCredentials(resolved, commandCredentials) : undefined;
 }
 
 /**
@@ -293,7 +306,7 @@ export function createConfigHeaderResolver(
 	return async signal => {
 		signal?.throwIfAborted();
 		const resolved: Record<string, string> = {};
-		let hasResolved = false;
+		const commandCredentialsByHeader = new Map<string, SentHeaderCommandCredential>();
 		for (const source of active) {
 			const next =
 				typeof source === "function"
@@ -303,18 +316,26 @@ export function createConfigHeaderResolver(
 			if (!next) continue;
 			for (const key in next) {
 				resolved[key] = next[key];
-				hasResolved = true;
+				commandCredentialsByHeader.delete(key);
+			}
+			for (const credential of getCommandHeaderCredentials(next)) {
+				commandCredentialsByHeader.set(credential.header, credential);
 			}
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
-			const keyConfig = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
+			const config = options.apiKeyConfig;
+			const apiKey = await untilAborted(signal, () => resolveConfigValue(config));
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
-				hasResolved = true;
+				commandCredentialsByHeader.delete("Authorization");
+				if (isCommandConfigValue(config)) {
+					commandCredentialsByHeader.set("Authorization", { header: "Authorization", config, value: apiKey });
+				}
 			}
 		}
-		return hasResolved ? resolved : undefined;
+		return Object.keys(resolved).length > 0
+			? setCommandHeaderCredentials(resolved, [...commandCredentialsByHeader.values()])
+			: undefined;
 	};
 }
 

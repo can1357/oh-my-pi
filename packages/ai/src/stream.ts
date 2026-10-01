@@ -19,9 +19,11 @@ import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted
 import { getCustomApi } from "./api-registry";
 import {
 	createAuthRetryKeyState,
+	getCommandHeaderCredentials,
 	isApiKeyResolver,
 	resolvedApiKeyBearer,
 	resolveNextAuthRetryKey,
+	type ApiKeyResolution,
 	type AuthRetryKeyState,
 } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
@@ -1341,6 +1343,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			resolvedCredentials?: ApiKeyResolution,
 			refreshHeaders = false,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
@@ -1359,8 +1362,15 @@ function streamSimpleRequest<TApi extends Api>(
 					}
 				}
 				if (retryState && apiKey !== undefined) {
-					retryState.lastHeaders = model.headers ? { ...model.headers } : undefined;
-					retryState.lastSentCredentials = { apiKey, headers: retryState.lastHeaders };
+					retryState.lastSentCredentials = {
+						apiKey,
+						commandCredentials: [
+							...(typeof resolvedCredentials === "string"
+								? []
+								: (resolvedCredentials?.commandCredentials ?? [])),
+							...getCommandHeaderCredentials(model.headers),
+						],
+					};
 				}
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
@@ -1428,19 +1438,19 @@ function streamSimpleRequest<TApi extends Api>(
 		};
 
 		void (async () => {
+			let initialResolved: ApiKeyResolution;
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
-				const resolved = await apiKeyResolver({
+				initialResolved = await apiKeyResolver({
 					lastChance: false,
 					error: undefined,
 					signal,
-					previousHeaders: model.headers,
 				});
-				lastKey = resolvedApiKeyBearer(resolved);
-				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				lastKey = resolvedApiKeyBearer(initialResolved);
+				credentialId = typeof initialResolved === "string" ? undefined : initialResolved?.credentialId;
+				oauthIdentity = typeof initialResolved === "string" ? undefined : initialResolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1461,8 +1471,8 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			retryState = createAuthRetryKeyState(lastKey, model.headers);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			retryState = createAuthRetryKeyState(lastKey, initialResolved);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, initialResolved);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1470,18 +1480,20 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextResolved: ApiKeyResolution = undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
 					signal,
 					resolved => {
+						nextResolved = resolved;
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, true);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextResolved, true);
 				if (!next) return;
 				failure = next;
 			}

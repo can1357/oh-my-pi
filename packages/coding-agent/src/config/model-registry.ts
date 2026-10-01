@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
-import { CommandConfigResolutionError } from "@oh-my-pi/pi-ai/error";
+import { resolvedApiKeyBearer, type SentCommandCredential, type SentCredentialSet } from "@oh-my-pi/pi-ai/auth-retry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -63,6 +63,7 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
+	commandConfigMatchesValue,
 	createConfigHeaderResolver,
 	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
@@ -265,9 +266,6 @@ export class ModelRegistry {
 	// Model/modelOverride header commands, rejected only when that model's request
 	// receives the 401 that proves the materialized value is bad.
 	#commandConfigsByProviderModel: Map<string, Map<string, Set<string>>> = new Map();
-	#commandHeadersByProvider: Map<string, Record<string, string>> = new Map();
-	#commandHeadersByProviderModel: Map<string, Map<string, Record<string, string>>> = new Map();
-	#lastResolvedHeadersByProviderModel: Map<string, Map<string, Record<string, string>>> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	#customModelOverlays: CustomModelOverlay[] = [];
@@ -349,80 +347,46 @@ export class ModelRegistry {
 		}
 	}
 
-	#commandHeaderConfigs(headers: Record<string, string> | undefined): Record<string, string> {
-		const commandHeaders: Record<string, string> = {};
-		if (!headers) return commandHeaders;
-		for (const key in headers) {
-			const value = headers[key];
-			if (isCommandConfigValue(value)) commandHeaders[key] = value;
+	/** Reject only the command-backed values dispatched by the failed request. */
+	#rejectSentCredentials(sentCredentials: SentCredentialSet): void {
+		for (const credential of sentCredentials.commandCredentials) {
+			rejectCommandConfig(credential.config, credential.value);
 		}
-		return commandHeaders;
 	}
 
-	/**
-	 * Refresh command-backed values for a provider. A 401 rejects provider-level
-	 * credentials plus only the model headers that were materialized for the
-	 * failed request; unrelated model headers keep their last-good value.
-	 */
-	#invalidateProviderCommandConfigs(
-		provider: string,
-		rejected = false,
-		modelId?: string,
-		rejectedApiKey?: string,
-		rejectedHeaders?: Readonly<Record<string, string>>,
-	): void {
-		const apiKeyConfig = this.#customProviderApiKeys.get(provider);
-		const runtimeApiKeyConfig = this.#runtimeProviderApiKeys.get(provider)?.keyConfig;
-		if (rejected) {
-			// Only the bearer handed to the failed request is proven rejected.
-			rejectCommandConfig(apiKeyConfig, rejectedApiKey);
-			rejectCommandConfig(runtimeApiKeyConfig, rejectedApiKey);
-		} else {
-			invalidateCommandConfig(apiKeyConfig);
-			invalidateCommandConfig(runtimeApiKeyConfig);
-		}
-		const rejectedConfigs = new Set<string>();
-		const rejectHeaders = (headerConfigs: Record<string, string> | undefined) => {
-			if (!headerConfigs) return;
-			for (const key in headerConfigs) {
-				const sentValue = rejectedHeaders?.[key];
-				if (rejected && sentValue !== undefined) {
-					rejectCommandConfig(headerConfigs[key], sentValue);
-					rejectedConfigs.add(headerConfigs[key]);
-				} else {
-					invalidateCommandConfig(headerConfigs[key]);
-				}
+	/** Tag the active command-backed API-key config with its dispatched bearer. */
+	#apiKeyCommandCredentials(provider: string, apiKey: string): readonly SentCommandCredential[] {
+		const configs = [
+			this.#customProviderApiKeys.get(provider),
+			this.#runtimeProviderApiKeys.get(provider)?.keyConfig,
+		];
+		const credentials: SentCommandCredential[] = [];
+		for (const config of configs) {
+			if (
+				!isCommandConfigValue(config) ||
+				!commandConfigMatchesValue(config, apiKey) ||
+				credentials.some(credential => credential.config === config)
+			) {
+				continue;
 			}
-		};
-		rejectHeaders(this.#commandHeadersByProvider.get(provider));
-		if (modelId !== undefined) rejectHeaders(this.#commandHeadersByProviderModel.get(provider)?.get(modelId));
-		const refreshHeader = (config: string) => {
-			if (config !== apiKeyConfig && config !== runtimeApiKeyConfig && !rejectedConfigs.has(config))
-				invalidateCommandConfig(config);
-		};
-		const configs = this.#commandConfigsByProvider.get(provider);
-		if (configs) {
-			for (const config of configs) refreshHeader(config);
+			credentials.push({ config, value: apiKey });
 		}
-		const modelCommandSets =
-			rejected && modelId !== undefined
-				? [this.#commandConfigsByProviderModel.get(provider)?.get(modelId)]
-				: [...(this.#commandConfigsByProviderModel.get(provider)?.values() ?? [])];
-		for (const modelConfigs of modelCommandSets) {
-			if (!modelConfigs) continue;
-			for (const config of modelConfigs) refreshHeader(config);
+		return credentials;
+	}
+
+	/** Invalidate command-backed values for an explicit, non-auth refresh. */
+	#invalidateProviderCommandConfigs(provider: string): void {
+		for (const config of this.#commandConfigsByProvider.get(provider) ?? []) {
+			invalidateCommandConfig(config);
 		}
-		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
-		if (runtimeConfigs) {
-			for (const config of runtimeConfigs) refreshHeader(config);
+		for (const configs of this.#commandConfigsByProviderModel.get(provider)?.values() ?? []) {
+			for (const config of configs) invalidateCommandConfig(config);
 		}
-		const runtimeModelCommandSets =
-			rejected && modelId !== undefined
-				? [this.#runtimeCommandConfigsByProviderModel.get(provider)?.get(modelId)]
-				: [...(this.#runtimeCommandConfigsByProviderModel.get(provider)?.values() ?? [])];
-		for (const runtimeModelConfigs of runtimeModelCommandSets) {
-			if (!runtimeModelConfigs) continue;
-			for (const config of runtimeModelConfigs) refreshHeader(config);
+		for (const config of this.#runtimeCommandConfigsByProvider.get(provider) ?? []) {
+			invalidateCommandConfig(config);
+		}
+		for (const configs of this.#runtimeCommandConfigsByProviderModel.get(provider)?.values() ?? []) {
+			for (const config of configs) invalidateCommandConfig(config);
 		}
 	}
 
@@ -993,8 +957,6 @@ export class ModelRegistry {
 		this.#providerLookupSnapshots.clear();
 		this.#commandConfigsByProvider.clear();
 		this.#commandConfigsByProviderModel.clear();
-		this.#commandHeadersByProvider.clear();
-		this.#commandHeadersByProviderModel.clear();
 	}
 
 	#knownStaticProviders(): string[] {
@@ -1626,15 +1588,11 @@ export class ModelRegistry {
 		for (const [providerName, providerConfig] of providerEntries) {
 			const commandConfigs = new Set<string>();
 			const modelCommandConfigs = new Map<string, Set<string>>();
-			const providerCommandHeaders = this.#commandHeaderConfigs(providerConfig.headers);
-			const modelCommandHeaders = new Map<string, Record<string, string>>();
 			this.#collectCommandConfigValues(commandConfigs, providerConfig.apiKey, providerConfig.headers);
 			for (const modelDef of providerConfig.models ?? []) {
 				const configs = new Set<string>();
-				const headers = this.#commandHeaderConfigs(modelDef.headers);
 				this.#collectCommandConfigValues(configs, undefined, modelDef.headers);
 				if (configs.size > 0) modelCommandConfigs.set(modelDef.id, configs);
-				if (Object.keys(headers).length > 0) modelCommandHeaders.set(modelDef.id, headers);
 			}
 			// Scope: effective APIs of models inheriting the provider URL; a
 			// provider-level api covers the override-only case; none is wide.
@@ -1721,22 +1679,14 @@ export class ModelRegistry {
 				const perModel = new Map<string, ModelOverride>();
 				for (const [modelId, override] of Object.entries(providerConfig.modelOverrides)) {
 					const configs = modelCommandConfigs.get(modelId) ?? new Set<string>();
-					const headers = {
-						...modelCommandHeaders.get(modelId),
-						...this.#commandHeaderConfigs(override.headers),
-					};
 					this.#collectCommandConfigValues(configs, undefined, override.headers);
 					if (configs.size > 0) modelCommandConfigs.set(modelId, configs);
-					if (Object.keys(headers).length > 0) modelCommandHeaders.set(modelId, headers);
 					perModel.set(modelId, override);
 				}
 				allModelOverrides.set(providerName, perModel);
 			}
 			if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
 			if (modelCommandConfigs.size > 0) this.#commandConfigsByProviderModel.set(providerName, modelCommandConfigs);
-			if (Object.keys(providerCommandHeaders).length > 0)
-				this.#commandHeadersByProvider.set(providerName, providerCommandHeaders);
-			if (modelCommandHeaders.size > 0) this.#commandHeadersByProviderModel.set(providerName, modelCommandHeaders);
 		}
 
 		return {
@@ -2930,18 +2880,11 @@ export class ModelRegistry {
 
 	/** Materialize a model's complete configured header chain for one request. */
 	async resolveModelHeaders(model: Model<Api>, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
-		const headers = model.resolveHeaders
+		return model.resolveHeaders
 			? await model.resolveHeaders(signal)
 			: model.headers
 				? { ...model.headers }
 				: undefined;
-		if (headers) {
-			const byModel =
-				this.#lastResolvedHeadersByProviderModel.get(model.provider) ?? new Map<string, Record<string, string>>();
-			byModel.set(model.id, headers);
-			this.#lastResolvedHeadersByProviderModel.set(model.provider, byModel);
-		}
-		return headers;
 	}
 
 	#isKeylessProvider(provider: string): boolean {
@@ -3006,15 +2949,8 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) {
-			this.#invalidateProviderCommandConfigs(
-				provider,
-				options.refreshReason === "auth-recovery",
-				options.modelId,
-				options.rejectedApiKey,
-				options.rejectedHeaders ??
-					this.#lastResolvedHeadersByProviderModel.get(provider)?.get(options.modelId ?? ""),
-			);
+		if (options?.forceRefresh && options.refreshReason !== "auth-recovery") {
+			this.#invalidateProviderCommandConfigs(provider);
 		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
@@ -3053,10 +2989,27 @@ export class ModelRegistry {
 						modelId: target.id,
 					});
 		return async context => {
+			if (AIError.status(context.error) === 401 && context.previousSentCredentials) {
+				this.#rejectSentCredentials(context.previousSentCredentials);
+			}
 			const resolved = await resolve(context);
-			if (context.error !== undefined || resolvedApiKeyBearer(resolved) !== undefined) return resolved;
+			const apiKey = resolvedApiKeyBearer(resolved);
+			if (apiKey !== undefined) {
+				const commandCredentials = this.#apiKeyCommandCredentials(provider, apiKey);
+				if (commandCredentials.length > 0) {
+					return typeof resolved === "string"
+						? { apiKey, commandCredentials }
+						: {
+								...resolved,
+								apiKey,
+								commandCredentials: [...(resolved?.commandCredentials ?? []), ...commandCredentials],
+							};
+				}
+				return resolved;
+			}
+			if (context.error !== undefined) return resolved;
 			const failure = describeCommandConfigFailure(this.#customProviderApiKeys.get(provider));
-			if (failure) throw new CommandConfigResolutionError(`API key command ${failure}`);
+			if (failure) throw new AIError.CommandConfigResolutionError(`API key command ${failure}`);
 			return resolved;
 		};
 	}

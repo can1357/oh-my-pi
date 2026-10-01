@@ -3,8 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
-import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
-import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { type ApiKeyResolveContext, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import type { Context, FetchImpl, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
@@ -654,12 +655,20 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			lastChance: false,
 			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
 			previousKey: "stale-key",
+			previousSentCredentials: {
+				apiKey: "stale-key",
+				commandCredentials: [{ config: `!${command}`, value: "stale-key" }],
+			},
 		});
 		expect(firstRecovery).toMatchObject({ apiKey: "fresh-key" });
 		const lateRecovery = await resolver({
 			lastChance: false,
 			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
 			previousKey: "stale-key",
+			previousSentCredentials: {
+				apiKey: "stale-key",
+				commandCredentials: [{ config: `!${command}`, value: "stale-key" }],
+			},
 		});
 		expect(lateRecovery).toMatchObject({ apiKey: "fresh-key" });
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
@@ -703,6 +712,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				lastChance: false,
 				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
 				previousKey: "bad-key",
+				previousSentCredentials: {
+					apiKey: "bad-key",
+					commandCredentials: [{ config: `!${command}`, value: "bad-key" }],
+				},
 			});
 			fs.writeFileSync(releaseFile, "");
 			await expect(waitingRequest).rejects.toThrow("returned a value rejected by a 401");
@@ -1210,4 +1223,304 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
 	});
+	type MatrixCredentialType = "apiKey only" | "header only" | "both";
+	type MatrixOutcome = "success" | "final failure";
+	type MatrixRetryPath = "normal force-refresh" | "lastChance" | "sibling rotation";
+	type MatrixRemint = "fresh value" | "reprint rejected value" | "failure";
+	type MatrixEntryPoint = "streamSimple" | "withAuth";
+
+	interface MatrixCommandCredential {
+		config: string;
+		value: string;
+	}
+
+	interface MatrixSentCredentials {
+		apiKey: string;
+		commandCredentials: readonly MatrixCommandCredential[];
+	}
+
+	interface MatrixResolution {
+		apiKey: string;
+		commandCredentials: readonly MatrixCommandCredential[];
+		afterSiblingWait?: boolean;
+	}
+
+	type MatrixResolveContext = ApiKeyResolveContext & {
+		previousSentCredentials?: MatrixSentCredentials;
+	};
+
+	/**
+	 * Synthetic command authority used by the retry matrix. Its received
+	 * credential set is the transport's only source of command-backed values.
+	 */
+	class MatrixCommandAuthority {
+		#stage = 0;
+		#current: MatrixResolution | undefined;
+		#lastDispatched: MatrixSentCredentials | undefined;
+		#sent: MatrixSentCredentials[] = [];
+		#rejected = new Set<string>();
+		#contexts: Array<{ lastChance: boolean; hadError: boolean }> = [];
+		#rejectionCount = 0;
+		#turnCommandRuns = 0;
+		#contractFailure: string | undefined;
+
+		constructor(
+			readonly credentialType: MatrixCredentialType,
+			readonly consecutive401s: number,
+			readonly outcome: MatrixOutcome,
+			readonly retryPath: MatrixRetryPath,
+			readonly remint: MatrixRemint,
+		) {}
+
+		#commands(): readonly ("apiKey" | "header")[] {
+			if (this.credentialType === "apiKey only") return ["apiKey"];
+			if (this.credentialType === "header only") return ["header"];
+			return ["apiKey", "header"];
+		}
+
+		#commandValue(kind: "apiKey" | "header"): string | undefined {
+			if (this.#stage > 0 && this.remint === "failure") return undefined;
+			return this.remint === "fresh value" ? `${kind}-synthetic-${this.#stage}` : `${kind}-synthetic-0`;
+		}
+
+		#isRejected(credential: MatrixCommandCredential): boolean {
+			return this.#rejected.has(`${credential.config}\u0000${credential.value}`);
+		}
+
+		#resolution(): MatrixResolution | undefined {
+			this.#turnCommandRuns += this.#commands().length;
+			const commandCredentials = this.#commands().flatMap(kind => {
+				const value = this.#commandValue(kind);
+				return value === undefined
+					? []
+					: [{ config: `!matrix-${kind}-command`, value } satisfies MatrixCommandCredential];
+			});
+			if (
+				commandCredentials.length !== this.#commands().length ||
+				commandCredentials.some(credential => this.#isRejected(credential))
+			) {
+				return undefined;
+			}
+			const apiKey =
+				commandCredentials.find(credential => credential.config === "!matrix-apiKey-command")?.value ??
+				`carrier-${this.#stage}`;
+			return {
+				apiKey,
+				commandCredentials,
+				...(this.retryPath === "sibling rotation" && this.#contexts.at(-1)?.lastChance
+					? { afterSiblingWait: true }
+					: {}),
+			};
+		}
+
+		headers(): Record<string, string> | undefined {
+			if (this.credentialType === "apiKey only") return undefined;
+			const value = this.#commandValue("header");
+			return value === undefined ? undefined : { "x-matrix-header": value };
+		}
+
+		beginTurn(): void {
+			const maximumRuns = this.#commands().length * (this.consecutive401s * 2 + 1);
+			if (this.#turnCommandRuns > maximumRuns) {
+				this.#contractFailure ??= `command mint budget exceeded (${this.#turnCommandRuns} > ${maximumRuns})`;
+			}
+			this.#turnCommandRuns = 0;
+		}
+
+		async resolve(context: ApiKeyResolveContext): Promise<MatrixResolution | undefined> {
+			this.#contexts.push({ lastChance: context.lastChance, hadError: context.error !== undefined });
+			if (context.error !== undefined) {
+				const previous = (context as MatrixResolveContext).previousSentCredentials;
+				if (!previous) {
+					this.#contractFailure ??= "the retry driver did not return the dispatched credential set";
+					return undefined;
+				}
+				if (
+					!this.#lastDispatched ||
+					previous.apiKey !== this.#lastDispatched.apiKey ||
+					JSON.stringify(previous.commandCredentials) !== JSON.stringify(this.#lastDispatched.commandCredentials)
+				) {
+					this.#contractFailure ??= "the retry driver returned credentials from a different attempt";
+					return undefined;
+				}
+				for (const credential of previous.commandCredentials) {
+					this.#rejected.add(`${credential.config}\u0000${credential.value}`);
+				}
+				this.#rejectionCount += 1;
+				this.#stage += 1;
+				if (this.outcome === "final failure" && this.#stage >= this.consecutive401s) return undefined;
+			}
+			this.#current = this.#resolution();
+			return this.#current;
+		}
+
+		dispatch(apiKey: string, headers?: Record<string, string> | Headers): MatrixSentCredentials {
+			const sent = this.#current;
+			if (!sent || sent.apiKey !== apiKey) {
+				throw new Error("the transport received a credential that was not materialized");
+			}
+			const expectedHeader = this.#commandValue("header");
+			const actualHeader =
+				headers instanceof Headers ? (headers.get("x-matrix-header") ?? undefined) : headers?.["x-matrix-header"];
+			if (this.credentialType !== "apiKey only" && actualHeader !== expectedHeader) {
+				throw new Error("the transport received headers from a different credential materialization");
+			}
+			if (sent.commandCredentials.some(credential => this.#isRejected(credential))) {
+				throw new Error("the transport received a command value previously rejected by a 401");
+			}
+			this.#lastDispatched = sent;
+			this.#sent.push(sent);
+			return sent;
+		}
+
+		assertInvariants(): void {
+			this.beginTurn();
+			if (this.#contractFailure) throw new Error(this.#contractFailure);
+			const sentValues = new Set(
+				this.#sent.flatMap(sent =>
+					sent.commandCredentials.map(credential => `${credential.config}\u0000${credential.value}`),
+				),
+			);
+			for (const rejected of this.#rejected) {
+				if (!sentValues.has(rejected)) throw new Error("a credential not sent by the transport was rejected");
+			}
+			if (!this.#contexts[0] || this.#contexts[0].hadError || this.#contexts[0].lastChance) {
+				throw new Error("the initial resolution did not use the normal retry context");
+			}
+			if (this.#rejectionCount >= 2 && !this.#contexts.some(context => context.lastChance)) {
+				throw new Error("a second 401 never reached the lastChance retry path");
+			}
+			if (
+				this.remint === "fresh value" &&
+				this.outcome === "success" &&
+				this.consecutive401s > 0 &&
+				!this.#sent.some(sent => sent.commandCredentials.some(credential => credential.value.endsWith("-1")))
+			) {
+				throw new Error("a fresh non-rejected command value was not dispatched");
+			}
+		}
+	}
+
+	async function runMatrixOperation(
+		entryPoint: MatrixEntryPoint,
+		authority: MatrixCommandAuthority,
+		remaining401s: number,
+	): Promise<void> {
+		let requests = 0;
+		const rejectOrSucceed = (apiKey: string, headers?: Record<string, string> | Headers): Promise<"ok"> => {
+			authority.dispatch(apiKey, headers);
+			requests += 1;
+			if (requests <= remaining401s) {
+				return Promise.reject(Object.assign(new Error("synthetic 401"), { status: 401 }));
+			}
+			return Promise.resolve("ok");
+		};
+		authority.beginTurn();
+		if (entryPoint === "withAuth") {
+			try {
+				await withAuth(authority.resolve.bind(authority), apiKey => rejectOrSucceed(apiKey, authority.headers()));
+			} catch {
+				// The matrix intentionally includes final 401 and command-mint failures.
+			}
+			return;
+		}
+
+		const model = {
+			...buildModel({
+				id: "matrix-model",
+				name: "Matrix model",
+				api: "openai-completions",
+				provider: "matrix-provider",
+				baseUrl: "https://matrix.invalid/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 4096,
+				maxTokens: 16,
+			} satisfies ModelSpec<"openai-completions">),
+			resolveHeaders: async () => authority.headers(),
+		};
+		const fetch: FetchImpl = async (_url, init) => {
+			try {
+				await rejectOrSucceed(
+					new Headers(init?.headers).get("Authorization")?.replace(/^Bearer /, "") ?? "",
+					new Headers(init?.headers),
+				);
+				return okChatCompletionStream();
+			} catch {
+				return new Response(JSON.stringify({ error: { message: "synthetic 401", type: "authentication_error" } }), {
+					status: 401,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+		};
+		const stream = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "matrix", timestamp: 0 }] },
+			{
+				apiKey: authority.resolve.bind(authority),
+				fetch,
+				maxTokens: 16,
+			},
+		);
+		try {
+			for await (const _event of stream) {
+				// Drain the retrying public stream.
+			}
+			await stream.result();
+		} catch {
+			// The matrix intentionally includes final 401 and command-mint failures.
+		}
+	}
+
+	test("never re-dispatches a 401-rejected command credential across the auth retry matrix", async () => {
+		const credentialTypes: readonly MatrixCredentialType[] = ["apiKey only", "header only", "both"];
+		const sequences = [1, 2, 3] as const;
+		const outcomes: readonly MatrixOutcome[] = ["success", "final failure"];
+		const retryPaths: readonly MatrixRetryPath[] = ["normal force-refresh", "lastChance", "sibling rotation"];
+		const remints: readonly MatrixRemint[] = ["fresh value", "reprint rejected value", "failure"];
+		const entryPoints: readonly MatrixEntryPoint[] = ["streamSimple", "withAuth"];
+		const failures: string[] = [];
+		let combinations = 0;
+
+		for (const credentialType of credentialTypes) {
+			for (const consecutive401s of sequences) {
+				for (const outcome of outcomes) {
+					for (const retryPath of retryPaths) {
+						for (const remint of remints) {
+							for (const entryPoint of entryPoints) {
+								combinations += 1;
+								const label = [
+									`credentials=${credentialType}`,
+									`401s=${consecutive401s}`,
+									`outcome=${outcome}`,
+									`path=${retryPath}`,
+									`remint=${remint}`,
+									`entry=${entryPoint}`,
+								].join("; ");
+								const authority = new MatrixCommandAuthority(
+									credentialType,
+									consecutive401s,
+									outcome,
+									retryPath,
+									remint,
+								);
+								try {
+									await runMatrixOperation(entryPoint, authority, consecutive401s);
+									await runMatrixOperation(entryPoint, authority, 0);
+									authority.assertInvariants();
+								} catch (error) {
+									failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		expect(combinations).toBe(324);
+		if (failures.length > 0)
+			throw new Error(`Failed ${failures.length} of ${combinations} matrix combinations:\n${failures.join("\n")}`);
+	}, 60_000);
 });
