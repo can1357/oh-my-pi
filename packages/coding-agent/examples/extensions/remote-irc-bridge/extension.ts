@@ -40,8 +40,12 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 	let socket: Bun.Socket | undefined;
 	let shuttingDown = false;
 	let reconnectDelay = RECONNECT_MIN_MS;
-	const pendingAcks = new Map<string, { resolve: (receipt: IrcDeliveryReceipt) => void; timer: Timer }>();
+	let reconnectTimer: Timer | undefined;
+	const pendingAcks = new Map<string, { to: string; resolve: (receipt: IrcDeliveryReceipt) => void; timer: Timer }>();
 
+	// Lines are short JSON records on a local unix socket, so the kernel buffer absorbs them and a
+	// partial write is not handled here. A bridge carrying large bodies over a real network link
+	// must queue on `write()`'s return value and resume on `drain`.
 	const write = (message: BridgeMessage): boolean => {
 		if (!socket) return false;
 		socket.write(encodeLine(message));
@@ -49,9 +53,9 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 	};
 
 	const failPendingAcks = (error: string): void => {
-		for (const [id, pending] of pendingAcks) {
+		for (const pending of pendingAcks.values()) {
 			clearTimeout(pending.timer);
-			pending.resolve({ to: id, outcome: "failed", error });
+			pending.resolve({ to: pending.to, outcome: "failed", error });
 		}
 		pendingAcks.clear();
 	};
@@ -71,7 +75,7 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 				pendingAcks.delete(message.id);
 				resolve({ to: message.to, outcome: "failed", error: "remote-irc-bridge: peer did not ack in time" });
 			}, ACK_TIMEOUT_MS);
-			pendingAcks.set(message.id, { resolve, timer });
+			pendingAcks.set(message.id, { to: message.to, resolve, timer });
 			write({
 				type: "outbound",
 				id: message.id,
@@ -151,7 +155,7 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 
 	const scheduleReconnect = (): void => {
 		if (shuttingDown) return;
-		setTimeout(connect, reconnectDelay);
+		reconnectTimer = setTimeout(connect, reconnectDelay);
 		reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 	};
 
@@ -175,6 +179,7 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 		// The namespace claim, transport and remote proxies are released by omp's own teardown;
 		// only the socket is ours to close.
 		shuttingDown = true;
+		clearTimeout(reconnectTimer);
 		failPendingAcks("remote-irc-bridge: session shut down");
 		socket?.end();
 		socket = undefined;
