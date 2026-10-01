@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed custom OpenAI-compatible Responses streams truncating reasoning when a proxy omits the summary index after a completed section, and running custom tools such as `apply_patch` with empty input when the final item repeats `input: ""` ([#11863](https://github.com/can1357/oh-my-pi/pull/11863) by [@moodiness](https://github.com/moodiness))
+
 ## [18.4.9] - 2026-10-01
 
 ### Fixed

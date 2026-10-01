@@ -813,6 +813,39 @@ describe("processResponsesStream: reasoning summary recovery", () => {
 		expect(output.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "First\n\nSecond" })]);
 	});
 
+	test("starts a new summary section after an omitted index on a closed part", async () => {
+		const output = makeOutput();
+		const deltas: string[] = [];
+		const stream = {
+			push: (event: EmittedEvent) => {
+				if (event.type === "thinking_delta") {
+					const delta = event.delta as string;
+					if (delta.length) deltas.push(delta);
+				}
+			},
+		} as never;
+
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", item: { type: "reasoning", id: "rs_proxy", summary: [] } },
+				{ type: "response.reasoning_summary_text.done", text: "First" },
+				{ type: "response.reasoning_summary_part.done" },
+				// The proxy omits both summary_part.added and summary_index for the
+				// next section; the indexless delta/done must open a fresh part.
+				{ type: "response.reasoning_summary_text.delta", delta: "Sec" },
+				{ type: "response.reasoning_summary_text.done", text: "Second" },
+				{ type: "response.output_item.done", item: { type: "reasoning", id: "rs_proxy", summary: [] } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(deltas).toEqual(["First", "\n\n", "Sec", "ond"]);
+		expect(output.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "First\n\nSecond" })]);
+	});
+
 	test.each([null, -1, 0.5, "0"])(
 		"rejects malformed summary index %j instead of guessing a section",
 		async summaryIndex => {
@@ -1309,5 +1342,26 @@ describe("processResponsesStream: payloadless proxy frames", () => {
 				makeModel(),
 			),
 		).rejects.toBeInstanceOf(TypeError);
+	});
+
+	test("keeps completed custom input when the terminal item repeats an empty input", async () => {
+		const item = { type: "custom_tool_call", id: "ct_empty", call_id: "ct", name: "patch" };
+		const output = makeOutput();
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", item: { ...item, input: "" } },
+				{ type: "response.custom_tool_call_input.delta", delta: "partial patch" },
+				{ type: "response.custom_tool_call_input.done", input: "complete patch" },
+				{ type: "response.output_item.done", item: { ...item, input: "" } },
+				{ type: "response.completed", response: { status: "completed" } },
+			]),
+			output,
+			{ push: () => {} } as never,
+			makeModel(),
+		);
+
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "patch", arguments: { input: "complete patch" } }),
+		]);
 	});
 });
