@@ -214,7 +214,7 @@ enum KeyboardConflict {
 /// Candidates come from the process's accessibility windows, not
 /// `WindowServer`'s list, which also holds the per-window compositor surfaces
 /// of Chromium, Electron, and `WebKit` apps. `DesktopWindow::focused` cannot
-/// disambiguate: it marks every window of the active application.
+/// disambiguate: it names only the active application's key window.
 fn ensure_sole_keyboard_destination(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
 	let conflict = ax::window_records(pid)
 		.map_or(Some(KeyboardConflict::Unmapped), |records| keyboard_conflict(wid, &records));

@@ -11,6 +11,7 @@ import type { ProxyAssistantMessageEvent } from "@oh-my-pi/pi-agent-core/proxy";
 import { type ProxyMessageEventStream, streamProxy } from "@oh-my-pi/pi-agent-core/proxy";
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const mockModel: Model = buildModel({
@@ -234,4 +235,33 @@ describe("streamProxy — tool-call streaming and partialJson isolation", () => 
 		expect(getStreamingPartialJson(toolCall)).toBeUndefined();
 		expect(toolCall.arguments).toEqual({ path: "/a" });
 	});
+
+	it.each([true, false])(
+		"refuses a cut-off argument buffer instead of executing its preview (toolcall_end=%s)",
+		async withEnd => {
+			const raw = '{"path":"a.txt","content":"hel';
+			const events: ProxyAssistantMessageEvent[] = [
+				{ type: "start" },
+				{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "write" },
+				{ type: "toolcall_delta", contentIndex: 0, delta: raw },
+				...(withEnd ? [{ type: "toolcall_end", contentIndex: 0 } as const] : []),
+				{ type: "done", reason: "toolUse", usage: { ...baseUsage } },
+			];
+			const body = buildSseBody(events);
+			const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+			const stream = streamProxy(mockModel, mockContext, {
+				proxyUrl: "http://localhost:0",
+				authToken: "test",
+				fetch: fetchMock,
+			});
+
+			await collectEvents(stream);
+			const toolCall = extractToolCall(await stream.result());
+			expect(toolCall.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+			expect(() =>
+				validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, toolCall),
+			).toThrow("Tool call arguments are not valid JSON");
+		},
+	);
 });

@@ -302,6 +302,17 @@ impl Shell {
 	pub async fn live_background_job_count(&self) -> u32 {
 		self.inner.live_background_job_count().await
 	}
+
+	/// Pids of the still-alive processes spawned by this session's in-flight
+	/// `run`, in spawn order: foreground commands, pipeline stages, and `&`
+	/// jobs started by that run. Builtins run in-process and never appear.
+	/// Empty when no run is executing; children that outlive their run are no
+	/// longer reported once it returns. Synchronous and never waits on the
+	/// running command.
+	#[napi]
+	pub fn pids(&self) -> Vec<i32> {
+		self.inner.pids()
+	}
 }
 
 /// Execute a brush shell command.

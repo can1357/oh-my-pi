@@ -23,6 +23,8 @@ memory:
 
 At session start, if a consolidated summary or manually captured lesson exists for the current project, it is injected into the system prompt as a **Memory Guidance** block. The summary and lessons share `memories.summaryInjectionTokenLimit`.
 
+If startup consolidation finishes after the first prompt build, the active session's summary snapshot is refreshed. Captured lessons remain pinned to the initial snapshot, so a concurrent `learn` call still affects only later sessions.
+
 - Treat memory as heuristic context — useful for process and prior decisions, not authoritative on current repo state.
 - Cite the memory artifact path when memory changes the plan, and pair it with current-repo evidence before acting.
 - Prefer repo state and user instruction when they conflict with memory; treat conflicting memory as stale.

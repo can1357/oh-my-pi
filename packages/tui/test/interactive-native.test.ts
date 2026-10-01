@@ -157,6 +157,20 @@ describe("native interactive primitives", () => {
 		expect(moved.p).toMatchObject({ cursor: 5 });
 	});
 
+	it("takes the terminal's wrap natively: Up and Down reach it only on the first and last drawn row", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.focused = true;
+		const text = `${"word ".repeat(40)}end`;
+		editor.setText(text);
+		expect(editorNode(editor).p).toMatchObject({ cursor: text.length });
+		// Tern moves the caret between the rows it drew; an Up it hands over comes
+		// from its first row, which is on the first line whatever width omp assumes.
+		editor.handleInput("\x1b[A");
+		expect(editorNode(editor).p).toMatchObject({ cursor: 0 });
+		editor.handleInput("\x1b[B");
+		expect(editorNode(editor).p).toMatchObject({ cursor: text.length });
+	});
+
 	it("never describes a masked input's secret", () => {
 		const input = new Input();
 		input.mask = true;

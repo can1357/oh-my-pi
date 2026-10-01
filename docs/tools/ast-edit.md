@@ -8,12 +8,13 @@
 - Key collaborators:
   - `crates/pi-natives/src/ast.rs` — native rewrite planning and file mutation
   - `crates/pi-ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
+  - `crates/pi-ast/src/ops.rs` — pattern compilation, JSON member-fragment fallback, and edit overlap validation
   - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing (host paths and internal URLs) and multi-path resolution
   - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native ast-edit reads and writes through
   - `packages/coding-agent/src/tools/resolve.ts` — preview/apply queueing
   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
   - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number diff references
-  - `packages/hashline/src/format.ts` — stable hashline header formatting for preview anchors
+  - `packages/tui/src/tools/hashline-format.ts` — stable hashline header formatting for preview anchors
   - `packages/natives/native/index.d.ts` — JS-visible native binding contract
 
 ## Inputs
@@ -80,7 +81,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 ## Side Effects
 - Filesystem
   - Preview reads files and scans directories.
-  - Apply stages every changed file in memory, verifies the full pass, then writes the staged files; a later compute/overlap failure cannot partially mutate earlier files.
+  - Each native apply pass stages its changed files in memory before writing; a compute/overlap failure in that pass cannot partially mutate earlier files. Write failures or cancellation during the write loop can still leave earlier writes applied. Multi-target calls run separate passes, so a later target's failure does not roll back earlier targets.
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - Registers a non-forcing pending resolve invoker through `queueResolveHandler(...)`.
   - Surfaces a `SoftToolRequirement` (with the resolve reminder) while pending; the agent runtime forces `write` only on non-compliance — no steering message and no per-preview forced tool choice.
@@ -92,7 +93,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
   - Cancellation and optional native timeout are cooperative through `CancelToken::heartbeat()`.
 
 ## Limits & Caps
-- File cap exposed by the wrapper: `PI_MAX_AST_FILES`, default `1000`, in `packages/coding-agent/src/tools/ast-edit.ts`.
+- File cap exposed by the wrapper: `PI_MAX_AST_FILES`, default `1000`, in `packages/coding-agent/src/tools/ast-edit.ts`. The cap is passed to each native target independently, not enforced globally across multi-target calls.
 - Native `maxFiles` and `maxReplacements` are both clamped to at least `1` when provided in `crates/pi-natives/src/ast.rs`.
 - The wrapper never sets `maxReplacements`; native behavior therefore defaults to effectively unbounded replacements for a run.
 - Parse issues are deduplicated and capped at `PARSE_ERRORS_LIMIT = 20` entries via `capParseErrors(...)` in `packages/tui/src/render/render-utils.ts`; `details.parseErrors` carries the capped list and `details.parseErrorsTotal` the pre-cap deduplicated count.
@@ -103,7 +104,8 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 ## Errors
 - TS wrapper throws `ToolError` for empty patterns, duplicate rewrite patterns, empty path entries, internal URLs of schemes tools may not write (`Cannot rewrite <url>: <scheme>:// URLs are not editable files`), internal URLs the URL filesystem cannot stat (`Cannot rewrite <url>: <reason>`), and missing paths.
 - Native code returns hard errors for:
-  - inability to infer a supported language for a candidate (reported as a parse issue in the wrapper's best-effort mode),
+  - a path/glob with no supported source files (`ast_edit found no supported source files for the given path/glob`),
+  - inability to resolve a candidate language (reported as a parse issue in best-effort mode),
   - unsupported explicit `lang` in internal/native calls,
   - bad glob compilation or unreadable search roots,
   - overlapping computed edits (`Overlapping replacements detected; refine pattern to avoid ambiguous edits`),
@@ -118,7 +120,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 ## Notes
 - `ast_edit` does not expose the native `lang`, `strictness`, `selector`, `maxReplacements`, `failOnParseError`, or `timeoutMs` fields to the model. The runtime fixes the call shape to a preview-first, smart-strictness, best-effort parse mode.
 - Mixed-language scopes are supported: the native layer infers each candidate's language and compiles each rule per discovered language. A pattern that parses for only some languages rewrites those files and reports parse issues for incompatible languages.
-- Idempotency is not enforced syntactically. A rewrite like `foo($A) -> foo($A)` previews zero changes because output equals input; a rewrite that keeps matching its own output may still produce replacements on repeated calls.
-- Rewrites are accumulated per file, then applied from the end of the file backward after an overlap check. Independent matches can coexist; overlapping matches abort the run.
+- Idempotency is not enforced. An identity rewrite such as `foo($A) -> foo($A)` still reports matching replacements in preview; apply skips the physical write when a file's resulting content is unchanged. Rewrites that keep matching their output can report replacements on repeated calls.
+- Rewrites are accumulated per file, then applied from the end of the file backward after an overlap check. Exact duplicate edits (same range and replacement) from multiple rules are counted once. Other overlapping edits abort apply; the dry-run preview does not perform that apply-time check.
 - Native rewrite rule order is by pattern-string sort, not by the original `ops` array order, because `normalize_rewrite_map(...)` sorts the `(pattern, rewrite)` pairs.
 - Preview/apply parity is validated by totals and per-file counts after the apply rerun, not by a byte-for-byte diff of every replacement payload.

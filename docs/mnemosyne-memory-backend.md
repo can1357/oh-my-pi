@@ -63,7 +63,7 @@ Read the full content and metadata for a recalled result with `read memory://<me
 | `mnemopi.embeddingModel`      | variant default    | Explicit embedding model id; overrides `mnemopi.embeddingVariant`. Precedence: this setting > `MNEMOPI_EMBEDDING_MODEL` env > variant default; a blank or `null` setting counts as unset.                                                                                                                                         |
 | `mnemopi.embeddingApiUrl`     | env/default        | OpenAI-compatible embedding endpoint passed to `Mnemopi`.                                                                                                                                                                                                                              |
 | `mnemopi.embeddingApiKey`     | env/default        | Embedding API key passed to `Mnemopi`.                                                                                                                                                                                                                                                 |
-| `mnemopi.llmMode`             | `smol`             | `smol` resolves the configured pi-ai `tiny` role then `smol`; `remote` uses the settings below; `none` disables LLM calls.                                                                                                                                                             |
+| `mnemopi.llmMode`             | `smol`             | `smol` resolves the `memory` model role and its retry chain; `remote` uses the settings below; `none` disables LLM calls. |
 | `mnemopi.llmBaseUrl`          | env/default        | OpenAI-compatible LLM endpoint for `llmMode: remote`.                                                                                                                                                                                                                                  |
 | `mnemopi.llmApiKey`           | env/default        | LLM API key for `llmMode: remote`.                                                                                                                                                                                                                                                     |
 | `mnemopi.llmModel`            | env/default        | LLM model id for `llmMode: remote`.                                                                                                                                                                                                                                                    |
@@ -77,6 +77,8 @@ The coding-agent wrapper applies scoping on top of the underlying `Mnemopi` pack
 - `per-project-tagged` writes to the project-local bank and recalls from both the project-local bank and the shared global bank, with duplicate recall results merged.
 
 Under `global` and `per-project-tagged`, the `retain` and `learn` tools also accept `scope: "global"`, which writes an item or lesson to the shared bank so every project recalls it. Under `per-project` the option is not offered, because no bank is recalled by every project.
+
+Non-global modes also recall legacy sibling banks whose working-memory rows all carry the current absolute cwd in `metadata.cwd`; mixed-cwd, empty, corrupt, or unreadable banks are excluded. Startup probes at most 64 additional bank directories. New writes still use the current project bank.
 
 The combined project-plus-global behavior lives in the wrapper. The `@oh-my-pi/pi-mnemopi` package itself still exposes banks and constructor options directly, including `bank` for selecting a bank name. Project-local banks other than the shared bank are stored as sibling bank databases managed by Mnemopi's `BankManager`.
 
@@ -109,7 +111,7 @@ Memories labelled `true` or `likely_true` always weigh `1.0`, and `false` weighs
 
 ## LLM and embeddings
 
-FTS and embedding paths use the settings below. LLM-backed extraction/consolidation uses the configured local on-device memory model (`providers.memoryModel`) when selected, otherwise `llmMode: smol` resolves the `tiny` role first and then `smol`; `llmMode: remote` uses the OpenAI-compatible endpoint settings; `llmMode: none` disables LLM calls. If no tiny/smol model or current credential resolves, Mnemopi continues without LLM-backed work.
+FTS and embedding paths use the settings below. `llmMode: smol` resolves the `memory` role and its configured retry chain, fetching credentials at call time. When unset, the role reuses `tiny`, then the fast (`smol`) defaults. It supports both local-inference and online models. `llmMode: remote` uses the OpenAI-compatible endpoint settings; `llmMode: none` disables LLM calls. If no usable model or credential resolves, Mnemopi continues without LLM-backed work. The legacy `providers.memoryModel` setting is migrated into the `memory` role.
 
 FTS-only:
 
@@ -177,18 +179,18 @@ new Mnemopi({
 });
 ```
 
-pi-ai tiny/smol role LLM:
+Managed memory-role LLM:
 
 ```yaml
 mnemopi:
   llmMode: smol
 ```
 
-The coding agent resolves `tiny` first and then `smol`, and passes a dynamic completion function so every Mnemopi LLM call can fetch current provider credentials at call time:
+The coding agent resolves the `memory` role and passes a dynamic completion function so every Mnemopi LLM call can fetch current provider credentials at call time and try the role's fallback candidates:
 
 ```ts
 new Mnemopi({
-  llm: async (prompt, opts) => completeSmolWithCurrentAuth(prompt, opts),
+  llm: async (prompt, opts) => completeMemoryRoleWithCurrentAuth(prompt, opts),
 });
 ```
 
@@ -199,6 +201,7 @@ new Mnemopi({
 - `/memory enqueue` forces retention of the current session, flushes pending fact extractions, and runs Mnemopi sleep/consolidation for eligible working-memory rows.
 - `/memory stats` and `/memory diagnose` render backend-specific bank statistics/diagnostics when the Mnemopi backend is active.
 - Subagents do not own separate Mnemopi retain loops; they alias the parent state when a parent Mnemopi state exists, and otherwise remain inert.
+- At primary backend startup, eligible working-memory rows are promoted across owned banks before the first write can TTL-trim them. Promotion failures are logged without disabling the backend.
 - Backend startup is best-effort. If database/model initialization fails, the session continues with Mnemopi inert and logs a warning; memory tools then report that the backend is not initialized.
 
 ## Shutdown and durability

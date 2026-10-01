@@ -1,5 +1,6 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getLogsDir, isBunTestRuntime, isRecord } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
@@ -90,14 +91,73 @@ export async function appendRawHttpRequestDumpFor400(
 
 	const payload = buildHttp400DumpPayload(dump, error, message);
 	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(payload)).toString(36)}.json`;
-	const filePath = path.join(getLogsDir(), "http-400-requests", fileName);
+	const dumpDir = path.join(getLogsDir(), HTTP_DUMP_DIR_NAME);
+	const filePath = path.join(dumpDir, fileName);
 
 	try {
 		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+		// Dumps are rare; bound the directory right after adding to it.
+		pruneHttpRequestDumps(dumpDir, { keep: fileName }).catch(err => {
+			logger.warn("Failed to prune HTTP request dumps", { dir: dumpDir, err });
+		});
 		return `${message}\n${RAW_HTTP_REQUEST_LINE}${filePath}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
 		return `${message}\n${RAW_HTTP_REQUEST_SAVE_FAILED_LINE}${writeMessage}`;
+	}
+}
+
+const HTTP_DUMP_DIR_NAME = "http-400-requests";
+const HTTP_DUMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const HTTP_DUMP_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+export interface HttpRequestDumpRetention {
+	/** Dump file name never deleted (the one just written and referenced by the error). */
+	keep?: string;
+	/** Dumps last modified longer ago than this are deleted (default 7 days). */
+	maxAgeMs?: number;
+	/** Oldest remaining dumps are deleted until the directory totals at most this (default 64 MiB). */
+	maxTotalBytes?: number;
+	now?: number;
+}
+
+/**
+ * Bound the rejected-request dump directory: delete `*.json` dumps older than
+ * the age limit, then the oldest survivors until the total fits the size cap.
+ */
+export async function pruneHttpRequestDumps(dir: string, retention: HttpRequestDumpRetention = {}): Promise<void> {
+	const maxAgeMs = retention.maxAgeMs ?? HTTP_DUMP_MAX_AGE_MS;
+	const maxTotalBytes = retention.maxTotalBytes ?? HTTP_DUMP_MAX_TOTAL_BYTES;
+	const now = retention.now ?? Date.now();
+	let names: string[];
+	try {
+		names = await fs.readdir(dir);
+	} catch (err) {
+		if (isEnoent(err)) return;
+		throw err;
+	}
+	const dumps: Array<{ name: string; mtimeMs: number; size: number }> = [];
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		try {
+			const stat = await fs.stat(path.join(dir, name));
+			if (stat.isFile()) dumps.push({ name, mtimeMs: stat.mtimeMs, size: stat.size });
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+	}
+	dumps.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+	let retainedBytes = 0;
+	for (const dump of dumps) {
+		if (dump.name === retention.keep) {
+			retainedBytes += dump.size;
+			continue;
+		}
+		if (now - dump.mtimeMs <= maxAgeMs && retainedBytes + dump.size <= maxTotalBytes) {
+			retainedBytes += dump.size;
+			continue;
+		}
+		await fs.rm(path.join(dir, dump.name), { force: true });
 	}
 }
 

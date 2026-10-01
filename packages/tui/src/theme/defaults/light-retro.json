@@ -94,5 +94,15 @@
 		"pageBg": "paper",
 		"cardBg": "#ffffff",
 		"infoBg": "greenBar"
+	},
+	"terminal": {
+		"background": "paper",
+		"foreground": "printBlack",
+		"chrome": "paperHighlight",
+		"widget": "#fbf9f3",
+		"ansi": [
+			"printBlack", "vintageRed", "dotMatrixGreen", "#9d7206", "vintageBlue", "#973787", "#02787d", "paperShadow",
+			"fadedInk", "#e64343", "#039c45", "#ac8103", "#427fd8", "#be4daa", "#09959b", "#fbf9f3"
+		]
 	}
 }

@@ -76,6 +76,11 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
 	if (kind !== undefined) model.kind = kind;
+	if (catalog.contextWindowAuthoritative === true) {
+		model.contextWindowAuthoritative = true;
+	} else {
+		delete model.contextWindowAuthoritative;
+	}
 	const webSearch = catalog.webSearch;
 	if (
 		webSearch === "gemini" ||
@@ -120,6 +125,15 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (editPromptVariant === "full" || editPromptVariant === "compact") {
 		model.editPromptVariant = editPromptVariant;
 	}
+	const pricingStatus = catalog.pricingStatus;
+	if (
+		pricingStatus === "free" ||
+		pricingStatus === "included" ||
+		pricingStatus === "variable" ||
+		pricingStatus === "unknown"
+	) {
+		model.pricingStatus = pricingStatus;
+	}
 	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
 	if (requiresCursorToolSchemaProjection === true) {
 		model.requiresCursorToolSchemaProjection = true;
@@ -136,6 +150,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		model.supportsAssistantPrefill = true;
 	} else {
 		delete model.supportsAssistantPrefill;
+	}
+	// The same KDL output-cap contract gates host options and the Responses
+	// transport. Materialize it because the transport consumes the model field.
+	if (typeof catalog.omitMaxOutputTokens === "boolean" && model.omitMaxOutputTokens === undefined) {
+		model.omitMaxOutputTokens = catalog.omitMaxOutputTokens;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
@@ -344,5 +363,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Configured lifetimes replace catalog lifetimes rather than merging with them.
+	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
 	return model;
 }

@@ -25,6 +25,29 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 }
 
 describe("context overflow evidence", () => {
+	it.each([
+		"prompt (105522 tokens) + max tokens (25571) exceeds the context (131072); requests are never truncated",
+		"prompt (131072 tokens) leaves no room to answer in the context (131072); requests are never truncated",
+		"PROMPT ( 105522  TOKENS )+MAX  TOKENS( 25571 ) EXCEEDS  THE CONTEXT( 131072 )",
+		"PROMPT( 131072  TOKENS ) LEAVES  NO ROOM TO ANSWER IN THE  CONTEXT ( 131072 )",
+	])("recognizes Strata token-context evidence without usage: %s", detail => {
+		// OpenAI HTTP status/message plus the captured envelope, without the local request-dump path.
+		const errorMessage = `400 ${detail}\n${detail} (type=invalid_request_error)`;
+		const message: AIError.ContextOverflowMessage = { stopReason: "error", errorMessage };
+		expect(isContextOverflow(message)).toBe(true);
+		const id = AIError.classifyMessage({ errorMessage, errorStatus: 400 });
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.PayloadRejected)).toBe(false);
+	});
+
+	it("does not treat an output-token cap as Strata context overflow", () => {
+		const errorMessage = "400 max tokens (25571) exceeds the output limit (16384)";
+		expect(isContextOverflow({ stopReason: "error", errorMessage })).toBe(false);
+		expect(
+			AIError.is(AIError.classifyMessage({ errorMessage, errorStatus: 400 }), AIError.Flag.ContextOverflow),
+		).toBe(false);
+	});
+
 	it("distinguishes transient errors from text-backed overflow when usage is missing", () => {
 		const message: AIError.ContextOverflowMessage = {
 			stopReason: "error",
