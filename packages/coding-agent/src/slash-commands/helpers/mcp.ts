@@ -210,7 +210,7 @@ async function withPreparedMcpConnection<T>(
 		// Without this, `/mcp test|resources|prompts` silently fails for any
 		// server saved by the TUI/reauth path.
 		manager.setAuthStorage(runtime.session.modelRegistry.authStorage);
-		const resolvedConfig = await manager.prepareConfig(config);
+		const resolvedConfig = await manager.prepareConfig(config, { serverName: name });
 		connection = await connectToServer(name, resolvedConfig);
 		return await fn(connection);
 	} finally {

@@ -412,11 +412,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(streamErrors).toEqual(
 				commands.map(() => `Failed to resolve API key for provider custom-proxy: ${diagnostic}`),
 			);
-			const failureLog = { failure: "exited with status 1", keptPreviousValue: false, freshRunRequired: false };
-			expect(loggedFields).toEqual([
-				...commands.map(() => ({ label: "custom-proxy apiKey", ...failureLog })),
-				{ label: "header-proxy header x-tenant-token", ...failureLog },
+			// The log names where the command is configured and how it failed, nothing from the command.
+			expect(loggedFields).toMatchObject([
+				...commands.map(() => ({ label: "custom-proxy apiKey", failure: "exited with status 1" })),
+				{ label: "header-proxy header x-tenant-token", failure: "exited with status 1" },
 			]);
+			const logged = JSON.stringify(loggedFields);
+			for (const fragment of ["SYNTH-", "synthetic-command-stdout", "AUTH=", "printf", helper]) {
+				expect(logged).not.toContain(fragment);
+			}
 			expect(headerValue).toBeUndefined();
 			expect(requests).toBe(0);
 		},

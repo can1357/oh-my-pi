@@ -1915,7 +1915,9 @@ export class ModelRegistry {
 		let discoveryAuthRejected = false;
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
-				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers, undefined, providerId);
+				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers, undefined, {
+					provider: providerId,
+				});
 				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
 				const models = this.#applyProviderModelOverrides(
 					providerId,
@@ -2402,12 +2404,12 @@ export class ModelRegistry {
 			override.headers !== undefined || (override.authHeader === true && override.apiKey !== undefined);
 		const resolveHeaders = changesHeaders
 			? mergeAuthHeaderSources(
-					entry.provider,
 					override.headers
 						? [entry.resolveHeaders ?? entry.headers, override.headers]
 						: [entry.resolveHeaders ?? entry.headers],
 					override.authHeader,
 					override.apiKey,
+					{ provider: entry.provider },
 				)
 			: entry.resolveHeaders;
 		return {

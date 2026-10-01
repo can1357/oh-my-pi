@@ -729,7 +729,7 @@ export class MCPManager {
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
-				const resolvedConfig = await this.#resolveAuthConfig(config);
+				const resolvedConfig = await this.#resolveAuthConfig(config, { serverName: name });
 				return connectToServer(name, resolvedConfig, {
 					onNotification: (method, params) => {
 						this.#handleServerNotification(name, method, params);
@@ -766,7 +766,7 @@ export class MCPManager {
 						lookupMcpOAuthCredential(this.#authStorage, config)
 					) {
 						connection.transport.onAuthError = async () => {
-							const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
+							const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true, serverName: name });
 							if (refreshed.type === "http" || refreshed.type === "sse") {
 								return refreshed.headers ?? null;
 							}
@@ -1183,8 +1183,12 @@ export class MCPManager {
 	 * Resolve auth and shell-command substitutions in config before connecting.
 	 * Pass `oauth: false` to skip OAuth credential injection (used by reauth's
 	 * unauthenticated probe, which must observe the server's bare 401).
+	 * `serverName` names a failing `!command` value in logs.
 	 */
-	async prepareConfig(config: MCPServerConfig, options?: { oauth?: boolean }): Promise<MCPServerConfig> {
+	async prepareConfig(
+		config: MCPServerConfig,
+		options?: { oauth?: boolean; serverName?: string },
+	): Promise<MCPServerConfig> {
 		return this.#resolveAuthConfig(config, options);
 	}
 
@@ -1536,7 +1540,7 @@ export class MCPManager {
 		source: SourceMeta | undefined,
 		reconnectEpoch: number,
 	): Promise<MCPServerConnection> {
-		const resolvedConfig = await this.#resolveAuthConfig(config);
+		const resolvedConfig = await this.#resolveAuthConfig(config, { serverName: name });
 		const connection = await connectToServer(name, resolvedConfig, {
 			onNotification: (method, params) => {
 				this.#handleServerNotification(name, method, params);
@@ -1563,7 +1567,7 @@ export class MCPManager {
 		// Same gate as connectServers: any resolvable managed credential.
 		if (isAuthRefreshableMCPTransport(connection.transport) && lookupMcpOAuthCredential(this.#authStorage, config)) {
 			connection.transport.onAuthError = async () => {
-				const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
+				const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true, serverName: name });
 				if (refreshed.type === "http" || refreshed.type === "sse") {
 					return refreshed.headers ?? null;
 				}
@@ -1832,9 +1836,11 @@ export class MCPManager {
 	 */
 	async #resolveAuthConfig(
 		config: MCPServerConfig,
-		opts?: { forceRefresh?: boolean; oauth?: boolean },
+		opts?: { forceRefresh?: boolean; oauth?: boolean; serverName?: string },
 	): Promise<MCPServerConfig> {
 		let resolved: MCPServerConfig = { ...config };
+		// Names a failing `!command` value in logs; never the value or its command text.
+		const labelPrefix = opts?.serverName ? `mcp ${opts.serverName}` : "mcp";
 
 		const auth = config.auth;
 		const lookup: MCPOAuthCredentialLookup | undefined =
@@ -1898,7 +1904,7 @@ export class MCPManager {
 						nextEnv[key] = value;
 						continue;
 					}
-					const resolvedValue = await resolveConfigValue(value);
+					const resolvedValue = await resolveConfigValue(value, `${labelPrefix} env ${key}`);
 					if (resolvedValue) nextEnv[key] = resolvedValue;
 				}
 				resolved = { ...resolved, env: nextEnv };
@@ -1909,7 +1915,7 @@ export class MCPManager {
 			if (resolved.headers && resolved.headerPolicy !== "origin-locked") {
 				const nextHeaders: Record<string, string> = {};
 				for (const [key, value] of Object.entries(resolved.headers)) {
-					const resolvedValue = await resolveConfigValue(value);
+					const resolvedValue = await resolveConfigValue(value, `${labelPrefix} header ${key}`);
 					if (resolvedValue) nextHeaders[key] = resolvedValue;
 				}
 				resolved = { ...resolved, headers: nextHeaders };

@@ -239,19 +239,19 @@ function completedRun(exitCode: number | null | undefined, stdout: string): Comm
 
 /**
  * Resolve one raw header record, preserving declaration order and omitting
- * empty values. `provider` labels a failing header command in logs.
+ * empty values. `options.provider` labels a failing header command in logs.
  */
 export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
 	signal?: AbortSignal,
-	provider?: string,
+	options?: Pick<ConfigHeaderResolutionOptions, "provider">,
 ): Promise<Record<string, string> | undefined> {
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
 	let hasResolved = false;
 	for (const key in headers) {
-		const label = provider ? `${provider} header ${key}` : `header ${key}`;
+		const label = options?.provider ? `${options.provider} header ${key}` : `header ${key}`;
 		const next = await untilAborted(signal, () => resolveConfigValue(headers[key], label));
 		if (!next) continue;
 		resolved[key] = next;
@@ -279,7 +279,7 @@ export function createConfigHeaderResolver(
 			const next =
 				typeof source === "function"
 					? await untilAborted(signal, () => source(signal))
-					: await resolveConfigHeaders(source, signal, options?.provider);
+					: await resolveConfigHeaders(source, signal, options);
 			signal?.throwIfAborted();
 			if (!next) continue;
 			for (const key in next) {
