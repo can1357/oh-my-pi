@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
-import { withFileLockSync } from "@oh-my-pi/pi-utils/file-lock";
+import { type FileLockHandle, tryAcquireFileLock, withFileLockSync } from "@oh-my-pi/pi-utils/file-lock";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { openCloexecSync } from "@oh-my-pi/pi-utils/fs-open";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -68,10 +68,12 @@ export class SessionWriteConflictError extends Error {
 	readonly expectedSize: number | null;
 	readonly actualSize: number | null;
 
-	constructor(path: string, expectedSize: number | null, actualSize: number | null) {
+	/** `summary` leads the message, e.g. what the conflict means for the session. */
+	constructor(path: string, expectedSize: number | null, actualSize: number | null, summary?: string) {
 		const expected = expectedSize === null ? "missing" : `${expectedSize} bytes`;
 		const actual = actualSize === null ? "missing" : `${actualSize} bytes`;
-		super(`Session file changed before rewrite: ${path} (expected ${expected}, found ${actual}).`);
+		const detail = `Session file changed before rewrite: ${path} (expected ${expected}, found ${actual}).`;
+		super(summary ? `${summary} ${detail}` : detail);
 		this.name = "SessionWriteConflictError";
 		this.path = path;
 		this.expectedSize = expectedSize;
@@ -163,6 +165,13 @@ export interface SessionStorage {
 	 * participate in close-time draft GC.
 	 */
 	withSessionFileLockSync?<T>(sessionPath: string, operation: () => T): T;
+	/**
+	 * Claim this process's ownership of a session file for as long as it has
+	 * the session open. Returns the release callback, or `null` while another
+	 * live process holds the claim. Optional because only backends with a
+	 * process-owned lock can tell that another process has a session open.
+	 */
+	claimSessionFile?(sessionPath: string): (() => void) | null;
 	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
@@ -413,6 +422,14 @@ function isPidAlive(pid: number): boolean {
 		return hasFsCode(err, "EPERM") || !hasFsCode(err, "ESRCH");
 	}
 }
+
+/**
+ * This process's ownership leases, shared by every `FileSessionStorage`
+ * instance: managers in one process share one lease per session file and only
+ * ever contend with other processes. The OS reclaims a lease when its process
+ * exits, so a crashed owner never blocks a later claim.
+ */
+const sessionFileLeases = new Map<string, { lease: FileLockHandle; holders: number }>();
 
 export class FileSessionStorage implements SessionStorage {
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
@@ -887,6 +904,41 @@ export class FileSessionStorage implements SessionStorage {
 	/** Run a synchronous session mutation under its cross-process lock. */
 	withSessionFileLockSync<T>(sessionPath: string, operation: () => T): T {
 		return withFileLockSync(sessionPath, operation);
+	}
+
+	/**
+	 * The lease is an OS lock (`flock` sidecar, abstract socket, or named mutex)
+	 * beside the session file, so the kernel drops a dead owner's claim. Never
+	 * throws: ownership only drives a warning, so a lock that cannot be taken
+	 * for another reason counts as owned rather than blocking the session.
+	 */
+	claimSessionFile(sessionPath: string): (() => void) | null {
+		const key = path.resolve(sessionPath);
+		let held = sessionFileLeases.get(key);
+		if (!held) {
+			let lease: FileLockHandle | null;
+			try {
+				// Like the publish lock: the directory may not exist before the first write.
+				this.ensureDirSync(path.dirname(key));
+				lease = tryAcquireFileLock(path.join(path.dirname(key), `.${path.basename(key)}.owner`));
+			} catch (err) {
+				logger.debug("Session ownership lease unavailable", { sessionFile: key, error: toError(err).message });
+				return () => {};
+			}
+			if (!lease) return null;
+			held = { lease, holders: 0 };
+			sessionFileLeases.set(key, held);
+		}
+		const claim = held;
+		claim.holders++;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			if (--claim.holders > 0) return;
+			sessionFileLeases.delete(key);
+			claim.lease.release();
+		};
 	}
 
 	/**

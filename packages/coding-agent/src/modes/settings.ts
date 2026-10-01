@@ -395,7 +395,8 @@ export const cfgTerminalShowProgress = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Native Terminal Progress",
-		description: "Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running",
+		description:
+			"Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running (always on in Tern)",
 	},
 });
 

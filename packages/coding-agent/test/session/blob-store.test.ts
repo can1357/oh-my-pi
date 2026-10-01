@@ -1,4 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	BlobStore,
 	externalizeImageData,
@@ -39,5 +41,34 @@ describe("BlobStore image display paths", () => {
 		expect(blobExtensionForImageMimeType("image/jpeg")).toBe("jpg");
 		expect(blobExtensionForImageMimeType("image/png")).toBe("png");
 		expect(blobExtensionForImageMimeType("text/plain")).toBeUndefined();
+	});
+});
+
+describe("BlobStore content-addressed writes", () => {
+	it("writes a blob once, creates the store on demand, and repairs a torn blob", async () => {
+		using tempDir = TempDir.createSync("@omp-blob-store-dedupe-");
+		// The store directory does not exist yet: the first put creates it.
+		const store = new BlobStore(path.join(tempDir.path(), "blobs"));
+		const data = Buffer.from("image-bytes");
+		const { path: blobPath } = store.putSync(data);
+		expect(await Bun.file(blobPath).bytes()).toEqual(new Uint8Array(data));
+
+		const writeFileSync = vi.spyOn(fs, "writeFileSync");
+		const bunWrite = vi.spyOn(Bun, "write");
+		try {
+			const blobWrites = () =>
+				[...writeFileSync.mock.calls, ...bunWrite.mock.calls].filter(([target]) => target === blobPath).length;
+			store.putSync(data);
+			await store.put(data);
+			expect(blobWrites()).toBe(0);
+
+			fs.truncateSync(blobPath, 3);
+			await store.put(data);
+			expect(blobWrites()).toBe(1);
+			expect(await Bun.file(blobPath).bytes()).toEqual(new Uint8Array(data));
+		} finally {
+			writeFileSync.mockRestore();
+			bunWrite.mockRestore();
+		}
 	});
 });

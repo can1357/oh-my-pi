@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	IndexedSessionStorage,
@@ -328,39 +329,62 @@ describe("SessionManager atomic rewrite race", () => {
 	});
 });
 describe("SessionManager cross-process rewrite freshness", () => {
-	it("refuses to erase a durable turn appended by another manager", async () => {
-		const tempDir = TempDir.createSync("@omp-session-rewrite-conflict-");
+	const userTurn = (content: string) => ({ role: "user" as const, content, timestamp: Date.now() });
+
+	// Each row meets the other writer's append through a different full-rewrite path.
+	it.each([
+		{
+			path: "an atomic rewrite (compaction, branch, entry discard)",
+			tornTail: false,
+			rewrite: (ours: SessionManager) =>
+				expect(ours.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError),
+		},
+		{
+			path: "the synchronous rewrite an append runs on a session that needs repair",
+			tornTail: true,
+			rewrite: undefined,
+		},
+	])("keeps another writer's appends and stops rewriting after $path meets them", async ({ tornTail, rewrite }) => {
+		using tempDir = TempDir.createSync("@omp-session-rewrite-conflict-");
+		const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
+		await creator.ensureOnDisk();
+		const contested = creator.getSessionFile();
+		if (!contested) throw new Error("Expected session file");
+		creator.appendMessage(userTurn("our turn before the conflict"));
+		await creator.close();
+		// A torn line makes the next append replace the whole file.
+		if (tornTail) await fs.appendFile(contested, '{"type":"message"\n');
+
+		const storage = new FileSessionStorage();
+		const ours = await SessionManager.open(contested, tempDir.path(), storage, { suppressBreadcrumb: true });
+		// A second writer resumes the same file and appends its own turn.
+		const theirs = await SessionManager.open(contested, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		theirs.appendMessage(userTurn("durable second-writer turn"));
+		await theirs.close();
+		const theirBytes = await Bun.file(contested).text();
+
+		const errors: Error[] = [];
+		ours.onPersistenceError(error => errors.push(error));
+		const fullRewrites = [vi.spyOn(storage, "writeTextSync"), vi.spyOn(storage, "writeTextAtomic")];
 		try {
-			const first = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
-			await first.ensureOnDisk();
-			const sessionFile = first.getSessionFile();
-			if (!sessionFile) throw new Error("Expected session file");
-
-			const second = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
-				suppressBreadcrumb: true,
-			});
-			second.appendMessage({ role: "user", content: "durable second-writer turn", timestamp: Date.now() });
-			await second.close();
-
-			await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
-
-			const reopened = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
-				suppressBreadcrumb: true,
-			});
-			expect(
-				reopened
-					.getEntries()
-					.some(
-						entry =>
-							entry.type === "message" &&
-							entry.message.role === "user" &&
-							entry.message.content === "durable second-writer turn",
-					),
-			).toBe(true);
-			await reopened.close();
+			await rewrite?.(ours);
+			for (let turn = 0; turn < 5; turn++) ours.appendMessage(userTurn(`our turn ${turn} after the conflict`));
+			// One attempt meets the foreign append; later appends do not re-serialize
+			// the transcript against a file that can never accept it.
+			expect(fullRewrites.reduce((calls, spy) => calls + spy.mock.calls.length, 0)).toBe(1);
 		} finally {
-			await tempDir.remove();
+			for (const spy of fullRewrites) spy.mockRestore();
 		}
+
+		// Reported once, and flush/close surface the same latched conflict.
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toBeInstanceOf(SessionWriteConflictError);
+		await expect(ours.flush()).rejects.toBe(errors[0]);
+		await expect(ours.close()).rejects.toBe(errors[0]);
+		// The other writer's file is never clobbered.
+		expect(await Bun.file(contested).text()).toBe(theirBytes);
 	});
 });
 

@@ -856,8 +856,9 @@ drops override keys the resolved shape does not declare.
 ### Bedrock compatibility (`bedrock-converse-stream`)
 
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
-`supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
-`promptCacheMaximumCheckpoints` for Bedrock models.
+`supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`,
+`promptCacheMaximumCheckpoints`, and `supportsForcedToolChoice` (forced `any`/`tool` choices
+fall back to `auto` when `false`; built in for Claude Opus/Sonnet 5.5) for Bedrock models.
 
 By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`.
 An explicit per-request region or a model ARN's region wins. Otherwise an ambient region from

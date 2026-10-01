@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.6] - 2026-10-01
+
 ### Added
 
-- Added `Agent.moveFollowUpsToSteering()` to move queued follow-ups into steering with a single queue-change notification ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
+- Added APIs for improving agent follow-up and steering workflow management, including moving queued follow-ups into steering with a single queue-change notification.
+- Added support for trusted post-tool guidance via `afterToolCall` results, allowing additional context to be included in the next provider request, including after tool failures.
 
 ## [18.4.4] - 2026-09-29
 

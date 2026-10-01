@@ -11,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	collectPendingToolCalls,
+	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	describePendingToolCalls,
 	SESSION_EXIT_CUSTOM_TYPE,
@@ -370,6 +371,66 @@ describe("session exit diagnostics", () => {
 			model: pendingAssistant.model,
 			stopReason: "aborted",
 		});
+	});
+
+	it("keeps an interrupted ask question in resumed model context without replaying completed calls", () => {
+		const sessionManager = SessionManager.inMemory();
+		const question = { questions: [{ question: "Deploy now?", options: ["Yes", "No"], recommended: "Yes" }] };
+		sessionManager.appendMessage({ role: "user", content: "prepare deployment", timestamp: Date.now() });
+		sessionManager.appendMessage({
+			...pendingAssistant,
+			content: [
+				{ type: "toolCall", id: "toolu_done", name: "read", arguments: { path: "deploy.md" } },
+				{ type: "toolCall", id: "toolu_ask", name: "ask", arguments: question },
+			],
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_done",
+			toolName: "read",
+			content: [{ type: "text", text: "Deployment instructions" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: "toolu_ask",
+			toolName: "ask",
+			startedAt: "2026-09-30T00:00:00.000Z",
+		});
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-09-30T00:00:01.000Z",
+		});
+
+		const branch = sessionManager.getBranch();
+		const aborted = createInterruptedTurnAbortMessage(branch);
+		expect(aborted).toBeDefined();
+		for (const result of createInterruptedToolResults(branch)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(aborted!);
+		const context = sessionManager.buildSessionContext().messages;
+		expect(context).toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				content: expect.arrayContaining([
+					expect.objectContaining({
+						type: "toolCall",
+						id: "toolu_ask",
+						arguments: question,
+					}),
+				]),
+			}),
+		);
+		expect(context.filter(message => message.role === "toolResult" && message.toolCallId === "toolu_ask")).toEqual([
+			expect.objectContaining({
+				isError: true,
+				content: [expect.objectContaining({ text: expect.stringContaining("outcome is unknown") })],
+			}),
+		]);
+		expect(
+			context.filter(message => message.role === "toolResult" && message.toolCallId === "toolu_done"),
+		).toHaveLength(1);
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toBeUndefined();
 	});
 
 	it("reconstructs tool-call content even when stopReason is stop", () => {

@@ -732,6 +732,12 @@ export interface BedrockCompat {
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
 	 */
 	streamIdleTimeoutMs?: number;
+	/**
+	 * Whether the model accepts a forced `toolChoice` (`any` / `tool`). Claude
+	 * Opus/Sonnet 5.5 reject it outright; the request builder downgrades forced
+	 * choices to `auto` when this is false. Default: true.
+	 */
+	supportsForcedToolChoice?: boolean;
 }
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
@@ -742,6 +748,7 @@ export interface ResolvedBedrockCompat {
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
+	supportsForcedToolChoice: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to

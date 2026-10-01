@@ -4,22 +4,58 @@
 
 ### Added
 
-- Added `promote_queued_message` to RPC, with `promoteQueuedMessage()` on the session and TypeScript RPC client and `promote_queued_message()` on the Python RPC client, so a queued follow-up can become a steering message without duplicating its text or losing attachments ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- The TypeScript RPC client's `prompt()` accepts a `streamingBehavior` (`"steer"` or `"followUp"`) for prompts sent while the agent is busy ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- Claude prompt caches can now stay warm on Amazon Bedrock and Bedrock Mantle, respecting configured per-model cache lifetimes as well as cache retention ([#13871](https://github.com/can1357/oh-my-pi/pull/13871) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added the RPC `cancel_subagent` command (and `RpcClient.cancelSubagent()`) to hard-kill one running subagent, foreground or background, without aborting the session ([#13481](https://github.com/can1357/oh-my-pi/pull/13481) by [@andrebrait](https://github.com/andrebrait)); supersedes [#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)
+- Added the RPC `steer_subagent` command (and `RpcClient.steerSubagent()`) to message a running subagent as its user, like Agent Hub chat ([#13482](https://github.com/can1357/oh-my-pi/pull/13482) by [@andrebrait](https://github.com/andrebrait)); ported from [#10427](https://github.com/can1357/oh-my-pi/pull/10427) by [@agenticfreedom](https://github.com/agenticfreedom)
+- Added `predict_word` and `predict_word_feedback` RPC commands so hosts with their own composer (web and IDE clients) can show the same ghost-text word completion as the terminal editor, using the `spelling.autocomplete` engine and its prose gates ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
+- Added an opt-in RPC ask dialog: after `set_ask_dialog` enables it, the `ask` tool sends all its questions in one `ask` extension UI request and takes the answers back in one `answers` response, so hosts can render every question with checkboxes or radio buttons and submit them together; hosts that don't opt in keep the one-`select`-per-choice prompts ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
-- RPC `prompt` (including a `/skill:` invocation sent through it) now acknowledges only once the message is admitted — queued onto its steer/follow-up/aside queue, an idle turn started for it, or routed to an extension command — so a `promote_queued_message` or `remove_queued_message` sent right after the acknowledgement finds a message queued moments earlier ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- Describing an attached image for a text-only model now gives up after 20 seconds and stops when you abort; the image stays saved and the model is told its description is unavailable ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- The status line's cost segment shows the session's own spend followed by subagent spend in parentheses, e.g. `$0.38 (+1.27)`. The subagent figure includes nested subagents, running and background agents, and subagents restored with a resumed session, and it matches the Agent Hub's cost total. The `$` or subscription mark is printed once, so advisor spend billed the same way shows as a bare amount ([#13944](https://github.com/can1357/oh-my-pi/pull/13944) by [@H4vC](https://github.com/H4vC))
+- RPC mode now sends a `cancel` extension UI request (with `targetId`) when omp's own dialog timeout elapses, for `select`, `confirm`, `input`, and `ask` dialogs, so hosts can close stale dialogs ([#13551](https://github.com/can1357/oh-my-pi/pull/13551) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
-- An `abort` that lands while a prompt's images are still being prepared now drops that prompt instead of starting or queueing it afterward ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- A path-pasted image or video sent as an aside while the agent is busy now reaches the model with its source path ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- Extension-registered model prompt-cache settings, including `{}` opt-outs, now take precedence over matching `models.yml` definitions ([#13871](https://github.com/can1357/oh-my-pi/pull/13871) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Cache warming now follows `providers.cacheRetention`: `none` no longer replays uncached requests, and `long` warms on the 1-hour lifetime the request actually wrote ([#13871](https://github.com/can1357/oh-my-pi/pull/13871) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Fixed `/wt` on filesystems without copy-on-write cloning (e.g. NTFS): the new worktree no longer lists unchanged files as modified under `core.autocrlf`, and staged-only edits, additions, and deletions now carry over with the right file contents instead of reverting to `HEAD` ([#13987](https://github.com/can1357/oh-my-pi/pull/13987) by [@H4vC](https://github.com/H4vC))
+- Fixed Ctrl+V on Windows taking about a second to paste text: omp no longer starts PowerShell to check for an image or read the text, and only uses it when the built-in clipboard read fails ([#13991](https://github.com/can1357/oh-my-pi/pull/13991) by [@H4vC](https://github.com/H4vC))
+- Fixed `local://` paths written with the working directory in front (`/repo/local://notes.md`) creating a literal `local:` directory in the project; `read`, `write`, and search tools now treat them as the `local://` URL ([#13977](https://github.com/can1357/oh-my-pi/pull/13977) by [@radkawar](https://github.com/radkawar))
+- Fixed `read` with a `;` list that mixes URLs and local paths (`https://…;src/a.ts:1-20`, `omp://;Makefile:1-3`) or starts with an extensionless file and a selector (`Makefile:1-3;docs/x.md`): it was fetched as one URL or sent to MCP; each entry is now read separately ([#13979](https://github.com/can1357/oh-my-pi/pull/13979) by [@radkawar](https://github.com/radkawar))
+- Fixed session saves rewriting every already-stored image blob on each save, which multiplied disk writes on sessions with many images ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+- Fixed omp freezing for seconds at a time and silently no longer saving the session after another omp process wrote to the same session file; omp now stops retrying, leaves the other process's file untouched, and tells you this session's further changes are not being saved to it ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+- Fixed writing to a session that another running omp process already has open giving no sign that both write to the same file; omp now warns once when it first writes to it ([#13989](https://github.com/can1357/oh-my-pi/pull/13989) by [@radkawar](https://github.com/radkawar))
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added a live Background Jobs view that lets you monitor running background jobs without interrupting the transcript.
+- Added agent lineage navigation, making it easy to move between subagents and the main session from the composer header.
+- Added queued-message controls to the RPC clients and session API, including promotion of queued follow-ups to steering messages without duplicating text or losing attachments, plus explicit steering or follow-up behavior for prompts sent while the agent is busy.
+- Added support for keeping Claude prompt caches warm on Amazon Bedrock and Bedrock Mantle according to configured model cache lifetimes and retention settings.
+- In Tern terminals, the effort indicator now visualizes the selected thinking level and becomes a fireball at the maximum level.
+
+### Changed
+
+- RPC prompt requests now acknowledge only after the message has been accepted for processing, queued, or routed to an extension command, so subsequent queue-management operations can act on the admitted message reliably.
+- Idle recaps now appear as structured notices in the transcript rather than status-line messages.
+- Attached-image descriptions for text-only models now time out after 20 seconds and stop when aborted, while preserving the image and informing the model when a description is unavailable.
+- The status line now separates the session's own cost from total subagent spend, including nested, background, and resumed subagents, and matches the Agent Hub total.
+- Tool-use reminders are now delivered as separate developer messages, keeping them distinct from tool output.
+- Reworked Tern transcript navigation and presentation: Esc-Esc rewind now uses the transcript with turn-by-turn and branch navigation, attached images open in Tern's image viewer, idle recaps remain unobtrusively in the transcript, and the background-jobs pill opens the live jobs view.
+- Tern now reports agent activity through terminal progress consistently, and its progress and agent indicators update smoothly during subagent work.
+
+### Fixed
+
+- Fixed Tern commands issued while the agent is working so they appear immediately in the transcript instead of being clipped above the prompt.
+- Added a dismiss action for Tern's prompt-area error notifications.
+- Fixed dollar signs in prompts being mistaken for Python mode until a following space confirms the mode.
+- Fixed turns getting stuck in a working state when post-turn maintenance, such as saving the session, fails; the session now becomes idle and reports a warning.
+- Fixed failed tool-output pruning from leaving live context out of sync with saved history.
+- Fixed oversized or undersized attached images being distorted when resized to fit display limits.
+- Fixed interrupted tool calls disappearing from the model's context after resuming a stopped session.
+- Fixed aborted prompts with images still being prepared from starting or entering the queue afterward.
+- Fixed aside messages containing pasted image or video paths so the source path is preserved when sent to the model.
+- Fixed extension-registered prompt-cache settings, including explicit opt-outs, not taking precedence over matching models.yml definitions.
+- Fixed prompt-cache warming to honor cache-retention settings, including disabling replay for no-retention caches and using the lifetime written by long-retention requests.
 
 ## [18.4.5] - 2026-09-30
 
@@ -1623,53 +1659,4 @@
 
 - Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
 
-## [18.1.3] - 2026-09-02
-
-### Changed
-
-- The `doubleEscapeAction` setting now accepts `tree`, so double-Escape can open the session tree instead of the rewind selector.
-- Updated the visual representation for the IRC tool from "irc" to "#"
-- Rewinding to a user message (double-Escape, `/branch`) now branches within the current session — the old path stays reachable in `/tree` — instead of forking a child session; `/rewind` is an alias for `/branch` ([#10565](https://github.com/can1357/oh-my-pi/pull/10565) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-
-### Fixed
-
-- Active sessions now keep memory proportional to truncated raw SSE and tool outputs instead of retaining complete oversized backing strings ([#10547](https://github.com/can1357/oh-my-pi/issues/10547)).
-- Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.
-- TypeScript code intelligence now works on TypeScript 7 projects: the built-in `typescript-native` server runs `tsc --lsp --stdio` when the resolved TypeScript install no longer ships `tsserver.js`, replacing `typescript-language-server` for that project.
-- Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).
-- Fixed prewalk conflicting with `todo.eager=always`: the forced eager-todo prelude ("call todo first this turn") was injected alongside the prewalk plan nudge ("write a complete plan first, then todo"), giving the model contradictory instructions; the eager-todo prelude is now suppressed only when prewalk will perform a handoff ([#10510](https://github.com/can1357/oh-my-pi/issues/10510)).
-- Fixed `authHeader: true` + command-backed `apiKey` discovery providers (no explicit `headers:` block) resending a stale bearer after a 401 force-refresh; discovered models now re-derive `Authorization` from the live `apiKey` each request ([#10551](https://github.com/can1357/oh-my-pi/issues/10551)).
-- Fixed the embedded shell's `command -v`/`-V` honoring only the first operand: it now iterates every name like bash/zsh, printing one line per resolved name and skipping misses ([#10544](https://github.com/can1357/oh-my-pi/issues/10544)).
-- Fixed hard-killed subagents vanishing from the agent registry under concurrent fan-out: `AgentLifecycleManager.release` now applies the terminal `aborted` transition before awaiting the tombstone sidecar write, closing a race where the dying session's own dispose-path unregister deleted the ref instead of leaving it as a tombstone ([#10531](https://github.com/can1357/oh-my-pi/issues/10531)).
-- `omp commit` now keeps extension-provided model credentials available in its nested commit-agent session ([#10528](https://github.com/can1357/oh-my-pi/issues/10528)).
-- MCP tool results now surface `structuredContent`: servers that return their payload in the structured channel while keeping `content` a terse ack (e.g. rhizome-mcp) are no longer data-less to the model ([#10522](https://github.com/can1357/oh-my-pi/issues/10522)).
-- Fixed the Agent Hub roster shuffling erratically while open: rows no longer re-sort on every agent heartbeat, so the list stays stable and navigable with many active agents ([#10524](https://github.com/can1357/oh-my-pi/issues/10524)).
-- Exiting Vibe mode now removes its restrictions from subsequent model turns, including restored sessions ([#10500](https://github.com/can1357/oh-my-pi/issues/10500)).
-- Fixed all-sessions listing (`Tab` in session picker) and cross-project resume failing when sessions are stored under `XDG_DATA_HOME`; `listAllSessions` now scans the active `getSessionsDir()` root instead of hardcoding `~/.omp/agent/sessions`.
-- Fixed the Nerd Font context icon showing a Windows logo instead of a generic window ([#10476](https://github.com/can1357/oh-my-pi/pull/10476) by [@erickmazer](https://github.com/erickmazer)).
-- The debug terminal snapshot now reports Herdr (and CMUX) as the multiplexer wrapping the session, matching the TUI's pane-identity detection instead of only tmux/screen/zellij.
-- Fixed vibe mode becoming un-exitable after branching a session (including via `/btw`), which previously failed with "Vibe parent session changed before mode exit could be persisted." ([#10468](https://github.com/can1357/oh-my-pi/issues/10468)).
-- Fixed HTML session exports reordering interleaved assistant text, thinking, images, and tool calls in the transcript, and split matching text/tool sidebar rows with block-accurate navigation. ([#10253](https://github.com/can1357/oh-my-pi/pull/10253) by [@realcoderandom](https://github.com/realcoderandom))
-- Fixed the built-in `grep` and `sed` treating a basic regular expression as an extended one: a bare `+` is now the literal and `\+` the operator, patterns like `^+` or `s/^\+/` no longer match every line, `^` anchors inside `\(…\)` and after `\|`, and a repetition operator with nothing to repeat is reported instead of silently selecting the whole file ([#10298](https://github.com/can1357/oh-my-pi/pull/10298) by [@mruangutai](https://github.com/mruangutai)).
-- Fixed RPC `prompt` responses for `/skill:*` commands arriving only after the entire prompt-dispatch pipeline finished (usage preflight, compaction, provider calls): under provider stress that outlasts any client prompt timeout, so hosts reported the prompt as rejected while the turn was in fact running. The skill branch now builds the skill prompt eagerly (preserving the immediate error for an unreadable skill file) and dispatches the expensive pipeline asynchronously after answering, matching plain prompts; when the dispatch is cancelled before a turn starts (e.g. an abort overtakes usage preflight), the session now reports it through the non-invoked  completion frame instead of leaving hosts waiting for an  that never comes ([#10249](https://github.com/can1357/oh-my-pi/pull/10249) by [@cwr250](https://github.com/cwr250)).
-- Fixed stale `omp-plugins.lock.json` entries loading leftover `node_modules` trees for plugins no longer declared in an existing `package.json` — the orphaned copy double-loaded its extensions. Lockfile-only plugins remain supported for manifest-less roots and symlinked packages (`omp plugin link`, marketplace runtime packages); stale entries are skipped with a warning.
-
-## [18.1.2] - 2026-09-01
-
-### Added
-
-- Recover stray <SM:EDIT> payloads emitted as plain text into real edit tool calls, with support for disabling this behavior through the edit.recoverInlineEdits setting.
-- Advisors now receive context from the active memory backend, including project decisions and recalled instructions; advisors also gain the recall tool when supported by the backend.
-
-### Changed
-
-- Replaced the sloppy edit format's symbolic markers with a clearer XML-based format using <SM:EDIT>, <SM:FIND>, and <SM:PUT> tags. Edit errors now include copy-ready XML payloads.
-- Increased the default input delay for the trace CLI to 3 seconds.
-
-### Fixed
-
-- Improved chat history stability in long-running sessions by avoiding unnecessary updates when date or directory context changes.
-- Fixed the trace CLI hanging during proxy connections and added support for forward HTTP proxies.
-- Fixed newly started sessions using stale model context-window limits after background model discovery completes; the active model now refreshes automatically so context usage and compaction thresholds match the model catalog.
-
-Older entries are archived in [packages\coding-agent\CHANGELOG.md@7057eb9cdda9](https://github.com/can1357/oh-my-pi/blob/7057eb9cdda91791fc4fbce4a60f33139bda3b8b/packages\coding-agent\CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@ddf916838520](https://github.com/can1357/oh-my-pi/blob/ddf916838520312aeee0448e398e108934a8b02a/packages/coding-agent/CHANGELOG.md).

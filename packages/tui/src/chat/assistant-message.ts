@@ -890,8 +890,8 @@ export class AssistantMessageComponent extends Container {
 	 * Turn-ending error, recovered-retry note or abort label. A failed request
 	 * is one error frame (head: "Request failed" + the HTTP status chip; body:
 	 * the message once; then Retry / Copy error / Switch model), and stays in
-	 * the transcript: the pinned banner is ANSI-only. A recovered attempt is an
-	 * inline row that discloses the original error.
+	 * the transcript: unlike ANSI, the pinned banner does not hide it natively.
+	 * A recovered attempt is an inline row that discloses the original error.
 	 */
 	#describeError(message: AssistantMessage): NativeNode | undefined {
 		const presentation = resolveAssistantErrorPresentation(message);

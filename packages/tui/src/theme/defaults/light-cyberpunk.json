@@ -92,5 +92,15 @@
 		"pageBg": "offWhite",
 		"cardBg": "#FFFFFF",
 		"infoBg": "purpleTint"
+	},
+	"terminal": {
+		"background": "offWhite",
+		"foreground": "darkNavy",
+		"chrome": "lightGray",
+		"widget": "#ffffff",
+		"ansi": [
+			"darkNavy", "#e3014c", "#068f57", "#957907", "#055eff", "#c900ba", "#0188a0", "lightGray",
+			"mediumGray", "neonPink", "#059e61", "#a78702", "#4886fe", "neonMagenta", "#0097b2", "#ffffff"
+		]
 	}
 }

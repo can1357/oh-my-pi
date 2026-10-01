@@ -75,6 +75,7 @@ describe("ModelRegistry default custom models config", () => {
 			supportsLongPromptCacheRetention: false,
 			promptCacheMinimumTokens: 1024,
 			promptCacheMaximumCheckpoints: 4,
+			supportsForcedToolChoice: true,
 			// Reasoning-tier Bedrock stream-stall watchdog widening applies to
 			// overrides too (model compat generation).
 			streamIdleTimeoutMs: 900000,
@@ -404,6 +405,7 @@ interface ModelSnapshot {
 		supportsLongPromptCacheRetention: boolean;
 		promptCacheMinimumTokens: number;
 		promptCacheMaximumCheckpoints: number;
+		supportsForcedToolChoice?: boolean;
 		streamIdleTimeoutMs?: number;
 		streamRevision?: "possible";
 	};

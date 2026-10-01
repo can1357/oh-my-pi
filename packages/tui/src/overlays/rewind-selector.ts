@@ -24,6 +24,10 @@
  * filter with the selection kept), Enter rewinds to the outlined item, A loads
  * earlier turns without changing selection (stepping above the oldest replayed
  * turn loads them too), Esc cancels.
+ *
+ * In a TSP terminal (Tern) the same replay is a page, not a sheet: a screen
+ * surface of the transcript's own blocks with `pick`/`drop` marks in place of
+ * the dotted outline (see `describeScreen`).
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -57,23 +61,12 @@ import {
 	positionRail,
 	userTurnLabel,
 } from "../chat/transcript-outline";
-import type { TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
-import { compact, node, span, text } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
-import { actionHint, hintsRow, overlayCard } from "../native/overlay";
-import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import type { TspMark } from "@oh-my-pi/pi-wire";
+import { kbd, node, span, text } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeScreen, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton, actionHint, hintsRow } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
-import {
-	collectBlocks,
-	EARLIER_TURNS_KEY,
-	earlierTurnsItem,
-	TIMELINE_COLUMNS,
-	TimelineItems,
-	targetCopy,
-	timelineItem,
-	turnItem,
-	turnPreview,
-} from "./copy-selector";
+import { collectBlocks, targetCopy } from "./copy-selector";
 
 /** One alternate branch at a divergence: its root and message path root → most-recent leaf. */
 export interface BranchVariantPath {
@@ -106,11 +99,57 @@ interface SiblingColumn {
 	targets: OutlineTarget[];
 	/** Short label for the column header: the branch's first user prompt. */
 	label: string;
-	/** Native list items for this column, built on first describe. */
-	nativeItems?: NativeNode[];
-	/** Picker catalogue while this column's tab is open: the main items, then this branch's. */
-	pickerItems?: { main: readonly TspPickerItem[]; items: TspPickerItem[] };
 }
+
+/**
+ * A replayed block on the rewind page, carrying a transient `mark`: it
+ * describes as the block with the mark merged into its root props, and hands
+ * events and rendering to the block.
+ */
+class MarkedBlock implements Component {
+	mark: TspMark | undefined;
+	#memo: { node: NativeNode; mark: TspMark; out: NativeNode } | undefined;
+
+	constructor(readonly block: Component) {}
+
+	render(width: number): readonly string[] {
+		return this.block.render(width);
+	}
+
+	invalidate(): void {
+		this.block.invalidate?.();
+	}
+
+	describe(cx: DescribeContext): NativeNode | null {
+		const described = this.block.describe?.(cx) ?? null;
+		const mark = this.mark;
+		if (!described || !mark) return described;
+		const memo = this.#memo;
+		if (memo?.node === described && memo.mark === mark) return memo.out;
+		const out = node(described.k, { ...described.p, mark }, described.c, described.key);
+		this.#memo = { node: described, mark, out };
+		return out;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.block.handleNativeEvent?.(event);
+	}
+}
+
+const kMarked = Symbol("rewind.marked");
+
+/** A replayed block tagged with its page wrapper, so stepping reuses one wrapper per block. */
+interface MarkTagged {
+	[kMarked]?: MarkedBlock;
+}
+
+/** The page's first row while older history is unreplayed: `a` loads it. */
+const EARLIER_TURNS = node(
+	"row",
+	{ role: "omp.rewind.earlier", gap: "xs", align: "center" },
+	[kbd("a"), text([span("load earlier turns", "muted")])],
+	"earlier",
+);
 
 /** Blank columns between branch-strip columns. */
 const STRIP_GAP = 2;
@@ -155,14 +194,8 @@ export class RewindSelectorComponent implements Component {
 	#rowText = new WeakMap<readonly string[], string>();
 	/** Native filter haystack: lowercased turn text per main target (no rendered rows under TSP). */
 	#nativeTexts: { targets: OutlineTarget[]; texts: string[] } | undefined;
-	/** Last described root and the state it was built from. */
-	#native: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
-	/** Main-path list items, rebuilt only when the replayed targets change. */
-	#nativeItems: { targets: OutlineTarget[]; truncated: boolean; items: NativeNode[] } | undefined;
-	/** Timeline picker items of the replayed main path. */
-	#pickerItems = new TimelineItems();
-	/** Last described picker and the state it was built from. */
-	#picker: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
+	/** Last described bar and the state it was built from. */
+	#bar: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
 
 	constructor(
 		entries: TranscriptEntry[],
@@ -579,338 +612,208 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	// ========================================================================
-	// Native
+	// Native: the transcript as a page
 	// ========================================================================
 
-	/** A `picker` is its own sheet: the backend mounts it in `layer`, over the transcript. */
-	nativeSheet(cx: DescribeContext): boolean {
-		return cx.supports("picker");
+	/**
+	 * The rewind page: the replayed transcript fills a screen surface block by
+	 * block, as the live one reads, the outlined turn marked `pick` under a
+	 * "Continue from here" caption (revealed as the outline moves) and what the
+	 * rewind drops marked `drop`. At a fork the region below it becomes a strip
+	 * of branch columns, the current path first. The bar is this component's
+	 * own node, docked under the page, so the filter field keeps the caret.
+	 */
+	describeScreen(_cx: DescribeContext): NativeScreen {
+		return { role: "omp.rewind", main: this.#page(), dock: [this] };
 	}
 
-	/** A branch tab click moves between the current path and its alternates, as Left/Right do. */
-	#showVariant(value: string | undefined): void {
-		const variant = Number(value);
-		if (!Number.isInteger(variant) || variant === this.#activeVariant) return;
-		if (variant < 0 || variant > this.#stripColumns().length) return;
-		this.#siblingSelected = 0;
-		if (variant === 0) {
-			this.#activeVariant = 0;
-			this.#stopSlide();
-			this.deps.requestRender();
-		} else {
-			this.#slideTo(variant);
+	/** The page's blocks, marked for the current outline. */
+	#page(): NativeChild[] {
+		const blocks = this.#builder.container.children;
+		const page: NativeChild[] = [];
+		const filter = this.#filter;
+		if (filter !== undefined) {
+			// Only the matching turns of the current path, like the filtered frame.
+			const matches = this.#filterMatches();
+			for (const index of matches) {
+				const target = this.#targets[index]!;
+				const picked = index === this.#selected;
+				if (picked) page.push(this.#caption(this.#targets, index, "main"));
+				for (let i = target.start; i < target.end; i++)
+					page.push(this.#marked(blocks[i]!, picked ? "pick" : undefined));
+			}
+			if (matches.length === 0) {
+				page.push(text([span(`No turns match "${filter}"`, "muted")], { role: "omp.rewind.empty" }));
+			}
+			return page;
+		}
+		if (this.#truncated) page.push(EARLIER_TURNS);
+		const columns = this.#stripColumns();
+		const anchor = this.#targets[this.#selected];
+		if (columns.length === 0 || !anchor) {
+			this.#markRun(page, blocks, 0, this.#targets, this.#selected, "main");
+			return page;
+		}
+		// Shared history above the fork at full width, then the branches side by side.
+		for (let i = 0; i < anchor.start; i++) page.push(this.#marked(blocks[i]!, undefined));
+		const count = columns.length + 1;
+		const current: NativeChild[] = [this.#columnHead(0, count, "current")];
+		this.#markRun(
+			current,
+			blocks,
+			anchor.start,
+			this.#targets,
+			this.#activeVariant === 0 ? this.#selected : -1,
+			"main",
+		);
+		const strip = [this.#column(0, current, "current")];
+		for (let index = 0; index < columns.length; index++) {
+			const column = columns[index]!;
+			const active = this.#activeVariant === index + 1;
+			const children: NativeChild[] = [this.#columnHead(index + 1, count, column.label)];
+			const picked = active ? this.#siblingSelected : -1;
+			this.#markRun(children, column.builder.container.children, 0, column.targets, picked, column.rootId);
+			strip.push(this.#column(index + 1, children, column.rootId));
+		}
+		page.push(node("row", { role: "omp.rewind.strip", gap: "lg", align: "start" }, strip, "strip"));
+		return page;
+	}
+
+	/**
+	 * Push `blocks[from..]` marked for `targets[picked]` (-1: none): unmarked
+	 * above it, then the caption and `pick` on its blocks, `drop` below.
+	 */
+	#markRun(
+		out: NativeChild[],
+		blocks: readonly Component[],
+		from: number,
+		targets: readonly OutlineTarget[],
+		picked: number,
+		column: string,
+	): void {
+		const target = targets[picked];
+		for (let i = from; i < blocks.length; i++) {
+			if (target && i === target.start) out.push(this.#caption(targets, picked, column));
+			const mark = !target || i < target.start ? undefined : i < target.end ? "pick" : "drop";
+			out.push(this.#marked(blocks[i]!, mark));
 		}
 	}
 
 	/**
-	 * Picker pointer events: a row click outlines that turn, a second click
-	 * rewinds there (Enter); the action bar and tabs run their keys' paths.
+	 * The line over the outlined turn: what Enter does and what it drops.
+	 * Keyed by the turn, so every step adds a fresh one that scrolls into view.
 	 */
-	#handlePickerEvent(event: PickerEvent): void {
-		if (event.kind === "action") {
-			switch (event.act) {
-				case "tab":
-					this.#showVariant(event.value);
-					return;
-				case "rewind":
-					if (this.#filter === undefined) this.#selectOutlined();
-					else this.#selectFiltered();
-					return;
-				case "lateral":
-					// A click steps back a user turn, or on to the next branch (wrapping to the current path).
-					if (this.#filter !== undefined || this.#stripColumns().length === 0) this.#left();
-					else if (this.#activeVariant < this.#stripColumns().length) this.#right();
-					else this.#showVariant("0");
-					return;
-				case "filter":
-					this.#openFilter();
-					return;
-				case "earlier":
-					this.#loadFullHistory();
-					return;
-				case "close":
-					if (this.#filter === undefined) this.deps.onCancel();
-					else this.#closeFilter();
-					return;
-				case "clear":
-					this.#closeFilter();
-					return;
-				default:
-					return;
-			}
-		}
-		if (!this.#outline(event.item)) return;
-		this.deps.requestRender();
-		if (event.kind === "activate") {
-			if (this.#filter === undefined) this.#selectOutlined();
-			else this.#selectFiltered();
-		}
-	}
-
-	/** Outline the turn `id`: on the active branch tab, or on the main path (leaving the tab). */
-	#outline(id: string): boolean {
-		if (this.#activeVariant > 0) {
-			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
-			const index = targets.findIndex(target => target.turnId === id);
-			if (index >= 0) {
-				this.#siblingSelected = index;
-				return true;
-			}
-		}
-		const index = this.#targets.findIndex(target => target.turnId === id);
-		if (index < 0) return false;
-		if (this.#filter !== undefined && !this.#filterMatches().includes(index)) return false;
-		this.#selected = index;
-		this.#activeVariant = 0;
-		this.#siblingSelected = 0;
-		this.#stopSlide();
-		return true;
-	}
-
-	handleNativeEvent(event: NativeUiEvent): void {
-		const picked = pickerEvent(event);
-		if (picked) {
-			this.#handlePickerEvent(picked);
-			return;
-		}
-		if (event.type !== "select" && event.type !== "activate") return;
-		if (event.key === "branches") {
-			this.#showVariant(event.item);
-			return;
-		}
-		// A click on an item outlines it and rewinds there, as Enter would.
-		if (event.key === "list") {
-			if (event.item === EARLIER_TURNS_KEY) {
-				this.#loadFullHistory();
-				return;
-			}
-			const index = this.#targets.findIndex(target => target.turnId === event.item);
-			if (index < 0) return;
-			this.#selected = index;
-			this.#activeVariant = 0;
-			this.#siblingSelected = 0;
-			this.#stopSlide();
-		} else if (event.key === "branch" && this.#activeVariant > 0) {
-			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
-			const index = targets.findIndex(target => target.turnId === event.item);
-			if (index < 0) return;
-			this.#siblingSelected = index;
-		} else {
-			return;
-		}
-		this.deps.requestRender();
-		this.#selectOutlined();
-	}
-
-	describe(cx: DescribeContext): NativeNode {
-		return cx.supports("picker") ? this.#describePicker() : this.#describeCard();
-	}
-
-	/**
-	 * The `timeline` picker: one row per turn, the branch tabs at a fork, the
-	 * filter as the query, and the outlined turn's own transcript components
-	 * as the preview under the drop warning.
-	 */
-	#describePicker(): NativeNode {
-		const filter = this.#filter;
-		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
-		const cached = this.#picker;
-		if (cached?.memo === memo && cached.targets === this.#targets) return cached.node;
-
-		const main = this.#pickerItems.of(this.#targets);
-		const columns = filter === undefined ? this.#stripColumns() : [];
-		const column = columns[this.#activeVariant - 1];
-		const matches = filter === undefined ? undefined : this.#filterMatches();
-		const props: TspPickerProps = {
-			title: "Rewind",
-			subtitle: "Pick the point to continue from",
-			icon: "rewind",
-			noun: "turns",
-			size: "lg",
-			layout: "timeline",
-			preview: "side",
-			...pickerQuery(this.#filterInput ?? null),
-			placeholder: "Filter turns…",
-			columns: TIMELINE_COLUMNS,
-			items: main,
-			selected: this.#targets[this.#selected]?.turnId ?? null,
-			total: this.#targets.length,
-			empty: "Nothing to rewind to",
-		};
-		if (matches) {
-			props.order = matches.map(index => this.#targets[index]!.turnId);
-			if (!matches.includes(this.#selected)) props.selected = null;
-		}
-		if (columns.length > 0) {
-			props.tabs = [
-				{ id: "0", label: "Current" },
-				...columns.map((strip, index) => ({
-					id: String(index + 1),
-					label: strip.label.length > 32 ? `${strip.label.slice(0, 31)}…` : strip.label,
-				})),
-			];
-			props.tab = String(this.#activeVariant);
-		}
-		if (column) {
-			// The shared history above the fork, then the alternate branch.
-			if (column.pickerItems?.main !== main) {
-				column.pickerItems = { main, items: [...main, ...column.targets.map(timelineItem)] };
-			}
-			props.items = column.pickerItems.items;
-			props.order = [
-				...this.#targets.slice(0, this.#selected).map(target => target.turnId),
-				...column.targets.map(target => target.turnId),
-			];
-			props.selected = column.targets[this.#siblingSelected]?.turnId ?? null;
-		}
-		props.actions = compact([
-			pickerAction("rewind", "Rewind here", "enter", { primary: true }),
-			pickerAction("lateral", columns.length > 0 ? "Branches" : "User turns", ["left", "right"]),
-			filter === undefined ? pickerAction("filter", "Filter", "f") : undefined,
-			filter === undefined && this.#truncated ? pickerAction("earlier", "Earlier turns", "a") : undefined,
-			filter === undefined ? CLOSE_ACTION : { ...CLOSE_ACTION, label: "Show all" },
-		]);
-
-		const preview: NativeChild[] = [];
-		const outlined = column ? column.targets[this.#siblingSelected] : this.#targets[this.#selected];
-		if (outlined && props.selected !== null) {
-			// A user turn rewinds past itself (its text returns to the editor); anything else keeps itself.
-			const kept = column || this.#targets[this.#selected]!.isUserTurn ? this.#selected : this.#selected + 1;
-			const dropped = this.#targets.length - kept;
-			preview.push(
-				text(
-					dropped > 0
-						? [
-								span("Continue from here: everything below is dropped", "warning"),
-								span(`${theme.sep.dot}${dropped} turn${dropped === 1 ? "" : "s"}`, "dim"),
-							]
-						: [span("Continue from here: nothing below to drop", "warning")],
-					{ role: "omp.rewind.drop" },
-				),
-				...(column?.builder ?? this.#builder).container.children.slice(outlined.start, outlined.end),
-			);
-		}
-		const root = picker(props, preview);
-		this.#picker = { memo, targets: this.#targets, node: root };
-		return root;
-	}
-
-	#describeCard(): NativeNode {
-		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${this.#filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
-		const cached = this.#native;
-		if (cached?.memo === memo && cached.targets === this.#targets) return cached.node;
-
-		const filter = this.#filter;
-		const children: NativeChild[] = [];
-		const allItems = this.#mainItems();
-		const columns = filter === undefined ? this.#stripColumns() : [];
-		const matches = filter === undefined ? undefined : this.#filterMatches();
-		if (filter !== undefined && matches) {
-			children.push(
-				this.#filterInput!,
-				node(
-					"list",
-					{
-						selected: matches.includes(this.#selected) ? (this.#targets[this.#selected]?.turnId ?? null) : null,
-						filter,
-						empty: `No items match "${filter}"`,
-						virtual: true,
-						max: 0.5,
-					},
-					matches.map(index => allItems[index + (this.#truncated ? 1 : 0)]!),
-					"list",
-				),
-			);
-		} else {
-			children.push(
-				node(
-					"list",
-					{
-						selected: this.#targets[this.#selected]?.turnId ?? null,
-						empty: "Nothing to rewind to",
-						virtual: true,
-						max: 0.5,
-					},
-					allItems,
-					"list",
-				),
-			);
-		}
-		if (columns.length > 0) {
-			children.push(
-				node(
-					"tabs",
-					{
-						items: [
-							{ id: "0", label: "current" },
-							...columns.map((column, index) => ({ id: String(index + 1), label: column.label })),
-						],
-						active: String(this.#activeVariant),
-					},
-					undefined,
-					"branches",
-				),
-			);
-			const column = columns[this.#activeVariant - 1];
-			if (column) {
-				column.nativeItems ??= column.targets.map(target => turnItem(target));
-				children.push(
-					node(
-						"list",
-						{ selected: column.targets[this.#siblingSelected]?.turnId ?? null, virtual: true, max: 0.4 },
-						column.nativeItems,
-						"branch",
-					),
-				);
-			}
-		}
-		const outlined = filter === undefined ? this.#outlinedTarget() : this.#targets[this.#selected];
-		if (outlined && (!matches || matches.includes(this.#selected))) {
-			const item = targetCopy(outlined, collectBlocks(outlined.entries));
-			children.push(
-				node("section", { head: [span(item.label, "strong")] }, [turnPreview(outlined, item.content)], "preview"),
-			);
-		}
-		const upDown = actionHint(["tui.select.up", "tui.select.down"], "step");
-		children.push(
-			hintsRow(
-				filter === undefined
-					? [
-							upDown,
-							{ keys: ["left", "right"], label: columns.length > 0 ? "branches" : "user turns" },
-							{ keys: ["f"], label: "filter" },
-							{ keys: ["enter"], label: "rewind" },
-							this.#truncated ? { keys: ["a"], label: "earlier turns" } : undefined,
-							actionHint("tui.select.cancel", "cancel"),
-						]
-					: [
-							upDown,
-							{ keys: ["left", "right"], label: "user turns" },
-							{ keys: ["enter"], label: "rewind" },
-							actionHint("tui.select.cancel", "show all"),
-						],
+	#caption(targets: readonly OutlineTarget[], picked: number, column: string): NativeNode {
+		const target = targets[picked]!;
+		const below = targets.length - picked - 1;
+		const spans = [
+			span(`${theme.icon.rewind} `, "accent"),
+			span(target.isUserTurn ? "Rewind to here" : "Continue from here", "accent strong"),
+		];
+		if (target.isUserTurn) spans.push(span(`${theme.sep.dot}the prompt returns to the editor`, "dim"));
+		spans.push(
+			span(
+				below > 0
+					? `${theme.sep.dot}${below} turn${below === 1 ? "" : "s"} below dropped`
+					: `${theme.sep.dot}nothing below to drop`,
+				"dim",
 			),
 		);
-		const root = overlayCard(
-			"omp.overlay.rewind",
-			[
-				span(`${theme.icon.rewind} `),
-				span("Rewind", "strong"),
-				span(`${theme.sep.dot}pick the point to continue from`, "dim"),
-			],
+		const caption = text(spans, { role: "omp.rewind.here", wrap: "none" });
+		return { ...caption, key: `here:${column}:${target.turnId}`, reveal: "start" };
+	}
+
+	/** One branch column of the strip; the active one carries the accent tone. */
+	#column(index: number, children: readonly NativeChild[], key: string): NativeNode {
+		const active = index === this.#activeVariant;
+		return node(
+			"col",
+			{ role: "omp.rewind.branch", gap: "lg", ...(active ? { tone: "accent" } : {}) },
 			children,
+			key,
 		);
-		this.#native = { memo, targets: this.#targets, node: root };
+	}
+
+	/** A strip column's caption: `⎇ i/n · label`. */
+	#columnHead(index: number, count: number, label: string): NativeNode {
+		const active = index === this.#activeVariant;
+		return text(
+			[
+				span(`${theme.icon.branch} `, active ? "accent" : "dim"),
+				span(`${index + 1}/${count}`, active ? "accent" : "dim"),
+				span(`${theme.sep.dot}${label}`, active ? "strong" : "dim"),
+			],
+			{ role: "omp.rewind.branch.head", wrap: "none" },
+		);
+	}
+
+	/** `block` wrapped to carry `mark`; one wrapper per block, so ids and view state persist while stepping. */
+	#marked(block: Component & MarkTagged, mark: TspMark | undefined): MarkedBlock {
+		const marked = (block[kMarked] ??= new MarkedBlock(block));
+		marked.mark = mark;
+		return marked;
+	}
+
+	/** The bar docked under the page: position, key hints, Cancel and Rewind; the filter field while filtering. */
+	describe(_cx: DescribeContext): NativeNode {
+		const filter = this.#filter;
+		const columns = filter === undefined ? this.#stripColumns() : [];
+		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${columns.length}|${filter ?? "\0"}`;
+		if (this.#bar?.memo === memo && this.#bar.targets === this.#targets) return this.#bar.node;
+
+		const title = text([span(`${theme.icon.rewind} `, "accent"), span("Rewind", "strong")], { wrap: "none" });
+		const upDown = actionHint(["tui.select.up", "tui.select.down"], "step");
+		const rewind = actionButton("Rewind here", "rewind", { keys: "enter", tone: "accent" });
+		let children: NativeChild[];
+		if (filter === undefined) {
+			const column = columns[this.#activeVariant - 1];
+			const at = column ? this.#siblingSelected : this.#selected;
+			const of = column ? column.targets.length : this.#targets.length;
+			children = [
+				title,
+				text([span(`${at + 1}/${of}`, "dim")], { wrap: "none" }),
+				hintsRow([
+					upDown,
+					{ keys: ["left", "right"], label: columns.length > 0 ? "branches" : "user turns" },
+					{ keys: ["f"], label: "filter" },
+					this.#truncated ? { keys: ["a"], label: "earlier turns" } : undefined,
+				]),
+				actionBar([null, actionButton("Cancel", "cancel", { keys: "escape" }), rewind]),
+			];
+		} else {
+			const matches = this.#filterMatches();
+			const at = matches.indexOf(this.#selected);
+			children = [
+				title,
+				this.#filterInput!,
+				text(
+					[
+						matches.length === 0
+							? span("no matches", "error")
+							: span(`${at >= 0 ? at + 1 : "-"}/${matches.length}`, "dim"),
+					],
+					{ wrap: "none" },
+				),
+				hintsRow([upDown, { keys: ["left", "right"], label: "user turns" }]),
+				actionBar([null, actionButton("Show all", "cancel", { keys: "escape" }), rewind]),
+			];
+		}
+		const root = node("row", { role: "omp.rewind.bar", gap: "md", align: "center", wrap: true }, children);
+		this.#bar = { memo, targets: this.#targets, node: root };
 		return root;
 	}
 
-	#mainItems(): NativeNode[] {
-		const cached = this.#nativeItems;
-		if (cached?.targets === this.#targets && cached.truncated === this.#truncated) return cached.items;
-		const items = this.#targets.map(target => turnItem(target));
-		if (this.#truncated) items.unshift(earlierTurnsItem);
-		this.#nativeItems = { targets: this.#targets, truncated: this.#truncated, items };
-		return items;
+	/** The bar's buttons run their keys' paths; everything else belongs to the blocks. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		const filtering = this.#filter !== undefined;
+		if (event.act === "rewind") {
+			if (filtering) this.#selectFiltered();
+			else this.#selectOutlined();
+		} else if (event.act === "cancel") {
+			if (filtering) this.#closeFilter();
+			else this.deps.onCancel();
+		}
 	}
 
 	// ========================================================================

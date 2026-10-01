@@ -10,7 +10,7 @@ import * as net from "node:net";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Tern wire protocol version omp speaks. */
-export const TERN_WIRE_VERSION = 6;
+export const TERN_WIRE_VERSION = 9;
 
 /** Tag of the daemon's `Welcome` reply. */
 const TAG_WELCOME = 0;

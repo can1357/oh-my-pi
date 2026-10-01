@@ -211,8 +211,8 @@ export class Reconciler {
 	#ops: TspOp[] = [];
 	#dels: Entry[] = [];
 	#settles: string[] = [];
-	/** Selected list items sent this frame, revealed once the frame's adds have landed. */
-	#reveals: string[] = [];
+	/** Selected list items and added `reveal` nodes sent this frame, revealed once the frame's adds have landed. */
+	#reveals: [id: string, at: "start" | "end" | "nearest"][] = [];
 	/** Wire ids `list.selected` keys resolved to (an unresolved key names no node to reveal). */
 	#selectedIds = new Set<string>();
 	#moves: PendingMove[] = [];
@@ -292,7 +292,7 @@ export class Reconciler {
 		}
 		this.#parked = [];
 		for (const id of this.#settles) this.#ops.push(["settle", id]);
-		for (const id of this.#reveals) this.#ops.push(["reveal", id, "nearest"]);
+		for (const [id, at] of this.#reveals) this.#ops.push(["reveal", id, at]);
 		const ops = this.#ops;
 		this.#ops = [];
 		return this.#gone.size === 0 ? ops : ops.filter(op => !this.#touchesGone(op));
@@ -716,6 +716,7 @@ export class Reconciler {
 
 	/** A full wire subtree for an entry; nested components get states (or pending moves when mounted elsewhere). */
 	#materialize(entry: NodeEntry, walk: Walk): TspNode {
+		if (entry.node.reveal) this.#reveals.push([entry.id, entry.node.reveal]);
 		const entries = this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, walk);
 		const children: TspNode[] = [];
 		for (let i = 0; i < entries.length; i++) {
@@ -779,7 +780,7 @@ export class Reconciler {
 
 	/** A list's selection went out (on add or change): scroll it into view at frame end. */
 	#noteSelected(selected: unknown): void {
-		if (typeof selected === "string" && this.#selectedIds.has(selected)) this.#reveals.push(selected);
+		if (typeof selected === "string" && this.#selectedIds.has(selected)) this.#reveals.push([selected, "nearest"]);
 	}
 
 	/** Move components an `add` left out into their new parent, last first so every `before` exists. */

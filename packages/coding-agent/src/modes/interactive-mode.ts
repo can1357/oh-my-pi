@@ -239,6 +239,7 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -281,6 +282,7 @@ import {
 } from "./loop-limit";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import { formatPersistenceNotice } from "./persistence-failure";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
 import { hintUsage } from "../utils/usage-counter";
 import {
@@ -682,9 +684,9 @@ class HudPillsRow implements Component {
 		return this.mode.describeHudPills();
 	}
 
-	/** A click on the jobs pill opens `/jobs`. */
+	/** A click on the jobs pill opens the jobs sheet. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "jobs.open") void this.mode.handleJobsCommand();
+		if (event.type === "action" && event.act === "jobs.open") this.mode.showJobsSheet();
 	}
 }
 
@@ -816,9 +818,10 @@ function isHudSubagent(session: ObservableSession): boolean {
 export class SubagentHudComponent implements Component {
 	readonly #text: Text;
 	#lines: readonly string[];
-	readonly #order: readonly string[];
-	readonly #toggleLine: number | undefined;
-	readonly #native: SubagentHudNative | undefined;
+	#order: readonly string[];
+	#toggleLine: number | undefined;
+	#node: NativeNode;
+	readonly #onOpen: (() => void) | undefined;
 	#physicalOwner?: (string | undefined)[];
 	#renderedWidth?: number;
 	#renderedRows = 0;
@@ -828,28 +831,29 @@ export class SubagentHudComponent implements Component {
 		this.#lines = lines;
 		this.#order = order;
 		this.#toggleLine = toggleRow;
-		this.#native = native;
+		this.#node = native?.node ?? EMPTY_HUD;
+		this.#onOpen = native?.onOpen;
 	}
 
 	describe(): NativeNode {
-		return this.#native?.node ?? EMPTY_HUD;
+		return this.#node;
 	}
 
 	/** A click on the pill opens the agent hub, as the hub key does. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "agents.open") this.#native?.onOpen();
+		if (event.type === "action" && event.act === "agents.open") this.#onOpen?.();
 	}
-	/** Same agents and expander row as `order`/`toggleRow`, so `setLines` can repaint in place. */
-	hasLayout(order: readonly string[], toggleRow: number | undefined): boolean {
-		return (
-			this.#toggleLine === toggleRow &&
-			this.#order.length === order.length &&
-			this.#order.every((id, index) => id === order[index])
-		);
-	}
-	/** Repaint rows in place (keeps component identity for the HUD memo); the click map rebuilds lazily. */
-	setLines(lines: readonly string[]): void {
-		if (!this.#text.setText(lines.join("\n"))) return;
+	/**
+	 * Repaint in place with a new view. Keeping the instance keeps its native
+	 * wire id, so the dock pill stays mounted (a fresh component would be
+	 * removed and re-added, replaying its entrance) and the HUD memo holds.
+	 * The click map rebuilds lazily.
+	 */
+	update(lines: readonly string[], order: readonly string[], toggleRow: number | undefined, node: NativeNode): void {
+		this.#node = node;
+		this.#order = order;
+		this.#toggleLine = toggleRow;
+		this.#text.setText(lines.join("\n"));
 		this.#lines = lines;
 		this.#physicalOwner = undefined;
 	}
@@ -1536,6 +1540,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
+	#jobsSheetHandle: OverlayHandle | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -2256,6 +2261,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// before initHooksAndCustomTools/#reconcileModeFromSession/#enterPlanMode —
 		// all of which can reach setSessionName during init.
 		this.#eventBusUnsubscribers.push(
+			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onPersistenceError(error => {
 				const detail = truncateToWidth(
 					replaceTabs(sanitizeText(error.message)).replace(/[\r\n]+/g, " "),
@@ -3722,7 +3728,24 @@ export class InteractiveMode implements InteractiveModeContext {
 					: undefined,
 			thinking: thinkingLevelWord(this.session),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
+			viewing: this.#viewingLineage(),
 		};
+	}
+
+	/** The focused subagent and its live ancestors below main, outermost first; undefined on the main session. */
+	#viewingLineage(): string[] | undefined {
+		const id = this.focusedAgentId;
+		if (!id) return undefined;
+		const registry = AgentRegistry.global();
+		const lineage = [id];
+		for (
+			let parent = registry.get(id)?.parentId;
+			parent && parent !== MAIN_AGENT_ID && !lineage.includes(parent) && registry.get(parent);
+			parent = registry.get(parent)?.parentId
+		) {
+			lineage.unshift(parent);
+		}
+		return lineage;
 	}
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
@@ -4407,15 +4430,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#renderSubagentList(): void {
 		this.#cancelSubagentPreviewTick();
-		this.subagentContainer.clear();
 		const view = this.#buildSubagentHudView();
-		if (!view) return;
-		this.subagentContainer.addChild(
-			new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
-				node: describeSubagentHud(view.sessions),
-				onOpen: () => this.showAgentHub(),
-			}),
-		);
+		if (!view) {
+			this.subagentContainer.clear();
+			return;
+		}
+		const node = describeSubagentHud(view.sessions);
+		const hud = this.subagentContainer.children[0];
+		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow, node);
+		else {
+			this.subagentContainer.addChild(
+				new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
+					node,
+					onOpen: () => this.showAgentHub(),
+				}),
+			);
+		}
 		this.#armSubagentPreviewTick(view.tickMs);
 	}
 
@@ -4449,26 +4479,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (tickMs === undefined) return;
 		this.#subagentPreviewTickTimer = setTimeout(() => {
 			this.#subagentPreviewTickTimer = undefined;
-			this.#tickSubagentPreview();
+			this.#renderSubagentList();
+			this.ui.requestRender();
 		}, tickMs);
 		this.#subagentPreviewTickTimer.unref?.();
-	}
-
-	/**
-	 * Elapsed-marker tick: with the same agents listed, repaint the existing HUD
-	 * in place so the native HUD memo and component identity survive; any
-	 * layout change falls back to a full rebuild.
-	 */
-	#tickSubagentPreview(): void {
-		const hud = this.subagentContainer.children[0];
-		const view = this.#buildSubagentHudView();
-		if (view && hud instanceof SubagentHudComponent && hud.hasLayout(view.order, view.toggleRow)) {
-			hud.setLines(view.lines);
-			this.#armSubagentPreviewTick(view.tickMs);
-		} else {
-			this.#renderSubagentList();
-		}
-		this.ui.requestRender();
 	}
 
 	#cancelSubagentPreviewTick(): void {
@@ -7064,9 +7078,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * which is why the earlier `showStatus` acknowledgment was reverted. An
 	 * anchored container is cleared and rebuilt in place without adding history
 	 * rows — the same reason the ctrl+p role-cycle track lives there.
+	 *
+	 * A Tern Surface Protocol surface has no append-only scrollback to
+	 * duplicate into, so there the panel mounts in the transcript at once.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void {
-		if (!this.session.isStreaming) {
+		if (!this.session.isStreaming || this.ui.nativeRendering) {
 			this.present(content);
 			return;
 		}
@@ -7092,6 +7109,35 @@ export class InteractiveMode implements InteractiveModeContext {
 			margin: 0,
 		});
 		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The jobs pill's sheet: live background jobs in a dismissable overlay.
+	 * Unlike `/jobs` it adds nothing to the transcript, so a click mid-turn
+	 * leaves no deferred command preview above the editor.
+	 */
+	showJobsSheet(): void {
+		if (this.#jobsSheetHandle) return;
+		if (!this.session.getAsyncJobSnapshot()) {
+			this.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+		const sheet = new JobsSheet(
+			() => this.session.getAsyncJobSnapshot({ recentLimit: 5 }) ?? { running: [], recent: [] },
+			() => this.#hideJobsSheet(),
+		);
+		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	#hideJobsSheet(): void {
+		const handle = this.#jobsSheetHandle;
+		this.#jobsSheetHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
 	}
 
@@ -7170,7 +7216,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	showPinnedError(message: string): void {
 		this.#dismissPlanReview();
 		this.errorBannerContainer.clear();
-		this.errorBannerContainer.addChild(new ErrorBannerComponent(message));
+		this.errorBannerContainer.addChild(new ErrorBannerComponent(message, () => this.clearPinnedError()));
 		this.ui.requestRender();
 	}
 

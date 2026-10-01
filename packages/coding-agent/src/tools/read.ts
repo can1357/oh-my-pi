@@ -85,6 +85,7 @@ import {
 	probeLiteralPathExists,
 	resolveReadPathAsync,
 	splitDelimitedPathEntry,
+	splitMixedUrlPathList,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
@@ -1030,8 +1031,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
-		if (!parts) return null;
+		return parts ? this.#readDelimitedParts(parts, signal) : null;
+	}
 
+	async #readDelimitedParts(parts: string[], signal?: AbortSignal): Promise<AgentToolResult<ReadToolDetails>> {
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
@@ -1541,6 +1544,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			readPath = expandPath(readPath);
 		}
 		readPath = recoverConflictUriPrefix(readPath).path;
+		// A `;` list mixing URLs with local paths must split before URL detection
+		// claims the whole string as one fetch or one internal/MCP resource.
+		const mixedParts = await splitMixedUrlPathList(
+			readPath,
+			this.session.cwd,
+			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
+		);
+		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal);
 		const imageQuestion = splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
 		const question = imageQuestion.question;

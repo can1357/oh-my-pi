@@ -49,8 +49,9 @@ class "anthropic" {
 	// Opus 5.5 rejects forced tool selection the way Fable/Mythos do — a
 	// `tool_choice` of `tool` or `any` fails the request with 400
 	// `invalid_request_error`: `tool_choice: type "tool" and "any" are not
-	// supported for this model`. The transport downgrades the selector to
-	// `auto` so the tool stays offered instead of the turn dying.
+	// supported for this model`. This holds on every route, including Bedrock
+	// Converse (`toolChoice: {any: {}}`). The transports downgrade the selector
+	// to `auto` so the tool stays offered instead of the turn dying.
 	//
 	// Upper-bounded on purpose: separator-collapsed ids parse their revision
 	// as a whole number (`claude-opus-45` is Opus 4.5, revision 45), so an

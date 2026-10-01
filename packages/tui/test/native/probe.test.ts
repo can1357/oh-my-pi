@@ -76,6 +76,25 @@ describe("TSP hello probe", () => {
 		}
 	});
 
+	it("takes the hello reply and events in their OSC 877 framing through a ConPTY", () => {
+		const { terminal, received, hellos } = setup();
+		try {
+			const oscHello = `\x1b]877;${HELLO_REPLY.slice(2)}`;
+			// Every probe's DA1 sentinel right behind the reply: none may resolve it to null.
+			process.stdin.emit("data", oscHello.slice(0, 40));
+			process.stdin.emit("data", `${oscHello.slice(40)}${DA1_REPLY.repeat(10)}`);
+			expect(hellos).toHaveLength(1);
+			expect(hellos[0]?.term).toBe("tern");
+			expect(terminal.tspProbePending).toBe(false);
+			// C1 code points arrive as JSON escapes; a BEL may end the OSC form.
+			process.stdin.emit("data", '\x1b]877;tsp;e;{"ev":"input","sf":"s:1","id":"q","value":"a\\u0085b"}\x07');
+			process.stdin.emit("data", `\x1b]877;${EVENT.slice(2)}`);
+			expect(received).toEqual(['\x1b_tsp;e;{"ev":"input","sf":"s:1","id":"q","value":"a\\u0085b"}\x1b\\', EVENT]);
+		} finally {
+			terminal.stop();
+		}
+	});
+
 	it("resolves to null when the DA1 sentinel arrives first, ignoring a late reply", () => {
 		const { terminal, received, hellos } = setup();
 		try {
