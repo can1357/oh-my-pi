@@ -17,6 +17,28 @@ export interface ApiKeyResolverOptions {
 }
 
 /**
+ * A provider's configured `!command` apiKey ran but produced no key (failed,
+ * timed out, or printed nothing). Transient, so turn auto-retry resolves again;
+ * `retryAfterMs` (the command's remaining failure backoff) rides on the message
+ * as the standard `retry-after-ms` hint, so each retry re-runs the command. The
+ * message never includes the command, which can carry credentials.
+ */
+export class ApiKeyCommandError extends AIError.CredentialUnavailableError {
+	constructor(provider: string, retryAfterMs: number | undefined) {
+		const hint = retryAfterMs ? ` retry-after-ms=${retryAfterMs}` : "";
+		super(`The apiKey command for provider ${provider} produced no key${hint}`);
+		this.name = "ApiKeyCommandError";
+	}
+}
+
+const API_KEY_COMMAND_FAILURE_PATTERN = /\bThe apiKey command for provider \S+ produced no key\b/;
+
+/** Whether a turn's error text is an {@link ApiKeyCommandError}, which turn recovery retries on its own cap. */
+export function isApiKeyCommandFailureMessage(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && API_KEY_COMMAND_FAILURE_PATTERN.test(errorMessage);
+}
+
+/**
  * Minimal slice of `ModelRegistry` the resolver needs. Typed structurally so
  * narrower registry shells (e.g. the commit pipeline's `CommitModelRegistry`)
  * can build resolvers without depending on the full class.

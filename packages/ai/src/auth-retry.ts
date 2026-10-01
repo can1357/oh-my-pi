@@ -297,7 +297,11 @@ export async function withAuth<T>(
 	const resolver = key;
 	const signal = opts?.signal;
 	const initialKey = await resolveRetryKey(resolver, false, undefined, signal);
-	if (initialKey === undefined) throw missingKey();
+	if (initialKey === undefined) {
+		// An abort during the resolve is the caller's cancellation, not a missing key.
+		signal?.throwIfAborted();
+		throw missingKey();
+	}
 
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;

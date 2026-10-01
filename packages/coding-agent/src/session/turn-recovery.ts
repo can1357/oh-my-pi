@@ -26,6 +26,7 @@ import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isApiKeyCommandFailureMessage } from "../config/api-key-resolver";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -93,6 +94,7 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+const KEY_COMMAND_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -311,6 +313,7 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#streamStallContinueCount = 0;
+	#keyCommandRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -448,6 +451,7 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#streamStallContinueCount = 0;
+		this.#keyCommandRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}
@@ -2384,7 +2388,21 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		// A failing apiKey command has its own cap, like the other per-kind retry
+		// limits, counted within this retry run (`#retryAttempt` is 1 on its first failure).
+		this.#keyCommandRetryCount = isApiKeyCommandFailureMessage(message.errorMessage)
+			? (this.#retryAttempt === 1 ? 0 : this.#keyCommandRetryCount) + 1
+			: 0;
+		const keyCommandCapReached = this.#keyCommandRetryCount > KEY_COMMAND_MAX_RETRIES;
+		if (keyCommandCapReached) {
+			logger.warn("apiKey command kept producing no key after retry cap", {
+				attempts: this.#keyCommandRetryCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#keyCommandRetryCount = 0;
+		}
+		const retryBudgetExhausted = this.#retryAttempt > maxRetries || keyCommandCapReached;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
