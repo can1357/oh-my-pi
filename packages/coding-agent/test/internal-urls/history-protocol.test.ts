@@ -211,6 +211,10 @@ describe("history:// protocol", () => {
 		await expect(InternalUrlRouter.instance().resolve("history://@cluster-b/han")).rejects.toThrow(
 			/@cluster-b\/han is a remote peer/,
 		);
+		// A bare namespace is in the reserved `@` space but not a peer: say so instead of "Unknown agent".
+		await expect(InternalUrlRouter.instance().resolve("history://@cluster-a")).rejects.toThrow(
+			/@cluster-a is not a valid remote agent id/,
+		);
 		expect(await InternalUrlRouter.instance().locate("history://@cluster-a/leia")).toBeNull();
 	});
 

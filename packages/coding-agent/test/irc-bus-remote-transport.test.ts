@@ -73,11 +73,11 @@ describe("IrcBus RemoteTransport seam", () => {
 		const bus = new IrcBus(AgentRegistry.global());
 		const { transport, seen } = recordingTransport("injected");
 		bus.setRemoteTransport(NS, transport, OWNER);
-		// Names the @ns/name contract forbids: empty, whitespace, or an extra "/".
-		for (const bad of [`@${NS}/`, `@${NS}/a b`, `@${NS}/a/b`]) {
+		// Ids the @ns/name contract forbids: bare namespace, empty namespace, empty/whitespace name, extra "/".
+		for (const bad of [`@${NS}`, "@/alice", `@${NS}/`, `@${NS}/a b`, `@${NS}/a/b`]) {
 			const receipt = await bus.send({ from: "Main", to: bad, body: "hi" });
 			expect(receipt.outcome).toBe("failed");
-			expect(receipt.error).toMatch(/Invalid remote recipient/);
+			expect(receipt.error).toMatch(/not a valid remote agent id/);
 		}
 		// A well-formed reach-by-name recipient still routes — only it reaches the transport.
 		const ok = await bus.send({ from: "Main", to: composeRemoteId(NS, "alice"), body: "hi" });
