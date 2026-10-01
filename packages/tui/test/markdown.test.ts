@@ -4,6 +4,7 @@ import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
 	extractMarkdownLinks,
+	LEX_WINDOW_BYTES,
 	Markdown,
 	renderInlineMarkdown,
 	urlTokenPossible,
@@ -13,6 +14,7 @@ import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
 import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
+import { straddleFirstWindow } from "./markdown-fixtures.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -2386,6 +2388,22 @@ describe("Inline and block HTML tag rendering", () => {
 	});
 });
 
+describe("Hard line breaks", () => {
+	const secondRow = (md: string): string =>
+		stripVTControlCharacters(new Markdown(md, 0, 0, defaultMarkdownTheme).render(60)[1]!).trimEnd();
+
+	it("keeps the space after inline code, emphasis or math that starts the next line", () => {
+		// Only the new line's own leading spaces are dropped. The space after a
+		// styled span at its start is text between two words.
+		expect(secondRow("p  \n`c` b")).toBe("c b");
+		expect(secondRow("p  \n**s** b")).toBe("s b");
+		expect(secondRow("p\\\n*e* b")).toBe("e b");
+		expect(secondRow("p  \n~~d~~ b")).toBe("d b");
+		expect(secondRow("p  \n$a$ b")).toBe("a b");
+		expect(secondRow("p  \n   b")).toBe("b");
+	});
+});
+
 describe("Math rendering", () => {
 	const plain = (c: Markdown): string =>
 		c
@@ -2564,6 +2582,12 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 			.render(width)
 			.map(line => stripVTControlCharacters(line).trimEnd());
 
+	// A document containing CR is lexed in one pass (marked normalizes CRLF,
+	// which shifts raw offsets), so its CRLF twin is the one-pass oracle. Each
+	// test also asserts the rows a bad cut changes, which still hold if CR text
+	// is ever windowed too.
+	const onePass = (text: string, width = 100) => plain(text.replaceAll("\n", "\r\n"), width);
+
 	it("resolves a reference definition that lands in a later window", () => {
 		const doc = `Follow [the label][ref] first.\n\n${filler("body", 400)}\n\n[ref]: https://example.com/late\n`;
 		expect(doc.length).toBeGreaterThan(16 * 1024);
@@ -2603,5 +2627,132 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		}
 		// A window cut that restarted the list would renumber later items.
 		expect(rendered.filter(line => line.includes(" 1. item 0 ")).length).toBeLessThanOrEqual(1);
+	});
+
+	const mathLines = Array.from({ length: 150 }, (_, i) => `x_{${i}} = y_{${i}} + z_{${i}}`).join("\n\n");
+
+	for (const [opener, closer] of [
+		["$$", "$$"],
+		["\\[", "\\]"],
+	] as const) {
+		it(`keeps a ${opener} display-math block with blank lines intact across window cuts`, () => {
+			const doc = ["Intro line before the math.", "", opener, mathLines, closer, "", filler("outro", 250)].join(
+				"\n",
+			);
+			expect(doc.length).toBeGreaterThan(16 * 1024);
+			expect(doc.lastIndexOf(closer) - doc.indexOf(opener)).toBeGreaterThan(2 * 1024);
+
+			const rendered = plain(doc);
+			// A cut inside the block renders the delimiters (`$$`, or `[` for the
+			// escaped bracket) and the raw TeX (`x{0} = y{0} + z_{0}`) as prose.
+			expect(rendered.slice(0, 3)).toEqual(["Intro line before the math.", "", "x₀ = y₀ + z₀"]);
+			expect(rendered.filter(line => ["$$", "[", "]"].includes(line.trim()))).toEqual([]);
+			expect(rendered.filter(line => line.includes("{"))).toEqual([]);
+			expect(rendered).toEqual(onePass(doc));
+		});
+	}
+
+	it("renders an own-line $$ that never closes as the one-pass lex does", () => {
+		const doc = `Intro.\n\n$$\nx = 1\n\n${filler("body", 350)}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		// No math block: the opener renders as text.
+		expect(rendered.slice(0, 4)).toEqual(["Intro.", "", "$$", "x = 1"]);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("renders a $$ pair around a blank body as the one-pass lex does", () => {
+		// mathBlockAt rejects a whitespace-only body, so this is no math block.
+		const doc = `Intro.\n\n$$\n \n$$\n\n${filler("body", 350)}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		expect(rendered.slice(0, 5)).toEqual(["Intro.", "", "$$", "", "$$"]);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("does not cut a fence whose blank line ends at the probe window's edge", () => {
+		const doc = straddleFirstWindow("```", i => `code line ${i}`, "```", filler("outro", 400));
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("does not cut an HTML comment whose blank line ends at the probe window's edge", () => {
+		const doc = straddleFirstWindow("<!--", i => `comment line ${i}`, "-->", filler("outro", 400));
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		expect(rendered.filter(line => line.includes("<!--"))).toEqual([]);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("does not cut an HTML block whose blank line ends at the probe window's edge", () => {
+		const doc = straddleFirstWindow("<div>", i => `html line ${i}`, "</div>", filler("outro", 400));
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		// A cut at the window's edge drops the blank row in front of the block's
+		// last line.
+		expect(rendered[rendered.findLastIndex(line => line.startsWith("html line ")) - 1]).toBe("");
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	// Windowing exists to keep lexing linear, so the display-math check at a
+	// window cut must not rescan the rest of the document for every opener.
+	const displayMathScans: ReadonlyArray<readonly [string, (bytes: number) => string]> = [
+		// Each paragraph opens a `\[` block that no `\]` line ever closes.
+		[
+			"own-line `\\[` openers that never close",
+			bytes => {
+				const unit = "\\[\nprose that never closes the bracket\n\n";
+				return unit.repeat(Math.ceil(bytes / unit.length));
+			},
+		],
+		// One `\[` block spans the document, so every window short of its `\]`
+		// stops at the opener.
+		[
+			"one `\\[` block whose `\\]` ends the document",
+			bytes => `Intro.\n\n\\[\n${filler("inside", Math.ceil(bytes / 60))}\n\\]\n\nOutro.\n`,
+		],
+	];
+	for (const [name, doc] of displayMathScans) {
+		it(`lexes ${name} in time proportional to the document`, () => {
+			const elapsed = (text: string): number => {
+				const start = Bun.nanoseconds();
+				extractMarkdownLinks(text);
+				return Bun.nanoseconds() - start;
+			};
+			const small = doc(32 * 1024);
+			const large = doc(512 * 1024);
+			const smallNs = Math.min(elapsed(small), elapsed(small), elapsed(small));
+			// 16 times the text: linear work takes about 16 times as long. The
+			// best of up to three runs absorbs a load spike.
+			let largeNs = Number.POSITIVE_INFINITY;
+			for (let run = 0; run < 3 && largeNs >= 48 * smallNs; run++) largeNs = Math.min(largeNs, elapsed(large));
+			expect(largeNs).toBeLessThan(48 * smallNs);
+		});
+	}
+
+	it("continues a numbered list across a no-break-space line that a window cut reaches", () => {
+		// The lexer's blank line is any whitespace-only line, so the list goes on
+		// past the no-break-space line. A cut in front of it restarted the list.
+		let list = "";
+		let count = 0;
+		while (list.length <= LEX_WINDOW_BYTES) list += `${++count}. step ${count} of a tight numbered list\n`;
+		const doc = `${list}\n\u00a0\n1. the step after the spacer line\n\n${filler("body", 350)}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+		const rendered = plain(doc);
+		expect(rendered.some(line => line.includes(`${count + 1}. the step after the spacer line`))).toBe(true);
+		expect(rendered).toEqual(onePass(doc));
+	});
+
+	it("keeps the blank line before a bare math environment where a window cut reaches it", () => {
+		// The first window ends one character into `\begin{align}`, so the cut
+		// falls on the blank line above it, which then renders as a blank row.
+		const list = Array.from({ length: 80 }, (_, i) => `- item ${i} of a tight list`).join("\n");
+		expect(list.length).toBeGreaterThan(LEX_WINDOW_BYTES);
+		const doc = `${list}\n\n\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}\n\n${filler("body", 350)}\n`;
+		const rendered = plain(doc);
+		expect(rendered[rendered.findIndex(line => line.includes("item 79")) + 1]).toBe("");
+		expect(rendered).toEqual(onePass(doc));
 	});
 });
