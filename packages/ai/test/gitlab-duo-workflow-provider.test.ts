@@ -39,6 +39,7 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 
@@ -3547,6 +3548,80 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			{ type: "toolCall", id: "req-mcp-1", name: "read", arguments: { path: "src/index.ts" } },
 		]);
 		expect(eventTypes).toEqual(["toolcall_start", "toolcall_delta", "toolcall_end", "done"]);
+	});
+
+	it("refuses truncated JSON in a runMCPTool action", async () => {
+		const sent: string[] = [];
+		let closed = false;
+		const stream = new AssistantMessageEventStream();
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send(data) {
+				sent.push(data);
+			},
+			close() {
+				closed = true;
+			},
+		};
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "gitlab-duo-agent",
+			provider: "gitlab-duo-agent",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const streamPromise = runGitLabDuoWorkflowSocket(
+			socket,
+			buildGitLabDuoWorkflowStartRequest("workflow-1", model, context),
+			{ stream, output, started: true },
+			{ apiKey: "redacted" },
+		);
+
+		socket.onopen?.(new Event("open"));
+		socket.onmessage?.(
+			new MessageEvent("message", {
+				data: JSON.stringify({
+					requestID: "req-mcp-1",
+					runMCPTool: { name: "mcp__omp__read", args: '{"path":"src/index.ts' },
+				}),
+			}),
+		);
+
+		await expect(streamPromise).resolves.toBe("action");
+		const eventTypes: string[] = [];
+		for await (const event of stream) {
+			eventTypes.push(event.type);
+		}
+
+		expect(sent).toHaveLength(1);
+		expect(closed).toBe(false);
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content).toEqual([
+			{
+				type: "toolCall",
+				id: "req-mcp-1",
+				name: "read",
+				arguments: { __parseError: expect.any(String), __rawJson: '{"path":"src/index.ts' },
+			},
+		]);
+		const call = output.content[0];
+		if (call?.type !== "toolCall") throw new Error("Expected tool call");
+		expect(() =>
+			validateToolArguments({ name: "read", description: "", parameters: { type: "object" } }, call),
+		).toThrow("Tool call arguments are not valid JSON");
 	});
 
 	it("rejects a runMCPTool action frame missing requestID instead of synthesizing one", async () => {
