@@ -51,6 +51,13 @@ function failedTrackingCommand(counterFile: string): string {
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
 
+/** Command emits a file's synthetic stdout before failing; callers must never surface it. */
+function noisyFailedCommand(stdoutFile: string): string {
+	if (process.platform !== "win32") return `cat ${shellQuote(stdoutFile)}; exit 1`;
+	const script = `const fs=require("node:fs");process.stdout.write(fs.readFileSync(${JSON.stringify(stdoutFile)}, "utf8"));process.exit(1);`;
+	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+}
+
 /** Command that prints the *current* trimmed contents of `file` on each run. */
 function stdoutFileCommand(file: string): string {
 	if (process.platform !== "win32") return `IFS= read -r t < ${shellQuote(file)}; printf %s "$t"`;
@@ -302,9 +309,42 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(
 			await Promise.all([resolveConfigValue(config), resolveConfigValue(config), resolveConfigValue(config)]),
 		).toEqual([undefined, undefined, undefined]);
+
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await resolveConfigValue(config)).toBeUndefined();
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+	test("withAuth preserves a ModelRegistry command diagnostic without command stdout", async () => {
+		const stdoutFile = path.join(tempDir, "command-stdout.txt");
+		fs.writeFileSync(stdoutFile, "synthetic-command-stdout");
+		const command = noisyFailedCommand(stdoutFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		let failure: unknown;
+		try {
+			await withAuth(registry.resolver(model), async () => "unexpected");
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain(command);
+		expect((failure as Error).message).toContain("status 1");
+		expect((failure as Error).message).not.toContain("synthetic-command-stdout");
 	});
 
 	test("a first mint that fails once succeeds on the request retry without a pre-send command run", async () => {
@@ -396,7 +436,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		};
 
 		await expect(withAuth(registry.resolver(model), reject)).rejects.toMatchObject({ status: 401 });
-		await expect(withAuth(registry.resolver(model), reject)).rejects.toBeInstanceOf(Error);
+		let nextTurnFailure: unknown;
+		try {
+			await withAuth(registry.resolver(model), reject);
+		} catch (error) {
+			nextTurnFailure = error;
+		}
+		expect(nextTurnFailure).toBeInstanceOf(Error);
+		expect((nextTurnFailure as Error).message).toContain(command);
+		expect((nextTurnFailure as Error).message).toContain("status 1");
 		expect(sent).toEqual(["rejected-key"]);
 		expect(await registry.getApiKey(model)).toBeUndefined();
 	});

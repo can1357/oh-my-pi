@@ -157,13 +157,15 @@ export async function resolveRetryKey(
 	signal?: AbortSignal,
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
+	onError?: (error: unknown) => void,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
 		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
-	} catch {
+	} catch (error) {
+		onError?.(error);
 		return undefined;
 	}
 }
@@ -296,8 +298,14 @@ export async function withAuth<T>(
 
 	const resolver = key;
 	const signal = opts?.signal;
-	const initialKey = await resolveRetryKey(resolver, false, undefined, signal);
-	if (initialKey === undefined) throw missingKey();
+	let initialResolverError: unknown;
+	const initialKey = await resolveRetryKey(resolver, false, undefined, signal, undefined, undefined, error => {
+		initialResolverError = error;
+	});
+	if (initialKey === undefined) {
+		if (initialResolverError !== undefined) throw initialResolverError;
+		throw missingKey();
+	}
 
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;
