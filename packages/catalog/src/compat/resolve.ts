@@ -751,6 +751,7 @@ function resolveOpenAIResponsesPolicy(
 		strictResponsesPairing: isAzure || provider === "github-copilot",
 		supportsImageDetailOriginal: !isXaiHost && !modelMatchesHost(hostModel, "githubCopilot"),
 		supportsReasoningSummary: !isXaiHost,
+		statefulResponses: undefined,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
 		supportsSteering: false,
@@ -867,6 +868,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		cacheControlFormat: compat.cacheControlFormat,
 		requiresReasoningOffJuiceInstruction: compat.requiresReasoningOffJuiceInstruction,
 		supportsReasoningSummary: compat.supportsReasoningSummary,
+		statefulResponses: compat.statefulResponses,
 		isVercelGatewayHost: compat.isVercelGatewayHost,
 	} satisfies ResponsesOnlyCompat;
 }

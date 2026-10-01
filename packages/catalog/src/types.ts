@@ -457,6 +457,8 @@ export interface OpenAICompat {
 	supportsReasoningParams?: boolean;
 	/** Whether Responses requests may include `reasoning.summary`. Default: true except on known incompatible hosts. */
 	supportsReasoningSummary?: boolean;
+	/** Whether to chain OpenAI Responses turns using stored response ids. Unset uses the official-endpoint default; env and call options take precedence. */
+	statefulResponses?: boolean;
 	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
@@ -884,6 +886,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
+			| "statefulResponses"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"
@@ -992,6 +995,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * filling `"auto"`.
 	 */
 	supportsReasoningSummary: boolean;
+	/** Optional chaining override; unset falls back to officialEndpoint at request time. */
+	statefulResponses?: boolean;
 	streamIdleTimeoutMs?: number;
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */

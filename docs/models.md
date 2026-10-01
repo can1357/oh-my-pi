@@ -771,6 +771,7 @@ Request shaping:
 - `disableReasoningWithTools` — suppress reasoning when tools are present even without forced tool choice. Default: `false` unless catalog policy overrides it.
 - `alwaysSendMaxTokens` — always send a max-token field when the caller did not provide one. Default: auto (Kimi-family models derive TPM limits from `max_tokens`).
 - `strictResponsesPairing` — Responses-API tool-call/result history must be strictly paired. Default: auto (Azure OpenAI, GitHub Copilot).
+- `statefulResponses` — enable or disable stored `previous_response_id` chaining for `openai-responses`. Enabling it sends `store: true` and delta input on later turns; disabling it replays full context with `store: false`. Precedence: call option > `PI_OPENAI_STATEFUL` > `compat.statefulResponses` > `compat.officialEndpoint` (on for official OpenAI, off elsewhere). This key does not enable `officialEndpoint` or official-only fields such as `text.verbosity`; it does not change Codex or Azure Responses behavior.
 - `streamIdleTimeoutMs` — stream-watchdog idle-timeout floor in ms for slow reasoning hosts. Default: auto (GLM coding-plan hosts, direct DeepSeek reasoning).
 - `streamMarkupHealingPattern` — recover leaked stream control markup with the `kimi`, `dsml`, `qwen`, or `thinking` grammar. Default: endpoint/model policy.
 - `cacheControlFormat` — `"anthropic"` to include Anthropic-style prompt-cache markers in chat-completions payloads. Default: auto (OpenRouter `anthropic/*` models).

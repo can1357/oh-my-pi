@@ -119,9 +119,9 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	/**
 	 * Stateful turns: chain via `previous_response_id` + delta input instead of
 	 * replaying the full transcript. Forces `store: true` (the platform only
-	 * resolves stored responses). Defaults ON against the official OpenAI API
-	 * and OFF for other Responses endpoints; `PI_OPENAI_STATEFUL` overrides the
-	 * default, and `false` here vetoes everything. Requires `sessionId` +
+	 * resolves stored responses). Precedence: this option, then
+	 * `PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then ON against the
+	 * official OpenAI API and OFF elsewhere. Requires `sessionId` +
 	 * `providerSessionState`. Falls back to a full replay whenever history
 	 * mutates or the server reports a stale id.
 	 */
@@ -269,7 +269,7 @@ function isOpenAIResponsesStatefulEnabled(
 	// Default ON only against the official OpenAI API: chaining forces
 	// `store: true`, and third-party /v1/responses proxies routinely ignore or
 	// reject `previous_response_id`.
-	return $flag("PI_OPENAI_STATEFUL", model.compat.officialEndpoint);
+	return $flag("PI_OPENAI_STATEFUL", model.compat.statefulResponses ?? model.compat.officialEndpoint);
 }
 
 function getOpenAIResponsesChainState(
