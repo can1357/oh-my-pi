@@ -893,6 +893,7 @@ const streamOpenAIResponsesOnce = (
 			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
 			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 				structuredCloneJSON(nativeOutputItems),
+				{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
 			);
 			if (replayableResponseItems) {
 				if (providerSessionState) providerSessionState.nativeHistoryReplayWarmed = true;

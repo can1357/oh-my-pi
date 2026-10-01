@@ -7,7 +7,10 @@ import {
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
-import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import {
+	createOpenAIResponsesHistoryPayload,
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -374,6 +377,83 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("clamps stored original image hints when replay support is unknown", () => {
+		const items = [
+			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
+		];
+		expect(collectResponsesInputImageDetails(sanitizeOpenAIResponsesHistoryItemsForReplay(items))).toEqual([
+			"auto",
+			"auto",
+		]);
+		expect(
+			collectResponsesInputImageDetails(
+				sanitizeOpenAIResponsesHistoryItemsForReplay(items, { supportsImageDetailOriginal: true }),
+			),
+		).toEqual(["original", "original"]);
+	});
+
+	it("honors Codex image-detail opt-out in persisted assistant snapshots", () => {
+		const items = [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
+			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Frame received" }] },
+		];
+		const original = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		const clamped = buildModel({ ...original, compat: { supportsImageDetailOriginal: false } });
+		const context: Context = { messages: [makeAssistantMessage(items, false, "openai-codex", original.id)] };
+		expect(collectResponsesInputImageDetails(convertCodexResponsesMessages(original, context))).toEqual(["original"]);
+		expect(collectResponsesInputImageDetails(convertCodexResponsesMessages(clamped, context))).toEqual(["auto"]);
+	});
+
+	it.each([
+		["user", true],
+		["user", false],
+		["developer", true],
+		["developer", false],
+	] as const)("clamps persisted %s images before Codex replay with computer use %s", (role, supportsComputerUse) => {
+		const items = [
+			{
+				type: "message",
+				id: "msg_saved",
+				status: "completed",
+				role,
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
+			{ type: "item_reference", id: "item_saved" },
+		];
+		const context: Context = {
+			messages: [
+				{
+					role,
+					content: "fallback",
+					providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", items),
+					timestamp: 1,
+				},
+			],
+		};
+		for (const supportsImageDetailOriginal of [false, true]) {
+			const model = buildModel({
+				...getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5"),
+				baseUrl: "http://127.0.0.1:8080/v1",
+				supportsComputerUse,
+				compat: { supportsImageDetailOriginal },
+			});
+			const replay = convertCodexResponsesMessages(model, context);
+			expect(collectResponsesInputImageDetails(replay)).toEqual([supportsImageDetailOriginal ? "original" : "auto"]);
+			expect(replay[0]).toMatchObject({ type: "message", id: "msg_saved", status: "completed", role });
+			expect(replay).toContainEqual({ type: "item_reference", id: "item_saved" });
+		}
+		expect(collectResponsesInputImageDetails(items)).toEqual(["original"]);
+	});
+
 	it("appends user-message replacement history without wiping prefix or tail", () => {
 		const middleItems = [
 			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },

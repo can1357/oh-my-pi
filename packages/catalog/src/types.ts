@@ -477,7 +477,7 @@ export interface OpenAICompat {
 	alwaysSendMaxTokens?: boolean;
 	/** Whether Responses-API tool-call/result history must be strictly paired. Default: auto-detected (Azure OpenAI, GitHub Copilot). */
 	strictResponsesPairing?: boolean;
-	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
+	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: true for OpenAI, Azure OpenAI, and Codex; false for other hosts. Explicit overrides win. */
 	supportsImageDetailOriginal?: boolean;
 	/**
 	 * Whether the Responses endpoint accepts `configuration_update` input items

@@ -356,6 +356,51 @@ describe("buildModel", () => {
 	});
 });
 
+describe("Responses native-resolution image compatibility", () => {
+	it.each([
+		["custom loopback", "custom", "openai-responses", "http://127.0.0.1:8080/v1", false],
+		["OpenAI routed through a custom host", "openai", "openai-responses", "https://proxy.example/v1", false],
+		["official OpenAI", "openai", "openai-responses", "https://api.openai.com/v1", true],
+		["OpenAI host with a custom provider name", "custom", "openai-responses", "https://api.openai.com/v1", true],
+		["Codex subscription", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", true],
+		["Codex legacy backend", "openai-codex", "openai-codex-responses", "https://chat.openai.com/backend-api", true],
+		[
+			"Codex routed through a custom host",
+			"openai-codex",
+			"openai-codex-responses",
+			"http://127.0.0.1:8080/v1",
+			false,
+		],
+		["custom Codex proxy", "cc-switch", "openai-codex-responses", "http://127.0.0.1:8080/v1", false],
+		["Azure runtime endpoint", "azure", "azure-openai-responses", "", true],
+		["Azure host", "custom", "openai-responses", "https://resource.openai.azure.com/openai/v1", true],
+		["Copilot", "github-copilot", "openai-responses", "https://api.githubcopilot.com", false],
+		["xAI", "xai", "openai-responses", "https://api.x.ai/v1", false],
+	] as const)("uses only supported image detail on %s", (_label, provider, api, baseUrl, supported) => {
+		const model = buildModel({ ...responsesSpec({ input: ["text", "image"] }), provider, api, baseUrl });
+		expect(model.compat.supportsImageDetailOriginal).toBe(supported);
+	});
+
+	it.each([
+		["custom opt-in", "custom", "openai-responses", "http://127.0.0.1:8080/v1", true],
+		["OpenAI opt-out", "openai", "openai-responses", "https://api.openai.com/v1", false],
+		["Codex opt-out", "openai-codex", "openai-codex-responses", "https://chatgpt.com/backend-api", false],
+		["xAI wire-rule opt-in", "xai-oauth", "openai-responses", "https://api.x.ai/v1", true],
+	] as const)(
+		"lets explicit image-detail compat win over detection and wire rules: %s",
+		(_label, provider, api, baseUrl, supported) => {
+			const model = buildModel({
+				...responsesSpec({ id: "grok-4.3", input: ["text", "image"] }),
+				provider,
+				api,
+				baseUrl,
+				compat: { supportsImageDetailOriginal: supported },
+			});
+			expect(model.compat.supportsImageDetailOriginal).toBe(supported);
+		},
+	);
+});
+
 describe("xAI Responses reasoning-effort suppression", () => {
 	const grokResponsesSpec = (
 		id: string,
