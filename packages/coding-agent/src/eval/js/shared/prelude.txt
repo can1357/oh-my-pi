@@ -38,7 +38,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 	const callHelper = (name, ...args) => globalThis.__omp_helpers__[name](...args);
 	const hasScheme = path => typeof path === "string" && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path);
-	const shouldDelegateRead = path => hasScheme(path) && !path.toLowerCase().startsWith("local://");
+	const shouldDelegateRead = path => hasScheme(path) && !callHelper("hasRoot", path);
 	const withReadLineSelector = (path, options) => {
 		const offset = typeof options.offset === "number" ? options.offset : 1;
 		const limit = typeof options.limit === "number" ? options.limit : undefined;
@@ -162,11 +162,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 
 		async send(message) {
-			return await globalThis.__omp_call_tool__("hub", {
-				op: "send",
-				to: this.id,
-				message: String(message),
-				i: "agent handle",
+			return await globalThis.__omp_call_tool__("write", {
+				path: this.handle,
+				content: String(message),
+				i: "Messaging agent",
 			});
 		}
 
@@ -182,14 +181,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 		toString() {
 			return `<completion ${this.id}>`;
-		}
-	}
-
-	// Shares the completion handle registry; the host settles it with the typed
-	// answers as structured data, so `wait()` never falls back to text parsing.
-	class JudgmentHandle extends CompletionHandle {
-		toString() {
-			return `<judgment ${this.id}>`;
 		}
 	}
 
@@ -309,17 +300,136 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return new PendingHandle(promise);
 	};
 
-	const judge = (state, questions) => {
-		const promise = (async () => {
-			if (questions === null || typeof questions !== "object" || Array.isArray(questions)) {
-				throw new TypeError("judge(state, questions) expects questions as an object keyed by id");
-			}
-			const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
-			if (!result || typeof result.id !== "string") throw new Error("judge() did not return a handle");
-			return new JudgmentHandle(result.id);
-		})();
-		return new PendingHandle(promise);
+	const checkQuestions = questions => {
+		if (questions === null || typeof questions !== "object" || Array.isArray(questions)) {
+			throw new TypeError("judge(state, questions) expects questions as an object keyed by id");
+		}
 	};
+
+	const judge = async (state, questions) => {
+		checkQuestions(questions);
+		const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
+		if (!result || !isPlainObject(result.answers)) throw new Error("judge() did not return answers");
+		return result.answers;
+	};
+
+	// One settled judgeBatch item: `answers` on success, else `error`.
+	class JudgmentItem {
+		constructor(item) {
+			this.key = item.key;
+			this.answers = item.answers;
+			this.error = item.error;
+			this.model = item.model;
+		}
+
+		get ok() {
+			return this.error === undefined;
+		}
+
+		toString() {
+			return this.error === undefined
+				? `<judgment ${JSON.stringify(this.key)} ${JSON.stringify(this.answers)}>`
+				: `<judgment ${JSON.stringify(this.key)} error=${JSON.stringify(this.error)}>`;
+		}
+	}
+
+	// Host-owned bulk judgment run. Pull settled items with `drain()` across as
+	// many cells as needed; the run outlives any single cell.
+	class JudgmentBatch {
+		constructor(id, total, intent) {
+			this.id = id;
+			this.total = total;
+			this.intent = intent;
+		}
+
+		async _call(op, args = {}) {
+			return await globalThis.__omp_call_tool__("__judge_batch__", { op, id: this.id, ...args });
+		}
+
+		async status() {
+			return await this._call("status");
+		}
+
+		// Items settled since the last drain as `[[key, JudgmentItem]]`; waits up
+		// to `timeout` seconds for at least one, else returns `[]`.
+		async drain(opts, ...rest) {
+			const { timeout } = optionsArg("JudgmentBatch.drain", opts, rest, ["timeout"], "{ timeout }");
+			const args = timeout === undefined ? {} : { timeoutMs: Math.max(0, Number(timeout) * 1000) };
+			const result = await this._call("drain", args);
+			const items = Array.isArray(result?.items) ? result.items : [];
+			return items.map(item => [item.key, new JudgmentItem(item)]);
+		}
+
+		// Yield `[key, JudgmentItem]` as items settle until `timeout` seconds
+		// elapse or the run completes.
+		async *drainIter(opts, ...rest) {
+			const { timeout } = optionsArg("JudgmentBatch.drainIter", opts, rest, ["timeout"], "{ timeout }");
+			const deadline = timeout === undefined ? undefined : Date.now() + Number(timeout) * 1000;
+			while (true) {
+				const remaining = deadline === undefined ? undefined : Math.max(0, (deadline - Date.now()) / 1000);
+				const items = await this.drain({ timeout: remaining });
+				if (items.length === 0) return;
+				yield* items;
+			}
+		}
+
+		async results() {
+			return (await this._call("results"))?.results ?? {};
+		}
+
+		async failed() {
+			return (await this._call("failed"))?.failed ?? {};
+		}
+
+		async cancel() {
+			return Boolean((await this._call("cancel"))?.cancelled);
+		}
+
+		async close() {
+			await this._call("close");
+		}
+
+		toString() {
+			return `<judgeBatch ${this.id} total=${this.total}>`;
+		}
+	}
+
+	const judgeBatchFrom = result => {
+		if (!result || typeof result.id !== "string") throw new Error("judgeBatch() did not return a batch");
+		return new JudgmentBatch(result.id, Number(result.total) || 0, result.intent ?? "Judging");
+	};
+
+	// Judge every state with the same questions on the host. `states` is
+	// `{ key: state }` or an array (keys are indices). `intent` is an optional
+	// nonempty progress/job label. Item failures land in `JudgmentItem.error`;
+	// only a run that dies wholesale rejects `drain()`.
+	const judgeBatch = async (states, questions, opts, ...rest) => {
+		checkQuestions(questions);
+		const options = optionsArg(
+			"judgeBatch",
+			opts,
+			rest,
+			["concurrency", "retries", "minOk", "intent"],
+			"{ intent, concurrency, retries, minOk }",
+		);
+		if (
+			options.intent !== undefined &&
+			(typeof options.intent !== "string" || options.intent.trim().length === 0)
+		) {
+			throw new TypeError("judgeBatch() intent must be a non-empty string");
+		}
+		let items;
+		if (Array.isArray(states)) items = states.map((state, key) => ({ key, state }));
+		else if (isPlainObject(states)) items = Object.entries(states).map(([key, state]) => ({ key, state }));
+		else throw new TypeError("judgeBatch(states, questions) expects states as an object or array");
+		return judgeBatchFrom(
+			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...options }),
+		);
+	};
+
+	// Re-create a batch ref by id (after a VM reset or from another runtime).
+	judgeBatch.attach = async id =>
+		judgeBatchFrom(await globalThis.__omp_call_tool__("__judge_batch__", { op: "attach", id: String(id) }));
 
 	const agent = (prompt, opts, ...rest) => {
 		const promise = (async () => {
@@ -508,7 +618,9 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.AgentHandle = AgentHandle;
 	globalThis.CompletionHandle = CompletionHandle;
 	globalThis.judge = judge;
-	globalThis.JudgmentHandle = JudgmentHandle;
+	globalThis.judgeBatch = judgeBatch;
+	globalThis.JudgmentBatch = JudgmentBatch;
+	globalThis.JudgmentItem = JudgmentItem;
 	globalThis.workpool = workpool;
 	globalThis.WorkPool = WorkPool;
 	globalThis.log = log;

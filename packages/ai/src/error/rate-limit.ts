@@ -37,7 +37,10 @@ const CREDITS_EXHAUSTED_PATTERN =
 // in unrelated diagnostics ("Failed to fetch usage credits from billing
 // service"), which must not rotate a healthy credential.
 const ANTHROPIC_CREDITS_REQUIRED_PATTERN = /\busage credits are required\b|\bcredits_required\b/i;
-const SPEND_LIMIT_PATTERN = /spend.?limit/i;
+// Account billing ceilings: Anthropic "monthly spend limit" (#4787) and Google
+// "Your project has exceeded its monthly spending cap" (#13090). The `\b` after
+// `cap` keeps "spending capacity" — a throttle, not a billing ceiling — out.
+const SPEND_LIMIT_PATTERN = /spend(?:ing)?[\s_-]?(?:limit|cap)\b/i;
 const SUBSCRIPTION_CAP_PATTERN =
 	/\b(?:subscription|plan|membership)\b[^\n]{0,80}\b(?:rate.?limits?|quota|cap)\b|\b(?:rate.?limits?|quota|cap)\b[^\n]{0,80}\b(?:subscription|plan|membership)\b/i;
 const TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN = /\bper\s+(?:second|minute)\b/i;
@@ -106,6 +109,17 @@ export function isDashScopeTokenLimitText(errorMessage: string): boolean {
 		DASHSCOPE_TOKEN_LIMIT_DOC_PATTERN.test(errorMessage) && DASHSCOPE_TOKEN_LIMIT_MESSAGE_PATTERN.test(errorMessage)
 	);
 }
+
+// Rolling per-minute token/request throttles (TPM/RPM). Providers report these
+// with quota wording — "tpm exhausted (type=quota_exceeded_error)",
+// "inference exceeds tpm/rpm limit", "RateLimitExceeded.EndpointTPMExceeded" —
+// but the window self-heals within the minute, so they belong in the transient
+// backoff lane, not the 30-minute credential-blocking quota lane (#13253).
+// Deliberately subordinate to the account-scoped arms of
+// {@link parseRateLimitReason}: a message that also carries a plan/spend/
+// account-quota signal classifies there first and keeps its quota verdict.
+const TPM_RPM_THROTTLE_PATTERN =
+	/\b(?:tpm|rpm)\b[^\n]{0,40}\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b|\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b[^\n]{0,40}\b(?:tpm|rpm)\b|\bRateLimitExceeded\.(?:Endpoint)?(?:TPM|RPM)\w*/i;
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
@@ -177,8 +191,9 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
  * Classify a rate-limit error message into a reason category.
  * Priority order: explicit details in a resource-exhausted error > QUOTA
  * (Antigravity "quota will reset") > CN quota > DASHSCOPE_TOKEN_LIMIT (TPM/TPS
- * throttle) > CONCURRENT_LIMIT > MODEL_CAPACITY > QUOTA (account) > RATE_LIMIT >
- * QUOTA (generic) > SERVER_ERROR > bare resource-exhausted > UNKNOWN.
+ * throttle) > CONCURRENT_LIMIT > MODEL_CAPACITY > QUOTA (account) > RATE_LIMIT
+ * (including TPM/RPM rolling windows) > QUOTA (generic) > SERVER_ERROR > bare
+ * resource-exhausted > UNKNOWN.
  *
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
@@ -249,7 +264,8 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		lower.includes("per minute") ||
 		lower.includes("rate limit") ||
 		lower.includes("too many requests") ||
-		lower.includes("presque")
+		lower.includes("presque") ||
+		TPM_RPM_THROTTLE_PATTERN.test(errorMessage)
 	) {
 		return "RATE_LIMIT_EXCEEDED";
 	}
@@ -306,15 +322,16 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 
 /** Detect usage/quota limit errors in error messages (persistent, requires credential switch). */
 const USAGE_LIMIT_PATTERN =
-	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
+	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
 
 /**
  * HTTP status codes that, absent richer body classification, represent an
  * account-local usage cap rather than a bad credential or a transient blip.
  * HTTP 402 Payment Required represents an account-billing cap (xAI
  * Grok Build "usage balance exhausted", DeepSeek "Insufficient Balance",
- * OpenRouter credit exhaustion) when opaque, payment/deactivation/balance-worded,
- * or QUOTA_EXHAUSTED/CONCURRENT_LIMIT, while informative non-quota 402s (e.g.
+ * OpenCode Go "Insufficient account funds", OpenRouter credit exhaustion)
+ * when opaque, payment/deactivation/balance/funds-worded, or
+ * QUOTA_EXHAUSTED/CONCURRENT_LIMIT. Informative non-quota 402s (e.g.
  * endpoint subscription requirements) remain non-usage-limits. Always combine
  * with {@link isUsageLimitOutcome} when a message is available.
  */
@@ -322,7 +339,7 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
 	return status === 429 || status === 402;
 }
 const STATUS_402_QUOTA_PATTERN =
-	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?balance)\b/i;
+	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\b/i;
 
 export function is402BillingCapBody(message: string | undefined): boolean {
 	if (message === undefined || isOpaqueStatusBody(message)) return true;
@@ -407,6 +424,13 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;
+	// Rolling TPM/RPM windows self-heal, so they never rotate a credential. The
+	// reason re-check is the precedence guard: an account-scoped cap that merely
+	// quotes a TPM number resolves to QUOTA_EXHAUSTED earlier in that ladder and
+	// keeps its usage-limit verdict.
+	if (TPM_RPM_THROTTLE_PATTERN.test(errorMessage) && parseRateLimitReason(errorMessage) === "RATE_LIMIT_EXCEEDED") {
+		return false;
+	}
 	return (
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||
 		ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(errorMessage) ||

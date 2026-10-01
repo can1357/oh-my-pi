@@ -19,6 +19,15 @@ export function parseXdUrl(input: string): { name: string | null } | null {
 	return { name };
 }
 
+/**
+ * Parse a read-only `xd://<tool>/<topic>` documentation URL.
+ * Returns `null` for anything else, including bare device URLs.
+ */
+export function parseXdTopicUrl(input: string): { name: string; topic: string } | null {
+	const match = /^xd:\/\/([^/?#]+)\/([^/?#]+)$/i.exec(input.trim());
+	return match ? { name: match[1]!, topic: match[2]! } : null;
+}
+
 /** Whether a streaming path prefix could still become an `xd://` URL. */
 export function couldBecomeXdUrl(partialPath: string): boolean {
 	if (partialPath.length <= XD_URL_PREFIX.length) {

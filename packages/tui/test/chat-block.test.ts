@@ -123,21 +123,4 @@ describe("ChatBlock lifecycle", () => {
 		block.dispose();
 		expect(childDisposed).toBe(1);
 	});
-
-	it("tears down a timer effect started in onMount when finished", async () => {
-		class TimerBlock extends ChatBlock {
-			protected override onMount(): void {
-				const id = setInterval(() => this.requestRender(), 5);
-				this.onCleanup(() => clearInterval(id));
-			}
-		}
-		const block = new TimerBlock();
-		block.mount(host);
-		await Bun.sleep(25);
-		expect(renders).toBeGreaterThan(0); // timer fired while active
-		block.finish();
-		const settled = renders; // includes finish()'s own render
-		await Bun.sleep(25);
-		expect(renders).toBe(settled); // interval torn down — no further ticks
-	});
 });

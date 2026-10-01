@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	runTtsrCommand,
-	TTSR_SOURCES,
 	type TtsrCommandArgs,
 	type TtsrScanArgs,
 	type TtsrTestArgs,
@@ -138,18 +137,6 @@ describe("omp ttsr", () => {
 			await run({ action: "test", test });
 			expect(stdout).toContain("source=text");
 			// tool-scoped rule does not fire under text source
-			expect(stdout).toContain("No rules triggered");
-		});
-
-		it("does not trigger a tool-scoped rule when --source text is explicit", async () => {
-			captureStreams();
-			const rulePath = await writeTempRule(": any", ["tool:edit(*.ts)"]);
-			const test: TtsrTestArgs = {
-				rule: rulePath,
-				source: "text",
-				snippet: "const x: any = 1",
-			};
-			await run({ action: "test", test });
 			expect(stdout).toContain("No rules triggered");
 		});
 
@@ -560,12 +547,6 @@ describe("omp ttsr", () => {
 			expect(result.summary.scannedFiles).toBe(0);
 			expect(result.summary.skipped.binary).toBe(1);
 			expect(result.summary.totalMatches).toBe(0);
-		});
-	});
-
-	describe("exports", () => {
-		it("TTSR_SOURCES lists all three match sources", () => {
-			expect(TTSR_SOURCES).toEqual(["text", "thinking", "tool"]);
 		});
 	});
 });

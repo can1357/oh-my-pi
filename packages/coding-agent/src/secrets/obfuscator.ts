@@ -50,6 +50,23 @@ export interface SecretEntry {
 	replacement?: string;
 	flags?: string;
 	friendlyName?: string;
+	/**
+	 * Regex entries only: literal substrings at least one of which every match
+	 * contains. Text containing none is skipped without running the regex.
+	 * Fail-safe: omitted means the regex always runs. Must be exhaustive for
+	 * the pattern; a wrong list here lets a secret through.
+	 */
+	literalPrefixes?: readonly string[];
+}
+
+interface CompiledRegexEntry {
+	regex: RegExp;
+	mode: "obfuscate" | "replace";
+	replacement?: string;
+	friendlyName?: string;
+	/** Pre-folded probes (lower-cased when the regex is case-insensitive); null = always scan. */
+	probes: readonly string[] | null;
+	ignoreCase: boolean;
 }
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
@@ -64,8 +81,7 @@ export class SecretObfuscator {
 	#plainMappings = new Map<string, number>();
 
 	/** Regex entries (patterns compiled at construction) */
-	#regexEntries: Array<{ regex: RegExp; mode: "obfuscate" | "replace"; replacement?: string; friendlyName?: string }> =
-		[];
+	#regexEntries: CompiledRegexEntry[] = [];
 
 	/** All obfuscate-mode mappings: index → { secret, placeholder } */
 	#obfuscateMappings = new Map<number, { secret: string; placeholder: string }>();
@@ -110,6 +126,9 @@ export class SecretObfuscator {
 	/** Whether any secrets were configured */
 	#hasAny: boolean;
 
+	/** Outbound obfuscation switch (`secrets.enabled`); deobfuscation stays active either way. */
+	#obfuscating = true;
+
 	/**
 	 * Private per-install (or per-process) key for the keyed placeholder digest.
 	 * Resolved lazily when the constructor received a key PROVIDER: the first
@@ -153,11 +172,20 @@ export class SecretObfuscator {
 				) {
 					continue;
 				}
+				const ignoreCase = regex.ignoreCase;
+				const prefixes = entry.literalPrefixes;
+				// An empty list would skip everything; treat it like "no metadata".
+				const probes =
+					prefixes !== undefined && prefixes.length > 0 && prefixes.every(prefix => prefix.length > 0)
+						? prefixes.map(prefix => (ignoreCase ? prefix.toLowerCase() : prefix))
+						: null;
 				this.#regexEntries.push({
 					regex,
 					mode,
 					replacement: entry.replacement,
 					friendlyName: entry.friendlyName,
+					probes,
+					ignoreCase,
 				});
 			} catch {
 				// Invalid regex — skip silently (validation happens at load time)
@@ -233,9 +261,22 @@ export class SecretObfuscator {
 		return this.#hasAny;
 	}
 
+	/** Whether outbound text is currently obfuscated: secrets exist and obfuscation is switched on. */
+	obfuscates(): boolean {
+		return this.#hasAny && this.#obfuscating;
+	}
+
+	/**
+	 * Toggle outbound obfuscation. When off, {@link obfuscate} is identity, while
+	 * placeholders minted earlier keep deobfuscating so prior turns stay readable.
+	 */
+	setObfuscating(enabled: boolean): void {
+		this.#obfuscating = enabled;
+	}
+
 	/** Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace. */
 	obfuscate(text: string, sharedRegexSecretValues?: ReadonlySet<string>): string {
-		if (!this.#hasAny) return text;
+		if (!this.obfuscates()) return text;
 		this.#currentRegexSecretValues = this.collectRegexSecretValuesForObfuscation(text);
 		for (const secretValue of sharedRegexSecretValues ?? []) {
 			this.#currentRegexSecretValues.add(secretValue);
@@ -286,7 +327,9 @@ export class SecretObfuscator {
 		}
 
 		// 3. Process regex entries — discover new matches
+		const foldedResult = this.#foldedOnce(result);
 		for (const entry of this.#regexEntries) {
+			if (!this.#entryMayMatch(entry, result, foldedResult)) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(result, entry.regex, entry.mode, origin, entry.replacement);
 
@@ -646,6 +689,7 @@ export class SecretObfuscator {
 		let currentOrigin = origin;
 		for (const entry of this.#regexEntries) {
 			if (entry.mode !== "replace" || entry.replacement !== undefined) continue;
+			if (!this.#entryMayMatch(entry, result, this.#foldedOnce(result))) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(result, entry.regex, entry.mode, currentOrigin, entry.replacement);
 			entry.regex.lastIndex = 0;
@@ -683,6 +727,27 @@ export class SecretObfuscator {
 			}
 		}
 		return { text: result, origin: currentOrigin };
+	}
+
+	/**
+	 * Cheap literal gate before a regex scan: with prefix metadata, a text
+	 * containing none of the prefixes cannot match, and `includes` costs a
+	 * fraction of a lookbehind regex over the whole provider context. Without
+	 * metadata the regex always runs. `folded` is the caller's lower-cased
+	 * copy for case-insensitive entries, computed once per text.
+	 */
+	#entryMayMatch(entry: CompiledRegexEntry, text: string, folded: () => string): boolean {
+		if (entry.probes === null) return true;
+		const haystack = entry.ignoreCase ? folded() : text;
+		for (const probe of entry.probes) {
+			if (haystack.includes(probe)) return true;
+		}
+		return false;
+	}
+
+	#foldedOnce(text: string): () => string {
+		let folded: string | undefined;
+		return () => (folded ??= text.toLowerCase());
 	}
 
 	/** Find the obfuscate index for a known secret value. */
@@ -817,7 +882,9 @@ export class SecretObfuscator {
 	// stamped unredacted onto every use of this secret.
 	#collectRegexSecretValues(text: string): Set<string> {
 		const values = new Set<string>();
+		const folded = this.#foldedOnce(text);
 		for (const entry of this.#regexEntries) {
+			if (!this.#entryMayMatch(entry, text, folded)) continue;
 			entry.regex.lastIndex = 0;
 			for (;;) {
 				const match = entry.regex.exec(text);
@@ -855,6 +922,7 @@ export class SecretObfuscator {
 		let simulatedOrigin = origin;
 		for (const entry of this.#regexEntries) {
 			if (entry.mode !== "replace") continue;
+			if (!this.#entryMayMatch(entry, simulated, this.#foldedOnce(simulated))) continue;
 			entry.regex.lastIndex = 0;
 			const matches = this.#collectRegexMatches(
 				simulated,

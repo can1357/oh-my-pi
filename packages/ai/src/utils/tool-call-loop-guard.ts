@@ -76,7 +76,7 @@ export class ToolCallLoopGuard {
 		this.#exemptTools = new Set(options.exemptTools);
 	}
 
-	/** Records one completed turn and returns the threshold hit, if any. */
+	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
 		if (toolCalls.length === 0) {
@@ -101,7 +101,7 @@ export class ToolCallLoopGuard {
 			this.#count = 1;
 		}
 
-		if (this.#count !== this.#threshold) return null;
+		if (this.#count < this.#threshold) return null;
 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",

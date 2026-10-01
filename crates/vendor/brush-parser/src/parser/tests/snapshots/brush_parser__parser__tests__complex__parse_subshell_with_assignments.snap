@@ -1,0 +1,84 @@
+---
+source: brush-parser/src/parser/tests/complex.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "( x=1; y=2; echo $((x + y)) )",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Compound(Subshell(SubshellCommand(
+                list: CompoundList([
+                  CompoundListItem(AndOrList(
+                    first: Pipeline(
+                      seq: [
+                        Simple(SimpleCommand(
+                          prefix: Some(CommandPrefix([
+                            AssignmentWord(Assignment(
+                              name: VariableName("x"),
+                              value: Scalar(Word(
+                                value: "1",
+                                loc: "[location]",
+                              )),
+                              loc: "[location]",
+                            ), Word(
+                              value: "x=1",
+                              loc: "[location]",
+                            )),
+                          ])),
+                        )),
+                      ],
+                    ),
+                  ), Sequence),
+                  CompoundListItem(AndOrList(
+                    first: Pipeline(
+                      seq: [
+                        Simple(SimpleCommand(
+                          prefix: Some(CommandPrefix([
+                            AssignmentWord(Assignment(
+                              name: VariableName("y"),
+                              value: Scalar(Word(
+                                value: "2",
+                                loc: "[location]",
+                              )),
+                              loc: "[location]",
+                            ), Word(
+                              value: "y=2",
+                              loc: "[location]",
+                            )),
+                          ])),
+                        )),
+                      ],
+                    ),
+                  ), Sequence),
+                  CompoundListItem(AndOrList(
+                    first: Pipeline(
+                      seq: [
+                        Simple(SimpleCommand(
+                          word_or_name: Some(Word(
+                            value: "echo",
+                            loc: "[location]",
+                          )),
+                          suffix: Some(CommandSuffix([
+                            Word(Word(
+                              value: "$((x + y))",
+                              loc: "[location]",
+                            )),
+                          ])),
+                        )),
+                      ],
+                    ),
+                  ), Sequence),
+                ]),
+                loc: "[location]",
+              )), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

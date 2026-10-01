@@ -339,7 +339,7 @@ describe("legacy uploader wire contracts", () => {
 			expect(init?.method).toBe("POST");
 			const form = formOf(init);
 			expect(form.get("k")).toBe("puush-key");
-			expect(form.get("z")).toBe("oh-my-pi");
+			expect(form.get("z")).toBe("omp");
 			await expectFile(form, "f");
 			return new Response("0,https://cdn.test/puush.png,p-42");
 		};

@@ -57,7 +57,7 @@ async function createSharedFixture(): Promise<SharedFixture> {
 	const baseDir = TempDir.createSync("@pi-goal-mode-shared-");
 	const authStorage = await AuthStorage.create(path.join(baseDir.path(), "testauth.db"));
 	// The real prompt path gates on a resolvable key; never rely on ambient env.
-	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	authStorage.keys.setRuntime("anthropic", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage);
 	const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 	if (!model) {
@@ -495,6 +495,80 @@ describe("InteractiveMode goal mode integration", () => {
 
 		streaming = false;
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		await waiter.inputPromise;
+	});
+
+	it("waits for input rather than continuing an active goal with only blocked work", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{
+				name: "Approval",
+				tasks: [
+					{ content: "Prepare the proposal", status: "completed" },
+					{ content: "Apply the approved change", status: "blocked", blocker: "Awaiting user approval" },
+				],
+			},
+		]);
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "Approved" }));
+		await waiter.inputPromise;
+	});
+
+	it("drops an armed continuation when work becomes blocked, then resumes after input", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{ name: "Approval", tasks: [{ content: "Apply the change", status: "pending" }] },
+		]);
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		harness.session.setTodoPhases([
+			{
+				name: "Approval",
+				tasks: [{ content: "Apply the change", status: "blocked", blocker: "Awaiting user approval" }],
+			},
+		]);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		const approval = harness.mode.startPendingSubmission({ text: "Approved" });
+		harness.mode.onInputCallback?.(approval);
+		await waiter.inputPromise;
+		harness.mode.finishPendingSubmission(approval);
+		harness.session.setTodoPhases([
+			{ name: "Approval", tasks: [{ content: "Apply the change", status: "pending" }] },
+		]);
+		const resumed = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(resumed.getResolvedInput()?.customType).toBe("goal-continuation");
+		await resumed.inputPromise;
+	});
+
+	it("continues an active goal when actionable work remains alongside blocked work", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{
+				name: "Release",
+				tasks: [
+					{ content: "Get approval", status: "blocked", blocker: "Awaiting user approval" },
+					{ content: "Run independent checks", status: "pending" },
+				],
+			},
+		]);
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()?.customType).toBe("goal-continuation");
 		await waiter.inputPromise;
 	});
 

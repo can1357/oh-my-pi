@@ -155,6 +155,12 @@ describe("task live progress rendering", () => {
 		expect(text).toContain("line 8");
 	});
 
+	it("shows the extension routing note on async progress rows after completion", () => {
+		setViewportRows(40);
+		const progress = { ...makeProgress([]), status: "completed" as const, resolvedModelRoute: "pool b (quota)" };
+		expect(renderProgressText(progress, false, uiTheme)).toContain("routed: pool b (quota)");
+	});
+
 	it("strips bash footer notices from expanded subagent recent output", () => {
 		setViewportRows(40);
 		const chronological = [

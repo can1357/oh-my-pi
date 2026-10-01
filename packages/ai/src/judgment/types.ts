@@ -115,14 +115,21 @@ export class JudgmentParseError extends Error {
 	}
 }
 
-/** Zero-cost usage for a request whose backend reports only token counts. */
-export function tokenUsage(input: number, output: number): Usage {
+/**
+ * Usage from a backend that reports token counts and, optionally, one billed
+ * USD amount. Missing or non-finite amounts contribute zero to session totals.
+ * Judgment pricing is input-only, so the amount lands on `input`.
+ */
+export function tokenUsage(input: number | undefined, output: number | undefined, cost = 0): Usage {
+	const inputTokens = typeof input === "number" && Number.isFinite(input) ? input : 0;
+	const outputTokens = typeof output === "number" && Number.isFinite(output) ? output : 0;
+	const billedCost = Number.isFinite(cost) ? cost : 0;
 	return {
-		input,
-		output,
+		input: inputTokens,
+		output: outputTokens,
 		cacheRead: 0,
 		cacheWrite: 0,
-		totalTokens: input + output,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		totalTokens: inputTokens + outputTokens,
+		cost: { input: billedCost, output: 0, cacheRead: 0, cacheWrite: 0, total: billedCost },
 	};
 }

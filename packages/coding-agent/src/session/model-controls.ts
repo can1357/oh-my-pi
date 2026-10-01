@@ -1,13 +1,16 @@
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 import {
-	clearAnthropicFastModeFallback,
 	Effort,
-	isAnthropicFastModeFallbackDisabled,
 	realizesPriorityServiceTier,
 	resolveModelServiceTier,
 	serviceTierFamily,
+	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai";
+import {
+	clearAnthropicFastModeFallback,
+	isAnthropicFastModeFallbackDisabled,
+} from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -23,7 +26,8 @@ import {
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
+import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -41,6 +45,9 @@ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
+import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
 	agent: Agent;
@@ -56,7 +63,7 @@ export interface ModelControlsHost {
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
-	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
+	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -133,9 +140,11 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
-	/** Models explicitly scoped to the session's cycle command. */
+	/** Models explicitly scoped to the session's cycle command, minus currently disabled providers. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-		return this.#scopedModels;
+		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
+		if (disabledProviders.length === 0) return this.#scopedModels;
+		return this.#scopedModels.filter(scoped => !disabledProviders.includes(scoped.model.provider));
 	}
 
 	/**
@@ -299,7 +308,7 @@ export class ModelControls {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.#scopedModels.length > 0) {
+		if (this.scopedModels.length > 0) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);
@@ -401,7 +410,7 @@ export class ModelControls {
 		const apiKeysByProvider = new Map<string, string | undefined>();
 		const result: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> = [];
 
-		for (const scoped of this.#scopedModels) {
+		for (const scoped of this.scopedModels) {
 			const provider = scoped.model.provider;
 			let apiKey: string | undefined;
 			if (apiKeysByProvider.has(provider)) {
@@ -482,7 +491,7 @@ export class ModelControls {
 	 */
 	getAvailableModels(): Model[] {
 		const all = this.#host.modelRegistry.getAvailable();
-		const patterns = this.#host.settings.get("enabledModels");
+		const patterns = cfgEnabledModels.get(this.#host.settings);
 		if (!patterns || patterns.length === 0) return all;
 		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings);
 	}
@@ -519,7 +528,7 @@ export class ModelControls {
 			}
 			this.#applyThinkingLevelToAgent(provisional);
 			if (persist) {
-				this.#host.settings.set("defaultThinkingLevel", AUTO_THINKING);
+				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging) {
@@ -548,7 +557,7 @@ export class ModelControls {
 			this.#host.clearInheritedProviderPromptCacheKey();
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				this.#host.settings.set("defaultThinkingLevel", effectiveLevel);
+				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
@@ -591,11 +600,13 @@ export class ModelControls {
 
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
+	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
+	 * only); when non-blank it is classified instead of `promptText`.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
+	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -604,7 +615,7 @@ export class ModelControls {
 		if (getSupportedEfforts(model).length === 0) return;
 
 		let resolved: Effort | undefined;
-		if (this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText)) {
+		if (this.#host.magicKeywordEnabled("ultrathink") && containsMagicKeyword(promptText, "ultrathink")) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// (and the `providers.autoThinkingMaxEffort` ceiling) and jump straight
 			// to the highest supported level for this model.
@@ -617,21 +628,22 @@ export class ModelControls {
 				parentId: this.#host.sessionManager.getLeafId(),
 			};
 			try {
-				resolved = await classifyDifficulty(promptText, {
-					settings: this.#host.settings,
-					registry: this.#host.modelRegistry,
-					model,
-					sessionId: this.#host.sessionId(),
-					signal: controller.signal,
-					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
-					onUsage: usage => {
-						const entryId = this.#host.sessionManager.appendModelUsage(
-							{ purpose: "auto-thinking", ...usage },
-							usageOwner,
-						);
-						if (entryId) usageOwner.parentId = entryId;
+				resolved = await classifyDifficulty(
+					{ request: promptText, solutionSpace },
+					{
+						settings: this.#host.settings,
+						registry: this.#host.modelRegistry,
+						model,
+						sessionId: this.#host.sessionId(),
+						signal: controller.signal,
+						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+						onUsage: usage => {
+							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
+							if (entryId) usageOwner.parentId = entryId;
+						},
+						telemetry: this.#host.agent.telemetry,
 					},
-				});
+				);
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {
 					error: error instanceof Error ? error.message : String(error),
@@ -666,28 +678,44 @@ export class ModelControls {
 	}
 
 	/**
-	 * True when the currently selected model's family is set to `priority` — the
-	 * `/fast` on/off state for the active model. Returns false when no model is
-	 * selected or the model exposes no service-tier family (e.g. Fireworks, which
-	 * has its own Providers › Fireworks Tier toggle).
+	 * True when the currently selected model's family is set to a fast tier —
+	 * `priority`, or `ultrafast` on the OpenAI family — the `/fast` on/off state
+	 * for the active model. Returns false when no model is selected or the
+	 * model exposes no service-tier family (e.g. Fireworks, which has its own
+	 * Providers › Fireworks Tier toggle).
 	 *
-	 * For "is priority actually applied to the next request?" use
+	 * For "is a fast tier actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
 	 */
 	isFastModeEnabled(): boolean {
 		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		return family ? this.#serviceTierByFamily[family] === "priority" : false;
+		const tier = family ? this.#serviceTierByFamily[family] : undefined;
+		return tier === "priority" || tier === "ultrafast";
+	}
+
+	/** True when the active model's OpenAI family is set to `ultrafast` (`/fast ultra`). */
+	isUltrafastModeEnabled(): boolean {
+		const model = this.#model;
+		return (
+			model !== undefined &&
+			serviceTierFamily(model) === "openai" &&
+			this.#serviceTierByFamily.openai === "ultrafast"
+		);
 	}
 
 	/**
-	 * True when `priority` is actually realized on the wire for the currently
-	 * selected model (OpenAI/Google `service_tier`, direct Anthropic fast mode,
-	 * or Fireworks priority). Returns false for tiers the active model can't
-	 * realize and when no model is selected.
+	 * True when a fast tier is actually realized on the wire for the currently
+	 * selected model: `priority` (OpenAI/Google `service_tier`, direct Anthropic
+	 * fast mode, or Fireworks priority), or `ultrafast` where the model offers
+	 * it. Returns false for tiers the active model can't realize and when no
+	 * model is selected.
 	 */
 	isFastModeActive(): boolean {
 		const model = this.#model;
-		if (!model || !realizesPriorityServiceTier(this.effectiveServiceTier(model), model)) return false;
+		if (!model) return false;
+		const tier = this.effectiveServiceTier(model);
+		if (tier === "ultrafast") return shouldSendServiceTier(tier, model);
+		if (!realizesPriorityServiceTier(tier, model)) return false;
 		if (model.provider === "anthropic") {
 			return !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model);
 		}
@@ -703,7 +731,7 @@ export class ModelControls {
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
 		if (model?.provider === "fireworks") {
-			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
+			return cfgProvidersFireworksTier.get(this.#host.settings) === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"
 				: undefined;
 		}
@@ -738,13 +766,16 @@ export class ModelControls {
 
 	/**
 	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. Returns `false` when the model
-	 * has no service-tier family, so callers can report that fast mode is
+	 * (or clears) that family's `priority` tier. `off` also clears `ultrafast`.
+	 * Returns `false` when the model has no service-tier family, or when it is an
+	 * OpenAI-family model that cannot take `priority` (a Codex model whose
+	 * discovered tier list omits it), so callers can report that fast mode is
 	 * unavailable instead of claiming success.
 	 */
 	setFastMode(enabled: boolean): boolean {
-		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		if (!family) {
+		const model = this.#model;
+		const family = model ? serviceTierFamily(model) : undefined;
+		if (!model || !family) {
 			this.#host.emitNotice(
 				"info",
 				"The current model has no service-tier control for /fast to toggle.",
@@ -753,13 +784,42 @@ export class ModelControls {
 			return false;
 		}
 		if (!enabled) {
-			if (this.#serviceTierByFamily[family] === "priority") this.setServiceTierFamily(family, undefined);
+			const tier = this.#serviceTierByFamily[family];
+			if (tier === "priority" || tier === "ultrafast") this.setServiceTierFamily(family, undefined);
 			return true;
+		}
+		if (family === "openai" && !shouldSendServiceTier("priority", model)) {
+			this.#host.emitNotice(
+				"info",
+				"The current model does not offer the priority (Fast) service tier.",
+				"priority",
+			);
+			return false;
 		}
 		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.setServiceTierFamily(family, "priority");
+		return true;
+	}
+
+	/**
+	 * `/fast ultra` sets the OpenAI family to `ultrafast`. Enabling requires the
+	 * active model to realize it (first-party OpenAI, or a Codex model whose
+	 * discovery advertises the tier); otherwise the tier is left unchanged and
+	 * `false` is returned. Disabling clears only an `ultrafast` selection.
+	 */
+	setUltrafastMode(enabled: boolean): boolean {
+		const model = this.#model;
+		if (!enabled) {
+			if (this.#serviceTierByFamily.openai === "ultrafast") this.setServiceTierFamily("openai", undefined);
+			return true;
+		}
+		if (!model || serviceTierFamily(model) !== "openai" || !shouldSendServiceTier("ultrafast", model)) {
+			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
+			return false;
+		}
+		this.setServiceTierFamily("openai", "ultrafast");
 		return true;
 	}
 

@@ -30,7 +30,6 @@ describe("CompactionSummaryMessageComponent", () => {
 		expect(lines.length).toBe(3); // breathing room above and below the rule
 		const rule = Bun.stripANSI(lines[1]);
 		expect(rule).toContain("compacted");
-		expect(rule).toContain("ctrl+o");
 		// The rule spans the full width and hides the summary body.
 		expect(Bun.stringWidth(rule)).toBe(80);
 		expect(rule).not.toContain(SUMMARY);
@@ -46,7 +45,6 @@ describe("CompactionSummaryMessageComponent", () => {
 		const rule = Bun.stripANSI(component.render(80)[1]);
 		expect(rule).toContain("remote-compacted");
 		expect(rule).toContain("256K→20K");
-		expect(rule).toContain("ctrl+o");
 	});
 
 	it("labels a handoff-method compaction as handed-off", () => {

@@ -156,7 +156,11 @@ export interface MemoryBackend {
 	 * commit publishes the cached snippet and first-turn consumption together.
 	 * Return undefined for an ineligible or failed recall, not an empty success.
 	 */
-	beforeAgentStartPrompt?(session: AgentSession, promptText: string): Promise<MemoryPromptPreparation | undefined>;
+	beforeAgentStartPrompt?(
+		session: AgentSession,
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined>;
 
 	/**
 	 * Optional hook to splice extra context into a compaction summarization.
@@ -172,4 +176,12 @@ export interface MemoryBackend {
 		settings: Settings,
 		session?: AgentSession,
 	): Promise<string | undefined>;
+
+	/**
+	 * Optional hook to apply live edits to this backend's own `<id>.*` settings
+	 * (`changed` lists them) in a running top-level session. When omitted, the
+	 * session re-applies the whole backend (`applyMemoryBackend`), which rebuilds
+	 * its runtime state, memory tools, and prompt from the current settings.
+	 */
+	applySettings?(session: AgentSession, changed: readonly string[]): Promise<void>;
 }

@@ -18,11 +18,18 @@ function imageSource(context: Context): ImageSource {
 	return contextHasImageUrls(context) ? "url" : "inline";
 }
 
-/** Wrap `base` with provider-file then URL then inline recovery. */
-export function wrapStreamFnWithBlobUrlFallback(base: StreamFn, broker: ImageUrlService | undefined): StreamFn {
-	if (!broker) return base;
+/**
+ * Wrap `base` with provider-file then URL then inline recovery. `resolveBroker`
+ * is consulted per request so live settings changes swap the service.
+ */
+export function wrapStreamFnWithBlobUrlFallback(
+	base: StreamFn,
+	resolveBroker: () => ImageUrlService | undefined,
+): StreamFn {
 	return (model, context, options) => {
 		if (!contextHasProviderFiles(context) && !contextHasImageUrls(context)) return base(model, context, options);
+		const broker = resolveBroker();
+		if (!broker) return base(model, context, options);
 
 		const outer = new AssistantMessageEventStream();
 		let sawStart = false;

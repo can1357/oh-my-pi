@@ -272,6 +272,16 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(tool.toolName).toBe("submit_move");
 	});
 
+	it('preserves reasoning_effort:"none" as an explicit reasoning-off request', () => {
+		const parsed = parseRequest({
+			model: "openai-codex/gpt-5.6-luna",
+			messages: [{ role: "user", content: "hello" }],
+			reasoning_effort: "none",
+		});
+		expect(parsed.options.reasoning).toBeUndefined();
+		expect(parsed.options.forceReasoningOff).toBe(true);
+	});
+
 	it("leaves toolName empty when no matching tool_call_id and no wire name", () => {
 		const parsed = parseRequest({
 			model: "m",

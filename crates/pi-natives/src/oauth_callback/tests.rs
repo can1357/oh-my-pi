@@ -352,3 +352,16 @@ fn darwin_compiler_selection_respects_cc_and_wrappers() {
 	let empty_args: Vec<_> = empty.get_args().collect();
 	assert_eq!(empty_args, vec![OsStr::new("clang")]);
 }
+
+#[test]
+fn darwin_sdk_root_prefers_explicit_sdkroot() {
+	use std::{ffi::OsStr, path::Path};
+
+	let explicit = super::darwin_compiler::darwin_sdk_root(Some(OsStr::new("/custom/MacOSX.sdk")));
+	assert_eq!(explicit.as_deref(), Some(Path::new("/custom/MacOSX.sdk")));
+
+	// Empty SDKROOT must not pin an empty sysroot; it falls through to xcrun
+	// discovery.
+	let empty = super::darwin_compiler::darwin_sdk_root(Some(OsStr::new("")));
+	assert_ne!(empty.as_deref(), Some(Path::new("")));
+}

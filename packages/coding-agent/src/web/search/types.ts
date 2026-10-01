@@ -1,4 +1,12 @@
-import { SEARCH_PROVIDER_OPTIONS, type SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
+import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search-types";
+
+export * from "@oh-my-pi/pi-tui/tools/web-search-types";
+
+export interface SearchResultDetails {
+	response: SearchResponse;
+	error?: string;
+}
 
 /** Default hard timeout for each web-search provider transport. */
 export const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS = 60;
@@ -6,27 +14,8 @@ export const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS = 60;
 /** Maximum configurable hard timeout for each web-search provider transport. */
 export const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 300;
 
-/**
- * Auto-resolution priority order. Derived from {@link SEARCH_PROVIDER_OPTIONS}
- * (minus `auto`) so the settings/setup dropdown and `resolveProviderChain()`
- * share one source of truth and never drift apart.
- */
-export const SEARCH_PROVIDER_ORDER: readonly SearchProviderId[] = SEARCH_PROVIDER_OPTIONS.flatMap(option =>
-	option.value === "auto" ? [] : [option.value],
-);
-
-/** Concrete provider choices (no `auto` sentinel) — for list-valued settings like order/exclude. */
-export const SEARCH_PROVIDER_CHOICES = SEARCH_PROVIDER_OPTIONS.filter(option => option.value !== "auto");
-
-export const SEARCH_PROVIDER_PREFERENCES = ["auto", ...SEARCH_PROVIDER_ORDER] as const;
-
-export function isSearchProviderId(value: string): value is SearchProviderId {
-	return SEARCH_PROVIDER_ORDER.includes(value as SearchProviderId);
-}
-
-export function isSearchProviderPreference(value: string): value is SearchProviderId | "auto" {
-	return SEARCH_PROVIDER_PREFERENCES.includes(value as SearchProviderId | "auto");
-}
+/** Pure search engines represented by `web/*` catalog models. */
+export type SearchEngineId = Exclude<SearchProviderId, WebSearchGrounding>;
 
 /** Provider-specific error with optional HTTP status */
 export class SearchProviderError extends Error {

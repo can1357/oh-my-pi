@@ -5,13 +5,13 @@
  * SearchResponse shape used by the web search tool.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, normalizeSearchText, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, siteHosts, withHardTimeout } from "./utils";
 
 const TINYFISH_SEARCH_URL = "https://api.search.tinyfish.ai";
 const DEFAULT_NUM_RESULTS = 10;
@@ -63,7 +63,7 @@ export function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	return authStorage.getApiKey("tinyfish", sessionId, { signal });
+	return authStorage.keys.get("tinyfish", sessionId, { signal });
 }
 
 async function callTinyFishSearch(apiKey: string, params: TinyFishSearchParams): Promise<TinyFishSearchResponse> {
@@ -133,16 +133,6 @@ function appendTinyFishSources(
 	}
 }
 
-/** Bare hosts from `site:` values; path constraints remain centrally post-filtered. */
-function siteHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
-}
-
 /**
  * Derive TinyFish `location` (ISO 3166-1 alpha-2, uppercase) and `language`
  * (ISO 639-1, lowercase) from a parsed `lang:` directive. The region subtag is
@@ -178,7 +168,7 @@ export async function searchTinyFish(params: SearchParams): Promise<SearchRespon
 	const { location, language } = tinyFishLocale(parsed.lang);
 	if (location) tinyFishParams.location = location;
 	if (language) tinyFishParams.language = language;
-	const keyOrResolver: ApiKey = params.authStorage.resolver("tinyfish", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("tinyfish", {
 		sessionId: params.sessionId,
 	});
 	const sources = await withAuth(
@@ -217,7 +207,7 @@ export class TinyFishProvider extends SearchProvider {
 	readonly label = "TinyFish";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("tinyfish") || !!getEnvApiKey("tinyfish");
+		return authStorage.keys.source("tinyfish") !== undefined || !!getEnvApiKey("tinyfish");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

@@ -937,6 +937,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
 			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
 		};
+		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
+			collapsed.isProviderDefault = true;
+		}
 		// The default wire id is the family's declared `defaultMember` when live,
 		// else the highest-priority live member. Omitted when it equals the
 		// logical id (bare/thinking pairs) — `resolveWireModelId` falls back.
@@ -1033,8 +1036,17 @@ function retargetCollapsedModelReferences<TSpec extends VariantSpecLike>(specs: 
 			liveIdsByProvider,
 		);
 		const compactionModel = resolveCollapsedModelReference(spec.compactionModel, spec.provider, liveIdsByProvider);
-		if (contextPromotionTarget === spec.contextPromotionTarget && compactionModel === spec.compactionModel) continue;
-		specs[index] = { ...spec, contextPromotionTarget, compactionModel };
+		const webSearchModel = resolveCollapsedModelReference(spec.webSearchModel, spec.provider, liveIdsByProvider);
+		const imageModel = resolveCollapsedModelReference(spec.imageModel, spec.provider, liveIdsByProvider);
+		if (
+			contextPromotionTarget === spec.contextPromotionTarget &&
+			compactionModel === spec.compactionModel &&
+			webSearchModel === spec.webSearchModel &&
+			imageModel === spec.imageModel
+		) {
+			continue;
+		}
+		specs[index] = { ...spec, contextPromotionTarget, compactionModel, webSearchModel, imageModel };
 	}
 }
 

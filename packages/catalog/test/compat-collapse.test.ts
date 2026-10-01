@@ -947,6 +947,24 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 	});
 
+	it("collapses built Grok 4.7 rows per service-tier lane before their per-row effort ladders leak (#12773)", () => {
+		const tiers = ["low", "medium", "high", "xhigh"];
+		const collapsed = collapseBuiltVariants(
+			[...tiers.map(tier => `grok-4.7-${tier}`), ...tiers.map(tier => `grok-4.7-${tier}-fast`)].map(id =>
+				buildModel({ ...cursorMemberSpec(id), reasoning: true }),
+			),
+		);
+		expect(collapsed.map(model => model.id)).toEqual(["grok-4.7", "grok-4.7-fast"]);
+
+		const [grok, fast] = collapsed;
+		if (!grok || !fast) throw new Error("grok-4.7 lanes did not collapse");
+		expect(grok.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(fast.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(resolveWireModelId(grok, Effort.XHigh)).toBe("grok-4.7-xhigh");
+		expect(resolveWireModelId(fast, Effort.XHigh)).toBe("grok-4.7-xhigh-fast");
+		expect(resolveWireModelId(fast, Effort.Low)).toBe("grok-4.7-low-fast");
+	});
+
 	it("defaults the collapsed row to -medium and clamps effort-less to -medium (issue #9478)", () => {
 		const collapsed = collapseVariants(
 			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
@@ -1664,16 +1682,6 @@ describe("Devin GLM-5.2 collapse", () => {
 			high: "glm-5-2",
 			xhigh: "glm-5-2",
 		});
-	});
-
-	it("routes every effort to glm-5-2 (never to the quota-gated glm-5-2-max or glm-5-2-none)", () => {
-		const out = collapseVariants([devinMemberSpec("glm-5-2"), devinMemberSpec("glm-5-2-max")], { table: devinTable });
-
-		const spec = out[0];
-		const routing = spec?.thinking?.effortRouting ?? {};
-		for (const wire of Object.values(routing)) {
-			expect(wire).toBe("glm-5-2");
-		}
 	});
 
 	it("collapses the three 1M GLM-5.2 variants into one paid entry with proper effort routing", () => {

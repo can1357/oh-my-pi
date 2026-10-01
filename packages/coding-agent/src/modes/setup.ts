@@ -11,10 +11,18 @@ import {
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { copyToClipboard } from "../utils/clipboard";
-import { getSearchProvider, setSearchProviderOrder } from "../web/search/provider";
-import { SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { createModelBrowserSource } from "./model-browser-source";
 import type { InteractiveModeContext } from "./types";
+
+import {
+	cfgColorBlindMode,
+	cfgComposerShape,
+	cfgSetupVersion,
+	cfgSymbolPreset,
+	cfgThemeDark,
+	cfgThemeLight,
+} from "./settings";
+import { cfgDisabledProviders, cfgModelRoleStorage } from "../config/model-settings";
 
 export { ALL_SCENES, CURRENT_SETUP_VERSION };
 export type { SetupScene, SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
@@ -29,19 +37,16 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			return ctx.statusLine;
 		},
 		get composerShape() {
-			return ctx.settings.get("composer.shape") ?? "band";
+			return cfgComposerShape.get(ctx.settings);
 		},
 		get symbolPreset() {
-			return ctx.settings.get("symbolPreset");
+			return cfgSymbolPreset.get(ctx.settings);
 		},
 		get colorBlindMode() {
-			return ctx.settings.get("colorBlindMode");
-		},
-		get webSearchOrder() {
-			return ctx.settings.get("providers.webSearchOrder");
+			return cfgColorBlindMode.get(ctx.settings);
 		},
 		get disabledProviders() {
-			return ctx.settings.get("disabledProviders");
+			return cfgDisabledProviders.get(ctx.settings);
 		},
 		get authStorage() {
 			return ctx.session.modelRegistry.authStorage;
@@ -54,33 +59,24 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		}),
 		refreshModels: () => ctx.session.modelRegistry.refresh("online-if-uncached"),
 		selectModel: async (model, selector) => {
-			const projectScope = ctx.settings.get("modelRoleStorage") === "project";
+			const projectScope = cfgModelRoleStorage.get(ctx.settings) === "project";
 			await ctx.session.setModel(model, "default", { selector, persist: !projectScope });
 			if (projectScope) ctx.settings.setProjectModelRole("default", selector);
 			await ctx.settings.flush();
 		},
 		refreshProvider: provider => ctx.session.modelRegistry.refreshProvider(provider, "online"),
 		saveComposerShape: async shape => {
-			ctx.settings.set("composer.shape", shape);
+			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();
 		},
 		saveSymbolPreset: preset => {
-			ctx.settings.set("symbolPreset", preset);
+			cfgSymbolPreset.set(ctx.settings, preset);
 		},
 		saveColorBlindMode: enabled => {
-			ctx.settings.set("colorBlindMode", enabled);
+			cfgColorBlindMode.set(ctx.settings, enabled);
 		},
 		saveTheme: (mode, name) => {
-			ctx.settings.set(`theme.${mode}`, name);
-		},
-		isSearchProviderAvailable: async id => {
-			const provider = await getSearchProvider(id);
-			return provider.isExplicitlyAvailable(ctx.session.modelRegistry.authStorage);
-		},
-		saveSearchProvider: id => {
-			const order = id === "auto" ? [] : [id, ...SEARCH_PROVIDER_ORDER.filter(candidate => candidate !== id)];
-			ctx.settings.set("providers.webSearchOrder", order);
-			setSearchProviderOrder(order);
+			(mode === "dark" ? cfgThemeDark : cfgThemeLight).set(ctx.settings, name);
 		},
 		captureBrowserSession,
 		copyToClipboard,
@@ -93,7 +89,7 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 
 /** Persist completion only after the setup overlay finishes. */
 export async function markSetupWizardComplete(settings: Settings, version = CURRENT_SETUP_VERSION): Promise<void> {
-	settings.set("setupVersion", version);
+	cfgSetupVersion.set(settings, version);
 	await settings.flush();
 }
 

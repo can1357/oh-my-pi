@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { renderComposerShapePreview } from "../src/overlays/composer-shape-preview";
 import { getComposerShapeOptions, installExtensionComposerShape } from "../src/overlays/composer-shape-registry";
 import { initTheme, setTheme } from "../src/theme/theme";
-import type { ComposerStyle } from "../src/index";
+import { type ComposerStyle, visibleWidth } from "../src/index";
 
 beforeAll(async () => {
 	await initTheme();
@@ -116,5 +116,20 @@ describe("composer shape preview", () => {
 		}
 
 		expect(getComposerShapeOptions().some(option => option.value === "extension-dock")).toBe(false);
+	});
+
+	it("uses the full overlay width instead of clipping the status band (issue #12500)", async () => {
+		await setTheme("dark");
+		const status = {
+			getTopBorder: (width: number) => ({ content: "", width }),
+			getStandaloneTopBorder: (width: number) => ({ content: "", width }),
+			getBandTopBorder: (width: number) => ({ content: " ".repeat(width - 6) + "STATUS", width }),
+			renderBottomBar: () => "",
+		};
+
+		const [statusBand] = renderComposerShapePreview("band", 200, status);
+
+		expect(visibleWidth(statusBand ?? "")).toBe(200);
+		expect(statusBand).toEndWith("STATUS");
 	});
 });

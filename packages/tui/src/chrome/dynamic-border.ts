@@ -1,5 +1,7 @@
 import type { Component } from "../tui";
 import { fgOrPlain, theme } from "../theme/index";
+import type { NativeNode } from "../native/node";
+import { EMPTY_NODE } from "../native/describe";
 /**
  * Dynamic border component that adjusts to viewport width.
  *
@@ -21,6 +23,11 @@ export class DynamicBorder implements Component {
 	invalidate(): void {
 		this.#cachedWidth = -1;
 		this.#cachedLines = undefined;
+	}
+
+	/** Native terminals draw their own chrome; a border rule describes nothing. */
+	describe(): NativeNode {
+		return EMPTY_NODE;
 	}
 
 	render(width: number): readonly string[] {

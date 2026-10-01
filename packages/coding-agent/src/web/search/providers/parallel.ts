@@ -1,7 +1,7 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { callMCP } from "../../../mcp/json-rpc";
-import type { SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
 	PARALLEL_BETA_HEADER,
@@ -16,7 +16,7 @@ import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, toSearchSources, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, siteHosts, toSearchSources, withHardTimeout } from "./utils";
 
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 40;
@@ -58,16 +58,6 @@ const RECENCY_DAYS: Record<NonNullable<SearchParams["recency"]>, number> = {
 	year: 365,
 };
 
-/** Site values may carry paths (`github.com/anthropics`); Parallel takes bare hosts. */
-function toHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
-}
-
 /**
  * Map parsed `site:`/`-site:`/`after:` directives and the relative recency
  * option onto Parallel's `source_policy`. An explicit `after:` bound wins.
@@ -77,8 +67,8 @@ function toHosts(sites: readonly string[]): string[] {
  */
 function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency"]): ParallelSourcePolicy | undefined {
 	const policy: ParallelSourcePolicy = {};
-	const include = toHosts(parsed.sites);
-	const exclude = toHosts(parsed.excludedSites);
+	const include = siteHosts(parsed.sites);
+	const exclude = siteHosts(parsed.excludedSites);
 	if (include.length) policy.include_domains = include;
 	else if (exclude.length) policy.exclude_domains = exclude;
 	if (parsed.after) policy.after_date = parsed.after;
@@ -178,8 +168,8 @@ async function searchWithAuthStorage(
 	sessionId?: string,
 	sourcePolicy?: ParallelSourcePolicy,
 ): Promise<ParallelSearchResult> {
-	const hasConfiguredAuth = authStorage.hasAuth("parallel");
-	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
+	const hasConfiguredAuth = authStorage.keys.source("parallel") !== undefined;
+	const apiKey = await authStorage.keys.get("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
 		// A failed credential lookup must not admit anonymous search to the automatic chain.
 		if (hasConfiguredAuth) {
@@ -194,7 +184,7 @@ async function searchWithAuthStorage(
 	// sibling-rotate retry policy. The `ParallelApiError` thrown below carries a
 	// `statusCode`, which `withAuth`'s default classifier reads to detect a
 	// retryable 401 / usage-limit.
-	const keyOrResolver: ApiKey = authStorage.resolver("parallel", { sessionId });
+	const keyOrResolver: ApiKey = authStorage.keys.resolver("parallel", { sessionId });
 	return withAuth(
 		keyOrResolver,
 		async key => {
@@ -289,6 +279,7 @@ export class ParallelProvider extends SearchProvider {
 	readonly id = "parallel";
 	readonly label = "Parallel";
 
+	/** Always available: without a credential, search runs through the keyless public MCP. */
 	isAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
@@ -303,7 +294,7 @@ export class ParallelProvider extends SearchProvider {
 				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 				parsedQuery: params.parsedQuery,
-				modelName: params.modelName,
+				modelName: params.model.id,
 			},
 			params.authStorage,
 			params.sessionId,

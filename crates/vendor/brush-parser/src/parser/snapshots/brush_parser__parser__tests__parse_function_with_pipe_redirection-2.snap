@@ -1,0 +1,111 @@
+---
+source: brush-parser/src/parser/mod.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "foo() { echo 1; } |& cat",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Function(FunctionDefinition(
+                fname: Word(
+                  value: "foo",
+                  loc: Some(SourceSpan(
+                    start: SourcePosition(
+                      index: 0,
+                      line: 1,
+                      column: 1,
+                    ),
+                    end: SourcePosition(
+                      index: 3,
+                      line: 1,
+                      column: 4,
+                    ),
+                  )),
+                ),
+                body: FunctionBody(BraceGroup(BraceGroupCommand(
+                  list: CompoundList([
+                    CompoundListItem(AndOrList(
+                      first: Pipeline(
+                        seq: [
+                          Simple(SimpleCommand(
+                            word_or_name: Some(Word(
+                              value: "echo",
+                              loc: Some(SourceSpan(
+                                start: SourcePosition(
+                                  index: 8,
+                                  line: 1,
+                                  column: 9,
+                                ),
+                                end: SourcePosition(
+                                  index: 12,
+                                  line: 1,
+                                  column: 13,
+                                ),
+                              )),
+                            )),
+                            suffix: Some(CommandSuffix([
+                              Word(Word(
+                                value: "1",
+                                loc: Some(SourceSpan(
+                                  start: SourcePosition(
+                                    index: 13,
+                                    line: 1,
+                                    column: 14,
+                                  ),
+                                  end: SourcePosition(
+                                    index: 14,
+                                    line: 1,
+                                    column: 15,
+                                  ),
+                                )),
+                              )),
+                            ])),
+                          )),
+                        ],
+                      ),
+                    ), Sequence),
+                  ]),
+                  loc: SourceSpan(
+                    start: SourcePosition(
+                      index: 6,
+                      line: 1,
+                      column: 7,
+                    ),
+                    end: SourcePosition(
+                      index: 17,
+                      line: 1,
+                      column: 18,
+                    ),
+                  ),
+                )), Some(RedirectList([
+                  File(Some(2), DuplicateOutput, Fd(1)),
+                ]))),
+              )),
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cat",
+                  loc: Some(SourceSpan(
+                    start: SourcePosition(
+                      index: 21,
+                      line: 1,
+                      column: 22,
+                    ),
+                    end: SourcePosition(
+                      index: 24,
+                      line: 1,
+                      column: 25,
+                    ),
+                  )),
+                )),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

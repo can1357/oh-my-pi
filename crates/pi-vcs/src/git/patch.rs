@@ -1574,6 +1574,8 @@ mod tests {
 
 	use super::*;
 
+	// Diff oracles pass `--no-ext-diff`: a developer's `diff.external` (e.g.
+	// difftastic) would otherwise replace git's patch with its own output.
 	fn git(cwd: &Path, args: &[&str]) -> String {
 		let output = Command::new("git")
 			.current_dir(cwd)
@@ -1747,7 +1749,7 @@ mod tests {
 			fs::set_permissions(ours.path().join("script.sh"), fs::Permissions::from_mode(0o755))
 				.expect("chmod");
 		}
-		let patch = git(ours.path(), &["diff", "--binary", "--find-renames"]);
+		let patch = git(ours.path(), &["diff", "--no-ext-diff", "--binary", "--find-renames"]);
 		reset(ours.path());
 		assert!(
 			repo(ours.path())
@@ -1825,7 +1827,7 @@ mod tests {
 			.replace("line 2\n", "LINE TWO\n")
 			.replace("line 18\n", "LINE EIGHTEEN\n");
 		fs::write(temp.path().join("file.txt"), changed).expect("edit");
-		let diff = git(temp.path(), &["diff", "--unified=1"]);
+		let diff = git(temp.path(), &["diff", "--no-ext-diff", "--unified=1"]);
 		let repository = repo(temp.path());
 		repository
 			.stage_hunks(
@@ -1905,7 +1907,7 @@ mod tests {
 	fn patch_cached_alternate_index_matches_git_and_preserves_real_index() {
 		let temp = init(&[("file.txt", b"base\n")]);
 		fs::write(temp.path().join("file.txt"), b"patched\n").expect("edit");
-		let patch = git(temp.path(), &["diff", "--full-index"]);
+		let patch = git(temp.path(), &["diff", "--no-ext-diff", "--full-index"]);
 		reset(temp.path());
 		let repository = repo(temp.path());
 		let ours_index = temp.path().join("ours.index");
@@ -1955,7 +1957,7 @@ mod tests {
 	fn patch_three_way_check_merges_drift_and_rejects_conflict() {
 		let temp = init(&[("file.txt", b"one\ntwo\nthree\n")]);
 		fs::write(temp.path().join("file.txt"), b"one\nTWO\nthree\n").expect("patch edit");
-		let patch = git(temp.path(), &["diff", "--full-index"]);
+		let patch = git(temp.path(), &["diff", "--no-ext-diff", "--full-index"]);
 		reset(temp.path());
 		fs::write(temp.path().join("file.txt"), b"ONE\ntwo\nthree\n").expect("drift");
 		let repository = repo(temp.path());

@@ -24,7 +24,6 @@ import {
 	resolveGitLabDuoWorkflowNamespaceSelection,
 	resolveGitLabDuoWorkflowRootNamespaceId,
 	runGitLabDuoWorkflowSocket,
-	selectGitLabDuoWorkflowModelRef,
 	streamGitLabDuoWorkflow,
 	traceGitLabDuoWorkflow,
 } from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
@@ -96,18 +95,6 @@ describe("GitLab Duo Workflow provider protocol", () => {
 			pre_approved_agent_privileges: [6],
 			requires_duo_cli_enabled: false,
 		});
-	});
-
-	it("uses project path without namespace for REST workflow bodies when available", () => {
-		const body = buildGitLabDuoWorkflowCreateBody("gid://gitlab/Group/1", {
-			projectId: "group/project",
-			goal: "Do it",
-		});
-		expect(body).toMatchObject({
-			project_id: "group/project",
-			goal: "Do it",
-		});
-		expect(body).not.toHaveProperty("namespace_id");
 	});
 
 	it("uses GraphQL root namespace ids for direct_access", () => {
@@ -471,14 +458,6 @@ describe("GitLab Duo Workflow provider protocol", () => {
 			rootNamespaceId: "1",
 			selectedModelIdentifier: "claude_sonnet_4_6_vertex",
 		});
-	});
-
-	it("pinned model overrides user selected model", () => {
-		const selected = selectGitLabDuoWorkflowModelRef("user_selected_model", {
-			pinnedModel: { name: "Pinned", ref: "pinned_model" },
-			selectableModels: [{ name: "User", ref: "user_selected_model" }],
-		});
-		expect(selected).toBe("pinned_model");
 	});
 });
 

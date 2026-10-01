@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { TUI } from "../src/index";
+import type { DescribeContext } from "../src/native/node";
 import {
 	AdvisorConfigOverlayComponent,
 	type AdvisorConfigDeps,
@@ -12,13 +13,15 @@ import { getThemeByName, setThemeInstance } from "../src/theme";
 const deps: AdvisorConfigDeps = {
 	getAvailableModels: () => [],
 	browserSource: {
+		revision: 0,
 		defaultThinkingLevel: "high",
 		modelProviderOrder: [],
 		knownRoleIds: [],
 		mruOrder: [],
 		modelPerf: new Map(),
 		getModelRole: () => undefined,
-		getRoleInfo: role => ({ name: role }),
+		getRoleInfo: role => ({ name: role, section: "chat", accepts: () => true }),
+		defaultRoleChain: () => [],
 		resolveRoleValue: () => ({ model: undefined, explicitThinkingLevel: false }),
 	},
 	defaultToolNames: new Set(["read", "grep", "glob"]),
@@ -41,6 +44,20 @@ describe("advisor config editor warnings and synthetic default row", () => {
 			requestRender: () => {},
 			notify: () => {},
 		});
+
+	it("docks as a side sheet like /settings only where the terminal draws prefs with aside", () => {
+		const overlay = buildOverlay({ advisors: [] }, () => {});
+		const cx: DescribeContext = {
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		expect(overlay.nativeSheet(cx)).toBe(true);
+		expect(overlay.nativeSheet({ ...cx, feature: name => name !== "aside" })).toBe(false);
+		expect(overlay.nativeSheet({ ...cx, supports: kind => kind !== "prefs" })).toBe(false);
+	});
 
 	it("still drops the untouched seeded default row on save", async () => {
 		let saved: WatchdogConfigDoc | undefined;

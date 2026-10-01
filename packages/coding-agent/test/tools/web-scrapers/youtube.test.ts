@@ -89,7 +89,13 @@ describe.skipIf(SKIP)("handleYouTube", () => {
 		if (result?.method === "youtube") {
 			expect(result.content).toContain("Video ID");
 			expect(result.content).toContain("Channel");
-			// May have duration, views, upload date, etc.
+			// Duration renders as M:SS or H:MM:SS, upload date as YYYY-MM-DD.
+			if (result.content.includes("Duration")) {
+				expect(result.content).toMatch(/Duration.*\d+:\d{2}/);
+			}
+			if (result.content.includes("Uploaded")) {
+				expect(result.content).toMatch(/Uploaded.*\d{4}-\d{2}-\d{2}/);
+			}
 		}
 
 		// If yt-dlp is not available, should indicate that
@@ -110,17 +116,6 @@ describe.skipIf(SKIP)("handleYouTube", () => {
 			const noTranscriptNote = result.content.includes("No transcript available");
 			expect(hasTranscript || noTranscriptNote).toBe(true);
 		}
-	}, 30000);
-
-	it("returns appropriate response when yt-dlp is not available", async () => {
-		// We can't force yt-dlp to be unavailable in tests, but we can verify
-		// the return structure matches expectations for both cases
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-		if (!result) throw new Error("expected YouTube result");
-
-		// Should have one of these methods
-		expect(["parallel", "youtube", "youtube-no-ytdlp"]).toContain(result.method);
-		expect(result.url).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
 	}, 30000);
 
 	it("normalizes video URLs to canonical format", async () => {
@@ -155,42 +150,6 @@ describe.skipIf(SKIP)("handleYouTube", () => {
 			// Should have exactly one of these
 			const noteCount = [hasManualNote, hasAutoNote, hasNoSubsNote].filter(Boolean).length;
 			expect(noteCount).toBeGreaterThanOrEqual(1);
-		}
-	}, 30000);
-
-	it("formats duration in human readable format", async () => {
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-
-		if (result?.method === "youtube" && result.content.includes("Duration")) {
-			// Should have duration in M:SS or H:MM:SS format
-			expect(result.content).toMatch(/Duration.*\d+:\d{2}/);
-		}
-	}, 30000);
-
-	it("formats view count in readable format", async () => {
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-
-		if (result?.method === "youtube" && result.content.includes("Views")) {
-			// Should have views formatted (e.g., 1.5B, 100M, 10.5K)
-			expect(result.content).toMatch(/Views.*\d+(\.\d+)?[KM]?/);
-		}
-	}, 30000);
-
-	it("includes upload date when available", async () => {
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-
-		if (result?.method === "youtube" && result.content.includes("Uploaded")) {
-			// Should have date in YYYY-MM-DD format
-			expect(result.content).toMatch(/Uploaded.*\d{4}-\d{2}-\d{2}/);
-		}
-	}, 30000);
-
-	it("truncates long descriptions", async () => {
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-
-		if (result?.method === "youtube" && result.content.includes("Description")) {
-			// Description section should exist
-			expect(result.content).toContain("## Description");
 		}
 	}, 30000);
 

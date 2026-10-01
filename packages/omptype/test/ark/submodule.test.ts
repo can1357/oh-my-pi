@@ -70,8 +70,6 @@ describe("submodule", () => {
 		expect(() => $.type("sub.marine")).toThrow();
 	});
 
-	it.todo("completions");
-
 	it("can reference subaliases in expression", () => {
 		const dateFrom = type("string.date.parse | Date");
 
@@ -150,8 +148,6 @@ describe("rooted submodules", () => {
 		expect(types.fooBar.expression).toBe('"bar"');
 		expect(types.fooBare.expression).toBe('"foo"');
 	});
-
-	it.todo("completions");
 
 	it("docs example", () => {
 		const userModule = type.module({
@@ -249,26 +245,4 @@ describe("nested submodule", () => {
 			}),
 		).toThrow();
 	});
-
-	it.todo("completions");
-
-	type _DeepExpected$ = {
-		a: Submodule<{
-			b: Submodule<{
-				c: Submodule<{
-					d: Submodule<{
-						e: Submodule<{
-							f: Submodule<{
-								g: Submodule<{
-									alias: 1;
-								}>;
-							}>;
-						}>;
-					}>;
-				}>;
-			}>;
-		}>;
-	};
-
-	it.todo("deep");
 });

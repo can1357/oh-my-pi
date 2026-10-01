@@ -1,0 +1,34 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# napi-free word-completion engines (personal n-gram, SmolLM2). pi_natives
+# wraps them in the `TextPredictor` N-API class served by the text-prediction
+# daemon.
+rust_library(
+    name = "pi-predict",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    # include_str!/include_bytes! inputs: the SmolLM2 preamble and the ngram
+    # web prior.
+    compile_data = glob([
+        "src/**/*.txt",
+        "data/*.bin.zst",
+    ]),
+    crate_name = "pi_predict",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "17.1.5",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "pi-predict_test",
+    crate = ":pi-predict",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

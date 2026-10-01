@@ -3,8 +3,13 @@ import { Disclosure } from "../components/disclosure";
 import { type Component } from "../tui";
 import { Markdown } from "../components/markdown";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import { getMarkdownTheme, theme } from "../theme";
+import { getMarkdownTheme, getThemeEpoch, theme } from "../theme";
+import { expandKeyHint } from "../render/render-utils";
 import type { BranchSummaryMessage, CompactionSummaryMessage, CustomMessage } from "./messages";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { md, node, span, text } from "../native/describe";
+import { type NativeChild, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { Memo } from "../native/memo";
 
 /** Divider labels per compaction method; unknown/legacy methods fall back to "compacted". */
 const COMPACTION_METHOD_LABELS: Record<string, string> = {
@@ -23,7 +28,13 @@ function compactionAmount(message: CompactionSummaryMessage): string | undefined
 
 interface SummaryDividerOptions {
 	label: () => string;
+	/** Themed spans of the label for native terminals. */
+	nativeLabel: () => TspSpan[];
 	detailMarkdown: () => string;
+	/** Native body when it differs from the markdown detail. */
+	nativeDetail?: () => NativeChild[];
+	/** Semantic role of the native section. */
+	role: string;
 }
 
 /**
@@ -54,7 +65,7 @@ class DividerSummary implements Component {
 		const rule = theme.tree.horizontal;
 		const label = this.#label();
 		// sep.dot ships pre-padded (" · "); trim so the hint joins with single spaces.
-		const hint = `${theme.sep.dot.trim()} ctrl+o`;
+		const hint = `${theme.sep.dot.trim()} ${expandKeyHint()}`;
 		const plainWidth = Bun.stringWidth(`${label} ${hint}`, { countAnsiEscapeCodes: false });
 		// ` label hint ` framed by rules on both sides.
 		const remaining = width - plainWidth - 2;
@@ -82,6 +93,8 @@ class SummaryMessageComponent implements Component {
 	#disclosure: Disclosure;
 	#ignoreTight: boolean | undefined;
 	#disposed = false;
+	#expanded = false;
+	readonly #native = new Memo();
 
 	readonly #options: SummaryDividerOptions;
 
@@ -91,7 +104,33 @@ class SummaryMessageComponent implements Component {
 	}
 
 	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
 		this.#disclosure.setExpanded(expanded);
+	}
+
+	/**
+	 * A collapsible `section` headed by the divider label, with the summary
+	 * markdown as its body; expanding is terminal-local and mirrored back
+	 * through {@link handleNativeEvent}.
+	 */
+	describe(): NativeNode {
+		return this.#native.get([this.#expanded, getThemeEpoch()], () =>
+			node(
+				"section",
+				{
+					role: this.#options.role,
+					head: this.#options.nativeLabel(),
+					collapsible: true,
+					collapsed: !this.#expanded,
+				},
+				this.#options.nativeDetail?.() ?? [md(this.#options.detailMarkdown())],
+			),
+		);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
 	}
 
 	setIgnoreTight(ignore: boolean): this {
@@ -159,9 +198,40 @@ export class CompactionSummaryMessageComponent extends SummaryMessageComponent {
 			// A dead-end warning stamped by the progress guard badges the bar;
 			// the full text lives in the ctrl+o detail block below.
 			label: () => compactionLabel(message),
+			nativeLabel: () => compactionNativeLabel(message),
+			nativeDetail: () => compactionNativeDetail(message),
 			detailMarkdown: () => compactionDetailMarkdown(message),
+			role: "omp.compaction",
 		});
 	}
+}
+
+/** The divider chip: `Soft-compacted · 19K → 6.9K tokens`, the arrow dimmed. */
+function compactionNativeLabel(message: CompactionSummaryMessage): TspSpan[] {
+	const name = (message.method && COMPACTION_METHOD_LABELS[message.method]) || "compacted";
+	const spans = [span(`${name[0]!.toUpperCase()}${name.slice(1)}`, "muted")];
+	if (message.tokensAfter !== undefined && message.tokensBefore > 0) {
+		spans.push(
+			span(` · ${formatNumber(message.tokensBefore)}`, "muted mono"),
+			span(" → ", "dim"),
+			span(`${formatNumber(message.tokensAfter)} tokens`, "muted mono"),
+		);
+	}
+	if (message.warning) spans.push(span(` ${theme.icon.warning}`, "warning"));
+	return spans;
+}
+
+/** The expanded divider: a caption, the warning if any, then the summary itself (the chip already has the amounts). */
+function compactionNativeDetail(message: CompactionSummaryMessage): NativeChild[] {
+	const frames = message.images?.length ?? 0;
+	const caption =
+		frames > 0
+			? `Summary · ${frames} snapcompact frame${frames === 1 ? "" : "s"} attached`
+			: "Summary of the earlier conversation";
+	const detail: NativeChild[] = [text([span(caption, "dim")], { role: "omp.compaction.caption", key: "caption" })];
+	if (message.warning) detail.push(text([span(message.warning, "warning")], { wrap: "word", key: "warning" }));
+	detail.push(md(message.summary, { key: "summary" }));
+	return detail;
 }
 
 function compactionLabel(message: CompactionSummaryMessage): string {
@@ -198,6 +268,8 @@ export class HandoffSummaryMessageComponent extends SummaryMessageComponent {
 	constructor(message: CustomMessage<unknown>) {
 		super({
 			label: () => `${theme.icon.context} handed-off`,
+			nativeLabel: () => [span("Handed off", "muted")],
+			role: "omp.handoff",
 			detailMarkdown: () => {
 				const document = extractHandoffDocument(getCustomMessageText(message));
 				return `**Handoff context**\n\n${document || "_No handoff content._"}`;
@@ -225,6 +297,8 @@ export class BranchSummaryMessageComponent extends SummaryMessageComponent {
 	constructor(message: BranchSummaryMessage) {
 		super({
 			label: () => `${theme.icon.branch} branch`,
+			nativeLabel: () => [span("Branch summarized", "muted")],
+			role: "omp.branch",
 			detailMarkdown: () => `**Branch summary**\n\n${message.summary}`,
 		});
 	}

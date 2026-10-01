@@ -886,6 +886,27 @@ describe("compact", () => {
 		expect(blocks[0]?.type).toBe("text");
 	});
 
+	it("omits the ¶think: legend from the preamble when thinking is excluded", async () => {
+		const fileOps = snapcompact.createFileOps();
+		fileOps.read.add("src/auth.ts");
+		const result = await snapcompact.compact(makePreparation({ fileOps }), {
+			frameSize: TEST_FRAME_SIZE,
+			includeThinking: false,
+		});
+
+		expect(result.summary).toContain("`¶user:`");
+		expect(result.summary).toContain("`¶call:`");
+		expect(result.summary).not.toContain("`¶think:`");
+	});
+
+	it("keeps the ¶think: legend in the preamble when thinking is included", async () => {
+		const fileOps = snapcompact.createFileOps();
+		fileOps.read.add("src/auth.ts");
+		const result = await snapcompact.compact(makePreparation({ fileOps }), { frameSize: TEST_FRAME_SIZE });
+
+		expect(result.summary).toContain("`¶think:`");
+	});
+
 	it("carries dim tool-output spans from text into the first image frame", async () => {
 		const result = await snapcompact.compact(
 			makePreparation({
@@ -1059,14 +1080,6 @@ describe("compact", () => {
 		expect(result.summary).toContain("condensed digest of still-older context");
 	});
 
-	it("includes the previous text summary when the prior compaction was not snapcompact", async () => {
-		const result = await snapcompact.compact(
-			makePreparation({ previousSummary: "Older context: project scaffolding done." }),
-			{ frameSize: TEST_FRAME_SIZE },
-		);
-		expect(result.summary).toContain("condensed digest of still-older context");
-	});
-
 	it("strips the OpenAI remote payload and preserves unrelated preserveData", async () => {
 		const first = await snapcompact.compact(makePreparation(), { frameSize: TEST_FRAME_SIZE });
 		const second = await snapcompact.compact(
@@ -1150,25 +1163,6 @@ describe("archive helpers", () => {
 			truncatedChars: 0,
 		};
 		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: valid })).toEqual(valid);
-	});
-
-	it("getPreservedArchive round-trips text-only and text-tail archives", () => {
-		const textOnly: snapcompact.Archive = {
-			frames: [],
-			totalChars: 21,
-			truncatedChars: 0,
-			text: "older history newer history",
-			textHead: "older history newer history",
-		};
-		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: textOnly })).toEqual(textOnly);
-
-		const archive: snapcompact.Archive = {
-			frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 }],
-			totalChars: 10,
-			truncatedChars: 0,
-			textTail: "newest unframed history",
-		};
-		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: archive })).toEqual(archive);
 	});
 
 	it("stripPreservedArchive drops the frame archive and collapses to undefined when empty", () => {
