@@ -7,6 +7,8 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
@@ -606,7 +608,16 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		// The refreshes below stay unscoped. Disabling every built-in provider keeps
+		// them from running catalog discovery for ~85 unrelated providers, which takes
+		// seconds; custom-proxy is the only provider they can reach.
+		const builtInProviders = new Set<string>([
+			...getBundledProviders(),
+			...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+		]);
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			settings: Settings.isolated({ disabledProviders: [...builtInProviders] }),
+		});
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect(await registry.getApiKey(model)).toBe("stale-key");
