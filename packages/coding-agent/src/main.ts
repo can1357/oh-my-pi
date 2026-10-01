@@ -96,6 +96,7 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { defaultAutoRestartWatchPaths, ExecutableUpdateMonitor } from "./session/auto-restart";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -139,6 +140,7 @@ import {
 	cfgComposerShape,
 	cfgImagesAutoResize,
 	cfgMarketplaceAutoUpdate,
+	cfgSettingsAutoRestartOnUpdate,
 	cfgSetupVersion,
 	cfgShowHardwareCursor,
 	cfgSpellingAutocomplete,
@@ -740,6 +742,23 @@ async function runInteractiveMode(
 		throw error;
 	}
 
+	let autoRestart: ExecutableUpdateMonitor | undefined;
+	if (session.sessionManager.getSessionFile()) {
+		autoRestart = new ExecutableUpdateMonitor({
+			paths: defaultAutoRestartWatchPaths({
+				argv: process.argv,
+				execPath: process.execPath,
+				env: process.env,
+			}),
+			isEnabled: () => cfgSettingsAutoRestartOnUpdate.get(session.settings),
+			onUpdate: () => {
+				mode.showStatus("OMP update detected. Restarting this session…");
+				mode.interruptIdleInputForAutoRestart();
+			},
+		});
+		await autoRestart.prime();
+		autoRestart.start();
+	}
 	if (initialMessage !== undefined) {
 		session.maybeStartTitleGeneration(initialMessage);
 		try {
@@ -766,9 +785,18 @@ async function runInteractiveMode(
 		}
 	}
 
-	while (true) {
-		const input = await mode.getUserInput();
-		await submitInteractiveInput(mode, session, input);
+	try {
+		while (true) {
+			if (autoRestart?.updatePending) {
+				await mode.restart();
+				return;
+			}
+			const input = await mode.getUserInput();
+			if (autoRestart?.updatePending && input.cancelled) continue;
+			await submitInteractiveInput(mode, session, input);
+		}
+	} finally {
+		autoRestart?.stop();
 	}
 }
 
