@@ -593,10 +593,11 @@ describe("Composer prepaint", () => {
 			lease.composer.setRuntimeChildren([transcript]);
 			try {
 				if (state === "disk failure") {
-					// #12238: an outside write to the file makes the next full rewrite
-					// refuse to clobber it, and the manager latches that failure.
-					const sessionFile = testSession.session.sessionManager.getSessionFile()!;
-					await fs.appendFile(sessionFile, "outside write\n");
+					// #12238: with the session directory replaced by a regular file,
+					// every write fails for real and the manager latches the failure.
+					const sessionDir = path.dirname(testSession.session.sessionManager.getSessionFile()!);
+					await fs.rm(sessionDir, { recursive: true, force: true });
+					await Bun.write(sessionDir, "not a directory\n");
 					await testSession.session.sessionManager.rewriteEntries().catch(() => undefined);
 				}
 				if (state === "teardown failed") {
