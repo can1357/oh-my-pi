@@ -484,7 +484,8 @@ function rosterScanError(error: unknown): string {
 	return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 
-function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
+/** Whether `sessionFile` is the root transcript or lives in its artifacts tree. */
+export function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
 	const file = path.resolve(sessionFile);
 	const root = path.resolve(rootSessionFile);
 	const artifactRoot = root.slice(0, -".jsonl".length);

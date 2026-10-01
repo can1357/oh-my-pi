@@ -4,6 +4,11 @@ Native tool-calling convention of Moonshot AI's **Kimi K2** family (`moonshotai/
 
 This document was verified against the model card, the official `docs/tool_call_guidance.md` and `docs/deploy_guidance.md` (GitHub `MoonshotAI/Kimi-K2`), the raw `chat_template.jinja` and `tokenizer_config.json` from the HF repo (rendered locally for the byte-exact streams below), and the vLLM `kimi_k2` tool parser source.
 
+The upstream template/tokenizer reference below is distinct from OMP's
+prompt-driven implementation. OMP does not run that template or inject its
+default system prompt; its current behavior is described in
+[omp / pi converter behavior](#omp--pi-converter-behavior).
+
 ## Special tokens
 
 The five tool-call markers required for manual parsing, plus the ChatML envelope markers. Token IDs are from `tokenizer_config.json` (`added_tokens_decoder`).
@@ -182,36 +187,66 @@ Moonshot's hosted API (`platform.moonshot.ai`) exposes both OpenAI- and Anthropi
 ## omp / pi converter behavior
 
 The repository's `kimi` dialect is an **owned in-band converter**. Select it
-with `PI_DIALECT=kimi` (or the equivalent agent configuration). With tools
-present, the agent appends the Kimi guide and compact tool catalog to the
-system prompt, removes native provider tools, rewrites prior calls/results in
-Kimi text form, and converts streamed output back into canonical pi events.
-Kimi-family model affinity resolves to this dialect.
+with `tools.format: kimi` in agent configuration or `PI_DIALECT=kimi`.
+The default `tools.format: auto` retains provider-native tools unless the
+model has `supportsTools: false`; a model id classified as Kimi then resolves
+to `kimi`. Selection is recomputed for each provider request. `PI_DIALECT`
+is a fallback when configuration resolves to no owned dialect, so unset it
+when selecting `native` to ensure provider-native calling.
+
+With tools present, the agent appends the Kimi guide and shared compact
+`<tools>` catalog to the system prompt, removes native provider tools and
+tool choice, rewrites prior calls/results as text, and converts streamed
+output back into canonical pi events. This catalog is not the upstream
+`tool_declare` turn shown above.
 
 The renderer emits one section per assistant call batch. It preserves a
 pre-existing id that already begins with `functions.`; otherwise it generates
 `functions.{name}:{batchIndex}`. Tool results are rendered as consecutive
 `<|im_system|>{name}<|im_middle|>## Return of …<|im_end|>` turns, and canonical
 tool-result messages are collapsed into one synthetic user message containing
-that text.
+that text. Result images remain image blocks after the rendered text.
+Call-bearing assistant history is reduced to prose plus rendered calls;
+its original thinking blocks are omitted. The separate `renderTranscript`
+API can render thinking and full Kimi turn envelopes.
 
 The scanner recognizes only calls inside a section. Once the argument marker
-arrives it preserves the raw header as the call id, derives the name from the
+arrives it trims the header to obtain the call id, derives the name from the
 last dot-separated segment before the first colon, and emits `toolStart`. It
 buffers the argument body until `<|tool_call_end|>`, then applies the shared
 repairing JSON parser and emits `toolEnd`; it does **not** emit incremental
 argument deltas. Invalid/non-object completed arguments normalize to `{}`.
+`toolEnd.rawBlock` retains the exact invocation, including header/argument
+whitespace, but excludes the surrounding section. The scanner does not
+validate the `functions.NAME:INDEX` convention, tool membership, or argument
+schema; even an empty header can emit `toolStart`.
 If EOF arrives after `toolStart` but before the close marker, no `toolEnd` is
 emitted, yet the canonical `{}` call remains and may be dispatched on a normal
 stop. Only incomplete input that never reaches the argument marker is
 discarded without creating a call. Section markers are suppressed from visible
-text, while an isolated call marker outside a section remains ordinary text.
+text inside a recognized section, while an isolated call or section-end
+marker outside a section remains ordinary text. Non-call text inside a
+section is discarded. Completed calls do not require the section close;
+a provider `length` stop remains `length` rather than `toolUse`.
 
-Thinking parsing is enabled by default and maps `<think>…</think>` to thinking
-events. `parseThinking: false` leaves those tags and their contents in visible
-text.
+Thinking parsing is enabled by default outside tool sections and maps
+`<think>…</think>` to thinking events. An unterminated block retains its
+content and emits `thinkingEnd` on flush. `parseThinking: false` leaves
+thinking markup as visible text outside sections.
+
+The first model-authored `<|im_system|>` is a fabricated-result boundary in
+the owned stream. The default `tools.abortOnFabricatedResult: true` aborts
+generation there; disabling it drains the stream but discards the continuation.
+If the provider still emits native structured calls, the first named native
+or in-band call chooses the channel for that turn; calls from the other
+channel are dropped to avoid double dispatch.
 
 ## Sources
+
+- `packages/ai/src/dialect/kimi.ts`, `coercion.ts`, and `kimi.md` — owned scanner, rendering, and injected guide.
+- `packages/ai/src/dialect/catalog.ts`, `history.ts`, and `owned-stream.ts` — prompt/history conversion, projection, and fabricated-result boundary.
+- `packages/agent/src/agent-loop.ts` — per-request selection, `PI_DIALECT`, and native-tool-choice suppression.
+- `packages/catalog/src/identity/dialect.ts` and `packages/coding-agent/src/sdk.ts` — family affinity and `tools.format` resolution.
 
 - Model card (Tool Calling section, OpenAI-style example, deployment/API notes): https://huggingface.co/moonshotai/Kimi-K2-Instruct
 - Official tool-call guidance (markers, ID convention, manual parser, `extract_tool_call_info`): https://raw.githubusercontent.com/MoonshotAI/Kimi-K2/main/docs/tool_call_guidance.md (the HF `resolve`/`blob` paths redirected to the model card; verified against this GitHub raw file)

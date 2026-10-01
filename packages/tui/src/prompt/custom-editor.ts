@@ -14,6 +14,7 @@ import { SpaceHoldGesture } from "../space-hold";
 import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
 import { formatKeyHint } from "../key-hint-format";
+import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
@@ -60,11 +61,19 @@ export interface ComposerNativeState {
 	readonly thinking?: string;
 	/** A turn is running: the send keycap becomes a Stop button. */
 	readonly running: boolean;
+	/** The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main session. */
+	readonly viewing?: readonly string[];
 }
+
+/** Action code prefix of the viewing header's links: `focus:<agent id>`, {@link MAIN_AGENT_ID} for the main session. */
+const FOCUS_ACTION = "focus:";
 
 const IDLE_COMPOSER: ComposerNativeState = { running: false };
 
-/** Filled steps (of four) of the effort chip's meter per thinking level; `auto` before it resolves has none known. */
+/**
+ * Filled steps (of four) of the effort chip's fallback meter, for terminals without the `effort`
+ * kind; `auto` before it resolves has none known.
+ */
 const EFFORT_STEPS: Partial<Record<string, number>> = {
 	off: 0,
 	minimal: 1,
@@ -932,7 +941,7 @@ export class CustomEditor extends Editor {
 				}
 			}
 			for (const typo of this.#spelling.typoRanges(value, { editorText: text, lines, line, startCol: 0 })) {
-				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "mark" });
+				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "typo" });
 			}
 			lineStart += value.length + 1;
 		}
@@ -986,7 +995,11 @@ export class CustomEditor extends Editor {
 		}, CustomEditor.SHIMMER_FRAME_MS);
 		this.#shimmerTimer.unref?.();
 	}
-	override nativePlaceholder: string | undefined = NATIVE_COMPOSER_PLACEHOLDER;
+	/** Viewing a subagent, the draft goes to it: the placeholder names it. */
+	override describePlaceholder = (): string => {
+		const agent = this.composerState().viewing?.at(-1);
+		return agent === undefined ? NATIVE_COMPOSER_PLACEHOLDER : `Message ${agent}`;
+	};
 	/** A shell-mode draft highlights as its language. */
 	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
 	/** Host-owned live state for the TSP composer (shell mode, effort chip, send/stop). */
@@ -1001,6 +1014,7 @@ export class CustomEditor extends Editor {
 				facts: ComposerFacts | undefined;
 				chips: Component | undefined;
 				input: NativeNode;
+				focus: NativeNode | undefined;
 				mode: NativeNode | undefined;
 				bar: NativeNode;
 				layout: NativeEditorLayout;
@@ -1009,13 +1023,15 @@ export class CustomEditor extends Editor {
 
 	/**
 	 * The TSP composer: role `omp.editor[.bash|.python]` (tone `pending` while
-	 * a turn runs) over the context hairline, the attachment chips, a `line`
-	 * row of the shell-mode chip and the input, and the `bar`: model chip,
-	 * effort chip, the other status facts, usage, then send (Stop while a turn
-	 * runs). Clicks come back as `status.model`, `thinking.cycle`, `submit`
-	 * and `interrupt` actions.
+	 * a turn runs) over the context hairline, the viewing header while a
+	 * subagent is focused, the attachment chips, a `line` row of the
+	 * shell-mode chip and the input, and the `bar`: model chip, effort chip,
+	 * the other status facts, usage, then send (Stop while a turn runs).
+	 * Clicks come back as `status.model`, `thinking.cycle`, `submit`,
+	 * `interrupt` and `focus:<id>` actions.
 	 */
-	override describeLayout = (input: NativeNode, _cx: DescribeContext): NativeEditorLayout => {
+	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
+		const effortGlyph = cx.supports("effort");
 		const state = this.composerState();
 		const shell = state.shell;
 		const facts = this.composerFacts?.describeComposerFacts();
@@ -1030,36 +1046,98 @@ export class CustomEditor extends Editor {
 			thinkingKey,
 			modelKey,
 			interruptKey,
+			state.viewing?.join("\u0001"),
+			effortGlyph,
 		].join("\0");
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
 		if (memo && memo.key === key && memo.facts === facts && memo.input === input && memo.chips === chips) {
 			return memo.layout;
 		}
-		const { mode, bar } =
+		const { focus, mode, bar } =
 			memo?.key === key && memo.facts === facts
 				? memo
-				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey);
+				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
 		const line = keyed(row(compact([mode, input]), { role: "omp.composer.line", align: "start", gap: "sm" }), "line");
 		const layout: NativeEditorLayout = {
 			role: shell ? `omp.editor.${shell.kind}` : "omp.editor",
 			tone: state.running ? "pending" : undefined,
-			children: compact([facts?.context, chips, line, bar]),
+			children: compact([facts?.context, focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, mode, bar, layout };
+		this.#nativeComposer = { key, facts, chips, input, focus, mode, bar, layout };
 		return layout;
 	};
 
-	/** The shell-mode chip before the input, and the bar under it. */
+	/**
+	 * The viewing header (`omp.composer.focus`) while a subagent is focused:
+	 * an eye, the agent's ancestors as `omp.composer.crumb` links, the agent
+	 * itself (`omp.composer.agent`), then the way back to the main session
+	 * (`omp.composer.exit`, the interrupt key's keycap: Esc on an empty draft).
+	 */
+	#describeViewing(viewing: readonly string[], interruptKey: KeyId): NativeNode | undefined {
+		const agent = viewing.at(-1);
+		if (agent === undefined) return undefined;
+		const back = interruptKey === "escape" ? "esc" : formatKeyHint(interruptKey);
+		const crumbs = viewing.slice(0, -1).map(id =>
+			node(
+				"text",
+				{
+					role: "omp.composer.crumb",
+					text: id,
+					wrap: "none",
+					title: `View ${id}`,
+					actions: { click: `${FOCUS_ACTION}${id}` },
+				},
+				undefined,
+				`crumb:${id}`,
+			),
+		);
+		return keyed(
+			row(
+				[
+					node("icon", { name: "eye" }, undefined, "icon"),
+					node("text", { text: "Viewing", wrap: "none" }, undefined, "label"),
+					...crumbs,
+					node("text", { role: "omp.composer.agent", text: agent, wrap: "none" }, undefined, "agent"),
+					node(
+						"row",
+						{
+							role: "omp.composer.exit",
+							gap: "xs",
+							align: "center",
+							title: `Back to the main session  ${back}`,
+							actions: { click: `${FOCUS_ACTION}${MAIN_AGENT_ID}` },
+						},
+						[
+							node("kbd", { keys: [interruptKey] }, undefined, "key"),
+							node("text", { text: "main", wrap: "none" }, undefined, "label"),
+						],
+						"exit",
+					),
+				],
+				{
+					role: "omp.composer.focus",
+					gap: "xs",
+					align: "center",
+					title: `Viewing subagent ${agent}: what you send goes to it`,
+				},
+			),
+			"focus",
+		);
+	}
+
+	/** The viewing header over the text, the shell-mode chip before the input, and the bar under it. */
 	#describeComposerControls(
 		state: ComposerNativeState,
 		facts: ComposerFacts | undefined,
 		thinkingKey: KeyId | undefined,
 		modelKey: KeyId | undefined,
 		interruptKey: KeyId,
-	): { mode: NativeNode | undefined; bar: NativeNode } {
+		effortGlyph: boolean,
+	): { focus: NativeNode | undefined; mode: NativeNode | undefined; bar: NativeNode } {
 		const shell = state.shell;
+		const focus = state.viewing && this.#describeViewing(state.viewing, interruptKey);
 		const model =
 			facts &&
 			node(
@@ -1079,9 +1157,10 @@ export class CustomEditor extends Editor {
 				],
 				"model",
 			);
-		const effortSteps = state.thinking === undefined ? undefined : EFFORT_STEPS[state.thinking];
+		const thinking = state.thinking;
+		const effortSteps = thinking === undefined ? undefined : EFFORT_STEPS[thinking];
 		const effort =
-			state.thinking !== undefined &&
+			thinking !== undefined &&
 			node(
 				"row",
 				{
@@ -1092,13 +1171,15 @@ export class CustomEditor extends Editor {
 					actions: { click: "thinking.cycle" },
 				},
 				[
-					node(
-						"meter",
-						{ value: effortSteps === undefined ? null : effortSteps / 4, style: "blocks", steps: 4 },
-						undefined,
-						"meter",
-					),
-					node("text", { text: state.thinking, wrap: "none" }, undefined, "level"),
+					effortGlyph
+						? node("effort", { level: thinking }, undefined, "glyph")
+						: node(
+								"meter",
+								{ value: effortSteps === undefined ? null : effortSteps / 4, style: "blocks", steps: 4 },
+								undefined,
+								"meter",
+							),
+					node("text", { text: thinking, wrap: "none" }, undefined, "level"),
 				],
 				"effort",
 			);
@@ -1135,7 +1216,7 @@ export class CustomEditor extends Editor {
 			}),
 			"bar",
 		);
-		if (!shell) return { mode: undefined, bar };
+		if (!shell) return { focus, mode: undefined, bar };
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
 		const mode = keyed(
 			row(
@@ -1158,15 +1239,20 @@ export class CustomEditor extends Editor {
 			),
 			"mode",
 		);
-		return { mode, bar };
+		return { focus, mode, bar };
 	}
 
 	/**
 	 * Clicks on the composer's controls take the same paths as their keys: ⇧⇥,
-	 * ⏎ and Esc; the status facts' clicks (`status.*`) go to their source.
+	 * ⏎ and Esc; the viewing header's links (`focus:<id>`) go to the host,
+	 * the status facts' clicks (`status.*`) to their source. Selection edits
+	 * go to the buffer.
 	 */
-	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type !== "action") return;
+	override handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") {
+			super.handleNativeEvent(event);
+			return;
+		}
 		switch (event.act) {
 			case "thinking.cycle":
 				this.onCycleThinkingLevel?.();
@@ -1178,7 +1264,8 @@ export class CustomEditor extends Editor {
 				this.onEscape?.();
 				return;
 			default:
-				this.composerFacts?.handleNativeEvent(event);
+				if (event.act.startsWith(FOCUS_ACTION)) this.onFocusAgent?.(event.act.slice(FOCUS_ACTION.length));
+				else this.composerFacts?.handleNativeEvent(event);
 		}
 	}
 
@@ -1208,6 +1295,8 @@ export class CustomEditor extends Editor {
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
+	/** Called when the viewing header asks to view agent `id` ({@link MAIN_AGENT_ID}: the main session). */
+	onFocusAgent?: (id: string) => void;
 
 	/** Space-bar push-to-talk; set its `handler` to enable it. It is a text-composition gesture, so it
 	 *  stays out of Vim's Normal/Visual modes (where the space bar is the `l` motion) and away from an

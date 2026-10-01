@@ -343,14 +343,23 @@ export interface ChatCompletionUserMessageParam {
 	name?: string;
 }
 
+/** Mistral Medium 3.5 reasoning content part on assistant history. */
+export interface ChatCompletionMistralThinkingPart {
+	type: "thinking";
+	thinking: ChatCompletionContentPartText[];
+}
+
 /** Assistant (model) message. */
 export interface ChatCompletionAssistantMessageParam {
 	/** Always `assistant`. */
 	role: "assistant";
 	/** Data about a previous audio response from the model. */
 	audio?: ChatCompletionAssistantMessageParamAudio | null;
-	/** Message contents. Required unless `tool_calls` or `function_call` is specified. */
-	content?: string | Array<ChatCompletionContentPartText | ChatCompletionContentPartRefusal> | null;
+	/** Message contents. Mistral reasoning uses typed thinking parts in this array. */
+	content?:
+		| string
+		| Array<ChatCompletionContentPartText | ChatCompletionContentPartRefusal | ChatCompletionMistralThinkingPart>
+		| null;
 	/** Deprecated by OpenAI; replaced by `tool_calls`. */
 	function_call?: ChatCompletionAssistantMessageParamFunctionCall | null;
 	/** Optional participant name. */
