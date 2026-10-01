@@ -38,7 +38,7 @@ import {
 	type NativeThemePalette,
 	setNativeSymbolPreset,
 } from "../theme/theme";
-import type { Component, OverlayOptions } from "../tui";
+import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
 import { getNativeBlob } from "./blobs";
 import { node } from "./describe";
@@ -58,6 +58,8 @@ export interface NativeOverlay {
 /** What the backend needs from the TUI. */
 export interface NativeHost {
 	readonly terminal: Terminal;
+	/** Clock and timers: the TUI's render scheduler. */
+	readonly scheduler: RenderScheduler;
 	/** `main`/`dock` content: the frame provider's surface, or the TUI children. */
 	describeSurface(cx: DescribeContext): NativeSurface;
 	/** Visible overlays, bottom to top. */
@@ -80,7 +82,6 @@ export interface NativeBackendOptions {
 	readonly recordPath?: string;
 	/** Log the `rows` fallback count per frame. Defaults to `PI_TUI_NATIVE_STATS=1`. */
 	readonly stats?: boolean;
-	readonly now?: () => number;
 }
 
 /** Frames kept for the debug `tsp` op. */
@@ -216,7 +217,8 @@ export class NativeBackend {
 	#mirror: boolean;
 	#recordPath: string | undefined;
 	#stats: boolean;
-	#now: () => number;
+	/** Wakes a render blocked on credits once its oldest frame counts as stalled. */
+	#stallTimer: RenderTimer | undefined;
 	#recent: TspFrame[] = [];
 	#sawResize = false;
 	#live = false;
@@ -237,7 +239,6 @@ export class NativeBackend {
 		this.#mirror = options.mirror === true;
 		this.#recordPath = options.recordPath ?? (Bun.env.PI_TUI_TSP_RECORD || undefined);
 		this.#stats = options.stats ?? Bun.env.PI_TUI_NATIVE_STATS === "1";
-		this.#now = options.now ?? Date.now;
 		this.#inline = this.#newSurface("inline");
 	}
 
@@ -330,6 +331,8 @@ export class NativeBackend {
 	stop(keep = true): void {
 		if (!this.#live) return;
 		this.#live = false;
+		this.#stallTimer?.cancel();
+		this.#stallTimer = undefined;
 		if (this.#screen) this.#close(this.#screen, false);
 		this.#screen = null;
 		this.#close(this.#inline, keep);
@@ -440,6 +443,7 @@ export class NativeBackend {
 		this.#pruneOverlayNodes(overlays);
 		if (!this.#hasCredit(surface)) {
 			surface.dirty = true;
+			this.#armStallTimer(surface);
 			return;
 		}
 		surface.dirty = false;
@@ -504,7 +508,7 @@ export class NativeBackend {
 	#hasCredit(surface: Surface): boolean {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
-		if (this.#now() - oldest < STALLED_ACK_MS) return false;
+		if (this.#host.scheduler.now() - oldest < STALLED_ACK_MS) return false;
 		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
 			sf: surface.id,
 			s: surface.seq,
@@ -515,9 +519,23 @@ export class NativeBackend {
 		return true;
 	}
 
+	/**
+	 * A render blocked on credits only marks the surface dirty; an `ack` wakes
+	 * it. If the terminal never acks, nothing else may request a render, so wake
+	 * it when the oldest unanswered frame counts as stalled.
+	 */
+	#armStallTimer(surface: Surface): void {
+		if (this.#stallTimer) return;
+		const delay = surface.unacked[0]! + STALLED_ACK_MS - this.#host.scheduler.now();
+		this.#stallTimer = this.#host.scheduler.scheduleRender(() => {
+			this.#stallTimer = undefined;
+			if (this.#live) this.#host.requestRender();
+		}, delay);
+	}
+
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
 		surface.seq++;
-		surface.unacked.push(this.#now());
+		surface.unacked.push(this.#host.scheduler.now());
 		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
@@ -563,7 +581,7 @@ export class NativeBackend {
 			}
 		}
 		try {
-			fs.appendFileSync(path, `${JSON.stringify({ t: this.#now(), dir, verb, params, body: payload })}\n`);
+			fs.appendFileSync(path, `${JSON.stringify({ t: Date.now(), dir, verb, params, body: payload })}\n`);
 		} catch (error) {
 			logger.warn("TSP: recording failed; disabling", { path, error: String(error) });
 			this.#recordPath = undefined;

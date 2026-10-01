@@ -55,6 +55,26 @@ describe("native backend", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("paints a change made while blocked once the terminal stops acking, without waiting for another render", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
+		const h = harness;
+		const id = nativeComponentId(stream);
+		for (const text of ["one", "one two", "one two three"]) {
+			stream.current = md(text, { stream: true });
+			await h.render();
+		}
+		const sent = h.frames.length;
+		expect(h.byId(id)?.p).not.toEqual({ text: "one two three", stream: true });
+
+		h.stall(4900);
+		expect(h.frames.length).toBe(sent);
+		h.flush(200);
+		expect(h.frames.length).toBe(sent + 1);
+		expect(h.byId(id)?.p).toEqual({ text: "one two three", stream: true });
+		expect(h.errors).toEqual([]);
+	});
+
 	it("routes pointer events to the component that described the node, with its keypath and item key", async () => {
 		const other = new Probe(node("text", { text: "other" }));
 		const target = new Probe(

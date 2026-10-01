@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native (Tern Surface Protocol) rendering freezing when the terminal stops acknowledging frames: a change made while out of credits now paints once the oldest frame counts as stalled, instead of waiting for the next keystroke or output.
+
 ## [18.4.7] - 2026-10-01
 
 ### Added

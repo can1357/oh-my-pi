@@ -1593,6 +1593,7 @@ export class TUI extends Container {
 	#nativeHost(): NativeHost {
 		return {
 			terminal: this.terminal,
+			scheduler: this.#renderScheduler,
 			describeSurface: cx => {
 				const provider = this.#frameProvider as
 					| (TerminalFrameProvider & Partial<NativeSurfaceProvider>)
