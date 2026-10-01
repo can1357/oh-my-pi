@@ -957,8 +957,15 @@ jobs:
          - name: Verify Apple Foundation Models bridge
            if: matrix.target_id == 'darwin-arm64'
            run: |
-              otool -L packages/natives/native/pi_natives.darwin-arm64.node | grep -F 'FoundationModels.framework' ||
-                 { echo "::error::Darwin arm64 addon was built without Apple Foundation Models"; exit 1; }
+              addon=packages/natives/native/pi_natives.darwin-arm64.node
+              # The bridge is embedded as a separate dylib (module OmpAppleFm),
+              # never linked: a linked Swift runtime crashes the addon on load
+              # on older macOS.
+              grep -aqF OmpAppleFm "$addon" ||
+                 { echo "::error::Darwin arm64 addon was built without the Apple Foundation Models bridge"; exit 1; }
+              if otool -L "$addon" | grep -E 'libswift|FoundationModels'; then
+                 echo "::error::Darwin arm64 addon links the Swift runtime or FoundationModels directly"; exit 1
+              fi
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}

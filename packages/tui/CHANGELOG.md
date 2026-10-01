@@ -6,6 +6,12 @@
 
 - Markdown links render as their clickable text alone, with no appended destination, when the host turns off link URLs (`MarkdownTheme.showLinkUrls`, `setMarkdownShowLinkUrls`) ([#13960](https://github.com/can1357/oh-my-pi/pull/13960) by [@pbondoer](https://github.com/pbondoer)).
 
+## [18.4.7] - 2026-10-01
+
+### Added
+
+- Added an optional `terminal` section to theme JSON (`background`, `foreground`, `chrome`, `widget`, 16 `ansi` colors) naming the terminal a theme was made for, for hosts that paint the terminal themselves; the built-in themes ported from known schemes (GitHub, Nord, Dracula, Catppuccin, Solarized, Gruvbox, Tokyo Night, One, Monokai, Rosé Pine, Poimandres, Celestial) carry their scheme's.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

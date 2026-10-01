@@ -95,5 +95,15 @@
 		"pageBg": "bg",
 		"cardBg": "#FFFFFF",
 		"infoBg": "#FFFAE6"
+	},
+	"terminal": {
+		"background": "bg",
+		"foreground": "#383a42",
+		"chrome": "#eaeaeb",
+		"widget": "#eaeaeb",
+		"ansi": [
+			"#383a42", "red", "green", "orange", "blue", "purple", "cyan", "mono3",
+			"mono2", "#ca1243", "green", "#986801", "blue", "purple", "#0997b3", "bg"
+		]
 	}
 }

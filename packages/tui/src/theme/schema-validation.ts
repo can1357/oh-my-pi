@@ -104,6 +104,13 @@ const themeJsonSchema = type({
 		"cardBg?": "string | number",
 		"infoBg?": "string | number",
 	},
+	"terminal?": {
+		"background?": "string | number",
+		"foreground?": "string | number",
+		"chrome?": "string | number",
+		"widget?": "string | number",
+		"ansi?": "(string | number)[] == 16",
+	},
 	"symbols?": {
 		"preset?": "'unicode' | 'nerd' | 'ascii'",
 		"overrides?": { "[string]": "string" },
