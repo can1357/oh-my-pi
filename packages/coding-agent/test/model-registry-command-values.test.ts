@@ -6,7 +6,8 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type OneshotRetryInfo, retryTransientCompletion, streamSimple } from "@oh-my-pi/pi-ai";
 import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as awsCredentials from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
@@ -14,6 +15,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -564,6 +566,85 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(run.elapsedMs).toBeGreaterThanOrEqual(30_000);
 		},
 	);
+
+	test("a createAgentSession turn whose apiKey command failed retries and completes once the command recovers", async () => {
+		const mockSource = "test/model-registry-command-values/create-agent-session";
+		registerMockApi(mockSource);
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const mock = createMockModel({
+			provider: "custom-proxy",
+			id: "mock-turn-model",
+			responses: [{ content: ["answered with the command key"], stopReason: "stop" }],
+		});
+		// No `getApiKey`: the session's turns resolve keys through createAgentSession's default.
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry: registry,
+			model: mock,
+			sessionManager: SessionManager.inMemory(tempDir),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.maxRetries": 10,
+				"retry.baseDelayMs": 500,
+				"retry.modelFallback": false,
+				"features.unexpectedStopDetection": "none",
+				"todo.enabled": false,
+				"todo.reminders": false,
+			}),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: [],
+		});
+		mockSchedulerWaitWithClock();
+		const wallStart = Date.now();
+		const monotonicStart = performance.now();
+		vi.spyOn(Date, "now").mockImplementation(() => Math.floor(wallStart + performance.now() - monotonicStart));
+		const retryEnds: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") fs.writeFileSync(tokenFile, "recovered-key");
+			if (event.type === "auto_retry_end") retryEnds.push(event);
+		});
+
+		try {
+			await session.prompt("Use the command-keyed provider.");
+			await session.waitForIdle();
+
+			const last = session.agent.state.messages.at(-1);
+			expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(mock.calls).toHaveLength(1);
+			expect(retryEnds).toEqual([expect.objectContaining({ success: true })]);
+			expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
+		} finally {
+			await session.dispose();
+			vi.restoreAllMocks();
+			unregisterCustomApis(mockSource);
+		}
+	});
 
 	test("a turn whose apiKey command never produces a key stops after 3 command retries without a request", async () => {
 		// retry.maxRetries at its default of 10: the key-command cap ends the turn first.
