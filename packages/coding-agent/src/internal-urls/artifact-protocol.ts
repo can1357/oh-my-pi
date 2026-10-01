@@ -7,7 +7,8 @@
  * URL form:
  * - artifact://<id> - Artifact content, bounded by the read tool's byte/line limits
  *
- * Pagination is handled by the read tool via line selectors; artifact lines are not column-clipped.
+ * Pagination is handled by the read tool via line selectors; requested artifact lines retain full
+ * columns within byte/line limits, while off-window context retains the configured column cap.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
