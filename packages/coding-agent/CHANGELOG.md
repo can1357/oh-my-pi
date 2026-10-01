@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added `plan.executeAfterCompactionFailure` to preserve best-effort plan execution by default while allowing operators to halt after failed approval compaction ([#12765](https://github.com/can1357/oh-my-pi/pull/12765) by [@gabrielrinaldi](https://github.com/gabrielrinaldi)).
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
