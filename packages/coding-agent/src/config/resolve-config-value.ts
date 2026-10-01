@@ -2,17 +2,22 @@ import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
 const COMMAND_TIMEOUT_MS = 10_000;
+const COMMAND_FAILURE_RETRY_MS = 30_000;
+const INITIAL_MINT_ATTEMPTS = 2;
 /** Last stdout each command printed on success; a failed run never replaces it. */
 const commandResultCache = new Map<string, string>();
-/** Commands whose cached stdout was invalidated and must be re-run before it is trusted again. */
-const commandStale = new Set<string>();
-/** Why the latest run failed, for commands that have never succeeded. */
+/** Failed runs wait before attempting another mint, preventing a credential-helper storm. */
+const commandFailureRetryAt = new Map<string, number>();
+/** Why the latest run failed, without retaining command stdout. */
 const commandFailure = new Map<string, string>();
+/** Commands an explicit refresh asked to mint once their backoff permits. */
+const commandRefreshPending = new Set<string>();
+/** Values rejected by a 401. They remain history only and are never sent again. */
+const commandRejected = new Set<string>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
 
-/** One `!command` run: its trimmed stdout, or why it produced none. */
-export type CommandRun = { ok: true; value: string } | { ok: false; failure: string };
+type CommandRun = { ok: true; value: string } | { ok: false; failure: string };
 
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
@@ -34,69 +39,100 @@ function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
-/**
- * Invalidate one command-backed value: its next resolve re-runs the command.
- * The previous stdout stays as the fallback for a failed re-run.
- */
+/** Invalidate one command-backed value for an ordinary refresh. */
 export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
-	if (commandResultCache.has(command)) commandStale.add(command);
+	commandRefreshPending.add(command);
+	commandFailureRetryAt.delete(command);
+	commandInFlight.delete(command);
+	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
+}
+
+/** Mark a command-backed credential rejected by a 401: its old stdout is never sendable again. */
+export function rejectCommandConfig(valueConfig: string | undefined): void {
+	if (!isCommandConfigValue(valueConfig)) return;
+	const command = commandKey(valueConfig);
+	commandRejected.add(command);
+	commandRefreshPending.add(command);
+	commandFailureRetryAt.delete(command);
 	commandInFlight.delete(command);
 	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 }
 
 /** Invalidate every command-backed value without cancelling shared in-flight processes. */
 export function invalidateAllCommandConfigs(): void {
-	for (const command of new Set([...commandResultCache.keys(), ...commandInFlight.keys()])) {
+	for (const command of new Set([
+		...commandResultCache.keys(),
+		...commandFailureRetryAt.keys(),
+		...commandInFlight.keys(),
+		...commandRejected.keys(),
+	])) {
+		commandRefreshPending.add(command);
+		commandFailureRetryAt.delete(command);
 		commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 	}
-	for (const command of commandResultCache.keys()) commandStale.add(command);
 	commandInFlight.clear();
 }
 
 /**
  * Describe why a command-backed value resolves to nothing: the command, and how
- * its latest run failed. Undefined once the command has succeeded, or when the
- * value is not a command.
+ * its latest run failed. Undefined once a sendable command value has succeeded,
+ * or when the value is not a command.
  */
 export function describeCommandConfigFailure(valueConfig: string | undefined): string | undefined {
 	if (!isCommandConfigValue(valueConfig)) return undefined;
 	const command = commandKey(valueConfig);
 	const failure = commandFailure.get(command);
-	return failure === undefined ? undefined : `\`${command}\` ${failure}`;
+	if (failure === undefined) return undefined;
+	if (commandResultCache.has(command) && !commandRejected.has(command)) return undefined;
+	return `\`${command}\` ${failure}`;
 }
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
-
 	const cached = commandResultCache.get(command);
-	if (cached !== undefined && !commandStale.has(command)) return cached;
+	const rejected = commandRejected.has(command);
+	if (cached !== undefined && !rejected && !commandRefreshPending.has(command)) return cached;
+	const retryAt = commandFailureRetryAt.get(command);
+	if (retryAt !== undefined && Date.now() < retryAt) return rejected ? undefined : cached;
 
 	const existing = commandInFlight.get(command);
 	if (existing) return await existing;
 
 	const generation = commandGeneration.get(command) ?? 0;
 	const promise: Promise<string | undefined> = (async () => {
-		const run = await runInProjectDir(command);
+		let run = await runInProjectDir(command);
+		// A request that has no safe bearer gets one immediate retry. Concurrent
+		// lookups share this entire budget through commandInFlight.
+		if (!run.ok && (cached === undefined || rejected)) {
+			for (let attempt = 1; attempt < INITIAL_MINT_ATTEMPTS; attempt++) {
+				run = await runInProjectDir(command);
+				if (run.ok) break;
+			}
+		}
 		const current = (commandGeneration.get(command) ?? 0) === generation;
 		if (run.ok) {
 			if (current) {
 				commandResultCache.set(command, run.value);
-				commandStale.delete(command);
+				commandFailureRetryAt.delete(command);
 				commandFailure.delete(command);
+				commandRefreshPending.delete(command);
+				commandRejected.delete(command);
 			}
 			return run.value;
 		}
-		// A failed run is never cached: the next resolve runs the command again,
-		// and until one succeeds the previous stdout (if any) stands in for it.
-		const previous = commandResultCache.get(command);
+
 		logger.warn("config: !command value resolution failed", {
 			failure: run.failure,
-			keptPreviousValue: previous !== undefined,
+			keptPreviousValue: cached !== undefined && !rejected,
+			rejected,
 		});
-		if (current && previous === undefined) commandFailure.set(command, run.failure);
-		return previous;
+		if (current) {
+			commandFailure.set(command, run.failure);
+			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+		}
+		return rejected ? undefined : cached;
 	})().finally(() => {
 		if (commandInFlight.get(command) === promise) commandInFlight.delete(command);
 	});
@@ -107,9 +143,8 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 
 /**
  * Resolve a configuration value. Command values execute asynchronously and
- * successful stdout is cached; a failed run returns the previous stdout, or
- * undefined when the command has never succeeded, and is retried on the next
- * resolve. Environment-backed and literal values stay live.
+ * cache only successful stdout. A failed ordinary refresh serves the prior
+ * stdout through a short backoff; a 401-rejected value never falls back.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
 	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
@@ -128,7 +163,7 @@ async function runInProjectDir(command: string): Promise<CommandRun> {
 	if (!(await directoryIsEnterable(cwd))) {
 		return { ok: false, failure: "was not run: the working directory cannot be entered" };
 	}
-	return await runShellCommand(command, COMMAND_TIMEOUT_MS, cwd);
+	return await runShellCommandResult(command, COMMAND_TIMEOUT_MS, cwd);
 }
 
 /**
@@ -141,7 +176,12 @@ export async function runShellCommand(
 	command: string,
 	timeoutMs: number,
 	cwd: string = getProjectDir(),
-): Promise<CommandRun> {
+): Promise<string | undefined> {
+	const run = await runShellCommandResult(command, timeoutMs, cwd);
+	return run.ok ? run.value : undefined;
+}
+
+async function runShellCommandResult(command: string, timeoutMs: number, cwd: string): Promise<CommandRun> {
 	try {
 		if (process.platform === "win32") {
 			let output = "";
@@ -243,6 +283,8 @@ export function createConfigHeaderResolver(
 export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs();
 	commandResultCache.clear();
-	commandStale.clear();
+	commandFailureRetryAt.clear();
 	commandFailure.clear();
+	commandRefreshPending.clear();
+	commandRejected.clear();
 }

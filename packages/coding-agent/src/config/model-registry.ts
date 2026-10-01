@@ -67,6 +67,7 @@ import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
+	rejectCommandConfig,
 	resolveConfigHeaders,
 	resolveConfigValue,
 } from "./resolve-config-value";
@@ -345,21 +346,20 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Drop the process-cached results of every command-backed config value a
-	 * provider carries (apiKey plus provider/model-override header commands) so
-	 * the next resolve re-runs them. Invoked on the 401 force-refresh path: the
-	 * apiKey alone was refreshed before, leaving command-backed header
-	 * credentials pinned to their stale value across the retry (#9760).
+	 * Refresh every command-backed config value a provider carries (apiKey plus
+	 * provider/model-override header commands). A 401 rejects their prior stdout:
+	 * it remains history but must never become a bearer on a later turn.
 	 */
-	#invalidateProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
+	#invalidateProviderCommandConfigs(provider: string, rejected = false): void {
+		const invalidate = rejected ? rejectCommandConfig : invalidateCommandConfig;
+		invalidate(this.#customProviderApiKeys.get(provider));
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidateCommandConfig(config);
+			for (const config of configs) invalidate(config);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+		for (const config of runtimeConfigs) invalidate(config);
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
@@ -2902,7 +2902,9 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
+		if (options?.forceRefresh) {
+			this.#invalidateProviderCommandConfigs(provider, options.refreshReason === "auth-recovery");
+		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}

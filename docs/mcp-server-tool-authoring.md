@@ -143,8 +143,8 @@ continues with the existing access token.
 
 Before connect, manager normally resolves stdio `env` values and HTTP/SSE `headers` values via `resolveConfigValue()` (`src/config/resolve-config-value.ts`):
 
-- value starting with `!` => execute a shell command with a 10-second timeout, use trimmed stdout; successful output is cached, concurrent requests share one execution, and a failed run is retried on the next resolution
-- a failed, timed-out, or whitespace-only run falls back to the command's previous output; a command that has never succeeded produces `undefined`, so that entry is omitted
+- value starting with `!` => execute a shell command with a 10-second timeout, use trimmed stdout; successful output is cached and concurrent requests share one execution
+- a failed, timed-out, or whitespace-only run never replaces the previous output; ordinary refreshes serve that output through a 30-second failure backoff, while a command with no previous output gets two bounded attempts before producing `undefined` and omitting the entry
 - otherwise, use a non-empty exact-name environment value, falling back to the literal value; empty resolved entries are omitted
 
 Plugin-origin policy markers change this behavior: `envPolicy: "literal"` keeps
