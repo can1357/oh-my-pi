@@ -27,7 +27,7 @@ import { fuzzyFilter } from "../utils/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { AgentRegistry, type AgentRegistryApi, isMessageablePeer, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
-import { remoteNamespaceOf } from "../registry/remote-id";
+import { malformedRemoteIdError, REMOTE_ID_PREFIX, remoteNamespaceOf } from "../registry/remote-id";
 import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import { agentMesh } from "../irc/mesh";
@@ -316,7 +316,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		if (outputId === "all" || remoteNamespaceOf(outputId) !== undefined || hasPathExtraction(url)) return null;
+		if (outputId === "all" || outputId.startsWith(REMOTE_ID_PREFIX) || hasPathExtraction(url)) return null;
 		if (crossInstanceEnabled(context) && (outputId === "peers" || /^\d+$/.test(outputId))) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
@@ -340,6 +340,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				: formatPeerAddress(pid.address)
 			: url.rawHost || url.hostname;
 		if (!named) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const malformedTo = malformedRemoteIdError(named);
+		if (malformedTo) throw malformedTo;
 		const segments = pid?.segments ?? url.pathname.split("/").filter(Boolean).map(decodeSegment);
 		const [field] = segments;
 		const remote = pid !== undefined && !pid.local;
@@ -418,6 +420,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
 		// A bridged peer (`@ns/name`) runs behind an extension's bridge: it is a message target, never an output.
+		const malformedId = malformedRemoteIdError(outputId);
+		if (malformedId) throw malformedId;
 		if (remoteNamespaceOf(outputId) !== undefined) {
 			throw new Error(
 				`${outputId} is a bridged peer and has no local output to read. Message it with \`write agent://${outputId}\`; list peers with \`read history://\`.`,
