@@ -37,7 +37,7 @@ describe("print mode disposes the session before terminating", () => {
 			sessionManager: {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
-				// Print mode subscribes to store failures (issue #11493).
+				// Print mode subscribes to store failures (issue #11493) and session moves.
 				onPersistenceError: () => () => {},
 				onPersistenceNotice: () => () => {},
 			},

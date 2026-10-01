@@ -70,6 +70,8 @@ import { MCPAddWizard } from "@oh-my-pi/pi-tui/overlays/mcp-add-wizard";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { parseCommandArgs } from "../../utils/command-args";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { col, span, text } from "@oh-my-pi/pi-tui/native/describe";
+import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import type { InteractiveModeContext } from "../types";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
 
@@ -227,6 +229,7 @@ function wrapUrlRows(label: string, url: string, width: number): string[] {
 export class MCPAuthorizationLinkPrompt implements Component {
 	readonly #fullUrl: string;
 	readonly #launchUrl: string | undefined;
+	#node: NativeNode | undefined;
 
 	constructor(url: string, launchUrl?: string) {
 		this.#fullUrl = url;
@@ -234,6 +237,23 @@ export class MCPAuthorizationLinkPrompt implements Component {
 	}
 
 	invalidate(): void {}
+
+	/** Prompt, clickable full URL (open + copy), and optional local shortcut; immutable, so built once. */
+	describe(): NativeNode {
+		this.#node ??= col(
+			[
+				text([span("Open authorization URL:", "success")]),
+				text([span("Click here to authorize", "link", { href: this.#fullUrl })], {
+					href: this.#fullUrl,
+					actions: { click: "open", menu: ["open", "copy"] },
+				}),
+				urlCopyRow("Copy URL:", this.#fullUrl),
+				...(this.#launchUrl ? [urlCopyRow("Local shortcut (this machine only):", this.#launchUrl)] : []),
+			],
+			{ gap: "xs" },
+		);
+		return this.#node;
+	}
 
 	render(width: number): readonly string[] {
 		const link = urlHyperlinkAlways(this.#fullUrl, "Click here to authorize");
@@ -247,6 +267,16 @@ export class MCPAuthorizationLinkPrompt implements Component {
 		}
 		return lines;
 	}
+}
+
+/** Labelled URL that copies on click and wraps anywhere so no parameter is hidden. */
+function urlCopyRow(label: string, url: string): NativeNode {
+	return text([span(`${label} `, "muted"), span(url, "mono", { href: url })], {
+		wrap: "char",
+		href: url,
+		actions: { click: "copy", menu: ["copy", "open"] },
+		title: "Copy URL",
+	});
 }
 
 /**

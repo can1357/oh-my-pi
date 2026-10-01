@@ -26,10 +26,23 @@ export function formatPersistenceDurabilityFailure(message: string): string {
 
 /**
  * A {@link SessionPersistenceNotice}: saving continues, so this claims no
- * failure. Not truncated, because it names the session file the user may need
- * to find.
+ * failure. Not truncated, because the notice names the session files the user
+ * may need to find.
  */
 export function formatPersistenceNotice(notice: SessionPersistenceNotice): string {
-	const sessionFile = replaceTabs(sanitizeText(shortenPath(notice.sessionFile))).replace(/[\r\n]+/g, " ");
-	return `Session ${sessionFile} is already open in another omp process. Both append to it; if either later rewrites the whole file (e.g. on compaction), that one stops saving this session.`;
+	const from = shortenPath(notice.from);
+	const to = shortenPath(notice.to);
+	let message: string;
+	switch (notice.reason) {
+		case "open-elsewhere":
+			message = `Session ${from} is open for writing in another omp process, so this session now saves to ${to} instead of mixing its entries into that file.`;
+			break;
+		case "replaced":
+			message = `Session ${from} changed on disk and no longer reads as this session; it is left untouched and this session now saves to ${to}.`;
+			break;
+		case "contested":
+			message = `Another program kept writing to session ${from}; it is left to that writer and this session now saves to ${to}.`;
+			break;
+	}
+	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
 }

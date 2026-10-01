@@ -212,7 +212,8 @@ export class TspDocument {
 				this.#focus = id;
 				return;
 			}
-			case "reveal": {
+			case "reveal":
+			case "scroll": {
 				const [, id] = op;
 				this.#node(id);
 				return;

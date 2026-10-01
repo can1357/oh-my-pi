@@ -268,6 +268,36 @@ function parseBreadcrumbExtras(lines: string[]): {
 }
 
 /**
+ * Storage facts about the writing session manager that decide whether the
+ * custom-files registry can usefully record its transcript.
+ *
+ * A transcript under another agent dir's managed root still needs its marker:
+ * the manager writes blobs to the current agent dir's store, and only that
+ * agent dir's gc decides their reachability, which never scans the other root.
+ */
+export interface CustomSessionFileScope {
+	/**
+	 * The session lives in a non-filesystem storage backend. A marker names a
+	 * local path gc reads from disk, so it would only ever dangle.
+	 */
+	remoteStorage?: boolean;
+}
+
+/**
+ * Overwrite `file` with `content` unless it already holds exactly that, so
+ * re-recording an unchanged pointer costs a read instead of a disk write.
+ */
+function writeIfChangedSync(file: string, content: string): void {
+	try {
+		if (fs.readFileSync(file, "utf8") === content) return;
+	} catch {
+		// Missing or unreadable: write it below.
+	}
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, content);
+}
+
+/**
  * Record a session's exact file in the persistent custom-files registry when
  * the managed-root glob scan cannot fully account for it. Idempotent: the
  * marker is keyed by a hash of the resolved file, and its content is the
@@ -277,17 +307,17 @@ function parseBreadcrumbExtras(lines: string[]): {
  * `sessionFile` may be relative (e.g. `--session .omp-sessions/work`); it is
  * resolved against the recorded `cwd`, matching how the breadcrumb stores it.
  */
-function recordCustomSessionFile(cwd: string, sessionFile: string): void {
+function recordCustomSessionFile(cwd: string, sessionFile: string, scope: CustomSessionFileScope | undefined): void {
+	if (scope?.remoteStorage) return;
 	try {
 		const resolvedSessionFile = path.resolve(cwd, sessionFile);
-		if (pathIsWithin(getSessionsDir(), resolvedSessionFile) && resolvedSessionFile.endsWith(".jsonl")) return;
-		const registryDir = getCustomSessionFilesDir();
-		fs.mkdirSync(registryDir, { recursive: true });
-		fs.writeFileSync(path.join(registryDir, hashPath(resolvedSessionFile)), resolvedSessionFile);
+		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) return;
+		writeIfChangedSync(path.join(getCustomSessionFilesDir(), hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });
 	}
 }
+
 /**
  * Write a breadcrumb linking the current terminal to a session file.
  * The breadcrumb contains the cwd and session path so --continue can
@@ -304,18 +334,25 @@ function recordCustomSessionFile(cwd: string, sessionFile: string): void {
  *
  * When `cwd` exists, the breadcrumb also records its device+inode so
  * `--continue` can tell a rename/move from a deleted or unmounted path.
+ *
+ * `scope` describes the writing manager's storage so the custom-files registry
+ * skips transcripts a marker cannot help gc read (see {@link CustomSessionFileScope}).
  */
-export function writeTerminalBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
+export function writeTerminalBreadcrumb(
+	cwd: string,
+	sessionFile: string,
+	fresh = false,
+	scope?: CustomSessionFileScope,
+): void {
 	// Persist session files the managed-root glob scan cannot fully account for,
 	// regardless of terminal identity. Storage GC needs the exact path after the
 	// per-terminal breadcrumb is overwritten by a later session.
-	recordCustomSessionFile(cwd, sessionFile);
+	recordCustomSessionFile(cwd, sessionFile, scope);
 
 	const terminalId = getTerminalId();
 	if (!terminalId) return;
 
-	const breadcrumbDir = getTerminalSessionsDir();
-	const breadcrumbFile = path.join(breadcrumbDir, terminalId);
+	const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId);
 	const extras: string[] = [];
 	if (fresh) extras.push("fresh");
 	const identity = readCwdIdentity(cwd);
@@ -326,10 +363,10 @@ export function writeTerminalBreadcrumb(cwd: string, sessionFile: string, fresh 
 	// per-append), and writing in order matters: a lazy fresh-session crumb is
 	// re-stamped non-fresh the instant the session materializes, so an async
 	// fire-and-forget could land the two writes out of order and leave a
-	// materialized session marked fresh.
+	// materialized session marked fresh. Re-recording the same session (resume,
+	// cwd re-adoption) leaves an identical crumb alone instead of rewriting it.
 	try {
-		fs.mkdirSync(breadcrumbDir, { recursive: true });
-		fs.writeFileSync(breadcrumbFile, content);
+		writeIfChangedSync(breadcrumbFile, content);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Terminal breadcrumb write failed", { err });
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the model cache rewriting multi-MB provider rows on every refresh: unchanged catalogs now only advance a small freshness record, routine replacements no longer zero-fill freed pages (secure delete stays on for the purge of possibly credential-bearing pre-v11 rows), rows from another app version or an older header-free schema (v11/v12) are ignored and replaced lazily instead of wiping the whole cache, and offline snapshots with endpoint-less models (e.g. Azure) are no longer written, rejected, and deleted on every startup ([#14007](https://github.com/can1357/oh-my-pi/pull/14007) by [@H4vC](https://github.com/H4vC))
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

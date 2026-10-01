@@ -7,6 +7,8 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -175,6 +177,85 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(blob).exists()).toBe(true);
 	});
 
+	test("--apply keeps a blob reused after the sweep scanned it as an old orphan", async () => {
+		const data = "reused-after-scan";
+		const blob = await writeBlob(root, hashFor(data), data);
+		await agePath(blob);
+		const store = new BlobStore(getBlobsDir(root));
+		// A session reuses the blob (refreshing its mtime) after gc took its
+		// candidate snapshot, right before gc first moves or removes it, and
+		// before the new reference reaches a session file.
+		let reused = false;
+		const reuseBeforeRemoval = async (target: unknown) => {
+			if (reused || String(target) !== blob) return;
+			reused = true;
+			await store.put(Buffer.from(data));
+		};
+		const rename = fs.rename.bind(fs);
+		const unlink = fs.unlink.bind(fs);
+		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+			await reuseBeforeRemoval(source);
+			await rename(source, destination);
+		});
+		const unlinkSpy = spyOn(fs, "unlink").mockImplementation(async target => {
+			await reuseBeforeRemoval(target);
+			await unlink(target);
+		});
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			renameSpy.mockRestore();
+			unlinkSpy.mockRestore();
+		}
+
+		expect(reused).toBe(true);
+		expect(result.blobs?.deleted).toBe(0);
+		expect(result.blobs?.wouldDelete).toBe(0);
+		expect(await Bun.file(blob).text()).toBe(data);
+	});
+
+	test("--apply keeps a blob reused while the sweep is deleting it", async () => {
+		const data = "reused-during-delete";
+		const hash = hashFor(data);
+		const blob = await writeBlob(root, hash, data);
+		await agePath(blob);
+		const store = new BlobStore(getBlobsDir(root));
+		const unlink = fs.unlink.bind(fs);
+		let reused = false;
+		const unlinkSpy = spyOn(fs, "unlink").mockImplementation(async target => {
+			if (!reused && path.basename(String(target)).includes(hash)) {
+				reused = true;
+				await store.put(Buffer.from(data));
+			}
+			await unlink(target);
+		});
+		try {
+			await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		expect(reused).toBe(true);
+		expect(await Bun.file(blob).text()).toBe(data);
+	});
+
+	test("--apply removes staging files abandoned by interrupted blob writes", async () => {
+		const blobDir = getBlobsDir(root);
+		await fs.mkdir(blobDir, { recursive: true });
+		const abandoned = blobStagingPath(path.join(blobDir, `${hashFor("abandoned")}.png`));
+		const inFlight = blobStagingPath(path.join(blobDir, hashFor("in-flight")));
+		await Bun.write(abandoned, "partial");
+		await agePath(abandoned);
+		await Bun.write(inFlight, "partial");
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(1);
+		expect(await Bun.file(abandoned).exists()).toBe(false);
+		expect(await Bun.file(inFlight).exists()).toBe(true);
+	});
+
 	test("--apply scans recoverable session backups before deleting blobs", async () => {
 		const referencedHash = hashFor("backup-reference");
 		const referenced = await writeBlob(root, referencedHash, "referenced");
@@ -265,6 +346,45 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.deleted).toBe(1);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
+
+	test("--apply keeps a blob referenced only by a session under another agent dir's managed root", async () => {
+		const referencedHash = hashFor("other-agent-dir-reference");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		const cwd = path.join(root, "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const originalAgentDir = getAgentDir();
+		setAgentDir(root);
+		try {
+			// An SDK manager rooted in another agent dir's sessions still writes its
+			// blobs to this agent dir's store, whose gc never scans that root.
+			const manager = SessionManager.create(
+				cwd,
+				SessionManager.getDefaultSessionDir(cwd, path.join(root, "other-agent")),
+			);
+			const sessionFile = manager.getSessionFile();
+			await manager.close();
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			await Bun.write(
+				sessionFile,
+				[
+					JSON.stringify({ type: "session", version: 3, id: "other", timestamp: "2026-01-01T00:00:00.000Z" }),
+					JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+					"",
+				].join("\n"),
+			);
+			// The terminal has since moved on to another session.
+			await fs.rm(getTerminalSessionsDir(root), { recursive: true, force: true });
+
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.referenced).toBe(1);
+			expect(result.blobs?.deleted).toBe(0);
+			expect(await Bun.file(referenced).exists()).toBe(true);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
 	});
 
 	test("keeps raw blob references split across chunks in journals, archives, and backups", async () => {

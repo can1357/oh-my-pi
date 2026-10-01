@@ -1002,6 +1002,11 @@ export class TUI extends Container {
 		options?: OverlayOptions;
 		preFocus: Component | null;
 		hidden: boolean;
+		/**
+		 * A sheet the user clicked away from (see {@link TUI.#focusFromPointer}):
+		 * it stays up but no longer holds the keys, until focus moves back into it.
+		 */
+		released: boolean;
 	}[] = [];
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, options?: TUIOptions) {
@@ -1120,12 +1125,14 @@ export class TUI extends Container {
 	}
 
 	setFocus(component: Component | null): void {
-		const topVisibleOverlay = this.#getTopmostVisibleOverlay();
-		if (topVisibleOverlay && !isOverlayFocusTarget(topVisibleOverlay.component, component)) {
+		const holder = this.#getKeyHolderOverlay();
+		if (holder && !isOverlayFocusTarget(holder.component, component)) {
 			const currentFocus = this.#focusedComponent;
-			component = isOverlayFocusTarget(topVisibleOverlay.component, currentFocus)
-				? currentFocus
-				: topVisibleOverlay.component;
+			component = isOverlayFocusTarget(holder.component, currentFocus) ? currentFocus : holder.component;
+		}
+		// Focus moving back into a released sheet makes it hold the keys again.
+		for (const entry of this.overlayStack) {
+			if (entry.released && isOverlayFocusTarget(entry.component, component)) entry.released = false;
 		}
 
 		const previousFocusedComponent = this.#focusedComponent;
@@ -1176,7 +1183,7 @@ export class TUI extends Container {
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
 		if (this.#isOverlayVisible(entry)) {
@@ -1194,8 +1201,7 @@ export class TUI extends Container {
 					this.overlayStack.splice(index, 1);
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						const topVisible = this.#getTopmostVisibleOverlay();
-						this.setFocus(topVisible?.component ?? entry.preFocus);
+						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
 					}
 					if (this.overlayStack.length === 0) {
 						this.terminal.hideCursor();
@@ -1209,10 +1215,9 @@ export class TUI extends Container {
 				entry.hidden = hidden;
 				// Update focus when hiding/showing
 				if (hidden) {
-					// If this overlay or one of its owned targets had focus, move focus to next visible or preFocus
+					// If this overlay or one of its owned targets had focus, move focus to the next one holding keys or preFocus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						const topVisible = this.#getTopmostVisibleOverlay();
-						this.setFocus(topVisible?.component ?? entry.preFocus);
+						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
 					}
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
@@ -1230,9 +1235,8 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();
 		if (!overlay) return;
-		// Find topmost visible overlay, or fall back to preFocus
-		const topVisible = this.#getTopmostVisibleOverlay();
-		this.setFocus(topVisible?.component ?? overlay.preFocus);
+		// Find the topmost visible overlay holding keys, or fall back to preFocus
+		this.setFocus(this.#getKeyHolderOverlay()?.component ?? overlay.preFocus);
 		if (this.overlayStack.length === 0) {
 			this.terminal.hideCursor();
 			this.#recordHardwareCursorHidden();
@@ -1310,6 +1314,39 @@ export class TUI extends Container {
 			}
 		}
 		return undefined;
+	}
+
+	/** The topmost visible overlay that holds the keys: not a sheet the user clicked away from. */
+	#getKeyHolderOverlay(): (typeof this.overlayStack)[number] | undefined {
+		for (let i = this.overlayStack.length - 1; i >= 0; i--) {
+			const entry = this.overlayStack[i];
+			if (!entry.released && this.#isOverlayVisible(entry)) return entry;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Moves keyboard focus where the user clicked (the terminal's `focus` event,
+	 * see {@link NativeHost.focusFromPointer}). A click inside an overlay gives it
+	 * the keys unless they are already inside it. A click on `field` under the
+	 * overlays focuses it only when every visible overlay is a `sheet` (a panel
+	 * beside the content, like `/settings` docked in Tern): those stay up but
+	 * stop holding the keys until focus moves back into one of them.
+	 */
+	#focusFromPointer(
+		owners: readonly Component[],
+		field: Component | null,
+		sheet: (overlay: Component) => boolean,
+	): void {
+		const visible = this.overlayStack.filter(entry => this.#isOverlayVisible(entry));
+		const overlay = visible.findLast(entry => owners.some(owner => isOverlayFocusTarget(entry.component, owner)));
+		if (overlay) {
+			if (!isOverlayFocusTarget(overlay.component, this.#focusedComponent)) this.setFocus(overlay.component);
+			return;
+		}
+		if (!field || field === this.#focusedComponent || !visible.every(entry => sheet(entry.component))) return;
+		for (const entry of visible) entry.released = true;
+		this.setFocus(field);
 	}
 
 	override invalidate(): void {
@@ -1616,6 +1653,7 @@ export class TUI extends Container {
 				return visible;
 			},
 			focused: () => this.#focusedComponent,
+			focusFromPointer: (owners, field, sheet) => this.#focusFromPointer(owners, field, sheet),
 			requestRender: () => this.requestRender(),
 			appearanceChanged: () => {
 				this.terminal.refreshAppearance?.();

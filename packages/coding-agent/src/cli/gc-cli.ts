@@ -21,7 +21,7 @@ import {
 import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
-import { BLOB_HASH_RE } from "../session/blob-store";
+import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 import {
@@ -114,6 +114,17 @@ interface BlobCandidate {
 	paths: string[];
 	bytes: number;
 	mtimeMs: number;
+}
+
+interface BlobStagingFile {
+	path: string;
+	bytes: number;
+	mtimeMs: number;
+}
+
+interface BlobScan {
+	candidates: BlobCandidate[];
+	staging: BlobStagingFile[];
 }
 
 interface ArchiveCandidate {
@@ -397,31 +408,101 @@ async function collectBreadcrumbSessionFiles(breadcrumbDir: string): Promise<str
 	return [...files.values()];
 }
 
-async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
+async function collectBlobCandidates(blobDir: string): Promise<BlobScan> {
 	let entries: string[];
 	try {
 		entries = await fs.readdir(blobDir);
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
+		if (codeOf(error) === "ENOENT") return { candidates: [], staging: [] };
 		throw error;
 	}
 
 	const byHash = new Map<string, BlobCandidate>();
+	const staging: BlobStagingFile[] = [];
 	for (const entry of entries) {
-		const match = entry.match(BLOB_FILE_RE);
-		const hash = match?.[1];
-		if (!hash) continue;
+		const isStaging = BLOB_STAGING_RE.test(entry);
+		const hash = isStaging ? undefined : entry.match(BLOB_FILE_RE)?.[1];
+		if (!isStaging && !hash) continue;
 		const file = path.join(blobDir, entry);
 		const stat = await statIfPresent(file);
 		if (!stat) continue;
 		if (!stat.isFile()) continue;
+		if (!hash) {
+			staging.push({ path: file, bytes: stat.size, mtimeMs: stat.mtimeMs });
+			continue;
+		}
 		const candidate = byHash.get(hash) ?? { hash, paths: [], bytes: 0, mtimeMs: stat.mtimeMs };
 		candidate.paths.push(file);
 		candidate.bytes += stat.size;
 		candidate.mtimeMs = Math.max(candidate.mtimeMs, stat.mtimeMs);
 		byHash.set(hash, candidate);
 	}
-	return [...byHash.values()].sort((a, b) => a.hash.localeCompare(b.hash));
+	return { candidates: [...byHash.values()].sort((a, b) => a.hash.localeCompare(b.hash)), staging };
+}
+
+async function unlinkBlobFile(file: string, result: BlobGcResult): Promise<void> {
+	try {
+		await fs.unlink(file);
+		result.deleted += 1;
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return;
+		result.errors.push(`${file}: ${errorMessage(error)}`);
+	}
+}
+
+/**
+ * Delete an unreferenced candidate unless a put reused its blob after the
+ * candidate scan. `BlobStore.put` refreshes an old reused blob's mtime before
+ * its new reference reaches a session file, and rewrites the blob when that
+ * touch finds the path gone. The canonical file is therefore moved to a
+ * staging name first: a touch that landed before the move shows on the moved
+ * file, which goes back; one that lands after misses the path, so the put
+ * writes the blob again. Returns whether the candidate was deleted.
+ */
+async function deleteBlobCandidate(
+	candidate: BlobCandidate,
+	deleteBeforeMs: number,
+	result: BlobGcResult,
+): Promise<boolean> {
+	const canonical = candidate.paths.find(file => path.basename(file) === candidate.hash);
+	const files = candidate.paths.filter(file => file !== canonical);
+	if (canonical) {
+		const moved = blobStagingPath(canonical);
+		try {
+			await fs.rename(canonical, moved);
+		} catch (error) {
+			if (codeOf(error) !== "ENOENT") {
+				result.errors.push(`${canonical}: ${errorMessage(error)}`);
+				return false;
+			}
+		}
+		const stat = await statIfPresent(moved);
+		if (stat && stat.mtimeMs > deleteBeforeMs) {
+			await restoreReusedBlob(moved, canonical, result);
+			return false;
+		}
+		if (stat) files.unshift(moved);
+	}
+	for (const file of files) await unlinkBlobFile(file, result);
+	return true;
+}
+
+/** Put a blob reused mid-sweep back; a put that already rewrote it wins (same bytes). */
+async function restoreReusedBlob(moved: string, canonical: string, result: BlobGcResult): Promise<void> {
+	try {
+		await fs.rename(moved, canonical);
+		return;
+	} catch (error) {
+		if (!(await statIfPresent(canonical))) {
+			result.errors.push(`${canonical}: failed to restore reused blob: ${errorMessage(error)}`);
+			return;
+		}
+	}
+	try {
+		await fs.unlink(moved);
+	} catch {
+		// The rewritten canonical blob stands; a leftover staging copy ages out.
+	}
 }
 
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
@@ -436,7 +517,7 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
 	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
-	const candidates = await collectBlobCandidates(blobDir);
+	const { candidates, staging } = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
 		candidates: candidates.length,
@@ -450,18 +531,17 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	for (const candidate of candidates) {
 		if (referenced.has(candidate.hash)) continue;
 		if (candidate.mtimeMs > deleteBeforeMs) continue;
+		if (options.apply && !(await deleteBlobCandidate(candidate, deleteBeforeMs, result))) continue;
 		result.wouldDelete += candidate.paths.length;
 		result.bytes += candidate.bytes;
-		if (!options.apply) continue;
-		for (const file of candidate.paths) {
-			try {
-				await fs.unlink(file);
-				result.deleted += 1;
-			} catch (error) {
-				if (codeOf(error) === "ENOENT") continue;
-				result.errors.push(`${file}: ${errorMessage(error)}`);
-			}
-		}
+	}
+	// A live write renames its staging file away within milliseconds; one past
+	// the grace was left by a killed or crashed writer and nothing will claim it.
+	for (const file of staging) {
+		if (file.mtimeMs > deleteBeforeMs) continue;
+		result.wouldDelete += 1;
+		result.bytes += file.bytes;
+		if (options.apply) await unlinkBlobFile(file.path, result);
 	}
 	return result;
 }

@@ -3,7 +3,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
 import { type FileLockHandle, tryAcquireFileLock, withFileLockSync } from "@oh-my-pi/pi-utils/file-lock";
-import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { type FsError, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { openCloexecSync } from "@oh-my-pi/pi-utils/fs-open";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
@@ -68,12 +68,10 @@ export class SessionWriteConflictError extends Error {
 	readonly expectedSize: number | null;
 	readonly actualSize: number | null;
 
-	/** `summary` leads the message, e.g. what the conflict means for the session. */
-	constructor(path: string, expectedSize: number | null, actualSize: number | null, summary?: string) {
+	constructor(path: string, expectedSize: number | null, actualSize: number | null) {
 		const expected = expectedSize === null ? "missing" : `${expectedSize} bytes`;
 		const actual = actualSize === null ? "missing" : `${actualSize} bytes`;
-		const detail = `Session file changed before rewrite: ${path} (expected ${expected}, found ${actual}).`;
-		super(summary ? `${summary} ${detail}` : detail);
+		super(`Session file changed before rewrite: ${path} (expected ${expected}, found ${actual}).`);
 		this.name = "SessionWriteConflictError";
 		this.path = path;
 		this.expectedSize = expectedSize;
@@ -144,6 +142,12 @@ export interface SessionStorage {
 
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
+	/**
+	 * Synchronous {@link readText}. Optional: `SessionManager` reads the file
+	 * back to keep another writer's entries when a synchronous rewrite meets
+	 * them, and reports the conflict instead on backends without it.
+	 */
+	readTextSync?(path: string): string;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
@@ -166,10 +170,11 @@ export interface SessionStorage {
 	 */
 	withSessionFileLockSync?<T>(sessionPath: string, operation: () => T): T;
 	/**
-	 * Claim this process's ownership of a session file for as long as it has
-	 * the session open. Returns the release callback, or `null` while another
-	 * live process holds the claim. Optional because only backends with a
-	 * process-owned lock can tell that another process has a session open.
+	 * Claim this process's ownership of a session file it writes, until the
+	 * returned release callback runs. Returns `null` while another live process
+	 * holds the claim; `SessionManager` then moves its session to a sibling
+	 * instead of writing that file. Optional because only backends with a
+	 * process-owned lock can tell that another process writes a session.
 	 */
 	claimSessionFile?(sessionPath: string): (() => void) | null;
 	/**
@@ -202,7 +207,7 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	#fpath: string;
-	#publishLock: ((task: () => void) => void) | undefined;
+	#publishLock: ((append: () => void, landed: () => boolean) => void) | undefined;
 	#closed = false;
 	#error: Error | undefined;
 	#onError: ((err: Error) => void) | undefined;
@@ -212,7 +217,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		options?: {
 			flags?: "a" | "w";
 			onError?: (err: Error) => void;
-			publishLock?: (task: () => void) => void;
+			publishLock?: (append: () => void, landed: () => boolean) => void;
 		},
 	) {
 		this.#fpath = fpath;
@@ -262,6 +267,23 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		this.#fd = nextFd;
 		writerRegistry.register(this, nextFd, this);
 		return fs.fstatSync(nextFd).size;
+	}
+
+	/**
+	 * Whether the descriptor the last append wrote through is still the file the
+	 * session path names. A vanished path counts as landed: nothing replaced it,
+	 * and `#reopenIfReplaced` would append to the same descriptor again.
+	 */
+	#holdsLivePath(): boolean {
+		const held = fs.fstatSync(this.#fd, { bigint: true });
+		let live: fs.BigIntStats;
+		try {
+			live = fs.statSync(this.#fpath, { bigint: true });
+		} catch (err) {
+			if (isEnoent(err)) return true;
+			throw err;
+		}
+		return live.ino === held.ino && live.dev === held.dev;
 	}
 
 	#recordError(err: unknown): Error {
@@ -325,7 +347,10 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// check-then-rename, which would otherwise erase the appended turn.
 		try {
 			if (this.#publishLock) {
-				this.#publishLock(() => this.#writeNow(line, this.#reopenIfReplaced()));
+				this.#publishLock(
+					() => this.#writeNow(line, this.#reopenIfReplaced()),
+					() => this.#holdsLivePath(),
+				);
 			} else {
 				this.#writeNow(line, fs.fstatSync(this.#fd).size);
 			}
@@ -384,9 +409,11 @@ class FileSessionStorageWriter implements SessionStorageWriter {
  * current writers the gate serializes the whole claim, which also closes
  * the two-reclaimer unlink race (rJDh). Against a previous-binary peer the
  * protocol degrades to its released semantics, documented on the steal
- * path. The window that remains is non-cooperating writers (plain
- * editors), against which the size check still fails closed whenever the
- * skew is detectable.
+ * path. Appends claim the lockfile only when a previous-binary publisher
+ * can be in flight (see `#withAppendLock`), so a transcript line does not
+ * create and unlink a file beside the session. The window that remains is
+ * non-cooperating writers (plain editors), against which the size check
+ * still fails closed whenever the skew is detectable.
  *
  * The region is held for microseconds and never yields, so in-process
  * contention is impossible; cross-process contention fails closed after a
@@ -469,13 +496,57 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				task();
 			} finally {
-				try {
-					fs.unlinkSync(lockPath);
-				} catch (err) {
-					if (!isEnoent(err)) {
-						logger.warn("Failed to remove session publish lock", { sessionFile: fpath, lockPath });
-					}
-				}
+				this.#releasePublishLock(fpath, lockPath);
+			}
+		} finally {
+			osGate.release();
+		}
+	}
+
+	#releasePublishLock(fpath: string, lockPath: string): void {
+		try {
+			fs.unlinkSync(lockPath);
+		} catch (err) {
+			if (!isEnoent(err)) {
+				logger.warn("Failed to remove session publish lock", { sessionFile: fpath, lockPath });
+			}
+		}
+	}
+
+	/**
+	 * Run `append` under the OS gate, claiming the lockfile only when a
+	 * previous-binary publisher may overlap it. Current publishers hold the
+	 * gate across their freshness check and rename, so among current writers
+	 * the gate alone excludes them and an append touches nothing beside the
+	 * session. A previous binary takes only the lockfile, so its claim stays
+	 * observable: an append that finds the lockfile waits for it exactly as
+	 * before, and one that saw it appear (or saw the path renamed away from
+	 * the descriptor it wrote through) waits for that publisher to finish and
+	 * re-appends to whatever file it published when the line did not survive.
+	 * That reproduces the serial order "their publish, then our append" the
+	 * lockfile used to enforce, and fails closed when the holder outlives the
+	 * bounded wait.
+	 */
+	#withAppendLock(fpath: string, append: () => void, landed: () => boolean): void {
+		const lockPath = this.#publishLockPath(fpath);
+		this.ensureDirSync(path.dirname(lockPath));
+		const osGate = this.#acquireOsPublishLock(fpath, lockPath);
+		try {
+			let appended = false;
+			if (!fs.existsSync(lockPath)) {
+				append();
+				appended = true;
+				// Lockfile before identity: a previous-binary publisher whose
+				// freshness check preceded our write holds the lockfile through its
+				// rename, so it is either still visible here or has already moved
+				// the path off our descriptor.
+				if (!fs.existsSync(lockPath) && landed()) return;
+			}
+			this.#acquirePublishLock(fpath, lockPath);
+			try {
+				if (!appended || !landed()) append();
+			} finally {
+				this.#releasePublishLock(fpath, lockPath);
 			}
 		} finally {
 			osGate.release();
@@ -725,6 +796,10 @@ export class FileSessionStorage implements SessionStorage {
 		return Bun.file(path).text();
 	}
 
+	readTextSync(path: string): string {
+		return fs.readFileSync(path, "utf8");
+	}
+
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
 		return peekFileEnds(path, prefixBytes, suffixBytes, (head, tail) => [
 			utf8Decoder.decode(head),
@@ -897,7 +972,7 @@ export class FileSessionStorage implements SessionStorage {
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
 		return new FileSessionStorageWriter(path, {
 			...options,
-			publishLock: task => this.#withPublishLock(path, task),
+			publishLock: (append, landed) => this.#withAppendLock(path, append, landed),
 		});
 	}
 
@@ -909,8 +984,8 @@ export class FileSessionStorage implements SessionStorage {
 	/**
 	 * The lease is an OS lock (`flock` sidecar, abstract socket, or named mutex)
 	 * beside the session file, so the kernel drops a dead owner's claim. Never
-	 * throws: ownership only drives a warning, so a lock that cannot be taken
-	 * for another reason counts as owned rather than blocking the session.
+	 * throws: a lock that cannot be taken for another reason counts as owned,
+	 * so it never moves a session off its file.
 	 */
 	claimSessionFile(sessionPath: string): (() => void) | null {
 		const key = path.resolve(sessionPath);
@@ -1203,6 +1278,11 @@ function sliceChunksTail(entry: MemoryFileEntry, maxBytes: number): string {
 	return chunkSuffix + joinChunkRange(entry.chunks, boundaryIndex + 1, entry.chunks.length);
 }
 
+/** A missing in-memory file, coded `ENOENT` like the file backend so callers' `isEnoent` checks agree. */
+function memoryFileNotFound(path: string): FsError {
+	return Object.assign(new Error(`File not found: ${path}`), { code: "ENOENT" });
+}
+
 export class MemorySessionStorage implements SessionStorage {
 	// Each path keeps appended string chunks plus cumulative UTF-8 byte offsets.
 	// Full reads materialize the chunks into one string chunk, so repeated reads
@@ -1213,7 +1293,7 @@ export class MemorySessionStorage implements SessionStorage {
 
 	#requireEntry(path: string): MemoryFileEntry {
 		const entry = this.#files.get(path);
-		if (!entry) throw new Error(`File not found: ${path}`);
+		if (!entry) throw memoryFileNotFound(path);
 		return entry;
 	}
 
@@ -1285,19 +1365,25 @@ export class MemorySessionStorage implements SessionStorage {
 
 	readText(path: string): Promise<string> {
 		const entry = this.#files.get(path);
-		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
+		if (!entry) return Promise.reject(memoryFileNotFound(path));
 		return Promise.resolve(materializeMemoryEntry(entry));
+	}
+
+	readTextSync(path: string): string {
+		const entry = this.#files.get(path);
+		if (!entry) throw memoryFileNotFound(path);
+		return materializeMemoryEntry(entry);
 	}
 
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
 		const entry = this.#files.get(path);
-		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
+		if (!entry) return Promise.reject(memoryFileNotFound(path));
 		return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
 	}
 
 	async hasAssistantTurn(path: string): Promise<boolean> {
 		const entry = this.#files.get(path);
-		if (!entry) throw new Error(`File not found: ${path}`);
+		if (!entry) throw memoryFileNotFound(path);
 		for (const line of materializeMemoryEntry(entry).split("\n")) {
 			if (isAssistantMessageLine(line)) return true;
 		}
@@ -1317,7 +1403,7 @@ export class MemorySessionStorage implements SessionStorage {
 
 	rename(path: string, nextPath: string): Promise<void> {
 		const entry = this.#files.get(path);
-		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
+		if (!entry) return Promise.reject(memoryFileNotFound(path));
 		this.#files.set(nextPath, entry);
 		this.#files.delete(path);
 		return Promise.resolve();

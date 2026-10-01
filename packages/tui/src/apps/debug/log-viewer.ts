@@ -1,10 +1,15 @@
+import type { TspPickerGroup, TspPickerItem, TspTone } from "@oh-my-pi/pi-wire";
 import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
 import type { Component } from "../../tui";
+import { code } from "../../native/describe";
+import { Memo } from "../../native/memo";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../../native/node";
+import { CLOSE_ACTION, picker, pickerAction, pickerEvent, pickerHits, pickerQuery } from "../../native/picker";
 import { matchesKey } from "../../keys";
 import { Input } from "../../components/input";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../../mouse";
 import { padding, truncateToWidth, visibleWidth } from "../../utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../../theme/theme";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { DebugViewerFrame, type DebugViewerFrameContent, type DebugViewerFrameContext } from "./viewer-frame";
@@ -24,6 +29,15 @@ export const LOAD_OLDER_LABEL = "### MOVE UP TO LOAD MORE...";
 const INITIAL_LOG_CHUNK = 50;
 const LOAD_OLDER_CHUNK = 50;
 const MIN_LOG_VIEWER_WIDTH = 48;
+/** Picker item id of the "load older entries" row. */
+const OLDER_ITEM = "older";
+/** Status-dot tone of a log level. */
+const LEVEL_TONES: Readonly<Record<string, TspTone>> = {
+	error: "error",
+	warn: "warning",
+	info: "info",
+	debug: "muted",
+};
 
 type LogEntry = {
 	rawLine: string;
@@ -39,6 +53,47 @@ type DebugLogViewerModelOptions = {
 	hasOlderLogs?: () => boolean;
 	loadOlderLogs?: (limitDays?: number) => Promise<string>;
 };
+
+/**
+ * One log entry as a picker row: the message as the label, the remaining
+ * fields as `key=value` detail, the local time and pid as facts and the
+ * level as the status dot. Lines that aren't JSON objects show as they are.
+ */
+function logPickerItem(id: string, rawLine: string): TspPickerItem {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawLine);
+	} catch {}
+	if (!isRecord(parsed)) {
+		return { id, label: sanitizeDisplayText(rawLine).replace(/\s+/g, " "), mono: true };
+	}
+	const { timestamp, level, pid, message, ...rest } = parsed;
+	let detail = "";
+	for (const key in rest) {
+		const value = rest[key];
+		detail += `${detail ? " " : ""}${key}=${typeof value === "string" ? value : JSON.stringify(value)}`;
+	}
+	const time = typeof timestamp === "string" ? new Date(timestamp) : undefined;
+	return {
+		id,
+		label: sanitizeDisplayText(typeof message === "string" ? message : rawLine).replace(/\s+/g, " "),
+		detail: detail ? sanitizeDisplayText(detail).replace(/\s+/g, " ") : undefined,
+		dot: typeof level === "string" ? LEVEL_TONES[level] : undefined,
+		facts: {
+			time: time && Number.isFinite(time.getTime()) ? time.toLocaleTimeString(undefined, { hour12: false }) : "",
+			pid: typeof pid === "number" ? String(pid) : "",
+		},
+	};
+}
+
+/** A log line pretty-printed for the preview pane: indented JSON when it parses, else the sanitized line. */
+function logPreviewText(rawLine: string): { text: string; lang?: string } {
+	try {
+		return { text: JSON.stringify(JSON.parse(rawLine), null, 2), lang: "json" };
+	} catch {
+		return { text: sanitizeDisplayText(rawLine) };
+	}
+}
 
 type ViewerRow =
 	| {
@@ -516,6 +571,10 @@ export class DebugLogViewerComponent implements Component {
 	#statusMessage: string | undefined;
 	#loadingOlder = false;
 	#bodyLineToRowIndex: Array<number | undefined> = [];
+	readonly #native = new Memo();
+	/** Picker rows by log index, valid while {@link #nativeItemsCount} entries are loaded (a prepend shifts indices). */
+	#nativeItems = new Map<number, TspPickerItem>();
+	#nativeItemsCount = 0;
 
 	constructor(options: DebugLogViewerComponentOptions) {
 		this.#deps = options.deps;
@@ -606,6 +665,24 @@ export class DebugLogViewerComponent implements Component {
 			return;
 		}
 
+		// Page and end keys jump the cursor; the frame (or the native list)
+		// keeps it in view.
+		const jump = matchesKey(keyData, "pageUp")
+			? -this.#frame.getBodyHeight()
+			: matchesKey(keyData, "pageDown")
+				? this.#frame.getBodyHeight()
+				: matchesKey(keyData, "home")
+					? -this.#model.rows.length
+					: matchesKey(keyData, "end")
+						? this.#model.rows.length
+						: 0;
+		if (jump !== 0) {
+			this.#statusMessage = undefined;
+			this.#model.moveCursor(jump, false);
+			this.#onUpdate?.();
+			return;
+		}
+
 		if (matchesKey(keyData, "right")) {
 			this.#statusMessage = undefined;
 			if (this.#model.cursorRowKind === "load-older") {
@@ -666,10 +743,167 @@ export class DebugLogViewerComponent implements Component {
 
 	invalidate(): void {
 		this.#frame.invalidate();
+		this.#native.clear();
 	}
 
 	dispose(): void {
 		this.#frame.dispose();
+	}
+
+	/** A `picker` sheet floats over the transcript instead of taking the screen. */
+	nativeSheet(cx: DescribeContext): boolean {
+		return cx.supports("picker");
+	}
+
+	/**
+	 * The logs as a picker sheet: the filter as its query, one row per entry
+	 * (message, fields, time, pid, level dot) with the session boundary as a
+	 * group head, the range selection checked, the entry under the cursor
+	 * pretty-printed below, and the keys' actions in the bar. Without the
+	 * `picker` kind it falls back to rows.
+	 */
+	describe(cx: DescribeContext): NativeNode | null {
+		if (!cx.supports("picker")) return null;
+		const model = this.#model;
+		const query = this.#filter.getValue();
+		const cursor = this.#filter.getCursor();
+		const selected = model.getSelectedLogIndices();
+		return this.#native.get(
+			[
+				model.rows,
+				model.cursorRowIndex,
+				selected.join(","),
+				model.logCount,
+				model.isProcessFilterEnabled(),
+				model.canLoadOlder(),
+				query,
+				cursor,
+				this.#loadingOlder,
+				this.#statusMessage,
+			],
+			() => {
+				if (this.#nativeItemsCount !== model.logCount) {
+					this.#nativeItems = new Map();
+					this.#nativeItemsCount = model.logCount;
+				}
+				const items: TspPickerItem[] = [];
+				const order: (string | TspPickerGroup)[] = [];
+				const hits: Record<string, [number, number][]> = {};
+				const needle = query.toLowerCase();
+				for (const viewerRow of model.rows) {
+					if (viewerRow.kind === "warning") {
+						order.push({ group: "session", label: "This session" });
+						continue;
+					}
+					if (viewerRow.kind === "load-older") {
+						items.push({ id: OLDER_ITEM, label: "Load older entries", tone: "muted" });
+						order.push(OLDER_ITEM);
+						continue;
+					}
+					let item = this.#nativeItems.get(viewerRow.logIndex);
+					if (!item) {
+						item = logPickerItem(`l${viewerRow.logIndex}`, model.getRawLine(viewerRow.logIndex));
+						this.#nativeItems.set(viewerRow.logIndex, item);
+					}
+					items.push(item);
+					order.push(item.id);
+					if (needle && typeof item.label === "string") {
+						const found = pickerHits(item.label, [needle]);
+						if (found.length > 0) hits[item.id] = found;
+					}
+				}
+				const cursorLog = model.cursorLogIndex;
+				const preview = cursorLog === undefined ? undefined : logPreviewText(model.getRawLine(cursorLog));
+				const subtitle = [
+					`${model.visibleLogCount}/${model.logCount} entries`,
+					selected.length > 1 ? `${selected.length} selected` : undefined,
+					this.#loadingOlder ? "loading older…" : undefined,
+				]
+					.filter(part => part !== undefined)
+					.join(" · ");
+				return picker(
+					{
+						title: "Recent logs",
+						subtitle,
+						noun: "entries",
+						size: "lg",
+						layout: "rows",
+						preview: preview ? "below" : "none",
+						...pickerQuery(this.#filter),
+						placeholder: "Filter logs…",
+						columns: [
+							{ id: "pid", format: "dim", priority: 0 },
+							{ id: "time", format: "dim", priority: 1 },
+						],
+						items,
+						order,
+						hits,
+						selected:
+							model.cursorRowKind === "load-older"
+								? OLDER_ITEM
+								: cursorLog === undefined
+									? null
+									: `l${cursorLog}`,
+						current: selected.length > 1 ? selected.map(index => `l${index}`) : [],
+						total: model.logCount,
+						empty: query ? "No matching log entries" : "No log entries",
+						message: this.#statusMessage,
+						actions: [
+							pickerAction("copy", "Copy", "ctrl+c", { primary: true }),
+							pickerAction("all", "Select all", "ctrl+a"),
+							pickerAction("pid", "This process", "ctrl+p", { on: model.isProcessFilterEnabled() }),
+							pickerAction("older", "Load older", "ctrl+o", {
+								disabled: model.canLoadOlder() ? undefined : "No older log entries",
+							}),
+							CLOSE_ACTION,
+						],
+					},
+					preview && cursorLog !== undefined
+						? [{ ...code(preview.text, { lang: preview.lang, wrap: true }), key: `entry:${cursorLog}` }]
+						: undefined,
+				);
+			},
+		);
+	}
+
+	/**
+	 * Pointer actions run the keys' code: a row click moves the cursor there,
+	 * a second click copies it (or loads older entries from that row), and the
+	 * bar's buttons mirror their keys.
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const ev = pickerEvent(event);
+		if (!ev) return;
+		this.#statusMessage = undefined;
+		if (ev.kind === "action") {
+			switch (ev.act) {
+				case "copy":
+					this.#copySelected();
+					return;
+				case "all":
+					this.#model.selectAllVisible();
+					return;
+				case "pid":
+					this.#model.toggleProcessFilter();
+					return;
+				case "older":
+					void this.#handleLoadOlder(this.#frame.getBodyHeight() + 1);
+					return;
+				case "close":
+					this.#onExit();
+					return;
+			}
+			return;
+		}
+		const rowIndex = this.#model.rows.findIndex(viewerRow =>
+			ev.item === OLDER_ITEM
+				? viewerRow.kind === "load-older"
+				: viewerRow.kind === "log" && `l${viewerRow.logIndex}` === ev.item,
+		);
+		if (rowIndex < 0 || !this.#model.moveCursorToRow(rowIndex, false)) return;
+		if (ev.kind !== "activate") return;
+		if (ev.item === OLDER_ITEM) void this.#handleLoadOlder();
+		else this.#copySelected();
 	}
 
 	render(width: number): readonly string[] {
@@ -715,7 +949,7 @@ export class DebugLogViewerComponent implements Component {
 	}
 
 	#controlsText(): string {
-		return `${formatKeyHint("escape")} close · ${formatKeyHint("ctrl+c")} copy · ${formatKeyHints(["up", "down"])}/wheel move · click toggle · ${formatKeyHints(["shift+up", "shift+down"])} select · ${formatKeyHints(["left", "right"])} collapse/expand · ${formatKeyHint("ctrl+a")} all · ${formatKeyHint("ctrl+o")} older · ${formatKeyHint("ctrl+p")} pid`;
+		return `${formatKeyHint("escape")} close · ${formatKeyHint("ctrl+c")} copy · ${formatKeyHints(["up", "down"])}/wheel move · ${formatKeyHints(["pageUp", "pageDown"])} page · ${formatKeyHints(["home", "end"])} first/last · click toggle · ${formatKeyHints(["shift+up", "shift+down"])} select · ${formatKeyHints(["left", "right"])} collapse/expand · ${formatKeyHint("ctrl+a")} all · ${formatKeyHint("ctrl+o")} older · ${formatKeyHint("ctrl+p")} pid`;
 	}
 
 	#filterText(): string {

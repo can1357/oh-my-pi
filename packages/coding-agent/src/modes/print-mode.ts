@@ -220,12 +220,12 @@ async function runPrintModeCore(
 
 	// Discriminates a store failure from any other dispose rejection below.
 	let persistenceFailure: Error | undefined;
-	session.sessionManager.onPersistenceNotice(notice => {
-		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
-	});
 	session.sessionManager.onPersistenceError(error => {
 		persistenceFailure = error;
 		writeStderrLine(formatPersistenceFailure(error.message));
+	});
+	session.sessionManager.onPersistenceNotice(notice => {
+		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
 	});
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
