@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- Artifact reads now preserve full requested lines within the existing byte and paging limits instead of reapplying the ordinary-file column cap, so long single-line JSON output can be recovered without `:raw`. Off-window bracket context retains the configured column cap; oversized multi-range content reports its byte-budget omission ([#13947](https://github.com/can1357/oh-my-pi/pull/13947) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - An `abort` that lands while a prompt's images are still being prepared now drops that prompt instead of starting or queueing it afterward ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
 - A path-pasted image or video sent as an aside while the agent is busy now reaches the model with its source path ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
 - Extension-registered model prompt-cache settings, including `{}` opt-outs, now take precedence over matching `models.yml` definitions ([#13871](https://github.com/can1357/oh-my-pi/pull/13871) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
