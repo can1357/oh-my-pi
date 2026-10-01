@@ -19,12 +19,15 @@ function makeAnthropicModel(id: string): Model<"anthropic-messages"> {
 	});
 }
 
-function makeMiniMaxAnthropicModel(id: string): Model<"anthropic-messages"> {
+function makeMiniMaxAnthropicModel(
+	id: string,
+	provider: "minimax" | "minimax-code" = "minimax",
+): Model<"anthropic-messages"> {
 	return buildModel({
 		id,
 		name: id,
 		api: "anthropic-messages",
-		provider: "minimax",
+		provider,
 		baseUrl: "https://api.minimax.io/anthropic",
 		reasoning: true,
 		input: ["text", "image"],
@@ -396,6 +399,41 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 	it("maps every MiniMax M2 reasoning tier to the documented adaptive tag", async () => {
 		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M2.7"), {
 			reasoning: Effort.Low,
+			thinkingEnabled: true,
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	// `high` must beat the M3 family's adaptive-tag map; `max` sits past the
+	// M3 family ladder.
+	it.each([
+		[Effort.High, "high"],
+		[Effort.Max, "max"],
+	] as const)("sends MiniMax-M3.1-Flash-Preview %s effort as output_config.effort", async (effort, wire) => {
+		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash-Preview", "minimax-code"), {
+			reasoning: effort,
+			thinkingEnabled: true,
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive" });
+		expect(payload.output_config?.effort).toBe(wire);
+	});
+
+	it("keeps MiniMax-M3.1-Flash-Preview thinking on at the lowest effort when thinking is off", async () => {
+		// The model 400s on `thinking.type: "disabled"` (error 2013).
+		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash-Preview", "minimax-code"), {
+			thinkingEnabled: false,
+		});
+
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.output_config?.effort).toBe("low");
+	});
+
+	it("drives Token Plan MiniMax-M3 through the adaptive tag like the pay-as-you-go host", async () => {
+		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3", "minimax-code"), {
+			reasoning: Effort.High,
 			thinkingEnabled: true,
 		});
 

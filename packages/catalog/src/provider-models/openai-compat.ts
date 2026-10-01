@@ -9,7 +9,6 @@ import {
 	isExcludedModel,
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
-	pricingPeerFor,
 } from "../compat/behavior";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
@@ -1629,35 +1628,6 @@ export interface XaiModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
-}
-
-// SuperGrok surfaces a few models under IDs that differ from their public
-// `xai` catalog equivalent, so the exact-ID price fallback misses them. Map
-// the OAuth ID to the paid ID it mirrors.
-// The alias map lives in the `pricing-peer` behavior rule.
-function hasTokenPrice(cost: ModelSpec["cost"]): boolean {
-	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
-}
-
-/**
- * Mirrors exact public-model prices onto matching SuperGrok catalog rows.
- * The >200K long-context tier itself is rule-owned (`classes/xai.kdl`
- * `long-context-cost` multiplier axis) and derives at build time.
- */
-export function applyXaiCatalogPricing(models: readonly ModelSpec[]): ModelSpec[] {
-	const publicCosts = new Map(
-		models
-			.filter(model => model.provider === "xai" && hasTokenPrice(model.cost))
-			.map(model => [model.id, model.cost]),
-	);
-
-	return models.map(model => {
-		if (model.provider !== "xai-oauth" || hasTokenPrice(model.cost)) return model;
-		const peer = pricingPeerFor("xai-oauth", model.id);
-		const publicCost =
-			publicCosts.get(model.id) ?? (peer && peer.peerId !== model.id ? publicCosts.get(peer.peerId) : undefined);
-		return publicCost ? { ...model, cost: { ...publicCost } } : model;
-	});
 }
 
 export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelManagerOptions<"openai-responses"> {
@@ -7115,23 +7085,12 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 			allowsSyntheticReasoningContentForToolCalls: false,
 		},
 	}),
-	// --- MiniMax Coding Plan ---
-	openAiCompletionsDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
-	openAiCompletionsDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
+	// --- MiniMax Token Plan ---
+	// MiniMax documents its Anthropic-compatible API as the recommended
+	// protocol: signed thinking blocks, `output_config.effort` depth control,
+	// and prompt-cache usage reporting.
+	anthropicMessagesDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/anthropic"),
+	anthropicMessagesDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/anthropic"),
 	// --- Alibaba Coding Plan ---
 	openAiCompletionsDescriptor(
 		"alibaba-coding-plan",

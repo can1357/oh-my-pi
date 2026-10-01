@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 function createSseResponse(events: unknown[]): Response {
 	const payload = `${events
@@ -52,9 +52,27 @@ function stopChunk(model: Model<"openai-completions">): unknown {
 	};
 }
 
+// The Token Plan catalog rides MiniMax's Anthropic endpoint; these repros pin
+// the plan's OpenAI-compatible route (legacy lightning rows, custom overrides),
+// resolving its compat from the same rules as a bundled row.
+function minimaxCodeCnOpenAIModel(id: string): Model<"openai-completions"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "minimax-code-cn",
+		baseUrl: "https://api.minimaxi.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 204_800,
+		maxTokens: 32_000,
+	});
+}
+
 describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 	it("parses minimax-code-cn <think> content into a thinking block", async () => {
-		const model = getBundledModel("minimax-code-cn", "MiniMax-M2.5") as Model<"openai-completions">;
+		const model = minimaxCodeCnOpenAIModel("MiniMax-M2.5");
 		const fetchMock = createMockFetch([
 			minimaxChunk(model, "<think>"),
 			minimaxChunk(model, "hidden reasoning"),
@@ -76,7 +94,7 @@ describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 	});
 
 	it("dedupes MiniMax-M3 cumulative reasoning snapshots after answer text has started", async () => {
-		const model = getBundledModel("minimax-code-cn", "MiniMax-M3") as Model<"openai-completions">;
+		const model = minimaxCodeCnOpenAIModel("MiniMax-M3");
 		const fetchMock = createMockFetch([
 			{
 				id: "chatcmpl-minimax-cn",

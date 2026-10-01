@@ -51,7 +51,7 @@ class "minimax" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}
 	}
-	on "minimax" "minimax-cn" "vercel-ai-gateway" {
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" "vercel-ai-gateway" {
 		thinking-mode "anthropic-adaptive"
 		family "m2" {
 			// Replaces the Anthropic-route MiniMax effort remap table.
@@ -71,6 +71,24 @@ class "minimax" {
 			thinking-efforts "low" "medium" "high"
 		}
 	}
+	// MiniMax-M3.1-Flash-Preview always thinks (`thinking.type: "disabled"` and
+	// effort `none` 400 with error 2013) and tunes depth through
+	// `output_config.effort` from `low` to `max` (the default when omitted).
+	// The identity map replaces the M3 family's adaptive-tag-only map so each
+	// level reaches the wire; thinking-off pins the lowest effort instead of
+	// sending `disabled`.
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3.1-Flash-Preview" {
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+			thinking-effort-map {
+				low "low"
+				medium "medium"
+				high "high"
+			}
+		}
+	}
+	// Token Plan rows ride the Anthropic route; these OpenAI-only wire axes
+	// serve the legacy lightning rows that stay on the OpenAI-compatible one.
 	on "minimax-code" "minimax-code-cn" {
 		supports-reasoning-effort #false
 		supports-store #false
