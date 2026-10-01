@@ -23,7 +23,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import {
 	renderTranscriptMessages,
@@ -420,7 +420,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * Both the bare index and `history://<id>` lookups read this one source.
 	 */
 	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
-		const registry = AgentRegistry.global();
+		const registry = context?.agentRegistry ?? AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
 		// root's scan must not be served (or listed as known) in its place.
@@ -432,20 +432,20 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// same-named transcript restored by another root's scan never shadows
 		// this caller's own on-disk transcript.
 		const preferredArtifactDir = rootSessionFile?.slice(0, -".jsonl".length);
-		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
-		// in the agent-facing roster. Hide them from the index, lookup, and completions.
-		const visible = registry.list().filter(ref => ref.kind !== "advisor");
+		// Advisor transcripts are observability-only, and remote proxies (murmur-q00p) have no local
+		// transcript — neither belongs in the agent-facing history. Hide both from index/lookup/completions.
+		const visible = registry.list().filter(ref => isLocalSession(ref.kind));
 		return { visible, preferredArtifactDir };
 	}
 
 	/**
-	 * Find the registry ref for `agentId` (exact, then case-insensitive),
-	 * skipping advisor transcripts.
+	 * Find the registry ref for `agentId` (exact, then case-insensitive) in the caller's
+	 * registry, skipping advisor transcripts and remote proxies.
 	 */
 	async #lookup(agentId: string, context: ResolveContext | undefined): Promise<RefLookup> {
 		const { visible, preferredArtifactDir } = await this.#roster(context);
-		let ref = AgentRegistry.global().get(agentId);
-		if (ref?.kind === "advisor") ref = undefined;
+		let ref = (context?.agentRegistry ?? AgentRegistry.global()).get(agentId);
+		if (ref && !isLocalSession(ref.kind)) ref = undefined;
 		if (!ref) {
 			// Case-insensitive fallback: agent ids are human-typed (e.g. AuthLoader).
 			const lower = agentId.toLowerCase();
@@ -478,6 +478,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const current = currentRoute(url);
 		if (current === "full") return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
+
 		if (!agentId) {
 			const { visible, preferredArtifactDir } = await this.#roster(context);
 			const content = await this.#renderIndex(visible, preferredArtifactDir);
@@ -624,7 +625,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
 		for (const ref of AgentRegistry.global().list()) {
-			if (ref.kind === "advisor") continue;
+			if (!isLocalSession(ref.kind)) continue;
 			seen.add(ref.id);
 			completions.push({
 				value: ref.id,

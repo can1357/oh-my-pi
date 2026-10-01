@@ -5,6 +5,7 @@ import { nativeShell } from "../../../helpers/native-shell";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import type { AgentActivityRow } from "../../../../src/modes/view-model/overlays/agent-activity";
 import type { AgentRecordLike } from "../../../../src/registry/agent-hub-types";
+import { hasLocalPresence } from "../../../../src/registry/agent-registry";
 import type { ObservableSession } from "../../../../src/task/session-observer-registry";
 import { AgentHub, type AgentHubHandle } from "../../../../src/ui/overlays/pickers/agent-hub";
 import { agentSlot, resetAgentIdentities } from "../../../../src/ui/tools/agent-identity";
@@ -129,6 +130,7 @@ test("Clear search restores the roster and activity results on their respective 
 				recent: () => [],
 			}}
 			irc={{ unreadCount: () => 0 }}
+			hasLocalPresence={hasLocalPresence}
 			lifecycle={() => ({ ensureLive: async () => {}, release: async () => false })}
 			loadPersisted={async () => {}}
 			hubKeys={[]}
@@ -236,6 +238,7 @@ pickerSuite({
 						release: async () => true,
 					})}
 					irc={{ unreadCount: id => (id === "Beta" ? 3 : 0) }}
+					hasLocalPresence={hasLocalPresence}
 					activity={{
 						setLive() {},
 						sync: async () => {},
