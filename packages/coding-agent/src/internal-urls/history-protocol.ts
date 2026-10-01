@@ -23,7 +23,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry, isLocalSession, isMessageablePeer } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { remoteNamespaceOf } from "../registry/remote-id";
+import { malformedRemoteIdError, REMOTE_ID_PREFIX, remoteNamespaceOf } from "../registry/remote-id";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import {
 	bashExecutionToText,
@@ -340,7 +340,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		if (isCurrentFullRoute(url)) return null;
 		const agentId = url.rawHost || url.hostname;
-		if (!agentId || remoteNamespaceOf(agentId) !== undefined) return null;
+		if (!agentId || agentId.startsWith(REMOTE_ID_PREFIX)) return null;
 		const { ref, preferredArtifactDir, onlyPreferred } = await this.#lookup(agentId, context);
 		if (ref?.sessionFile) return ref.sessionFile;
 		if (ref?.session) return null;
@@ -424,8 +424,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				size: Buffer.byteLength(content, "utf-8"),
 			};
 		}
-		// Prefix-authoritative, like IrcBus routing: an `@ns/name` id is remote whether or not a proxy
-		// ref is registered, so never fall through to the local transcript/disk lookups.
+		// Prefix-authoritative, like IrcBus routing: an id in the reserved `@` space is remote whether or
+		// not a proxy ref is registered, so never fall through to the local transcript/disk lookups.
+		const malformed = malformedRemoteIdError(agentId);
+		if (malformed) throw malformed;
 		if (remoteNamespaceOf(agentId) !== undefined) throw remotePeerHasNoTranscript(agentId);
 
 		const { ref, visible, preferredArtifactDir, onlyPreferred } = await this.#lookup(agentId, context);
