@@ -285,6 +285,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `toks` | Count file or text tokens with the embedded offline tokenizers. | |
 | `ttsr` | Inspect and test Time-Traveling Stream Rules (TTSR). (Covers the CLI command; the [TTSR feature](./ttsr-injection-lifecycle.md) is documented separately.) | |
+| `workload` | Run a YAML DAG of subagent steps that omp executes without a model driving the control flow. | [workloads](./workloads.md) |
 | `worktree`, `wt` | Add, list, or clear git worktrees; uses clone-first behavior when enabled. | |
 | `search`, `q`, `web-search` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
 
