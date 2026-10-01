@@ -31,6 +31,9 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// lanes), so no rows are frozen into models.json.
 	"singularityapi-dev",
 	"singularityapi-tech",
+	// B.AI's `/v1/models` requires a key and the roster is live, so no rows are
+	// frozen into models.json.
+	"bai",
 	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
 	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
 	"litellm",

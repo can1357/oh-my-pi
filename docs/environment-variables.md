@@ -115,6 +115,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
 | `SINGULARITYAPI_DEV_API_KEY`    | SingularityAPI universal gateway auth            | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`    |
 | `SINGULARITYAPI_TECH_API_KEY`   | SingularityAPI reserved lanes auth               | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models` |
+| `BAI_API_KEY`                   | B.AI gateway auth                                | Using `bai` provider                                           | Multi-vendor gateway; validated against `https://api.b.ai/v1/models`, which is also the live model roster |
 
 ### GitHub/Copilot tokens
 

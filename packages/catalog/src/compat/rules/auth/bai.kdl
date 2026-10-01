@@ -1,0 +1,15 @@
+// B.AI inference gateway (api.b.ai): `sk-...` bearer keys created after
+// signing in at chat.b.ai. Key validation probes the non-billable
+// `GET /v1/models`, which answers 401 for a missing or unknown key (verified
+// 2026-10-01), so a bad key is rejected without spending.
+auth "bai" {
+	name "B.AI"
+	env "BAI_API_KEY"
+	login "api-key" {
+		auth-url "https://chat.b.ai/chat"
+		instructions "Sign in to B.AI, create an API key, then paste it here"
+		prompt "Paste your B.AI API key" placeholder="sk-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="B.AI" url="https://api.b.ai/v1/models"
+	}
+}
