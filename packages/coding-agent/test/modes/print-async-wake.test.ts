@@ -91,6 +91,7 @@ function sessionWithJobs(
 			return !disposed && (pending > 0 || retrying);
 		},
 		setTextOutputCommitted: () => {},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		waitForAdvisorCatchup: async () => {
 			events.push("advisor-catchup");
 			return true;
