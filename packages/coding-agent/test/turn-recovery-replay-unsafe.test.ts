@@ -918,6 +918,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
 		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
 		const codexClose = "Codex stream ended before terminal completion event";
+		const cursorClose = "Cursor stream ended before turnEnded";
 
 		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
 			const message = makeMessage(content, model);
@@ -937,6 +938,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			["completions", completionsClose],
 			["responses", responsesClose],
 			["Codex responses", codexClose],
+			["Cursor", cursorClose],
 		])("continues a premature %s close after a resolved tool call", (_provider, errorMessage) => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],

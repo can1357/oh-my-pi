@@ -689,9 +689,8 @@ interface EvalCellSection {
 }
 
 /**
- * One cell as a borderless section: its highlighted code (no line numbers),
- * then its output. Only multi-cell calls caption the section (`2/3 title ·
- * 1.2s`); a single cell's title is the tool head, never repeated.
+ * A notebook cell with separate input and output gutters. Only multi-cell
+ * calls repeat titles; prompts show execution state, never invented counts.
  */
 function evalCellSection(cell: EvalCellSection, index: number, total: number): NativeNode {
 	let head: TspSpan[] | undefined;
@@ -702,13 +701,36 @@ function evalCellSection(cell: EvalCellSection, index: number, total: number): N
 		if (cell.status === "error") head.push(span(" · failed", "error"));
 		if (cell.durationMs !== undefined) head.push(span(` · ${(cell.durationMs / 1000).toFixed(2)}s`, "muted"));
 	}
+	const prompt = cell.status === "running" ? "In [*]:" : !cell.status || cell.status === "pending" ? "In [ ]:" : "In:";
 	return node(
-		"section",
-		{ head, role: "omp.tool.eval.cell", tone: cell.status === "error" ? "error" : undefined },
-		[
-			keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
-			...(cell.output ?? []),
-		],
+		"col",
+		{
+			role: "omp.tool.eval.cell",
+			tone: cell.status === "error" ? "error" : cell.status === "running" ? "pending" : undefined,
+		},
+		compact<NativeChild>([
+			head ? text(head, { role: "omp.tool.eval.caption" }) : undefined,
+			node(
+				"row",
+				{ role: "omp.tool.eval.input", align: "start" },
+				[
+					text(prompt, { role: "omp.tool.eval.prompt", wrap: "none" }),
+					keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
+				],
+				"input",
+			),
+			cell.output?.length
+				? node(
+						"row",
+						{ role: "omp.tool.eval.result", align: "start" },
+						[
+							text("Out:", { role: "omp.tool.eval.prompt", wrap: "none" }),
+							node("col", { role: "omp.tool.eval.outputs" }, cell.output),
+						],
+						"output",
+					)
+				: undefined,
+		]),
 		`cell-${index}`,
 	);
 }
@@ -1061,6 +1083,7 @@ export const evalToolRenderer = {
 								cell.status === "error",
 							),
 							...(cell.statusEvents ?? []).map(describeStatusEvent),
+							...(i === cellResults.length - 1 ? jsonNodes : []),
 						],
 					},
 					i,
@@ -1086,17 +1109,26 @@ export const evalToolRenderer = {
 					result.isError === true,
 				),
 				...(details?.statusEvents ?? []).map(describeStatusEvent),
+				...jsonNodes,
 			];
 			cells =
 				argCells.length > 0
 					? argCells.map((cell, i) =>
-							evalCellSection(i === argCells.length - 1 ? { ...cell, output } : cell, i, argCells.length),
+							evalCellSection(
+								{
+									...cell,
+									status: isPartial ? "running" : result.isError ? "error" : "complete",
+									output: i === argCells.length - 1 ? output : undefined,
+								},
+								i,
+								argCells.length,
+							),
 						)
 					: output;
 		}
 		return {
 			tool: head,
-			body: compact<NativeChild>([...cells, ...jsonNodes, footer]),
+			body: compact<NativeChild>([...cells, footer]),
 			preview: { lines: previewLines },
 		};
 	},

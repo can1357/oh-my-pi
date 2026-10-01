@@ -18,10 +18,15 @@ It does **not** cover TypeScript/JavaScript extension module loading (`extension
 
 ## What gets discovered
 
-The Gemini provider (`id: gemini`, priority `60`) registers an `extensions` loader that scans two fixed roots:
+The Gemini provider (`id: gemini`, priority `60`) registers an `extensions` loader with two fixed roots:
 
-- User: `~/.gemini/extensions`
+- User: `~/.gemini/extensions`, only when the Gemini user source is opted in
 - Project: `<cwd>/.gemini/extensions`
+
+Foreign user config is opt-in via `enabledProviders` (`"gemini"`, `"*"`, or
+`"all"`). Explicit capability loads with `providers: ["gemini"]` and loads with
+`includeDisabled: true` also allow the user root. `disabledProviders` can
+disable the entire provider, including project discovery.
 
 Path resolution is direct from `ctx.home` and `ctx.cwd` via `getUserPath()` / `getProjectPath()`.
 
@@ -31,7 +36,7 @@ Important scope rule: project lookup is **cwd-only**. It does not walk parent di
 
 ## Directory scan rules
 
-For each root (`~/.gemini/extensions` and `<cwd>/.gemini/extensions`), discovery does:
+For each enabled root, discovery does:
 
 1. `readDirEntries(root)`
 2. keep only direct child directories (`entry.isDirectory()`)
@@ -105,8 +110,8 @@ A valid parsed manifest creates one `Extension` capability item:
 Notes:
 
 - `_source.path` is normalized to an absolute path by `createSourceMeta()`.
-- Registry-level capability validation for `extensions` only checks presence of `name` and `path`.
-- Manifest internals (`mcpServers`, `tools`, `context`) are not validated during discovery.
+- Registry-level capability validation for `extensions` checks truthiness of `name` and `path`, not their types. An explicit empty-string name passes parsing but fails this gate.
+- Manifest internals (`mcpServers`, `tools`, `context`) are not validated during discovery or materialized as separate MCP/tool/context items by this loader.
 
 ---
 
@@ -116,17 +121,21 @@ Notes:
 
 - Invalid JSON, or a syntactically valid falsy JSON literal, in a non-empty
   manifest file:
-  - warning format: `Invalid JSON in <manifestPath>`
+  - provider warning: `Invalid JSON in <manifestPath>`
+- A surviving item with a falsy name:
+  - registry warning: `[Gemini CLI] Invalid item at <manifestPath>: Missing extension name`
+
+The registry prefixes provider warnings with `[Gemini CLI]`.
 
 ### Not warned (silent skip)
 
 - `extensions` directory missing
 - child directory has no `gemini-extension.json`
 - unreadable or empty manifest file
-- manifest JSON is truthy but semantically odd/incomplete
+- manifest JSON is truthy but semantically odd/incomplete, provided its resulting name passes the registry gate
 
-This means semantic validity is not enforced; the warning gate is the truthiness
-of `tryParseJson()` rather than an `ExtensionManifest` runtime validator.
+Manifest internals have no runtime validator; the parse gate is the truthiness
+of `tryParseJson()`, followed by the registry's name/path checks.
 
 ---
 
@@ -155,7 +164,10 @@ Because dedup is “first seen wins”, provider-local item order matters.
 - Gemini loader appends **user first**, then **project**.
 - Therefore, duplicate names between `~/.gemini/extensions` and `<cwd>/.gemini/extensions` keep the user entry and shadow the project entry.
 
-By contrast, native provider builds config dir order differently (`project` then `user` in `getConfigDirs()`), so native intra-provider shadowing is the opposite direction.
+By contrast, the native provider scans `<cwd>/.omp/extensions` before
+`<getAgentDir()>/extensions`, so native intra-provider shadowing is
+project-first. It also reads `gemini-extension.json`, but skips dot-prefixed
+child directories and uses `manifest.name || directoryName` rather than `??`.
 
 ---
 
@@ -163,7 +175,7 @@ By contrast, native provider builds config dir order differently (`project` then
 
 For Gemini manifests specifically:
 
-- Both user and project roots are scanned every load.
+- Project discovery is enabled by default; user discovery requires opt-in. The whole provider can be disabled.
 - Project root is fixed to `<cwd>/.gemini/extensions` (no ancestor walk).
 - Duplicate names inside Gemini source resolve to user-first.
 - Duplicate names against higher-priority providers (notably native) lose by priority.
@@ -176,9 +188,13 @@ For Gemini manifests specifically:
 does **not** identify a runnable TS/JS entry point.
 
 The Gemini provider separately populates the `extension-module` capability by
-scanning the same two extension roots for direct `.ts`/`.js` files,
+scanning the enabled roots for direct `.ts`/`.js` files,
 `<name>/index.ts` / `index.js`, and `package.json` `omp`/`pi` extension entries.
-Those module records are independent of `gemini-extension.json`.
+Declared package entries take precedence over an implicit index; otherwise
+`index.ts` wins over `index.js`. The shared module scanner also supports
+top-level symlinked extension directories. Those module records are independent
+of `gemini-extension.json`; the manifest scanner itself only accepts directory
+entries, not symlink entries.
 
 The ambient startup path in `discoverExtensionPaths()` currently requests only
 the `native` provider, so Gemini-discovered module records are not automatically

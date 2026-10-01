@@ -65,7 +65,7 @@ export function isUserQueuedMessage(message: AgentMessage): boolean {
 
 /**
  * Whether a queued user prompt was authored by the user rather than handed off by an
- * agent. Queue editing (chips, removal, editor restore) only touches these.
+ * agent. Queue editing (chips, removal, promotion, editor restore) only touches these.
  */
 export function isUserAuthoredQueuedMessage(message: AgentMessage): boolean {
 	return isUserQueuedMessage(message) && !("attribution" in message && message.attribution === "agent");

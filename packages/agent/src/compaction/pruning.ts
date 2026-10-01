@@ -62,6 +62,34 @@ export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 export interface PruneResult {
 	prunedCount: number;
 	tokensSaved: number;
+	/**
+	 * Restore every result this pass blanked. Pruning mutates entries in place,
+	 * so a caller whose persistence of the pruned history fails calls this to keep
+	 * memory matching what is durable.
+	 */
+	undo(): void;
+}
+
+const NOTHING_PRUNED: PruneResult = { prunedCount: 0, tokensSaved: 0, undo: () => {} };
+
+/** Blank `message` to `notice`, returning the step that restores it. */
+function blankToolResult(message: ToolResultMessage, notice: string, prunedAt: number): () => void {
+	const { content, prunedAt: previousPrunedAt } = message;
+	message.content = [{ type: "text", text: notice }];
+	message.prunedAt = prunedAt;
+	invalidateMessageCache(message as AgentMessage);
+	return () => {
+		message.content = content;
+		message.prunedAt = previousPrunedAt;
+		invalidateMessageCache(message as AgentMessage);
+	};
+}
+
+/** Combine per-message restore steps into one {@link PruneResult.undo}. */
+function undoAll(steps: Array<() => void>): () => void {
+	return () => {
+		for (const step of steps) step();
+	};
 }
 
 /** Exact placeholder written over a superseded tool result. */
@@ -257,7 +285,7 @@ export function pruneSupersededToolResults(
 		candidates.push(...collectUselessResults(entries, tokenizer, toolCallsById, config.protectedTools, exclude));
 		candidates.sort((a, b) => a.index - b.index);
 	}
-	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+	if (candidates.length === 0) return NOTHING_PRUNED;
 
 	const now = config.now ?? Date.now();
 	let lastMessageTimestamp: number | undefined;
@@ -290,17 +318,15 @@ export function pruneSupersededToolResults(
 			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
 		);
 	}
-	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+	if (toPrune.length === 0) return NOTHING_PRUNED;
 
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
-	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
-		candidate.message.prunedAt = prunedAt;
-		invalidateMessageCache(candidate.message as AgentMessage);
+	const steps = toPrune.map(candidate => {
 		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
-	}
-	return { prunedCount: toPrune.length, tokensSaved };
+		return blankToolResult(candidate.message, candidate.notice, prunedAt);
+	});
+	return { prunedCount: toPrune.length, tokensSaved, undo: undoAll(steps) };
 }
 
 export function pruneToolOutputs(
@@ -310,7 +336,6 @@ export function pruneToolOutputs(
 ): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
-	let prunedCount = 0;
 
 	const candidates: Array<{ entry: SessionMessageEntry; tokens: number; superseded: boolean; useless: boolean }> = [];
 	const toolCallsById = collectToolCallsById(entries);
@@ -394,24 +419,20 @@ export function pruneToolOutputs(
 	}
 
 	if (tokensSaved < config.minimumSavings || candidates.length === 0) {
-		return { prunedCount: 0, tokensSaved: 0 };
+		return NOTHING_PRUNED;
 	}
 
 	const prunedAt = Date.now();
-	for (const candidate of candidates) {
-		const message = candidate.entry.message as ToolResultMessage;
+	const steps = candidates.map(candidate => {
 		const notice = candidate.superseded
 			? SUPERSEDED_NOTICE
 			: candidate.useless
 				? USELESS_NOTICE
 				: createPrunedNotice(candidate.tokens);
-		message.content = [{ type: "text", text: notice }];
-		message.prunedAt = prunedAt;
-		invalidateMessageCache(message as AgentMessage);
-		prunedCount++;
-	}
+		return blankToolResult(candidate.entry.message as ToolResultMessage, notice, prunedAt);
+	});
 
-	return { prunedCount, tokensSaved };
+	return { prunedCount: candidates.length, tokensSaved, undo: undoAll(steps) };
 }
 
 /**

@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+## [18.4.7] - 2026-10-01
+
+### Added
+
+- Added an optional `terminal` section to theme JSON (`background`, `foreground`, `chrome`, `widget`, 16 `ansi` colors) naming the terminal a theme was made for, for hosts that paint the terminal themselves; the built-in themes ported from known schemes (GitHub, Nord, Dracula, Catppuccin, Solarized, Gruvbox, Tokyo Night, One, Monokai, Rosé Pine, Poimandres, Celestial) carry their scheme's.
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added a full-page transcript replay experience for Rewind in native terminals, with branching navigation through the conversation.
+- Added agent lineage navigation, including headers and links for moving between a subagent and its ancestors or returning to the main session.
+- Added a Jobs overlay for viewing background jobs.
+- Added OSC 877 protocol support for native TUI surfaces in Windows ConPTY environments.
+- Added customizable native screen layouts through Component.describeScreen and programmatic scrolling for native nodes.
+- Added native-terminal text editing support for selections in the composer and single-line inputs, including undoable host edits and safe handling of stale or token-spanning ranges.
+- Added optional dismissal handling for error banners, including a Dismiss button in native terminal strips.
+
+### Changed
+
+- Notebook evaluation cells now use dedicated input and output gutters with clearer status indicators.
+- Streaming file operations now remain expanded while running and collapse after execution completes.
+- Improved native-terminal effort indicators, using terminal glyphs where available and block meters as a fallback.
+- Updated native composer navigation when viewing a subagent to show the agent lineage and provide a direct return to the main session.
+- Native `/resume` picker sheets drop the "Resume session" heading and the This folder / All projects tabs: the search placeholder names the scope ("Search sessions in app…", "Search all sessions…") and Tab (the footer's All projects / This folder action) switches it. Picker `title` is now optional on the wire.
+- Updated the native composer's context display to span the window and provide clearer context usage and session-cost information, with shortcuts to the context and usage views.
+- Updated status-line billing summaries to show subagent spend separately from session spend and avoid repeating the same currency or subscription marker for subsequent amounts.
+
+### Fixed
+
+- Fixed search results so gaps between non-adjacent context runs are displayed correctly.
+- Fixed custom-answer and note prompts in native terminals so questions are shown completely with the correct titles and are no longer truncated or incorrectly wrapped.
+- Fixed text fields in native dialogs to render without a duplicate prompt indicator.
+- Fixed native TUI surfaces falling back to plain text rendering in Tern on Windows by accepting OSC 877 messages received through ConPTY.
+- Fixed streaming edit, patch, and write operation cards so they remain fully visible while running and collapse only after completion.
+
+## [18.4.5] - 2026-09-30
+
+### Added
+
+- Added Factory Droid base-credit badges; models without a dollar-price reference no longer appear free ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz), continued in [#13276](https://github.com/can1357/oh-my-pi/pull/13276) by [@DusKing1](https://github.com/DusKing1)).
+
+### Fixed
+
+- Fixed home directories next to shell redirections, control operators or Markdown emphasis (`<`, `>`, `&`, `|`, `*`, `_`) leaking the full path in display-only text ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+- Fixed the subagent task card showing full home paths in tool intents and arguments, while keeping search patterns literal ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+- Fixed Enter doing nothing on a fully typed slash-command argument while its completion popup was open (e.g. `/mcp list`): it now submits instead of re-accepting the identical completion; subcommands that still need a required argument (e.g. `/mcp test`) keep inserting the subcommand so you can type it ([#13885](https://github.com/can1357/oh-my-pi/pull/13885) by [@H4vC](https://github.com/H4vC)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
@@ -10,6 +58,10 @@
 - Redesigned transcript, chat, dashboard, and picker UI components for native wire representation
 - `HookEditorComponent` accepts pasted images when constructed with `acceptImages`; the ask dialog returns them as `customInputImages` / `noteImages` ([#13774](https://github.com/can1357/oh-my-pi/pull/13774) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 - Added `formatFileMatches` and `FileMatchSection` to `tools/grouped-file-output` for rendering per-file grep/ast-grep matches in grouped or flat mode.
+
+### Fixed
+
+- The model browser shows `varies`, `included`, or `pricing unknown` for models whose catalog declares that state, instead of labeling them `free` ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.4.3] - 2026-09-28
 

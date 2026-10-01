@@ -165,6 +165,7 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
+	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
 	error: { msg: "string" },
 	gone: { ids: "array" },
 };
