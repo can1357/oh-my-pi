@@ -60,6 +60,7 @@ export function createApiKeyResolver(
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
 		rejectedApiKey?: string,
+		rejectedHeaders?: Readonly<Record<string, string>>,
 	): Promise<ApiKeyResolution> =>
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
@@ -68,8 +69,9 @@ export function createApiKeyResolver(
 			signal,
 			refreshReason,
 			rejectedApiKey,
+			rejectedHeaders,
 		});
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal, previousKey, previousHeaders }) => {
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}
@@ -102,6 +104,7 @@ export function createApiKeyResolver(
 			signal,
 			AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			AIError.status(error) === 401 ? previousKey : undefined,
+			AIError.status(error) === 401 ? previousHeaders : undefined,
 		);
 	};
 }

@@ -6,8 +6,10 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
+	rejectCommandConfig,
 	resolveConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -316,6 +318,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBe("previous-key");
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer previous-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+
+	test("fails closed after the bounded rejected-digest ledger fills", async () => {
+		const config = `!${stdoutCommand("would-be-accepted")}`;
+		for (let index = 0; index <= 256; index++) {
+			rejectCommandConfig(config, `rejected-${index}`);
+		}
+		expect(await resolveConfigValue(config)).toBeUndefined();
+		expect(describeCommandConfigFailure(config)).toContain("rejected too many keys");
 	});
 
 	test("a first mint retries once, then shares its failure backoff across lookups", async () => {
@@ -710,6 +721,47 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer stale-bearer", tenant: "stale-tenant" },
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
+	});
+
+	test("a 401 rejects the sent command-backed header instead of resending its last-good value", async () => {
+		const bearerFile = path.join(tempDir, "bearer.txt");
+		const tenantFile = path.join(tempDir, "tenant.txt");
+		fs.writeFileSync(bearerFile, "stale-bearer");
+		fs.writeFileSync(tenantFile, "stale-tenant");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${stdoutFileCommand(bearerFile)}`,
+						headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-bearer");
+		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
+		fs.writeFileSync(bearerFile, "fresh-bearer");
+		fs.writeFileSync(tenantFile, "");
+		const seen: Array<{ auth?: string; tenant?: string }> = [];
+		const streamHandle = streamSimple(
+			model,
+			{ systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ apiKey: registry.resolver(model), fetch: refreshGateFetch(seen), maxTokens: 16 },
+		);
+		for await (const _event of streamHandle) {
+			// drain
+		}
+		const result = await streamHandle.result();
+		expect(result.stopReason).toBe("error");
+		expect(seen[0]).toEqual({ auth: "Bearer stale-bearer", tenant: "stale-tenant" });
+		expect(seen.slice(1).every(request => request.tenant !== "stale-tenant")).toBe(true);
 	});
 
 	test("401 refreshes a command-backed custom model header and retries with the fresh value", async () => {

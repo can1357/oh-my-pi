@@ -489,6 +489,8 @@ export type AuthApiKeyOptions = {
 	refreshReason?: OAuthRefreshReason;
 	/** Bearer that received the 401 which triggered this command-backed refresh. */
 	rejectedApiKey?: string;
+	/** Headers sent with the 401 request, used to reject matching command-backed header values. */
+	rejectedHeaders?: Readonly<Record<string, string>>;
 };
 
 /** Non-secret identity bound to the OAuth credential selected for one request attempt. */

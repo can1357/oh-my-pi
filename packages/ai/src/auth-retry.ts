@@ -32,6 +32,8 @@ export interface ApiKeyResolveContext {
 	previousKey?: string;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
+	/** Headers sent with the failed request, when command-backed header recovery needs their exact values. */
+	previousHeaders?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -157,10 +159,11 @@ export async function resolveRetryKey(
 	signal?: AbortSignal,
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
+	previousHeaders?: Readonly<Record<string, string>>,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
+		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey, previousHeaders });
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
 	} catch {
@@ -179,12 +182,18 @@ export interface AuthRetryKeyState {
 	tokenRefreshReplayUsed?: boolean;
 	/** Total outbound attempts accepted for this logical operation, including the initial request. */
 	attempts: number;
+	/** Headers sent with the last failed attempt. */
+	lastHeaders?: Readonly<Record<string, string>>;
 }
 
-export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
+export function createAuthRetryKeyState(
+	initialKey: string,
+	initialHeaders?: Readonly<Record<string, string>>,
+): AuthRetryKeyState {
 	return {
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
+		lastHeaders: initialHeaders,
 		refreshedCurrent: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
@@ -219,7 +228,15 @@ export async function resolveNextAuthRetryKey(
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
-		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
+		const refreshed = await resolveRetryKey(
+			resolver,
+			false,
+			error,
+			signal,
+			state.lastKey,
+			onResolved,
+			state.lastHeaders,
+		);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
 		return acceptRetryKey(state, refreshed, true);
@@ -227,7 +244,15 @@ export async function resolveNextAuthRetryKey(
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
+			const refreshed = await resolveRetryKey(
+				resolver,
+				false,
+				error,
+				signal,
+				state.lastKey,
+				onResolved,
+				state.lastHeaders,
+			);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
@@ -239,10 +264,18 @@ export async function resolveNextAuthRetryKey(
 
 	if (signal?.aborted) return undefined;
 	let afterSiblingWait = false;
-	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, resolved => {
-		afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
-		onResolved?.(resolved);
-	});
+	const rotated = await resolveRetryKey(
+		resolver,
+		true,
+		error,
+		signal,
+		state.lastKey,
+		resolved => {
+			afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
+			onResolved?.(resolved);
+		},
+		state.lastHeaders,
+	);
 	if (signal?.aborted || rotated === undefined) return undefined;
 	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
 }

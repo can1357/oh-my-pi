@@ -4,7 +4,7 @@ import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAbo
 const COMMAND_TIMEOUT_MS = 10_000;
 const COMMAND_FAILURE_RETRY_MS = 30_000;
 const INITIAL_MINT_ATTEMPTS = 2;
-const MAX_REJECTED_VALUE_DIGESTS = 16;
+const MAX_REJECTED_VALUE_DIGESTS = 256;
 /** Last stdout each command printed on success; a failed run never replaces it. */
 const commandResultCache = new Map<string, string>();
 /** Failed runs wait before attempting another mint, preventing a credential-helper storm. */
@@ -15,6 +15,8 @@ const commandFailure = new Map<string, string>();
 const commandRefreshPending = new Set<string>();
 /** SHA-256 digests of 401-rejected values, bounded FIFO per command. */
 const commandRejectedValueDigests = new Map<string, string[]>();
+/** Commands that reached the digest cap and fail closed rather than evict a rejected value. */
+const commandRejectedValueOverflow = new Set<string>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
 
@@ -45,7 +47,11 @@ function valueDigest(value: string): string {
 }
 
 function valueIsRejected(command: string, value: string | undefined): boolean {
-	return value !== undefined && commandRejectedValueDigests.get(command)?.includes(valueDigest(value)) === true;
+	return (
+		value !== undefined &&
+		(commandRejectedValueOverflow.has(command) ||
+			commandRejectedValueDigests.get(command)?.includes(valueDigest(value)) === true)
+	);
 }
 
 function handOutValue(command: string, value: string | undefined): string | undefined {
@@ -73,9 +79,13 @@ export function rejectCommandConfig(valueConfig: string | undefined, rejectedVal
 		const digests = commandRejectedValueDigests.get(command) ?? [];
 		const digest = valueDigest(rejectedValue);
 		if (!digests.includes(digest)) {
-			digests.push(digest);
-			if (digests.length > MAX_REJECTED_VALUE_DIGESTS) digests.shift();
-			commandRejectedValueDigests.set(command, digests);
+			if (digests.length === MAX_REJECTED_VALUE_DIGESTS) {
+				commandRejectedValueOverflow.add(command);
+				commandFailure.set(command, "rejected too many keys");
+			} else {
+				digests.push(digest);
+				commandRejectedValueDigests.set(command, digests);
+			}
 		}
 	}
 	if (handOutValue(command, commandResultCache.get(command)) === undefined) {
@@ -115,6 +125,10 @@ export function describeCommandConfigFailure(valueConfig: string | undefined): s
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
+	if (commandRejectedValueOverflow.has(command)) {
+		commandFailure.set(command, "rejected too many keys");
+		return undefined;
+	}
 	const cached = commandResultCache.get(command);
 	if (handOutValue(command, cached) !== undefined && !commandRefreshPending.has(command)) return cached;
 	const retryAt = commandFailureRetryAt.get(command);
@@ -312,4 +326,5 @@ export function clearConfigValueCache(): void {
 	commandFailure.clear();
 	commandRefreshPending.clear();
 	commandRejectedValueDigests.clear();
+	commandRejectedValueOverflow.clear();
 }

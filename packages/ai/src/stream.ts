@@ -934,6 +934,7 @@ export function listProvidersWithEnvKey(): string[] {
 	return Object.keys(serviceProviderMap);
 }
 
+const resolvedHeaderResolvers = new WeakMap<object, NonNullable<Model<Api>["resolveHeaders"]>>();
 function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
@@ -947,7 +948,9 @@ function withResolvedModelHeaders<TApi extends Api>(
 		try {
 			const headers = await untilAborted(signal, () => resolveHeaders(signal));
 			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			const resolvedModel = { ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined };
+			resolvedHeaderResolvers.set(resolvedModel, resolveHeaders);
+			const inner = run(resolvedModel);
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -1325,6 +1328,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			refreshHeaders = false,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1334,6 +1338,13 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
+				if (refreshHeaders) {
+					const resolveHeaders = resolvedHeaderResolvers.get(model);
+					if (resolveHeaders) {
+						const headers = await untilAborted(signal, () => resolveHeaders(signal));
+						model.headers = headers ? { ...headers } : undefined;
+					}
+				}
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
@@ -1404,7 +1415,12 @@ function streamSimpleRequest<TApi extends Api>(
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				const resolved = await apiKeyResolver({
+					lastChance: false,
+					error: undefined,
+					signal,
+					previousHeaders: model.headers,
+				});
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
@@ -1428,7 +1444,7 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey);
+			const retryState = createAuthRetryKeyState(lastKey, model.headers);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
@@ -1448,7 +1464,7 @@ function streamSimpleRequest<TApi extends Api>(
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, true);
 				if (!next) return;
 				failure = next;
 			}
