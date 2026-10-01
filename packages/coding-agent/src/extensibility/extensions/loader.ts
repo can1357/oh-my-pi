@@ -26,7 +26,13 @@ import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import { getCodingAgentApi } from "../host-api";
-import { composeRemoteId, IrcBus, isValidRemoteName, isValidRemoteNamespace, remoteNamespaceOf } from "../../irc/bus";
+import { IrcBus } from "../../irc/bus";
+import {
+	composeRemoteId,
+	isValidRemoteName,
+	isValidRemoteNamespace,
+	remoteNamespaceOf,
+} from "../../registry/remote-id";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";

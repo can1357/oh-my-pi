@@ -114,6 +114,11 @@ export interface SchemeSpec {
 	portAuthority?: boolean;
 	/** The authority is the first path segment under one root (local://a/b), so a glob may start there; other schemes' authority is an id. */
 	pathAuthority?: true;
+	/**
+	 * The authority is an agent id, so a cross-process remote id `@<namespace>/<name>` spans the
+	 * authority and the first path segment (agent://@ns/name); the parser folds it into one host token.
+	 */
+	agentIdAuthority?: true;
 	/** Default immutability of resolved resources; a resource may override it per URL. */
 	immutable: boolean;
 	/** Resources are session artifact storage (artifact://); located read pages skip the artifact spill. */
