@@ -128,6 +128,7 @@ describe("print mode disposes the session before terminating", () => {
 			// Mimic a real mid-turn signal: the postmortem teardown fires (which
 			// disposes and aborts the agent), and only then does the awaited turn
 			// settle with an aborted assistant message.
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				await signalCallback?.(postmortem.Reason.SIGTERM);
 			},

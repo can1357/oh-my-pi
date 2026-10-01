@@ -56,6 +56,7 @@ function createMockSession(
 		},
 		extensionRunner: undefined,
 		subscribe: () => () => {},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		prompt: async () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},

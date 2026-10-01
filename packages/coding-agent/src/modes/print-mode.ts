@@ -281,13 +281,15 @@ async function runPrintModeCore(
 	// follow-up instead (irrelevant when idle: the prompt then runs to completion as before). A
 	// queued prompt returns while the wake turn is still streaming, so wait until nothing is in
 	// flight (a stranded follow-up re-arms as a tracked continue, hence the loop) and the response
-	// read after each dispatch is the prompt's own, not the wake turn's reply. A prompt still queued
-	// once everything is idle (the queued drain was refused, e.g. by a usage-limit denial) must not
-	// pass as the printed answer of another turn: fail loudly, the catch below still disposes.
+	// read after each dispatch is the prompt's own, not the wake turn's reply. A user-authored
+	// follow-up still queued once everything is idle (the queued drain was refused, e.g. by a
+	// usage-limit denial) is this prompt, undispatched: it must not pass as the printed answer of
+	// another turn, so fail loudly; the catch below still disposes. Only the follow-up queue counts:
+	// hidden next-turn reminders legitimately outlive the last dispatch.
 	const dispatch = async (label: string, text: string, images?: ImageContent[]): Promise<void> => {
 		await logger.time(label, () => session.prompt(text, { images, streamingBehavior: "followUp" }));
 		while (session.isStreaming) await session.waitForIdle();
-		if (session.queuedMessageCount > 0) {
+		if (session.getQueuedMessages().followUp.length > 0) {
 			throw new Error("print mode: the prompt was queued behind another turn and never dispatched");
 		}
 	};
