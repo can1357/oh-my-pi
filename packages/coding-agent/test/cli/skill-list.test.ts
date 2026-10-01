@@ -178,6 +178,50 @@ describe("handleSkillList", () => {
 		expect(stderr).toContain('warning: name collision: "calendar"');
 	});
 
+	test("--json reports skills.optInSkills from config as hidden, including collision aliases", async () => {
+		// Hosts such as omp-web read `hide` from this listing to show which
+		// skills the model sees, so the configured policy must reach it.
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
+		for (const [root, name] of [
+			["first", "calendar"],
+			["second", "calendar"],
+			["first", "reviewer"],
+		] as const) {
+			await fs.mkdir(path.join(directory, root, name), { recursive: true });
+			await Bun.write(
+				path.join(directory, root, name, "SKILL.md"),
+				`---\nname: ${name}\ndescription: ${root} ${name}.\n---\n\n# ${name}\n`,
+			);
+		}
+		await Bun.write(
+			path.join(directory, ".omp", "config.yml"),
+			"skills:\n  customDirectories:\n    - first\n    - second\n  optInSkills:\n    - calendar\n",
+		);
+
+		let stdout = "";
+		const originalStdoutWrite = process.stdout.write;
+		const originalStderrWrite = process.stderr.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			stdout += chunk.toString();
+			return true;
+		}) as typeof process.stdout.write;
+		process.stderr.write = (() => true) as typeof process.stderr.write;
+		try {
+			expect(await handleSkillList([], directory, true)).toBe(0);
+		} finally {
+			process.stdout.write = originalStdoutWrite;
+			process.stderr.write = originalStderrWrite;
+			await removeWithRetries(directory);
+		}
+
+		const { skills } = JSON.parse(stdout) as { skills: Array<{ name: string; hide: boolean }> };
+		expect(Object.fromEntries(skills.map(skill => [skill.name, skill.hide]))).toEqual({
+			calendar: true,
+			"second/calendar": true,
+			reviewer: false,
+		});
+	});
+
 	test("rejects a target that is not a directory", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
 		const file = path.join(directory, "file.txt");

@@ -120,7 +120,7 @@ Filter order is:
 3. not ignored
 4. included (if include list present)
 
-`skills.optInSkills` is not a removal filter. After provider, custom-directory, and managed-skill discovery and name deduplication are complete, its Bun-style glob patterns are matched against each final resolved skill name. Matches are marked hidden from the model prompt but remain loaded and accessible through `skill://<name>` and `/skill:<name>`.
+`skills.optInSkills` is not a removal filter. After provider, custom-directory, and managed-skill discovery and name deduplication are complete, its Bun-style glob patterns are matched against each skill's raw and final resolved name, so hiding `tdd` also hides a `<namespace>/tdd` collision alias, and `superpowers/*` hides one namespace. Matches are marked hidden from the model prompt but remain loaded and accessible through `skill://<name>` and `/skill:<name>`. Unlike the author-controlled `hide` frontmatter, it needs no edit to the skill's files, so it works for plugin and registry installs that an update would overwrite. `omp skill list --json` reports the effective `hide`.
 
 The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Foreign user-level providers are opt-in through `enabledProviders`; their project roots still load by default. Native OMP sources and marketplace plugins registered under `~/.omp/plugins` also load by default. For `claude-plugins`, the opt-in controls only plugins from Claude Code's own user registry.
 

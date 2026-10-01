@@ -615,8 +615,11 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	}
 
 	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
+	// Like `ignoredSkills`, opt-in patterns see both the raw and the final name,
+	// so hiding `tdd` also hides the `<namespace>/tdd` alias a collision produced.
 	for (const skill of skills) {
-		if (matchesOptInPatterns(skill.name)) skill.hide = true;
+		const rawName = admitted.get(skill.name)?.rawName ?? skill.name;
+		if (matchesOptInPatterns(skill.name) || matchesOptInPatterns(rawName)) skill.hide = true;
 	}
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
