@@ -1038,10 +1038,26 @@ class RpcClient:
             self._request("new_session", parentSession=parent_session)
         )
 
-    def open_session(self, session_dir: str | Path) -> OpenSessionResult:
-        """Continue the newest non-empty session in `session_dir`, or start a fresh one there."""
+    def open_session(
+        self,
+        session_dir: str | Path,
+        *,
+        provider: str | None = None,
+        model_id: str | None = None,
+    ) -> OpenSessionResult:
+        """Continue the newest non-empty session in `session_dir`, or start a fresh one there.
+
+        With `provider` and `model_id` (both or neither), the session uses that model
+        instead of its saved one; otherwise a saved model that cannot be restored
+        fails the request with `Could not restore model <provider/id>`.
+        """
         return parse_open_session_result(
-            self._request("open_session", sessionDir=str(session_dir))
+            self._request(
+                "open_session",
+                sessionDir=str(session_dir),
+                provider=provider,
+                modelId=model_id,
+            )
         )
 
     def set_event_filter(
@@ -1068,9 +1084,20 @@ class RpcClient:
             raise RpcError("set_event_filter response has an invalid events list")
         return tuple(cast(list[str], applied))
 
-    def switch_session(self, session_path: str | Path) -> CancellationResult:
+    def switch_session(
+        self,
+        session_path: str | Path,
+        *,
+        provider: str | None = None,
+        model_id: str | None = None,
+    ) -> CancellationResult:
         return parse_cancellation_result(
-            self._request("switch_session", sessionPath=str(session_path))
+            self._request(
+                "switch_session",
+                sessionPath=str(session_path),
+                provider=provider,
+                modelId=model_id,
+            )
         )
 
     def branch(self, entry_id: str) -> BranchResult:

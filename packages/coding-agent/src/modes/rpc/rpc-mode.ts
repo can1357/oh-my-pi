@@ -13,8 +13,10 @@
  */
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { $env, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -675,6 +677,7 @@ export async function handleRpcSessionChange(
 	session: RpcSessionChangeSession,
 	command: RpcSessionChangeCommand,
 	subagentRegistry?: RpcSubagentResetRegistry,
+	requestedModel?: Model,
 ): Promise<RpcSessionChangeResult> {
 	switch (command.type) {
 		case "new_session": {
@@ -685,7 +688,8 @@ export async function handleRpcSessionChange(
 		}
 
 		case "switch_session": {
-			const cancelled = !(await session.switchSession(command.sessionPath));
+			const options = requestedModel ? { model: requestedModel } : undefined;
+			const cancelled = !(await session.switchSession(command.sessionPath, options));
 			if (!cancelled) subagentRegistry?.clear();
 			return { type: "switch_session", data: { cancelled } };
 		}
@@ -701,7 +705,7 @@ export async function handleRpcSessionChange(
 
 export type RpcOpenSessionSession = Pick<
 	AgentSession,
-	"newSession" | "switchSession" | "sessionFile" | "sessionId" | "messages"
+	"newSession" | "switchSession" | "sessionFile" | "sessionId" | "messages" | "model" | "setModel"
 >;
 
 /**
@@ -710,12 +714,17 @@ export type RpcOpenSessionSession = Pick<
  * can bind a pre-spawned process to a conversation it keys by directory.
  * Reopening the session that is already active is a no-op and does not abort a run.
  *
+ * With `model`, the session uses that model instead of its saved one, like an
+ * explicit `--model`; otherwise a saved model that cannot be restored fails the
+ * switch (see {@link AgentSession.switchSession}).
+ *
  * @throws Error when the process runs without session persistence (`--no-session`).
  */
 export async function openRpcSession(
 	session: RpcOpenSessionSession,
 	sessionDir: string,
 	subagentRegistry?: RpcSubagentResetRegistry,
+	model?: Model,
 ): Promise<RpcOpenSessionResult> {
 	if (!session.sessionFile) throw new Error("open_session requires session persistence (omit --no-session)");
 	const dir = path.resolve(sessionDir);
@@ -726,15 +735,50 @@ export async function openRpcSession(
 		: path.dirname(current) === dir && session.messages.length === 0;
 	let cancelled = false;
 	if (!alreadyOpen) {
-		cancelled = latest ? !(await session.switchSession(latest)) : !(await session.newSession({ sessionDir: dir }));
+		cancelled = latest
+			? !(await session.switchSession(latest, model ? { model } : undefined))
+			: !(await session.newSession({ sessionDir: dir }));
 		if (!cancelled) subagentRegistry?.clear();
 	}
+	// A resumed session is bound to the model by the switch; an already-open or
+	// fresh one selects it as `set_model` would.
+	if (!cancelled && model && !modelsAreEqual(session.model, model)) await session.setModel(model);
 	return {
 		cancelled,
 		resumed: !cancelled && latest !== null,
 		sessionId: session.sessionId,
 		sessionFile: session.sessionFile,
 	};
+}
+
+type RpcModelLookupSession = Pick<AgentSession, "getAvailableModels" | "modelRegistry">;
+
+/**
+ * The available model with exactly this provider and id. Models missing from
+ * the current catalog wait for in-flight background discovery first: on cold
+ * start, discovery-backed providers (proxy / ollama / etc.) populate seconds
+ * after session ready. Catalog hits skip the wait, so the RPC queue is not
+ * stalled behind unrelated discovery.
+ */
+async function findRpcModel(session: RpcModelLookupSession, provider: string, modelId: string) {
+	const find = () => session.getAvailableModels().find(m => m.provider === provider && m.id === modelId);
+	const model = find();
+	if (model) return model;
+	await session.modelRegistry.awaitBackgroundRefresh();
+	return find();
+}
+
+/** The optional `provider`/`modelId` pair of `open_session` or `switch_session`, validated like `set_model`. */
+async function resolveRequestedRpcModel(
+	session: RpcModelLookupSession,
+	command: { provider?: string; modelId?: string },
+): Promise<Model | undefined> {
+	const { provider, modelId } = command;
+	if (provider === undefined && modelId === undefined) return undefined;
+	if (provider === undefined || modelId === undefined) throw new Error("provider and modelId must be given together");
+	const model = await findRpcModel(session, provider, modelId);
+	if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+	return model;
 }
 
 function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostToolDefinition[] {
@@ -1616,7 +1660,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
+				const requestedModel =
+					command.type === "switch_session" ? await resolveRequestedRpcModel(session, command) : undefined;
+				const result = await handleRpcSessionChange(session, command, subagentRegistry, requestedModel);
 				if (!result.data.cancelled) {
 					promptResults.abortOpen();
 					// The detached run publishes no terminal agent_end to settle on.
@@ -1627,7 +1673,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "open_session": {
-				const result = await openRpcSession(session, command.sessionDir, subagentRegistry);
+				const requestedModel = await resolveRequestedRpcModel(session, command);
+				const result = await openRpcSession(session, command.sessionDir, subagentRegistry, requestedModel);
 				if (!result.cancelled) {
 					promptResults.abortOpen();
 					void settleWatcher.check();
@@ -1829,19 +1876,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "set_model": {
-				let models = session.getAvailableModels();
-				let model = models.find(m => m.provider === command.provider && m.id === command.modelId);
-				if (!model) {
-					// Model not in the current catalog. Wait for in-flight
-					// background discovery before declaring it missing: on cold
-					// start, discovery-backed providers (proxy / ollama / etc.)
-					// populate seconds after session ready. Models already in
-					// the bundled catalog skip this await entirely so the RPC
-					// queue is not stalled behind unrelated discovery.
-					await session.modelRegistry.awaitBackgroundRefresh();
-					models = session.getAvailableModels();
-					model = models.find(m => m.provider === command.provider && m.id === command.modelId);
-				}
+				const model = await findRpcModel(session, command.provider, command.modelId);
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}

@@ -74,6 +74,8 @@ import {
 	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolveSessionModelSelector,
+	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
@@ -796,6 +798,17 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+	/**
+	 * When a resumed session's saved models cannot be restored even after
+	 * discovery, allow continuing with a warning on another model: the settings
+	 * default at startup (`modelFallbackMessage`), or the current model when
+	 * `switchSession` later opens another session. Applies only when `hasUI` is
+	 * true and `retry.modelFallback` is on; otherwise `createAgentSession` and
+	 * `switchSession` throw `Could not restore model <provider/id>`. Hosts whose
+	 * `hasUI` only enables tool dialogs and cannot show the warning (rpc-ui) set
+	 * this to false. Default: true.
+	 */
+	allowSessionModelFallback?: boolean;
 	/**
 	 * A human can answer synchronous prompts even without a terminal UI (e.g. an
 	 * ACP client rendering elicitation forms). Enables `ask` without enabling
@@ -1913,21 +1926,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const parsedModel = parseModelString(sessionModelStr, {
-					allowMaxSuffix: true,
-					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-				});
-				if (!parsedModel) {
-					failedSessionModel ??= sessionModelStr;
-					continue;
-				}
-
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
+				const restored = resolveSessionModelSelector(modelRegistry, sessionModelStr);
+				if (restored) {
+					model = restored.model;
 					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+					restoredSessionThinkingLevel = restored.thinkingLevel;
 					break;
 				}
 				failedSessionModel ??= sessionModelStr;
@@ -2669,19 +2672,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
-					const sessionModelStr = sessionModelStrings[i];
-					const parsedModel = parseModelString(sessionModelStr, {
-						allowMaxSuffix: true,
-						allowAutoAlias: true,
-						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-					});
-					if (!parsedModel) continue;
-					const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-					if (restoredModel && hasModelAuth(restoredModel)) {
+					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
+					if (restored) {
+						const restoredModel = restored.model;
 						model = restoredModel;
 						modelFallbackMessage = undefined;
 						restoredSessionModelIndex = i;
-						restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+						restoredSessionThinkingLevel = restored.thinkingLevel;
 						// Recompute thinking-level from scratch against the reclaimed
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
@@ -2702,25 +2699,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!restoreSessionModel()) {
 				// The saved candidates weren't in the static+cached catalog. If any
 				// belongs to a discovery-backed provider that hasn't been fetched
-				// yet (models.yml `discovery:` — openai-models-list/litellm/proxy/…),
+				// yet (models.yml `discovery:` or extension `fetchDynamicModels`),
 				// trigger a cache-aware, provider-scoped discovery pass and retry
 				// before resume silently downgrades to the default role. The
 				// registry coalesces this with any matching request already running
 				// in the SDK's startup background refresh.
-				const discoverableProviders = new Set(modelRegistry.getDiscoverableProviders());
-				const candidateProviders = new Set<string>();
-				if (discoverableProviders.size > 0) {
-					for (const sessionModelStr of sessionModelStrings.slice(0, sessionRetryLimit)) {
-						const parsedModel = parseModelString(sessionModelStr, {
-							allowMaxSuffix: true,
-							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-						});
-						if (parsedModel && discoverableProviders.has(parsedModel.provider)) {
-							candidateProviders.add(parsedModel.provider);
-						}
-					}
-				}
+				const candidateProviders = sessionModelDiscoveryProviders(
+					modelRegistry,
+					sessionModelStrings.slice(0, sessionRetryLimit),
+					disabledProviderIds(settings),
+				);
 				if (candidateProviders.size > 0) {
 					// This skips the static reload and all-other-runtime restore
 					// performed by `refreshProvider`, so unrelated runtime providers
@@ -2731,6 +2719,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoreSessionModel();
 				}
 			}
+		}
+		// Exhaust persisted candidates (including configured and extension discovery)
+		// before permitting a settings-default or first-available substitution.
+		if (
+			sessionModelStrings.length > 0 &&
+			restoredSessionModelIndex < 0 &&
+			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
+		) {
+			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
@@ -4477,6 +4474,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: cfgSkills.get(settings),
 			modelRegistry,
+			allowSessionModelFallback: options.hasUI === true && options.allowSessionModelFallback !== false,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
 			reconcileBrowserMcpFilter: mcpManager

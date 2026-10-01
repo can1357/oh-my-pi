@@ -177,7 +177,10 @@ with RpcClient() as client:
 ```
 
 `open_session()` continues the newest non-empty session in the directory or
-starts a fresh one there (`resumed=False`). The event filter applies only to
+starts a fresh one there (`resumed=False`). Pass `provider=` and `model_id=` to
+use that model instead of the session's saved one; without them, a saved model
+that can no longer be restored fails the call with `RpcCommandError` and the
+previous session stays active. The event filter applies only to
 session events; responses, `prompt_result`, and UI/host frames always arrive,
 so `prompt_and_wait()` still completes when `agent_end` is filtered out.
 
