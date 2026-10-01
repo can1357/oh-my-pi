@@ -89,6 +89,15 @@ const handleBridgeMessage = (message: BridgeMessage): void => {
 	}
 };
 
+const newDecoder = (): LineDecoder<BridgeMessage> =>
+	new LineDecoder<BridgeMessage>((line, error) =>
+		console.error(`dropped malformed bridge line: ${line} (${String(error)})`),
+	);
+// One decoder per connection, so a partial line buffered from a replaced session never prefixes
+// the next session's first line.
+const decoders = new WeakMap<Bun.Socket, LineDecoder<BridgeMessage>>();
+
+// Lines are short JSON records on a local unix socket; partial writes are not handled (see extension.ts).
 Bun.listen({
 	unix: roster.socket,
 	socket: {
@@ -98,11 +107,15 @@ Bun.listen({
 				bridge.end();
 			}
 			bridge = socket;
+			decoders.set(socket, newDecoder());
 		},
-		data(_socket, chunk) {
+		data(socket, chunk) {
+			const decoder = decoders.get(socket);
+			if (!decoder) return;
 			for (const message of decoder.push(chunk)) handleBridgeMessage(message);
 		},
 		close(socket) {
+			decoders.delete(socket);
 			if (bridge === socket) {
 				bridge = undefined;
 				console.log("omp session disconnected");
@@ -113,9 +126,6 @@ Bun.listen({
 		},
 	},
 });
-const decoder = new LineDecoder<BridgeMessage>((line, error) =>
-	console.error(`dropped malformed bridge line: ${line} (${String(error)})`),
-);
 
 console.log(`roster written to ${values.roster}`);
 console.log(`listening on ${roster.socket} as @${roster.namespace}/{${roster.peers.join(",")}}`);

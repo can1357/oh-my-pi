@@ -44,6 +44,7 @@ function startPeer(socketPath: string): {
 	const received: BridgeMessage[] = [];
 	const waiters: Array<{ type: BridgeMessage["type"]; resolve: (message: BridgeMessage) => void }> = [];
 	let bridge: Bun.Socket | undefined;
+	let stopped = false;
 	const decoder = new LineDecoder<BridgeMessage>((line, error) => {
 		throw new Error(`peer: malformed bridge line ${line}: ${String(error)}`);
 	});
@@ -95,6 +96,8 @@ function startPeer(socketPath: string): {
 			bridge.write(encodeLine(message));
 		},
 		stop: () => {
+			if (stopped) return;
+			stopped = true;
 			bridge?.end();
 			server.stop(true);
 		},
@@ -190,10 +193,43 @@ describe("examples/extensions/remote-irc-bridge", () => {
 			expect(typeof receipt.ompId).toBe("string");
 			expect(delivered).toHaveBeenCalledTimes(1);
 			expect(delivered.mock.calls[0][0]).toMatchObject({ from: "@demo/leia", to: "Main", body: "ping" });
+
+			// A send in flight when the peer drops must fail with a receipt that still names the
+			// recipient, so the model's "Failed: … is not running" line is about the peer, not a message id.
+			const stranded = IrcBus.forRegistry(agentRegistry).send({
+				from: "Main",
+				to: "@demo/han",
+				body: "anyone there",
+			});
+			await peer.next("outbound");
+			peer.stop();
+			expect(await stranded).toMatchObject({
+				to: "@demo/han",
+				outcome: "failed",
+				error: expect.stringContaining("disconnected"),
+			});
 		} finally {
 			await session.dispose();
 			peer.stop();
 			fs.rmSync(socketPath, { force: true });
 		}
+	});
+});
+
+describe("remote-irc-bridge LineDecoder", () => {
+	it("reassembles a UTF-8 character split across socket chunks", () => {
+		const decoder = new LineDecoder<{ body: string }>((line, error) => {
+			throw new Error(`malformed ${line}: ${String(error)}`);
+		});
+		const bytes = new TextEncoder().encode('{"body":"héllo €"}\n');
+		// Cut inside the two-byte "é" (C3 A9): a per-chunk decode would yield replacement characters.
+		expect(decoder.push(bytes.slice(0, 11))).toEqual([]);
+		expect(decoder.push(bytes.slice(11))).toEqual([{ body: "héllo €" }]);
+	});
+
+	it("yields each complete line and keeps a trailing partial line buffered", () => {
+		const decoder = new LineDecoder<{ n: number }>(() => {});
+		expect(decoder.push('{"n":1}\n{"n":2}\n{"n"')).toEqual([{ n: 1 }, { n: 2 }]);
+		expect(decoder.push(":3}\n")).toEqual([{ n: 3 }]);
 	});
 });

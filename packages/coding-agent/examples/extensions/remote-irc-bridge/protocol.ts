@@ -32,15 +32,17 @@ export function encodeLine(message: BridgeMessage | PeerMessage): string {
 
 /**
  * Accumulates socket chunks and yields complete JSON lines. A malformed line is skipped and
- * reported through `onError` rather than tearing the connection down.
+ * reported through `onError` rather than tearing the connection down. One decoder per connection:
+ * UTF-8 is decoded in streaming mode so a multi-byte character split across two chunks survives.
  */
 export class LineDecoder<T> {
 	#buffer = "";
+	readonly #utf8 = new TextDecoder();
 
 	constructor(private readonly onError: (line: string, error: unknown) => void) {}
 
 	push(chunk: Uint8Array | string): T[] {
-		this.#buffer += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+		this.#buffer += typeof chunk === "string" ? chunk : this.#utf8.decode(chunk, { stream: true });
 		const messages: T[] = [];
 		let newline = this.#buffer.indexOf("\n");
 		while (newline !== -1) {
