@@ -90,5 +90,15 @@
 		"pageBg": "#f5f1e8",
 		"cardBg": "#fcfaf5",
 		"infoBg": "#f0ece0"
+	},
+	"terminal": {
+		"background": "#f5f1e8",
+		"foreground": "darkEarth",
+		"chrome": "customMsgBg",
+		"widget": "#fcfaf5",
+		"ansi": [
+			"darkEarth", "#a85840", "#577249", "#937636", "#43668a", "#84506e", "#3b7474", "sediment",
+			"#8c8c7c", "#bf5542", "sage", "#a6832e", "#4f7eae", "#a46188", "#488d8d", "#fcfaf5"
+		]
 	}
 }

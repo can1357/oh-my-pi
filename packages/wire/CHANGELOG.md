@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added terminal scrolling support through the TSP scroll operation, allowing keyboard scrolling of the terminal scroller when supported.
+- Added a terminal focus event for requesting keyboard focus on editors and inputs, or returning focus to the preferences sheet.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

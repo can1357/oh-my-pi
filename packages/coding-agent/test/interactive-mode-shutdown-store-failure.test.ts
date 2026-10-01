@@ -9,32 +9,30 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
-// Regression coverage for #12238: a corrupted session file makes the close-time
-// atomic rewrite fail closed with SessionWriteConflictError (it refuses to
-// clobber bytes another writer added). The guard is correct, but shutdown() used
-// to swallow the error, reset its own latch, and return without ever exiting —
-// so the process stayed alive and every further Ctrl+C repeated the identical
-// failure. The escape hatch is a second Ctrl+C that exits without writing the
-// session log, and it must be reachable with a SINGLE press after the error
-// message (the double-tap gate would otherwise demand two rapid presses).
+// Regression coverage for #12238: when the session store keeps failing, the
+// close-time write fails and dispose() rejects. shutdown() used to swallow the
+// error, reset its own latch, and return without ever exiting — so the process
+// stayed alive and every further Ctrl+C repeated the identical failure. The
+// escape hatch is a second Ctrl+C that exits without writing the session log,
+// and it must be reachable with a SINGLE press after the error message (the
+// double-tap gate would otherwise demand two rapid presses).
 //
-// The conflict is produced by the REAL persistence path, not a mocked error:
-// a file-backed SessionManager materializes a genuine session file, the test
-// corrupts it exactly like the reporter did (`echo garbage >> sessionfile`),
-// and the next real rewrite runs the storage expectedSize guard for real. The
-// guard throws the genuine SessionWriteConflictError, the manager latches it,
-// and the real dispose()/close() rethrows it into shutdown().
-describe("InteractiveMode shutdown when the session write conflicts (#12238)", () => {
+// The failure comes from the REAL persistence path, not a mocked error: a
+// file-backed SessionManager materializes a genuine session file, then its
+// directory is replaced by a regular file, so every real write fails, the
+// manager latches the failure, and the real dispose()/close() rethrows it into
+// shutdown(). (A file another writer appended to no longer fails: the session
+// moves to a sibling file, covered by the SessionManager freshness tests.)
+describe("InteractiveMode shutdown when the session store keeps failing (#12238)", () => {
+	const BLOCKER = "not a directory\n";
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode;
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let tempDir: TempDir;
-	let sessionFile: string;
-	let corruptedBytes: string;
+	let sessionDir: string;
 	let quitSpy: Mock<typeof postmortem.quit>;
 	let quitCalled: PromiseWithResolvers<void>;
 	let exitSpy: Mock<typeof postmortem.exitProcess>;
@@ -47,14 +45,14 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 
 	beforeEach(async () => {
 		resetSettingsForTest();
-		tempDir = TempDir.createSync("@omp-shutdown-conflict-");
+		tempDir = TempDir.createSync("@omp-shutdown-store-failure-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
-		// File-backed (not inMemory): the expectedSize guard under test lives in
-		// the real storage backend's rewrite path.
+		// File-backed (not inMemory): the failure under test comes from the real
+		// storage backend's write path.
 		sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [], messages: [] } }),
@@ -67,8 +65,7 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		mode.ui.terminal.drainInput = async () => {};
 
 		// A real conversation crosses the lazy gate and materializes the session
-		// file on disk. Then apply the reporter's exact corruption while the
-		// manager still holds its pre-corruption expectedSize.
+		// file on disk.
 		sessionManager.appendMessage({ role: "user", content: "hi", timestamp: Date.now() });
 		sessionManager.appendMessage({
 			role: "assistant",
@@ -90,16 +87,15 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		await sessionManager.ensureOnDisk();
 		const materializedFile = sessionManager.getSessionFile();
 		if (!materializedFile) throw new Error("expected a materialized session file");
-		sessionFile = materializedFile;
-		await fs.appendFile(sessionFile, "you're now broken\n");
-		corruptedBytes = await Bun.file(sessionFile).text();
+		// Replace the session directory with a regular file: every later write
+		// (temp file, publish lock, append) fails for real, on every platform.
+		sessionDir = path.dirname(materializedFile);
+		await fs.rm(sessionDir, { recursive: true, force: true });
+		await Bun.write(sessionDir, BLOCKER);
 
 		// Any real full-body rewrite (compaction, branch, entry discard, title
-		// repair) now runs the storage guard against the externally modified
-		// file. It throws the genuine SessionWriteConflictError, which the
-		// manager latches as its disk failure; the close() inside dispose()
-		// rethrows that latched error — this is the exact propagation the
-		// reporter hit, with no mocked error construction.
+		// repair) now fails; the manager latches the failure and the close()
+		// inside dispose() rethrows it, with no mocked error construction.
 		await sessionManager.rewriteEntries().catch(() => undefined);
 
 		quitCalled = Promise.withResolvers<void>();
@@ -119,24 +115,26 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		resetSettingsForTest();
 	});
 
-	it("surfaces the genuine write conflict on the first attempt without force-exiting", async () => {
+	it("surfaces the store failure on the first attempt without force-exiting", async () => {
 		await mode.shutdown();
 
+		expect(disposeSpy).toHaveBeenCalledTimes(1);
+		const disposeResult = disposeSpy.mock.results[0]?.value as Promise<void>;
+		const disposeError = await disposeResult.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(disposeError).toBeInstanceOf(Error);
 		const message = showErrorSpy.mock.calls.map((call: unknown[]) => String(call[0])).join("\n");
 		expect(message).toContain("Could not close session");
-		// The surfaced detail is the real guard's message, proving the error
-		// came from the storage backend rather than a hand-constructed throw.
-		expect(message).toContain("Session file changed before rewrite");
+		// The surfaced detail is the store's own failure, end to end.
+		expect(message).toContain((disposeError as Error).message);
 		// Must not force-exit yet: the user gets one chance to see the error.
 		expect(quitSpy).not.toHaveBeenCalled();
 		// The latch is cleared so a second Ctrl+C can re-enter shutdown().
 		expect(mode.isShuttingDown).toBe(false);
 		expect(mode.teardownFailed).toBe(true);
-		expect(disposeSpy).toHaveBeenCalledTimes(1);
-		// The dispose failure IS the genuine guard error, end to end.
-		await expect(disposeSpy.mock.results[0]!.value).rejects.toBeInstanceOf(SessionWriteConflictError);
-		// The guard refused to clobber: the externally added bytes survive.
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
+		expect(await Bun.file(sessionDir).text()).toBe(BLOCKER);
 	});
 
 	it("exits without writing the session log on the second attempt", async () => {
@@ -148,9 +146,8 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		expect(quitSpy).toHaveBeenCalledTimes(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
-		// "Without writing the session log" is literal: the corrupted file is
-		// still byte-identical to what the external writer left behind.
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
+		// "Without writing the session log": the failed store is left as it was.
+		expect(await Bun.file(sessionDir).text()).toBe(BLOCKER);
 	});
 
 	it("a single Ctrl+C keypress after the failure reaches the escape hatch", async () => {
@@ -167,7 +164,7 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		expect(quitSpy).toHaveBeenCalledTimes(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1); // never re-runs the doomed teardown
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
+		expect(await Bun.file(sessionDir).text()).toBe(BLOCKER);
 	});
 
 	it("a failed restart arms the same single-Ctrl+C escape hatch", async () => {
@@ -181,7 +178,7 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		expect(quitSpy).toHaveBeenCalledTimes(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
+		expect(await Bun.file(sessionDir).text()).toBe(BLOCKER);
 	});
 
 	it("bypasses a guarded process.exit after cleanup", async () => {

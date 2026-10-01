@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `tryAcquireFileLock`, a non-blocking file-lock helper that returns `null` when the lock is already held.
+- Added an `unref` option to `AsyncDrain`, allowing applications to use long batch windows without keeping the process alive.
+
+### Changed
+
+- Improved logging efficiency and configurability by batching routine file writes, flushing urgent records promptly, adding on-demand `logger.flush()` support, and allowing file log levels to be limited with `OMP_LOG_LEVEL`. Log files are created only when needed, and obsolete log and audit files are cleaned up automatically.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

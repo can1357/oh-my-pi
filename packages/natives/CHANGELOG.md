@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `readTextFromClipboard()` for reading plain text from the system clipboard without starting a subprocess.
+- Added `Shell.pids()` to retrieve the IDs of still-running processes spawned by an in-flight shell command.
+
+## [18.4.7] - 2026-10-01
+
+### Fixed
+
+- Fixed omp 18.4.3 and later crashing with a segmentation fault at startup on Apple silicon Macs running macOS older than 27; Apple Foundation Models support now loads only on macOS 27 and later
+
 ## [18.4.5] - 2026-09-30
 
 ### Fixed

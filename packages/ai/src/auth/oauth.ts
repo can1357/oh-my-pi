@@ -244,17 +244,22 @@ export class OAuthAccounts implements OAuthApi {
 			sessionCredential?.type === "oauth"
 				? this.#deps.pool.entries(provider)[sessionCredential.index]?.id
 				: undefined;
-		return this.#getStoredOAuthSelections(provider).map((selection, position) => ({
-			position,
-			credentialId: selection.credentialId,
-			accountId: selection.credential.accountId,
-			email: selection.credential.email,
-			projectId: selection.credential.projectId,
-			enterpriseUrl: selection.credential.enterpriseUrl,
-			orgId: selection.credential.orgId,
-			orgName: selection.credential.orgName,
-			active: selection.credentialId === activeCredentialId,
-		}));
+		const activeLastUsedAtMs = activeCredentialId !== undefined ? sessionCredential?.lastUsedAtMs : undefined;
+		return this.#getStoredOAuthSelections(provider).map((selection, position) => {
+			const active = selection.credentialId === activeCredentialId;
+			return {
+				position,
+				credentialId: selection.credentialId,
+				accountId: selection.credential.accountId,
+				email: selection.credential.email,
+				projectId: selection.credential.projectId,
+				enterpriseUrl: selection.credential.enterpriseUrl,
+				orgId: selection.credential.orgId,
+				orgName: selection.credential.orgName,
+				active,
+				...(active && activeLastUsedAtMs !== undefined ? { lastUsedAtMs: activeLastUsedAtMs } : {}),
+			};
+		});
 	}
 
 	/**

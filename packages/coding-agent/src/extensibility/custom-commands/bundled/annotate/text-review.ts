@@ -1,23 +1,9 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import { markdownFenceFor } from "../../../../utils/markdown-fence";
 import textReviewTemplate from "./prompts/text-review.md" with { type: "text" };
 import type { TextReviewAnnotation, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 
 const SHORT_SOURCE_CHARACTER_LIMIT = 1000;
-
-/** Pick a Markdown fence that cannot occur in the supplied exact value. */
-export function markdownFenceFor(value: string): string {
-	let longestRun = 0;
-	let run = 0;
-	for (const character of value) {
-		if (character === "`") {
-			run++;
-			if (run > longestRun) longestRun = run;
-		} else {
-			run = 0;
-		}
-	}
-	return "`".repeat(Math.max(3, longestRun + 1));
-}
 
 function shouldIncludeSource(source: TextReviewSource): boolean {
 	if (source.kind === "code" || source.kind === "command" || source.kind === "file" || source.kind === "prompt") {

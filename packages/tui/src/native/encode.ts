@@ -106,9 +106,13 @@ export function encodeTspJson(verb: TspVerb, value: unknown, params?: TspParams,
 	return encodeTspMessage(verb, JSON.stringify(value), params, limit);
 }
 
-/** The `hello` query; callers follow it with a DA1 sentinel. */
+/**
+ * The `hello` query; callers follow it with a DA1 sentinel. `features: ["edit"]`
+ * tells the terminal that omp applies its `edit` events (TSP §8.5), so it may keep a
+ * native selection in omp's editors; without it, every key stays omp's.
+ */
 export function encodeTspHelloQuery(version?: string): string {
-	return encodeTspJson("q", { q: "hello", v: [TSP_VERSION], app: "omp", ver: version });
+	return encodeTspJson("q", { q: "hello", v: [TSP_VERSION], app: "omp", features: ["edit"], ver: version });
 }
 
 /** One decoded APC message: verb, parameters and raw body. */
@@ -166,6 +170,7 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
 	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
+	focus: { id: "string" },
 	error: { msg: "string" },
 	gone: { ids: "array" },
 };

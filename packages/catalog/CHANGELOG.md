@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
+### Fixed
+
+- Fixed model catalog caching so unchanged catalogs refresh without unnecessary rewrites, and offline snapshots for endpoint-less models (such as Azure models) are now handled correctly across startups.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

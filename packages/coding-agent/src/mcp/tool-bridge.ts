@@ -132,6 +132,10 @@ async function resolveOutboundUrlArgs(
 	seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
 	if (typeof value === "string") {
+		// Only arguments that are themselves URLs: the router's repair of a
+		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
+		// mentions one.
+		if (!extractUriScheme(value)) return value;
 		const router = InternalUrlRouter.instance();
 		const url = router.normalize(value);
 		if (!router.canHandle(url)) return value;

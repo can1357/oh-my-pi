@@ -423,4 +423,20 @@ describe("MCP tool arguments", () => {
 			},
 		]);
 	});
+
+	it("forwards free text that mentions a path-prefixed local:// URL unchanged", async () => {
+		using tempDir = TempDir.createSync("@pi-mcp-local-text-");
+		const calls: CapturedRequest[] = [];
+		const { context } = await createLocalImageContext(tempDir);
+		const tool = new MCPTool(createCapturedConnection(calls), imageToolDefinition);
+		// The router repairs `<cwd>/local://x` for path arguments; an MCP string
+		// that only mentions one must not be replaced by the backing file path.
+		const text = "Attached notes/local://image-issue.png";
+
+		await tool.execute("call-1", { image_path: text }, undefined, context, undefined);
+
+		expect(calls).toEqual([
+			{ method: "tools/call", params: { name: "read_image_with_model", arguments: { image_path: text } } },
+		]);
+	});
 });

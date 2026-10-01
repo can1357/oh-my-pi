@@ -331,6 +331,56 @@ describe("RpcInputDispatcher", () => {
 		expect((outputs[1] as RpcResponse).command).toBe("get_state");
 	});
 
+	test("a steer_subagent waiting for the subagent to accept does not block a later abort", async () => {
+		const accepted = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			started.push(command.type);
+			if (command.type === "steer_subagent") {
+				await accepted.promise;
+				return { id: command.id, type: "response", command: "steer_subagent", success: true };
+			}
+			if (command.type === "abort") return { id: command.id, type: "response", command: "abort", success: true };
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "steer", type: "steer_subagent", subagentId: "SubagentA", message: "go" });
+		dispatcher.dispatch({ id: "abort", type: "abort" });
+		await flushMicrotasks();
+
+		expect(started).toEqual(["steer_subagent", "abort"]);
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["abort"]);
+
+		accepted.resolve();
+		await flushMicrotasks();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["abort", "steer"]);
+	});
+
+	test("a pending predict_word does not hold back later commands", async () => {
+		const releasePrediction = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "predict_word") {
+				await releasePrediction.promise;
+				return { id: command.id, type: "response", command: "predict_word", success: true, data: { suffix: "er" } };
+			}
+			if (command.type === "abort_retry") {
+				return { id: command.id, type: "response", command: "abort_retry", success: true };
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "predict", type: "predict_word", text: "The weath", cursor: 9 });
+		dispatcher.dispatch({ id: "after", type: "abort_retry" });
+		await dispatcher.drain();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["after"]);
+
+		releasePrediction.resolve();
+		await flushMicrotasks();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["after", "predict"]);
+	});
+
 	test("a prompt waits for an earlier session change without blocking a later abort", async () => {
 		const reset = Promise.withResolvers<void>();
 		const admission = Promise.withResolvers<void>();

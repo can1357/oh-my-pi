@@ -7,6 +7,21 @@ import type { KeyOverrides } from "./cascade";
 
 /** Prefix for persisted session-to-credential affinity. */
 export const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
+/** Persisted sticky rows live this long past their last use. */
+const SESSION_STICKY_TTL_SEC = 30 * 24 * 60 * 60;
+/**
+ * Same-credential re-records rewrite the persisted row at most this often. The
+ * in-memory sticky stays exact; only the copy other processes resume from lags.
+ */
+const SESSION_STICKY_PERSIST_INTERVAL_MS = 60_000;
+
+/** What this process last wrote (or read) for one persisted sticky row. */
+type PersistedSticky = {
+	type: AuthCredential["type"];
+	credentialId: number;
+	explicit: boolean;
+	lastUsedAtMs: number;
+};
 
 /** A session's pinned credential (resolved index + durable row id). */
 export type SessionCredential = {
@@ -25,6 +40,8 @@ export class SessionAffinity implements SessionsApi {
 	#sessionLastCredential: Map<string, Map<string, SessionCredential>> = new Map();
 	/** Sessions that explicitly opted out of configured/default account pins. */
 	#automaticSessions: Map<string, Set<string>> = new Map();
+	/** Persisted sticky rows keyed by cache key, so unchanged re-records skip the write. */
+	#persistedSticky: Map<string, PersistedSticky> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
 	#overrides: KeyOverrides;
@@ -39,8 +56,12 @@ export class SessionAffinity implements SessionsApi {
 	clearProvider(provider: string): void {
 		this.#sessionLastCredential.delete(provider);
 		this.#automaticSessions.delete(provider);
+		const prefix = `${SESSION_STICKY_CACHE_PREFIX}${provider}:`;
+		for (const cacheKey of this.#persistedSticky.keys()) {
+			if (cacheKey.startsWith(prefix)) this.#persistedSticky.delete(cacheKey);
+		}
 		try {
-			this.#store.deleteCachePrefix?.(`${SESSION_STICKY_CACHE_PREFIX}${provider}:`);
+			this.#store.deleteCachePrefix?.(prefix);
 		} catch (err) {
 			logger.debug("Failed to clear provider session sticky credentials from persistent store cache", { err });
 		}
@@ -56,6 +77,11 @@ export class SessionAffinity implements SessionsApi {
 	 * `lastUsedAtMs` backdates the sticky (session-file pin restores on resume);
 	 * it defaults to now for live selections. Automatic re-recording of the same
 	 * durable row preserves an explicit user pin.
+	 *
+	 * The in-memory sticky is always exact. The persisted row is rewritten only
+	 * when the credential, its type, or explicitness changes, or when the stored
+	 * last-use drifts by {@link SESSION_STICKY_PERSIST_INTERVAL_MS} — per-request
+	 * rewrites were pure database churn.
 	 */
 	record(
 		provider: string,
@@ -91,14 +117,29 @@ export class SessionAffinity implements SessionsApi {
 		sessionMap.set(sessionId, sessionCredential);
 		this.#sessionLastCredential.set(provider, sessionMap);
 
+		if (credentialId === undefined) return;
+		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
+		const expiresAtSec = Math.floor(nowMs / 1000) + SESSION_STICKY_TTL_SEC;
+		const persisted = this.#persistedSticky.get(cacheKey);
+		if (
+			persisted &&
+			persisted.type === type &&
+			persisted.credentialId === credentialId &&
+			persisted.explicit === isExplicit &&
+			Math.abs(nowMs - persisted.lastUsedAtMs) < SESSION_STICKY_PERSIST_INTERVAL_MS
+		) {
+			return;
+		}
 		try {
-			if (credentialId !== undefined) {
-				const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
-				// Expires in 30 days
-				const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
-				this.#store.setCache(cacheKey, JSON.stringify(sessionCredential), expiresAtSec);
-			}
+			this.#store.setCache(cacheKey, JSON.stringify(sessionCredential), expiresAtSec);
+			this.#persistedSticky.set(cacheKey, {
+				type,
+				credentialId,
+				explicit: isExplicit,
+				lastUsedAtMs: nowMs,
+			});
 		} catch (err) {
+			this.#persistedSticky.delete(cacheKey);
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
 		}
 	}
@@ -155,12 +196,14 @@ export class SessionAffinity implements SessionsApi {
 							sessionMap.set(sessionId, preserved);
 							return preserved;
 						}
+						this.#persistedSticky.delete(cacheKey);
 						this.#store.setCache(cacheKey, "", 0);
 						return undefined;
 					}
 					val.index = actualIndex;
 				} else {
 					// Fallback: drop unsafe index-only cache rows to prevent wrong-account routing
+					this.#persistedSticky.delete(cacheKey);
 					this.#store.setCache(cacheKey, "", 0);
 					return undefined;
 				}
@@ -177,6 +220,14 @@ export class SessionAffinity implements SessionsApi {
 					...(val.explicit === true ? { explicit: true } : {}),
 					...(val.strict === true ? { strict: true } : {}),
 				};
+				if (typeof val.lastUsedAtMs === "number") {
+					this.#persistedSticky.set(cacheKey, {
+						type: val.type,
+						credentialId: val.credentialId,
+						explicit: val.explicit === true,
+						lastUsedAtMs: val.lastUsedAtMs,
+					});
+				}
 				sessionMap.set(sessionId, sessionVal);
 				return sessionVal;
 			}
@@ -197,8 +248,9 @@ export class SessionAffinity implements SessionsApi {
 			}
 		}
 		this.#automaticSessions.get(provider)?.delete(sessionId);
+		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
+		this.#persistedSticky.delete(cacheKey);
 		try {
-			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
 			this.#store.setCache(cacheKey, "", 0);
 		} catch (err) {
 			logger.debug("Failed to clear session sticky credential from persistent store cache", { err });
