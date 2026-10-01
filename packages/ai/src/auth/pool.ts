@@ -631,21 +631,27 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	/**
-	 * Remove one stored credential for a provider.
+	 * Permanently remove one active or disabled stored row for the exact provider.
 	 */
 	async removeById(provider: string, credentialId: number): Promise<boolean> {
-		const entries = this.entries(provider);
-		const index = entries.findIndex(entry => entry.id === credentialId);
-		if (index === -1) return false;
-		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
+		const entries = this.#store.listAuthCredentials(provider);
+		const active = entries.some(entry => entry.id === credentialId && entry.provider === provider);
+		if (!active) {
+			const disabled = await this.listDisabled(provider);
+			if (!disabled.some(entry => entry.id === credentialId && entry.provider === provider)) return false;
+		}
+		const remainingEntries = entries.filter(entry => entry.id !== credentialId);
 		this.#options.policies.validateFor(
 			provider,
 			remainingEntries.map(entry => entry.credential),
 		);
 
-		const deleted = await this.#store.deleteAuthCredential(credentialId, "deleted by user");
+		const deleted = await this.#store.hardDeleteAuthCredential(credentialId);
 		if (!deleted) return false;
-		this.replace(provider, remainingEntries);
+		const generation = this.#generation;
+		this.reloadProvider(provider);
+		// Tombstone-only removal still changes the durable credential identities.
+		if (this.#generation === generation) this.bump("credentials");
 		this.reset(provider);
 		return true;
 	}

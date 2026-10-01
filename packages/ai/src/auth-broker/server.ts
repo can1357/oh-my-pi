@@ -20,7 +20,9 @@ import type {
 	CredentialBlockResponse,
 	CredentialBlockSnapshot,
 	CredentialBlocksDeleteResponse,
+	CredentialDeleteResponse,
 	CredentialDisableResponse,
+	CredentialNotFoundResponse,
 	CredentialRefreshResponse,
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
@@ -152,6 +154,7 @@ async function parseBody<t>(
 
 const REFRESH_ROUTE = /^\/v1\/credential\/(\d+)\/refresh$/;
 const DISABLE_ROUTE = /^\/v1\/credential\/(\d+)\/disable$/;
+const DELETE_CREDENTIAL_ROUTE = /^\/v1\/credential\/(\d+)$/;
 const BLOCK_ROUTE = /^\/v1\/credential\/(\d+)\/block$/;
 const BLOCKS_ROUTE = /^\/v1\/credential\/(\d+)\/blocks$/;
 
@@ -786,6 +789,33 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					logger.info("auth-broker credential disabled", { id, peer, cause });
 					const response: CredentialDisableResponse = { ok: true };
 					return json(200, response);
+				}
+				const deleteMatch = req.method === "DELETE" ? pathname.match(DELETE_CREDENTIAL_ROUTE) : null;
+				if (deleteMatch) {
+					const id = Number.parseInt(deleteMatch[1], 10);
+					try {
+						await opts.storage.credentials.revalidate();
+						const active = opts.storage.credentials.list().find(entry => entry.id === id);
+						const provider =
+							active?.provider ??
+							(await opts.storage.credentials.listDisabled(undefined, req.signal)).find(entry => entry.id === id)
+								?.provider;
+						const ok = provider !== undefined && (await opts.storage.credentials.removeById(provider, id));
+						if (!ok) {
+							const body: CredentialNotFoundResponse = {
+								error: `No credential with id=${id}`,
+								code: "credential_not_found",
+								id,
+							};
+							return json(404, body);
+						}
+						logger.info("auth-broker credential permanently deleted", { id, peer });
+						const body: CredentialDeleteResponse = { ok: true };
+						return json(200, body);
+					} catch {
+						logger.warn("auth-broker permanent credential deletion failed", { id, peer });
+						return json(500, { error: "Failed to permanently delete credential" });
+					}
 				}
 				const blockMatch = req.method === "POST" ? pathname.match(BLOCK_ROUTE) : null;
 				if (blockMatch) {

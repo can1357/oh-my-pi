@@ -815,6 +815,11 @@ ON CONFLICT(model_key) DO UPDATE SET
 		return this.#authStore.deleteAuthCredential(id, disabledCause);
 	}
 
+	/** Permanently deletes one active or disabled row; persistence failures reject. */
+	hardDeleteAuthCredential(id: number): Promise<boolean> {
+		return this.#authStore.hardDeleteAuthCredential(id);
+	}
+
 	/**
 	 * Disables all auth credentials for a provider with a persisted cause.
 	 * @param provider - Provider name whose credentials should be disabled

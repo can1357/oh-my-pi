@@ -23,6 +23,9 @@ function emptyStore(): AuthCredentialStore {
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

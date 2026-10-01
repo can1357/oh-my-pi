@@ -155,12 +155,17 @@ describe("AuthStorage.oauth.identity", () => {
 		const before = authStorage.credentials.list(PROVIDER);
 		const target = before.find(row => row.credential.type === "oauth" && row.credential.accountId === "acc-a");
 		if (!target) throw new Error("missing target credential");
+		const sibling = before.find(row => row.id !== target.id);
+		expect(await authStorage.credentials.removeById(`${PROVIDER}-other`, target.id)).toBe(false);
+		expect(await authStorage.credentials.removeById(PROVIDER, Number.MAX_SAFE_INTEGER)).toBe(false);
 
 		const removed = await authStorage.credentials.removeById(PROVIDER, target.id);
 
 		expect(removed).toBe(true);
 		const after = authStorage.credentials.list(PROVIDER);
 		expect(after.map(row => (row.credential.type === "oauth" ? row.credential.accountId : ""))).toEqual(["acc-b"]);
+		expect(after).toEqual([sibling!]);
+		expect(await authStorage.credentials.listDisabled(PROVIDER)).toEqual([]);
 		expect(await authStorage.credentials.removeById(PROVIDER, target.id)).toBe(false);
 	});
 });

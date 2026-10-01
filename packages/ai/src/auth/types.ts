@@ -122,6 +122,7 @@ export interface DisabledCredentialSummary {
 	type: AuthCredential["type"];
 	email?: string;
 	accountId?: string;
+	projectId?: string;
 	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
@@ -846,18 +847,21 @@ export interface CredentialsApi {
 	 */
 	upsert(provider: string, credential: AuthCredential): Promise<AuthCredentialSnapshotEntry[]>;
 	/**
-	 * Remove credential for a provider.
+	 * Disable all active credentials for a provider, retaining stored tombstones.
 	 */
 	remove(provider: string): Promise<void>;
 	/**
-	 * Remove one stored credential for a provider.
+	 * Permanently remove one active or disabled stored row for the exact provider.
+	 * Resolves after persistence and the provider's pool update. Returns false
+	 * for a missing ID or provider mismatch; persistence failures reject.
 	 */
 	removeById(provider: string, credentialId: number): Promise<boolean>;
 	/**
 	 * Disable the credential with the given id and emit a
 	 * {@link CredentialDisabledEvent}. Used by the auth-broker server to honour
-	 * `POST /v1/credential/:id/disable`. Resolves after persistence; returns
-	 * `false` when no active row with this ID exists.
+	 * `POST /v1/credential/:id/disable`. Always disables, never permanently deletes,
+	 * regardless of the cause. Returns `false` for a missing active row or a failed
+	 * local SQLite write; remote transport failures retain their rejection contract.
 	 */
 	disable(id: number, disabledCause: string): Promise<boolean>;
 	/**

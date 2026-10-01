@@ -24,6 +24,9 @@ function makeStore(rows: StoredAuthCredential[], blocked = new Map<number, numbe
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches: () => false,
 		replaceAuthCredentials: async () => rows,
 		upsertAuthCredential: async () => rows,

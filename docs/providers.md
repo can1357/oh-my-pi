@@ -69,9 +69,26 @@ Logins are **provider-scoped**: authenticating `anthropic` does not authenticate
 Use the interactive slash commands inside a session:
 
 - `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
-- `/logout` — opens the provider selector to remove stored credentials.
+- `/logout` — opens the provider/account selector to permanently remove one stored credential, including a disabled account.
 
 Outside a session, `omp login [<provider>]` runs the same login from the terminal, including extension-registered providers: it prints the auth URL (and opens it in your browser), reads any prompts from stdin, and saves to the same store sessions use — local `agent.db`, or the configured auth broker. Without a provider it shows a numbered picker. Successful login refreshes that provider's model catalog online so newly unlocked models are visible.
+
+Outside a session, `omp logout [provider] [account]` permanently removes **one stored credential**, using the same local store or configured auth broker as single-account `/logout`:
+
+```sh
+omp logout                                 # Pick a stored provider, then an account
+omp logout openai-codex                     # Pick a stored Codex account
+omp logout openai-codex user@example.com    # Select by exact email
+omp logout openai-codex 5                   # Select by exact credential row ID
+```
+
+The account selector also accepts an exact account ID or project ID. Identity matching ignores case and surrounding whitespace, never matches substrings, and is scoped to the selected provider. If an email matches multiple workspaces, nothing is removed: the CLI lists their credential row IDs so you can select one explicitly.
+
+Removal shows the resolved account and row ID before asking `[y/N]`. Empty input, declining, Escape, Ctrl-C, or EOF cancels without deleting anything. Disabled or expired credentials can be removed without refreshing or authenticating that account. After removal, the CLI refreshes the provider's model state and reports any remaining authentication source; environment/config/runtime keys are not removed. If the provider refresh fails, the CLI reports that deletion already succeeded and exits with an error rather than claiming it was rolled back.
+
+Single-account logout deletes the persisted row instead of leaving a recoverable disabled credential. The provider-wide `AuthStorage.credentials.remove(provider)` operation retains its existing disable/tombstone behavior. Broker-backed permanent deletion requires support for `DELETE /v1/credential/:id`; an older broker produces an explicit error asking you to update it, never a fallback to disabling the account.
+
+Use `omp --profile <name> logout ...` to select that profile's local store and `.env`-configured broker; the profile flag must precede the command. Disabled account project IDs remain available as selectors, but `omp usage --json --redact` masks them in shared output.
 
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 

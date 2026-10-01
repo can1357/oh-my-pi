@@ -32,7 +32,9 @@ import type {
 	CredentialBlockResponse,
 	CredentialBlockSnapshot,
 	CredentialBlocksDeleteResponse,
+	CredentialDeleteResponse,
 	CredentialDisableResponse,
+	CredentialNotFoundResponse,
 	CredentialRefreshResponse,
 	CredentialUploadRequest,
 	CredentialUploadResponse,
@@ -357,6 +359,20 @@ export const credentialRefreshResponseSchema: FluentType<CredentialRefreshRespon
 	entry: credentialSnapshotEntrySchema,
 });
 
+// ─── Permanent deletion ──────────────────────────────────────────────────────
+
+export const credentialDeleteResponseSchema: FluentType<CredentialDeleteResponse> = type({
+	"+": "reject",
+	ok: "boolean",
+});
+
+export const credentialNotFoundResponseSchema: FluentType<CredentialNotFoundResponse> = type({
+	"+": "reject",
+	error: "string",
+	code: "'credential_not_found'",
+	id: "number.integer",
+});
+
 // ─── Disable ─────────────────────────────────────────────────────────────────
 
 export const credentialDisableRequestSchema: FluentType<{ cause?: string }> = type({
@@ -377,6 +393,7 @@ export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSumma
 	type: "'oauth' | 'api_key'",
 	"email?": "string",
 	"accountId?": "string",
+	"projectId?": "string",
 	"orgId?": "string",
 	"orgName?": "string",
 	cause: "string",

@@ -62,6 +62,9 @@ function makeStore(
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

@@ -75,6 +75,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential`             | bearer | Upsert one OAuth or API-key credential                             |
 | `POST`   | `/v1/credential/:id/refresh` | bearer | Force-refresh one OAuth credential                                 |
 | `POST`   | `/v1/credential/:id/disable` | bearer | Disable one credential with a recorded cause                       |
+| `DELETE` | `/v1/credential/:id`         | bearer | Permanently delete one active or disabled stored credential       |
 | `GET`    | `/v1/credentials/disabled`   | bearer | List disabled credentials; optional `provider` query filter        |
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
 | `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`       |
@@ -86,6 +87,8 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/usage/stale`            | bearer | Invalidate the broker's current usage cache                        |
 
 Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
+
+`DELETE /v1/credential/:id` returns `200 {"ok":true}` after permanent deletion. A confirmed missing row returns `404` with `code: "credential_not_found"` and the requested `id`; persistence failures return a safe `500` error. Clients distinguish that coded not-found response from an unsupported endpoint on an older broker and request a broker update instead of silently falling back to `/disable`. `POST /v1/credential/:id/disable` only disables; it never permanently deletes a row, regardless of its free-form `cause`, including `"deleted by user"`.
 
 A snapshot contains `generation`, `generatedAt`, `serverNowMs`, `refresher`
 (`enabled`, `intervalMs`, `skewMs`, `nextSweepInMs`), and `credentials`.

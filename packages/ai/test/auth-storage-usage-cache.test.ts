@@ -85,6 +85,9 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
@@ -1240,6 +1243,9 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			async deleteAuthCredential() {
 				return false;
 			},
+			async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				disableCalls += 1;
 				return true;
@@ -1329,6 +1335,9 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			listAuthCredentials: () => rows.filter(r => !r.disabledCause),
 			updateAuthCredential() {},
 			async deleteAuthCredential() {
+				return false;
+			},
+			async hardDeleteAuthCredential(_id: number): Promise<boolean> {
 				return false;
 			},
 			tryDisableAuthCredentialIfMatches() {

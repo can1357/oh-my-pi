@@ -1,3 +1,4 @@
+import type { AuthStorage, DisabledCredentialSummary } from "@oh-my-pi/pi-ai";
 import type { OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
@@ -7,29 +8,71 @@ interface LogoutAccountOptions {
 	activeApiKey?: boolean;
 }
 
+/** Identity-only view shared by logout surfaces; never contains token material or disable causes. */
+export interface LogoutCredentialSummary {
+	id: number;
+	provider: string;
+	type: StoredAuthCredential["credential"]["type"];
+	email?: string;
+	accountId?: string;
+	projectId?: string;
+	enterpriseUrl?: string;
+	orgId?: string;
+	orgName?: string;
+	disabled: boolean;
+}
+
+function summarizeCredential(row: StoredAuthCredential | DisabledCredentialSummary): LogoutCredentialSummary {
+	const credential = "credential" in row ? row.credential : row;
+	return {
+		id: row.id,
+		provider: row.provider,
+		type: credential.type,
+		disabled: !("credential" in row),
+		...(credential.type === "oauth"
+			? {
+					email: credential.email,
+					accountId: credential.accountId,
+					projectId: credential.projectId,
+					enterpriseUrl:
+						"credential" in row && row.credential.type === "oauth" ? row.credential.enterpriseUrl : undefined,
+					orgId: credential.orgId,
+					orgName: credential.orgName,
+				}
+			: {}),
+	};
+}
+
+export async function collectLogoutCredentials(
+	storage: AuthStorage,
+	provider?: string,
+): Promise<LogoutCredentialSummary[]> {
+	const active = storage.credentials.list(provider).map(summarizeCredential);
+	const disabled = (await storage.credentials.listDisabled(provider)).map(summarizeCredential);
+	return [...active, ...disabled];
+}
+
 function nonEmpty(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-function oauthLabel(row: StoredAuthCredential): string {
-	const credential = row.credential;
-	if (credential.type !== "oauth") return `API key #${row.id}`;
+export function logoutCredentialLabel(credential: LogoutCredentialSummary): string {
+	if (credential.type !== "oauth") return `API key #${credential.id}`;
 	const base =
 		nonEmpty(credential.email) ??
 		nonEmpty(credential.accountId) ??
 		nonEmpty(credential.projectId) ??
 		nonEmpty(credential.enterpriseUrl) ??
-		`OAuth credential #${row.id}`;
+		`OAuth credential #${credential.id}`;
 	// Two subscriptions (orgs) can share one email — the org is the only
 	// user-visible way to tell which row a logout will remove.
 	const org = nonEmpty(credential.orgName) ?? nonEmpty(credential.orgId);
 	return org && org !== base ? `${base} (${org})` : base;
 }
 
-function oauthDetail(row: StoredAuthCredential, label: string): string {
-	const credential = row.credential;
-	if (credential.type === "api_key") return `stored API key #${row.id}`;
+function oauthDetail(credential: LogoutCredentialSummary, label: string): string {
+	if (credential.type === "api_key") return `stored API key #${credential.id}`;
 	const parts: string[] = [];
 	const email = nonEmpty(credential.email);
 	const accountId = nonEmpty(credential.accountId);
@@ -39,7 +82,7 @@ function oauthDetail(row: StoredAuthCredential, label: string): string {
 	if (accountId && accountId !== label) parts.push(`account ${accountId}`);
 	if (projectId && projectId !== label) parts.push(`project ${projectId}`);
 	if (enterpriseUrl && enterpriseUrl !== label) parts.push(enterpriseUrl);
-	parts.push(`oauth #${row.id}`);
+	parts.push(`oauth #${credential.id}`);
 	return parts.join(" · ");
 }
 
@@ -80,7 +123,8 @@ export function toLogoutAccounts(
 ): LogoutAccount[] {
 	return credentials
 		.map(row => {
-			const label = oauthLabel(row);
+			const summary = summarizeCredential(row);
+			const label = logoutCredentialLabel(summary);
 			const active =
 				row.credential.type === "oauth"
 					? oauthMatchesActiveIdentity(row, options.activeIdentity)
@@ -89,7 +133,7 @@ export function toLogoutAccounts(
 				credentialId: row.id,
 				provider,
 				label,
-				detail: oauthDetail(row, label),
+				detail: oauthDetail(summary, label),
 				type: row.credential.type,
 				active,
 			} satisfies LogoutAccount;

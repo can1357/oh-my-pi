@@ -44,6 +44,9 @@ function makeStorage(usage: UsageReport, scope = ""): { storage: AuthStorage; bl
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches: () => false,
 		replaceAuthCredentials: async () => [row],
 		upsertAuthCredential: async () => [row],

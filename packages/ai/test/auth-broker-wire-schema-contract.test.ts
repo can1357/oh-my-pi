@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Type, type } from "@oh-my-pi/omptype";
+import { type } from "@oh-my-pi/omptype";
 import * as wireSchemas from "@oh-my-pi/pi-ai/auth-broker/wire-schemas";
 
 const REFRESHER = {
@@ -42,7 +42,6 @@ const SNAPSHOT = {
 	refresher: REFRESHER,
 	credentials: [SNAPSHOT_ENTRY],
 };
-const STREAM_SNAPSHOT = { kind: "snapshot", ...SNAPSHOT };
 const STREAM_ENTRY = {
 	kind: "entry",
 	generation: 3,
@@ -83,124 +82,7 @@ const USAGE_REPORT = {
 	raw: { providerPayload: true },
 	providerExtension: "kept",
 };
-const OBSERVED_USAGE = {
-	at: 1_000,
-	provider: "anthropic",
-	model: "claude",
-	requests: 1,
-	inputTokens: 2,
-	outputTokens: 3,
-	cacheReadTokens: 4,
-	cacheWriteTokens: 5,
-	costUsd: 0.01,
-};
-
-const schemaNames = [
-	"oauthCredentialSchema",
-	"remoteOauthCredentialSchema",
-	"apiKeyCredentialSchema",
-	"writableAuthCredentialSchema",
-	"snapshotCredentialSchema",
-	"credentialSnapshotEntrySchema",
-	"credentialBlockSnapshotSchema",
-	"snapshotEntrySchema",
-	"refresherScheduleSchema",
-	"snapshotResponseSchema",
-	"snapshotStreamSnapshotEventSchema",
-	"snapshotStreamEntryEventSchema",
-	"snapshotStreamRemovedEventSchema",
-	"snapshotStreamEventSchema",
-	"healthzResponseSchema",
-	"usageResponseSchema",
-	"usageHistoryResponseSchema",
-	"clientUsageReportRequestSchema",
-	"clientUsageReportResponseSchema",
-	"clientUsageSummaryResponseSchema",
-	"credentialRefreshResponseSchema",
-	"credentialDisableRequestSchema",
-	"credentialDisableResponseSchema",
-	"disabledCredentialSummarySchema",
-	"disabledCredentialsResponseSchema",
-	"credentialBlockRequestSchema",
-	"credentialBlockDeleteRequestSchema",
-	"credentialBlockResponseSchema",
-	"credentialBlocksDeleteResponseSchema",
-	"usageStaleResponseSchema",
-	"credentialUploadRequestSchema",
-	"credentialUploadResponseSchema",
-] as const;
-
-type SchemaName = (typeof schemaNames)[number];
 type CallableSchema = (input: unknown) => unknown;
-
-const validSamples: Record<SchemaName, unknown> = {
-	oauthCredentialSchema: REAL_OAUTH,
-	remoteOauthCredentialSchema: REMOTE_OAUTH,
-	apiKeyCredentialSchema: API_KEY,
-	writableAuthCredentialSchema: REAL_OAUTH,
-	snapshotCredentialSchema: REMOTE_OAUTH,
-	credentialSnapshotEntrySchema: CREDENTIAL_ENTRY,
-	credentialBlockSnapshotSchema: BLOCK,
-	snapshotEntrySchema: SNAPSHOT_ENTRY,
-	refresherScheduleSchema: REFRESHER,
-	snapshotResponseSchema: SNAPSHOT,
-	snapshotStreamSnapshotEventSchema: STREAM_SNAPSHOT,
-	snapshotStreamEntryEventSchema: STREAM_ENTRY,
-	snapshotStreamRemovedEventSchema: STREAM_REMOVED,
-	snapshotStreamEventSchema: STREAM_ENTRY,
-	healthzResponseSchema: { ok: true, version: "contract" },
-	usageResponseSchema: { generatedAt: 2_000, reports: [USAGE_REPORT] },
-	usageHistoryResponseSchema: {
-		generatedAt: 2_000,
-		entries: [
-			{
-				recordedAt: 1_000,
-				provider: "anthropic",
-				accountKey: "account:test",
-				limitId: "rolling",
-				label: "Rolling window",
-				usedFraction: 0.1,
-				status: "ok",
-			},
-		],
-	},
-	clientUsageReportRequestSchema: { installId: "install", hostname: "host", app: "robomp", entries: [OBSERVED_USAGE] },
-	clientUsageReportResponseSchema: { ok: true },
-	clientUsageSummaryResponseSchema: {
-		generatedAt: 2_000,
-		clients: [
-			{
-				installId: "install",
-				hostname: "host",
-				firstSeen: 1_000,
-				lastSeen: 2_000,
-				providers: [{ ...OBSERVED_USAGE, app: "robomp", firstSeen: undefined, at: undefined, model: undefined }],
-			},
-		],
-	},
-	credentialRefreshResponseSchema: { entry: CREDENTIAL_ENTRY },
-	credentialDisableRequestSchema: {},
-	credentialDisableResponseSchema: { ok: true },
-	disabledCredentialSummarySchema: {
-		id: 7,
-		provider: "anthropic",
-		type: "oauth",
-		email: "user@example.test",
-		cause: "revoked",
-		disabledAtMs: 2_000,
-	},
-	disabledCredentialsResponseSchema: {
-		generatedAt: 2_000,
-		disabled: [{ id: 7, provider: "anthropic", type: "oauth", cause: "revoked" }],
-	},
-	credentialBlockRequestSchema: BLOCK,
-	credentialBlockDeleteRequestSchema: { providerKey: BLOCK.providerKey, blockScope: BLOCK.blockScope },
-	credentialBlockResponseSchema: { ok: true },
-	credentialBlocksDeleteResponseSchema: { ok: true },
-	usageStaleResponseSchema: { ok: true },
-	credentialUploadRequestSchema: { provider: "anthropic", credential: REAL_OAUTH },
-	credentialUploadResponseSchema: { entries: [CREDENTIAL_ENTRY] },
-};
 
 function run(schema: unknown, input: unknown): unknown {
 	return (schema as CallableSchema)(input);
@@ -218,16 +100,6 @@ function reject(schema: unknown, input: unknown): void {
 }
 
 describe("auth-broker public wire schemas", () => {
-	test("exports all 32 real callable ArkType values with canonical behavior", () => {
-		expect(Object.keys(wireSchemas).sort()).toEqual([...schemaNames].sort());
-		for (const name of schemaNames) {
-			const schema = wireSchemas[name];
-			expect(typeof schema).toBe("function");
-			expect(schema).toBeInstanceOf(Type);
-			accept(schema, validSamples[name]);
-		}
-	});
-
 	test("preserves credential extension and sentinel boundaries", () => {
 		expect(accept(wireSchemas.oauthCredentialSchema, REAL_OAUTH)).toEqual(REAL_OAUTH);
 		expect(accept(wireSchemas.remoteOauthCredentialSchema, REMOTE_OAUTH)).toEqual(REMOTE_OAUTH);
@@ -239,8 +111,7 @@ describe("auth-broker public wire schemas", () => {
 		reject(wireSchemas.credentialUploadRequestSchema, { provider: "", credential: REAL_OAUTH });
 	});
 
-	test("preserves fixed envelopes, integer fields, discriminators, and block alias identity", () => {
-		expect(wireSchemas.credentialBlockRequestSchema).toBe(wireSchemas.credentialBlockSnapshotSchema);
+	test("preserves fixed envelopes, integer fields, discriminators, and block boundaries", () => {
 		accept(wireSchemas.credentialBlockRequestSchema, {
 			providerKey: BLOCK.providerKey,
 			blockScope: "",

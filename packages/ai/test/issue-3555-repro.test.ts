@@ -12,6 +12,9 @@ describe("issue 3555 Ollama usage registration", () => {
 			async deleteAuthCredential() {
 				return false;
 			},
+			async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				return false;
 			},

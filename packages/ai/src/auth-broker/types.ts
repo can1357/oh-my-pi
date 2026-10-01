@@ -87,6 +87,18 @@ export interface CredentialDisableResponse {
 	ok: boolean;
 }
 
+/** DELETE /v1/credential/:id response body. */
+export interface CredentialDeleteResponse {
+	ok: boolean;
+}
+
+/** DELETE /v1/credential/:id confirmed missing-row response body. */
+export interface CredentialNotFoundResponse {
+	error: string;
+	code: "credential_not_found";
+	id: number;
+}
+
 /** GET /v1/credentials/disabled response body — tombstones of auto-disabled rows. */
 export interface DisabledCredentialsResponse {
 	generatedAt: number;

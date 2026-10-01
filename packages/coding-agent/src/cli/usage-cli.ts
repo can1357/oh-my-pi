@@ -176,6 +176,7 @@ function collectIdentityStrings(
 	for (const summary of disabled) {
 		add(summary.email);
 		add(summary.accountId);
+		add(summary.projectId);
 		add(summary.orgId);
 		add(summary.orgName);
 	}
@@ -1136,6 +1137,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					...summary,
 					email: maskIdentity(redaction, summary.email),
 					accountId: maskIdentity(redaction, summary.accountId),
+					projectId: maskIdentity(redaction, summary.projectId),
 					orgId: maskIdentity(redaction, summary.orgId),
 					orgName: maskIdentity(redaction, summary.orgName),
 				}));

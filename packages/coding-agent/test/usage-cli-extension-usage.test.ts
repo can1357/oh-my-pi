@@ -62,9 +62,15 @@ afterEach(async () => {
 	await tmp.remove();
 });
 
-async function usageJson(options: { extensions?: string[]; noExtensions?: boolean; provider?: string }): Promise<{
+async function usageJson(options: {
+	extensions?: string[];
+	noExtensions?: boolean;
+	provider?: string;
+	redact?: boolean;
+}): Promise<{
 	reports: Array<{ provider: string; limits: Array<{ id: string }> }>;
 	accountsWithoutUsage: Array<{ provider: string }>;
+	disabledCredentials: Array<{ id: number; projectId?: string }>;
 }> {
 	const chunks: string[] = [];
 	vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
@@ -81,6 +87,26 @@ test("omp usage reports accounts through an extension-registered usage provider 
 		["ext-usage", ["credits"]],
 	]);
 	expect(output.accountsWithoutUsage).toEqual([]);
+});
+
+test("omp usage --json --redact masks project identities on disabled credentials", async () => {
+	const projectId = "sensitive-fixture-project-identity";
+	await authStorage.credentials.set("ext-usage", {
+		type: "oauth",
+		access: "fixture-access",
+		refresh: "fixture-refresh",
+		expires: 0,
+		projectId,
+	});
+	const credential = authStorage.credentials.list("ext-usage")[0]!;
+	await authStorage.credentials.disable(credential.id, "fixture revoked token");
+
+	const output = await usageJson({ noExtensions: true, redact: true });
+	expect(output.disabledCredentials.map(row => row.id)).toEqual([credential.id]);
+	const maskedProjectId = output.disabledCredentials[0]!.projectId;
+	expect(maskedProjectId).toBeString();
+	expect(maskedProjectId).toContain("*");
+	expect(JSON.stringify(output)).not.toContain(projectId);
 });
 
 test("omp usage fetches extension usage without discovering the extension's model catalog", async () => {

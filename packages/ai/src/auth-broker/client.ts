@@ -17,6 +17,7 @@ import type {
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlocksDeleteResponse,
+	CredentialDeleteResponse,
 	CredentialDisableRequest,
 	CredentialDisableResponse,
 	CredentialRefreshResponse,
@@ -37,7 +38,9 @@ import {
 	clientUsageSummaryResponseSchema,
 	credentialBlockResponseSchema,
 	credentialBlocksDeleteResponseSchema,
+	credentialDeleteResponseSchema,
 	credentialDisableResponseSchema,
+	credentialNotFoundResponseSchema,
 	credentialRefreshResponseSchema,
 	credentialUploadResponseSchema,
 	disabledCredentialsResponseSchema,
@@ -55,6 +58,7 @@ const RESPONSE_SCHEMAS = {
 	clientUsageSummaryResponseSchema,
 	credentialBlockResponseSchema,
 	credentialBlocksDeleteResponseSchema,
+	credentialDeleteResponseSchema,
 	credentialDisableResponseSchema,
 	credentialRefreshResponseSchema,
 	credentialUploadResponseSchema,
@@ -88,6 +92,16 @@ export class AuthBrokerError extends Error {
 		this.name = "AuthBrokerError";
 		this.status = opts.status;
 		this.body = opts.body;
+	}
+}
+
+/** Older brokers must be upgraded; disabling a credential is not permanent deletion. */
+export class AuthBrokerCredentialDeleteUnsupportedError extends AuthBrokerError {
+	constructor(status?: number) {
+		super("This auth broker does not support permanent credential deletion. Update the broker and try again.", {
+			status,
+		});
+		this.name = "AuthBrokerCredentialDeleteUnsupportedError";
 	}
 }
 
@@ -335,6 +349,32 @@ export class AuthBrokerClient {
 			schema: "credentialDisableResponseSchema",
 			signal,
 		});
+	}
+
+	async deleteCredential(id: number, signal?: AbortSignal): Promise<CredentialDeleteResponse> {
+		try {
+			return await this.#request<CredentialDeleteResponse>("DELETE", `/v1/credential/${id}`, {
+				schema: "credentialDeleteResponseSchema",
+				signal,
+			});
+		} catch (error) {
+			if (!(error instanceof AuthBrokerError)) throw error;
+			if (error.status === 404) {
+				let raw: unknown;
+				try {
+					raw = JSON.parse(error.body ?? "");
+				} catch {
+					throw new AuthBrokerCredentialDeleteUnsupportedError(error.status);
+				}
+				const missing = credentialNotFoundResponseSchema(raw);
+				if (!(missing instanceof type.errors) && missing.id === id) return { ok: false };
+				throw new AuthBrokerCredentialDeleteUnsupportedError(error.status);
+			}
+			if (error.status === 405 || error.status === 501) {
+				throw new AuthBrokerCredentialDeleteUnsupportedError(error.status);
+			}
+			throw error;
+		}
 	}
 
 	/**

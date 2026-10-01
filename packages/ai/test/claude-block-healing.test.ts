@@ -96,6 +96,9 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches: () => false,
 		replaceAuthCredentials: async () => rows,
 		upsertAuthCredential: async () => rows,

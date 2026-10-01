@@ -64,6 +64,13 @@ class MemoryAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
+	async hardDeleteAuthCredential(id: number): Promise<boolean> {
+		const at = this.#rows.findIndex(row => row.id === id);
+		if (at < 0) return false;
+		this.#rows.splice(at, 1);
+		return true;
+	}
+
 	tryDisableAuthCredentialIfMatches(id: number, expectedData: string, disabledCause: string): boolean {
 		const row = this.#rows.find(entry => entry.id === id && entry.disabledCause === null);
 		if (!row || serializeTestCredential(row.credential) !== expectedData) return false;

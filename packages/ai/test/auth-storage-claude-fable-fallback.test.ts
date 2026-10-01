@@ -25,6 +25,9 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 		async deleteAuthCredential() {
 			return false;
 		},
+		async hardDeleteAuthCredential(_id: number): Promise<boolean> {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

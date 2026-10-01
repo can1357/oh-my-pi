@@ -269,6 +269,12 @@ describe("AuthStorage OAuth refresh race", () => {
 			async deleteAuthCredential() {
 				return false;
 			},
+			async hardDeleteAuthCredential(id: number): Promise<boolean> {
+				const at = rows.findIndex(row => row.id === id);
+				if (at < 0) return false;
+				rows.splice(at, 1);
+				return true;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				return false;
 			},
