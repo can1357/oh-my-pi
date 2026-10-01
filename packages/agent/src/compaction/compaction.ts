@@ -1764,14 +1764,14 @@ export async function compact(
 						});
 				const remote = await withAuth(
 					apiKey,
-					key =>
-						requestCompactionV2Streaming(model, key, request, signal, {
+					(key, headers) =>
+						requestCompactionV2Streaming({ ...model, resolveHeaders: undefined, headers }, key, request, signal, {
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
 							preferWebsockets: summaryOptions.preferWebsockets,
 							codexCompaction: summaryOptions.codexCompaction,
 						}),
-					{ signal },
+					{ signal, headerResolver: model },
 				);
 				preserveData = { ...preserveData, ...storeCompactionV2PreserveData(remote, model) };
 				usedRemoteCompaction = true;
@@ -1809,9 +1809,9 @@ export async function compact(
 			try {
 				const remote = await withAuth(
 					apiKey,
-					key =>
+					(key, headers) =>
 						requestOpenAiRemoteCompaction(
-							model,
+							{ ...model, resolveHeaders: undefined, headers },
 							key,
 							remoteHistory,
 							summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
@@ -1823,7 +1823,7 @@ export async function compact(
 								codexCompaction: summaryOptions.codexCompaction,
 							},
 						),
-					{ signal },
+					{ signal, headerResolver: model },
 				);
 				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
 				usedRemoteCompaction = true;

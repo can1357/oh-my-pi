@@ -1,5 +1,6 @@
 import { executeShell } from "@oh-my-pi/pi-natives";
 import {
+	type CommandCredentialRejector,
 	getCommandHeaderCredentials,
 	setCommandHeaderCredentials,
 	type SentHeaderCommandCredential,
@@ -105,6 +106,10 @@ export function rejectCommandConfig(valueConfig: string | undefined, rejectedVal
 	}
 	commandFailureRetryAt.delete(command);
 }
+
+/** Rejector attached to every config-materialized header record; auth drivers call it on 401. */
+const rejectHeaderCredential: CommandCredentialRejector = credential =>
+	rejectCommandConfig(credential.config, credential.value);
 
 /** Invalidate every command-backed value without cancelling shared in-flight processes. */
 export function invalidateAllCommandConfigs(): void {
@@ -289,7 +294,9 @@ export async function resolveConfigHeaders(
 		resolved[key] = next;
 		if (isCommandConfigValue(config)) commandCredentials.push({ header: key, config, value: next });
 	}
-	return Object.keys(resolved).length > 0 ? setCommandHeaderCredentials(resolved, commandCredentials) : undefined;
+	return Object.keys(resolved).length > 0
+		? setCommandHeaderCredentials(resolved, commandCredentials, rejectHeaderCredential)
+		: undefined;
 }
 
 /**
@@ -334,7 +341,7 @@ export function createConfigHeaderResolver(
 			}
 		}
 		return Object.keys(resolved).length > 0
-			? setCommandHeaderCredentials(resolved, [...commandCredentialsByHeader.values()])
+			? setCommandHeaderCredentials(resolved, [...commandCredentialsByHeader.values()], rejectHeaderCredential)
 			: undefined;
 	};
 }

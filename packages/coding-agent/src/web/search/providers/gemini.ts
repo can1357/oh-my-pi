@@ -577,11 +577,10 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 		result = await withOAuthAccess(
 			params.authStorage,
 			seed.provider,
-			async access => {
+			async (access, configuredHeaders) => {
 				// Derive bearer + projectId from the access this attempt received; a
 				// re-resolved access may omit projectId, in which case the seed's
 				// project is still the right tenant for the credential.
-				const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 				return callGeminiSearch(
 					{
 						accessToken: access.accessToken,
@@ -605,7 +604,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 					params.timeoutMs,
 				);
 			},
-			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
+			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access, headerResolver: params.model },
 		);
 	} else if (params.model.api === "google-generative-ai") {
 		const endpoint = resolveGeminiDeveloperEndpoint(params.model.baseUrl);

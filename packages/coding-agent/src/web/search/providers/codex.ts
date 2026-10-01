@@ -283,13 +283,6 @@ function codexSearchTransport(baseUrl: string, headers: Record<string, string> |
 	};
 }
 
-async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
-	return codexSearchTransport(
-		params.model.baseUrl,
-		await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
-	);
-}
-
 /**
  * Builds HTTP headers for Codex API requests.
  */
@@ -616,11 +609,11 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		result = await withOAuthAccess(
 			params.authStorage,
 			params.model.provider,
-			async access => {
+			async (access, headers) => {
 				// A refreshed/rotated credential can carry a different bearer and
 				// ChatGPT account id than the seed used to select the first attempt.
 				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				const requestTransport = await resolveCodexSearchTransport(params);
+				const requestTransport = codexSearchTransport(params.model.baseUrl, headers);
 				return callCodexSearch({ accessToken: access.accessToken, accountId }, query, {
 					signal: params.signal,
 					timeoutMs: params.timeoutMs,
@@ -631,7 +624,7 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 					transport: requestTransport,
 				});
 			},
-			{ sessionId: params.sessionId, signal: params.signal, seed },
+			{ sessionId: params.sessionId, signal: params.signal, seed, headerResolver: params.model },
 		);
 	}
 

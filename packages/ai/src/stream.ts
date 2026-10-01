@@ -23,6 +23,7 @@ import {
 	getCommandHeaderCredentials,
 	isApiKeyResolver,
 	resolvedApiKeyBearer,
+	rejectCommandHeaderCredentials,
 	resolveNextAuthRetryKey,
 	type ApiKeyResolution,
 	type AuthRetryKeyState,
@@ -944,9 +945,16 @@ export function listProvidersWithEnvKey(): string[] {
 }
 
 const resolvedHeaderResolvers = new WeakMap<object, NonNullable<Model<Api>["resolveHeaders"]>>();
+
+/** Lower-cased header names a caller's `StreamOptions.headers` override; those model values never reach the wire. */
+function overriddenHeaderNames(callerHeaders: Record<string, string> | undefined): ReadonlySet<string> {
+	return new Set(Object.keys(callerHeaders ?? {}).map(header => header.toLowerCase()));
+}
+
 function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
+	callerHeaders: Record<string, string> | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	const resolveHeaders = model.resolveHeaders;
@@ -965,6 +973,11 @@ function withResolvedModelHeaders<TApi extends Api>(
 			resolvedHeaderResolvers.set(resolvedModel, resolveHeaders);
 			const inner = run(resolvedModel);
 			for await (const event of inner) {
+				// The terminal 401 of a static-key request, or of the last retry,
+				// retires the command-backed headers that request sent.
+				if (event.type === "error" && extractStatusFromAssistantError(event.error) === 401) {
+					rejectCommandHeaderCredentials(resolvedModel.headers, overriddenHeaderNames(callerHeaders));
+				}
 				outer.push(event);
 				if (outer.done) return;
 			}
@@ -982,7 +995,9 @@ export function stream<TApi extends Api>(
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
+		return withResolvedModelHeaders(model, options?.signal, options?.headers, resolvedModel =>
+			stream(resolvedModel, context, options),
+		);
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
@@ -1331,7 +1346,7 @@ function streamSimpleRequest<TApi extends Api>(
 	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
 
 	if (model.resolveHeaders) {
-		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
+		return withResolvedModelHeaders(model, requestOptions.signal, requestOptions.headers, resolvedModel =>
 			streamSimpleRequest(resolvedModel, context, requestOptions),
 		);
 	}
@@ -1341,9 +1356,7 @@ function streamSimpleRequest<TApi extends Api>(
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
-		const overriddenHeaderNames = new Set(
-			Object.keys(requestOptions.headers ?? {}).map(header => header.toLowerCase()),
-		);
+		const maskedHeaderNames = overriddenHeaderNames(requestOptions.headers);
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
@@ -1371,7 +1384,7 @@ function streamSimpleRequest<TApi extends Api>(
 				}
 				if (retryState && apiKey !== undefined) {
 					const sentHeaderCredentials = getCommandHeaderCredentials(model.headers).filter(
-						credential => !overriddenHeaderNames.has(credential.header.toLowerCase()),
+						credential => !maskedHeaderNames.has(credential.header.toLowerCase()),
 					);
 					retryState.lastSentCredentials = {
 						apiKey,
@@ -1405,6 +1418,9 @@ function streamSimpleRequest<TApi extends Api>(
 							event.error.errorMessage,
 						)
 					) {
+						if (extractStatusFromAssistantError(event.error) === 401) {
+							rejectCommandHeaderCredentials(model.headers, maskedHeaderNames);
+						}
 						return {
 							error: contextualizeAuthRetryError(model, createAssistantAuthError(event.error)),
 							bufferedEvents,
@@ -1432,6 +1448,7 @@ function streamSimpleRequest<TApi extends Api>(
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
+					if (AIError.status(error) === 401) rejectCommandHeaderCredentials(model.headers, maskedHeaderNames);
 					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
 				}
 				flushBuffered();

@@ -359,6 +359,34 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * Re-mint, without rejecting, the provider-level and current-model header
+	 * commands a failed request did not report sending. A consumer that dispatches
+	 * model headers outside an auth driver still sees a fresh value after a 401.
+	 */
+	#invalidateUnsentHeaderCommands(
+		provider: string,
+		modelId: string | undefined,
+		sentCredentials: SentCredentialSet,
+	): void {
+		const skipped = new Set<string | undefined>([
+			...sentCredentials.commandCredentials.map(credential => credential.config),
+			this.#customProviderApiKeys.get(provider),
+			this.#runtimeProviderApiKeys.get(provider)?.keyConfig,
+		]);
+		const configs = [
+			...(this.#commandConfigsByProvider.get(provider) ?? []),
+			...(this.#runtimeCommandConfigsByProvider.get(provider) ?? []),
+			...(modelId === undefined ? [] : (this.#commandConfigsByProviderModel.get(provider)?.get(modelId) ?? [])),
+			...(modelId === undefined
+				? []
+				: (this.#runtimeCommandConfigsByProviderModel.get(provider)?.get(modelId) ?? [])),
+		];
+		for (const config of new Set(configs)) {
+			if (!skipped.has(config)) invalidateCommandConfig(config);
+		}
+	}
+
 	/** Tag the active command-backed API-key config with its dispatched bearer. */
 	#apiKeyCommandCredentials(provider: string, apiKey: string): readonly SentCommandCredential[] {
 		const configs = [
@@ -1905,7 +1933,11 @@ export class ModelRegistry {
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
 				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
-				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
+				const requestConfig = {
+					...providerConfig,
+					headers: resolvedHeaders,
+					resolveHeaders: (signal?: AbortSignal) => resolveConfigHeaders(providerConfig.headers, signal),
+				};
 				const models = this.#applyProviderModelOverrides(
 					providerId,
 					await discoverModelsByProviderType(requestConfig, this.#discoveryContext()),
@@ -2994,6 +3026,11 @@ export class ModelRegistry {
 		return async context => {
 			if (AIError.status(context.error) === 401 && context.previousSentCredentials) {
 				this.#rejectSentCredentials(context.previousSentCredentials);
+				this.#invalidateUnsentHeaderCommands(
+					provider,
+					typeof target === "string" ? options?.modelId : target.id,
+					context.previousSentCredentials,
+				);
 			}
 			const resolved = await resolve(context);
 			const apiKey = resolvedApiKeyBearer(resolved);

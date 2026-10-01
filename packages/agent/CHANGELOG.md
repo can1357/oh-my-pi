@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote compaction requests send the model's configured headers, and a 401 re-mints command-backed header values instead of resending them.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added

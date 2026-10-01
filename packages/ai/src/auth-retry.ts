@@ -1,3 +1,18 @@
+/**
+ * Central auth-retry drivers: {@link withAuth}, {@link withOAuthAccess}, and
+ * the streaming driver in `stream.ts`.
+ *
+ * No-resend invariant: a command-backed credential that an attempt dispatched,
+ * and that the attempt's response rejected with 401, is never dispatched again,
+ * neither by a refresh, a rotation, nor a later logical operation. Drivers learn
+ * what they dispatched from provenance: an {@link ApiKeyResolver} reports its
+ * command-backed bearer in {@link ResolvedApiKey.commandCredentials}, and every
+ * model-header record carries its command provenance and the rejector that
+ * retires it. Drivers therefore materialize model headers themselves, once per
+ * attempt, and reject that record's command values on a 401 before resolving
+ * the next attempt. A raw string key has no provenance; a caller needing the
+ * guarantee for a command-backed key passes its resolver instead.
+ */
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
@@ -54,19 +69,28 @@ export interface SentCredentialSet {
 	commandCredentials: readonly SentCommandCredential[];
 }
 
-const commandHeaderCredentials = Symbol("commandHeaderCredentials");
+/** Retires one command-backed value after a response rejected it with 401. */
+export type CommandCredentialRejector = (credential: SentCommandCredential) => void;
 
-type HeadersWithCommandCredentials = Record<string, string> & {
-	[commandHeaderCredentials]?: readonly SentHeaderCommandCredential[];
+interface CommandHeaderProvenance {
+	credentials: readonly SentHeaderCommandCredential[];
+	reject: CommandCredentialRejector;
+}
+
+const commandHeaderProvenance = Symbol("commandHeaderProvenance");
+
+type HeadersWithCommandProvenance = Record<string, string> & {
+	[commandHeaderProvenance]?: CommandHeaderProvenance;
 };
 
-/** Attach command provenance to a materialized request-header record. */
+/** Attach command provenance, and the rejector that retires it, to a materialized header record. */
 export function setCommandHeaderCredentials(
 	headers: Record<string, string>,
 	credentials: readonly SentHeaderCommandCredential[],
+	reject: CommandCredentialRejector,
 ): Record<string, string> {
 	if (credentials.length > 0) {
-		Object.defineProperty(headers, commandHeaderCredentials, { value: credentials });
+		Object.defineProperty(headers, commandHeaderProvenance, { value: { credentials, reject } });
 	}
 	return headers;
 }
@@ -76,20 +100,40 @@ export function copyHeadersWithCommandCredentials(
 	headers: Readonly<Record<string, string>> | undefined,
 ): Record<string, string> | undefined {
 	if (!headers) return undefined;
-	return setCommandHeaderCredentials({ ...headers }, getCommandHeaderCredentials(headers));
+	const copy = { ...headers };
+	const provenance = (headers as HeadersWithCommandProvenance)[commandHeaderProvenance];
+	if (provenance) Object.defineProperty(copy, commandHeaderProvenance, { value: provenance });
+	return copy;
 }
 
 /** Read command provenance recorded during this header record's materialization. */
 export function getCommandHeaderCredentials(
 	headers: Readonly<Record<string, string>> | undefined,
 ): readonly SentHeaderCommandCredential[] {
-	return (headers as HeadersWithCommandCredentials | undefined)?.[commandHeaderCredentials] ?? [];
+	return (headers as HeadersWithCommandProvenance | undefined)?.[commandHeaderProvenance]?.credentials ?? [];
 }
 
 /**
- * Source for model headers dispatched by {@link withAuth}. A model's resolver
- * is re-run for every request attempt; a function is useful when the caller
- * owns equivalent registry-backed materialization.
+ * Retire the command-backed values a 401 attempt dispatched from this header
+ * record. Lower-cased names in `maskedHeaderNames` were overridden by the
+ * caller and never reached the wire, so they stay sendable.
+ */
+export function rejectCommandHeaderCredentials(
+	headers: Readonly<Record<string, string>> | undefined,
+	maskedHeaderNames?: ReadonlySet<string>,
+): void {
+	const provenance = (headers as HeadersWithCommandProvenance | undefined)?.[commandHeaderProvenance];
+	if (!provenance) return;
+	for (const credential of provenance.credentials) {
+		if (!maskedHeaderNames?.has(credential.header.toLowerCase())) provenance.reject(credential);
+	}
+}
+
+/**
+ * Source for model headers dispatched by {@link withAuth} and
+ * {@link withOAuthAccess}. A model's resolver is re-run for every request
+ * attempt; a function is useful when the caller owns equivalent
+ * registry-backed materialization.
  */
 export type AuthHeaderResolver =
 	| Model
@@ -107,6 +151,32 @@ async function resolveAuthHeaders(
 				? await headerResolver.resolveHeaders(signal)
 				: headerResolver.headers;
 	return copyHeadersWithCommandCredentials(headers);
+}
+
+type AuthAttemptOutcome<T> = { ok: true; result: T } | { ok: false; error: unknown };
+
+/**
+ * Dispatch one auth attempt with model headers the driver materialized for it.
+ * Materialization runs outside auth classification: nothing was sent, so its
+ * failure propagates unchanged and never consumes a credential retry. A 401
+ * retires the command-backed header values this attempt sent before the driver
+ * resolves another attempt; other auth-classified failures return to the retry
+ * policy, and everything else propagates.
+ */
+async function dispatchAuthAttempt<T>(
+	headerResolver: AuthHeaderResolver | undefined,
+	signal: AbortSignal | undefined,
+	isAuthError: (error: unknown) => boolean,
+	dispatch: (headers: Record<string, string> | undefined) => Promise<T>,
+): Promise<AuthAttemptOutcome<T>> {
+	const headers = await resolveAuthHeaders(headerResolver, signal);
+	try {
+		return { ok: true, result: await dispatch(headers) };
+	} catch (error) {
+		if (AIError.status(error) === 401) rejectCommandHeaderCredentials(headers);
+		if (!isAuthError(error)) throw error;
+		return { ok: false, error };
+	}
 }
 
 /**
@@ -375,19 +445,6 @@ function oauthCredentialIdentity(access: OAuthAccess): string {
 	return access.credentialId !== undefined ? `credential:${access.credentialId}` : `bearer:${access.accessToken}`;
 }
 
-async function runOAuthAttempt<T>(
-	access: OAuthAccess,
-	attempt: (access: OAuthAccess) => Promise<T>,
-	isAuthError: (error: unknown) => boolean,
-): Promise<{ ok: true; result: T } | { ok: false; error: unknown }> {
-	try {
-		return { ok: true, result: await attempt(access) };
-	} catch (error) {
-		if (!isAuthError(error)) throw error;
-		return { ok: false, error };
-	}
-}
-
 /**
  * Runs an auth-protected operation through the central a/b/c retry policy.
  *
@@ -421,7 +478,11 @@ export async function withAuth<T>(
 
 	if (!isApiKeyResolver(key)) {
 		if (key === undefined) throw missingKey();
-		return attempt(key, await resolveAuthHeaders(opts?.headerResolver, signal));
+		const outcome = await dispatchAuthAttempt(opts?.headerResolver, signal, isAuthError, headers =>
+			attempt(key, headers),
+		);
+		if (outcome.ok) return outcome.result;
+		throw outcome.error;
 	}
 
 	const resolver = key;
@@ -436,31 +497,27 @@ export async function withAuth<T>(
 	if (initialKey === undefined) throw missingKey();
 
 	const state = createAuthRetryKeyState(initialKey, initialResolved);
-	const runAttempt = async (apiKey: string): Promise<T> => {
-		const headers = await resolveAuthHeaders(opts?.headerResolver, signal);
-		state.lastSentCredentials = {
-			apiKey,
-			commandCredentials: [...state.lastSentCredentials.commandCredentials, ...getCommandHeaderCredentials(headers)],
-		};
-		return attempt(apiKey, headers);
-	};
-	let lastError: unknown;
-	try {
-		return await runAttempt(initialKey);
-	} catch (error) {
-		if (!isAuthError(error)) throw error;
-		lastError = error;
-	}
+	const runAttempt = (apiKey: string): Promise<AuthAttemptOutcome<T>> =>
+		dispatchAuthAttempt(opts?.headerResolver, signal, isAuthError, headers => {
+			state.lastSentCredentials = {
+				apiKey,
+				commandCredentials: [
+					...state.lastSentCredentials.commandCredentials,
+					...getCommandHeaderCredentials(headers),
+				],
+			};
+			return attempt(apiKey, headers);
+		});
+	let outcome = await runAttempt(initialKey);
+	if (outcome.ok) return outcome.result;
+	let lastError = outcome.error;
 
 	while (true) {
 		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
 		if (nextKey === undefined) break;
-		try {
-			return await runAttempt(nextKey);
-		} catch (error) {
-			if (!isAuthError(error)) throw error;
-			lastError = error;
-		}
+		outcome = await runAttempt(nextKey);
+		if (outcome.ok) return outcome.result;
+		lastError = outcome.error;
 	}
 
 	throw lastError;
@@ -489,6 +546,8 @@ export interface WithOAuthAccessOptions {
 	 */
 	seed?: OAuthAccess;
 	missingAccessMessage?: string;
+	/** Model headers materialized for, and retired by a 401 on, each attempt. */
+	headerResolver?: AuthHeaderResolver;
 }
 
 /**
@@ -515,11 +574,13 @@ export interface WithOAuthAccessOptions {
 export async function withOAuthAccess<T>(
 	storage: OAuthAccessSource,
 	provider: string,
-	attempt: (access: OAuthAccess) => Promise<T>,
+	attempt: (access: OAuthAccess, headers: Record<string, string> | undefined) => Promise<T>,
 	opts?: WithOAuthAccessOptions,
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
 	const { sessionId, signal } = opts ?? {};
+	const runAttempt = (access: OAuthAccess): Promise<AuthAttemptOutcome<T>> =>
+		dispatchAuthAttempt(opts?.headerResolver, signal, isAuthError, headers => attempt(access, headers));
 
 	let lastAccess = opts?.seed ?? (await storage.oauth.access(provider, sessionId, { signal }));
 	if (!lastAccess) {
@@ -534,7 +595,7 @@ export async function withOAuthAccess<T>(
 	let attemptCount = 1;
 	let refreshedCurrent = false;
 	let tokenRefreshReplayUsed = false;
-	let attemptResult = await runOAuthAttempt(lastAccess, attempt, isAuthError);
+	let attemptResult = await runAttempt(lastAccess);
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
@@ -558,7 +619,7 @@ export async function withOAuthAccess<T>(
 			attemptedBearers.add(bearer);
 			attemptCount += 1;
 			lastAccess = next;
-			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+			attemptResult = await runAttempt(next);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
 			continue;
@@ -585,7 +646,7 @@ export async function withOAuthAccess<T>(
 						attemptedBearers.add(bearer);
 						attemptCount += 1;
 						lastAccess = next;
-						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+						attemptResult = await runAttempt(next);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
 						continue;
@@ -623,7 +684,7 @@ export async function withOAuthAccess<T>(
 		attemptCount += 1;
 		lastAccess = next;
 		refreshedCurrent = !directRotation;
-		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+		attemptResult = await runAttempt(next);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
 	}

@@ -5,7 +5,7 @@
  * `discoverModelsByProviderType` with a `DiscoveryContext`; built-in provider
  * discovery lives in pi-catalog's provider-models.
  */
-import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { type ApiKey, type AuthHeaderResolver, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -181,6 +181,12 @@ export interface DiscoveryProviderConfig {
 	api: Api;
 	baseUrl?: string;
 	headers?: Record<string, string>;
+	/**
+	 * Re-materializes `headers` for each authenticated probe attempt, so a 401
+	 * can retire the command-backed values that attempt sent. The registry
+	 * supplies it; without it the static `headers` record is reused.
+	 */
+	resolveHeaders?: (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	discovery: ProviderDiscovery;
@@ -198,6 +204,11 @@ export interface DiscoveryContext {
 	 * central force-refresh/rotate auth-retry policy on 401/usage-limit.
 	 */
 	getBearerApiKeyResolver(provider: string): Promise<ApiKey | undefined>;
+}
+
+/** Header source for an authenticated discovery probe; see {@link DiscoveryProviderConfig.resolveHeaders}. */
+function discoveryHeaderResolver(providerConfig: DiscoveryProviderConfig): AuthHeaderResolver {
+	return providerConfig.resolveHeaders ?? (() => providerConfig.headers);
 }
 
 type OllamaDiscoveredModelMetadata = {
@@ -638,7 +649,9 @@ export async function discoverLlamaCppModels(
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, serverMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, (key, headers) => attempt({ ...headers, Authorization: `Bearer ${key}` }), {
+				headerResolver: discoveryHeaderResolver(providerConfig),
+			})
 		: await attempt(baseHeaders);
 	const models = parseLlamaCppModelList(payload);
 	const discovered: Model<Api>[] = [];
@@ -917,7 +930,9 @@ export async function discoverOpenAIModelsList(
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, nativeMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, (key, headers) => attempt({ ...headers, Authorization: `Bearer ${key}` }), {
+				headerResolver: discoveryHeaderResolver(providerConfig),
+			})
 		: await attempt(baseHeaders);
 	const models = payload.data ?? [];
 	const references = getBundledModelReferenceIndex();
@@ -1058,7 +1073,9 @@ export async function discoverLiteLLMModels(
 	let richModels: ModelSpec<Api>[] | null;
 	try {
 		richModels = apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, (key, headers) => attempt({ ...headers, Authorization: `Bearer ${key}` }), {
+					headerResolver: discoveryHeaderResolver(providerConfig),
+				})
 			: await attempt(baseHeaders);
 	} catch {
 		// The rich-metadata probes failed (auth, timeout, or network). The cheap
@@ -1115,7 +1132,9 @@ export async function discoverProxyModels(
 		});
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const payload = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, (key, headers) => attempt({ ...headers, Authorization: `Bearer ${key}` }), {
+				headerResolver: discoveryHeaderResolver(providerConfig),
+			})
 		: await attempt(baseHeaders);
 	const items = payload.data ?? [];
 	const discovered: Model<Api>[] = [];

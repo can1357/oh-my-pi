@@ -3,10 +3,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { generateImage } from "@oh-my-pi/pi-ai/images";
+import {
+	type CompactionPreparation,
+	compact,
+	createFileOps,
+	DEFAULT_COMPACTION_SETTINGS,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import { TypeSafeJudge } from "@oh-my-pi/pi-ai/judgment";
 import { synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import {
+	type ApiKey,
 	getCommandHeaderCredentials,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
@@ -18,6 +25,7 @@ import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types
 import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
 import { searchOpenAIResponses } from "@oh-my-pi/pi-coding-agent/web/search/providers/openai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
@@ -1297,14 +1305,50 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
 	});
-	type NonStreamingAdapter = {
+	type AdapterEntryPoint = {
 		name: string;
 		api: Model["api"];
 		success: () => Response;
 		run: (model: Model, registry: ModelRegistry, fetch: FetchImpl) => Promise<unknown>;
 	};
 
-	const nonStreamingAdapters: readonly NonStreamingAdapter[] = [
+	function codexSearchSuccess(): Response {
+		return new Response(
+			[
+				`data: ${JSON.stringify({ type: "response.web_search_call.completed", item_id: "search" })}`,
+				"",
+				`data: ${JSON.stringify({
+					type: "response.output_item.done",
+					item: { type: "message", content: [{ type: "output_text", text: "Synthetic answer" }] },
+				})}`,
+				"",
+				`data: ${JSON.stringify({
+					type: "response.completed",
+					response: { id: "search", model: "adapter-model" },
+				})}`,
+				"",
+			].join("\n"),
+			{ headers: { "Content-Type": "text/event-stream" } },
+		);
+	}
+
+	/** One logical streaming operation; an error result rejects with its provider status. */
+	async function streamOnce(model: Model, apiKey: ApiKey, fetch: FetchImpl): Promise<void> {
+		const handle = streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "synthetic", timestamp: 0 }] },
+			{ apiKey, fetch, maxTokens: 16 },
+		);
+		for await (const _event of handle) {
+			// Drain the public stream.
+		}
+		const result = await handle.result();
+		if (result.stopReason === "error") {
+			throw Object.assign(new Error(result.errorMessage), { status: result.errorStatus });
+		}
+	}
+
+	const adapterEntryPoints: readonly AdapterEntryPoint[] = [
 		{
 			name: "image generation",
 			api: "openai-images",
@@ -1332,24 +1376,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		{
 			name: "Codex custom-endpoint search",
 			api: "openai-codex-responses",
-			success: () =>
-				new Response(
-					[
-						`data: ${JSON.stringify({ type: "response.web_search_call.completed", item_id: "search" })}`,
-						"",
-						`data: ${JSON.stringify({
-							type: "response.output_item.done",
-							item: { type: "message", content: [{ type: "output_text", text: "Synthetic answer" }] },
-						})}`,
-						"",
-						`data: ${JSON.stringify({
-							type: "response.completed",
-							response: { id: "search", model: "adapter-model" },
-						})}`,
-						"",
-					].join("\n"),
-					{ headers: { "Content-Type": "text/event-stream" } },
-				),
+			success: codexSearchSuccess,
 			run: (model, registry, fetch) =>
 				searchCodex({
 					query: "synthetic query",
@@ -1395,9 +1422,59 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 					{ apiKey: registry.resolver(model), fetch },
 				),
 		},
+		{
+			name: "image generation with a static key",
+			api: "openai-images",
+			success: () => Response.json({ data: [{ b64_json: Buffer.from("image").toString("base64") }] }),
+			run: (model, _registry, fetch) =>
+				generateImage(model, { prompt: "synthetic image" }, { apiKey: "static-api-key", fetch }),
+		},
+		{
+			name: "speech with a non-registry key resolver",
+			api: "openai-speech",
+			success: () => new Response(new Uint8Array([1]), { headers: { "Content-Type": "audio/mpeg" } }),
+			run: (model, _registry, fetch) =>
+				synthesizeSpeech(
+					model,
+					{ text: "synthetic speech", format: "mp3" },
+					{ apiKey: () => "resolver-key", fetch },
+				),
+		},
+		{
+			name: "Codex OAuth search",
+			api: "openai-codex-responses",
+			success: codexSearchSuccess,
+			run: async (model, registry, fetch) => {
+				const access = spyOn(authStorage.oauth, "access").mockResolvedValue({ accessToken: "oauth-access-token" });
+				try {
+					return await searchCodex({
+						query: "synthetic query",
+						systemPrompt: "synthetic prompt",
+						authStorage,
+						model: { ...model, baseUrl: CODEX_BASE_URL },
+						modelRegistry: registry,
+						fetch,
+					});
+				} finally {
+					access.mockRestore();
+				}
+			},
+		},
+		{
+			name: "streamSimple with a static key",
+			api: "openai-completions",
+			success: okChatCompletionStream,
+			run: (model, _registry, fetch) => streamOnce(model, "static-api-key", fetch),
+		},
+		{
+			name: "streamSimple with a non-registry key resolver",
+			api: "openai-completions",
+			success: okChatCompletionStream,
+			run: (model, _registry, fetch) => streamOnce(model, () => "resolver-key", fetch),
+		},
 	];
 
-	async function assertRejectedHeaderIsNotResent(adapter: NonStreamingAdapter): Promise<void> {
+	async function assertRejectedHeaderIsNotResent(adapter: AdapterEntryPoint): Promise<void> {
 		const tenantFile = path.join(tempDir, `${adapter.api}-tenant.txt`);
 		fs.writeFileSync(tenantFile, "stale-tenant");
 		fs.writeFileSync(
@@ -1436,10 +1513,118 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(sentHeaders.slice(1)).not.toContain("stale-tenant");
 	}
 
-	for (const adapter of nonStreamingAdapters) {
+	for (const adapter of adapterEntryPoints) {
 		test(`never re-dispatches a rejected command header through ${adapter.name}`, () =>
 			assertRejectedHeaderIsNotResent(adapter));
 	}
+
+	/** Provider whose `!command` tenant header prints `stale-tenant` until the first request is rejected. */
+	function writeRotatingTenantProvider(provider: Record<string, unknown>): string {
+		const tenantFile = path.join(tempDir, "tenant.txt");
+		fs.writeFileSync(tenantFile, "stale-tenant");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"adapter-proxy": {
+						apiKey: "static-api-key",
+						headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
+						models: [{ id: "adapter-model", name: "Adapter model" }],
+						...provider,
+					},
+				},
+			}),
+		);
+		return tenantFile;
+	}
+
+	test("a 401 on Bedrock remote compaction re-mints the command header it sent", async () => {
+		const tenantFile = writeRotatingTenantProvider({
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			api: "openai-responses",
+		});
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("adapter-proxy", "adapter-model");
+		if (!model) throw new Error("Expected Bedrock compaction model");
+		const sent: Array<string | null> = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			sent.push(new Headers(init?.headers).get("x-tenant-token"));
+			if (sent.length === 1) {
+				fs.writeFileSync(tenantFile, "fresh-tenant");
+				return new Response("authentication failed", { status: 401, statusText: "Unauthorized" });
+			}
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+		};
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
+		};
+
+		await expect(
+			compact(preparation, model, registry.resolver(model), undefined, undefined, { fetch }),
+		).rejects.toMatchObject({ cause: { status: 401 } });
+		await compact(preparation, model, registry.resolver(model), undefined, undefined, { fetch });
+
+		expect(sent).toEqual(["stale-tenant", "fresh-tenant"]);
+	});
+
+	test("a 401 on authenticated model discovery re-mints the command header it sent", async () => {
+		const tenantFile = writeRotatingTenantProvider({
+			baseUrl: "http://127.0.0.1:8080",
+			api: "openai-completions",
+			discovery: { type: "llama.cpp" },
+		});
+		const sent: Array<string | null> = [];
+		const fetch: FetchImpl = async (input, init) => {
+			if (String(input) !== "http://127.0.0.1:8080/models") return Response.json({}, { status: 404 });
+			sent.push(new Headers(init?.headers).get("x-tenant-token"));
+			if (sent.length === 1) {
+				fs.writeFileSync(tenantFile, "fresh-tenant");
+				return new Response("authentication failed", { status: 401 });
+			}
+			return Response.json({ data: [{ id: "discovered-model" }] });
+		};
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch });
+
+		await registry.refreshProvider("adapter-proxy", "online");
+		await registry.refreshProvider("adapter-proxy", "online");
+
+		expect(sent).toEqual(["stale-tenant", "fresh-tenant"]);
+		expect(registry.find("adapter-proxy", "discovered-model")).toBeDefined();
+	});
+
+	test("a 401 re-mints provider header commands a consumer resolved without reporting them", async () => {
+		const tenantFile = writeRotatingTenantProvider({
+			baseUrl: "https://adapter-proxy.example.com/v1",
+			api: "openai-completions",
+		});
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("adapter-proxy", "adapter-model");
+		if (!model) throw new Error("Expected adapter model");
+		const sent: Array<string | undefined> = [];
+		// An SDK consumer that materializes registry headers itself instead of
+		// handing them to withAuth: the driver cannot know what it sent.
+		const unreportedAttempt = async () => {
+			const headers = await registry.resolveModelHeaders(model);
+			sent.push(headers?.["x-tenant-token"]);
+			if (sent.length === 1) {
+				fs.writeFileSync(tenantFile, "fresh-tenant");
+				throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+			}
+			return "ok";
+		};
+
+		await expect(withAuth(registry.resolver(model), unreportedAttempt)).rejects.toMatchObject({ status: 401 });
+		expect(await withAuth(registry.resolver(model), unreportedAttempt)).toBe("ok");
+
+		expect(sent).toEqual(["stale-tenant", "fresh-tenant"]);
+	});
 
 	type MatrixCredentialType = "apiKey only" | "header only" | "both";
 	type MatrixOutcome = "success" | "final failure";
@@ -1536,7 +1721,9 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			const credential = { header: "x-matrix-header", config: "!matrix-header-command", value };
 			return this.#isRejected(credential)
 				? undefined
-				: setCommandHeaderCredentials({ "x-matrix-header": value }, [credential]);
+				: setCommandHeaderCredentials({ "x-matrix-header": value }, [credential], rejected =>
+						this.#rejected.add(`${rejected.config}\u0000${rejected.value}`),
+					);
 		}
 
 		beginTurn(): void {
@@ -1656,7 +1843,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 								authority.resolve.bind(authority),
 							)
 						: authority.resolve.bind(authority);
-				await withAuth(resolver, apiKey => rejectOrSucceed(apiKey, authority.headers()), {
+				await withAuth(resolver, (apiKey, headers) => rejectOrSucceed(apiKey, headers), {
 					headerResolver: () => authority.headers(),
 				});
 			} catch {
