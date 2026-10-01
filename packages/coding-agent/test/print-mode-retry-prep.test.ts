@@ -64,6 +64,7 @@ function createMockSession(): { session: AgentSession; spies: RetryPrepSpies } {
 		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		waitForAdvisorCatchup: async () => true,
 		dispose: async () => {},
 	} as unknown as AgentSession;
