@@ -27,7 +27,13 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
-import { composeRemoteId, IrcBus, isValidRemoteName, isValidRemoteNamespace, remoteNamespaceOf } from "../../irc/bus";
+import { IrcBus } from "../../irc/bus";
+import {
+	composeRemoteId,
+	isValidRemoteName,
+	isValidRemoteNamespace,
+	remoteNamespaceOf,
+} from "../../registry/remote-id";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";

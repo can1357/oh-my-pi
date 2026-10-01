@@ -289,8 +289,8 @@ export class InternalUrlRouter {
 				: undefined
 			: this.#resourceFallbackHandler(scheme);
 		if (!handler) return null;
-		const url = parseInternalUrl(bare);
 		const spec = handler.spec;
+		const url = parseInternalUrl(bare, spec);
 		if (spec.backing === "file" && handler.locate) {
 			const located = await handler.locate(url, context);
 			if (located !== null) return { kind: "file", url, spec, path: located, sel };
@@ -302,7 +302,11 @@ export class InternalUrlRouter {
 	async locate(input: string, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		const registered = this.#registered(input);
 		if (!registered?.handler.locate) return null;
-		return registered.handler.locate(parseInternalUrl(this.split(registered.url).path), context, options);
+		return registered.handler.locate(
+			parseInternalUrl(this.split(registered.url).path, registered.handler.spec),
+			context,
+			options,
+		);
 	}
 
 	/**
@@ -323,7 +327,10 @@ export class InternalUrlRouter {
 		const spec = registered?.handler.spec;
 		if (registered?.handler.locate && spec?.immutable && spec.backing !== "remote") {
 			try {
-				await registered.handler.resolve(parseInternalUrl(this.split(registered.url).path), context);
+				await registered.handler.resolve(
+					parseInternalUrl(this.split(registered.url).path, registered.handler.spec),
+					context,
+				);
 			} catch (error) {
 				if (context?.signal?.aborted) throw error;
 				throw new ToolError(`Cannot ${action} ${input}: ${error instanceof Error ? error.message : String(error)}`);
@@ -353,7 +360,7 @@ export class InternalUrlRouter {
 		if (!registered?.handler.spec.linkable || !registered.handler.locateSync) return undefined;
 		let parsed: InternalUrl;
 		try {
-			parsed = parseInternalUrl(this.split(registered.url).path);
+			parsed = parseInternalUrl(this.split(registered.url).path, registered.handler.spec);
 		} catch {
 			return undefined;
 		}
@@ -378,13 +385,15 @@ export class InternalUrlRouter {
 	async enumerate(input: string, context?: ResolveContext): Promise<Array<{ url: string; content: string }> | null> {
 		const registered = this.#registered(input);
 		if (!registered?.handler.enumerate) return null;
-		return registered.handler.enumerate(parseInternalUrl(registered.url), context);
+		return registered.handler.enumerate(parseInternalUrl(registered.url, registered.handler.spec), context);
 	}
 
 	/** Parsed URL and scheme spec of a registered `input`, for the `write` tool's routing and gates; undefined for non-URLs. */
 	writeTarget(input: string): { url: InternalUrl; spec: SchemeSpec } | undefined {
 		const registered = this.#registered(input);
-		return registered && { url: parseInternalUrl(registered.url), spec: registered.handler.spec };
+		return (
+			registered && { url: parseInternalUrl(registered.url, registered.handler.spec), spec: registered.handler.spec }
+		);
 	}
 
 	/**
@@ -405,7 +414,7 @@ export class InternalUrlRouter {
 		if (!registered) return "write";
 		const policy = registered.handler.spec.write;
 		if (!policy) return { tier: "write", policy: "deny", reason: `${registered.scheme}:// URLs are read-only` };
-		return policy.tier(parseInternalUrl(registered.url), content, session);
+		return policy.tier(parseInternalUrl(registered.url, registered.handler.spec), content, session);
 	}
 
 	/** Max spec.readTier over every registered `scheme://` occurring ANYWHERE in `text` (substring, fail-closed for delimited paths). Default "read". */
@@ -465,8 +474,11 @@ export class InternalUrlRouter {
 	}
 
 	#route(input: string, allowResourceFallback = false): { parsed: InternalUrl; handler: ProtocolHandler } {
-		const parsed = parseInternalUrl(this.normalize(input));
-		const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+		const normalized = this.normalize(input);
+		// Scheme first so the parse below can honour the handler's authority spec; a non-URI input
+		// still surfaces the parser's own `Invalid URL` error.
+		const scheme =
+			extractUriScheme(normalized) ?? parseInternalUrl(normalized).protocol.replace(/:$/, "").toLowerCase();
 		const handler =
 			this.#handlers.get(scheme) ?? (allowResourceFallback ? this.#resourceFallbackHandler(scheme) : undefined);
 		if (!handler) {
@@ -475,7 +487,7 @@ export class InternalUrlRouter {
 				.join(", ");
 			throw new Error(`Unknown protocol: ${scheme}://\nSupported: ${available || "none"}`);
 		}
-		return { parsed, handler };
+		return { parsed: parseInternalUrl(normalized, handler.spec), handler };
 	}
 
 	/** Resolve an internal URL through its registered protocol handler. */

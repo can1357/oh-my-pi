@@ -673,7 +673,10 @@ export class InternalUrlFilesystem {
 		const locate = route.handler?.locate;
 		if (!locate) return Promise.resolve(null);
 		// Nodes keep one type: a bare `skill://<name>` / `memory://root` is always its directory.
-		return locate.call(route.handler, parseInternalUrl(url), this.#context, { directory: true, create });
+		return locate.call(route.handler, parseInternalUrl(url, route.handler?.spec), this.#context, {
+			directory: true,
+			create,
+		});
 	}
 
 	/** The session scratch root always exists, like a mount point. */

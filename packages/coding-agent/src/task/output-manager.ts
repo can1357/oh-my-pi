@@ -12,7 +12,7 @@
  */
 import * as fs from "node:fs/promises";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
-import { REMOTE_ID_PREFIX } from "../registry/agent-registry";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 
 /**
  * Manages agent output ID allocation to ensure uniqueness.

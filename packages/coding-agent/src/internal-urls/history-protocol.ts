@@ -20,8 +20,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
+import { AgentRegistry, isLocalSession, isMessageablePeer } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { remoteNamespaceOf } from "../registry/remote-id";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import {
 	bashExecutionToText,
@@ -50,10 +51,17 @@ import type {
 /** Registry lookup for a `history://<id>` URL, bound to the caller's root. */
 interface RefLookup {
 	ref?: AgentRef;
-	/** Registered, non-advisor refs. */
+	/** Registered messageable peers (local sessions plus remote proxies; advisors excluded). */
 	visible: AgentRef[];
 	/** Caller root's artifact dir, scanned first by on-disk fallbacks. */
 	preferredArtifactDir?: string;
+}
+
+/** Model-facing explanation for a `history://@ns/name` read: remote peers have no local transcript. */
+function remotePeerHasNoTranscript(agentId: string): Error {
+	return new Error(
+		`${agentId} is a remote peer: it runs in another process and has no local transcript. Message it with \`write agent://${agentId}\`; list peers with \`read history://\`.`,
+	);
 }
 
 /** True for `history://current/<path>`; throws unless the route is exactly `current/full`. */
@@ -289,7 +297,13 @@ export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[])
  */
 export class HistoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "history";
-	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: false, linkable: true };
+	readonly spec: SchemeSpec = {
+		backing: "virtual",
+		selectors: "lines",
+		agentIdAuthority: true,
+		immutable: false,
+		linkable: true,
+	};
 
 	promptDoc(): string {
 		return historyPromptDoc.trim();
@@ -303,7 +317,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		if (isCurrentFullRoute(url)) return null;
 		const agentId = url.rawHost || url.hostname;
-		if (!agentId) return null;
+		if (!agentId || remoteNamespaceOf(agentId) !== undefined) return null;
 		const { ref, preferredArtifactDir } = await this.#lookup(agentId, context);
 		if (ref?.sessionFile) return ref.sessionFile;
 		if (ref?.session) return null;
@@ -328,9 +342,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// same-named transcript restored by another root's scan never shadows
 		// this caller's own on-disk transcript.
 		const preferredArtifactDir = rootSessionFile?.slice(0, -".jsonl".length);
-		// Advisor transcripts are observability-only, and remote proxies (murmur-q00p) have no local
-		// transcript — neither belongs in the agent-facing history. Hide both from index/lookup/completions.
-		const visible = registry.list().filter(ref => isLocalSession(ref.kind));
+		// Advisor transcripts are observability-only and never listed. Remote proxies (murmur-q00p) are
+		// listed so a caller can discover and spell its cross-process peers, but they have no local
+		// transcript: `ref` resolves local sessions only (a remote id is rejected before lookup).
+		const visible = registry.list().filter(ref => isMessageablePeer(ref.kind));
 		return { visible, preferredArtifactDir };
 	}
 
@@ -383,6 +398,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				size: Buffer.byteLength(content, "utf-8"),
 			};
 		}
+		// Prefix-authoritative, like IrcBus routing: an `@ns/name` id is remote whether or not a proxy
+		// ref is registered, so never fall through to the local transcript/disk lookups.
+		if (remoteNamespaceOf(agentId) !== undefined) throw remotePeerHasNoTranscript(agentId);
 
 		const { ref, visible, preferredArtifactDir } = await this.#lookup(agentId, context);
 		if (!ref) {
@@ -487,10 +505,16 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		for (const entry of entries) {
 			lines.push(`| ${entry.id} | ${entry.status} | ${entry.kind} | ${entry.parent} | ${entry.lastActivity} |`);
 		}
-		lines.push("", "Read a transcript with `read history://<id>`.");
+		lines.push("", "Read a transcript with `read history://<id>`. Message an agent with `write agent://<id>`.");
+		if (refs.some(ref => ref.kind === "remote")) {
+			lines.push(
+				"`remote` rows are peers in other processes, addressed as `@<namespace>/<name>`; they have no local transcript.",
+			);
+		}
 		return `${lines.join("\n")}\n`;
 	}
 
+	/** Readable transcripts only: remote peers complete under agent:// (write targets), not here. */
 	async complete(): Promise<UrlCompletion[]> {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();

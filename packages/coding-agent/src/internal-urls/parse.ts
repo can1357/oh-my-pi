@@ -9,7 +9,8 @@
  * All code that parses internal URLs (router, protocol handlers, tools)
  * MUST use this function instead of calling `new URL()` directly.
  */
-import type { InternalUrl } from "./types";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
+import type { InternalUrl, SchemeSpec } from "./types";
 
 const SCHEME_HOST_RE = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)/i;
 const PATHNAME_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*(\/[^?#]*)?/i;
@@ -49,8 +50,12 @@ export function extractUriScheme(input: string): string | undefined {
  *
  * Handles URLs where `new URL()` would fail (e.g., `skill://plugin:name`
  * where the colon is not a port separator).
+ *
+ * `spec` is the target scheme's declared facts when the caller has resolved one:
+ * a scheme whose authority is an agent id ({@link SchemeSpec.agentIdAuthority})
+ * gets a remote id `@<namespace>/<name>` folded back into one host token.
  */
-export function parseInternalUrl(input: string): InternalUrl {
+export function parseInternalUrl(input: string, spec?: Pick<SchemeSpec, "agentIdAuthority">): InternalUrl {
 	const hostMatch = input.match(SCHEME_HOST_RE);
 	const pathMatch = input.match(PATHNAME_RE);
 
@@ -94,10 +99,29 @@ export function parseInternalUrl(input: string): InternalUrl {
 	} catch {
 		// Leave rawHost as-is if decoding fails.
 	}
+	let rawPathname = pathMatch?.[1] ?? parsed.pathname;
+
+	// A remote agent id `@<namespace>/<name>` carries one `/` inside what is logically the host, so
+	// `agent://@ns/name` would otherwise parse as host `@ns` + path `/name`. The `@` prefix is reserved
+	// for that id space (REMOTE_ID_PREFIX), so for a scheme whose authority is an agent id fold the
+	// first path segment back into the host; anything after it stays the path. Scheme-gated because
+	// `ssh://@host/...` is an (invalid) empty userinfo, not a remote id.
+	if (spec?.agentIdAuthority && rawHost.startsWith(REMOTE_ID_PREFIX) && rawPathname.length > 1) {
+		const segmentEnd = rawPathname.indexOf("/", 1);
+		let segment = segmentEnd === -1 ? rawPathname.slice(1) : rawPathname.slice(1, segmentEnd);
+		try {
+			segment = decodeURIComponent(segment);
+		} catch {
+			// Leave the segment as-is if decoding fails.
+		}
+		rawHost = `${rawHost}/${segment}`;
+		rawPathname = segmentEnd === -1 ? "" : rawPathname.slice(segmentEnd);
+		parsed.pathname = rawPathname;
+	}
 
 	const result = parsed as InternalUrl;
 	result.rawHost = rawHost;
-	result.rawPathname = pathMatch?.[1] ?? parsed.pathname;
+	result.rawPathname = rawPathname;
 	result.rawHref = input;
 	return result;
 }

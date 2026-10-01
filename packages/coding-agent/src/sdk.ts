@@ -159,13 +159,8 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import {
-	type AgentKind,
-	type AgentRef,
-	AgentRegistry,
-	MAIN_AGENT_ID,
-	REMOTE_ID_PREFIX,
-} from "./registry/agent-registry";
+import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { REMOTE_ID_PREFIX } from "./registry/remote-id";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,

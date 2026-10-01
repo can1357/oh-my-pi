@@ -21,12 +21,6 @@ export type { AgentStatus, AgentMetricsSummary };
 export const BROADCAST_ID = "all";
 
 /**
- * Reserved leading marker for the cross-process REMOTE agent id space (`@<namespace>/<name>`, see
- * `src/irc/bus.ts`). A LOCAL agent id (`main`/`sub`) may never begin with it, so local and remote id
- * spaces are disjoint by construction — no per-id reserved-name or clobber guards are needed.
- */
-export const REMOTE_ID_PREFIX = "@";
-/**
  * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents) — messageable
  *   peers with a locally-managed session.
  * - `advisor`: a passive review transcript, persisted for usage attribution + Agent Hub

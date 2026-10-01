@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -175,5 +177,52 @@ describe("write agent:// messaging", () => {
 			"non-empty content",
 		);
 		expect(received.get("Scout")?.map(message => message.body)).toEqual(["from device", "from plan"]);
+	});
+
+	it("routes agent://@ns/name to the namespace transport: the /name segment is the id, not a JSON path", async () => {
+		// A leaf root (cannot spawn) has only the bridge's remote peers; the write gate must still open.
+		const settings = Settings.isolated({ "task.maxRecursionDepth": 0 });
+		const seen: Array<{ to: string; toName: string | undefined }> = [];
+		IrcBus.global().setRemoteTransport(
+			"cluster-a",
+			{
+				async send(message, opts) {
+					seen.push({ to: message.to, toName: opts?.toName });
+					return { to: message.to, outcome: "injected" };
+				},
+			},
+			"ext:test",
+		);
+		const session = makeSession();
+		session.settings = settings;
+		const tool = new WriteTool(session);
+
+		const result = await tool.execute("remote", { path: "agent://@cluster-a/leia", content: "hello leia" });
+		expect(result.isError).toBeFalsy();
+		expect(result.content[0]).toMatchObject({ text: "Delivered to @cluster-a/leia." });
+		expect(seen).toEqual([{ to: "@cluster-a/leia", toName: "leia" }]);
+
+		// Anything after the id is still a JSON-path suffix and still rejected.
+		await expect(tool.execute("suffix", { path: "agent://@cluster-a/leia/result", content: "oops" })).rejects.toThrow(
+			"JSON-path suffix",
+		);
+		// Reading a remote peer explains what it is instead of a not-found scan.
+		await expect(
+			InternalUrlRouter.instance().resolve("agent://@cluster-a/leia", { sessionFile: undefined }),
+		).rejects.toThrow(/@cluster-a\/leia is a remote peer[\s\S]*write agent:\/\/@cluster-a\/leia/);
+
+		// Remote peers are write targets, so they tab-complete under agent:// (not history://, where a
+		// completed remote id could only ever resolve to the no-transcript error).
+		registry.register({
+			id: "@cluster-a/leia",
+			displayName: "leia",
+			kind: "remote",
+			session: null,
+			status: "running",
+		});
+		const agentCompletions = await new AgentProtocolHandler().complete();
+		expect(agentCompletions.map(completion => completion.value)).toContain("@cluster-a/leia");
+		const historyCompletions = await new HistoryProtocolHandler().complete();
+		expect(historyCompletions.map(completion => completion.value)).not.toContain("@cluster-a/leia");
 	});
 });
