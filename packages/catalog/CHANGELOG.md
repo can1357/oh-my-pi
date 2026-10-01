@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- OpenRouter's model list now reflects the live `/models` endpoint: models the endpoint no longer serves are no longer selectable ([#14026](https://github.com/can1357/oh-my-pi/pull/14026) by [@HarutoHiroki](https://github.com/HarutoHiroki)).
+
 ## [18.4.9] - 2026-10-01
 
 ### Fixed

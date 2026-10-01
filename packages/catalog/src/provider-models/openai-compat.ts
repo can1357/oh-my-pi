@@ -3307,6 +3307,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		// Namespace the refreshed pseudo-API cache separately so those rows cannot
 		// override bundled `api: "openrouter"` models during online-if-uncached startup.
 		cacheProviderId: resolveModelCacheProviderId("openrouter"),
+		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
@@ -3503,6 +3504,14 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 						fetch: config?.fetch,
 					}),
 				]);
+
+			// A failed /models must fail the whole discovery: under dynamicModelsAuthoritative a partial roster prunes all bundled chat rows.
+			if (chatModels === null) {
+				logger.warn("OpenRouter chat model discovery unavailable; preserving bundled catalog", {
+					endpoint: `${baseUrl}/models`,
+				});
+				return null;
+			}
 
 			if (imageModels === null) {
 				logger.warn("OpenRouter image model discovery unavailable; preserving chat model discovery", {

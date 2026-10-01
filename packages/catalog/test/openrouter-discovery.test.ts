@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -236,10 +237,14 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		const result = await resolveProviderModels(
 			{
 				...openrouterModelManagerOptions({
-					fetch: async input =>
-						String(input).endsWith("/models?output_modalities=decisions")
-							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
-							: new Response(null, { status: 404 }),
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/models?output_modalities=decisions")) {
+							return Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] });
+						}
+						if (url.endsWith("/models")) return Response.json(CHAT_PAYLOAD);
+						return new Response(null, { status: 404 });
+					},
 				}),
 				staticModels: [],
 				cacheDbPath: ":memory:",
@@ -253,5 +258,58 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			contextWindow: null,
 			maxTokens: null,
 		});
+	});
+
+	it("keeps bundled chat rows when /models fails but another endpoint succeeds", async () => {
+		const options = openrouterModelManagerOptions({
+			fetch: async input => {
+				const url = String(input);
+				if (url.endsWith("/embeddings/models")) return Response.json(EMBEDDING_PAYLOAD);
+				return new Response(null, { status: 500 });
+			},
+		});
+
+		expect(await options.fetchDynamicModels?.()).toBeNull();
+
+		const result = await resolveProviderModels(
+			{
+				...options,
+				staticModels: getBundledModels("openrouter"),
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+		expect(result.models.some(model => model.id === "openai/gpt-5.5")).toBe(true);
+		expect(result.models.filter(model => (model.kind ?? "chat") === "chat").length).toBeGreaterThan(0);
+	});
+
+	it("prunes stale bundled chat rows when the live roster succeeds, keeping seeded non-chat rows", async () => {
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					fetch: async input =>
+						String(input) === "https://openrouter.ai/api/v1/models"
+							? Response.json({
+									data: [
+										{
+											id: "live/fresh-chat",
+											name: "Live Fresh Chat",
+											supported_parameters: ["tools"],
+											architecture: { input_modalities: ["text"] },
+										},
+									],
+								})
+							: new Response(null, { status: 404 }),
+				}),
+				staticModels: getBundledModels("openrouter"),
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.some(model => model.id === "openai/gpt-5.5")).toBe(false);
+		expect(result.models.some(model => model.id === "live/fresh-chat")).toBe(true);
+		expect(result.models.some(model => model.id === "openai/whisper-1")).toBe(true);
+		expect(result.models.some(model => model.id === "~typesafe/jev-latest")).toBe(true);
 	});
 });
