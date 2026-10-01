@@ -41,6 +41,18 @@ function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
+/**
+ * Name a command by its program alone, for diagnostics and logs. Arguments and
+ * leading `NAME=value` assignments can carry credentials, so they are elided.
+ */
+function commandProgram(command: string): string {
+	const words = command.split(/\s+/);
+	const index = words.findIndex(word => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+	if (index === -1) return "…";
+	const program = words[index].replace(/^["']+|["']+$/g, "");
+	return words.length > 1 ? `${program} …` : program;
+}
+
 /** Withhold a command's cached value while a 401 mark awaits a successful run. */
 function handOutValue(command: string, value: string | undefined): string | undefined {
 	return commandRecoveryPending.has(command) && value === commandResultCache.get(command) ? undefined : value;
@@ -80,9 +92,9 @@ export function invalidateAllCommandConfigs(): void {
 }
 
 /**
- * Describe why a command-backed value resolves to nothing: the command, and how
- * its latest run failed. Undefined once a sendable command value has succeeded,
- * or when the value is not a command.
+ * Describe why a command-backed value resolves to nothing: the command's
+ * program (never its arguments), and how its latest run failed. Undefined once
+ * a sendable command value has succeeded, or when the value is not a command.
  */
 export function describeCommandConfigFailure(valueConfig: string | undefined): string | undefined {
 	if (!isCommandConfigValue(valueConfig)) return undefined;
@@ -90,7 +102,7 @@ export function describeCommandConfigFailure(valueConfig: string | undefined): s
 	const failure = commandFailure.get(command);
 	if (failure === undefined) return undefined;
 	if (handOutValue(command, commandResultCache.get(command)) !== undefined) return undefined;
-	return `\`${command}\` ${failure}`;
+	return `\`${commandProgram(command)}\` ${failure}`;
 }
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
@@ -132,6 +144,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 		const lastGood = commandResultCache.get(command);
 		const sendableLastGood = handOutValue(command, lastGood);
 		logger.warn("config: !command value resolution failed", {
+			command: commandProgram(command),
 			failure: run.failure,
 			keptPreviousValue: sendableLastGood !== undefined,
 			awaitingRecovery: lastGood !== undefined && sendableLastGood === undefined,

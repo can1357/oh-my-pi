@@ -2999,7 +2999,7 @@ export class ModelRegistry {
 			const resolved = await resolve(context);
 			if (resolvedApiKeyBearer(resolved) !== undefined || context.error !== undefined) return resolved;
 			const failure = describeCommandConfigFailure(this.#customProviderApiKeys.get(provider));
-			if (failure) throw new AIError.CommandConfigResolutionError(`API key command ${failure}`);
+			if (failure) throw new AIError.CommandConfigResolutionError(provider, `${provider} apiKey command ${failure}`);
 			return resolved;
 		};
 	}

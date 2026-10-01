@@ -40,16 +40,6 @@ export function failedTrackingCommand(counterFile: string): string {
 	);
 }
 
-/** Command whose first run exits 1 with no output; later runs print `<key>-<run number>`. */
-export function failOnceCommand(counterFile: string, key: string): string {
-	if (process.platform !== "win32") {
-		return `printf 1 >> ${shellQuote(counterFile)}; n=$(wc -c < ${shellQuote(counterFile)}); [ $n -le 1 ] && exit 1; printf %s ${shellQuote(key)}-$n`;
-	}
-	return nodeScript(
-		`const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");const n=fs.readFileSync(${JSON.stringify(counterFile)}, "utf8").length;if(n<=1)process.exit(1);process.stdout.write(${JSON.stringify(key)}+"-"+n);`,
-	);
-}
-
 /** Credential helper that mints a new value on every run: `<prefix>-<run number>`. */
 export function mintingCommand(counterFile: string, prefix: string): string {
 	if (process.platform !== "win32") {
@@ -57,14 +47,6 @@ export function mintingCommand(counterFile: string, prefix: string): string {
 	}
 	return nodeScript(
 		`const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");const n=fs.readFileSync(${JSON.stringify(counterFile)}, "utf8").length;process.stdout.write(${JSON.stringify(prefix)}+"-"+n);`,
-	);
-}
-
-/** Command emits a file's synthetic stdout before failing; callers must never surface it. */
-export function noisyFailedCommand(stdoutFile: string): string {
-	if (process.platform !== "win32") return `cat ${shellQuote(stdoutFile)}; exit 1`;
-	return nodeScript(
-		`const fs=require("node:fs");process.stdout.write(fs.readFileSync(${JSON.stringify(stdoutFile)}, "utf8"));process.exit(1);`,
 	);
 }
 

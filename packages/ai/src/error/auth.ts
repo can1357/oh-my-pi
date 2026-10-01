@@ -19,12 +19,15 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
-/** A configured `!command` credential could not mint a safe API key. */
-export class CommandConfigResolutionError extends Error {
-	constructor(message: string) {
-		super(message);
+/**
+ * A configured `!command` API key could not mint a servable value. A
+ * {@link MissingApiKeyError}, so callers that fall back past a provider with no
+ * usable key keep doing so; the message names what failed.
+ */
+export class CommandConfigResolutionError extends MissingApiKeyError {
+	constructor(provider: string, message: string) {
+		super(provider, message);
 		this.name = "CommandConfigResolutionError";
-		attach(this, create(Flag.AuthFailed));
 	}
 }
 

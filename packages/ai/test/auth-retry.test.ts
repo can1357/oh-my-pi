@@ -163,7 +163,10 @@ describe("withAuth", () => {
 		try {
 			await withAuth(
 				() => {
-					throw new CommandConfigResolutionError("API key command `synthetic` exited with status 1");
+					throw new CommandConfigResolutionError(
+						"synthetic",
+						"synthetic apiKey command `synthetic` exited with status 1",
+					);
 				},
 				async () => "never",
 			);

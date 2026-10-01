@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	invalidateAllCommandConfigs,
@@ -19,8 +21,6 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	failedTrackingCommand,
-	failOnceCommand,
-	noisyFailedCommand,
 	okChatCompletionStream,
 	refreshGateFetch,
 	stdoutCommand,
@@ -276,10 +276,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await resolveConfigValue(config)).toBeUndefined();
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	});
-	test("withAuth preserves a ModelRegistry command diagnostic without command stdout", async () => {
-		const stdoutFile = path.join(tempDir, "command-stdout.txt");
-		fs.writeFileSync(stdoutFile, "synthetic-command-stdout");
-		const command = noisyFailedCommand(stdoutFile);
+
+	test("a key command diagnostic names the provider, field and program, never its arguments or stdout", async () => {
+		// A bootstrap credential passed as an argument must not leave models.yml.
+		const script = "process.stdout.write('synthetic-command-stdout');process.exit(3)";
+		const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)} --token=SYNTHETIC-ARGUMENT-TOKEN`;
 		fs.writeFileSync(
 			modelsPath,
 			JSON.stringify({
@@ -296,20 +297,51 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
+		const warn = spyOn(piUtils.logger, "warn");
+		let requests = 0;
+		const fetch: FetchImpl = async () => {
+			requests++;
+			return okChatCompletionStream();
+		};
 
-		let failure: unknown;
+		let withAuthFailure: unknown;
+		let streamError: string | undefined;
+		let logged = "";
 		try {
-			await withAuth(registry.resolver(model), async () => "unexpected");
-		} catch (error) {
-			failure = error;
+			try {
+				await withAuth(registry.resolver(model), async () => "unexpected");
+			} catch (error) {
+				withAuthFailure = error;
+			}
+			const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+			const handle = streamSimple(model, context, { apiKey: registry.resolver(model), fetch, maxTokens: 16 });
+			try {
+				for await (const _event of handle) {
+					// drain
+				}
+				streamError = (await handle.result()).errorMessage;
+			} catch (error) {
+				streamError = (error as Error).message;
+			}
+		} finally {
+			logged = JSON.stringify(warn.mock.calls);
+			warn.mockRestore();
 		}
-		expect(failure).toBeInstanceOf(Error);
-		expect((failure as Error).message).toContain(command);
-		expect((failure as Error).message).toContain("status 1");
-		expect((failure as Error).message).not.toContain("synthetic-command-stdout");
+
+		expect(withAuthFailure).toBeInstanceOf(MissingApiKeyError);
+		const withAuthMessage = (withAuthFailure as Error).message;
+		expect(withAuthMessage).toContain("custom-proxy apiKey command `");
+		expect(withAuthMessage).toContain("exited with status 3");
+		expect(streamError).toContain("exited with status 3");
+		expect(logged).toContain("config: !command value resolution failed");
+		for (const surfaced of [withAuthMessage, streamError, logged]) {
+			expect(surfaced).not.toContain("SYNTHETIC-ARGUMENT-TOKEN");
+			expect(surfaced).not.toContain("synthetic-command-stdout");
+		}
+		expect(requests).toBe(0);
 	});
 
-	test("a first mint that fails once succeeds on the request retry without a pre-send command run", async () => {
+	test("prompt() reports a key command that never mints as an assistant error and sends nothing", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(
@@ -319,7 +351,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 					"custom-proxy": {
 						baseUrl: "https://custom-proxy.example.com/v1",
 						api: "openai-completions",
-						apiKey: `!${failOnceCommand(counterFile, "minted-key")}`,
+						apiKey: `!${failedTrackingCommand(counterFile)}`,
 						models: [{ id: "custom-model", name: "Custom Model" }],
 					},
 				},
@@ -346,22 +378,27 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			skipPythonPreflight: true,
 			toolNames: [],
 		});
-		const preSendLookup = spyOn(registry, "getApiKey");
-		const authorizations: Array<string | undefined> = [];
-		const recordingFetch: FetchImpl = async (_url, init) => {
-			authorizations.push(((init?.headers ?? {}) as Record<string, string>).Authorization);
+		const requests: string[] = [];
+		const recordingFetch: FetchImpl = async input => {
+			requests.push(String(input));
 			return okChatCompletionStream();
 		};
 		session.agent.streamFn = (streamModel, context, options) =>
 			streamSimple(streamModel, context, { ...options, fetch: recordingFetch });
+		let last: AgentMessage | undefined;
 		try {
 			await session.prompt("hi");
+			last = session.agent.state.messages.at(-1);
 		} finally {
 			await session.dispose();
 		}
 
-		expect(preSendLookup).not.toHaveBeenCalled();
-		expect(authorizations).toEqual(["Bearer minted-key-2"]);
+		if (last?.role !== "assistant") throw new Error("Expected the turn to end with an assistant message");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toContain("custom-proxy apiKey command `");
+		expect(last.errorMessage).toContain("exited with status 1");
+		expect(requests).toEqual([]);
+		// Two bounded first-mint attempts at the request boundary, none before it.
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	}, 20_000);
 

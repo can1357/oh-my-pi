@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A failing, empty, or timed-out `!command` API key or header keeps its previous value through a 30-second retry backoff instead of becoming an empty key; after a 401 the command runs again before its value is reused, and a first mint that fails names the command and exit status
+- A failing, empty, or timed-out `!command` API key or header keeps its previous value through a 30-second retry backoff instead of becoming an empty key; after a 401 the command runs again before its value is reused. A key command that cannot mint is reported by provider, program (never its arguments) and exit status, and `prompt()` now returns it as an assistant error instead of throwing "No API key found"
 
 ## [18.4.6] - 2026-10-01
 

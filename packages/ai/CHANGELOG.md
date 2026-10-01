@@ -4,7 +4,7 @@
 
 ### Added
 
-- `CommandConfigResolutionError`, which `withAuth` rethrows from the initial key resolution so a failing `!command` credential reports its command and exit status; other resolver failures still map to missing-key errors
+- `CommandConfigResolutionError`, a `MissingApiKeyError` that `withAuth` rethrows from the initial key resolution so a failing `!command` API key reports its provider, program and exit status; other resolver failures still map to plain missing-key errors
 
 ## [18.4.6] - 2026-10-01
 

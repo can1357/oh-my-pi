@@ -11,6 +11,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveSpeechCandidates, ttsTool } from "@oh-my-pi/pi-coding-agent/tools/tts";
 import { ttsClient } from "@oh-my-pi/pi-coding-agent/tts/tts-client";
+import { failedTrackingCommand } from "../helpers/command-config";
 
 function requireModel(provider: GeneratedProvider, id: string): Model {
 	const model = getBundledModel(provider, id);
@@ -186,5 +187,44 @@ describe("tts speech chain execution", () => {
 		});
 		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(true);
 		expect(fs.existsSync(path.join(tempDir, "voice.mp3"))).toBe(false);
+	});
+
+	test("advances past a cloud candidate whose !command API key cannot mint", async () => {
+		const keyRuns = path.join(tempDir, "key-runs.txt");
+		fs.writeFileSync(keyRuns, "");
+		const modelsPath = path.join(tempDir, "models.yml");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({ providers: { xai: { apiKey: `!${failedTrackingCommand(keyRuns)}` } } }),
+		);
+		const settings = Settings.isolated();
+		const registry = new ModelRegistry(authStorage, modelsPath, { settings });
+		expect(resolveSpeechCandidates(settings, registry, true).map(candidate => candidate.model)).toEqual([xai, local]);
+		const localSynthesis = spyOn(ttsClient, "synthesize").mockResolvedValue({
+			pcm: new Float32Array([0, 0.5, -0.5]),
+			sampleRate: 24_000,
+		});
+		let cloudRequests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			cloudRequests++;
+			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+		};
+
+		const result = await ttsTool.execute(
+			"tts-key-command",
+			{ text: "Fall back past the key", language: "en", output_path: "voice.mp3" },
+			undefined,
+			createContext(settings, registry, tempDir, fetchImpl),
+		);
+
+		expect(result.isError).not.toBe(true);
+		expect(result.details).toMatchObject({ backend: "local-inference", codec: "wav" });
+		expect(localSynthesis).toHaveBeenCalledWith("kokoro", "Fall back past the key", {
+			voice: "af_heart",
+			signal: undefined,
+		});
+		// The xai candidate was tried: its key command ran its two first-mint attempts, and nothing was sent.
+		expect(fs.readFileSync(keyRuns, "utf8")).toBe("11");
+		expect(cloudRequests).toBe(0);
 	});
 });
