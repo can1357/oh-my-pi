@@ -2145,7 +2145,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| {
 					result: TruncationResult;
 					options: {
-						direction: "head";
+						direction: "head" | "middle";
 						startLine?: number;
 						totalFileLines?: number;
 						nextOffset?: number | null;
