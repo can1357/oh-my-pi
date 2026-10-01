@@ -1,6 +1,11 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
-import { resolvedApiKeyBearer, type SentCommandCredential, type SentCredentialSet } from "@oh-my-pi/pi-ai/auth-retry";
+import {
+	copyHeadersWithCommandCredentials,
+	resolvedApiKeyBearer,
+	type SentCommandCredential,
+	type SentCredentialSet,
+} from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
@@ -2882,9 +2887,7 @@ export class ModelRegistry {
 	async resolveModelHeaders(model: Model<Api>, signal?: AbortSignal): Promise<Record<string, string> | undefined> {
 		return model.resolveHeaders
 			? await model.resolveHeaders(signal)
-			: model.headers
-				? { ...model.headers }
-				: undefined;
+			: copyHeadersWithCommandCredentials(model.headers);
 	}
 
 	#isKeylessProvider(provider: string): boolean {

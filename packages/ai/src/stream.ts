@@ -18,6 +18,7 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
+	copyHeadersWithCommandCredentials,
 	createAuthRetryKeyState,
 	getCommandHeaderCredentials,
 	isApiKeyResolver,
@@ -956,7 +957,11 @@ function withResolvedModelHeaders<TApi extends Api>(
 		try {
 			const headers = await untilAborted(signal, () => resolveHeaders(signal));
 			signal?.throwIfAborted();
-			const resolvedModel = { ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined };
+			const resolvedModel = {
+				...model,
+				resolveHeaders: undefined,
+				headers: copyHeadersWithCommandCredentials(headers),
+			};
 			resolvedHeaderResolvers.set(resolvedModel, resolveHeaders);
 			const inner = run(resolvedModel);
 			for await (const event of inner) {
@@ -1336,6 +1341,9 @@ function streamSimpleRequest<TApi extends Api>(
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
+		const overriddenHeaderNames = new Set(
+			Object.keys(requestOptions.headers ?? {}).map(header => header.toLowerCase()),
+		);
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
@@ -1358,17 +1366,20 @@ function streamSimpleRequest<TApi extends Api>(
 					const resolveHeaders = resolvedHeaderResolvers.get(model);
 					if (resolveHeaders) {
 						const headers = await untilAborted(signal, () => resolveHeaders(signal));
-						model.headers = headers ? { ...headers } : undefined;
+						model.headers = copyHeadersWithCommandCredentials(headers);
 					}
 				}
 				if (retryState && apiKey !== undefined) {
+					const sentHeaderCredentials = getCommandHeaderCredentials(model.headers).filter(
+						credential => !overriddenHeaderNames.has(credential.header.toLowerCase()),
+					);
 					retryState.lastSentCredentials = {
 						apiKey,
 						commandCredentials: [
 							...(typeof resolvedCredentials === "string"
 								? []
 								: (resolvedCredentials?.commandCredentials ?? [])),
-							...getCommandHeaderCredentials(model.headers),
+							...sentHeaderCredentials,
 						],
 					};
 				}

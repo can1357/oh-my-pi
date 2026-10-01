@@ -11,6 +11,7 @@ import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	rejectCommandConfig,
+	resolveConfigHeaders,
 	resolveConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -185,6 +186,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(headers?.["X-Api-Key"]).toBe("cmd-header");
 		}
 		expect(await registry.getApiKey(models[0])).toBe("cmd-api-key");
+	});
+
+	test("materialized command headers remain valid Fetch headers", async () => {
+		const headers = await resolveConfigHeaders({ "x-command-token": `!${stdoutCommand("synthetic-header")}` });
+		expect(new Headers(headers).get("x-command-token")).toBe("synthetic-header");
 	});
 
 	test("modelOverrides headers resolve from command stdout", async () => {
@@ -822,6 +828,62 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(seen.slice(1).every(request => request.tenant !== "stale-tenant")).toBe(true);
 	});
 
+	test("a caller header override does not reject the masked command header", async () => {
+		const bearerFile = path.join(tempDir, "bearer.txt");
+		const tenantFile = path.join(tempDir, "tenant.txt");
+		const tenantCounter = path.join(tempDir, "tenant-counter.txt");
+		fs.writeFileSync(bearerFile, "stale-bearer");
+		fs.writeFileSync(tenantFile, "stale-tenant");
+		fs.writeFileSync(tenantCounter, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${stdoutFileCommand(bearerFile)}`,
+						headers: { "x-tenant-token": `!${trackedTokenCommand(tenantFile, tenantCounter)}` },
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		const seen: Array<{ auth?: string; tenant?: string }> = [];
+		const fetch: FetchImpl = async (_url, init) => {
+			const headers = (init?.headers ?? {}) as Record<string, string>;
+			seen.push({ auth: headers.Authorization, tenant: headers["x-tenant-token"] });
+			if (seen.length === 1) {
+				fs.writeFileSync(bearerFile, "fresh-bearer");
+				fs.writeFileSync(tenantFile, "FAIL");
+				return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+			}
+			return okChatCompletionStream();
+		};
+		const streamHandle = streamSimple(
+			model,
+			{ systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{
+				apiKey: registry.resolver(model),
+				fetch,
+				headers: { "x-tenant-token": "caller-token" },
+				maxTokens: 16,
+			},
+		);
+		for await (const _event of streamHandle) {
+			// drain
+		}
+		expect((await streamHandle.result()).stopReason).not.toBe("error");
+		expect(seen).toEqual([
+			{ auth: "Bearer stale-bearer", tenant: "caller-token" },
+			{ auth: "Bearer fresh-bearer", tenant: "caller-token" },
+		]);
+		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
+	});
+
 	test("401 refreshes a command-backed custom model header and retries with the fresh value", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");
 		const tenantFile = path.join(tempDir, "tenant.txt");
@@ -1257,9 +1319,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		#stage = 0;
 		#current: MatrixResolution | undefined;
 		#lastDispatched: MatrixSentCredentials | undefined;
+		#lastRejectedCredentials: string | undefined;
 		#sent: MatrixSentCredentials[] = [];
 		#rejected = new Set<string>();
 		#contexts: Array<{ lastChance: boolean; hadError: boolean }> = [];
+		#forcedLastChance = false;
+		#usedSiblingRotation = false;
 		#rejectionCount = 0;
 		#turnCommandRuns = 0;
 		#contractFailure: string | undefined;
@@ -1343,11 +1408,20 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 					this.#contractFailure ??= "the retry driver returned credentials from a different attempt";
 					return undefined;
 				}
-				for (const credential of previous.commandCredentials) {
-					this.#rejected.add(`${credential.config}\u0000${credential.value}`);
+				const serializedCredentials = JSON.stringify(previous.commandCredentials);
+				if (serializedCredentials !== this.#lastRejectedCredentials) {
+					for (const credential of previous.commandCredentials) {
+						this.#rejected.add(`${credential.config}\u0000${credential.value}`);
+					}
+					this.#lastRejectedCredentials = serializedCredentials;
+					this.#rejectionCount += 1;
+					this.#stage += 1;
 				}
-				this.#rejectionCount += 1;
-				this.#stage += 1;
+				if (context.lastChance && this.retryPath === "sibling rotation") this.#usedSiblingRotation = true;
+				if (this.retryPath !== "normal force-refresh" && !context.lastChance && !this.#forcedLastChance) {
+					this.#forcedLastChance = true;
+					return { apiKey: previous.apiKey, commandCredentials: [] };
+				}
 				if (this.outcome === "final failure" && this.#stage >= this.consecutive401s) return undefined;
 			}
 			this.#current = this.#resolution();
@@ -1387,8 +1461,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			if (!this.#contexts[0] || this.#contexts[0].hadError || this.#contexts[0].lastChance) {
 				throw new Error("the initial resolution did not use the normal retry context");
 			}
-			if (this.#rejectionCount >= 2 && !this.#contexts.some(context => context.lastChance)) {
-				throw new Error("a second 401 never reached the lastChance retry path");
+			if (this.retryPath !== "normal force-refresh" && this.#rejectionCount > 0 && !this.#forcedLastChance) {
+				throw new Error("the requested lastChance path was not exercised");
+			}
+			if (this.retryPath === "sibling rotation" && this.#rejectionCount > 0 && !this.#usedSiblingRotation) {
+				throw new Error("the requested sibling rotation path was not exercised");
 			}
 			if (
 				this.remint === "fresh value" &&

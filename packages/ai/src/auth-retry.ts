@@ -65,12 +65,17 @@ export function setCommandHeaderCredentials(
 	credentials: readonly SentHeaderCommandCredential[],
 ): Record<string, string> {
 	if (credentials.length > 0) {
-		Object.defineProperty(headers, commandHeaderCredentials, {
-			enumerable: true,
-			value: credentials,
-		});
+		Object.defineProperty(headers, commandHeaderCredentials, { value: credentials });
 	}
 	return headers;
+}
+
+/** Copy materialized headers without exposing command provenance on the wire. */
+export function copyHeadersWithCommandCredentials(
+	headers: Readonly<Record<string, string>> | undefined,
+): Record<string, string> | undefined {
+	if (!headers) return undefined;
+	return setCommandHeaderCredentials({ ...headers }, getCommandHeaderCredentials(headers));
 }
 
 /** Read command provenance recorded during this header record's materialization. */
