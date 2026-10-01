@@ -146,12 +146,12 @@ export async function resolveApiKeyOnce(
 	key: ApiKey | undefined,
 	signal?: AbortSignal,
 	onResolved?: (resolved: ApiKeyResolution) => void,
-): Promise<string | undefined> {
+): Promise<ApiKeyResolution> {
 	if (key === undefined) return undefined;
 	if (isApiKeyResolver(key)) {
 		const resolved = await key({ lastChance: false, error: undefined, signal });
 		onResolved?.(resolved);
-		return resolvedApiKeyBearer(resolved);
+		return resolved;
 	}
 	return key;
 }
@@ -383,7 +383,10 @@ async function runOAuthAttempt<T>(
  */
 export async function withAuth<T>(
 	key: ApiKey | undefined,
-	attempt: (key: string) => Promise<T>,
+	attempt: (
+		key: string,
+		recordSentCredentials?: (credentials: readonly SentCommandCredential[]) => void,
+	) => Promise<T>,
 	opts?: { isAuthError?: (error: unknown) => boolean; signal?: AbortSignal; missingKeyMessage?: string },
 ): Promise<T> {
 	const isAuthError = opts?.isAuthError ?? isAuthRetryableError;
@@ -407,9 +410,16 @@ export async function withAuth<T>(
 	if (initialKey === undefined) throw missingKey();
 
 	const state = createAuthRetryKeyState(initialKey, initialResolved);
+	const runAttempt = (apiKey: string): Promise<T> =>
+		attempt(apiKey, commandCredentials => {
+			state.lastSentCredentials = {
+				apiKey,
+				commandCredentials: [...state.lastSentCredentials.commandCredentials, ...commandCredentials],
+			};
+		});
 	let lastError: unknown;
 	try {
-		return await attempt(initialKey);
+		return await runAttempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
@@ -419,7 +429,7 @@ export async function withAuth<T>(
 		const nextKey = await resolveNextAuthRetryKey(state, resolver, lastError, signal);
 		if (nextKey === undefined) break;
 		try {
-			return await attempt(nextKey);
+			return await runAttempt(nextKey);
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;

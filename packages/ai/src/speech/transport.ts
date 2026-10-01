@@ -1,7 +1,7 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
-import { withAuth } from "../auth-retry";
+import { getCommandHeaderCredentials, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { SPEECH_FORMAT_MIME_TYPES, type SpeechFormat, type SpeechOptions, type SpeechResult } from "./types";
 
@@ -24,8 +24,9 @@ export async function postSpeechRequest(
 	const label = `${model.provider}/${model.id}`;
 	const audio = await withAuth(
 		options.apiKey,
-		async key => {
+		async (key, recordSentCredentials) => {
 			const configuredHeaders = model.resolveHeaders ? await model.resolveHeaders(signal) : model.headers;
+			recordSentCredentials?.(getCommandHeaderCredentials(configuredHeaders));
 			const response = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}${path}`, {
 				method: "POST",
 				headers: {

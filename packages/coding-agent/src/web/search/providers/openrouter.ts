@@ -1,4 +1,5 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { getCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../types";
 import { asRecord } from "@oh-my-pi/pi-utils";
 import { SearchProviderError } from "../../../web/search/types";
@@ -176,8 +177,9 @@ export async function searchOpenRouterGrounded(params: SearchParams): Promise<Se
 	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	const response = await withAuth(
 		keyOrResolver,
-		async apiKey => {
+		async (apiKey, recordSentCredentials) => {
 			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+			recordSentCredentials?.(getCommandHeaderCredentials(configuredHeaders));
 			const httpResponse = await (params.fetch ?? fetch)(
 				`${params.model.baseUrl.replace(/\/+$/, "")}/chat/completions`,
 				{

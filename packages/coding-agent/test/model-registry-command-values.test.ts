@@ -3,7 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
-import { type ApiKeyResolveContext, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import {
+	getCommandHeaderCredentials,
+	resolveApiKeyOnce,
+	seedApiKeyResolver,
+	setCommandHeaderCredentials,
+	type ApiKeyResolveContext,
+	withAuth,
+} from "@oh-my-pi/pi-ai/auth-retry";
 import type { Context, FetchImpl, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -1289,7 +1296,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	type MatrixOutcome = "success" | "final failure";
 	type MatrixRetryPath = "normal force-refresh" | "lastChance" | "sibling rotation";
 	type MatrixRemint = "fresh value" | "reprint rejected value" | "failure";
-	type MatrixEntryPoint = "streamSimple" | "withAuth";
+	type MatrixEntryPoint = "streamSimple" | "withAuth" | "preflightThenSeed";
 
 	interface MatrixCommandCredential {
 		config: string;
@@ -1360,18 +1367,13 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 					? []
 					: [{ config: `!matrix-${kind}-command`, value } satisfies MatrixCommandCredential];
 			});
-			if (
-				commandCredentials.length !== this.#commands().length ||
-				commandCredentials.some(credential => this.#isRejected(credential))
-			) {
-				return undefined;
-			}
-			const apiKey =
-				commandCredentials.find(credential => credential.config === "!matrix-apiKey-command")?.value ??
-				`carrier-${this.#stage}`;
+			const apiKeyCredentials = commandCredentials.filter(
+				credential => credential.config === "!matrix-apiKey-command",
+			);
+			if (apiKeyCredentials.some(credential => this.#isRejected(credential))) return undefined;
 			return {
-				apiKey,
-				commandCredentials,
+				apiKey: apiKeyCredentials[0]?.value ?? `carrier-${this.#stage}`,
+				commandCredentials: apiKeyCredentials,
 				...(this.retryPath === "sibling rotation" && this.#contexts.at(-1)?.lastChance
 					? { afterSiblingWait: true }
 					: {}),
@@ -1381,7 +1383,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		headers(): Record<string, string> | undefined {
 			if (this.credentialType === "apiKey only") return undefined;
 			const value = this.#commandValue("header");
-			return value === undefined ? undefined : { "x-matrix-header": value };
+			if (!value) return undefined;
+			const credential = { header: "x-matrix-header", config: "!matrix-header-command", value };
+			return this.#isRejected(credential)
+				? undefined
+				: setCommandHeaderCredentials({ "x-matrix-header": value }, [credential]);
 		}
 
 		beginTurn(): void {
@@ -1429,16 +1435,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		}
 
 		dispatch(apiKey: string, headers?: Record<string, string> | Headers): MatrixSentCredentials {
-			const sent = this.#current;
-			if (!sent || sent.apiKey !== apiKey) {
+			const current = this.#current;
+			if (!current || current.apiKey !== apiKey) {
 				throw new Error("the transport received a credential that was not materialized");
 			}
-			const expectedHeader = this.#commandValue("header");
-			const actualHeader =
-				headers instanceof Headers ? (headers.get("x-matrix-header") ?? undefined) : headers?.["x-matrix-header"];
-			if (this.credentialType !== "apiKey only" && actualHeader !== expectedHeader) {
-				throw new Error("the transport received headers from a different credential materialization");
-			}
+			const provenanceHeaders = headers instanceof Headers ? this.headers() : headers;
+			const sent = {
+				apiKey,
+				commandCredentials: [...current.commandCredentials, ...getCommandHeaderCredentials(provenanceHeaders)],
+			};
 			if (sent.commandCredentials.some(credential => this.#isRejected(credential))) {
 				throw new Error("the transport received a command value previously rejected by a 401");
 			}
@@ -1493,9 +1498,20 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			return Promise.resolve("ok");
 		};
 		authority.beginTurn();
-		if (entryPoint === "withAuth") {
+		if (entryPoint === "withAuth" || entryPoint === "preflightThenSeed") {
 			try {
-				await withAuth(authority.resolve.bind(authority), apiKey => rejectOrSucceed(apiKey, authority.headers()));
+				const resolver =
+					entryPoint === "preflightThenSeed"
+						? seedApiKeyResolver(
+								await resolveApiKeyOnce(authority.resolve.bind(authority)),
+								authority.resolve.bind(authority),
+							)
+						: authority.resolve.bind(authority);
+				await withAuth(resolver, (apiKey, recordSentCredentials) => {
+					const headers = authority.headers();
+					recordSentCredentials?.(getCommandHeaderCredentials(headers));
+					return rejectOrSucceed(apiKey, headers);
+				});
 			} catch {
 				// The matrix intentionally includes final 401 and command-mint failures.
 			}
@@ -1556,7 +1572,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const outcomes: readonly MatrixOutcome[] = ["success", "final failure"];
 		const retryPaths: readonly MatrixRetryPath[] = ["normal force-refresh", "lastChance", "sibling rotation"];
 		const remints: readonly MatrixRemint[] = ["fresh value", "reprint rejected value", "failure"];
-		const entryPoints: readonly MatrixEntryPoint[] = ["streamSimple", "withAuth"];
+		const entryPoints: readonly MatrixEntryPoint[] = ["streamSimple", "withAuth", "preflightThenSeed"];
 		const failures: string[] = [];
 		let combinations = 0;
 
@@ -1596,7 +1612,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 		}
 
-		expect(combinations).toBe(324);
+		expect(combinations).toBe(486);
 		if (failures.length > 0)
 			throw new Error(`Failed ${failures.length} of ${combinations} matrix combinations:\n${failures.join("\n")}`);
 	}, 60_000);

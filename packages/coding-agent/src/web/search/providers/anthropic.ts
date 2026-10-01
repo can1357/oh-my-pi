@@ -19,6 +19,7 @@ import {
 	stripClaudeToolPrefix,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
+import { getCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { $env } from "@oh-my-pi/pi-utils";
@@ -329,9 +330,10 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 	const plan = planQuery(params.query, parsed);
 	const response = await withAuth(
 		keyOrResolver,
-		async key => {
+		async (key, recordSentCredentials) => {
 			const auth = buildAnthropicAuthConfig(key, params.model.baseUrl);
 			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+			recordSentCredentials?.(getCommandHeaderCredentials(configuredHeaders));
 			// Mirror the main Messages path: OAuth requests need a Claude-Code-shaped
 			// metadata.user_id (`{session_id, account_uuid?, device_id}`) so the
 			// CC billing header + system fingerprint installed by

@@ -1,4 +1,5 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { getCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import type { XAIHttpTransport } from "../../../lib/xai-http";
 import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../types";
@@ -429,14 +430,16 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 	const resultCap = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 	const response = await withAuth(
 		keyOrResolver,
-		async key => {
+		async (key, recordSentCredentials) => {
+			const headers = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+			recordSentCredentials?.(getCommandHeaderCredentials(headers));
 			const requestTransport: XAIHttpTransport = {
 				// XAI_BASE_URL never receives official OAuth credentials: neither an OAuth-origin
 				// credential nor an OAuth access-token bearer leaves the bundled endpoint.
 				baseURL: officialOAuthCredential
 					? params.model.baseUrl
 					: (resolveXaiBaseUrl(params.model.provider, params.model.baseUrl, key) ?? params.model.baseUrl),
-				headers: await params.modelRegistry.resolveModelHeaders(params.model, params.signal),
+				headers,
 			};
 			return callXAIResponses(key, params, requestTransport);
 		},

@@ -5,6 +5,7 @@
  * SearchResponse shape used by the web search tool.
  */
 import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { resolveFirecrawlUrl } from "../../firecrawl";
@@ -165,11 +166,12 @@ export async function searchFirecrawl(params: SearchParams): Promise<SearchRespo
 	});
 	const numResults = clampNumResults(firecrawlParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 
-	const resolvedKey = await resolveApiKeyOnce(keyResolver, params.signal);
+	const resolvedCredential = await resolveApiKeyOnce(keyResolver, params.signal);
+	const resolvedKey = resolvedApiKeyBearer(resolvedCredential);
 	let data: FirecrawlSearchResponse;
 	if (resolvedKey) {
-		// Reuse the preflight credential for the initial authenticated attempt.
-		const seededResolver = seedApiKeyResolver(resolvedKey, keyResolver);
+		// Reuse the full preflight resolution for the initial authenticated attempt.
+		const seededResolver = seedApiKeyResolver(resolvedCredential, keyResolver);
 		data = await withAuth(seededResolver, key => callFirecrawlSearch(key, firecrawlParams), {
 			signal: params.signal,
 		});

@@ -1,4 +1,5 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { getCommandHeaderCredentials } from "@oh-my-pi/pi-ai/auth-retry";
 import { asRecord } from "@oh-my-pi/pi-utils";
 import {
 	type SearchCitation,
@@ -227,8 +228,9 @@ export async function searchOpenAIResponses(params: SearchParams): Promise<Searc
 	const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 	return withAuth(
 		keyOrResolver,
-		async apiKey => {
+		async (apiKey, recordSentCredentials) => {
 			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+			recordSentCredentials?.(getCommandHeaderCredentials(configuredHeaders));
 			const headers = new Headers(configuredHeaders);
 			headers.set("Authorization", `Bearer ${apiKey}`);
 			headers.set("Content-Type", "application/json");
