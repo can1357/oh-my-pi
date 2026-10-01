@@ -91,5 +91,15 @@
 		"pageBg": "#f0fdfa",
 		"cardBg": "#e6f7f5",
 		"infoBg": "#e0f5e8"
+	},
+	"terminal": {
+		"background": "userMsgBg",
+		"foreground": "#2f3d3b",
+		"chrome": "selectedBg",
+		"widget": "#ffffff",
+		"ansi": [
+			"#36403f", "#be4e4f", "#288653", "#997010", "#3a76a7", "#9932cc", "#0d837d", "darkGray",
+			"#778180", "red", "#21a05f", "#b18516", "blue", "#ba55d3", "#009d95", "selectedBg"
+		]
 	}
 }

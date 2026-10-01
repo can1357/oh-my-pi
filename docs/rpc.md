@@ -127,6 +127,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
 - `{ id?, type: "remove_queued_message", message: string, queue: "steering" | "followUp" }`
+- `{ id?, type: "promote_queued_message", message: string }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
@@ -140,6 +141,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
+- `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
 - `{ id?, type: "get_tree" }`
@@ -150,6 +152,8 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_event_filter", events: string[] | null, messageUpdates?: "full" | "delta" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+- `{ id?, type: "cancel_subagent", subagentId: string }`
+- `{ id?, type: "steer_subagent", subagentId: string, message: string }`
 
 ### Model
 
@@ -244,6 +248,33 @@ authorization URL. Prompts marked `secret: true` are always rejected with a
 failed `login` response directing the user to the terminal UI; no ordinary
 `input` request is emitted. RPC does not negotiate secret-input support.
 
+### Word prediction
+
+- `{ id?, type: "predict_word", text: string, cursor: number }` → `data: { suffix: string | null }`
+- `{ id?, type: "predict_word_feedback", text: string, cursor: number, suggestion: string, accepted: boolean }`
+
+Composer ghost text for hosts that render their own input box. `text` is the
+whole draft and `cursor` a UTF-16 offset into it. The server applies the same
+gates as the terminal editor (the cursor must sit at the end of its line and
+end a prose word; code, paths, and slash commands get nothing) and answers from the engine selected by
+`spelling.autocomplete`; `off` always answers `suffix: null`.
+
+`predict_word` is dispatched concurrently like `bash`, so a slow prediction
+never delays other commands; match responses on `id`. Per session the server
+keeps one engine request in flight: a request arriving while one runs waits,
+and a newer one replaces it, answering the replaced request `suffix: null`.
+Hosts may send on every keystroke; only the newest draft reaches the engine.
+
+The first request may take seconds (worst case about two minutes) while the
+shared prediction daemon starts and loads its engine. When the daemon cannot
+start or answer, `predict_word` fails (`success: false`), and keeps failing
+fast for about 30 seconds while the daemon is backed off. Treat failures as
+"no ghost text" rather than surfacing them per keystroke.
+
+Send `predict_word_feedback` with the `text` and `cursor` at which a
+suggestion was shown: `accepted: true` when the user took it, `false` when
+they typed past it. Feedback tunes the engine's learned state.
+
 ## Response Schema
 
 All command results use `RpcResponse`:
@@ -255,7 +286,9 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 
 ### `prompt` payload
 
-`prompt` is acknowledged after the command is accepted, not after a model turn finishes:
+`prompt` is acknowledged once the message is admitted — an idle turn has started for it, it has been pushed onto the steer/follow-up/aside queue while the agent is busy, or it has been routed to a registered extension command (before that command's handler runs) — not after a model turn finishes. Admission runs any image normalization first (and, for a text-only model with vision description enabled, the vision-description call), so those complete before the acknowledgement. The vision-description call is capped at 20 seconds, which keeps the acknowledgement inside the bundled clients' 30-second request timeout; past the cap the image is still saved and the model is told its description is unavailable. The same applies to a `/skill:` invocation sent through `prompt`. A prompt that settles without ever being admitted (dropped by an `abort`, or failing first) is acknowledged once it settles. Gating the acknowledgement does not change completion: the prompt still completes exactly once, through `data.agentInvoked: false` or its `prompt_result` (below).
+
+`prompt` starts after previously received ordinary commands, such as `new_session` or `set_model`, have completed. Its admission then runs in the background: the RPC server keeps handling later commands — `abort`, `steer`, `follow_up`, `get_state`, and so on — without waiting for slow image normalization or vision description. An `abort` that lands while a prompt's images are still being prepared cancels the vision-description call and drops the prompt, whether it would have started an idle turn or been queued with `streamingBehavior`.
 
 ```json
 {
@@ -325,6 +358,23 @@ The check and removal are synchronous: `data.removed: false` means no matching u
 A removal request may hide the chip or restore its draft only after `removed: true`; normal delivery still removes chips through queue snapshots. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
 
 The official Python client exposes `remove_queued_message(message, queue) -> RemoveQueuedMessageResult`; inspect its `.removed` boolean rather than the result object's truthiness.
+
+### `promote_queued_message` payload
+
+Move the first matching user-authored follow-up to the end of the steering queue:
+
+```json
+{"id":"req_3","type":"promote_queued_message","message":"Use the existing parser"}
+{"id":"req_3","type":"response","command":"promote_queued_message","success":true,"data":{"promoted":true}}
+```
+
+The command moves the existing queued message, including its attachments and contiguous preceding hidden user companions, without reprocessing or duplicating it. `message` matches exactly as for `remove_queued_message`, so agent-authored entries never match. With duplicate text, each request moves only the first matching follow-up; repeating a successful request can move another occurrence.
+
+`data.promoted: false` means no matching user follow-up is pending at dispatch time (for example, it was already delivered). Non-string `message` values produce an error response. Existing steering, follow-up, and interrupt modes still apply; promotion does not abort the model stream or guarantee cancellation of running tools. While the agent is idle, a promoted message starts a turn right away, including after a user `abort` — promoting is an explicit request to steer now. The move is reported as one `queue_update` in which the message has already left `followUp` and joined `steering`.
+
+Since `prompt` acknowledges only once the message is admitted (see above), a `promote_queued_message` sent immediately after a queued `prompt`'s acknowledgement reliably observes it. Older runtimes reject this command; clients must not fall back to `steer`, which would enqueue a duplicate. The TypeScript client exposes `promoteQueuedMessage(message): Promise<{ promoted: boolean }>`, and its `prompt(message, images?, streamingBehavior?)` accepts `"steer"` or `"followUp"` to queue a prompt sent while the agent is busy.
+
+The official Python client exposes `promote_queued_message(message) -> PromoteQueuedMessageResult`; inspect its `.promoted` boolean rather than the result object's truthiness.
 
 ### `get_state` payload
 
@@ -465,6 +515,29 @@ The corresponding `get_state` result reports the same computed state:
 {
   "fastModeEnabled": false,
   "fastModeActive": true
+}
+```
+
+### `set_ask_dialog` payload
+
+`set_ask_dialog` opts the host in to the `ask` extension UI request (see
+[Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default
+for every process; until a host enables it, the `ask` tool keeps prompting with
+one `select` (plus `editor` for free text) per choice. Builds without the
+command answer with a failed `response`, so hosts should keep the `select`
+fallback when enabling fails.
+
+```json
+{ "id": "req_ask", "type": "set_ask_dialog", "enabled": true }
+```
+
+```json
+{
+  "id": "req_ask",
+  "type": "response",
+  "command": "set_ask_dialog",
+  "success": true,
+  "data": { "enabled": true }
 }
 ```
 
@@ -780,12 +853,68 @@ message entries. Only complete newline-terminated records are consumed; reuse
 If `fromByte` exceeds the current file size, reading restarts at byte zero and
 reports `reset: true`.
 
+### Cancelling subagents
+
+`cancel_subagent` hard-kills one subagent currently listed by `get_subagents`
+(foreground or background, at any nesting depth) without aborting the parent
+turn. It uses the same path as the Agent Hub kill: the subagent's live turn is
+aborted and its registry entry becomes an `aborted` tombstone, so the owning
+`task` call settles with an aborted result and the subagent cannot be revived.
+When `set_subagent_subscription` is `"progress"` or `"events"`, a
+`subagent_lifecycle` frame with `status: "aborted"` follows.
+
+```json
+{ "id": "req_1", "type": "cancel_subagent", "subagentId": "OmpWorker" }
+{ "id": "req_1", "type": "response", "command": "cancel_subagent", "success": true, "data": { "cancelled": true } }
+```
+
+`cancelled` is `false` when the id is not a running subagent of this session:
+unknown, another session's same-name agent, finished (including a subagent
+whose result the parent already accepted, even before its terminal lifecycle
+frame), or already cancelled, so hosts can treat it as idempotent. If the
+`aborted` tombstone cannot be persisted, the subagent is still aborted and
+disposed, and the command returns an error response with the write failure.
+
+### Steering subagents
+
+`steer_subagent` sends a message to a running subagent as its user, the same
+way Agent Hub chat does: a mid-turn subagent is steered at its next step
+boundary, and one between turns starts its next turn. The message is recorded
+in the subagent's own transcript; it is not attributed to the parent agent,
+and the parent sees only the subagent's eventual result. Isolated (worktree)
+subagents run in-process and are steered the same way.
+
+```json
+{ "id": "req_1", "type": "steer_subagent", "subagentId": "OmpWorker", "message": "Drop the glob, keep the direct path." }
+{ "id": "req_1", "type": "response", "command": "steer_subagent", "success": true }
+```
+
+The response arrives once the message is accepted: queued into the running
+turn, or the subagent's new turn started. It does not wait for the turn to
+finish. Like `prompt`, the command starts in queue order but waits for
+acceptance in the background, so later commands (including `abort`) are not
+held behind it. As in Agent Hub chat (not RPC `steer`), the message goes
+through the subagent's `prompt()`: extension, custom and file slash commands
+run and prompt templates expand.
+
+Failure responses:
+
+- missing/empty `subagentId` or blank `message` → validation error
+- `subagentId` not currently listed as running by `get_subagents` (unknown,
+  finished, already cancelled, another session's agent, or one whose result
+  the parent already accepted) → `error: "Subagent not running: <id>"`
+- the subagent drops or rejects the message before accepting it (for example
+  an abort or a usage-limit preflight denial lands first) →
+  `error: "Subagent refused the message: <reason>"`
+
 ## Prompt/Queue Concurrency and Ordering
 
 Ordinary commands run on a serialized queue. Extension UI responses and host
 tool/URI updates/results bypass that queue, so they can complete a request
 while its command handler is waiting. `bash` also bypasses the serial queue and
 is tracked as background command work; its response may arrive out of order.
+`prompt` and `steer_subagent` start in queue order but await admission in the
+background, so their responses may also arrive after later commands'.
 
 ### Immediate ack vs completion
 
@@ -858,11 +987,16 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
 
 `RpcExtensionUIRequest` (`type: "extension_ui_request"`) methods:
 
-- `select`, `confirm`, `input`, `editor`, `cancel`
+- `select`, `confirm`, `input`, `editor`, `ask`, `cancel`
   - `select` keeps labels in `options: string[]` and, when any option has a
     description, emits a positionally aligned
     `optionDetails: Array<{ description?: string }>` array. Hosts that do not
     render descriptions can continue using `options` alone.
+  - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
+    question of one `ask` tool call:
+    `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
+    plus `timeout?: number`. `options` never include an "Other" entry; hosts
+    always offer free text.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -893,12 +1027,45 @@ Example:
 - `{ type: "extension_ui_response", id: string, value: string }`
 - `{ type: "extension_ui_response", id: string, confirmed: boolean }`
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
+- `{ type: "extension_ui_response", id: string, answers: Array<{ id: string, selectedOptions: string[], customInput?: string }> }` (answers an `ask` request)
 
 `select` and `input` resolve to `undefined`, and `confirm` to `false`, on
 cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
-with `targetId`; the server's timeout resolves locally without emitting that
-request. `editor` supports cancellation and signal abort but has no wire timeout.
+with `targetId`. `editor` supports cancellation and signal abort but has no wire timeout.
 Presentation methods and `open_url` are fire-and-forget and require no response.
+
+If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires, and emits
+`{ method: "cancel", targetId }` so the host closes the dialog; a later answer to it is ignored. For `ask`, a timeout
+(omp's timer or a host `cancelled: true, timedOut: true` reply) answers every question with its recommended
+option, else its first.
+
+`answers` must list one entry per question in request order, with each `id` equal to that question's `id`.
+`selectedOptions` holds exact option labels without duplicates; a multi-select may be empty. A single-select
+(`multi` absent or false) takes at most one option and not both an option and `customInput`. `customInput`
+is trimmed and ignored when empty. Any other shape fails the `ask` tool call instead of guessing.
+
+```json
+{
+  "type": "extension_ui_request",
+  "id": "ui_9",
+  "method": "ask",
+  "questions": [
+    { "id": "db", "question": "Which database?", "options": [{ "label": "Postgres" }, { "label": "SQLite" }], "recommended": 1 },
+    { "id": "features", "question": "Which features?", "options": [{ "label": "Auth" }, { "label": "Billing" }, { "label": "Search" }], "multi": true }
+  ]
+}
+```
+
+```json
+{
+  "type": "extension_ui_response",
+  "id": "ui_9",
+  "answers": [
+    { "id": "db", "selectedOptions": [], "customInput": "DuckDB" },
+    { "id": "features", "selectedOptions": ["Auth", "Search"] }
+  ]
+}
+```
 
 Terminal-only UI features are unsupported: component factories, custom
 headers/footers/editors, raw terminal input, autocomplete composition, theme

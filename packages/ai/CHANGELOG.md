@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.6] - 2026-10-01
+
+### Fixed
+
+- Fixed forced tool calls failing for Claude Opus 5.5 and Sonnet 5.5 through Amazon Bedrock, including required-tool retries in plan mode.
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

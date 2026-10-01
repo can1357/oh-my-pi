@@ -100,6 +100,7 @@ import {
 	MemorySessionStorage,
 	type SessionStorage,
 	type SessionStorageWriter,
+	SessionWriteConflictError,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
@@ -350,6 +351,7 @@ function emptyUsageStatistics(): UsageStatistics {
 		orchestrationCacheRead: 0,
 		premiumRequests: 0,
 		cost: 0,
+		subagentCost: 0,
 	};
 }
 
@@ -491,7 +493,13 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+		// Completed `task` results carry the child's spend; tracked apart so the
+		// status line can split the session's own cost from its subagents'.
+		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
+			this.#usage.subagentCost += usage.cost.total;
+		}
 	}
 
 	has(id: string): boolean {
@@ -687,6 +695,22 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
 		this.recoveryErrors = [...recoveryErrors];
 	}
 }
+
+/**
+ * A persistence condition the user must hear about that is not a failure:
+ * nothing is latched and saving continues. The only notice today is that the
+ * session file is already open in another omp process. Delivered through
+ * {@link SessionManager.onPersistenceNotice}, never through
+ * `onPersistenceError`.
+ */
+export class SessionPersistenceNotice {
+	/** The session file another live omp process already has open. */
+	readonly sessionFile: string;
+
+	constructor(sessionFile: string) {
+		this.sessionFile = sessionFile;
+	}
+}
 /**
  * Thrown by {@link SessionManager.forkFrom} when the fork source is missing.
  * The CLI maps this to a clean session-resolution failure at its own boundary
@@ -830,6 +854,26 @@ export class SessionManager {
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
+	#persistenceNoticeCallbacks = new Set<(notice: SessionPersistenceNotice) => void>();
+	/**
+	 * Every notice raised so far, replayed to each later subscriber. Bounded:
+	 * at most one per session file (see {@link #sharedSessionFiles}).
+	 */
+	#persistenceNotices: SessionPersistenceNotice[] = [];
+	/** This process's ownership claim on `#sessionFile` (file storage only). */
+	#sessionFileClaim: { sessionFile: string; release: () => void } | undefined;
+	/**
+	 * Session files whose ownership claim failed because another live process
+	 * holds them. Never re-claimed: each write would otherwise retry the lock,
+	 * and the user is warned once per file.
+	 */
+	#sharedSessionFiles = new Set<string>();
+	/**
+	 * Resolved session file whose durable bytes another writer changed: this
+	 * manager latched the conflict and stopped writing to it (see
+	 * {@link #latchWriteConflict}). Cleared with the disk-failure latch.
+	 */
+	#contestedSessionFile: string | undefined;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -858,24 +902,26 @@ export class SessionManager {
 	#clearDiskError(): void {
 		this.#diskFailure = undefined;
 		this.#diskFailureLogged = false;
+		this.#contestedSessionFile = undefined;
 	}
 
 	/**
-	 * Deliver one store failure to a single observer. Observer failures are
-	 * swallowed: a host surface that throws must not corrupt session teardown.
+	 * Deliver one store failure or notice to a single observer. Observer
+	 * failures are swallowed: a host surface that throws must not corrupt
+	 * session teardown.
 	 */
-	#invokePersistenceErrorObserver(observer: (error: Error) => void, error: Error): void {
+	#invokePersistenceObserver<T>(observer: (value: T) => void, value: T): void {
 		try {
-			observer(error);
+			observer(value);
 		} catch (callbackError) {
-			logger.warn("Session persistence error observer failed", {
+			logger.warn("Session persistence observer failed", {
 				error: toError(callbackError).message,
 			});
 		}
 	}
 
 	#notifyPersistenceErrorObservers(error: Error): void {
-		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceErrorObserver(observer, error);
+		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceObserver(observer, error);
 	}
 
 	#noteDiskFailure(errorLike: unknown): Error {
@@ -893,6 +939,91 @@ export class SessionManager {
 		}
 
 		return this.#diskFailure;
+	}
+
+	#notifyPersistenceNotice(notice: SessionPersistenceNotice): void {
+		logger.warn("Session file is already open in another omp process", { sessionFile: notice.sessionFile });
+		this.#persistenceNotices.push(notice);
+		for (const observer of this.#persistenceNoticeCallbacks) this.#invokePersistenceObserver(observer, notice);
+	}
+
+	/**
+	 * Hold this process's ownership claim on `#sessionFile`, moving it off a
+	 * previous path. Called lazily by the write paths (writer open, full
+	 * rewrites), never on open, so read-only openers (`omp share`, `--export`,
+	 * `render`) never take the lease. When another live process already holds
+	 * it, both now write to one file: warn once and remember the file so later
+	 * writes do not retry the lock.
+	 */
+	#claimSessionFile(): void {
+		const sessionFile = this.#sessionFile;
+		if (!this.#persist || !sessionFile || !this.#storage.claimSessionFile) return;
+		const current = this.#sessionFileClaim;
+		if (current?.sessionFile === sessionFile || this.#sharedSessionFiles.has(sessionFile)) return;
+		if (current) {
+			current.release();
+			this.#sessionFileClaim = undefined;
+		}
+		const release = this.#storage.claimSessionFile(sessionFile);
+		if (release) {
+			this.#sessionFileClaim = { sessionFile, release };
+			return;
+		}
+		this.#sharedSessionFiles.add(sessionFile);
+		this.#notifyPersistenceNotice(new SessionPersistenceNotice(sessionFile));
+	}
+
+	/** Whether writes to `targetPath` stopped after {@link #latchWriteConflict}. */
+	#isContested(targetPath: string): boolean {
+		return this.#contestedSessionFile !== undefined && this.#contestedSessionFile === path.resolve(targetPath);
+	}
+
+	/**
+	 * Another writer (typically a second omp process on the same session)
+	 * changed `#sessionFile` since this manager last wrote it, so replacing it
+	 * would erase their entries, and every retry would re-serialize the whole
+	 * transcript only to meet the same conflict. Latch the conflict once as the
+	 * disk failure (observers hear it once; flush/close surface it) and stop
+	 * writing to that file: entries stay in memory only.
+	 *
+	 * Returns the latched error, or `undefined` when `error` is not a conflict
+	 * on durable bytes of the current file. Backends that defer sync publishes
+	 * keep the ordinary retrying latch: there a conflict can be this manager
+	 * racing its own unconfirmed publish, not another writer.
+	 */
+	#latchWriteConflict(error: unknown): SessionWriteConflictError | undefined {
+		const sessionFile = this.#sessionFile;
+		if (
+			!(error instanceof SessionWriteConflictError) ||
+			error.expectedSize === null ||
+			!sessionFile ||
+			!this.#persist ||
+			this.#storage.defersSyncPublish ||
+			path.resolve(error.path) !== path.resolve(sessionFile)
+		) {
+			return undefined;
+		}
+		if (this.#isContested(sessionFile) && this.#diskFailure instanceof SessionWriteConflictError) {
+			return this.#diskFailure;
+		}
+		const conflict = new SessionWriteConflictError(
+			error.path,
+			error.expectedSize,
+			error.actualSize,
+			"Another process changed this session file, so this session's further changes are not being saved to it.",
+		);
+		this.#contestedSessionFile = path.resolve(sessionFile);
+		this.#diskFailure = conflict;
+		this.#diskFailureLogged = true;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#closeWriterEventually();
+		logger.error("Session file changed by another writer; no longer saving to it.", {
+			sessionFile,
+			error: conflict.message,
+		});
+		this.#notifyPersistenceErrorObservers(conflict);
+		return conflict;
 	}
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
@@ -988,6 +1119,8 @@ export class SessionManager {
 			return;
 		}
 		if (!this.#persist || !this.#sessionFile) return;
+		// Another writer changed this file: a repair would erase their entries.
+		if (this.#isContested(this.#sessionFile) && this.#diskFailure) throw this.#diskFailure;
 		const previousDiskTail = this.#diskTail;
 		const writer = this.#writer;
 		this.#diskEpoch++;
@@ -1048,6 +1181,8 @@ export class SessionManager {
 			this.#clearDiskError();
 		} catch (error) {
 			if (error instanceof SessionPersistenceIndeterminateError) throw error;
+			// Refused before publishing, so not indeterminate: the latched conflict stands.
+			if (error instanceof SessionWriteConflictError && error === this.#diskFailure) throw error;
 			throw this.#latchIndeterminate(operationError, [toError(error)]);
 		} finally {
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
@@ -1071,6 +1206,9 @@ export class SessionManager {
 		try {
 			await this.#storage.writeTextAtomic(sessionFile, body, { expectedSize: this.#expectedDiskSize, commitGuard });
 		} catch (error) {
+			// Refused before publishing: another writer changed the file.
+			const conflict = this.#latchWriteConflict(error);
+			if (conflict) throw conflict;
 			const recoveryErrors = [toError(error)];
 			try {
 				await this.#storage.drain();
@@ -1097,6 +1235,7 @@ export class SessionManager {
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
+		this.#claimSessionFile();
 		this.#writer = this.#storage.openWriter(this.#sessionFile, {
 			flags: "a",
 			onError: err => this.#noteDiskFailure(err),
@@ -1204,8 +1343,11 @@ export class SessionManager {
 	#rewriteSynchronously(): void {
 		if (this.#released) return;
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
+		this.#claimSessionFile();
 		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
+		// Another writer owns this file's bytes now; the conflict is latched once.
+		if (this.#isContested(targetPath)) return;
 
 		try {
 			const body = this.#fileBody();
@@ -1268,7 +1410,7 @@ export class SessionManager {
 				this.#hasTitleSlot = true;
 			}
 		} catch (err) {
-			this.#noteDiskFailure(err);
+			if (!this.#latchWriteConflict(err)) this.#noteDiskFailure(err);
 		}
 	}
 
@@ -1312,6 +1454,7 @@ export class SessionManager {
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
+		this.#claimSessionFile();
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
@@ -1326,6 +1469,8 @@ export class SessionManager {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 					});
 				} catch (error) {
+					const conflict = this.#latchWriteConflict(error);
+					if (conflict) throw conflict;
 					try {
 						if ((await this.#storage.readText(sessionFile)) === body) this.#recordFullRewrite(body);
 					} catch {
@@ -1356,6 +1501,9 @@ export class SessionManager {
 			this.#atomicRewriteDirty = true;
 			return;
 		}
+		// Writes to a file another writer changed stopped at the latched conflict;
+		// entries stay in memory only.
+		if (this.#isContested(this.#sessionFile)) return;
 		if (this.#diskFailure) {
 			// The failed entry and any later entries remain in memory. A full
 			// replacement is the writability probe and restores all of them once
@@ -2248,6 +2396,8 @@ export class SessionManager {
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				if (repairError instanceof SessionPersistenceIndeterminateError) throw repairError;
+				if (repairError instanceof SessionWriteConflictError && repairError === this.#diskFailure)
+					throw repairError;
 				throw this.#latchIndeterminate(operationError, [toError(repairError)]);
 			}
 			const retainedNotifications = batch.deferredNotifications.filter(entry => !batch.entryIds.has(entry.id));
@@ -2359,6 +2509,9 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
+		// Closing gives up this process's ownership claim; a later write reclaims it.
+		this.#sessionFileClaim?.release();
+		this.#sessionFileClaim = undefined;
 		// A prior `flushSync` can self-conflict with this manager's own
 		// unconfirmed deferred publish; drain despite the latch so that
 		// publish can still confirm before we give up on the transcript.
@@ -2751,9 +2904,25 @@ export class SessionManager {
 	onPersistenceError(cb: (error: Error) => void): () => void {
 		this.#persistenceErrorCallbacks.add(cb);
 		const latched = this.#diskFailure;
-		if (latched) this.#invokePersistenceErrorObserver(cb, latched);
+		if (latched) this.#invokePersistenceObserver(cb, latched);
 		return () => {
 			this.#persistenceErrorCallbacks.delete(cb);
+		};
+	}
+
+	/**
+	 * Subscribe to {@link SessionPersistenceNotice}s: conditions the user must
+	 * hear about while saving continues (the session file is already open in
+	 * another omp process). Failures go to {@link onPersistenceError} instead.
+	 *
+	 * Every notice raised before this call is replayed to the new subscriber,
+	 * so each host sees a notice raised before it wired its observer.
+	 */
+	onPersistenceNotice(cb: (notice: SessionPersistenceNotice) => void): () => void {
+		this.#persistenceNoticeCallbacks.add(cb);
+		for (const notice of this.#persistenceNotices) this.#invokePersistenceObserver(cb, notice);
+		return () => {
+			this.#persistenceNoticeCallbacks.delete(cb);
 		};
 	}
 

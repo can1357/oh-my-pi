@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
@@ -164,6 +164,41 @@ export function createInterruptedTurnAbortMessage(
 		errorMessage: "Previous OMP process exited before completing the turn.",
 		timestamp: Number.isFinite(recordedAt) ? recordedAt : Date.now(),
 	};
+}
+
+/** Pairs the last interrupted assistant turn's unresolved calls before resume builds model context. */
+export function createInterruptedToolResults(entries: readonly SessionEntry[]): ToolResultMessage[] {
+	let tail: AgentMessage | undefined;
+	let assistant: AssistantMessage | undefined;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry?.type !== "message") continue;
+		tail ??= entry.message;
+		if (entry.message.role === "assistant") {
+			assistant = entry.message;
+			break;
+		}
+	}
+	if (!assistant || (tail?.role !== "assistant" && tail?.role !== "toolResult")) return [];
+	const pendingIds = new Set(collectPendingToolCalls(entries).map(call => call.toolCallId));
+	const results: ToolResultMessage[] = [];
+	for (const call of assistant.content) {
+		if (call.type !== "toolCall" || !pendingIds.has(call.id)) continue;
+		results.push({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [
+				{
+					type: "text",
+					text: "Previous OMP process exited before this tool returned; its outcome is unknown.",
+				},
+			],
+			isError: true,
+			timestamp: Date.now(),
+		});
+	}
+	return results;
 }
 
 function isToolCallContent(value: unknown): value is ToolCallContent {

@@ -190,13 +190,15 @@ function looksLikePastedShellPrompt(code: string): boolean {
 	);
 }
 
+/**
+ * Length of the `$`/`$$` Python sigil, or 0 when the draft is not Python. The sigil
+ * counts only once whitespace follows it: a bare `$` may still become prose such as
+ * `$HOME` (#2944), so claiming Python mode before the next key would flip back.
+ */
 function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
 	if (trimmedText.charCodeAt(0) !== 36 /* $ */) return 0;
-	if (trimmedText.charCodeAt(1) === 123 /* { */) return 0;
-
 	const prefixLength = trimmedText.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
 	const next = trimmedText.charCodeAt(prefixLength);
-	if (Number.isNaN(next)) return prefixLength;
 	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
 }
 
@@ -717,6 +719,8 @@ export class InputController {
 				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
 			}
 		};
+		// The native composer's viewing header: an ancestor crumb, or back to main.
+		this.ctx.editor.onFocusAgent = id => this.#focusResolvedAgent(id);
 
 		this.#setupEnhancedPaste();
 
@@ -2419,7 +2423,7 @@ export class InputController {
 			// No usable image-file URL (pure bitmap pasteboard: screenshots,
 			// browser copies, or a non-image Finder selection). Fall to the
 			// image representation. The text bridge starts alongside the image
-			// bridge: on Windows each is a cold powershell.exe spawn (~100ms+),
+			// bridge: either can shell out (WSL's powershell.exe, wl-paste, xclip),
 			// so serial awaits stall an empty clipboard by their sum before
 			// "Clipboard is empty" can surface. Image precedence is preserved —
 			// a resolved text payload is discarded unused when an image is present.

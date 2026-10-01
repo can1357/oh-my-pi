@@ -83,7 +83,8 @@ describe("session selector picker", () => {
 		const p = props(root);
 		expect(p.size).toBe("lg");
 		expect(p.layout).toBe("cards");
-		expect(p.tab).toBe("folder");
+		expect(p.actions?.find(a => a.id === "scope")?.label).toBe("All projects");
+		expect(p.placeholder).toMatch(/^Search sessions in .+…$/);
 		expect(p.order).toEqual([
 			{ group: "today-0", label: "Today", count: 2 },
 			today.path,
@@ -146,13 +147,15 @@ describe("session selector picker", () => {
 		expect(deleted).toEqual(["c"]);
 		expect(props(selector.describe(withPicker)).order).not.toContain(old.path);
 
-		const loaded = renderedWhen(selector, p => p.state === "ready" && p.tab === "all");
-		selector.handleNativeEvent({ type: "action", key: "", act: "tab", value: "all", mods: [] });
+		const loaded = renderedWhen(
+			selector,
+			p => p.state === "ready" && p.actions?.find(a => a.id === "scope")?.label === "This folder",
+		);
+		selector.handleNativeEvent({ type: "action", key: "", act: "scope", mods: [] });
 		expect(props(selector.describe(withPicker)).state).toBe("loading");
 		await loaded;
 		const all = props(selector.describe(withPicker));
-		expect(all.tab).toBe("all");
-		expect(all.actions?.find(a => a.id === "scope")?.label).toBe("This folder");
+		expect(all.placeholder).toBe("Search all sessions…");
 		expect(all.items?.find(item => item.id === others.path)?.detail).toEqual([
 			{ t: "/work/", s: "path dim" },
 			{ t: "other", s: "path" },

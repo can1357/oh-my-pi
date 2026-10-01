@@ -2589,6 +2589,17 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
 
 /**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
+
+/**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
  * xychart) to ASCII/Unicode art. Synchronous: callers render inside the
  * TUI compositor.
