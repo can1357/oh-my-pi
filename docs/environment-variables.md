@@ -556,8 +556,11 @@ These affect where coding-agent stores data and which process-local settings ove
 | `CLAUDE_CODE_SHELL_PREFIX` | Legacy alias fallback for `PI_SHELL_PREFIX`                                    |
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
+| `OMP_SESSION_ID`           | Session id omp stamps into every spawned shell env (omp sets it)               |
 
 `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
+
+`OMP_SESSION_ID` is written by omp, not read from your shell. Exactly one session per process owns it — the session the CLI creates for interactive, `--print`, and RPC use, or the first `session/new` when ACP mode runs several in one process — and it publishes its id at startup and again whenever that id changes (`/clear`, `--fork`, resuming another session), so shells, hooks, and other descendants inherit it. No sibling session may repoint it. Every session also passes its own id to the processes it spawns — sessions sharing a process share `process.env`, so their child processes get the spawner's id, not the inherited one — and advertises it in its own system prompt.
 
 ---
 

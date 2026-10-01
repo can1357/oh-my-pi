@@ -8,6 +8,7 @@ import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
 import type { BashExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+import { sessionIdEnv } from "./session-env";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
 
@@ -120,7 +121,9 @@ export class BashRunner {
 					cwd,
 					timeout: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000,
 					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
-					env: shellEnv,
+					// The shell carries the session that ran it; an extension's own
+					// per-command env still wins.
+					env: { ...sessionIdEnv(target.sessionId), ...shellEnv },
 					useUserShell: options?.useUserShell,
 					pty: options?.pty,
 				});

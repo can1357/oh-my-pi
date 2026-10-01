@@ -2,6 +2,7 @@
 <workstation>
 {{#list environment prefix="- " join="\n"}}{{label}}: {{value}}{{/list}}
 {{#if model}}- Model: {{model}}{{/if}}
+{{#if sessionId}}- Session: {{sessionId}} (`$OMP_SESSION_ID`, inherited by child shells){{/if}}
 </workstation>
 
 {{#if contextFiles.length}}

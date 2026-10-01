@@ -194,6 +194,7 @@ import {
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { getRestorableSessionModels } from "./session/session-context";
+import { publishProcessSessionId } from "./session/session-env";
 import { SessionManager } from "./session/session-manager";
 import {
 	collectMountedMCPToolRoutes,
@@ -686,6 +687,18 @@ export interface CreateAgentSessionOptions {
 	 * root session; `buildSubagentSessionOptions` inherits the spawner's.
 	 */
 	subagentEventBus?: EventBus;
+
+	/**
+	 * Publish this session's id to the process-wide `OMP_SESSION_ID` at startup and
+	 * on every later id change (new session, fork, switch), so every process the
+	 * agent spawns inherits it. Exactly one session per process may set it: the CLI
+	 * designates its primary session, and the ACP factory designates only the first
+	 * session it creates, so a later `session/new` cannot repoint a value its
+	 * siblings' child processes already read. Default: false — helpers such as the
+	 * compaction/commit sessions never touch it. Every session advertises its OWN id
+	 * in its system prompt and passes it to the processes it spawns regardless.
+	 */
+	publishSessionIdEnv?: boolean;
 
 	/** Skills. Default: discovered from multiple locations */
 	skills?: Skill[];
@@ -3647,12 +3660,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			dbPath: path.join(agentDir, "skill-descriptions.db"),
 			compress: createSkillDescriptionCompressor(modelRegistry, settings),
 		});
+		// The prompt line and the process-wide `OMP_SESSION_ID` are published from this
+		// one seam, so the owning session is never told an id its own spawned
+		// processes do not carry. Rebuilding at session start covers startup, and every
+		// session reset (new/fork/switch) rebuilds, so the value tracks the id the
+		// session actually has. Only the caller-designated owner writes the shared
+		// variable: subagents share `process.env` with their parent, so they hand their
+		// own id to each child process instead (`sessionIdEnv`).
+		const publishSessionIdEnv = options.publishSessionIdEnv === true;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			const promptSessionId = sessionManager.getSessionId();
+			if (publishSessionIdEnv) publishProcessSessionId(promptSessionId);
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
@@ -3814,6 +3837,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
+				sessionId: promptSessionId,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",

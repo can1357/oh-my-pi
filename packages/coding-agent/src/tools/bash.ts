@@ -77,6 +77,7 @@ import {
 	cfgBashPatterns,
 } from "../exec/settings";
 import { cfgSkillful } from "../session/settings";
+import { sessionIdEnv } from "../session/session-env";
 import { cfgWorktreeClone } from "../task/settings";
 
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
@@ -845,6 +846,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
 						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						// Children of a subagent must see the SUBAGENT's id, not the
+						// process-wide one its parent published.
+						env: sessionIdEnv(this.session.getSessionId?.()),
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						// Bound to the job's own signal: the job outlives the call that started it.
@@ -1203,6 +1207,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const backendPreflight =
 			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
 				? await applyDirenvPreflight(command, commandCwd, {
+						callerEnv: sessionIdEnv(this.session.getSessionId?.()),
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
@@ -1503,6 +1508,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				await executeBash(command, {
 					cwd: commandCwd,
 					sessionKey: this.session.getSessionId?.() ?? undefined,
+					env: sessionIdEnv(this.session.getSessionId?.()),
 					timeout: timeoutMs ?? 0,
 					signal,
 					filesystem: this.#urlFilesystem(signal, approvalTier).shellFilesystem(),

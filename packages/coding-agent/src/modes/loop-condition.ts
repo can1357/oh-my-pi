@@ -18,6 +18,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { BashResult } from "../exec/bash-executor";
+import { sessionIdEnv } from "../session/session-env";
 import { executeBash } from "../exec/bash-executor";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
@@ -100,6 +101,9 @@ export async function evaluateLoopCondition(
 			timeout: options.timeoutMs,
 			signal: options.signal,
 			sessionKey: `${LOOP_CONDITION_SESSION_KEY}:${options.sessionId}`,
+			// The condition runs in its own shell session, but it still belongs to the
+			// session that scheduled it.
+			env: sessionIdEnv(options.sessionId),
 		});
 	} catch (error) {
 		logger.error("loop condition failed to start", { command: condition.command, error: String(error) });
