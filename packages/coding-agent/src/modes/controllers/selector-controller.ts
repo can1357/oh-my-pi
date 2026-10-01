@@ -72,8 +72,10 @@ import {
 import { loadDailyActivity } from "../../stats/activity-client";
 import {
 	AUTO_THINKING,
+	type AutoThinkingLevel,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	isAutoThinking,
 	parseConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../../tools";
@@ -800,7 +802,7 @@ export class SelectorController {
 						if (role === "default") {
 							// `auto` on the default role configures the active session. Other roles
 							// persist an explicit `:auto` suffix and must not mutate the current model.
-							const isAuto = thinkingLevel === AUTO_THINKING;
+							const isAuto = isAutoThinking(thinkingLevel);
 							const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
 							const effectiveProvenance = this.ctx.settings.getModelRoleProvenance("default");
 							const shadowedGlobal =
@@ -820,7 +822,7 @@ export class SelectorController {
 									formatModelSelectorValue(selectorValue, concreteThinking),
 								);
 								if (isAuto) {
-									cfgDefaultThinkingLevel.set(this.ctx.settings, AUTO_THINKING);
+									cfgDefaultThinkingLevel.set(this.ctx.settings, thinkingLevel);
 								}
 							} else if (shadowedProject) {
 								this.ctx.settings.setProjectModelRole(
@@ -828,7 +830,7 @@ export class SelectorController {
 									formatModelSelectorValue(selectorValue, concreteThinking),
 								);
 								if (isAuto) {
-									cfgDefaultThinkingLevel.set(this.ctx.settings, AUTO_THINKING);
+									cfgDefaultThinkingLevel.set(this.ctx.settings, thinkingLevel);
 								}
 							} else {
 								const { switched } = await this.ctx.session.setModel(model, role, {
@@ -844,7 +846,7 @@ export class SelectorController {
 									);
 								}
 								if (isAuto) {
-									this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
+									this.ctx.session.setThinkingLevel(thinkingLevel, true);
 								} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
 									this.ctx.session.setThinkingLevel(concreteThinking);
 								}
@@ -915,15 +917,21 @@ export class SelectorController {
 								});
 								if (resolved.model) {
 									const fallbackModel = resolved.model;
-									const isAuto = resolved.thinkingLevel === AUTO_THINKING;
+									let configuredAutoLevel: AutoThinkingLevel | undefined = isAutoThinking(
+										resolved.thinkingLevel,
+									)
+										? resolved.thinkingLevel
+										: undefined;
+									const isAuto = configuredAutoLevel !== undefined;
 									let concreteThinking = concreteThinkingLevel(resolved.thinkingLevel);
 									let isAutoFromDefault = false;
 									if (!resolved.explicitThinkingLevel && !concreteThinking) {
 										const defaultLevel = parseConfiguredThinkingLevel(
 											cfgDefaultThinkingLevel.get(this.ctx.settings),
 										);
-										if (defaultLevel === AUTO_THINKING) {
+										if (isAutoThinking(defaultLevel)) {
 											isAutoFromDefault = true;
+											configuredAutoLevel = defaultLevel;
 										} else if (defaultLevel) {
 											concreteThinking = defaultLevel;
 										}
@@ -937,7 +945,7 @@ export class SelectorController {
 									});
 									if (!switched) return;
 									if (effectiveIsAuto) {
-										this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
+										this.ctx.session.setThinkingLevel(configuredAutoLevel ?? AUTO_THINKING, true);
 									} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
 										this.ctx.session.setThinkingLevel(concreteThinking);
 									}
