@@ -218,11 +218,13 @@ fn interactable(props: &AxProps) -> bool {
 				| "cell"
 		)
 }
+/// Containers that keep their own line even around a single survivor: the role
+/// itself tells the model where the child sits (a list, a toolbar, a scroll
+/// area).
 fn structural(role: &str) -> bool {
 	matches!(
 		role,
 		"window"
-			| "group"
 			| "webarea"
 			| "list"
 			| "table"
@@ -236,23 +238,25 @@ fn structural(role: &str) -> bool {
 	)
 }
 
+/// Drops unnamed, inactionable nodes that carry nothing, while keeping every
+/// survivor below them: a container with no survivors disappears, one wrapping
+/// a single survivor (any role outside [`structural`], `group` included) gives
+/// way to it, and one grouping several survivors stays. A container's role
+/// never decides whether its content is shown; `AXSplitGroup`, which holds the
+/// list and detail panes of Reminders, Contacts and Notes, is on no role list.
 fn filter_node(mut node: WalkNode, all: bool) -> Option<WalkNode> {
 	node.children = node
 		.children
 		.into_iter()
 		.filter_map(|child| filter_node(child, all))
 		.collect();
-	if all {
+	if all || interactable(&node.props) || named(&node.props) {
 		return Some(node);
 	}
-	let keep_self = interactable(&node.props) || named(&node.props);
-	if !keep_self && node.props.role == "group" && node.children.len() == 1 {
-		return node.children.pop();
-	}
-	if keep_self || (structural(&node.props.role) && !node.children.is_empty()) {
-		Some(node)
-	} else {
-		None
+	match node.children.len() {
+		0 => None,
+		1 if !structural(&node.props.role) => node.children.pop(),
+		_ => Some(node),
 	}
 }
 
@@ -649,6 +653,35 @@ mod tests {
 			"- window \"Title\" [ref=e1] app=Safari (focused)\n  - button \"Go\" [ref=e2]"
 		);
 		assert_eq!(s.node_count, 2);
+	}
+	#[test]
+	fn unnamed_containers_keep_their_surviving_content() {
+		// A Reminders-shaped window: an unnamed split group holding a list pane and
+		// a detail pane, an unnamed splitter, and an empty wrapper.
+		let mut m = Mock {
+			props:    [
+				(1, p("window", Some("Title"))),
+				(2, p("splitgroup", None)),
+				(3, p("scrollarea", None)),
+				(4, p("button", Some("Groceries"))),
+				(5, p("splitter", None)),
+				(6, p("layoutarea", None)),
+				(7, p("textfield", Some("Notes"))),
+				(8, p("group", None)),
+			]
+			.into(),
+			children: [(1, vec![2]), (2, vec![3, 5, 6, 8]), (3, vec![4]), (6, vec![7])].into(),
+		};
+		let s =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap();
+		assert_eq!(
+			s.text,
+			"- window \"Title\" [ref=e1] app=Safari (focused)\n  - splitgroup [ref=e2]\n    - \
+			 scrollarea [ref=e3]\n      - button \"Groceries\" [ref=e4]\n    - textfield \"Notes\" \
+			 [ref=e5]"
+		);
+		assert_eq!(s.node_count, 5);
 	}
 	#[test]
 	fn description_labels_unnamed_controls_without_changing_raw_title() {

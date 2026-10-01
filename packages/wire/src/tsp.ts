@@ -75,6 +75,7 @@ export const TSP_KINDS = [
 	"agent",
 	"chart",
 	"meter",
+	"effort",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -114,8 +115,11 @@ export interface TspSpan {
 /** Text given either as one plain string or as styled spans. */
 export type TspText = string | readonly TspSpan[];
 
-/** What a pointer gesture on a node does. */
-export type TspAction = "toggle" | "copy" | "open" | "select" | "activate" | (string & {});
+/**
+ * What a pointer gesture on a node does. `zoom` shows an `image` (and the images
+ * beside it) large in the terminal's viewer; it is an image's click by default.
+ */
+export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
 /** Props every node accepts. */
 export interface TspCommonProps {
@@ -134,7 +138,16 @@ export interface TspCommonProps {
 	aria?: string;
 	/** Target of an `open` action on this node (a URL or `file://` path). */
 	href?: string;
+	/**
+	 * Transient selection state drawn over the node without restyling it (the
+	 * rewind page): `pick` marks the chosen point (adjacent picks read as one
+	 * run), `drop` dims what the choice discards.
+	 */
+	mark?: TspMark;
 }
+
+/** A {@link TspCommonProps.mark}. */
+export type TspMark = "pick" | "drop";
 
 export type TspWrap = "word" | "char" | "none";
 export type TspTruncate = "end" | "start" | "middle";
@@ -227,9 +240,13 @@ export interface TspMathProps {
 	text?: string;
 	display?: boolean;
 }
+/** Images the terminal ships (`image.p.builtin`): `omp` is omp's gradient mark. */
+export type TspBuiltinImage = "omp";
 export interface TspImageProps {
 	/** Content address (sha256 hex) of a blob sent with verb `b`. */
-	blob: string;
+	blob?: string;
+	/** An image the terminal ships, drawn instead of any blob. */
+	builtin?: TspBuiltinImage;
 	alt?: string;
 	w?: number;
 	h?: number;
@@ -692,12 +709,21 @@ export interface TspAgentProps {
 	collapsed?: boolean;
 }
 
+/**
+ * A thinking-effort glyph: a small ring that fills rung by rung with the level and
+ * turns into a flickering fireball at `max`. Leaf; the terminal draws everything.
+ */
+export interface TspEffortProps {
+	/** `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; anything else (e.g. `auto`) draws an empty dashed ring. */
+	level: string;
+}
+
 /** A value drawn as a bar, ring or block grid (§8.2): context %, usage windows, agent context. */
 export interface TspMeterProps {
 	/** 0–1, or null for unknown. */
 	value: number | null;
 	style?: "bar" | "ring" | "blocks";
-	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (effort meter). */
+	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (e.g. the effort chip's fallback meter). */
 	steps?: number;
 	/** Stacked parts instead of one fill (context breakdown); values sum to ≤ 1. */
 	parts?: readonly { value: number; token?: string; label?: string; hatch?: boolean }[];
@@ -771,6 +797,7 @@ export interface TspPropsByKind {
 	agent: TspAgentProps;
 	chart: TspChartProps;
 	meter: TspMeterProps;
+	effort: TspEffortProps;
 }
 
 /** Props of a node of kind `K`: its kind-specific props plus the common ones. */
@@ -886,5 +913,11 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/**
+	 * An edit over the terminal's selection in an `editor`/`input` node: replace
+	 * `[from, to)` with `text`, caret to `cursor` (UTF-16 offsets; `len` is the
+	 * text length the terminal saw, a mismatch makes the edit stale).
+	 */
+	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

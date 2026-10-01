@@ -61,10 +61,61 @@ describe("compat compiler grammar", () => {
 		});
 	});
 
+	test("class provider and API selectors compile as a conjunction", () => {
+		const compiled = compileCascade([
+			{
+				file: "classes/test.kdl",
+				text: [
+					'class "anthropic" {',
+					'\ton "amazon-bedrock" {',
+					'\t\ton-api "anthropic-messages" {',
+					'\t\t\tfamily "sonnet" {',
+					'\t\t\t\trevision ">=4.6" {',
+					"\t\t\t\t\tprompt-cache {",
+					"\t\t\t\t\t\tshort 300",
+					"\t\t\t\t\t}",
+					"\t\t\t\t}",
+					"\t\t\t}",
+					"\t\t}",
+					"\t}",
+					"}",
+				].join("\n"),
+			},
+		]);
+		expect(compiled.rules).toHaveLength(1);
+		expect(compiled.rules[0]).toMatchObject({
+			class: "anthropic",
+			providers: ["amazon-bedrock"],
+			apis: ["anthropic-messages"],
+			family: "sonnet",
+			revision: [{ op: ">=", revision: "4.6.0" }],
+			catalog: { promptCache: { short: 300 } },
+		});
+	});
+
+	test("a bare empty-array axis compiles to an explicit empty list; other arrays still need values", () => {
+		const compiled = compileCascade([
+			{ file: "providers/test.kdl", text: 'provider "p" {\n\tregion-upstreams-eu\n}' },
+		]);
+		expect(compiled.rules[0]).toMatchObject({ providers: ["p"], catalog: { regionUpstreamsEu: [] } });
+		expect(() =>
+			compileCascade([{ file: "providers/test.kdl", text: 'provider "p" {\n\tupstream-rotation\n}' }]),
+		).toThrow(/directive `upstream-rotation` has a malformed value/);
+	});
+
 	test("root on-api rejects catalog-entry directives it does not own", () => {
 		expect(() =>
 			compileCascade([{ file: "providers/test.kdl", text: 'on-api "cursor-agent" {\n\tdefault-model "m"\n}' }]),
 		).toThrow(/providers\/test\.kdl:2.*unknown directive `default-model`/);
+	});
+
+	test("on-upstream rejects nested upstreams, empty selectors and catalog-entry directives", () => {
+		const source = (text: string) => compileCascade([{ file: "providers/test.kdl", text }]);
+		expect(() => source('provider "p" { on-upstream "a" { on-upstream "b" { supports-store #true } } }')).toThrow(
+			/unexpected node/,
+		);
+		expect(() => source('provider "p" { on-upstream { supports-store #true } }')).toThrow(/malformed/);
+		expect(() => source('provider "p" { on-upstream "a" { default-model "m" } }')).toThrow(/unknown directive/);
 	});
 
 	test("boolean-valued axes reject non-boolean scalars", () => {

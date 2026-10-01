@@ -87,6 +87,8 @@ export interface NativeBackendOptions {
 const RECENT_FRAMES = 64;
 /** An unanswered frame older than this no longer holds rendering back. */
 const STALLED_ACK_MS = 5000;
+/** Role of the session's surfaces; a screen page may name its own. */
+const SESSION_ROLE = "omp.session";
 
 class NativeContext implements DescribeContext {
 	cols: number;
@@ -148,6 +150,8 @@ export function assumedTspHello(terminal: Terminal): TspHello {
 class Surface {
 	readonly id: string;
 	readonly mode: "inline" | "screen";
+	/** The `o` role: `omp.session`, or a screen page's own (`NativeScreen.role`). */
+	readonly role: string;
 	readonly reconciler: Reconciler;
 	readonly doc: TspDocument | null;
 	seq = 0;
@@ -158,9 +162,10 @@ class Surface {
 	focus: string | null = null;
 	dirty = false;
 
-	constructor(id: string, mode: "inline" | "screen", mirror: boolean) {
+	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
 		this.id = id;
 		this.mode = mode;
+		this.role = role;
 		this.reconciler = new Reconciler(id);
 		this.doc = mirror ? new TspDocument(id) : null;
 	}
@@ -353,7 +358,7 @@ export class NativeBackend {
 		surface.acked = surface.seq;
 		surface.focus = null;
 		surface.dirty = false;
-		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: "omp.session", adopt: true });
+		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
 		this.#sendPalette(surface);
 		// After the `o`, as in `start()`.
 		setNativeRendering(true);
@@ -408,13 +413,18 @@ export class NativeBackend {
 		let dock: readonly NativeChild[];
 		let layer: NativeChild[];
 		if (fullscreen >= 0) {
-			if (!this.#screen) {
-				this.#screen = this.#newSurface("screen");
+			const component = overlays[fullscreen]!.component;
+			const page = component.describeScreen?.(this.#cx);
+			const role = page?.role ?? SESSION_ROLE;
+			if (this.#screen?.role !== role) {
+				// A page with another role is another surface: its styling keys off the `o`.
+				if (this.#screen) this.#close(this.#screen, false);
+				this.#screen = this.#newSurface("screen", role);
 				this.#open(this.#screen);
 			}
 			surface = this.#screen;
-			main = [overlays[fullscreen]!.component];
-			dock = [];
+			main = page?.main ?? [component];
+			dock = page?.dock ?? [];
 			layer = overlays.slice(fullscreen + 1).map(overlay => this.#overlayNode(overlay));
 		} else {
 			if (this.#screen) {
@@ -478,12 +488,12 @@ export class NativeBackend {
 		this.#sawResize = false;
 	}
 
-	#newSurface(mode: "inline" | "screen"): Surface {
-		return new Surface(`s:${this.#nextSurface++}`, mode, this.#mirror);
+	#newSurface(mode: "inline" | "screen", role = SESSION_ROLE): Surface {
+		return new Surface(`s:${this.#nextSurface++}`, mode, role, this.#mirror);
 	}
 
 	#open(surface: Surface): void {
-		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: "omp.session" });
+		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: surface.role });
 		this.#sendPalette(surface);
 	}
 
@@ -611,12 +621,15 @@ export class NativeBackend {
 			case "activate":
 			case "action":
 			case "change":
+			case "edit":
 				this.#routeUiEvent(event);
 				return;
 		}
 	}
 
-	#routeUiEvent(event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" }>): void {
+	#routeUiEvent(
+		event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" }>,
+	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
 		const target = reconciler?.target(event.id);
 		if (!reconciler || !target?.component.handleNativeEvent) return;
@@ -644,6 +657,11 @@ export class NativeBackend {
 			case "change":
 				ui = { type: "change", key: target.keypath, item: event.item, value: event.value };
 				break;
+			case "edit": {
+				const { from, to, text, cursor, len } = event;
+				ui = { type: "edit", key: target.keypath, from, to, text, cursor, len };
+				break;
+			}
 		}
 		target.component.handleNativeEvent(ui);
 		this.#host.requestRender();

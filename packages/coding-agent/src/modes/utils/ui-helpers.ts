@@ -956,7 +956,10 @@ export class UiHelpers {
 			this.ctx.chatContainer = stagedChatContainer;
 			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
-			this.ctx.pendingMessagesContainer.disposeChildren();
+			// Drops deferred bash/python blocks with the old transcript, then repaints
+			// the queued-message bar from the live session queue: a mid-turn rebuild
+			// (rewind, /tree) keeps the queue, so it must stay visible and editable.
+			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.pendingBashComponents = [];
 			this.ctx.pendingPythonComponents = [];
 			while (true) {

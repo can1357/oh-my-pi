@@ -27,7 +27,7 @@ import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
-import type { DescribeContext, NativeNode, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
@@ -273,6 +273,14 @@ export interface Component {
 	 * `cx.supports("picker")`, so older terminals keep the wrapped fallback.
 	 */
 	nativeSheet?(cx: DescribeContext): boolean;
+
+	/**
+	 * A fullscreen overlay that is a page of its own rather than one block:
+	 * the regions (and role) of the screen surface it fills, instead of the
+	 * default lone `main` child. Put the component itself in `dock` to keep
+	 * its focus target and events.
+	 */
+	describeScreen?(cx: DescribeContext): NativeScreen;
 
 	/** User actions on nodes this component described (toggle, select, activate, custom). */
 	handleNativeEvent?(event: NativeUiEvent): void;

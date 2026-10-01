@@ -19,6 +19,7 @@ StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 QueuedMessageQueue: TypeAlias = Literal["steering", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
+CacheWarmingMode: TypeAlias = Literal["off", "streaming", "idle"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 PromptStatus: TypeAlias = Literal["completed", "aborted", "error"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
@@ -74,6 +75,7 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
+_CACHE_WARMING_MODE_VALUES: Final[frozenset[str]] = frozenset({"off", "streaming", "idle"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"stop", "length", "toolUse", "error", "aborted"}
 )
@@ -935,6 +937,11 @@ class RemoveQueuedMessageResult:
 
 
 @dataclass(slots=True, frozen=True)
+class PromoteQueuedMessageResult:
+    promoted: bool
+
+
+@dataclass(slots=True, frozen=True)
 class BranchMessage:
     entry_id: str
     text: str
@@ -1579,6 +1586,15 @@ def parse_fast_mode_result(payload: JsonObject) -> FastModeResult:
     )
 
 
+def parse_cache_warming_mode(payload: JsonObject) -> CacheWarmingMode:
+    return cast(
+        CacheWarmingMode,
+        _require_literal(
+            payload.get("mode"), _CACHE_WARMING_MODE_VALUES, field="set_cache_warming.mode"
+        ),
+    )
+
+
 def parse_compaction_result(payload: JsonObject) -> CompactionResult:
     return CompactionResult(
         summary=str(payload.get("summary", "")),
@@ -1630,6 +1646,10 @@ def parse_open_session_result(payload: JsonObject) -> OpenSessionResult:
 
 def parse_remove_queued_message_result(payload: JsonObject) -> RemoveQueuedMessageResult:
     return RemoveQueuedMessageResult(removed=_require_bool(payload, "removed"))
+
+
+def parse_promote_queued_message_result(payload: JsonObject) -> PromoteQueuedMessageResult:
+    return PromoteQueuedMessageResult(promoted=_require_bool(payload, "promoted"))
 
 
 def parse_branch_result(payload: JsonObject | None) -> BranchResult:

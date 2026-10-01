@@ -10,7 +10,18 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { compactImageMarkers, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
-import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "../index";
+import {
+	Editor,
+	Ellipsis,
+	type Focusable,
+	matchesKey,
+	replaceTabs,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+	wrapTextWithAnsi,
+} from "../index";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } from "../keybinding-matchers";
@@ -23,12 +34,39 @@ import { node, span } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
 import { plainText } from "../native/spans";
+import { sanitizeCarriageReturns } from "../render/render-utils";
+
+/** Most title rows the terminal prompt shows, so a long question cannot push the input row off-screen. */
+const MAX_PROMPT_TITLE_ROWS = 3;
+/** Border (2) + padX (2) columns consumed by the panel chrome. */
+const PROMPT_TITLE_CHROME_COLUMNS = 4;
+
+/**
+ * `prefix` and `question` flattened onto one line, wrapped to the terminal's width and cut to
+ * {@link MAX_PROMPT_TITLE_ROWS} rows (the last ends in `…` when cut). For terminal rendering only:
+ * native hosts get the question whole ({@link HookEditorOptions.question}).
+ */
+export function boundPromptTitle(prefix: string, question: string): string {
+	const width = Math.max(1, (process.stdout.columns ?? 80) - PROMPT_TITLE_CHROME_COLUMNS);
+	const flat = replaceTabs(`${prefix}${question}`).replace(/\s+/g, " ").trim();
+	const wrapped = wrapTextWithAnsi(flat, width);
+	if (wrapped.length <= MAX_PROMPT_TITLE_ROWS) return wrapped.join("\n");
+	const kept = wrapped.slice(0, MAX_PROMPT_TITLE_ROWS - 1);
+	const last = truncateToWidth(wrapped.slice(MAX_PROMPT_TITLE_ROWS - 1).join(" "), width, Ellipsis.Unicode);
+	return [...kept, last].join("\n");
+}
 
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */
 	externalEditor?: (text: string) => Promise<string | null>;
 	/** When true, use prompt-style keybindings with the legacy ask prompt chrome. */
 	promptStyle?: boolean;
+	/**
+	 * The question the text answers (the ask tool's custom answers and notes). The terminal
+	 * shows it after `<title>: `, wrapped and cut to three rows; native hosts put it whole,
+	 * as markdown, under the title.
+	 */
+	question?: string;
 	/** Allow clipboard images to be attached to this prompt. */
 	acceptImages?: boolean;
 	/** Images already represented by markers in the prefilled text. */
@@ -85,9 +123,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		options?: HookEditorOptions,
 	) {
 		// First title line insets into the panel border; remaining lines (e.g. the
-		// bounded ask question under "◆ Other (type your own)") stay as body rows
-		// so they are never truncated into the one-row border.
-		const [titleLine = "", ...detailLines] = title.split("\n");
+		// bounded ask question) stay as body rows so they are never truncated into
+		// the one-row border.
+		const question = options?.question;
+		const terminalTitle = question === undefined ? title : boundPromptTitle(`${title}: `, question);
+		const [titleLine = "", ...detailLines] = terminalTitle.split("\n");
 		super(titleLine, "omp.overlay.hook-editor");
 
 		this.#tui = tui;
@@ -151,7 +191,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 					externalHint,
 				];
 		const nativeChildren: NativeChild[] = [];
-		if (detailLines.length > 0) {
+		if (question !== undefined) {
+			nativeChildren.push(
+				node("md", { text: replaceTabs(sanitizeCarriageReturns(question)), role: "omp.ask.question" }, undefined, "question"),
+			);
+		} else if (detailLines.length > 0) {
 			nativeChildren.push(
 				node(
 					"text",
@@ -162,7 +206,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			);
 		}
 		nativeChildren.push(this.#editor, hintsRow(nativeHints));
-		this.#nativeRoot = overlayCard(this.nativeRole, plainText(titleLine), nativeChildren);
+		this.#nativeRoot = overlayCard(this.nativeRole, plainText(question === undefined ? titleLine : title), nativeChildren);
 	}
 
 	/** The editor (which describes itself) under the title and detail lines, with the key hints below. */

@@ -24,14 +24,14 @@ import type {
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import {
+	type AskDialogPrompt,
 	type AskDialogPromptValue,
 	AskDialogComponent,
-	boundPromptTitle,
 	normalizeDialogQuestions,
 } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -710,14 +710,14 @@ export class ExtensionUiController {
 				queueMicrotask(restoreAskDialog);
 			};
 
-			const openPrompt = (title: string, prefill: string | undefined, options: HookEditorOptions): void => {
+			const openPrompt = (prompt: AskDialogPrompt, prefill: string | undefined, options: HookEditorOptions): void => {
 				promptEditor = new HookEditorComponent(
 					this.ctx.ui,
-					title,
+					prompt.title,
 					prefill,
 					(text, images) => finishPrompt({ text, images }),
 					() => finishPrompt(undefined),
-					{ promptStyle: true, externalEditor: editDialogExternally, ...options },
+					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
@@ -725,22 +725,22 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			};
 
-			const promptForText = (title: string, prefill?: string): Promise<string | undefined> => {
+			const promptForText = (prompt: AskDialogPrompt, prefill?: string): Promise<string | undefined> => {
 				if (closed) return Promise.resolve(undefined);
 				const { promise, resolve } = Promise.withResolvers<string | undefined>();
 				promptResolve = value => resolve(value?.text);
-				openPrompt(title, prefill, {});
+				openPrompt(prompt, prefill, {});
 				return promise;
 			};
 
 			const promptWithImages = (
-				title: string,
+				prompt: AskDialogPrompt,
 				prefill: AskDialogPromptValue | undefined,
 			): Promise<AskDialogPromptValue | undefined> => {
 				if (closed) return Promise.resolve(undefined);
 				const { promise, resolve } = Promise.withResolvers<AskDialogPromptValue | undefined>();
 				promptResolve = resolve;
-				openPrompt(title, prefill?.text, {
+				openPrompt(prompt, prefill?.text, {
 					acceptImages: true,
 					images: prefill?.images,
 					onPasteImage: () => this.ctx.handleImagePaste(),

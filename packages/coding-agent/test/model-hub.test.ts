@@ -146,6 +146,7 @@ function createHub(options: {
 			onUnassign: options.callbacks?.onUnassign ?? onUnassign,
 			onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
+			onSavePreset: options.callbacks?.onSavePreset,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
@@ -584,6 +585,39 @@ describe("ModelHub", () => {
 			const call = onAssign.mock.calls[0];
 			expect(call?.[1]).toBe("reviewer");
 			expect(call?.[3]).toBe("test/reviewer-model");
+		});
+
+		test("s saves the current setup as a named model preset", () => {
+			const model = makeModel("test", "preset-model");
+			const onSavePreset = vi.fn();
+			const { hub } = createHub({ models: [model], scoped: true, callbacks: { onSavePreset } });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles (since Recent is removed)
+			hub.handleInput("\n"); // dive into rows
+			expect(footerLine(hub.render(220))).toContain("save preset");
+
+			hub.handleInput("s");
+			expect(footerLine(hub.render(220))).toContain("Preset name:");
+
+			for (const ch of "work-setup") hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(onSavePreset).toHaveBeenCalledTimes(1);
+			expect(onSavePreset).toHaveBeenCalledWith("work-setup");
+
+			hub.handleInput("s");
+			for (const ch of "1bad") hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(onSavePreset).toHaveBeenCalledTimes(1);
+			expect(footerLine(hub.render(220))).toContain("Preset name:");
+
+			const { hub: bareHub } = createHub({ models: [model], scoped: true });
+			bareHub.handleInput(UP); // All models → Roles (since Recent is removed)
+			bareHub.handleInput("\n"); // dive into rows
+			expect(footerLine(bareHub.render(220))).not.toContain("save preset");
+
+			bareHub.handleInput("s");
+			expect(footerLine(bareHub.render(220))).not.toContain("Preset name:");
 		});
 	});
 

@@ -5,6 +5,9 @@ This document describes how `crates/pi-natives` schedules native work and how ca
 ## Implementation files
 
 - `crates/pi-natives/src/task.rs`
+- `crates/pi-shell/src/cancel.rs`
+- `crates/pi-shell/src/shell.rs`
+- `crates/pi-natives/src/vcs.rs`
 - `crates/pi-natives/src/grep.rs`
 - `crates/pi-natives/src/glob.rs`
 - `crates/pi-natives/src/fd.rs`
@@ -27,6 +30,8 @@ This document describes how `crates/pi-natives` schedules native work and how ca
    - `compute()` runs on libuv worker threads.
    - Returns a JS `Promise<T>` for exported functions.
    - Records a profiling sample through `profile_region(tag)`.
+   - Catches worker panics at the N-API async-work FFI boundary and rejects with ``native task `<tag>` panicked: <message>``.
+   - Before resolving on the JS thread, checks explicit abort-flag state again. An abort after worker completion rejects as an `AbortError`; a deadline that elapsed only while JS was busy settling a completed result does not invalidate that result.
 
 2. `task::future(env, tag, work)`
    - Wraps `env.spawn_future(...)`.
@@ -35,12 +40,17 @@ This document describes how `crates/pi-natives` schedules native work and how ca
    - Records a profiling sample through `profile_region(tag)`.
 
 3. `CancelToken` / `AbortToken` / `AbortReason`
-   - `CancelToken::new(timeout_ms, signal)` wraps the shared `pi_shell::cancel::CancelToken`, adding an optional JS `AbortSignal` bridge.
+   - `CancelToken::new(timeout_ms, signal)` wraps the shared `pi_shell::cancel::CancelToken`, adding an optional JS `AbortSignal` bridge. Already-aborted signals set the flag immediately; invalid optional signal values are tolerated rather than rejecting the operation.
    - `CancelToken::heartbeat()` is cooperative cancellation for blocking loops.
    - `CancelToken::wait()` asynchronously waits for signal or timeout.
    - `CancelToken::abort_token()` returns an abort handle backed by the shared flag when one already exists; without a flag, the handle is inert. `emplace_abort_token()` lazily installs the flag and returns a live handle. `CancelToken::new` uses the latter to bridge a JS `AbortSignal` to `AbortReason::Signal`.
-   - `CancelToken::aborted()` provides a non-blocking signal/deadline check, and `into_core()` transfers the token to `pi-shell`.
+   - `CancelToken::aborted()` provides a non-blocking signal/deadline check. `abort_reason()` checks only the explicit flag, excluding deadlines; `into_core()` transfers the token to `pi-shell`.
    - `AbortToken::abort(reason)` lets external code request abort. Reasons are `Unknown`, `Timeout`, `Signal`, and `User`.
+
+4. `task::blocking_mapped(tag, cancel_token, reject_hook, cancel_hook, work)`
+   - Uses the same libuv execution/profiling and panic guard as `blocking`.
+   - Converts typed domain failures into rich JS errors through `reject_hook(env, error)` on the JS thread.
+   - Uses `cancel_hook(env, reason)` for explicit cancellation noticed at result settlement. Native VCS exports use this path.
 
 ## `blocking` vs `future`: execution model and selection
 
@@ -56,8 +66,9 @@ Use when work is CPU-heavy or fundamentally synchronous/blocking:
 Behavior:
 
 - Work closure receives a cloned `CancelToken`.
-- Cancellation is only observed where code checks `ct.heartbeat()?`.
+- During computation, cancellation is cooperative: work must check `ct.heartbeat()?`. Result settlement additionally checks the explicit abort flag, but cannot stop uncooperative work early.
 - Closure `Err(...)` rejects the JS promise.
+- `blocking_mapped` is appropriate when the rejection needs a domain-specific JS error object, code, or properties.
 
 ### Use `task::future`
 
@@ -85,12 +96,12 @@ Behavior:
 | `executeShell(options, onChunk?)`                             | `execute_shell`             | `task::future(env, "shell.execute", ...)`                      | same cancellation race and 2s graceful window (5s on Windows)                                                                        |
 | `Process#terminate(options?)`                                 | `Process::terminate`        | `task::future(env, "process.terminate", ...)`                  | optional signal cancels termination waits; grace and hard-kill timeouts are process policy rather than `CancelToken` deadlines       |
 | `Process#waitForExit(options?)`                               | `Process::wait_for_exit`    | `task::future(env, "process.wait_for_exit", ...)`              | optional signal is bridged through `CancelToken`; `timeoutMs` is the wait operation's typed `false` timeout                          |
-| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | `CancelToken` checked in sync PTY loop via `heartbeat()`                                                                             |
+| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | heartbeat checks before PTY allocation/spawn reject; checks in the running loop produce cancellation flags |
 | `htmlToMarkdown(html, options?)`                              | `html_to_markdown`          | `task::blocking("html_to_markdown", (), ...)`                  | none (`()` token)                                                                                                                    |
 | `encodeSixel(...)`                                            | `encode_sixel`              | synchronous native function                                    | none                                                                                                                                 |
 | `readImageFromClipboard()`                                    | `read_image_from_clipboard` | `task::blocking("clipboard.read_image", (), ...)`              | none (`()` token)                                                                                                                    |
 
-`text.rs`, `tokens.rs`, `keys.rs`, most synchronous `ps.rs` functions, SIXEL encoding, and synchronous utility exports do not use `task::blocking`/`task::future` cancellation. The async `Process.terminate()` and `Process.waitForExit()` methods do.
+`text.rs`, `tokens.rs`, `keys.rs`, most synchronous `ps.rs` functions, SIXEL encoding/decoding, and synchronous utility exports do not use `task::blocking`/`task::future` cancellation. The async `Process.terminate()` and `Process.waitForExit()` methods do. Other blocking conversions such as `rasterizeSvg`, `pdfToMarkdown`, `renderSnapcompactPng`, and `deviceCheckGenerateToken` use passive `()` tokens and expose no timeout/signal option.
 
 ## Cancellation lifecycle and state transitions
 
@@ -115,12 +126,13 @@ Aborted
 
 - **Before start / before first cancellation check**:
   - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
-  - `task::blocking` users only observe cancellation when closure code reaches `heartbeat()`.
+  - `task::blocking` users observe cancellation at closure heartbeat checks, with an explicit-flag check again during JS result settlement. The helper itself does not insert a pre-compute heartbeat.
+  - PTY checks before `openpty` and before spawn reject setup rather than returning a command cancellation result.
 
 - **Mid-execution**:
   - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
   - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
-  - shell: cancellation triggers a Tokio cancellation token, sends descendant termination waves, waits up to 2 seconds (5 on Windows) for the command task, then aborts the task if needed.
+  - shell: cancellation triggers a Tokio cancellation token and TERM/KILL waves over a per-run spawn registry, waits up to 2 seconds (5 on Windows) for the command task, then aborts the task if needed. Cleanup is scoped to that run, not a process-global descendant snapshot.
   - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
 
 ## Heartbeat expectations for long-running loops
@@ -146,11 +158,13 @@ Error path:
 2. `Task::compute()` returns `Err`.
 3. `AsyncTask` rejects JS promise.
 
+A successful worker result can still reject if the explicit abort flag was set before `resolve()` runs. That path uses `AbortError` / `Status::Cancelled`; elapsed deadlines alone are not checked at settlement. `blocking_mapped` applies its domain and cancellation hooks instead of the generic rejection.
+
 Typical error strings:
 
 - `Aborted: Timeout`
 - `Aborted: Signal`
-- domain errors (`Failed to decode image: ...`, `Conversion error: ...`, etc.)
+- domain errors (`Conversion error: ...`, etc.) and caught worker panic errors
 
 ### Future tasks
 
@@ -158,12 +172,12 @@ Error path:
 
 1. Async body returns `Err(napi::Error)` or join failure is mapped (`... task failed: {err}`).
 2. `task::future`-spawned promise rejects.
-3. Shell and PTY command APIs model cancellation as structured results instead of rejection when the cancellation path wins: `exitCode` omitted, `cancelled` or `timedOut` set.
+3. Shell cancellation resolves a structured result with `exitCode` omitted and `cancelled` or `timedOut` set. Running PTY cancellation also resolves flags, but may retain an observed child exit code; PTY setup cancellation rejects.
 
 ### Cancellation reporting split
 
 - **Abort as error**: blocking exports using `heartbeat()?`.
-- **Abort as typed result**: shell/PTY command APIs that model cancellation in result structs.
+- **Abort as typed result**: shell command APIs and the PTY running loop model cancellation in result structs; PTY pre-spawn checks remain errors.
 
 Choose one model per API and document it explicitly.
 

@@ -9,12 +9,19 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import {
+	previewLine,
+	replaceTabs,
+	shortenToolArgumentPaths,
+	TRUNCATE_LENGTHS,
+} from "@oh-my-pi/pi-tui/render/render-utils";
+import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorSelection,
@@ -37,8 +44,6 @@ import { Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
-import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -64,7 +69,7 @@ import {
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -131,7 +136,8 @@ import {
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
-import { cfgModelRoles, cfgDisabledProviders } from "../config/model-settings";
+import { cfgDisabledProviders } from "../config/model-settings";
+import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
@@ -211,7 +217,10 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.filter(Boolean);
 }
 
-const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
+/** Session-scoped role owning subagent `id`'s retry fallback chain; cold revival reinstalls it under this name. */
+export function subagentRetryFallbackRole(id: string): string {
+	return `subagent:${id}`;
+}
 
 interface SubagentRetryFallbackCandidate {
 	model: Model<Api>;
@@ -295,7 +304,6 @@ function installSubagentRetryFallbackChain(args: {
 	);
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
-	const existingFallbackChains = cfgRetryFallbackChains.get(settings);
 	// A single configured model may reuse its role's (or the default) configured chain, but never an implicit parent fallback.
 	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
 	if (
@@ -306,27 +314,8 @@ function installSubagentRetryFallbackChain(args: {
 		return undefined;
 	}
 
-	const role = `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`;
-	const modelRoles: Record<string, string> = {};
-	const existingRoles = settings.getModelRoles();
-	for (const existingRole in existingRoles) {
-		const selector = existingRoles[existingRole];
-		if (selector) {
-			modelRoles[existingRole] = selector;
-		}
-	}
-	modelRoles[role] = candidates[selectedIndex].selector;
-	cfgModelRoles.override(settings, modelRoles);
-	// Insert the task-specific role first so another role assigned to the same model cannot capture fallback routing.
-	const fallbackChains: Record<string, string[]> = {
-		[role]: fallbackChain,
-	};
-	for (const existingRole in existingFallbackChains) {
-		if (existingRole !== role) {
-			fallbackChains[existingRole] = existingFallbackChains[existingRole];
-		}
-	}
-	cfgRetryFallbackChains.override(settings, fallbackChains);
+	const role = subagentRetryFallbackRole(id);
+	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
 	return role;
 }
 
@@ -866,21 +855,45 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
+function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
+	const safe = shortenToolArgumentPaths(replaceTabs(sanitizeText(value)), key);
+	return { value: previewLine(safe, TRUNCATE_LENGTHS.CONTENT), key };
+}
+
 /**
- * Extract a short preview from tool args for display.
+ * Extract bounded display arguments after path and terminal sanitation. The key names which argument
+ * was chosen so the renderer can shorten home paths in path-valued arguments without rewriting a
+ * literal search pattern.
  */
-function extractToolArgsPreview(args: Record<string, unknown>): string {
+function extractToolArgsPreview(
+	args: Record<string, unknown>,
+	toolName: string,
+	editMode?: EditMode,
+): { value: string; key: string } | undefined {
 	// Priority order for preview
 	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
-
+	const isEdit = toolName === "edit" || toolName === "apply_patch";
+	if (isEdit && typeof args.input === "string") {
+		const paths = getEditInputPaths(args.input, editMode);
+		if (paths.length > 0) return formatToolArgsPreview(paths.join(", "), "path");
+	}
+	const compoundEdits = args.edits;
+	if (isEdit && Array.isArray(compoundEdits)) {
+		const paths = new Set<string>();
+		if (typeof args.path === "string" && args.path) paths.add(args.path);
+		for (const edit of compoundEdits) {
+			if (!isRecord(edit)) continue;
+			if (typeof edit.path === "string" && edit.path) paths.add(edit.path);
+			if (typeof edit.rename === "string" && edit.rename) paths.add(edit.rename);
+		}
+		if (paths.size > 0) return formatToolArgsPreview([...paths].join(", "), "path");
+	}
 	for (const key of previewKeys) {
-		if (args[key] && typeof args[key] === "string") {
-			const value = args[key] as string;
-			return value.length > 60 ? `${value.slice(0, 59)}…` : value;
+		if (typeof args[key] === "string" && args[key]) {
+			return formatToolArgsPreview(args[key] as string, key);
 		}
 	}
-
-	return "";
+	return undefined;
 }
 
 function getNumberField(record: Record<string, unknown>, key: string): number | undefined {
@@ -1630,6 +1643,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	/**
+	 * Tool calls in flight, by call id. Sibling calls run concurrently, so one call ending must not
+	 * blank or relabel another that is still running: the live row shows the newest started call, and
+	 * when that call ends it falls back to the oldest one still running.
+	 */
+	const activeTools = new Map<
+		string,
+		{ tool: string; args?: string; argsKey?: string; intent?: string; startMs: number }
+	>();
+	let visibleToolCallId: string | undefined;
+
+	/**
 	 * Soft request budget: steer at the budget, stop the free-running turn at
 	 * 1.5x, and hard-abort {@link BUDGET_STOP_GRACE_REQUESTS} requests later if
 	 * the forced final yield never lands.
@@ -1699,9 +1723,30 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
-				progress.currentToolArgs = extractToolArgsPreview(startArgs);
+				const editMode =
+					event.toolName === "apply_patch"
+						? "apply_patch"
+						: ((activeSession?.getToolByName(event.toolName) as { mode?: EditMode } | undefined)?.mode ??
+							undefined);
+				const preview = extractToolArgsPreview(startArgs, event.toolName, editMode);
+				progress.currentToolArgs = preview?.value;
+				progress.currentToolArgsKey = preview?.key;
 				progress.currentToolStartMs = now;
-				const intent = event.intent?.trim();
+				const intent = event.intent?.trim() || undefined;
+				// Per call: intent-optional tools (e.g. MCP) start without one, and
+				// `lastIntent` would otherwise label them with the previous call's.
+				progress.currentToolIntent = intent;
+				activeTools.set(event.toolCallId, {
+					tool: event.toolName,
+					args: preview?.value,
+					argsKey: preview?.key,
+					intent,
+					startMs: now,
+				});
+				visibleToolCallId = event.toolCallId;
+				// A fast tool may finish before the coalesced update fires.
+				// Publish both lifecycle edges rather than dropping its start.
+				flushProgress = true;
 				if (intent) {
 					progress.lastIntent = intent;
 				}
@@ -1717,10 +1762,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_end": {
-				if (progress.currentTool) {
+				const finished = activeTools.get(event.toolCallId);
+				activeTools.delete(event.toolCallId);
+				if (finished) {
 					progress.recentTools.unshift({
-						tool: progress.currentTool,
-						args: progress.currentToolArgs || "",
+						tool: finished.tool,
+						args: finished.args ?? "",
+						argsKey: finished.argsKey,
+						intent: finished.intent,
+						isError: event.isError,
 						endMs: now,
 					});
 					// Keep only last 5
@@ -1728,9 +1778,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						progress.recentTools.pop();
 					}
 				}
-				progress.currentTool = undefined;
-				progress.currentToolArgs = undefined;
-				progress.currentToolStartMs = undefined;
+				if (visibleToolCallId === event.toolCallId) {
+					const remaining = activeTools.entries().next().value;
+					visibleToolCallId = remaining?.[0];
+					const visible = remaining?.[1];
+					progress.currentTool = visible?.tool;
+					progress.currentToolArgs = visible?.args;
+					progress.currentToolArgsKey = visible?.argsKey;
+					progress.currentToolIntent = visible?.intent;
+					progress.currentToolStartMs = visible?.startMs;
+				}
 				// The finalized TaskToolDetails will be captured below into
 				// `extractedToolData.task`; drop the in-flight snapshot so the
 				// renderer doesn't double-count it against the final entry.
@@ -3933,8 +3990,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
 					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
-				modelPatternFallbackRole:
-					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
+				modelPatternFallbackRole: model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
 				modelPatternDefaultFallbackChain:
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
@@ -4081,6 +4137,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// createAgentSession was returning.
 				if (runRef.status === "aborted") monitor.requestAbort("signal");
 			}
+			// Todos are parent-owned bookkeeping and stripped from subagents —
+			// except under prewalk, whose plan nudge + todo gate require the
+			// subagent to commit its own todo list before the hand-off.
+			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
 			if (sessionFile !== null) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -4122,6 +4182,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							logger.error("Extension send failed", { action, error: err.message }),
 						reportRuntimeError: err =>
 							logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+						filterActiveTools: toolNames => toolNames.filter(name => !isParentOwnedTool(name)),
 					});
 					AgentRegistry.global().syncSessionStatus(id, revived);
 					installIrcWakeTurnMonitor(revived);
@@ -4143,10 +4204,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
-			// Todos are parent-owned bookkeeping and stripped from subagents —
-			// except under prewalk, whose plan nudge + todo gate require the
-			// subagent to commit its own todo list before the hand-off.
-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
 			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
@@ -4172,6 +4229,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
+				// Deferred model resolution installs this role inside createAgentSession,
+				// so read it back from the settings both install paths write.
+				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
@@ -4200,67 +4260,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void monitor.abortActiveSession();
 			}
 
+			// No closure in this block may capture `session`: JSC gives every closure in a
+			// block one shared scope object, so the lifecycle reviver built above would
+			// then pin the parked, disposed session for the life of the process.
 			const pendingExtensionMessages: Array<Promise<unknown>> = [];
-			const extensionRunner = session.extensionRunner;
-			if (extensionRunner) {
-				extensionRunner.initialize(
-					{
-						sendMessage: (message, options) => {
-							const sendPromise = session.sendCustomMessage(message, options).catch(e => {
-								logger.error("Extension sendMessage failed", {
-									error: e instanceof Error ? e.message : String(e),
-								});
-							});
-							pendingExtensionMessages.push(sendPromise);
-						},
-						sendUserMessage: (content, options) => {
-							const sendPromise = session.sendUserMessage(content, options).catch(e => {
-								logger.error("Extension sendUserMessage failed", {
-									error: e instanceof Error ? e.message : String(e),
-								});
-							});
-							pendingExtensionMessages.push(sendPromise);
-						},
-						appendEntry: (customType, data) => {
-							session.sessionManager.appendCustomEntry(customType, data);
-						},
-						setLabel: (targetId, label) => {
-							session.sessionManager.appendLabelChange(targetId, label);
-						},
-						getActiveTools: () => session.getEnabledToolNames(),
-						getAllTools: () => session.getAllToolInfos(),
-						setActiveTools: (toolNames: string[]) =>
-							session.setActiveToolsByName(toolNames.filter(name => !isParentOwnedTool(name))),
-						getCommands: () => getSessionSlashCommands(session),
-						setModel: model => runExtensionSetModel(session, model),
-						getThinkingLevel: () => session.thinkingLevel,
-						setThinkingLevel: level => session.setThinkingLevel(level),
-						getServiceTiers: () => session.serviceTierByFamily,
-						setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
-						getSessionName: () => session.sessionManager.getSessionName(),
-						setSessionName: async name => {
-							await session.sessionManager.setSessionName(name, "user");
-						},
+			await awaitAbortable(
+				initializeExtensions(session, {
+					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+					reportRuntimeError: err =>
+						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+					trackExtensionSend: task => {
+						pendingExtensionMessages.push(task.catch(() => {}));
 					},
-					{
-						getModel: () => session.model,
-						isIdle: () => !session.isStreaming,
-						abort: () => session.abort({ reason: USER_INTERRUPT_LABEL }),
-						hasPendingMessages: () => session.queuedMessageCount > 0,
-						shutdown: () => {},
-						getContextUsage: () => session.getContextUsage(),
-						getSystemPrompt: () => session.systemPrompt,
-						runEphemeralTurn: args => session.runEphemeralTurn(args),
-						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
-					},
-				);
-				extensionRunner.onError(err => {
-					logger.error("Extension error", { path: err.extensionPath, error: err.error });
-				});
-				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
-				while (pendingExtensionMessages.length > 0) {
-					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
-				}
+					filterActiveTools: toolNames => toolNames.filter(name => !isParentOwnedTool(name)),
+				}),
+			);
+			while (pendingExtensionMessages.length > 0) {
+				await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
 			}
 
 			unsubscribe = monitor.attach(session);

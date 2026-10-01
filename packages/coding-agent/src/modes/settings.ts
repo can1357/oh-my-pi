@@ -395,7 +395,8 @@ export const cfgTerminalShowProgress = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Native Terminal Progress",
-		description: "Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running",
+		description:
+			"Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running (always on in Tern)",
 	},
 });
 
@@ -562,6 +563,18 @@ export const cfgDisplayPinnedAgents = register({
 			{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
 			{ value: "full", label: "Full", description: "Always list every live agent" },
 		],
+	},
+});
+
+export const cfgDisplaySubagentLivePreview = register({
+	id: "display.subagentLivePreview",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Subagent Live Preview",
+		description: "Show each pinned subagent's current (or most recent) tool call beneath its row",
 	},
 });
 

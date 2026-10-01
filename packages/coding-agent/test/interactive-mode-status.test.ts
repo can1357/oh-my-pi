@@ -21,6 +21,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 	const ctx = {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),

@@ -2,8 +2,9 @@
 
 The compiled macOS `omp` binaries shipped on GitHub Releases can be signed with a
 **Developer ID Application** certificate and **notarized** by Apple. This makes
-them Gatekeeper-acceptable and is the prerequisite for an official Homebrew
-submission (see [#776](https://github.com/can1357/oh-my-pi/issues/776)).
+them eligible for Gatekeeper acceptance when the notarization ticket is
+available. The repository also maintains a Homebrew tap; formula installs
+have different quarantine behavior from browser downloads (see below).
 
 Signing happens in CI in the Darwin legs of the `release_binary_hosted` matrix
 (`.github/workflows/ci.yml`), via `scripts/ci-macos-sign.sh`. The workflow step
@@ -20,10 +21,17 @@ does not skip: invoking it without any required credential is an error.
    - re-signs with `--options runtime --timestamp` (hardened runtime + secure
      timestamp) and `--entitlements scripts/macos-entitlements.plist`;
    - runs `--version` and `--smoke-test` under the new signature to fail fast;
-   - notarizes the binary via `notarytool submit --wait`.
+   - packages the binary in a ZIP and submits it with
+     `notarytool submit --wait --timeout 30m`;
+   - requires an `Accepted` result; otherwise fetches the submission log when
+     available and fails. The temporary keychain and credential files are
+     removed on exit.
 3. `release_github_verify` re-downloads the published arm64 asset, runs
    `codesign --verify --strict` and both launch checks, and—when signing secrets
    are configured—also asserts that the signature is not ad-hoc.
+4. For non-canary releases, `release_brew` regenerates and pushes the tap formula
+   after published-binary verification. It skips when
+   `HOMEBREW_TAP_DEPLOY_KEY` is absent; that secret is separate from signing.
 
 ### Why the entitlements are mandatory
 
@@ -94,11 +102,16 @@ The App Store Connect API key is the one credential that **cannot** be minted
 from a CLI — it is the bootstrap credential for the API itself, and the `.p8`
 downloads exactly once. Everything else is local.
 
-### Uploading without printing secret values
+### Uploading credential files
 
-`scripts/ci-macos-upload-secrets.sh` validates the files (opens the `.p12` with
-your password, sanity-checks the `.p8`) and pipes each value to `gh secret set`
-over stdin — no secret is ever printed to the terminal, argv, or shell history:
+`scripts/ci-macos-upload-secrets.sh` requires exactly one `.p12` and one `.p8`,
+imports the certificate into a temporary keychain to verify its password and
+Developer ID identity, and checks that the `.p8` contains a PEM private-key
+header. It pipes each uploaded value to `gh secret set` over stdin rather than
+putting it in `gh` arguments or printing the credential payloads. Validation
+does pass the certificate password to `security import -P`, so the password
+can appear in that subprocess's arguments. The script prints the filenames
+and Key ID.
 
 ```sh
 scripts/ci-macos-upload-secrets.sh ~/omp-signing --dry-run   # validate first
@@ -106,7 +119,10 @@ scripts/ci-macos-upload-secrets.sh ~/omp-signing             # upload all five
 gh secret list --repo can1357/oh-my-pi                       # confirm
 ```
 
-Re-run it whenever the certificate is renewed.
+Re-run it whenever the certificate is renewed. `OMP_SIGNING_DIR` changes the
+default input directory; `OMP_REPO=owner/repo` changes the target repository
+(default `can1357/oh-my-pi`). The validation path requires macOS `security`;
+uploading also requires an authenticated `gh` CLI.
 
 ### Finding your signing identity / Team ID (sanity check)
 

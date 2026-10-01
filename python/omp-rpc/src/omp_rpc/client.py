@@ -27,6 +27,7 @@ from .protocol import (
     BashResult,
     FastModeResult,
     BranchMessage,
+    CacheWarmingMode,
     BranchResult,
     CancellationResult,
     CompactionResult,
@@ -43,6 +44,7 @@ from .protocol import (
     ModelCycleResult,
     ModelInfo,
     OpenSessionResult,
+    PromoteQueuedMessageResult,
     PromptResultEvent,
     QueuedMessageQueue,
     QueueUpdateEvent,
@@ -74,6 +76,7 @@ from .protocol import (
     assistant_text,
     parse_agent_messages,
     parse_bash_result,
+    parse_cache_warming_mode,
     parse_fast_mode_result,
     parse_branch_messages,
     parse_branch_result,
@@ -83,6 +86,7 @@ from .protocol import (
     parse_model_info,
     parse_notification,
     parse_open_session_result,
+    parse_promote_queued_message_result,
     parse_remove_queued_message_result,
     parse_session_state,
     parse_session_stats,
@@ -1004,6 +1008,10 @@ class RpcClient:
     def set_auto_retry(self, enabled: bool) -> None:
         self._request("set_auto_retry", enabled=enabled)
 
+    def set_cache_warming(self, mode: CacheWarmingMode) -> CacheWarmingMode:
+        """Override cache warming for this session only, never writing config.yml; returns the effective mode."""
+        return parse_cache_warming_mode(self._request("set_cache_warming", mode=mode))
+
     def abort_retry(self) -> None:
         self._request("abort_retry")
 
@@ -1252,6 +1260,12 @@ class RpcClient:
         """Remove one queued prompt; inspect the returned result's ``removed`` flag."""
         return parse_remove_queued_message_result(
             self._request("remove_queued_message", message=message, queue=queue)
+        )
+
+    def promote_queued_message(self, message: str) -> PromoteQueuedMessageResult:
+        """Move one queued follow-up to steering; inspect the result's ``promoted`` flag."""
+        return parse_promote_queued_message_result(
+            self._request("promote_queued_message", message=message)
         )
 
     def abort(self) -> None:

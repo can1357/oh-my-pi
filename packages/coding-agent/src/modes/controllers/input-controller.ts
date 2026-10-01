@@ -713,6 +713,8 @@ export class InputController {
 				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
 			}
 		};
+		// The native composer's viewing header: an ancestor crumb, or back to main.
+		this.ctx.editor.onFocusAgent = id => this.#focusResolvedAgent(id);
 
 		this.#setupEnhancedPaste();
 
@@ -968,7 +970,9 @@ export class InputController {
 			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
 			// developer directive (no visible user message) instead of an empty turn, so the
 			// model continues the prior intent rather than second-guessing the interrupt.
-			if (text === "." || text === "c") {
+			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
+			// so it is sent as a normal reply there.
+			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({

@@ -12,6 +12,7 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -152,6 +153,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"auto_compaction_end",
 	"auto_retry_start",
 	"auto_retry_end",
+	"cache_warming_start",
+	"cache_warming_end",
 	"retry_fallback_applied",
 	"retry_fallback_succeeded",
 	"ttsr_triggered",
@@ -626,11 +629,13 @@ export class RpcClient {
 
 	/**
 	 * Send a prompt to the agent.
-	 * Returns the request id once accepted; use onEvent() to receive streaming events
-	 * and onPromptResult() to observe its completion under that id.
+	 * Returns the request id once the message is admitted (dispatched, queued via
+	 * `streamingBehavior` while the agent is busy, or routed to an extension command);
+	 * use onEvent() to receive streaming events and onPromptResult() to observe its
+	 * completion under that id.
 	 */
-	async prompt(message: string, images?: ImageContent[]): Promise<string> {
-		const response = await this.#send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp"): Promise<string> {
+		const response = await this.#send({ type: "prompt", message, images, streamingBehavior });
 		this.#getData(response);
 		return response.id ?? "";
 	}
@@ -654,6 +659,15 @@ export class RpcClient {
 	 */
 	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<{ removed: boolean }> {
 		const response = await this.#send({ type: "remove_queued_message", message, queue });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Move the first matching queued follow-up into steering.
+	 * A missing target returns false; retrying may promote another occurrence.
+	 */
+	async promoteQueuedMessage(message: string): Promise<{ promoted: boolean }> {
+		const response = await this.#send({ type: "promote_queued_message", message });
 		return this.#getData(response);
 	}
 
@@ -863,6 +877,12 @@ export class RpcClient {
 	 */
 	async setAutoCompaction(enabled: boolean): Promise<void> {
 		await this.#send({ type: "set_auto_compaction", enabled });
+	}
+
+	/** Set the session-scoped cache warming mode and return the effective mode. */
+	async setCacheWarming(mode: CacheWarmingMode): Promise<CacheWarmingMode> {
+		const response = await this.#send({ type: "set_cache_warming", mode });
+		return this.#getData<{ mode: CacheWarmingMode }>(response).mode;
 	}
 
 	/**
