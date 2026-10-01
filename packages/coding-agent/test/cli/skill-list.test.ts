@@ -194,7 +194,6 @@ describe("handleSkillList", () => {
 				["second", "calendar"],
 				["first", "reviewer"],
 			] as const) {
-				await fs.mkdir(path.join(directory, root, name), { recursive: true });
 				await Bun.write(
 					path.join(directory, root, name, "SKILL.md"),
 					`---\nname: ${name}\ndescription: ${root} ${name}.\n---\n\n# ${name}\n`,
@@ -206,18 +205,16 @@ describe("handleSkillList", () => {
 			);
 
 			let stdout = "";
-			const originalStdoutWrite = process.stdout.write;
-			const originalStderrWrite = process.stderr.write;
-			process.stdout.write = ((chunk: string | Uint8Array) => {
+			const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
 				stdout += chunk.toString();
 				return true;
-			}) as typeof process.stdout.write;
-			process.stderr.write = (() => true) as typeof process.stderr.write;
+			});
+			const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
 			try {
 				expect(await handleSkillList([], directory, true)).toBe(0);
 			} finally {
-				process.stdout.write = originalStdoutWrite;
-				process.stderr.write = originalStderrWrite;
+				stdoutSpy.mockRestore();
+				stderrSpy.mockRestore();
 				await removeWithRetries(directory);
 			}
 

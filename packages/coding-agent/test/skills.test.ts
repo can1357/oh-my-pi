@@ -458,10 +458,8 @@ enabled: false
 				["visible-skill", "visible-skill", "Visible skill instructions."],
 				["explicit-only-directory", "manual-skill", "Manual skill instructions."],
 			] as const) {
-				const skillDir = path.join(tempSkillsDir, directoryName);
-				await fs.mkdir(skillDir, { recursive: true });
-				await fs.writeFile(
-					path.join(skillDir, "SKILL.md"),
+				await Bun.write(
+					path.join(tempSkillsDir, directoryName, "SKILL.md"),
 					[
 						"---",
 						`name: ${skillName}`,
