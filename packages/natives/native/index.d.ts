@@ -3317,6 +3317,9 @@ export declare function vcsGitClone(url: string, target: string, options: VcsClo
 /** Discover the Git checkout containing a directory. */
 export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
 
+/** Initialize an empty Git repository. */
+export declare function vcsGitInit(dir: string, signal?: unknown | undefined | null): Promise<undefined>
+
 /** Discover Git metadata without opening the repository. */
 export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
 

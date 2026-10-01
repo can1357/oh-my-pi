@@ -74,6 +74,9 @@ export declare function clone(
 	signal?: AbortSignal,
 ): Promise<void>;
 
+/** Create an empty git repository at `dir`, creating the directory first. */
+export declare function init(dir: string, signal?: AbortSignal): Promise<void>;
+
 /** Sever a copied working tree from shared git metadata. */
 export declare function detachGitDir(
 	worktreeRoot: string,

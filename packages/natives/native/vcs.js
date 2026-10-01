@@ -90,6 +90,11 @@ export function clone(url, target, options = {}, signal) {
 	return api().vcsGitClone(url, target, options, signal);
 }
 
+/** Create an empty git repository at `dir`, creating the directory first. */
+export function init(dir, signal) {
+	return api().vcsGitInit(dir, signal);
+}
+
 /** Sever a copied working tree from shared git metadata. */
 export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);

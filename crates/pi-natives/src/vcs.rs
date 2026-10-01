@@ -1386,6 +1386,17 @@ pub fn vcs_git_clone<'e>(
 		pi_vcs::git::clone(&url, Path::new(&target), &options, cancel).await
 	})
 }
+/// Initialize an empty Git repository.
+#[napi]
+pub fn vcs_git_init(dir: String, signal: Option<Unknown>) -> Promise<()> {
+	let ct = task::CancelToken::new(None, signal);
+	task::blocking_mapped("vcs.init", ct, rich_error, canceled_error, move |ct| {
+		if ct.heartbeat().is_err() {
+			return Err(pi_vcs::Error::Canceled);
+		}
+		pi_vcs::git::init(Path::new(&dir))
+	})
+}
 /// Detach copied Git metadata.
 #[napi]
 pub fn vcs_detach_git_dir(
