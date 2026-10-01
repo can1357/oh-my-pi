@@ -2944,3 +2944,40 @@ describe("Amazon Bedrock compaction request preparation", () => {
 		expect(proxies).toEqual(["http://proxy.example.test:8080", "http://proxy.example.test:8080"]);
 	});
 });
+
+describe("remote compaction configured headers", () => {
+	test("non-Bedrock builders send lazily resolved configured headers", async () => {
+		const nativeInput = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+		const model: Model<"openai-responses"> = {
+			...makeOpenAiModel(),
+			resolveHeaders: async () => ({ "x-tenant-token": "lazy-tenant" }),
+		};
+		const tenants: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			tenants.push(new Headers(init?.headers).get("x-tenant-token"));
+			return String(input).endsWith("/compact")
+				? Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] })
+				: sseResponse([
+						{
+							type: "response.output_item.done",
+							output_index: 0,
+							item: { type: "compaction", encrypted_content: "enc" },
+						},
+						{ type: "response.completed" },
+					]);
+		};
+
+		await requestOpenAiRemoteCompaction(model, "test-key", nativeInput, "instructions", undefined, {
+			fetch: fetchMock,
+		});
+		await requestCompactionV2Streaming(
+			model,
+			"test-key",
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(tenants).toEqual(["lazy-tenant", "lazy-tenant"]);
+	});
+});

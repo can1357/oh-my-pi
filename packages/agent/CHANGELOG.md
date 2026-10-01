@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote compaction requests to non-Bedrock endpoints now send the model's configured headers, including command-backed ones, instead of dropping them
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
