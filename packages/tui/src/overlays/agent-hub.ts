@@ -304,6 +304,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	 * registered; absent, every ref is listed.
 	 */
 	inSession?: (ref: AgentRecordLike) => boolean;
+	/** Host policy for records with a local session or transcript. */
+	hasLocalPresence: (kind: AgentRecordLike["kind"]) => boolean;
 	/** Resolve lifecycle actions lazily when a local action needs them. */
 	lifecycle: () => AgentLifecycleLike<TRecord>;
 	/** Host message bus supplying unread counts. */
@@ -345,6 +347,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 {
 	#registry: AgentHubRegistry<TRecord>;
 	#inSession: ((ref: AgentRecordLike) => boolean) | undefined;
+	#hasLocalPresence: (kind: AgentRecordLike["kind"]) => boolean;
 	#observers: SessionObserverRegistry;
 	#getRoleInfo: ((role: string) => AgentRoleDisplay) | undefined;
 	#transcript: AgentTranscriptSource;
@@ -496,6 +499,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#manageActivityLive = deps.manageActivityLive ?? true;
 		this.#registry = deps.registry;
 		this.#inSession = deps.inSession;
+		this.#hasLocalPresence = deps.hasLocalPresence;
 		this.#observers = deps.observers;
 		this.#getRoleInfo = deps.getRoleInfo;
 		this.#transcript = deps.transcript;
@@ -1566,11 +1570,17 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	/** Registry refs shown in this session's roster, excluding the main agent. */
 	#sessionRefs(): TRecord[] {
-		return this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && (this.#inSession?.(ref) ?? true));
+		return this.#registry
+			.list()
+			.filter(
+				ref => ref.id !== MAIN_AGENT_ID && this.#hasLocalPresence(ref.kind) && (this.#inSession?.(ref) ?? true),
+			);
 	}
 
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
+		// Remote proxies (murmur-q00p) are messaging peers, not local sessions: they have no local
+		// presence to display and the hub's focus/revive/kill act on the local lifecycle (see #sessionRefs).
 		const refs = this.#sessionRefs();
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);

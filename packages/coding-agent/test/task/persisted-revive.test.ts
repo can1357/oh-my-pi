@@ -45,7 +45,7 @@ import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-co
 import { cfgTaskMaxEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { attachIrcWakeTurnMonitor, buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -1775,6 +1775,46 @@ describe("persisted subagent revival", () => {
 			IrcBus.resetGlobalForTests();
 		});
 
+		it("relays a wake-turn reply on the session's own registry bus, not the global one (custom registry, finding 6b)", async () => {
+			// The executor threads a subagent's OWN registry into the wake monitor.
+			// relayWakeTurnOutput must publish the turn's answer on THAT registry's
+			// bus; reverting it to IrcBus.global() strands the reply for any session
+			// on a custom (non-global) registry.
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+			MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+			const custom = new AgentRegistry();
+			custom.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
+			const handle = createRevivedSession([]);
+			custom.register({ id: "Scout", displayName: "Scout", kind: "sub", session: handle.session, status: "idle" });
+			const wakeAgent: AgentDefinition = {
+				name: "Scout",
+				description: "",
+				systemPrompt: "You are a read-only scout.",
+				source: "user",
+			};
+			attachIrcWakeTurnMonitor(handle.session, {
+				id: "Scout",
+				agent: wakeAgent,
+				registry: custom,
+				eventBus: new EventBus(),
+			});
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const finish = observer?.([wakeRecord("Main")]);
+			expect(handle.trackedReplies).toHaveLength(1);
+			handle.setLastAssistantText("cold-revive answer");
+			const customReply = IrcBus.forRegistry(custom).wait("Main", { from: "Scout" }, 5000);
+			const globalReply = IrcBus.global().wait("Main", { from: "Scout" }, 200);
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			expect(await customReply).toMatchObject({ from: "Scout", to: "Main", body: "cold-revive answer" });
+			expect(await globalReply).toBeNull();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
 		it("reports the failure even after the agent sent a progress ping to the waker", async () => {
 			// `sentSince` cannot tell "already answered" from "pinged 'on it'".
 			// A progress ping is not an answer, so a failed wake turn must still
