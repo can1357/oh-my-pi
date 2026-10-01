@@ -2261,7 +2261,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// before initHooksAndCustomTools/#reconcileModeFromSession/#enterPlanMode —
 		// all of which can reach setSessionName during init.
 		this.#eventBusUnsubscribers.push(
-			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onPersistenceError(error => {
 				const detail = truncateToWidth(
 					replaceTabs(sanitizeText(error.message)).replace(/[\r\n]+/g, " "),
@@ -2271,6 +2270,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					`Session persistence failed: ${detail}. Unsaved entries remain in memory; persistence will retry on the next entry.`,
 				);
 			}),
+			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();

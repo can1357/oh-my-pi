@@ -264,6 +264,19 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
 	return buffer.toString("utf8");
 }
 
+/** Synchronous variant of {@link resolveImageDataUrl}. */
+export function resolveImageDataUrlSync(blobStore: BlobStore, data: string): string {
+	const hash = parseBlobRef(data);
+	if (!hash) return data;
+
+	const buffer = blobStore.getSync(hash);
+	if (!buffer) {
+		logger.warn("Blob not found for persisted image data URL", { hash });
+		return data;
+	}
+	return buffer.toString("utf8");
+}
+
 /**
  * Resolve a blob reference back to base64 data.
  * If the data is not a blob reference, returns it unchanged.
