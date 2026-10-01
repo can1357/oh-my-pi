@@ -207,7 +207,7 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	#fpath: string;
-	#publishLock: ((task: () => void) => void) | undefined;
+	#publishLock: ((append: () => void, landed: () => boolean) => void) | undefined;
 	#closed = false;
 	#error: Error | undefined;
 	#onError: ((err: Error) => void) | undefined;
@@ -217,7 +217,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		options?: {
 			flags?: "a" | "w";
 			onError?: (err: Error) => void;
-			publishLock?: (task: () => void) => void;
+			publishLock?: (append: () => void, landed: () => boolean) => void;
 		},
 	) {
 		this.#fpath = fpath;
@@ -267,6 +267,23 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		this.#fd = nextFd;
 		writerRegistry.register(this, nextFd, this);
 		return fs.fstatSync(nextFd).size;
+	}
+
+	/**
+	 * Whether the descriptor the last append wrote through is still the file the
+	 * session path names. A vanished path counts as landed: nothing replaced it,
+	 * and `#reopenIfReplaced` would append to the same descriptor again.
+	 */
+	#holdsLivePath(): boolean {
+		const held = fs.fstatSync(this.#fd, { bigint: true });
+		let live: fs.BigIntStats;
+		try {
+			live = fs.statSync(this.#fpath, { bigint: true });
+		} catch (err) {
+			if (isEnoent(err)) return true;
+			throw err;
+		}
+		return live.ino === held.ino && live.dev === held.dev;
 	}
 
 	#recordError(err: unknown): Error {
@@ -330,7 +347,10 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// check-then-rename, which would otherwise erase the appended turn.
 		try {
 			if (this.#publishLock) {
-				this.#publishLock(() => this.#writeNow(line, this.#reopenIfReplaced()));
+				this.#publishLock(
+					() => this.#writeNow(line, this.#reopenIfReplaced()),
+					() => this.#holdsLivePath(),
+				);
 			} else {
 				this.#writeNow(line, fs.fstatSync(this.#fd).size);
 			}
@@ -389,9 +409,11 @@ class FileSessionStorageWriter implements SessionStorageWriter {
  * current writers the gate serializes the whole claim, which also closes
  * the two-reclaimer unlink race (rJDh). Against a previous-binary peer the
  * protocol degrades to its released semantics, documented on the steal
- * path. The window that remains is non-cooperating writers (plain
- * editors), against which the size check still fails closed whenever the
- * skew is detectable.
+ * path. Appends claim the lockfile only when a previous-binary publisher
+ * can be in flight (see `#withAppendLock`), so a transcript line does not
+ * create and unlink a file beside the session. The window that remains is
+ * non-cooperating writers (plain editors), against which the size check
+ * still fails closed whenever the skew is detectable.
  *
  * The region is held for microseconds and never yields, so in-process
  * contention is impossible; cross-process contention fails closed after a
@@ -474,13 +496,57 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				task();
 			} finally {
-				try {
-					fs.unlinkSync(lockPath);
-				} catch (err) {
-					if (!isEnoent(err)) {
-						logger.warn("Failed to remove session publish lock", { sessionFile: fpath, lockPath });
-					}
-				}
+				this.#releasePublishLock(fpath, lockPath);
+			}
+		} finally {
+			osGate.release();
+		}
+	}
+
+	#releasePublishLock(fpath: string, lockPath: string): void {
+		try {
+			fs.unlinkSync(lockPath);
+		} catch (err) {
+			if (!isEnoent(err)) {
+				logger.warn("Failed to remove session publish lock", { sessionFile: fpath, lockPath });
+			}
+		}
+	}
+
+	/**
+	 * Run `append` under the OS gate, claiming the lockfile only when a
+	 * previous-binary publisher may overlap it. Current publishers hold the
+	 * gate across their freshness check and rename, so among current writers
+	 * the gate alone excludes them and an append touches nothing beside the
+	 * session. A previous binary takes only the lockfile, so its claim stays
+	 * observable: an append that finds the lockfile waits for it exactly as
+	 * before, and one that saw it appear (or saw the path renamed away from
+	 * the descriptor it wrote through) waits for that publisher to finish and
+	 * re-appends to whatever file it published when the line did not survive.
+	 * That reproduces the serial order "their publish, then our append" the
+	 * lockfile used to enforce, and fails closed when the holder outlives the
+	 * bounded wait.
+	 */
+	#withAppendLock(fpath: string, append: () => void, landed: () => boolean): void {
+		const lockPath = this.#publishLockPath(fpath);
+		this.ensureDirSync(path.dirname(lockPath));
+		const osGate = this.#acquireOsPublishLock(fpath, lockPath);
+		try {
+			let appended = false;
+			if (!fs.existsSync(lockPath)) {
+				append();
+				appended = true;
+				// Lockfile before identity: a previous-binary publisher whose
+				// freshness check preceded our write holds the lockfile through its
+				// rename, so it is either still visible here or has already moved
+				// the path off our descriptor.
+				if (!fs.existsSync(lockPath) && landed()) return;
+			}
+			this.#acquirePublishLock(fpath, lockPath);
+			try {
+				if (!appended || !landed()) append();
+			} finally {
+				this.#releasePublishLock(fpath, lockPath);
 			}
 		} finally {
 			osGate.release();
@@ -906,7 +972,7 @@ export class FileSessionStorage implements SessionStorage {
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
 		return new FileSessionStorageWriter(path, {
 			...options,
-			publishLock: task => this.#withPublishLock(path, task),
+			publishLock: (append, landed) => this.#withAppendLock(path, append, landed),
 		});
 	}
 

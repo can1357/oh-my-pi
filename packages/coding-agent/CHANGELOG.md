@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Fixed session transcript appends creating and deleting a `.jsonl.lock` file beside the session for every recorded entry, cutting disk writes during long sessions ([#14003](https://github.com/can1357/oh-my-pi/pull/14003) by [@H4vC](https://github.com/H4vC))
+- Fixed an interrupted image blob write leaving a partial image under its final name, image copies being rewritten on every save on filesystems without hardlinks, and `omp gc` possibly deleting a long-stored image that a session had just started referencing again ([#14004](https://github.com/can1357/oh-my-pi/pull/14004) by [@H4vC](https://github.com/H4vC))
+- Fixed terminal breadcrumbs and custom-session markers being rewritten when unchanged, and sessions on a non-file session store leaving dangling markers in `~/.omp/agent/custom-session-files` ([#14005](https://github.com/can1357/oh-my-pi/pull/14005) by [@H4vC](https://github.com/H4vC))
 - Fixed agent.db write churn: model performance samples are batched once a minute (and flushed on exit or when `/models` reads them), session account stickiness is persisted only when it changes or drifts, the schema version and file permissions are no longer rewritten on every start, and resuming a session advances a stale same-account sticky to the session's last turn ([#14001](https://github.com/can1357/oh-my-pi/pull/14001) by [@H4vC](https://github.com/H4vC))
 - Fixed setting an option, record entry, or model role to the value it already has rewriting `config.yml`; saves that would reproduce the file byte-for-byte now leave it untouched ([#14002](https://github.com/can1357/oh-my-pi/pull/14002) by [@H4vC](https://github.com/H4vC))
 - Reduced disk writes from model discovery: refreshes whose provider catalogs are unchanged no longer rewrite `models.db`, and a refresh that does rewrite more than five provider rows is noted in the debug log ([#14007](https://github.com/can1357/oh-my-pi/pull/14007) by [@H4vC](https://github.com/H4vC))
