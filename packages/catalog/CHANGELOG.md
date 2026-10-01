@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `bai` provider for the B.AI multi-vendor gateway: `/login bai` (or `BAI_API_KEY`) unlocks its live model roster, including TypeSafe Jev as a judge model.
+- Added the `bai` provider for the B.AI multi-vendor gateway: `/login bai` (or `BAI_API_KEY`) unlocks its live model roster, including TypeSafe Jev as a judge model ([#13962](https://github.com/can1357/oh-my-pi/pull/13962) by [@vanko001](https://github.com/vanko001)).
 
 ## [18.4.6] - 2026-10-01
 
