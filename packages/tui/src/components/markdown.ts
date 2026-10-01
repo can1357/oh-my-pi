@@ -1370,6 +1370,14 @@ export interface MarkdownTheme {
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
+	/**
+	 * Append the destination as ` (href)` after link text. When false, a link whose
+	 * text is already wrapped in an OSC 8 hyperlink renders as the text alone.
+	 * Links with nothing visible to click (hyperlinks off, no destination, empty,
+	 * whitespace-only, or image-only link text) keep the suffix so the target stays
+	 * discoverable. Defaults to true.
+	 */
+	showLinkUrls?: boolean;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
@@ -3312,7 +3320,17 @@ export class Markdown implements Component {
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
 					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
-					if (!href || token.text === href || token.text === hrefForComparison)
+					// A clickable link text already carries the destination, so the theme
+					// may drop the redundant " (href)" suffix. A link with nothing visible
+					// to click keeps it, as does a non-clickable one: dropping the suffix
+					// would lose the target entirely. Whitespace-only and image-only link
+					// text (no alt) render zero visible cells, hence both checks.
+					const hideUrlSuffix =
+						this.#theme.showLinkUrls === false &&
+						clickableLinkText !== styledLinkText &&
+						token.text.trim().length > 0 &&
+						visibleWidth(linkText) > 0;
+					if (!href || token.text === href || token.text === hrefForComparison || hideUrlSuffix)
 						result += clickableLinkText + stylePrefix;
 					else {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
