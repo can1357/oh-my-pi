@@ -11,6 +11,7 @@
 ### Changed
 
 - Advisor notes merge at final boundaries with age markers and at most one permitted continuation per batch; advisor continuations no longer trigger recursive reviews ([#12387](https://github.com/can1357/oh-my-pi/pull/12387) by [@olegpulatov](https://github.com/olegpulatov)).
+- Finished subagents now park 5 seconds after going idle instead of 7 minutes, so long sessions that spawn many subagents no longer hold every finished one in memory; `history://`, `agent://` and messages still reach a parked agent (`task.agentIdleTtlMs`).
 
 ### Fixed
 
