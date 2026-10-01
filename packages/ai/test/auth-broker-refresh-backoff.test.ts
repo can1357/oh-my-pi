@@ -178,17 +178,17 @@ describe("auth broker OAuth refresh backoff", () => {
 			brokerStorage,
 			model as Model<Api>,
 			"gateway",
-			"access-0",
+			{ apiKey: "access-0" },
 			new AbortController().signal,
 			"openai",
 			"peer",
 		);
 		const unauthorized = Object.assign(new Error("401 invalid_api_key"), { status: 401 });
-		expect(await resolve({ lastChance: false, error: unauthorized })).toBe("access-1");
-		expect(await resolve({ lastChance: false, error: unauthorized })).toBe("access-1");
+		expect(await resolve({ lastChance: false, error: unauthorized })).toMatchObject({ apiKey: "access-1" });
+		expect(await resolve({ lastChance: false, error: unauthorized })).toMatchObject({ apiKey: "access-1" });
 		expect(
 			await resolve({ lastChance: false, error: Object.assign(new Error("server error"), { status: 500 }) }),
-		).toBe("access-2");
+		).toMatchObject({ apiKey: "access-2" });
 		expect(refreshCalls).toBe(2);
 	});
 

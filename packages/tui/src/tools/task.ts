@@ -33,7 +33,9 @@ import {
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	shortenEmbeddedPaths,
 	shortenPath,
+	shortenToolArgumentPaths,
 	type ToolUIStatus,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -663,6 +665,11 @@ function renderRouteLine(route: string | undefined, continuePrefix: string, maxW
 	];
 }
 
+/** A tool call's own intent, else its argument, with home paths shortened as the subagent HUD does. */
+function toolCallDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
+	return intent ? shortenEmbeddedPaths(intent) : shortenToolArgumentPaths(args ?? "", argsKey);
+}
+
 /**
  * Render streaming progress for a single agent.
  */
@@ -723,7 +730,11 @@ function renderAgentProgress(
 	if (progress.status === "running") {
 		if (progress.currentTool) {
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", sanitizeText(progress.currentTool))}`;
-			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
+			const toolDetail = toolCallDetail(
+				progress.currentToolIntent,
+				progress.currentToolArgs,
+				progress.currentToolArgsKey,
+			);
 			if (toolDetail) {
 				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
 			}
@@ -738,7 +749,7 @@ function renderAgentProgress(
 			// Show most recent completed tool when idle between tools
 			const recent = progress.recentTools[0];
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", sanitizeText(recent.tool))}`;
-			const toolDetail = progress.lastIntent ?? recent.args;
+			const toolDetail = toolCallDetail(recent.intent, recent.args, recent.argsKey);
 			if (toolDetail) {
 				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
 			}
@@ -1795,7 +1806,10 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 		running && progress.currentTool
 			? {
 					name: plainText(progress.currentTool),
-					intent: plainText(progress.lastIntent ?? progress.currentToolArgs ?? "") || undefined,
+					intent:
+						plainText(
+							toolCallDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey),
+						) || undefined,
 					age: progress.currentToolStartMs ? Math.max(0, nowMs - progress.currentToolStartMs) : undefined,
 				}
 			: null;
@@ -2252,8 +2266,19 @@ export interface AgentProgress {
 	lastIntent?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
+	/** Argument key selected for the display preview, when known. */
+	currentToolArgsKey?: string;
+	/** Intent the model attached to the current call; undefined when that call carried none. */
+	currentToolIntent?: string;
 	currentToolStartMs?: number;
-	recentTools: Array<{ tool: string; args: string; endMs: number }>;
+	recentTools: Array<{
+		tool: string;
+		args: string;
+		argsKey?: string;
+		intent?: string;
+		isError?: boolean;
+		endMs: number;
+	}>;
 	recentOutput: string[];
 	toolCount: number;
 	/** Count of assistant requests (assistant message_end events) across the run. Drives the soft request budget guard. */

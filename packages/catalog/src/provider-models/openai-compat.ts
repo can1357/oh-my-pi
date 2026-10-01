@@ -1258,6 +1258,81 @@ export function huggingfaceModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 4.5 Helmcode
+// ---------------------------------------------------------------------------
+
+export interface HelmcodeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * First-party hosts of the models Helmcode resells (helmcode.com/docs/models,
+ * "Frontier models"). Resold ids resolve only against these rows: the global
+ * bare-id index picks whichever gateway row wins a context/output tie, which
+ * can carry a zero or marked-up price instead of the vendor list price.
+ */
+const HELMCODE_RESOLD_VENDORS = ["anthropic", "openai", "google"] as const satisfies readonly GeneratedProvider[];
+
+function createHelmcodeVendorReferenceMap(): Map<string, ModelSpec<"openai-completions">> {
+	const references = new Map<string, ModelSpec<"openai-completions">>();
+	for (const vendor of HELMCODE_RESOLD_VENDORS) {
+		for (const [id, reference] of createBundledReferenceMap<"openai-completions">(vendor)) {
+			if (!references.has(id)) references.set(id, reference);
+		}
+	}
+	return references;
+}
+
+/**
+ * Helmcode model manager: OpenAI-compatible chat completions at
+ * `api.helmcode.com/v1`. `/v1/models` also lists embedding, rerank, TTS, and
+ * STT models; the exclusion policy lives in `runtime/behavior.kdl`
+ * (`exclude-models provider="helmcode"`).
+ *
+ * `/v1/models` carries no capability data. Resold frontier ids (Claude, GPT,
+ * Gemini) take only capability facts from the first-party vendor's bundled
+ * row: reasoning, modalities, context window, output cap, and list price. The
+ * rest of that row (thinking shape, compat, native web search, tool dialects,
+ * cache semantics) describes the vendor's own API, not this chat-completions
+ * proxy; the host's `reasoning_effort` ladders and cache-write pricing live in
+ * `providers/helmcode.kdl`. Ids with no Helmcode or vendor row (e.g. a new
+ * open-weight model) inherit nothing from other gateways.
+ */
+export function helmcodeModelManagerOptions(
+	config?: HelmcodeModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	let vendorReferences: Map<string, ModelSpec<"openai-completions">> | undefined;
+	const resolveVendorReference = (id: string) => (vendorReferences ??= createHelmcodeVendorReferenceMap()).get(id);
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "helmcode",
+		defaultBaseUrl: "https://api.helmcode.com/v1",
+		config,
+		requireApiKey: true,
+		filterModel: (_entry, model) => !isExcludedModel("helmcode", model.id),
+		mapModel: (entry, defaults, helmcodeReference) => {
+			if (helmcodeReference) return mapWithBundledReference(entry, defaults, helmcodeReference);
+			const vendor = resolveVendorReference(defaults.id);
+			if (!vendor) return mapWithBundledReference(entry, defaults, undefined);
+			return {
+				...defaults,
+				name: toModelName(entry.name, vendor.name),
+				reasoning: vendor.reasoning,
+				input: vendor.input,
+				cost: vendor.cost,
+				contextWindow: toPositiveNumber(entry.context_length, vendor.contextWindow),
+				maxTokens: toPositiveNumber(entry.max_completion_tokens, vendor.maxTokens),
+			};
+		},
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 5. NVIDIA
 // ---------------------------------------------------------------------------
 
@@ -3277,12 +3352,8 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 									cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
 									cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
 								},
-								contextWindow:
-									typeof entry.context_length === "number" ? entry.context_length : baseModel.contextWindow,
-								maxTokens:
-									typeof topProvider?.max_completion_tokens === "number"
-										? topProvider.max_completion_tokens
-										: baseModel.maxTokens,
+								contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
 								...(!supportsToolChoice && {
 									compat: { ...baseModel.compat, supportsToolChoice: false },
 								}),
@@ -3346,11 +3417,9 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 									cacheRead: 0,
 									cacheWrite: 0,
 								},
-								contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
-								maxTokens:
-									typeof topProvider?.max_completion_tokens === "number"
-										? topProvider.max_completion_tokens
-										: null,
+								// Some rows (e.g. respan/span-01) advertise `0` for unknown limits.
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, null),
 							};
 						},
 						fetch: config?.fetch,
@@ -3382,11 +3451,8 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 								supportsTools: false,
 								// OpenRouter bills reranking per search; ModelCost has no search-unit axis.
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
-								maxTokens:
-									typeof topProvider?.max_completion_tokens === "number"
-										? topProvider.max_completion_tokens
-										: null,
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, null),
 							};
 						},
 						fetch: config?.fetch,
@@ -3430,7 +3496,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 									cacheRead: 0,
 									cacheWrite: 0,
 								},
-								contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
+								contextWindow: toPositiveNumber(entry.context_length, null),
 								maxTokens: null,
 							};
 						},

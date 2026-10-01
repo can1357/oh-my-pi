@@ -5,10 +5,16 @@
 //! autocorrect in `pi_natives::spelling`) submits work to this lazily spawned,
 //! dedicated thread. Ranges are UTF-16 offsets, the unit both `NSString` and
 //! JavaScript strings index by.
+//!
+//! `NSSpellChecker` talks to the spelling service over XPC and needs no
+//! `NSApplication`. Never initialize one here (`NSApplicationLoad`,
+//! `NSApplication.sharedApplication`): that checks the process in with
+//! `LaunchServices`, which attributes it to the host terminal and adds a
+//! duplicate Dock tile per session (issue #12491).
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use objc2::rc::Retained;
 use objc2_app_kit::NSSpellChecker;
 use objc2_foundation::{NSArray, NSRange, NSString, NSTextCheckingType};
@@ -27,18 +33,8 @@ static SPELLING_THREAD: LazyLock<flume::Sender<Job>> = LazyLock::new(|| {
 		.expect("failed to spawn the native spelling thread");
 	sender
 });
-static APP_KIT_LOADED: LazyLock<bool> = LazyLock::new(|| {
-	// SAFETY: AppKit documents `NSApplicationLoad` as process-global and
-	// idempotent; `LazyLock` guarantees this process calls it at most once.
-	unsafe { NSApplicationLoad() }
-});
 const NS_NOT_FOUND: usize = isize::MAX as usize;
 const THREAD_STOPPED: &str = "native spelling thread stopped";
-
-#[link(name = "AppKit", kind = "framework")]
-unsafe extern "C" {
-	fn NSApplicationLoad() -> bool;
-}
 
 /// A misspelled span in UTF-16 code units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,13 +45,10 @@ pub struct SpellingRange {
 	pub length: u32,
 }
 
-fn checker() -> anyhow::Result<Retained<NSSpellChecker>> {
-	if !*APP_KIT_LOADED {
-		bail!("failed to initialize AppKit");
-	}
+fn checker() -> Retained<NSSpellChecker> {
 	let checker = NSSpellChecker::sharedSpellChecker();
 	checker.setAutomaticallyIdentifiesLanguages(true);
-	Ok(checker)
+	checker
 }
 
 fn submit<T: Send + 'static>(
@@ -96,15 +89,6 @@ pub fn run_blocking<T: Send + 'static>(
 		.map_err(|_| anyhow::anyhow!(THREAD_STOPPED))?
 }
 
-/// Fail unless `AppKit` and the shared spell checker are usable.
-/// Call on the spelling thread.
-///
-/// # Errors
-/// Returns an error when `AppKit` cannot be initialized.
-pub fn ensure_available() -> anyhow::Result<()> {
-	checker().map(|_| ())
-}
-
 fn ns_range(start: u32, length: u32) -> anyhow::Result<NSRange> {
 	Ok(NSRange {
 		location: usize::try_from(start).context("spelling range start is too large")?,
@@ -115,9 +99,9 @@ fn ns_range(start: u32, length: u32) -> anyhow::Result<NSRange> {
 /// Every misspelled word in `text`. Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn check(text: &str) -> anyhow::Result<Vec<SpellingRange>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let full = NSRange { location: 0, length: text.length() };
 	// `checkString:...` honors `automaticallyIdentifiesLanguages`, selecting
@@ -176,9 +160,9 @@ fn word_language(checker: &NSSpellChecker, text: &NSString, range: NSRange) -> R
 /// Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn completions(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);
@@ -195,9 +179,9 @@ pub fn completions(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<St
 /// language macOS identifies for it. Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn is_known_word(text: &str, start: u32, length: u32) -> anyhow::Result<bool> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);
@@ -221,9 +205,9 @@ pub fn is_known_word(text: &str, start: u32, length: u32) -> anyhow::Result<bool
 /// Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn guesses(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);
@@ -240,9 +224,9 @@ pub fn guesses(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String
 /// if it is confident. Call on the spelling thread.
 ///
 /// # Errors
-/// Returns an error when `AppKit` is unavailable or a range overflows.
+/// Returns an error when a range overflows.
 pub fn correction(text: &str, start: u32, length: u32) -> anyhow::Result<Option<String>> {
-	let checker = checker()?;
+	let checker = checker();
 	let text = NSString::from_str(text);
 	let range = ns_range(start, length)?;
 	let language = word_language(&checker, &text, range);

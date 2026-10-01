@@ -81,10 +81,12 @@ const PINNED_NATIVE_PRIORITY = 1000;
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
  * the context hairline and usage text (context, cost), Tern's pane header
- * (path, git), the tab title (session name, PR), the HUD pills (subagents)
- * and the editor (vim). The brand (`pi`) stays only while focus-proxied.
+ * (path, git), the tab title (session name, PR), the HUD pills (subagents),
+ * the editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent
+ * is the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
+	pi: true,
 	model: true,
 	context_pct: true,
 	context_total: true,
@@ -642,6 +644,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
+	#subagentTreeCost = 0;
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -885,6 +888,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Host-computed spend of the main session's whole subagent tree (Agent Hub projection). */
+	setSubagentTreeCost(cost: number): void {
+		const next = Number.isFinite(cost) && cost > 0 ? cost : 0;
+		if (next === this.#subagentTreeCost) return;
+		this.#subagentTreeCost = next;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2391,6 +2402,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
+			// The tree total describes the main session; a focused subagent's
+			// view falls back to its own completed task results.
+			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			now: new Date(nowMs),
@@ -3367,7 +3381,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const facts: NativeNode[] = [];
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]): void => {
 			ids.forEach((id, index) => {
-				if (COMPOSER_HOMED_SEGMENTS[id] || (id === "pi" && ctx.focusedAgentId === undefined)) return;
+				if (COMPOSER_HOMED_SEGMENTS[id]) return;
 				const view = describeSegment(id, ctx);
 				if (!view) return;
 				const props: TspProps<"seg"> = {
