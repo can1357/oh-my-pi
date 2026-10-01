@@ -6,27 +6,23 @@
 
 - Improved editor history handling: history can now refresh when its source context changes, while preserving drafts created within the editor; entries are also recorded under the context active when they are added ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.4.9] - 2026-10-01
+
 ### Added
 
-- Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose gates as ghost-text word completion ([#13517](https://github.com/can1357/oh-my-pi/pull/13517) by [@andrebrait](https://github.com/andrebrait))
-- The native Background jobs sheet now lists every job selectably (↑/↓ or click) and inspects the selected one: status with live elapsed, working directory, live pids, exit code, full command, and a tail-following output pane; X cancels a running job
+- Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose eligibility rules used by ghost-text word completion.
+- Added a full-featured Background jobs view with selectable jobs, live status and elapsed time, working directory, process IDs, exit code, command, tailing output, and cancellation for running jobs.
 
 ### Changed
 
-- `OutputSink` now caps artifact files at 16 MiB by default (first 3 MiB, at most half the cap, plus a rolling tail around an `[ARTIFACT TRUNCATED: …]` notice); pass `artifactMaxBytes: 0` for unbounded files. `dump()` reports the bytes the cap dropped as `artifactElidedBytes`, and `formatFullOutputReference()` then labels the artifact as a head/tail sample. The rolling tail is trimmed in amortized linear time ([#14012](https://github.com/can1357/oh-my-pi/pull/14012) by [@H4vC](https://github.com/H4vC))
+- `OutputSink` now limits artifact files to 16 MiB by default while preserving the beginning and end of oversized output and marking the omitted bytes. Set `artifactMaxBytes: 0` to keep artifacts unbounded; `dump()` reports omitted bytes and full-output references identify sampled artifacts.
 
 ### Fixed
 
-- Reduced composer startup-cache disk writes: identical status, welcome, UI, recent-session, and LSP payloads no longer start a SQLite write, and closing the cache releases the database file on Windows ([#14008](https://github.com/can1357/oh-my-pi/pull/14008) by [@H4vC](https://github.com/H4vC))
-- Fixed Shift+Enter submitting the prompt and Ctrl+Enter inserting a newline in Windows Terminal 1.24 and earlier; Shift+Enter now inserts a newline and Ctrl+Enter sends a follow-up, as on other platforms ([#13975](https://github.com/can1357/oh-my-pi/pull/13975) by [@H4vC](https://github.com/H4vC))
-- Fixed Background jobs rows wrapping a multi-line label (heredoc commands) over several lines and breaking the job type mid-word (`bas`/`h`); labels now collapse to one truncated line and the type and elapsed never shrink
-### Fixed
-
-- Fixed the composer being unreachable while `/settings` is docked beside the transcript in Tern: clicking the composer now moves the keys there (the sheet stays open) and clicking the settings sheet brings them back, through the terminal's new `focus` event.
-- Fixed the key after Ctrl+A / ⌘A in Tern's composer only clearing the selection instead of replacing or deleting it, as with omp versions that dropped Tern's `edit` events: the TSP `hello` now announces `features: ["edit"]`, and Tern keeps a native selection only for programs that do.
-- Fixed `/debug`'s raw provider stream, recent logs and protocol test, the extension dashboard and the interactive bash console drawing as pre-rendered `rows` fallback grids in Tern: the stream is now a native page whose output follows its tail until you scroll away, with Copy raw / Close docked under it so they never scroll off, the logs a picker sheet (filter, level dots, time and pid columns, the entry under the cursor pretty-printed below, Copy / Select all / This process / Load older buttons), the dashboard a picker with providers as scopes and the inspector as its preview, and the console a sheet with its terminal screen, state and Force kill button.
-- Fixed PgUp/PgDn/Home/End (and ↑/↓ in the raw provider stream) doing nothing in Tern's native views, where the terminal owns scrolling: described nodes can carry a `scroll` request that omp sends as the new TSP `scroll` op to terminals advertising the `scroll` feature, so the stream page, the extension dashboard's inspector and Recent logs (whose page and Home/End keys now move the cursor) scroll from the keyboard; End follows the stream again.
-- Fixed native-terminal (TSP) hook selectors with a multi-line title (the `report_tool_issue` consent, `cfg://` change approvals, confirmations) losing their question's line breaks: the picker `subtitle` now keeps each extra title line on its own line.
+- Reduced unnecessary composer startup-cache writes and ensured the cache database is released when it closes on Windows.
+- Fixed Shift+Enter and Ctrl+Enter prompt behavior in Windows Terminal 1.24 and earlier; Shift+Enter now inserts a newline and Ctrl+Enter sends a follow-up, matching other platforms.
+- Improved the Tern native terminal experience across background jobs, settings, debugging, logs, extension management, interactive shell, and provider streams: views remain usable and navigable, preserve output and selection behavior, support keyboard scrolling, and keep key actions accessible.
+- Fixed multi-line labels in Background jobs and multi-line titles in native-terminal prompts so their formatting remains readable.
 
 ## [18.4.8] - 2026-10-01
 

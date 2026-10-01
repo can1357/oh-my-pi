@@ -7640,8 +7640,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleAdvisorStatusCommand();
 	}
 
-	handleJobsCommand(): Promise<void> {
-		return this.#commandController.handleJobsCommand();
+	handleJobsCommand(options?: { full?: boolean }): Promise<void> {
+		return this.#commandController.handleJobsCommand(options);
 	}
 
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {

@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.9] - 2026-10-01
+
 ### Added
 
-- Added the TSP `scroll` op (`["scroll", id, by]`, `TspScrollBy`): keyboard scrolling of the scroller holding a node, sent to terminals whose `hello.features` lists `scroll`
-- Added the `focus` terminal event (`{ ev: "focus", sf, id }`): a click asking the program to move its keyboard focus to an `editor`/`input`, or back to a `prefs` sheet.
+- Added terminal scrolling support through the TSP scroll operation, allowing keyboard scrolling of the terminal scroller when supported.
+- Added a terminal focus event for requesting keyboard focus on editors and inputs, or returning focus to the preferences sheet.
 
 ## [18.4.6] - 2026-10-01
 
