@@ -88,6 +88,35 @@ describe("classifyModel", () => {
 			logicalId: "qwen/qwq-32b",
 		});
 	});
+
+	test("reviewed Bonsai basenames and quantized namespaces retain their wire id and Qwen generation", () => {
+		for (const [model, revision] of [
+			["Bonsai-27B", "3.6.0"],
+			["PrismML/Ternary-Bonsai-27B-q2_0", "3.6.0"],
+			["local/prefix-Ternary-BONSAI-2-27B-Q5_K_S.gguf", "3.8.0"],
+		] as const) {
+			expect(classifyModel("custom-local", model)).toEqual({ class: "qwen", revision });
+		}
+	});
+
+	test("Bonsai override globs do not absorb adjacent model sizes", () => {
+		for (const model of ["bonsai-270b", "bonsai-2-270b", "ternary-bonsai-270b-q4_k_m.gguf", "namespace/bonsai-7b"]) {
+			expect(classifyModel("llama.cpp", model)).toEqual({ class: "unknown" });
+		}
+	});
+
+	test("Bedrock dotted Grok ids classify as xai with a revision", () => {
+		// AWS Converse ids bury the vendor in dots (`us.xai.grok-4.6`). An
+		// unbounded `namespace "xai"` never splits on `.`, so these used to
+		// land in class unknown and inherit the Bedrock budget default.
+		for (const id of ["us.xai.grok-4.6", "global.xai.grok-4.6", "xai.grok-4.6"]) {
+			expect(classifyModel("amazon-bedrock", id)).toEqual({
+				class: "xai",
+				family: "grok",
+				revision: "4.6.0",
+			});
+		}
+	});
 });
 
 describe("collapse and variant vocabulary", () => {

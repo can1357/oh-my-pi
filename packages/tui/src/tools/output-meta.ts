@@ -58,7 +58,8 @@ export interface DiagnosticMeta {
  */
 export interface LimitsMeta {
 	matchLimit?: { reached: number; suggestion: number };
-	resultLimit?: { reached: number; suggestion: number };
+	/** `suggestion` is omitted when the tool is already at its hard cap, so no larger usable limit exists to advise. */
+	resultLimit?: { reached: number; suggestion?: number };
 	headLimit?: { reached: number; suggestion: number };
 	/** `unit` may be absent in sessions persisted before it was recorded. */
 	columnTruncated?: { maxColumn: number; unit?: "bytes" | "chars"; artifactId?: string };
@@ -72,6 +73,8 @@ export interface OutputMeta {
 	/** Capture failure of this output itself; aggregate reports keep source failures on their entries. */
 	artifactError?: OutputArtifactError;
 	source?: SourceMeta;
+	/** The output is a bounded page of session artifact storage its `source` re-reads with line selectors; spill-to-artifact skips it. */
+	pagedSource?: true;
 	diagnostics?: DiagnosticMeta;
 	limits?: LimitsMeta;
 }
@@ -185,7 +188,7 @@ function isGeneratedOutputNoticeLine(line: string): boolean {
 	return (
 		body.startsWith("Showing ") ||
 		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
-		/^\d+ results limit reached\. Use limit=\d+ for more/u.test(body) ||
+		/^\d+ results limit reached(?:\.|$)/u.test(body) ||
 		body.startsWith("Some lines truncated to ")
 	);
 }
@@ -298,7 +301,14 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 	}
 	if (meta.limits?.resultLimit) {
 		const l = meta.limits.resultLimit;
-		parts.push(`${l.reached} results limit reached. Use limit=${l.suggestion} for more`);
+		// At the tool's hard cap there is no larger usable limit, so the
+		// "Use limit=" advice would name a value that gets clamped right
+		// back — emit the bare reached notice instead (#13263).
+		parts.push(
+			l.suggestion === undefined
+				? `${l.reached} results limit reached`
+				: `${l.reached} results limit reached. Use limit=${l.suggestion} for more`,
+		);
 	}
 	if (meta.limits?.headLimit) {
 		const l = meta.limits.headLimit;

@@ -1,39 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { extractRetryHint } from "@oh-my-pi/pi-utils";
 
-// The fail-fast regex used inside the provider to distinguish "known quota errors" (throw immediately)
-// from "ambiguous 429s" (retry up to RATE_LIMIT_BUDGET_MS).
-// Option A (minimal): only hard quota limits fail-fast; transient rate-limit messages fall through to retry.
-const FAIL_FAST_RE = /quota|exhausted/i;
-const shouldFailFast = (errorText: string) => FAIL_FAST_RE.test(errorText);
-
-describe("google-gemini-cli 429 fail-fast detection", () => {
-	it("fails fast on 'Quota exceeded' messages", () => {
-		expect(shouldFailFast("Quota exceeded for project")).toBe(true);
-	});
-
-	it("fails fast on 'exhausted' messages", () => {
-		expect(shouldFailFast("Resource has been exhausted")).toBe(true);
-	});
-
-	it("does not fail fast on ambiguous 429 ('Please retry in 5s')", () => {
-		expect(shouldFailFast("Please retry in 5s")).toBe(false);
-	});
-
-	it("does not fail fast on generic rate-limit text", () => {
-		expect(shouldFailFast("Rate limit exceeded, please slow down")).toBe(false);
-	});
-
-	it("matches case-insensitively", () => {
-		expect(shouldFailFast("QUOTA EXCEEDED")).toBe(true);
-		expect(shouldFailFast("Resource Has Been Exhausted")).toBe(true);
-	});
-
-	it("does not fail fast on empty error", () => {
-		expect(shouldFailFast("")).toBe(false);
-	});
-});
-
 describe("extractRetryHint – header parsing", () => {
 	it("reads retry-after header as seconds", () => {
 		const headers = new Headers({ "retry-after": "5" });

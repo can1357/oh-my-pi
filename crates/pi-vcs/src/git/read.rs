@@ -101,6 +101,24 @@ impl GitRepo {
 		}
 	}
 
+	/// Abbreviate the object `rev` names to its shortest unambiguous id
+	/// (honoring `core.abbrev`), as `git rev-parse --short` does.
+	pub fn short_id(&self, rev: &str) -> Result<String> {
+		if self.is_reftable() {
+			return Ok(cli_text(self.root(), &["rev-parse", "--short", rev])?
+				.trim()
+				.to_owned());
+		}
+		let repo = self.gix()?;
+		let id = repo
+			.rev_parse_single(rev)
+			.map_err(|err| Error::backend("git rev-parse", err))?;
+		Ok(id
+			.shorten()
+			.map_err(|err| Error::backend("git rev-parse", err))?
+			.to_string())
+	}
+
 	/// Test whether a ref or revision resolves.
 	pub fn ref_exists(&self, name: &str) -> Result<bool> {
 		Ok(self.resolve_ref(name)?.is_some())

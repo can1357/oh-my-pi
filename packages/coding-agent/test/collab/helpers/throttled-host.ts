@@ -7,6 +7,7 @@
  * the first frame past the 64 KB high-water mark and the test decides when it
  * moves again by zeroing the field.
  */
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { unpackEnvelope } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -49,7 +50,7 @@ export function makeHostContext(snapshot: Snapshot, seen: HostObservations): Int
 	// that here, or a host-level test never exercises the mirror.
 	const listeners: ((event: unknown) => void)[] = [];
 	return {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => snapshot.header.id,
 			getCwd: () => snapshot.header.cwd,

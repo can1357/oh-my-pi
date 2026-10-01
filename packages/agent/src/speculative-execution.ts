@@ -10,6 +10,7 @@ import type {
 	SpeculativeChildDefinition,
 	SpeculativeChildHandle,
 	SpeculativeCommitContext,
+	SpeculativeLaunchContext,
 	SpeculativeOperationContext,
 	SpeculativePhysicalOutcome,
 	SpeculativeResourceAccess,
@@ -517,6 +518,17 @@ export class SpeculativeOperationCoordinator {
 			if (session && args !== undefined && !session.matchesFinalArgs(args as Record<string, unknown>)) {
 				await this.discardStreamSession(toolCallId, "final outer tool call arguments changed");
 			}
+		}
+	}
+
+	async authorizeLaunch(context: SpeculativeLaunchContext): Promise<SpeculativeAuthorization> {
+		if (this.#closed) return { allowed: false, reason: "speculation coordinator is closed" };
+		const authorize = this.config.host?.authorizeLaunch;
+		if (!authorize) return { allowed: false, reason: "host does not authorize speculative launches" };
+		try {
+			return await authorize.call(this.config.host, context);
+		} catch {
+			return { allowed: false, reason: "host launch authorization failed" };
 		}
 	}
 

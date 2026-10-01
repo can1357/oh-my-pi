@@ -4,7 +4,7 @@
  * Faithful port of the o2 reference (`taxonomy.rs`): class membership
  * matchers, product families, revision extraction, reviewed identity
  * overrides, and the collapse/discovery vocabularies, with the same
- * validation rules (unique class names and override ids/pairs, exactly one
+ * validation rules (unique class names, override ids/selectors, exactly one
  * non-empty collapse, at most one discovery).
  */
 
@@ -90,6 +90,7 @@ const OVERRIDE_PROPS = [
 	"id",
 	"provider",
 	"model",
+	"glob",
 	"logical",
 	"class",
 	"family",
@@ -108,12 +109,20 @@ function parseOverride(node: KdlNodeView): CompiledIdentityOverride {
 		const value = propString(node, name);
 		if (value !== undefined && value === "") malformed(node);
 	}
-	const override: CompiledIdentityOverride = {
+	const model = propString(node, "model");
+	const glob = propString(node, "glob");
+	if ((model === undefined) === (glob === undefined) || model === "" || glob === "") malformed(node);
+	const fields = {
 		id: requiredProp(node, "id"),
-		model: requiredProp(node, "model"),
 		rationale: requiredProp(node, "rationale"),
 		provenance: requiredProp(node, "provenance"),
 	};
+	const override: CompiledIdentityOverride =
+		model !== undefined
+			? { ...fields, model }
+			: glob !== undefined
+				? { ...fields, glob: glob.toLowerCase() }
+				: malformed(node);
 	const provider = propString(node, "provider");
 	if (provider !== undefined) override.provider = provider;
 	const logical = propString(node, "logical");
@@ -545,9 +554,12 @@ export function compileTaxonomy(sources: readonly { file: string; text: string }
 							throw new CompatCompileError(file, node.line, `duplicate override id \`${override.id}\``);
 						}
 						overrideIds.add(override.id);
-						const key = `${override.provider?.toLowerCase() ?? ""}\0${override.model.toLowerCase()}`;
+						const selectorKind = override.model === undefined ? "glob" : "model";
+						const selector = override.model ?? override.glob;
+						const key = `${selectorKind}\0${override.provider?.toLowerCase() ?? ""}\0${selector.toLowerCase()}`;
 						if (overrideKeys.has(key)) {
-							throw new CompatCompileError(file, node.line, `duplicate override pair for \`${override.model}\``);
+							const label = selectorKind === "model" ? "pair" : "glob";
+							throw new CompatCompileError(file, node.line, `duplicate override ${label} for \`${selector}\``);
 						}
 						overrideKeys.add(key);
 					}

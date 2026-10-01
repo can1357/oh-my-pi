@@ -484,7 +484,8 @@ function rosterScanError(error: unknown): string {
 	return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 
-function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
+/** Whether `sessionFile` is the root transcript or lives in its artifacts tree. */
+export function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
 	const file = path.resolve(sessionFile);
 	const root = path.resolve(rootSessionFile);
 	const artifactRoot = root.slice(0, -".jsonl".length);
@@ -679,6 +680,10 @@ async function registerPersistedSubagentsFromDir(
 		throw error;
 	}
 	if (!shouldContinue()) return;
+	const childDirectories = new Set<string>();
+	for (const entry of entries) {
+		if (entry.isDirectory()) childDirectories.add(entry.name);
+	}
 	let entriesSinceYield = 0;
 	for (const entry of entries) {
 		if (!shouldContinue()) return;
@@ -812,15 +817,19 @@ async function registerPersistedSubagentsFromDir(
 				}
 			}
 		}
-		await registerPersistedSubagentsFromDir(
-			registry,
-			path.join(dir, id),
-			id,
-			vibeOwnedIds,
-			transcripts,
-			shouldContinue,
-			rootSessionFile,
-			owned,
-		);
+		// A transcript stem is not proof of a child directory: "." and ".."
+		// revisit ancestors, and symlinks can point back into the same tree.
+		if (childDirectories.has(id)) {
+			await registerPersistedSubagentsFromDir(
+				registry,
+				path.join(dir, id),
+				id,
+				vibeOwnedIds,
+				transcripts,
+				shouldContinue,
+				rootSessionFile,
+				owned,
+			);
+		}
 	}
 }

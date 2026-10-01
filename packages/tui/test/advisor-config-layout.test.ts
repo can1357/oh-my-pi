@@ -11,13 +11,15 @@ describe("AdvisorConfigOverlayComponent", () => {
 	const deps: AdvisorConfigDeps = {
 		getAvailableModels: () => [],
 		browserSource: {
+			revision: 0,
 			defaultThinkingLevel: "high",
 			modelProviderOrder: [],
 			knownRoleIds: [],
 			mruOrder: [],
 			modelPerf: new Map(),
 			getModelRole: () => undefined,
-			getRoleInfo: role => ({ name: role }),
+			getRoleInfo: role => ({ name: role, section: "chat", accepts: () => true }),
+			defaultRoleChain: () => [],
 			resolveRoleValue: () => ({ model: undefined, explicitThinkingLevel: false }),
 		},
 		defaultToolNames: new Set(["read", "grep", "glob"]),

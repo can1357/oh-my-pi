@@ -8,6 +8,7 @@ import {
 	formatCollabLink,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
@@ -46,7 +47,7 @@ function makeGuestContext(): InteractiveModeContext {
 	let statusLineCount = 0;
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionFile: () => null,
 			getSessionName: () => "local session",

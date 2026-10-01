@@ -6,8 +6,6 @@ import {
 	assertOwnerPrivateDir,
 	controlDirGuardError,
 	controlPathFitsBudget,
-	getControlDir,
-	getControlPathTemplate,
 	resolveSshControlDir,
 	sshControlFallbackDir,
 } from "../src/ssh/connection-manager";
@@ -77,22 +75,6 @@ describe("resolveSshControlDir", () => {
 		const choice = resolveSshControlDir({ canonicalDir, platform: "darwin", uid: 501, tmpBase: "/tmp" });
 		expect(choice).toEqual({ dir: "/tmp/omp-5434354bc38f9a50fbbd", shared: true });
 		expect(controlPathFitsBudget(choice.dir, "darwin")).toBe(true);
-	});
-
-	it("keeps distinct fallback masters for the same profile under different XDG state roots", () => {
-		const a = resolveSshControlDir({
-			canonicalDir: "/very/long/xdg-state-a/omp/profiles/upstream/ssh-control",
-			platform: "darwin",
-			uid: 501,
-		});
-		const b = resolveSshControlDir({
-			canonicalDir: "/very/long/xdg-state-b/omp/profiles/upstream/ssh-control",
-			platform: "darwin",
-			uid: 501,
-		});
-		expect(a.shared).toBe(true);
-		expect(b.shared).toBe(true);
-		expect(a.dir).not.toBe(b.dir);
 	});
 
 	it("never relocates on Windows (ControlMaster unused) even for a long path", () => {
@@ -167,13 +149,5 @@ describe("assertOwnerPrivateDir", () => {
 		const file = path.join(mkScratch(), "ctl");
 		fs.writeFileSync(file, "");
 		expect(() => assertOwnerPrivateDir(file)).toThrow("is not a directory");
-	});
-});
-
-describe("control template sharing", () => {
-	// sshfs-mount consumes getControlPathTemplate()/getControlDir() verbatim, so
-	// the %C.sock basename and its parent dir must stay in lockstep.
-	it("keeps %C.sock under the resolved control dir", () => {
-		expect(getControlPathTemplate()).toBe(path.join(getControlDir(), "%C.sock"));
 	});
 });

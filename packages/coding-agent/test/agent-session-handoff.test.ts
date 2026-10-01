@@ -21,6 +21,14 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
+import {
+	cfgCompactionEnabled,
+	cfgCompactionHandoffSaveToDisk,
+	cfgCompactionMethodOrder,
+	cfgCompactionThresholdPercent,
+	cfgContextPromotionEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 const HANDOFF_SECRET = "HANDOFF_SECRET_TOKEN_12345";
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -53,7 +61,7 @@ describe("AgentSession handoff", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-handoff-shared-");
 		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -260,7 +268,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("obfuscates the previous compaction summary but preserves opaque replay data", async () => {
-		session.settings.set("compaction.methodOrder", ["soft"]);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
 		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
@@ -303,7 +311,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("obfuscates migrated snapcompact archive text but preserves opaque replay data", async () => {
-		session.settings.set("compaction.methodOrder", ["soft"]);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
 		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
@@ -388,7 +396,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("advances from auto snapcompact to soft compaction when local preflight rejects the transcript", async () => {
-		session.settings.set("compaction.methodOrder", ["snapcompact", "soft"]);
+		cfgCompactionMethodOrder.set(session.settings, ["snapcompact", "soft"]);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
 		if (!lastEntryId) throw new Error("Expected a seeded entry id");
@@ -586,7 +594,7 @@ describe("AgentSession handoff", () => {
 	});
 	it("keeps pre-prompt context-full checks aligned with provider-anchored usage", async () => {
 		await session.dispose();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
@@ -699,7 +707,7 @@ describe("AgentSession handoff", () => {
 		// NOT encrypted reasoning. The provider reports a deflated 1k prompt tokens, yet
 		// the stored conversation is ~20k tokens — compaction MUST still fire.
 		await session.dispose();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
@@ -778,7 +786,7 @@ describe("AgentSession handoff", () => {
 	});
 	it("does not double-count unchanged non-message tokens in provider-anchored pre-prompt checks", async () => {
 		await session.dispose();
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
@@ -830,7 +838,7 @@ describe("AgentSession handoff", () => {
 
 		await session.prompt("seed prompt");
 		expect(mock.calls).toHaveLength(1);
-		session.settings.set("compaction.enabled", true);
+		cfgCompactionEnabled.set(session.settings, true);
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "pre-prompt compacted",
 			shortSummary: undefined,
@@ -847,9 +855,9 @@ describe("AgentSession handoff", () => {
 		expect(mock.calls).toHaveLength(2);
 	});
 	it("does not run auto maintenance after final yield", async () => {
-		session.settings.set("compaction.methodOrder", ["handoff", "soft"]);
-		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		cfgCompactionThresholdPercent.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
 
 		const model = session.model;
 		if (!model) {
@@ -922,9 +930,9 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("does not run auto maintenance when strategy is off", async () => {
-		session.settings.set("compaction.methodOrder", []);
-		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
+		cfgCompactionMethodOrder.set(session.settings, []);
+		cfgCompactionThresholdPercent.set(session.settings, 1);
+		cfgContextPromotionEnabled.set(session.settings, false);
 
 		const model = session.model;
 		if (!model) {
@@ -960,12 +968,12 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("restores default methods when enabling auto-compaction from an empty order", () => {
-		session.settings.set("compaction.enabled", true);
-		session.settings.set("compaction.methodOrder", []);
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionMethodOrder.set(session.settings, []);
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.methodOrder")).toEqual([
+		expect(cfgCompactionMethodOrder.get(session.settings)).toEqual([
 			"remote",
 			"snapcompact",
 			"handoff",
@@ -975,7 +983,7 @@ describe("AgentSession handoff", () => {
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 	it("completes threshold-triggered auto-handoff while the original prompt is still unwinding", async () => {
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected built-in anthropic model to exist");
@@ -1221,7 +1229,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("saves auto-handoff document to disk when enabled", async () => {
-		session.settings.set("compaction.handoffSaveToDisk", true);
+		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
 
 		const handoffText = "## Goal\nContinue from here";
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
@@ -1235,7 +1243,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("does not save manual handoff document when save setting is enabled", async () => {
-		session.settings.set("compaction.handoffSaveToDisk", true);
+		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
 
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nManual handoff");
 

@@ -18,6 +18,7 @@ import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./en
 import { invalidateMessageCache } from "./message-cache";
 import {
 	collectToolCallsById,
+	getToolResultMessage,
 	isArtifactRecoveryToolResult,
 	isProtectedToolResult,
 	isSkillReadToolResult,
@@ -108,13 +109,6 @@ export type ShakeRegion = ToolResultShakeRegion | BlockShakeRegion;
 // conservative by design (uppercase / mixed-case tags are ignored).
 const OPENING_XML = /^<([a-z_-]+)(?:\s+[^>]*)?>$/;
 const CLOSING_XML = /^<\/([a-z_-]+)>$/;
-
-function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefined {
-	if (entry.type !== "message") return undefined;
-	const message = entry.message as AgentMessage;
-	if (message.role !== "toolResult") return undefined;
-	return message as ToolResultMessage;
-}
 
 function toolResultText(
 	message: ToolResultMessage,

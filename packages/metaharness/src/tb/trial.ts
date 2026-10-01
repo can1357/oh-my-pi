@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 
 import { installAgent } from "./agent";
-import type { AgentBinaries, GatewayConfig, TbTask, TrialResult, TrialUsage, VmonConfig } from "./types";
+import type { AgentBinaries, AgentConfig, GatewayConfig, TbTask, TrialResult, TrialUsage, VmonConfig } from "./types";
 import { TrialVm } from "./vmon";
 
 const EMPTY_USAGE: TrialUsage = {
@@ -15,8 +15,6 @@ const EMPTY_USAGE: TrialUsage = {
 	costUsd: 0,
 	turns: 0,
 };
-
-const TERMINAL_BENCH_TOOLS = "bash,read,write,edit,grep,glob";
 
 function elapsedMs(startedAt: number): number {
 	return Math.round(performance.now() - startedAt);
@@ -45,6 +43,7 @@ export async function runTrial(opts: {
 	task: TbTask;
 	model: string;
 	binaries: AgentBinaries;
+	agent: AgentConfig;
 	gateway: GatewayConfig;
 	vmon: VmonConfig;
 	trialDir: string;
@@ -114,17 +113,19 @@ export async function runTrial(opts: {
 		opts.log?.("connect gateway");
 		const gatewayUrl = await beforeDeadline(vm.startGateway(opts.gateway.url));
 		opts.log?.("install agent");
-		const entrypoint = await beforeDeadline(installAgent(vm, opts.binaries, { ...opts.gateway, url: gatewayUrl }));
+		const entrypoint = await beforeDeadline(
+			installAgent(vm, opts.binaries, { ...opts.gateway, url: gatewayUrl }, opts.agent),
+		);
 		const logDirs = await vm.exec("mkdir -p /logs/agent /logs/verifier");
 		if (logDirs.exitCode !== 0) throw new Error(`Could not create log directories: ${logDirs.stderr.trim()}`);
 		checkDeadline();
 
 		const { provider, model } = modelParts(opts.model);
 		client = new RpcClient({
-			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30),
+			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30, opts.agent.env),
 			provider,
 			model,
-			args: ["--no-session", "--auto-approve", "--tools", TERMINAL_BENCH_TOOLS],
+			args: ["--no-session", "--auto-approve", "--tools", opts.agent.tools.join(",")],
 		});
 		let turns = 0;
 		const unsubscribe = client.onEvent(event => {

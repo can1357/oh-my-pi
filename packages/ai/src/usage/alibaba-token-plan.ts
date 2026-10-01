@@ -46,7 +46,6 @@ const CHINA_CONSOLE = {
 		protocol: "V2",
 		console: "ONE_CONSOLE",
 		productCode: "p_efm",
-		switchAgent: 12608464,
 		switchUserType: 3,
 		domain: "bailian.console.aliyun.com",
 		consoleSite: "BAILIAN_ALIYUN",
@@ -94,9 +93,9 @@ function usageStatus(usedFraction: number): UsageLimit["status"] {
 }
 
 function buildLimit(
-	id: "5h" | "7d",
+	id: "5h" | "7d" | "monthly",
 	label: string,
-	durationMs: number,
+	durationMs: number | undefined,
 	usedFraction: number | undefined,
 	resetsAt: number | undefined,
 	accountId: string | undefined,
@@ -106,7 +105,7 @@ function buildLimit(
 		id: `credits:${id}`,
 		label,
 		scope: { provider: PROVIDER, ...(accountId ? { accountId } : {}), windowId: id },
-		window: { id, label, durationMs, ...(resetsAt ? { resetsAt } : {}) },
+		window: { id, label, ...(durationMs !== undefined ? { durationMs } : {}), ...(resetsAt ? { resetsAt } : {}) },
 		amount: { used: usedFraction * 100, usedFraction, unit: "percent" },
 		status: usageStatus(usedFraction),
 	};
@@ -221,6 +220,13 @@ async function fetchAlibabaTokenPlanUsage(
 			ctx.logger?.warn("Alibaba Token Plan usage response invalid", { provider: PROVIDER });
 			return null;
 		}
+		if (payload.data.success === false) {
+			ctx.logger?.warn("Alibaba Token Plan usage request rejected", {
+				provider: PROVIDER,
+				errorCode: typeof payload.data.errorCode === "string" ? payload.data.errorCode : "unknown",
+			});
+			return null;
+		}
 		const responseData = unwrapGatewayData(payload.data);
 		const limits = [
 			buildLimit(
@@ -237,6 +243,17 @@ async function fetchAlibabaTokenPlanUsage(
 				WEEK_MS,
 				parseUsedFraction(responseData.per1WeekPercentage),
 				parsePositiveTimestamp(responseData.per1WeekResetTime),
+				accountId,
+			),
+			// Monthly-only plans report just this bucket, and the console never
+			// states its span (calendar months differ), so the window carries a
+			// reset deadline without a duration.
+			buildLimit(
+				"monthly",
+				"Monthly Credits",
+				undefined,
+				parseUsedFraction(responseData.per1MonthPercentage),
+				parsePositiveTimestamp(responseData.per1MonthResetTime),
 				accountId,
 			),
 		].filter((limit): limit is UsageLimit => limit !== undefined);

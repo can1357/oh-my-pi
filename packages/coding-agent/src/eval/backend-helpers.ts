@@ -1,25 +1,14 @@
 /**
  * Helpers shared by the per-language eval backend definitions (js/py
- * index modules): session-id namespacing, settings access, and projection of
+ * index modules): session-id namespacing and projection of
  * executor results into the ExecutorBackend result shape.
  */
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { ToolSession } from "../tools";
 import type { ExecutorBackendResult } from "./backend";
 import type { EvalDisplayOutput } from "./types";
 
 export function namespaceSessionId(sessionId: string, prefix: string): string {
 	return sessionId.startsWith(prefix) ? sessionId : `${prefix}${sessionId}`;
-}
-
-export function readSetting<T>(session: ToolSession, key: string): T | undefined {
-	const settings = session.settings as { get?: (key: string) => T | undefined } | undefined;
-	return settings?.get?.(key);
-}
-
-export function readInterpreterSetting(session: ToolSession, key: string): string | undefined {
-	const value = readSetting<unknown>(session, key);
-	return typeof value === "string" ? value.trim() || undefined : undefined;
 }
 
 export function toExecutorBackendResult(result: {

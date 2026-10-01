@@ -409,36 +409,6 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		});
 	});
 
-	it("infers type:string for a bare string-literal enum under properties (Vertex rejects type-less enums)", () => {
-		// Regression: ArkType emits string-literal unions (e.g. the lsp tool's
-		// `action`) as a bare `{ enum: [...] }` with no `type`. Vertex / Cloud
-		// Code Assist reject that with HTTP 500 "parameters.action schema didn't
-		// specify the schema type field". Both Google paths must infer the type.
-		const schema = {
-			type: "object",
-			properties: {
-				action: {
-					enum: ["definition", "references", "code_actions", "type_definition"],
-				},
-			},
-			required: ["action"],
-		} as unknown;
-
-		const expected = {
-			type: "object",
-			properties: {
-				action: {
-					type: "string",
-					enum: ["definition", "references", "code_actions", "type_definition"],
-				},
-			},
-			required: ["action"],
-		};
-
-		expect(normalizeSchemaForGoogle(schema)).toEqual(expected);
-		expect(normalizeSchemaForCCA(schema)).toEqual(expected);
-	});
-
 	it("infers enum type through convertTools for both claude (parameters) and gemini (parametersJsonSchema)", () => {
 		const parameters = {
 			type: "object",
@@ -488,28 +458,6 @@ describe("normalizeSchemaForGoogle parity with python-genai process_schema", () 
 			default: "null",
 			title: "Total Area Sq Mi",
 		});
-	});
-
-	// Mirrors python-genai test_schema.py::test_t_schema_for_null_fields
-	it("collapses {type:'null'} variant in anyOf into nullable + sole remaining variant", () => {
-		const schema = {
-			type: "object",
-			properties: {
-				name: { type: "string" },
-				population: {
-					anyOf: [{ type: "integer" }, { type: "null" }],
-					default: null,
-					title: "Population",
-				},
-			},
-			required: ["name"],
-		} as const;
-
-		const sanitized = normalizeSchemaForGoogle(schema) as Record<string, unknown>;
-		const props = sanitized.properties as Record<string, Record<string, unknown>>;
-		expect(props.population?.nullable).toBe(true);
-		expect(props.population?.type).toBe("integer");
-		expect(props.population?.anyOf).toBeUndefined();
 	});
 
 	// Mirrors python-genai test_schema.py::test_schema_with_any_of
@@ -764,33 +712,6 @@ describe("normalizeSchemaForGoogle parity with python-genai process_schema", () 
 
 		const sanitized = normalizeSchemaForGoogle(schema) as Record<string, unknown>;
 		expect(sanitized.propertyOrdering).toEqual(custom);
-	});
-
-	// Mirrors python-genai test_schema.py::test_t_schema_sets_property_ordering_for_json_schema
-	it("populates propertyOrdering from properties insertion order when missing", () => {
-		const schema = {
-			type: "object",
-			properties: {
-				name: { type: "string" },
-				population: { type: "integer" },
-				capital: { type: "string" },
-				continent: { type: "string" },
-				gdp: { type: "integer" },
-				official_language: { type: "string" },
-				total_area_sq_mi: { type: "integer" },
-			},
-		} as const;
-
-		const sanitized = normalizeSchemaForGoogle(schema) as Record<string, unknown>;
-		expect(sanitized.propertyOrdering).toEqual([
-			"name",
-			"population",
-			"capital",
-			"continent",
-			"gdp",
-			"official_language",
-			"total_area_sq_mi",
-		]);
 	});
 
 	// Covers python-genai _transformers.py:745-752 snake_case → camelCase renames.

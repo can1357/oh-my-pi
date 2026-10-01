@@ -7,7 +7,7 @@
  */
 
 import type { Type } from "@oh-my-pi/omptype";
-import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { isRecord, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import type { Tool, TSchema } from "../../types";
 import { upgradeJsonSchemaTo202012 } from "./draft";
 import { stamp } from "./stamps";
@@ -28,13 +28,13 @@ export function isArkSchema(value: unknown): value is Type {
 
 function isArkJsonAst(value: unknown): boolean {
 	if (Array.isArray(value)) return value.some(isArkJsonAst);
-	if (!isSchemaRecord(value)) return false;
+	if (!isRecord(value)) return false;
 	if (typeof value.domain === "string" || Object.hasOwn(value, "unit")) return true;
 	if (value.proto === "Array" && Object.hasOwn(value, "sequence")) return true;
 	const required = value.required;
 	return (
 		Array.isArray(required) &&
-		required.some(entry => isSchemaRecord(entry) && typeof entry.key === "string" && "value" in entry)
+		required.some(entry => isRecord(entry) && typeof entry.key === "string" && "value" in entry)
 	);
 }
 
@@ -46,7 +46,7 @@ function parseArkObjectKey(key: string): { name: string; description?: string } 
 
 function withArkKeyDescription(schema: unknown, description: string | undefined): unknown {
 	if (!description) return schema;
-	if (isSchemaRecord(schema)) {
+	if (isRecord(schema)) {
 		if (typeof schema.description !== "string") schema.description = description;
 		return schema;
 	}
@@ -70,13 +70,13 @@ function arkJsonAstToWire(value: unknown): unknown {
 	}
 
 	if (Array.isArray(value)) {
-		if (value.every(item => isSchemaRecord(item) && Object.hasOwn(item, "unit"))) {
+		if (value.every(item => isRecord(item) && Object.hasOwn(item, "unit"))) {
 			return { enum: value.map(item => (item as { unit: unknown }).unit) };
 		}
 		return { anyOf: value.map(arkJsonAstToWire) };
 	}
 
-	if (!isSchemaRecord(value)) return {};
+	if (!isRecord(value)) return {};
 
 	if (Object.hasOwn(value, "unit")) return { const: value.unit };
 
@@ -88,7 +88,7 @@ function arkJsonAstToWire(value: unknown): unknown {
 		const properties: Record<string, unknown> = {};
 		const required: string[] = [];
 		const addEntry = (entry: unknown, isRequired: boolean): void => {
-			if (!isSchemaRecord(entry) || typeof entry.key !== "string" || !("value" in entry)) return;
+			if (!isRecord(entry) || typeof entry.key !== "string" || !("value" in entry)) return;
 			const key = parseArkObjectKey(entry.key);
 			properties[key.name] = withArkKeyDescription(arkJsonAstToWire(entry.value), key.description);
 			if (isRequired) required.push(key.name);
@@ -109,9 +109,9 @@ function arkJsonAstToWire(value: unknown): unknown {
 }
 
 /** `stamp` cache keys; the entries themselves live in a weak side table keyed by schema identity. */
-const kJsonWireSchema = Symbol("pi.schema.json.wire");
-const kArkWireSchema = Symbol("pi.schema.ark.wire");
-const kStrippedSchema = Symbol("pi.schema.descriptions.stripped");
+const kJsonWireSchema = Symbol("omp.schema.json.wire");
+const kArkWireSchema = Symbol("omp.schema.ark.wire");
+const kStrippedSchema = Symbol("omp.schema.descriptions.stripped");
 
 function postProcessJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
 	walk(schema);
@@ -143,10 +143,6 @@ const SCHEMA_DEFINING_SIBLING_KEYS = new Set([
 	"unevaluatedItems",
 	"unevaluatedProperties",
 ]);
-
-function isSchemaRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function hasSchemaDefiningSibling(schema: Record<string, unknown>): boolean {
 	for (const key in schema) {
@@ -188,7 +184,7 @@ function rewriteNullableScalarAnyOf(schema: Record<string, unknown>): void {
 	let scalarType: string | undefined;
 	let sawNull = false;
 	for (const variant of variants) {
-		if (!isSchemaRecord(variant)) return;
+		if (!isRecord(variant)) return;
 		if (isNullVariant(variant)) {
 			if (sawNull) return;
 			sawNull = true;
@@ -206,7 +202,7 @@ function rewriteNullableScalarAnyOf(schema: Record<string, unknown>): void {
 }
 
 function isExclusiveRequiredBranch(branch: unknown): boolean {
-	if (!isSchemaRecord(branch)) return false;
+	if (!isRecord(branch)) return false;
 	if (Object.hasOwn(branch, "type")) return false;
 	if (!Array.isArray(branch.required) || branch.required.length === 0) return false;
 	if (!branch.required.every(name => typeof name === "string" && name.length > 0)) return false;
@@ -229,7 +225,7 @@ export function flattenExclusiveRequiredRootUnion(schema: Record<string, unknown
 	const union = schema[unionKey];
 	if (!Array.isArray(union) || union.length === 0) return schema;
 	const typedObject = schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"));
-	if (!typedObject && !isSchemaRecord(schema.properties)) return schema;
+	if (!typedObject && !isRecord(schema.properties)) return schema;
 	if (!union.every(isExclusiveRequiredBranch)) return schema;
 	const flattened = { ...schema };
 	delete flattened[unionKey];
@@ -261,11 +257,11 @@ function normalizeArkPropertyComments(node: unknown): void {
 		for (const child of node) normalizeArkPropertyComments(child);
 		return;
 	}
-	if (!isSchemaRecord(node)) return;
+	if (!isRecord(node)) return;
 	const obj = node as Record<string, unknown>;
 
 	const properties = obj.properties;
-	if (isSchemaRecord(properties)) {
+	if (isRecord(properties)) {
 		const required = Array.isArray(obj.required) ? obj.required : undefined;
 		if (required) {
 			obj.required = required.map(key => (typeof key === "string" ? parseArkObjectKey(key).name : key));
@@ -289,7 +285,7 @@ function normalizeArkPropertyComments(node: unknown): void {
 	for (const mapKey of SCHEMA_MAP_KEYS) {
 		if (mapKey === "properties") continue;
 		const map = obj[mapKey];
-		if (isSchemaRecord(map)) {
+		if (isRecord(map)) {
 			for (const key in map) normalizeArkPropertyComments(map[key]);
 		}
 	}
@@ -382,7 +378,7 @@ function collapseConstUnionAnyOf(obj: Record<string, unknown>): void {
 	let branchDescription: string | undefined;
 	let describedCount = 0;
 	for (const variant of variants) {
-		if (!isSchemaRecord(variant) || !Object.hasOwn(variant, "const")) return;
+		if (!isRecord(variant) || !Object.hasOwn(variant, "const")) return;
 		for (const key in variant) {
 			if (key !== "const" && key !== "description") return; // extra constraints — not a bare const
 		}
@@ -553,7 +549,7 @@ function pruneArkUndefinedUnionBranches(node: unknown): void {
 		const concrete = branches.filter(branch => !isUnconstrainedSchema(branch));
 		if (concrete.length === branches.length || concrete.length === 0) continue;
 		const only = concrete.length === 1 ? concrete[0] : undefined;
-		if (only !== undefined && isSchemaRecord(only)) {
+		if (only !== undefined && isRecord(only)) {
 			delete obj[unionKey];
 			for (const key in only) {
 				if (!(key in obj)) obj[key] = only[key];
@@ -651,14 +647,14 @@ function stripSchemaDescriptionsInPlace(node: unknown): void {
 		for (const child of node) stripSchemaDescriptionsInPlace(child);
 		return;
 	}
-	if (!isSchemaRecord(node)) return;
+	if (!isRecord(node)) return;
 	delete node.description;
 	for (const key of STRIP_SCHEMA_VALUE_KEYS) {
 		if (Object.hasOwn(node, key)) stripSchemaDescriptionsInPlace(node[key]);
 	}
 	for (const mapKey of STRIP_SCHEMA_MAP_KEYS) {
 		const map = node[mapKey];
-		if (isSchemaRecord(map)) {
+		if (isRecord(map)) {
 			for (const key in map) stripSchemaDescriptionsInPlace(map[key]);
 		}
 	}

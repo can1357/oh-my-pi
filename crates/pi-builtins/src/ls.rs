@@ -2,14 +2,11 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::{
 	borrow::Cow,
 	cell::{Cell, OnceCell, RefCell},
 	cmp::Reverse,
 	ffi::{OsStr, OsString},
-	fs::{self, DirEntry, FileType, Metadata, ReadDir},
 	io::{ErrorKind, Write},
 	ops::RangeInclusive,
 	path::{Path, PathBuf},
@@ -22,7 +19,7 @@ use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{NonEmptyStringValueParser, PossibleValue, ValueParser},
 };
-use lscolors::Colorable;
+use pi_vfs::{BlockingFs, DirEntry, FileId, FileType, Metadata, ReadDir};
 #[cfg(unix)]
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
@@ -30,26 +27,26 @@ use thiserror::Error;
 #[cfg(unix)]
 use uucore::libc::{S_IXGRP, S_IXOTH, S_IXUSR};
 use uucore::{
-	display::Quotable,
-	fs::FileInformation,
-	fsext::metadata_get_time,
-	parser::shortcut_value_parser::ShortcutValueParser,
-	version_cmp::version_cmp,
+	display::Quotable, parser::shortcut_value_parser::ShortcutValueParser, version_cmp::version_cmp,
 };
 
-use crate::host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::{
+	fsmeta::metadata_get_time,
+	host::{
+		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util,
+	},
+};
 
 mod colors {
 //! Color handling for the `ls` builtin.
-#[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::{
 	borrow::Cow,
-	ffi::OsString,
-	fs::{self, Metadata},
+	ffi::{OsStr, OsString},
+	path::Path,
 };
 
 use lscolors::{Indicator, LsColors, Style};
+use pi_vfs::{BlockingFs, FileType, Metadata};
 use rustc_hash::FxHashMap;
 
 use super::PathData;
@@ -163,7 +160,7 @@ impl<'a> StyleManager<'a> {
 		let indicator = self.indicator_for_raw_code(path)?;
 		let should_skip = indicator == Indicator::SymbolicLink
 			&& self.ln_color_from_target
-			&& path.fs_path.exists();
+			&& path.fs().exists(&path.fs_path);
 
 		if should_skip {
 			return None;
@@ -280,9 +277,7 @@ impl<'a> StyleManager<'a> {
 		name: OsString,
 		wrap: bool,
 	) -> OsString {
-		let style = self
-			.colors
-			.style_for_path_with_metadata(&path.p_buf, md_option);
+		let style = self.style_for_path_with_metadata(path.fs(), &path.p_buf, &path.fs_path, md_option);
 		self.apply_style(style, Some(path), name, wrap)
 	}
 
@@ -292,8 +287,39 @@ impl<'a> StyleManager<'a> {
 		name: OsString,
 		wrap: bool,
 	) -> OsString {
-		let style = self.colors.style_for(path);
+		let style = style_for(
+			self.colors,
+			path.display_name(),
+			path.file_type().copied(),
+			|| path.metadata(),
+			|| path.fs().exists(&path.fs_path),
+		);
 		self.apply_style(style, Some(path), name, wrap)
+	}
+
+	/// `LsColors::style_for_path_with_metadata` over provider metadata. `path`
+	/// supplies the suffix-matched name; `fs_path` is what the provider sees
+	/// when checking whether a symlink target exists.
+	pub(crate) fn style_for_path_with_metadata(
+		&self,
+		fs: &BlockingFs,
+		path: &Path,
+		fs_path: &Path,
+		metadata: Option<&Metadata>,
+	) -> Option<&'a Style> {
+		// `Path::file_name` only works if the last component is Normal, but
+		// lscolors matches suffixes against every component type.
+		let file_name = path
+			.components()
+			.next_back()
+			.map_or_else(|| path.as_os_str(), |component| component.as_os_str());
+		style_for(
+			self.colors,
+			file_name,
+			metadata.map(|md| md.file_type()),
+			|| metadata,
+			|| fs.exists(fs_path),
+		)
 	}
 
 	pub(crate) fn apply_indicator_style(
@@ -366,18 +392,17 @@ impl<'a> StyleManager<'a> {
 		if path.must_dereference && path.metadata().is_none() {
 			return None;
 		}
-		let mut target = path.fs_path.read_link().ok()?;
+		let fs = path.fs();
+		let mut target = fs.read_link(&path.fs_path).ok()?;
 		if target.is_relative()
-			&& let Some(parent) = path.fs_path.parent()
+			&& let Some(parent) = pi_vfs::parent_path(&path.fs_path)
 		{
-			target = parent.join(target);
+			target = pi_vfs::join_path(parent, &target);
 		}
 
-		match fs::metadata(&target) {
+		match fs.metadata(&target) {
 			Ok(metadata) => {
-				let style = self
-					.colors
-					.style_for_path_with_metadata(&target, Some(&metadata));
+				let style = self.style_for_path_with_metadata(fs, &target, &target, Some(&metadata));
 				Some(self.apply_style(style, None, name, wrap))
 			},
 			Err(_) => {
@@ -397,7 +422,7 @@ impl<'a> StyleManager<'a> {
 
 		let mut existence_cache: Option<bool> = None;
 		let mut entry_exists = || -> bool {
-			*existence_cache.get_or_insert_with(|| path.fs_path.exists())
+			*existence_cache.get_or_insert_with(|| path.fs().exists(&path.fs_path))
 		};
 
 		let Some(file_type) = path.file_type() else {
@@ -461,7 +486,9 @@ impl<'a> StyleManager<'a> {
 			if self.has_indicator_style(Indicator::ExecutableFile) && mode & mode::EXECUTABLE != 0 {
 				return Some(Indicator::ExecutableFile);
 			}
-			if self.has_indicator_style(Indicator::MultipleHardLinks) && metadata.nlink() > 1 {
+			if self.has_indicator_style(Indicator::MultipleHardLinks)
+				&& metadata.nlink().is_some_and(|nlink| nlink > 1)
+			{
 				return Some(Indicator::MultipleHardLinks);
 			}
 		}
@@ -518,7 +545,7 @@ impl<'a> StyleManager<'a> {
 	}
 
 	#[cfg(unix)]
-	fn indicator_for_special_file(&self, file_type: fs::FileType) -> Option<Indicator> {
+	fn indicator_for_special_file(&self, file_type: FileType) -> Option<Indicator> {
 		if file_type.is_fifo() && self.has_indicator_style(Indicator::FIFO) {
 			return Some(Indicator::FIFO);
 		}
@@ -535,7 +562,7 @@ impl<'a> StyleManager<'a> {
 	}
 
 	#[cfg(not(unix))]
-	fn indicator_for_special_file(&self, _file_type: fs::FileType) -> Option<Indicator> {
+	fn indicator_for_special_file(&self, _file_type: FileType) -> Option<Indicator> {
 		None
 	}
 
@@ -570,7 +597,7 @@ pub(crate) fn color_name(
 		let has_capabilities = style_manager
 			.colors
 			.has_explicit_style_for(Indicator::Capabilities)
-			&& uucore::fsxattr::has_security_cap_acl(&path.p_buf);
+			&& has_security_cap_acl(path);
 
 		// If the file has capabilities, use a specific style for `ca` (capabilities)
 		if has_capabilities {
@@ -582,7 +609,7 @@ pub(crate) fn color_name(
 	}
 
 	if target_symlink.is_none()
-		&& path.file_type().is_some_and(fs::FileType::is_symlink)
+		&& path.file_type().is_some_and(|ft| ft.is_symlink())
 		&& let Some(colored) = style_manager.color_symlink_name(path, name.clone(), wrap)
 	{
 		return colored;
@@ -602,12 +629,160 @@ pub(crate) fn color_name(
 		return style_manager.apply_style_for_path(path, name, wrap);
 	}
 
-	let md_option: Option<Metadata> = path
-		.metadata()
-		.cloned()
-		.or_else(|| path.fs_path.symlink_metadata().ok());
+	let link_metadata;
+	let md_option = match path.metadata() {
+		Some(md) => Some(md),
+		None => {
+			link_metadata = path.fs().symlink_metadata(&path.fs_path).ok();
+			link_metadata.as_ref()
+		},
+	};
 
-	style_manager.apply_style_based_on_metadata(path, md_option.as_ref(), name, wrap)
+	style_manager.apply_style_based_on_metadata(path, md_option, name, wrap)
+}
+
+/// Whether the file carries a `security.capability` extended attribute,
+/// following symlinks like uucore's `has_security_cap_acl`.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+fn has_security_cap_acl(path: &PathData) -> bool {
+	use std::os::unix::ffi::OsStrExt;
+
+	path.fs().list_xattr(&path.fs_path, true).is_ok_and(|names| {
+		names
+			.iter()
+			.any(|name| name.as_bytes() == b"security.capability")
+	})
+}
+
+/// `LsColors::style_for` over provider metadata: lscolors only classifies
+/// `std::fs::Metadata`, which virtual files do not have. Mirrors its
+/// indicator selection, suffix lookup for regular files, and fallbacks.
+pub(crate) fn style_for<'c, 'm>(
+	colors: &'c LsColors,
+	file_name: &OsStr,
+	file_type: Option<FileType>,
+	metadata: impl FnOnce() -> Option<&'m Metadata>,
+	exists: impl FnOnce() -> bool,
+) -> Option<&'c Style> {
+	let indicator = match file_type {
+		// Default to a regular file so the suffix map still applies without
+		// metadata.
+		None => Indicator::RegularFile,
+		Some(file_type) if file_type.is_file() => file_indicator(colors, metadata),
+		Some(file_type) if file_type.is_dir() => dir_indicator(colors, metadata),
+		Some(file_type) if file_type.is_symlink() => {
+			if colors.has_explicit_style_for(Indicator::OrphanedSymbolicLink) && !exists() {
+				Indicator::OrphanedSymbolicLink
+			} else {
+				Indicator::SymbolicLink
+			}
+		},
+		Some(file_type) => special_indicator(file_type),
+	};
+
+	if indicator == Indicator::RegularFile {
+		// Like lscolors, a regular file whose name is not UTF-8 gets no style.
+		if let Some(style) = colors.style_for_str(file_name.to_str()?) {
+			return Some(style);
+		}
+	}
+	colors.style_for_indicator(indicator)
+}
+
+#[cfg(unix)]
+fn file_indicator<'m>(
+	colors: &LsColors,
+	metadata: impl FnOnce() -> Option<&'m Metadata>,
+) -> Indicator {
+	let needs_metadata = colors.has_explicit_style_for(Indicator::Setuid)
+		|| colors.has_explicit_style_for(Indicator::Setgid)
+		|| colors.has_explicit_style_for(Indicator::ExecutableFile)
+		|| colors.has_explicit_style_for(Indicator::MultipleHardLinks);
+	if needs_metadata && let Some(metadata) = metadata() {
+		let file_mode = metadata.mode();
+		if colors.has_explicit_style_for(Indicator::Setuid) && file_mode & mode::SETUID != 0 {
+			return Indicator::Setuid;
+		}
+		if colors.has_explicit_style_for(Indicator::Setgid) && file_mode & mode::SETGID != 0 {
+			return Indicator::Setgid;
+		}
+		if colors.has_explicit_style_for(Indicator::ExecutableFile)
+			&& file_mode & mode::EXECUTABLE != 0
+		{
+			return Indicator::ExecutableFile;
+		}
+		if colors.has_explicit_style_for(Indicator::MultipleHardLinks)
+			&& metadata.nlink().is_some_and(|nlink| nlink > 1)
+		{
+			return Indicator::MultipleHardLinks;
+		}
+	}
+	Indicator::RegularFile
+}
+
+/// Without Unix mode bits or link counts only the plain file style applies.
+#[cfg(not(unix))]
+fn file_indicator<'m>(
+	_colors: &LsColors,
+	_metadata: impl FnOnce() -> Option<&'m Metadata>,
+) -> Indicator {
+	Indicator::RegularFile
+}
+
+#[cfg(unix)]
+fn dir_indicator<'m>(
+	colors: &LsColors,
+	metadata: impl FnOnce() -> Option<&'m Metadata>,
+) -> Indicator {
+	let needs_metadata = colors.has_explicit_style_for(Indicator::StickyAndOtherWritable)
+		|| colors.has_explicit_style_for(Indicator::OtherWritable)
+		|| colors.has_explicit_style_for(Indicator::Sticky);
+	if needs_metadata && let Some(metadata) = metadata() {
+		let dir_mode = metadata.mode();
+		if colors.has_explicit_style_for(Indicator::StickyAndOtherWritable)
+			&& dir_mode & mode::STICKY_OTHER_WRITABLE == mode::STICKY_OTHER_WRITABLE
+		{
+			return Indicator::StickyAndOtherWritable;
+		}
+		if colors.has_explicit_style_for(Indicator::OtherWritable)
+			&& dir_mode & mode::OTHER_WRITABLE != 0
+		{
+			return Indicator::OtherWritable;
+		}
+		if colors.has_explicit_style_for(Indicator::Sticky) && dir_mode & mode::STICKY != 0 {
+			return Indicator::Sticky;
+		}
+	}
+	Indicator::Directory
+}
+
+#[cfg(not(unix))]
+fn dir_indicator<'m>(
+	_colors: &LsColors,
+	_metadata: impl FnOnce() -> Option<&'m Metadata>,
+) -> Indicator {
+	Indicator::Directory
+}
+
+#[cfg(unix)]
+fn special_indicator(file_type: FileType) -> Indicator {
+	if file_type.is_fifo() {
+		Indicator::FIFO
+	} else if file_type.is_socket() {
+		Indicator::Socket
+	} else if file_type.is_block_device() {
+		Indicator::BlockDevice
+	} else if file_type.is_char_device() {
+		Indicator::CharacterDevice
+	} else {
+		// Files of unknown type are treated as errors.
+		Indicator::MissingFile
+	}
+}
+
+#[cfg(not(unix))]
+fn special_indicator(_file_type: FileType) -> Indicator {
+	Indicator::MissingFile
 }
 
 #[derive(Debug)]
@@ -2313,17 +2488,12 @@ mod display {
 use core::ops::RangeInclusive;
 #[cfg(unix)]
 use std::fmt::Display;
-#[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 /// Show the directory name in the case where several arguments are given to ls
 use std::{
 	borrow::Cow,
 	cell::LazyCell,
 	ffi::{OsStr, OsString},
 	fmt::Write as FmtWrite,
-	fs::{self, DirEntry, FileType, Metadata},
 	io::Write,
 	iter,
 	sync::LazyLock,
@@ -2333,13 +2503,12 @@ use std::{
 use ansi_width::ansi_width;
 use glob::MatchOptions;
 
+use pi_vfs::{DirEntry, Metadata};
 #[cfg(unix)]
 use rustc_hash::FxHashMap;
 use term_grid::{DEFAULT_SEPARATOR_SIZE, Direction, Filling, Grid, GridOptions};
 #[cfg(unix)]
 use uucore::entries;
-#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
-use uucore::fsxattr::has_acl;
 #[cfg(any(
 	target_os = "linux",
 	target_os = "macos",
@@ -2355,8 +2524,6 @@ use uucore::fsxattr::has_acl;
 use uucore::libc::{dev_t, major, minor};
 use uucore::{
 	format::human::human_readable,
-	fs::display_permissions,
-	fsext::metadata_get_time,
 	quoting_style::{QuotingStyle, locale_aware_escape_dir_name, locale_aware_escape_name},
 	time::system_time_to_sec,
 };
@@ -2372,7 +2539,10 @@ use super::{
 	dired::{self, DiredOutput},
 	get_block_size,
 };
-use crate::host::os_bytes_lossy;
+use crate::{
+	fsmeta::{display_permissions, metadata_get_time},
+	host::os_bytes_lossy,
+};
 
 // Fields that can be removed or added to the long format
 pub(crate) struct LongFormat {
@@ -2570,7 +2740,7 @@ fn display_dir_entry_size(
 			SizeOrDeviceId::Size(size) => (size.len(), 0usize, 0usize),
 		};
 		#[cfg(unix)]
-		let nlink_len = digits(md.nlink());
+		let nlink_len = md.nlink().map_or(1, digits);
 		#[cfg(not(unix))]
 		let nlink_len = display_symlink_count(md).len();
 		(
@@ -2841,10 +3011,9 @@ fn display_additional_leading_info(
 	}
 
 	if config.alloc_size {
-		let s: Cow<'_, str> = if let Some(md) = item.metadata() {
-			display_size(get_block_size(md, config), config).into()
-		} else {
-			"?".into()
+		let s: Cow<'_, str> = match item.metadata().and_then(|md| get_block_size(md, config)) {
+			Some(size) => display_size(size, config).into(),
+			None => "?".into(),
 		};
 		// extra space is insert to align the sizes, as needed for all formats, except
 		// for the comma format.
@@ -2867,8 +3036,11 @@ fn display_uname<'a>(
 	metadata: &Metadata,
 	config: &Config,
 	uid_cache: &'a mut FxHashMap<u32, String>,
-) -> &'a String {
-	let uid = metadata.uid();
+) -> &'a str {
+	// Providers without ownership report no uid; GNU shows `?` for unknown fields.
+	let Some(uid) = metadata.uid() else {
+		return "?";
+	};
 
 	uid_cache.entry(uid).or_insert_with(|| {
 		if config.long.numeric_uid_gid {
@@ -2884,8 +3056,10 @@ fn display_group<'a>(
 	metadata: &Metadata,
 	config: &Config,
 	gid_cache: &'a mut FxHashMap<u32, String>,
-) -> &'a String {
-	let gid = metadata.gid();
+) -> &'a str {
+	let Some(gid) = metadata.gid() else {
+		return "?";
+	};
 	gid_cache.entry(gid).or_insert_with(|| {
 		if config.long.numeric_uid_gid {
 			gid.to_string()
@@ -2951,8 +3125,11 @@ fn display_len_or_rdev(metadata: &Metadata, config: &Config) -> SizeOrDeviceId {
 	{
 		let ft = metadata.file_type();
 		if ft.is_char_device() || ft.is_block_device() {
+			let Some(rdev) = metadata.rdev() else {
+				return SizeOrDeviceId::Device("?".to_string(), "?".to_string());
+			};
 			// A type cast is needed here as the `dev_t` type varies across OSes.
-			let dev = metadata.rdev() as dev_t;
+			let dev = rdev as dev_t;
 			let major = major(dev);
 			let minor = minor(dev);
 			return SizeOrDeviceId::Device(major.to_string(), minor.to_string());
@@ -3054,10 +3231,11 @@ fn display_item_name(
 	let dired_name_len = if config.dired { name.len() } else { 0 };
 
 	if config.format == Format::Long
-		&& path.file_type().is_some_and(FileType::is_symlink)
+		&& path.file_type().is_some_and(|ft| ft.is_symlink())
 		&& !path.must_dereference
 	{
-		match path.fs_path.read_link() {
+		let fs = path.fs();
+		match fs.read_link(&path.fs_path) {
 			Ok(target_path) => {
 				name.push(" -> ");
 
@@ -3069,15 +3247,15 @@ fn display_item_name(
 					// We get the absolute path to be able to construct PathData with valid
 					// Metadata. This is because relative symlinks will fail to get_metadata.
 					let absolute_target = if target_path.is_relative() {
-						match path.path().parent() {
-							Some(p) => &p.join(&target_path),
+						match pi_vfs::parent_path(path.path()) {
+							Some(p) => &pi_vfs::join_path(p, &target_path),
 							None => &target_path,
 						}
 					} else {
 						&target_path
 					};
 
-					match fs::canonicalize(config.runtime.resolve(absolute_target)) {
+					match fs.canonicalize(config.runtime.paths.resolve(absolute_target)) {
 						Ok(resolved_target) => {
 							let target_data = PathData::new(
 								resolved_target.as_path().into(),
@@ -3088,13 +3266,20 @@ fn display_item_name(
 							);
 
 							// Check if the target actually needs coloring
-							let md_option: Option<Metadata> = target_data
-								.metadata()
-								.cloned()
-								.or_else(|| target_data.p_buf.symlink_metadata().ok());
-							let style = style_manager
-								.colors
-								.style_for_path_with_metadata(&target_data.p_buf, md_option.as_ref());
+							let link_metadata;
+							let md_option = match target_data.metadata() {
+								Some(md) => Some(md),
+								None => {
+									link_metadata = fs.symlink_metadata(&target_data.fs_path).ok();
+									link_metadata.as_ref()
+								},
+							};
+							let style = style_manager.style_for_path_with_metadata(
+								fs,
+								&target_data.p_buf,
+								&target_data.fs_path,
+								md_option,
+							);
 
 							if style.is_some() {
 								// Only apply coloring if there's actually a style
@@ -3128,7 +3313,7 @@ fn display_item_name(
 					path.path().to_path_buf(),
 					err,
 					false,
-					path.fs_path.is_dir(),
+					fs.is_dir(&path.fs_path),
 				));
 			},
 		}
@@ -3207,7 +3392,7 @@ fn display_item_long(
 		// TODO: See how Mac should work here
 		let is_acl_set = false;
 		#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
-		let is_acl_set = has_acl(item.path());
+		let is_acl_set = has_acl(item);
 		state
 			.display_buf
 			.extend(display_permissions(md, true).as_bytes());
@@ -3465,24 +3650,32 @@ fn create_hyperlink(name: &OsStr, path: &PathData) -> OsString {
 	// \x1b = ESC, \x1b\\ = ESC backslash
 	// FIXME: switch to constants once OsStr::new() is const-stable and over our
 	// MSRV.
-	let osc_8_head = OsStr::new("\x1b]8;;file://");
+	let osc_8_head = OsStr::new("\x1b]8;;");
+	let file_scheme = OsStr::new("file://");
 	let osc_8_tail = OsStr::new("\x1b]8;;\x1b\\");
 	let esc_bl = OsStr::new("\x1b\\");
 
-	let absolute_path = fs::canonicalize(&path.fs_path).unwrap_or_default();
+	let absolute_path = path.fs().canonicalize(&path.fs_path).unwrap_or_default();
+	// A virtual path is already a URL; host `file://` links name local files.
+	let is_virtual = pi_vfs::is_virtual_path(&absolute_path);
 	let mut ret = OsString::with_capacity(
 		osc_8_head.len()
+			+ file_scheme.len()
 			+ osc_8_tail.len()
 			+ HOSTNAME.len()
 			+ esc_bl.len()
 			+ absolute_path.as_os_str().len(),
 	);
 	ret.push(osc_8_head);
-	ret.push(HOSTNAME.as_os_str());
+	if !is_virtual {
+		ret.push(file_scheme);
+		ret.push(HOSTNAME.as_os_str());
+	}
 
 	// a set of safe ASCII bytes that don't need encoding
 	#[cfg(not(target_os = "windows"))]
-	let unencoded = |c| matches!(c, '_' | '-' | '.' | '~' | '/');
+	let unencoded =
+		|c: char| matches!(c, '_' | '-' | '.' | '~' | '/') || (is_virtual && c == ':');
 	#[cfg(target_os = "windows")]
 	let unencoded = |c| matches!(c, '_' | '-' | '.' | '~' | '/' | '\\' | ':');
 
@@ -3501,12 +3694,25 @@ fn create_hyperlink(name: &OsStr, path: &PathData) -> OsString {
 	ret
 }
 
+/// Whether any extended attribute is present (indicating an ACL), following
+/// symlinks like uucore's `has_acl`.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
+fn has_acl(item: &PathData) -> bool {
+	item.fs()
+		.list_xattr(&item.fs_path, true)
+		.is_ok_and(|names| !names.is_empty())
+}
+
 fn is_hidden(file_path: &DirEntry) -> bool {
 	#[cfg(windows)]
 	{
-		let metadata = file_path.metadata().unwrap();
-		let attr = metadata.file_attributes();
-		(attr & 0x2) > 0
+		// `FILE_ATTRIBUTE_HIDDEN`; entries without Windows attributes (virtual
+		// providers) follow the dotfile convention.
+		match file_path.metadata().map(|metadata| metadata.file_attributes()) {
+			Ok(Some(attributes)) => attributes & 0x2 != 0,
+			Ok(None) => file_path.file_name().as_encoded_bytes().starts_with(b"."),
+			Err(_) => false,
+		}
 	}
 	#[cfg(not(windows))]
 	{
@@ -3526,12 +3732,16 @@ fn update_dired_for_item(
 
 #[cfg(unix)]
 fn display_symlink_count(metadata: &Metadata) -> String {
-	metadata.nlink().to_string()
+	metadata
+		.nlink()
+		.map_or_else(|| "?".to_string(), |nlink| nlink.to_string())
 }
 
 #[cfg(unix)]
 fn display_inode(metadata: &Metadata) -> impl Display {
-	metadata.ino().to_string()
+	metadata
+		.ino()
+		.map_or_else(|| "?".to_string(), |ino| ino.to_string())
 }
 
 #[cfg(unix)]
@@ -3556,7 +3766,7 @@ fn calculate_padding_collection(
 		#[cfg(unix)]
 		if config.inode {
 			let inode_len = if let Some(md) = item.metadata() {
-				digits(md.ino())
+				md.ino().map_or(1, digits)
 			} else {
 				continue;
 			};
@@ -3564,9 +3774,9 @@ fn calculate_padding_collection(
 		}
 
 		if config.alloc_size
-			&& let Some(md) = item.metadata()
+			&& let Some(size) = item.metadata().and_then(|md| get_block_size(md, config))
 		{
-			let block_size_len = display_size(get_block_size(md, config), config).len();
+			let block_size_len = display_size(size, config).len();
 			padding_collections.block_size = block_size_len.max(padding_collections.block_size);
 		}
 
@@ -3588,7 +3798,7 @@ fn calculate_padding_collection(
 				// TODO: See how Mac should work here
 				let is_acl_set = false;
 				#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
-				let is_acl_set = has_acl(item.display_name());
+				let is_acl_set = has_acl(item);
 				if context_len > 1 || is_acl_set {
 					padding_collections.link_count += 1;
 				}
@@ -3635,8 +3845,8 @@ fn calculate_padding_collection(
 
 	for item in items {
 		if config.alloc_size {
-			if let Some(md) = item.metadata() {
-				let block_size_len = display_size(get_block_size(md, config), config).len();
+			if let Some(size) = item.metadata().and_then(|md| get_block_size(md, config)) {
+				let block_size_len = display_size(size, config).len();
 				padding_collections.block_size = block_size_len.max(padding_collections.block_size);
 			}
 		}
@@ -3728,21 +3938,20 @@ impl LsError {
 }
 
 struct LsRuntime {
-	cwd:     PathBuf,
-	stderr:  RefCell<OpenFile>,
-	status:  Cell<i32>,
+	paths:  ShellPaths,
+	stderr: RefCell<OpenFile>,
+	status: Cell<i32>,
 }
 
 impl LsRuntime {
-	fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
-		let path = normalized_path.as_ref();
-		if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) }
-	}
-
 	fn error(&self, err: LsError) {
 		self.status.set(err.code());
 		let _ = writeln!(self.stderr.borrow_mut(), "ls: {err}");
+	}
+
+	/// The shell's filesystem, which every listed path goes through.
+	fn fs(&self) -> &BlockingFs {
+		self.paths.fs()
 	}
 }
 
@@ -3769,7 +3978,7 @@ impl Utility for Ls {
 
 	fn run(self, host: &mut Host) -> i32 {
 		let runtime = Rc::new(LsRuntime {
-			cwd: host.cwd().to_path_buf(),
+			paths: host.paths().clone(),
 			stderr: RefCell::new(host.stderr_clone()),
 			status: Cell::new(0),
 		});
@@ -4577,19 +4786,20 @@ impl<'a> PathData<'a> {
 			PathDataDisplayName::Custom(
 				dir_entry
 					.as_ref()
-					.map(DirEntry::file_name)
+					.map(|entry| entry.file_name())
 					.unwrap_or_default()
 					.into(),
 			)
 		};
 
-		let fs_path = config.runtime.resolve(&p_buf);
+		let fs = config.runtime.fs();
+		let followed_path = config.runtime.paths.resolve(&p_buf);
 		let must_dereference = match &config.dereference {
 			Dereference::All => true,
 			Dereference::Args => command_line,
 			Dereference::DirArgs => {
 				if command_line {
-					if let Ok(md) = fs_path.metadata() {
+					if let Ok(md) = fs.metadata(&followed_path) {
 						md.is_dir()
 					} else {
 						false
@@ -4600,6 +4810,12 @@ impl<'a> PathData<'a> {
 			},
 			Dereference::None => false,
 		};
+		// Without dereferencing, `/dev/stdin` is listed as the symlink it is.
+		let fs_path = if must_dereference {
+			followed_path
+		} else {
+			config.runtime.paths.resolve_link(&p_buf)
+		};
 
 		// Why prefer to check the DirEntry file_type()?  B/c the call is
 		// nearly free compared to a metadata() call on a Path
@@ -4608,7 +4824,7 @@ impl<'a> PathData<'a> {
 		let security_context: OnceCell<Box<str>> = OnceCell::new();
 
 		let de: RefCell<Option<DirEntry>> = if let Some(de) = dir_entry {
-			if must_dereference && let Ok(md_pb) = fs_path.metadata() {
+			if must_dereference && let Ok(md_pb) = fs.metadata(&fs_path) {
 				ft.get_or_init(|| Some(md_pb.file_type()));
 				md.get_or_init(|| Some(md_pb));
 			}
@@ -4646,7 +4862,8 @@ impl<'a> PathData<'a> {
 					return dir_entry.metadata().ok();
 				}
 
-				match get_metadata_with_deref_opt(&self.fs_path, self.must_dereference) {
+				let fs = self.fs();
+				match get_metadata_with_deref_opt(fs, &self.fs_path, self.must_dereference) {
 					Err(err) => {
 						let errno = err.raw_os_error().unwrap_or(1i32);
 						// a bad fd will throw an error when dereferenced,
@@ -4655,15 +4872,15 @@ impl<'a> PathData<'a> {
 						// back the non-dereferenced metadata upon an EBADF
 						if self.must_dereference
 							&& errno == 9i32
-							&& let Ok(file) = self.fs_path.read_link()
+							&& let Ok(file) = fs.read_link(&self.fs_path)
 						{
-							return file.symlink_metadata().ok();
+							return fs.symlink_metadata(&file).ok();
 						}
 						self.runtime().error(LsError::IOErrorContext(
 							self.path().to_path_buf(),
 							err,
 							self.command_line,
-							self.fs_path.is_dir(),
+							fs.is_dir(&self.fs_path),
 						));
 						None
 					},
@@ -4676,7 +4893,7 @@ impl<'a> PathData<'a> {
 	fn file_type(&self) -> Option<&FileType> {
 		self
 			.ft
-			.get_or_init(|| self.metadata().map(Metadata::file_type))
+			.get_or_init(|| self.metadata().map(|md| md.file_type()))
 			.as_ref()
 	}
 
@@ -4688,7 +4905,7 @@ impl<'a> PathData<'a> {
 
 	#[cfg(unix)]
 	fn is_executable_file(&self) -> bool {
-		self.file_type().is_some_and(FileType::is_file)
+		self.file_type().is_some_and(|ft| ft.is_file())
 			&& self.metadata().is_some_and(file_is_executable)
 	}
 
@@ -4706,29 +4923,15 @@ impl<'a> PathData<'a> {
 		&self.runtime
 	}
 
+	fn fs(&self) -> &BlockingFs {
+		self.runtime.fs()
+	}
+
 	fn display_name(&self) -> &OsStr {
 		match self.display_name {
 			PathDataDisplayName::SelfReferential => self.p_buf.as_os_str(),
 			PathDataDisplayName::Custom(ref cow) => cow,
 		}
-	}
-}
-
-impl Colorable for PathData<'_> {
-	fn file_name(&self) -> OsString {
-		self.display_name().to_os_string()
-	}
-
-	fn file_type(&self) -> Option<FileType> {
-		self.file_type().copied()
-	}
-
-	fn metadata(&self) -> Option<Metadata> {
-		self.metadata().cloned()
-	}
-
-	fn path(&self) -> PathBuf {
-		self.path().to_path_buf()
 	}
 }
 
@@ -4754,13 +4957,14 @@ struct ListState<'a> {
 	gid_cache:         (),
 	recent_time_range: RangeInclusive<SystemTime>,
 	stack:             Vec<DirData>,
-	listed_ancestors:  FxHashSet<FileInformation>,
+	listed_ancestors:  FxHashSet<DirIdentity>,
 	initial_locs_len:  usize,
 	display_buf:       Vec<u8>,
 }
 
 #[allow(clippy::cognitive_complexity)]
 pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Result<()> {
+	let fs = config.runtime.fs();
 	let mut files = Vec::<PathData>::new();
 	let mut dirs = Vec::<PathData>::new();
 	let mut dired = DiredOutput::default();
@@ -4841,7 +5045,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 		let needs_blank_line = pos != 0 || !files.is_empty();
 		// Do read_dir call here to match GNU semantics by printing
 		// read_dir errors before directory headings, names and totals
-		let read_dir = match fs::read_dir(&path_data.fs_path) {
+		let read_dir = match fs.read_dir(&path_data.fs_path) {
 			Err(err) => {
 				// flush stdout buffer before the error to preserve formatting and order
 				state.out.flush()?;
@@ -4849,17 +5053,16 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 					path_data.path().to_path_buf(),
 					err,
 					path_data.command_line,
-					path_data.fs_path.is_dir(),
+					fs.is_dir(&path_data.fs_path),
 				));
 				continue;
 			},
 			Ok(rd) => rd,
 		};
 
-		state.listed_ancestors.insert(FileInformation::from_path(
-			&path_data.fs_path,
-			path_data.must_dereference,
-		)?);
+		state
+			.listed_ancestors
+			.insert(DirIdentity::of(fs, &path_data.fs_path, path_data.must_dereference)?);
 
 		// List each of the arguments to ls first.
 		depth_first_list(
@@ -4873,8 +5076,8 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 
 		// Only runs if it must list recursively.
 		while let Some(dir_data) = state.stack.pop() {
-			let resolved_dir = config.runtime.resolve(&dir_data.0);
-			let read_dir = match fs::read_dir(&resolved_dir) {
+			let resolved_dir = config.runtime.paths.resolve(&dir_data.0);
+			let read_dir = match fs.read_dir(&resolved_dir) {
 				Err(err) => {
 					// flush stdout buffer before the error to preserve formatting and order
 					state.out.flush()?;
@@ -4882,7 +5085,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 						path_data.path().to_path_buf(),
 						err,
 						path_data.command_line,
-						resolved_dir.is_dir(),
+						fs.is_dir(&resolved_dir),
 					));
 					continue;
 				},
@@ -4918,7 +5121,7 @@ fn sort_entries(entries: &mut [PathData], config: &Config) {
 			)
 		}),
 		Sort::Size => {
-			entries.sort_unstable_by_key(|k| Reverse(k.metadata().map_or(0, Metadata::len)));
+			entries.sort_unstable_by_key(|k| Reverse(k.metadata().map_or(0, |md| md.len())));
 		},
 		// The default sort in GNU ls is case insensitive
 		Sort::Name => entries.sort_unstable_by(|a, b| a.display_name().cmp(b.display_name())),
@@ -4963,7 +5166,8 @@ fn sort_entries(entries: &mut [PathData], config: &Config) {
 			!match ft {
 				None => {
 					// If it metadata cannot be determined, treat as a file.
-					get_metadata_with_deref_opt(&p.fs_path, true).map_or_else(|_| false, |m| m.is_dir())
+					get_metadata_with_deref_opt(p.fs(), &p.fs_path, true)
+						.map_or_else(|_| false, |m| m.is_dir())
 				},
 				Some(ft) => ft.is_dir(),
 			}
@@ -4979,6 +5183,7 @@ fn depth_first_list(
 	dired: &mut DiredOutput,
 	is_top_level: bool,
 ) -> std::io::Result<()> {
+	let fs = config.runtime.fs();
 	let path_data = PathData::new(dir_path.as_path().into(), None, None, config, false);
 
 	// Print dir heading - name... 'total' comes after error display
@@ -5026,9 +5231,9 @@ fn depth_first_list(
 				// preopened root.  Fall back to "." so the entry still
 				// appears with valid metadata instead of an error.
 				{
-					let dotdot = path_data.path().join("..");
+					let dotdot = pi_vfs::join_path(path_data.path(), Path::new(".."));
 					#[cfg(target_os = "wasi")]
-					let dotdot = if dotdot.metadata().is_err() {
+					let dotdot = if fs.metadata(config.runtime.paths.resolve(&dotdot)).is_err() {
 						path_data.path().into()
 					} else {
 						dotdot
@@ -5052,7 +5257,7 @@ fn depth_first_list(
 			Ok(dir_entry) => {
 				if should_display(&dir_entry, config) {
 					buf.push(PathData::new(
-						path_data.path().join(dir_entry.file_name()).into(),
+						pi_vfs::join_path(path_data.path(), Path::new(&dir_entry.file_name())).into(),
 						Some(dir_entry),
 						None,
 						config,
@@ -5084,21 +5289,21 @@ fn depth_first_list(
 		for e in buf
 			.iter()
 			.skip(trim)
-			.filter(|p| p.file_type().is_some_and(FileType::is_dir))
+			.filter(|p| p.file_type().is_some_and(|ft| ft.is_dir()))
 			.rev()
 		{
 			// Try to open only to report any errors in order to match GNU semantics.
-			if let Err(err) = fs::read_dir(&e.fs_path) {
+			if let Err(err) = fs.read_dir(&e.fs_path) {
 				state.out.flush()?;
 				config.runtime.error(LsError::IOErrorContext(
 					e.path().to_path_buf(),
 					err,
 					e.command_line,
-					e.fs_path.is_dir(),
+					fs.is_dir(&e.fs_path),
 				));
 			} else {
-				let fi = FileInformation::from_path(&e.fs_path, e.must_dereference)?;
-				if state.listed_ancestors.insert(fi) {
+				let id = DirIdentity::of(fs, &e.fs_path, e.must_dereference)?;
+				if state.listed_ancestors.insert(id) {
 					// Push to stack, but with a less aggressive growth curve.
 					let (cap, len) = (state.stack.capacity(), state.stack.len());
 					if cap == len {
@@ -5115,11 +5320,36 @@ fn depth_first_list(
 	Ok(())
 }
 
-fn get_metadata_with_deref_opt(path: &Path, dereference: bool) -> std::io::Result<Metadata> {
+/// Key for `ls -R` cycle detection: the provider's file identity, or for
+/// providers that expose none, the directory's canonical path within that
+/// provider.
+#[derive(PartialEq, Eq, Hash)]
+enum DirIdentity {
+	Id(FileId),
+	Canonical(PathBuf),
+}
+
+impl DirIdentity {
+	fn of(fs: &BlockingFs, path: &Path, follow: bool) -> std::io::Result<Self> {
+		match fs.file_id(path, follow) {
+			Ok(id) => Ok(Self::Id(id)),
+			Err(err) if err.kind() == ErrorKind::Unsupported => {
+				fs.canonicalize(path).map(Self::Canonical)
+			},
+			Err(err) => Err(err),
+		}
+	}
+}
+
+fn get_metadata_with_deref_opt(
+	fs: &BlockingFs,
+	path: &Path,
+	dereference: bool,
+) -> std::io::Result<Metadata> {
 	if dereference {
-		path.metadata()
+		fs.metadata(path)
 	} else {
-		path.symlink_metadata()
+		fs.symlink_metadata(path)
 	}
 }
 
@@ -5132,8 +5362,8 @@ fn write_total<W: Write>(
 	for item in items {
 		total_size += item
 			.metadata()
-			.as_ref()
-			.map_or(0, |md| get_block_size(md, config));
+			.and_then(|md| get_block_size(md, config))
+			.unwrap_or(0);
 	}
 	if config.dired {
 		dired::indent(out)?;
@@ -5144,8 +5374,10 @@ fn write_total<W: Write>(
 	Ok(total.len() + 1)
 }
 
+/// Allocated size shown by `-s` and `total`; `None` when the provider does
+/// not report block counts.
 #[allow(unused_variables)]
-fn get_block_size(md: &Metadata, config: &Config) -> u64 {
+fn get_block_size(md: &Metadata, config: &Config) -> Option<u64> {
 	/* GNU ls will display sizes in terms of block size
 		md.len() will differ from this value when the file has some holes
 	*/
@@ -5156,17 +5388,17 @@ fn get_block_size(md: &Metadata, config: &Config) -> u64 {
 		let raw_blocks = if md.file_type().is_char_device() || md.file_type().is_block_device() {
 			0u64
 		} else {
-			md.blocks() * 512
+			md.blocks()? * 512
 		};
-		match config.size_format {
+		Some(match config.size_format {
 			SizeFormat::Binary | SizeFormat::Decimal => raw_blocks,
 			SizeFormat::Bytes => raw_blocks / config.block_size,
-		}
+		})
 	}
 	#[cfg(not(unix))]
 	{
 		// no way to get block size for windows, fall-back to file size
-		md.len()
+		Some(md.len())
 	}
 }
 
@@ -5195,9 +5427,10 @@ fn get_security_context<'a>(
 	// system does not support SELinux.
 	// Conforms to the GNU coreutils where a dangling symlink results in exit code
 	// 1.
+	let fs = config.runtime.fs();
 	if must_dereference
 		&& let Err(err) =
-			get_metadata_with_deref_opt(&config.runtime.resolve(path), must_dereference)
+			get_metadata_with_deref_opt(fs, &config.runtime.paths.resolve(path), must_dereference)
 	{
 		// The Path couldn't be dereferenced, so return early and set exit code 1
 		// to indicate a minor error
@@ -5207,7 +5440,7 @@ fn get_security_context<'a>(
 				path.to_path_buf(),
 				err,
 				false,
-				config.runtime.resolve(path).is_dir(),
+				fs.is_dir(config.runtime.paths.resolve(path)),
 			));
 		}
 		return Cow::Borrowed(SUBSTITUTE_STRING);

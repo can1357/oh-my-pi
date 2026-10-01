@@ -34,6 +34,12 @@ export interface EvalPreludeDefinition {
 	python: string;
 	/** Globals owned by the snippets and removed when the prelude is replaced or disabled. */
 	exports: readonly string[];
+	/**
+	 * Model-facing policy appended as its own system-prompt block while this
+	 * prelude is advertised. Replayed by the hidden prelude notice when enabled
+	 * mid-session, since the cached system prompt is not rebuilt for the toggle.
+	 */
+	guidance?: string;
 	/** Optional declarations appended to code-mode TypeScript context while enabled. */
 	codeModeDeclarations?: string;
 	/** Approval tier or argument-dependent approval decision for host calls. */
@@ -62,6 +68,12 @@ export function getEnabledEvalPreludes(definitions: readonly EvalPreludeDefiniti
 		if (definition.enabled?.() !== false) enabledByName.set(definition.name, definition);
 	}
 	return Array.from(enabledByName.values());
+}
+
+/** First documentation line, advertised as the prelude's one-line summary; undefined when undocumented. */
+export function evalPreludeSummary(definition: Pick<EvalPreludeDefinition, "documentation">): string | undefined {
+	const doc = definition.documentation.trim();
+	return doc ? doc.split("\n", 1)[0] : undefined;
 }
 
 /** Resolve a prelude from the session's live enabled set. Captured stale VM functions therefore fail closed. */

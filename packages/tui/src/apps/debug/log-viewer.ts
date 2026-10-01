@@ -1,7 +1,9 @@
+import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
 import type { Component } from "../../tui";
-import { extractPrintableText, matchesKey } from "../../keys";
+import { matchesKey } from "../../keys";
+import { Input } from "../../components/input";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../../mouse";
-import { padding, replaceTabs, truncateToWidth, visibleWidth } from "../../utils";
+import { padding, truncateToWidth, visibleWidth } from "../../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../../theme/theme";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
@@ -502,6 +504,8 @@ interface DebugLogViewerComponentOptions {
 /** Interactive log viewer with host-provided storage and clipboard capabilities. */
 export class DebugLogViewerComponent implements Component {
 	#model: DebugLogViewerModel;
+	/** Filter field; its value is pushed into the model whenever it changes. */
+	readonly #filter = new Input();
 	#terminalRows: number;
 	#onExit: () => void;
 	#onStatus?: (message: string) => void;
@@ -521,6 +525,7 @@ export class DebugLogViewerComponent implements Component {
 			hasOlderLogs: this.#deps.hasOlderLogs?.bind(this.#deps),
 			loadOlderLogs: this.#deps.loadOlderLogs?.bind(this.#deps),
 		});
+		this.#filter.prompt = "";
 		this.#terminalRows = options.terminalRows;
 		this.#onExit = options.onExit;
 		this.#onStatus = options.onStatus;
@@ -617,18 +622,13 @@ export class DebugLogViewerComponent implements Component {
 			return;
 		}
 
-		if (matchesKey(keyData, "backspace")) {
-			if (this.#model.filterQuery.length > 0) {
-				this.#statusMessage = undefined;
-				this.#model.setFilterQuery(this.#model.filterQuery.slice(0, -1));
-			}
-			return;
-		}
-
-		const printableText = extractPrintableText(keyData);
-		if (printableText) {
+		// Everything else edits the filter field; refilter only when the text changed.
+		const before = this.#filter.getValue();
+		this.#filter.handleInput(keyData);
+		const after = this.#filter.getValue();
+		if (after !== before) {
 			this.#statusMessage = undefined;
-			this.#model.setFilterQuery(this.#model.filterQuery + printableText);
+			this.#model.setFilterQuery(after);
 		}
 	}
 
@@ -715,12 +715,13 @@ export class DebugLogViewerComponent implements Component {
 	}
 
 	#controlsText(): string {
-		return "Esc close · Ctrl+C copy · ↑/↓/wheel move · click toggle · Shift+↑/↓ select · ←/→ collapse/expand · Ctrl+A all · Ctrl+O older · Ctrl+P pid";
+		return `${formatKeyHint("escape")} close · ${formatKeyHint("ctrl+c")} copy · ${formatKeyHints(["up", "down"])}/wheel move · click toggle · ${formatKeyHints(["shift+up", "shift+down"])} select · ${formatKeyHints(["left", "right"])} collapse/expand · ${formatKeyHint("ctrl+a")} all · ${formatKeyHint("ctrl+o")} older · ${formatKeyHint("ctrl+p")} pid`;
 	}
 
 	#filterText(): string {
-		const sanitized = replaceTabs(sanitizeText(this.#model.filterQuery));
-		const query = sanitized.length === 0 ? theme.fg("muted", "type to filter") : theme.fg("accent", sanitized);
+		const value = this.#filter.getValue();
+		const [field = ""] = this.#filter.render(visibleWidth(value) + 1);
+		const query = value.length === 0 ? field + theme.fg("muted", "type to filter") : theme.fg("accent", field);
 		const pidStatus = this.#model.isProcessFilterEnabled()
 			? theme.fg("success", "pid on")
 			: theme.fg("muted", "pid off");
@@ -731,7 +732,7 @@ export class DebugLogViewerComponent implements Component {
 	#statusText(): string {
 		return this.#statusMessage
 			? theme.fg("success", this.#statusMessage)
-			: theme.fg("dim", "Enter loads older when highlighted; printable keys update filter");
+			: theme.fg("dim", `${formatKeyHint("enter")} loads older when highlighted; printable keys update filter`);
 	}
 
 	async #handleLoadOlder(additionalCount: number = LOAD_OLDER_CHUNK): Promise<void> {

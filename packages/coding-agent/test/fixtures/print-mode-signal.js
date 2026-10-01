@@ -1,3 +1,4 @@
+import { Settings } from "../../src/config/settings.ts";
 import { runPrintMode } from "../../src/modes/print-mode.ts";
 
 const marker = process.argv[2];
@@ -6,7 +7,7 @@ if (!marker) throw new Error("Missing disposal marker path");
 const session = {
 	extensionRunner: undefined,
 	subscribe() {},
-	settings: { get: () => false },
+	settings: Settings.isolated(),
 	sessionManager: {
 		buildSessionContext: () => ({ messages: [] }),
 		getEntries: () => [],

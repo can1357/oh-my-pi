@@ -10,33 +10,38 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { initializeWithSettings } from "../discovery";
+import { releaseIdaDatabases } from "../ida";
 import { loadSkills } from "../extensibility/skills";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
-import { loadCliExtensionProviders } from "../sdk";
-import { discoverAuthStorage } from "../session/auth-broker-config";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ToolSession } from "../tools";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { ReadTool, splitImageQuestionTarget } from "../tools/read";
 import { renderError } from "../tools/tool-errors";
 
+import { cfgDisabledExtensions, cfgExtensions, cfgSkills } from "../extensibility/settings";
+import { cfgMcpEnableProjectConfig } from "../mcp/settings";
+
 export interface ReadCommandArgs {
 	path: string;
 }
 
-function shouldDiscoverMcp(path: string): boolean {
-	// MCP resource URIs may be hierarchical (`test://notes`) or opaque
-	// (`urn:example:document`); `extractUriScheme` recognizes both while
-	// rejecting Windows drive paths and selector-shaped filesystem inputs.
-	const scheme = extractUriScheme(path);
-	if (!scheme) return false;
-	if (scheme === "mcp") return true;
-	if (["conflict", "file", "http", "https"].includes(scheme)) return false;
-	return InternalUrlRouter.instance().getHandler(scheme) === undefined;
+/**
+ * Session state `omp read <path>` must load before resolving: the caller's
+ * skills for skill:// and MCP servers for MCP resources — `mcp://` or any
+ * scheme with no registered handler that the router's MCP fallback accepts.
+ * Filesystem paths, web URLs, and other registered schemes need neither.
+ */
+function readPrerequisites(input: string): { skills: boolean; mcp: boolean } {
+	const router = InternalUrlRouter.instance();
+	const scheme = extractUriScheme(input);
+	if (!scheme || !router.canResolve(input)) return { skills: false, mcp: false };
+	return { skills: scheme === "skill", mcp: scheme === "mcp" || router.getHandler(scheme) === undefined };
 }
 
 export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
@@ -47,6 +52,8 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
+	// Capability providers (skills, MCP servers, SSH hosts) honor this session's provider switches.
+	initializeWithSettings(settings);
 
 	const session: ToolSession = {
 		cwd,
@@ -61,26 +68,26 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	let failed = false;
 
 	try {
-		if (extractUriScheme(cmd.path) === "skill") {
-			initializeWithSettings(settings);
+		const needs = readPrerequisites(cmd.path);
+		if (needs.skills) {
 			const discovered = await loadSkills({
-				...settings.getGroup("skills"),
+				...cfgSkills.get(settings),
 				cwd,
-				disabledExtensions: settings.get("disabledExtensions") ?? [],
+				disabledExtensions: cfgDisabledExtensions.get(settings),
 				extensionRoots: {
 					explicit: [],
 					mode: "merge",
-					configured: settings.get("extensions") ?? [],
+					configured: cfgExtensions.get(settings),
 					configuredLevel: settings.extensionsSourceLevel(),
 				},
 			});
 			session.skills = discovered.skills;
 		}
 
-		if (shouldDiscoverMcp(cmd.path)) {
-			authStorage = await discoverAuthStorage();
+		if (needs.mcp) {
+			authStorage = await discoverAuthStorage(undefined, { settings });
 			const result = await discoverAndLoadMCPTools(cwd, {
-				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 				filterExa: true,
 				// `omp read` has no Eval prelude, so browser MCP remains available.
 				filterBrowser: false,
@@ -99,7 +106,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		// "Model registry is unavailable for image questions." before resolving
 		// anything (issue #11338).
 		if (splitImageQuestionTarget(cmd.path).question) {
-			authStorage ??= await discoverAuthStorage();
+			authStorage ??= await discoverAuthStorage(undefined, { settings });
 			const modelRegistry = new ModelRegistry(authStorage);
 			await modelRegistry.hydrateCredentialScopedModelCaches();
 			await loadCliExtensionProviders(modelRegistry, settings, cwd);
@@ -129,6 +136,8 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
 		}
 		authStorage?.close();
+		// Saves unsaved IDA changes and drops the host sockets that would keep the event loop alive.
+		await releaseIdaDatabases();
 		await closeDaemonClients();
 	}
 

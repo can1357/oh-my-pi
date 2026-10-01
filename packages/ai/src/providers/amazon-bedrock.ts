@@ -56,6 +56,7 @@ import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-crede
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
 import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
+import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
 import { transformMessages } from "./transform-messages";
 
 /**
@@ -70,6 +71,43 @@ const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha25
 // body, so a caller value would be signed but not sent, and AWS rejects the
 // mismatch.
 const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
+
+/**
+ * HTTP status for a ConverseStream in-stream failure, keyed by lowercased
+ * exception shape name. Exception and error frames ride inside an HTTP 200
+ * event stream, so the shape name in `:exception-type` / `:error-code` is the
+ * only evidence of what actually failed upstream. Values come from the
+ * bedrock-runtime service model (the same source the AWS SDKs deserialize
+ * against): without them every in-stream failure would be stamped 400, which
+ * the retry classifier reads as a deterministic client rejection and refuses
+ * to replay — making a transient `internalServerException` (500) terminal.
+ * Shapes absent from the map keep 400 so an unrecognized rejection is never
+ * retried by accident.
+ */
+const BEDROCK_STREAM_EXCEPTION_STATUS: Record<string, number> = {
+	accessdeniedexception: 403,
+	conflictexception: 400,
+	internalserverexception: 500,
+	modelerrorexception: 424,
+	modelnotreadyexception: 429,
+	modelstreamerrorexception: 424,
+	modeltimeoutexception: 408,
+	resourcenotfoundexception: 404,
+	servicequotaexceededexception: 400,
+	serviceunavailableexception: 503,
+	throttlingexception: 429,
+	validationexception: 400,
+};
+
+/**
+ * Resolve the service-model status for an in-stream exception/error code.
+ * Frame headers carry the bare shape name in either camelCase
+ * (`internalServerException`) or PascalCase (`InternalServerException`); both
+ * normalize to the same map key. Unknown shapes default to 400.
+ */
+export function bedrockStreamExceptionStatus(code: string): number {
+	return BEDROCK_STREAM_EXCEPTION_STATUS[code.trim().toLowerCase()] ?? 400;
+}
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -260,7 +298,7 @@ interface WireMessage {
 }
 
 interface WireToolSpec {
-	toolSpec: { name: string; description: string; inputSchema: { json: unknown } };
+	toolSpec: { name: string; description?: string; inputSchema: { json: unknown } };
 }
 interface WireToolChoice {
 	auto?: Record<string, never>;
@@ -344,9 +382,7 @@ interface MetadataEvent {
 	};
 }
 
-const REQUEST_METADATA_PATTERN = /^[a-zA-Z0-9\s:_@$#=/+,\-.]*$/;
 const REQUEST_METADATA_MAX_ENTRIES = 16;
-const REQUEST_METADATA_MAX_LENGTH = 256;
 
 /**
  * Bedrock rejects the whole invocation on a malformed `requestMetadata` entry.
@@ -363,10 +399,8 @@ function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefin
 		if (
 			typeof value !== "string" ||
 			key.length < 1 ||
-			key.length > REQUEST_METADATA_MAX_LENGTH ||
-			!REQUEST_METADATA_PATTERN.test(key) ||
-			value.length > REQUEST_METADATA_MAX_LENGTH ||
-			!REQUEST_METADATA_PATTERN.test(value) ||
+			!isBedrockRequestMetadataValue(key) ||
+			!isBedrockRequestMetadataValue(value) ||
 			kept >= REQUEST_METADATA_MAX_ENTRIES
 		) {
 			dropped.push(key);
@@ -409,6 +443,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		};
 
 		const blocks = output.content as Block[];
+		const contentIndexByBlockIndex = new Map<number, number>();
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		const region = resolveBedrockRegion(model.id, options);
 
@@ -424,14 +459,16 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
 				: undefined;
 
-			// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
-			// thinking cannot be disabled, so downgrade its forced choice instead.
-			if (toolConfig?.toolChoice && additionalModelRequestFields) {
-				const tc = toolConfig.toolChoice;
-				if (tc.any || tc.tool) {
-					if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
-					else additionalModelRequestFields = undefined;
-				}
+			// Some models (Opus/Sonnet 5.5) reject forced tool use outright; keep the
+			// tools offered under `auto` and leave thinking intact.
+			const forcedChoice = toolConfig?.toolChoice?.any || toolConfig?.toolChoice?.tool;
+			if (toolConfig && forcedChoice && !model.compat.supportsForcedToolChoice) {
+				toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+			} else if (toolConfig && forcedChoice && additionalModelRequestFields) {
+				// Bedrock rejects thinking + forced tool_choice. Fable's adaptive
+				// thinking cannot be disabled, so downgrade its forced choice instead.
+				if (prefixMismatchBehavior) toolConfig = { ...toolConfig, toolChoice: { auto: {} } };
+				else additionalModelRequestFields = undefined;
 			}
 			if (prefixMismatchBehavior) {
 				additionalModelRequestFields = applyBedrockThinkingBinding(
@@ -603,14 +640,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				if (messageType === "exception") {
 					const exceptionType = message.headers[":exception-type"] || "Exception";
 					const payload = safeParsePayload(message.payload) as { message?: string } | undefined;
-					const errorMessage = payload?.message || new TextDecoder().decode(message.payload);
+					const errorMessage = payload?.message || PAYLOAD_DECODER.decode(message.payload);
 					const text = `${exceptionType}: ${errorMessage}`;
-					throw new AIError.BedrockApiError(text, 400, { code: exceptionType });
+					throw new AIError.BedrockApiError(text, bedrockStreamExceptionStatus(exceptionType), {
+						code: exceptionType,
+					});
 				}
 				if (messageType === "error") {
 					const code = message.headers[":error-code"] || "UnknownError";
-					const errorMessage = message.headers[":error-message"] || new TextDecoder().decode(message.payload);
-					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, 400, { code });
+					const errorMessage = message.headers[":error-message"] || PAYLOAD_DECODER.decode(message.payload);
+					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, bedrockStreamExceptionStatus(code), {
+						code,
+					});
 				}
 				if (messageType !== "event") continue;
 
@@ -632,16 +673,35 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					}
 					case "contentBlockStart": {
 						if (!firstTokenTime) firstTokenTime = performance.now();
-						handleContentBlockStart(payload as ContentBlockStartEvent, blocks, output, stream, sentinelInjected);
+						handleContentBlockStart(
+							payload as ContentBlockStartEvent,
+							blocks,
+							contentIndexByBlockIndex,
+							output,
+							stream,
+							sentinelInjected,
+						);
 						break;
 					}
 					case "contentBlockDelta": {
 						if (!firstTokenTime) firstTokenTime = performance.now();
-						handleContentBlockDelta(payload as ContentBlockDeltaEvent, blocks, output, stream);
+						handleContentBlockDelta(
+							payload as ContentBlockDeltaEvent,
+							blocks,
+							contentIndexByBlockIndex,
+							output,
+							stream,
+						);
 						break;
 					}
 					case "contentBlockStop": {
-						handleContentBlockStop(payload as ContentBlockStopEvent, blocks, output, stream);
+						handleContentBlockStop(
+							payload as ContentBlockStopEvent,
+							blocks,
+							contentIndexByBlockIndex,
+							output,
+							stream,
+						);
 						break;
 					}
 					case "messageStop": {
@@ -741,18 +801,40 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	return stream;
 };
 
+/** Shared across events: every payload decode is a complete, non-streaming call. */
+const PAYLOAD_DECODER = new TextDecoder();
+
 function safeParsePayload(payload: Uint8Array): unknown {
 	if (payload.length === 0) return {};
 	try {
-		return JSON.parse(new TextDecoder().decode(payload));
+		return JSON.parse(PAYLOAD_DECODER.decode(payload));
 	} catch {
 		return undefined;
 	}
 }
 
+/**
+ * Append a streamed block and index it by Bedrock's `contentBlockIndex`, so
+ * per-delta routing is an O(1) lookup instead of a scan over every block
+ * (quadratic over a long turn). The first block registered for an index wins,
+ * as the first-match scan did. Returns the block's content index.
+ */
+function pushStreamBlock(
+	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
+	block: Block,
+	contentBlockIndex: number,
+): number {
+	const contentIndex = blocks.length;
+	blocks.push(block);
+	if (!contentIndexByBlockIndex.has(contentBlockIndex)) contentIndexByBlockIndex.set(contentBlockIndex, contentIndex);
+	return contentIndex;
+}
+
 function handleContentBlockStart(
 	event: ContentBlockStartEvent,
 	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	sentinelInjected: boolean,
@@ -774,29 +856,29 @@ function handleContentBlockStart(
 			[kStreamingPartialJson]: "",
 			[kStreamingBlockIndex]: index,
 		};
-		output.content.push(block);
-		stream.push({ type: "toolcall_start", contentIndex: blocks.length - 1, partial: output });
+		const contentIndex = pushStreamBlock(blocks, contentIndexByBlockIndex, block, index);
+		stream.push({ type: "toolcall_start", contentIndex, partial: output });
 	}
 }
 
 function handleContentBlockDelta(
 	event: ContentBlockDeltaEvent,
 	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
 	const contentBlockIndex = event.contentBlockIndex;
 	const delta = event.delta;
-	let index = blocks.findIndex(b => b[kStreamingBlockIndex] === contentBlockIndex);
+	let index = contentIndexByBlockIndex.get(contentBlockIndex) ?? -1;
 	let block = blocks[index];
 
 	if (delta?.text !== undefined) {
 		// If no text block exists yet, create one — `handleContentBlockStart` is not sent for text blocks
 		if (!block) {
 			const newBlock: Block = { type: "text", text: "", [kStreamingBlockIndex]: contentBlockIndex };
-			output.content.push(newBlock);
-			index = blocks.length - 1;
-			block = blocks[index];
+			index = pushStreamBlock(blocks, contentIndexByBlockIndex, newBlock, contentBlockIndex);
+			block = newBlock;
 			stream.push({ type: "text_start", contentIndex: index, partial: output });
 		}
 		if (block.type === "text") {
@@ -822,9 +904,8 @@ function handleContentBlockDelta(
 				thinkingSignature: "",
 				[kStreamingBlockIndex]: contentBlockIndex,
 			};
-			output.content.push(newBlock);
-			thinkingIndex = blocks.length - 1;
-			thinkingBlock = blocks[thinkingIndex];
+			thinkingIndex = pushStreamBlock(blocks, contentIndexByBlockIndex, newBlock, contentBlockIndex);
+			thinkingBlock = newBlock;
 			stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
 		}
 
@@ -860,10 +941,11 @@ function handleMetadata(event: MetadataEvent, model: Model<"bedrock-converse-str
 function handleContentBlockStop(
 	event: ContentBlockStopEvent,
 	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
-	const index = blocks.findIndex(b => b[kStreamingBlockIndex] === event.contentBlockIndex);
+	const index = contentIndexByBlockIndex.get(event.contentBlockIndex) ?? -1;
 	const block = blocks[index];
 	if (!block) return;
 
@@ -947,10 +1029,17 @@ function buildToolResultBlock(
 	hoistedImages: ImageBlockWire[],
 ): ToolResultBlockWire {
 	const content: Array<TextBlockWire | ImageBlockWire> = [];
+	// Bedrock's Anthropic Claude models reject an error toolResult that carries a
+	// non-text block ("all content must be type `text` if `is_error` is true"),
+	// so images inside an error result must always be hoisted out regardless of
+	// the model's requiresToolResultImageHoisting flag (no `class "anthropic"`
+	// rule sets it). Mirrors anthropic.ts buildToolResultBlock. Re-serializing a
+	// previously-persisted poisoned result on a later turn repairs it in place.
+	const hoistImages = message.isError || model.requiresToolResultImageHoisting;
 	for (const block of message.content) {
 		if (block.type === "image") {
 			const image: ImageBlockWire = { image: createImageBlock(block.mimeType, block.data) };
-			if (model.requiresToolResultImageHoisting) {
+			if (hoistImages) {
 				content.push({ text: "(see attached image)" });
 				hoistedImages.push(image);
 			} else {
@@ -1114,7 +1203,9 @@ function convertToolSpec(tool: Tool): WireToolSpec {
 	return {
 		toolSpec: {
 			name: tool.name,
-			description: tool.description || "",
+			// Descriptions may be pruned into the system prompt. Bedrock permits
+			// omission, but rejects an explicitly empty description (minLength: 1).
+			description: tool.description || undefined,
 			inputSchema: { json: toolWireSchema(tool) },
 		},
 	};

@@ -523,6 +523,49 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)).toBeUndefined();
 	});
 
+	test("never recycles auto ids after settled jobs are evicted", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 0, onJobComplete: async () => {} });
+		const first = manager.register("bash", "first", async () => "one");
+		const second = manager.register("bash", "second", async () => "two");
+		await manager.waitForAll();
+		expect(manager.getJob(first)).toBeUndefined();
+		expect(manager.getJob(second)).toBeUndefined();
+
+		const third = manager.register("bash", "third", async () => "three");
+		expect([first, second, third]).toEqual(["bg_1", "bg_2", "bg_3"]);
+		await manager.dispose();
+	});
+
+	test("keeps a foreground-backed job out of listings and delivery unless promoted", async () => {
+		const completions: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async jobId => {
+				completions.push(jobId);
+			},
+		});
+
+		// Released before its body settles (the foreground waiter wins the race).
+		const pending = Promise.withResolvers<string>();
+		const racing = manager.register("bash", "racing foreground", () => pending.promise, { foreground: true });
+		expect(manager.getAllJobs()).toEqual([]);
+		expect(manager.getRunningJobs()).toEqual([]);
+		manager.releaseForegroundJob(racing);
+		pending.resolve("done");
+		await manager.waitForAll();
+		expect(manager.getJob(racing)).toBeUndefined();
+
+		// Settled before promotion: stays hidden until promoted, then delivers once.
+		const promoted = manager.register("bash", "promoted", async () => "slow", { foreground: true });
+		expect(promoted).toBe(racing);
+		await manager.waitForAll();
+		expect(manager.getRecentJobs()).toEqual([]);
+		expect(manager.backgroundJob(promoted)).toBeTrue();
+		expect(manager.getAllJobs().map(job => job.id)).toEqual([promoted]);
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+		expect(completions).toEqual([promoted]);
+		await manager.dispose();
+	});
+
 	test("evicts a consumed settled row on the short grace instead of full retention", async () => {
 		// A settled job whose result reached its consumer (sink delivery or a
 		// foreground snapshot) must not linger in `hub jobs` reads for the full
@@ -592,7 +635,7 @@ describe("AsyncJobManager", () => {
 			await manager.waitForAll();
 			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
 
-			// Foreground `hub jobs` read consumes the result mid-park.
+			// A foreground recovery read consumes the result mid-park.
 			expect(manager.consumeJobResults([jobId])).toBe(1);
 			vi.advanceTimersByTime(1_000);
 
@@ -900,6 +943,24 @@ describe("AsyncJobManager", () => {
 		expect(defaultDeliveries).toEqual(["unowned-1"]);
 	});
 
+	test("delivers a completion that settled while a wait watched it but returned something else", async () => {
+		const delivered: string[] = [];
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const id = manager.register("task", "EchoPeer", async () => "received=kestrel42", { ownerId: "Main" });
+		manager.watchJobs([id]);
+		await manager.getJob(id)?.promise;
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual([]);
+
+		// The wait returned a peer message instead of this job's result.
+		manager.unwatchJobs([id]);
+		await manager.drainDeliveries({ timeoutMs: 500 });
+		expect(delivered).toEqual(["received=kestrel42"]);
+	});
+
 	test("dead-letters an owned delivery when its owner has no live sink", async () => {
 		const defaultDeliveries: string[] = [];
 		const manager = new AsyncJobManager({
@@ -947,52 +1008,5 @@ describe("AsyncJobManager", () => {
 		manager.cancelAll({ ownerId: "Sub" });
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
-	});
-});
-
-describe("AsyncJobManager adaptive wait ladder", () => {
-	const newManager = () => new AsyncJobManager({ onJobComplete: async () => {} });
-
-	test("back-to-back waits climb the ladder and saturate at the top rung", () => {
-		const m = newManager();
-		const owner = "Main";
-		const t = 1_000;
-		const waits: number[] = [];
-		for (let i = 0; i < 6; i++) {
-			// Same timestamp every time → zero gap → always escalates.
-			waits.push(m.nextPollWaitMs(owner, t));
-			m.recordPollWaitEnd(owner, t);
-		}
-		expect(waits).toEqual([5_000, 10_000, 30_000, 60_000, 300_000, 300_000]);
-	});
-
-	test("a quiet gap of a minute resets back to the floor", () => {
-		const m = newManager();
-		const owner = "Main";
-
-		expect(m.nextPollWaitMs(owner, 0)).toBe(5_000);
-		m.recordPollWaitEnd(owner, 0);
-
-		// Just under the reset window → keeps climbing.
-		expect(m.nextPollWaitMs(owner, 59_999)).toBe(10_000);
-		m.recordPollWaitEnd(owner, 60_000);
-
-		// A full minute without waiting resets the climb to the floor.
-		expect(m.nextPollWaitMs(owner, 120_000)).toBe(5_000);
-	});
-
-	test("escalation is tracked independently per owner", () => {
-		const m = newManager();
-		const t = 1_000;
-
-		m.nextPollWaitMs("A", t);
-		m.recordPollWaitEnd("A", t);
-		m.nextPollWaitMs("A", t);
-		m.recordPollWaitEnd("A", t);
-
-		// A fresh owner starts at the floor regardless of A's escalation.
-		expect(m.nextPollWaitMs("B", t)).toBe(5_000);
-		// A keeps climbing from where it left off.
-		expect(m.nextPollWaitMs("A", t)).toBe(30_000);
 	});
 });

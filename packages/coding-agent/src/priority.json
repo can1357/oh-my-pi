@@ -33,7 +33,7 @@
 		"gpt-5.6-luna",
 		"openai-codex/gpt-5.4-mini",
 		"gpt-5.4-mini",
-		"mini"
+		"-mini"
 	],
 	"slow": [
 		"openai-codex/gpt-5.6-sol",
@@ -52,6 +52,9 @@
 		"k3",
 		"zai/glm-5.3",
 		"glm-5.3",
+		"anthropic/claude-opus-5-5",
+		"claude-opus-5-5",
+		"opus-5-5",
 		"anthropic/claude-opus-5",
 		"claude-opus-5",
 		"opus-5",
@@ -61,5 +64,43 @@
 		"claude-opus-4.8",
 		"opus-4-8",
 		"opus-4.8"
+	],
+	"image": [
+		"openai/gpt-image-2",
+		"openai-codex/gpt-image-2",
+		"google-antigravity/gemini-3-pro-image",
+		"xai/grok-imagine-image",
+		"xai-oauth/grok-imagine-image",
+		"openrouter/google/gemini-3-pro-image",
+		"google/gemini-3-pro-image",
+		"deepinfra/black-forest-labs/FLUX-2-pro"
+	],
+	"web": [
+		"web/parallel",
+		"web/hosted",
+		"web/exa",
+		"web/firecrawl",
+		"web/searxng",
+		"web/startpage",
+		"web/duckduckgo",
+		"web/ecosia",
+		"web/google",
+		"web/mojeek",
+		"web/public"
+	],
+	"speech": [
+		"local/kokoro",
+		"xai/grok-tts",
+		"xai-oauth/grok-tts"
+	],
+	"dictation": [
+		"local/parakeet-tdt-0.6b-v3"
+	],
+	"judge": [
+		"typesafe/jev-latest",
+		"openrouter/~typesafe/jev-latest",
+		"@tiny",
+		"@smol",
+		"@default"
 	]
 }

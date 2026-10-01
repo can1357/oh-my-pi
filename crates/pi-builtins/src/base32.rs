@@ -5,7 +5,6 @@
 use std::{
 	fmt,
 	ffi::OsString,
-	fs::File,
 	io::{self, BufRead, BufReader, Write},
 };
 
@@ -191,7 +190,7 @@ pub(crate) fn run_base(matches: &ArgMatches, format: Format, host: &mut Host) ->
 	};
 
 	let result = if let Some(name) = config.to_read.clone() {
-		match File::open(host.resolve(&name)) {
+		match host.fs().open(host.resolve(&name)) {
 			Ok(file) => {
 				let mut input = BufReader::with_capacity(DEFAULT_BUF_SIZE, file);
 				handle_input(&mut input, &mut host.stdout, format, config)

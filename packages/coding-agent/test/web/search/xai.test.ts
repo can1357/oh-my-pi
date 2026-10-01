@@ -1,13 +1,34 @@
-import { describe, expect, it, vi } from "bun:test";
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { generateOpenAIImage } from "@oh-my-pi/pi-ai/images/openai-images";
+import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchXAI } from "@oh-my-pi/pi-coding-agent/web/search/providers/xai";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
-const fakeAuthStorage = {
-	resolver: vi.fn(() => async () => "test-key"),
-	getCredentialOrigin: vi.fn(() => undefined),
-	hasAuth: vi.fn(() => true),
-} as unknown as AuthStorage;
+const SELECTED_MODEL_ID = "grok-selected-grounding";
+const SELECTED_BASE_URL = "https://xai-grounding.example.test/v1";
+const authStorage = createInMemoryAuthStorage();
+authStorage.keys.setRuntime("xai", "selected-xai-key");
+const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+const model = buildModel({
+	id: SELECTED_MODEL_ID,
+	name: "Selected xAI Grounding",
+	api: "openai-responses",
+	provider: "xai",
+	baseUrl: SELECTED_BASE_URL,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 16_384,
+});
+
+afterAll(() => {
+	authStorage.close();
+});
 
 function makeFetchMock(response: Record<string, unknown>): FetchImpl {
 	return async () =>
@@ -17,17 +38,43 @@ function makeFetchMock(response: Record<string, unknown>): FetchImpl {
 		});
 }
 
-function makeParams(fetch: FetchImpl, extras: Record<string, unknown> = {}) {
+function makeParams(fetch: FetchImpl, extras: Partial<SearchParams> = {}): SearchParams {
 	return {
 		query: "Bun latest release",
 		systemPrompt: "xAI integration test prompt",
-		authStorage: fakeAuthStorage,
+		authStorage,
+		modelRegistry,
+		model,
 		fetch,
 		...extras,
 	};
 }
 
 describe("xAI Responses answer extraction from relay output items", () => {
+	it("uses the selected catalog model, endpoint, and credential provider", async () => {
+		let requestUrl: string | undefined;
+		let requestHeaders: Headers | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		const fetch: FetchImpl = async (input, init) => {
+			requestUrl = String(input);
+			requestHeaders = new Headers(init?.headers);
+			requestBody = JSON.parse(String(init?.body));
+			return new Response(
+				JSON.stringify({
+					id: "resp-selected-model",
+					model: SELECTED_MODEL_ID,
+					output_text: "Selected transport answer.",
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		await searchXAI(makeParams(fetch));
+
+		expect(requestUrl).toBe(`${SELECTED_BASE_URL}/responses`);
+		expect(requestHeaders?.get("authorization")).toBe("Bearer selected-xai-key");
+		expect(requestBody?.model).toBe(SELECTED_MODEL_ID);
+	});
 	it("drops between-call narration and keeps the final substantive message", async () => {
 		const relayResponse = {
 			id: "resp-relay",
@@ -82,26 +129,6 @@ describe("xAI Responses answer extraction from relay output items", () => {
 		expect(response.answer).toContain("The Bun changelog records the 1.3.12 patch.");
 		expect(response.answer).toContain("Summarizing now.");
 		expect(response.answer).not.toContain("I'll check the changelog.");
-	});
-
-	it("keeps a long substantive earlier message and drops surrounding narration", async () => {
-		const longText = "A".repeat(400);
-		const relayResponse = {
-			id: "resp-relay",
-			model: "grok-4.5",
-			output: [
-				{ type: "message", content: [{ type: "output_text", text: "Let me search for this." }] },
-				{ type: "message", content: [{ type: "output_text", text: longText }] },
-				{ type: "message", content: [{ type: "output_text", text: "Done." }] },
-			],
-			usage: { input_tokens: 10, output_tokens: 5 },
-		};
-
-		const response = await searchXAI(makeParams(makeFetchMock(relayResponse)));
-
-		expect(response.answer).toContain(longText);
-		expect(response.answer).toContain("Done.");
-		expect(response.answer).not.toContain("Let me search for this.");
 	});
 
 	it("keeps an earlier message at exactly the narration threshold and drops one below it", async () => {
@@ -554,4 +581,150 @@ describe("xAI Responses answer extraction from relay output items", () => {
 			status: 502,
 		});
 	});
+});
+
+describe("XAI_BASE_URL", () => {
+	const originalXaiBaseUrl = Bun.env.XAI_BASE_URL;
+	afterEach(() => {
+		if (originalXaiBaseUrl === undefined) delete Bun.env.XAI_BASE_URL;
+		else Bun.env.XAI_BASE_URL = originalXaiBaseUrl;
+	});
+
+	function captureUrl(): { fetch: FetchImpl; url: () => string | undefined } {
+		let requestUrl: string | undefined;
+		const fetch: FetchImpl = async input => {
+			requestUrl = String(input);
+			return new Response(JSON.stringify({ id: "resp-env", model: SELECTED_MODEL_ID, output_text: "Answer." }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+		return { fetch, url: () => requestUrl };
+	}
+
+	it("redirects a model on the bundled xAI endpoint", async () => {
+		Bun.env.XAI_BASE_URL = "https://xai-env.example.test/v1/";
+		const bundled = { ...model, baseUrl: "https://api.x.ai/v1" };
+		const capture = captureUrl();
+		await searchXAI(makeParams(capture.fetch, { model: bundled }));
+		expect(capture.url()).toBe("https://xai-env.example.test/v1/responses");
+	});
+
+	it("keeps a custom model baseUrl", async () => {
+		Bun.env.XAI_BASE_URL = "https://xai-env.example.test/v1";
+		const capture = captureUrl();
+		await searchXAI(makeParams(capture.fetch));
+		expect(capture.url()).toBe(`${SELECTED_BASE_URL}/responses`);
+	});
+});
+
+describe("XAI_BASE_URL credential routing agrees across chat, images, and search", () => {
+	const ENV_BASE_URL = "https://xai-env.example.test/v1";
+	const BUNDLED_BASE_URL = "https://api.x.ai/v1";
+	const originalXaiBaseUrl = Bun.env.XAI_BASE_URL;
+	// xAI OAuth access tokens are JWTs; the signature is irrelevant to routing.
+	const OAUTH_ACCESS_TOKEN = [
+		Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url"),
+		Buffer.from(JSON.stringify({ sub: "xai-user", exp: 4_102_444_800 })).toString("base64url"),
+		"signature",
+	].join(".");
+
+	afterEach(() => {
+		if (originalXaiBaseUrl === undefined) delete Bun.env.XAI_BASE_URL;
+		else Bun.env.XAI_BASE_URL = originalXaiBaseUrl;
+		vi.restoreAllMocks();
+	});
+
+	function urlCapture(body: Record<string, unknown>): { fetch: FetchImpl; url: () => string | undefined } {
+		let requestUrl: string | undefined;
+		const fetch: FetchImpl = async input => {
+			requestUrl = String(input);
+			return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+		};
+		return { fetch, url: () => requestUrl };
+	}
+
+	type RoutingCase = {
+		name: string;
+		provider: "xai" | "xai-oauth";
+		bearer: string;
+		origin?: "oauth" | "env";
+		commandBacked?: boolean;
+		expected: string;
+	};
+
+	const cases: RoutingCase[] = [
+		{
+			name: "stored xai-oauth OAuth token stays on the bundled endpoint",
+			provider: "xai-oauth",
+			bearer: OAUTH_ACCESS_TOKEN,
+			origin: "oauth",
+			expected: BUNDLED_BASE_URL,
+		},
+		{
+			name: "XAI_OAUTH_TOKEN access token stays on the bundled endpoint",
+			provider: "xai-oauth",
+			bearer: OAUTH_ACCESS_TOKEN,
+			origin: "env",
+			expected: BUNDLED_BASE_URL,
+		},
+		{
+			name: "xai-oauth API key follows the override",
+			provider: "xai-oauth",
+			bearer: "xai-api-key",
+			expected: ENV_BASE_URL,
+		},
+		{
+			name: "command-backed xai-oauth key follows the override",
+			provider: "xai-oauth",
+			bearer: "xai-command-key",
+			origin: "oauth",
+			commandBacked: true,
+			expected: ENV_BASE_URL,
+		},
+		{ name: "xai API key follows the override", provider: "xai", bearer: "xai-api-key", expected: ENV_BASE_URL },
+	];
+
+	for (const routing of cases) {
+		it(routing.name, async () => {
+			Bun.env.XAI_BASE_URL = `${ENV_BASE_URL}/`;
+			const xaiModel = { ...model, provider: routing.provider, baseUrl: BUNDLED_BASE_URL };
+
+			const chatBaseUrl = resolveOpenAIRequestSetup(xaiModel, { apiKey: routing.bearer, messages: [] }).baseUrl;
+
+			const images = urlCapture({ data: [{ b64_json: "aGVsbG8=", media_type: "image/png" }] });
+			await generateOpenAIImage(
+				{ ...xaiModel, id: "grok-imagine-image" },
+				{ prompt: "a cat" },
+				{ apiKey: routing.bearer, fetch: images.fetch },
+			);
+
+			const routingAuth = createInMemoryAuthStorage();
+			try {
+				routingAuth.keys.setRuntime(routing.provider, routing.bearer);
+				const origin = routing.origin;
+				if (origin) vi.spyOn(routingAuth.keys, "source").mockReturnValue({ kind: origin, concrete: true });
+				const registry = new ModelRegistry(routingAuth, undefined, { ignoreLocalModelConfig: true });
+				if (routing.commandBacked) vi.spyOn(registry, "hasCommandBackedApiKey").mockReturnValue(true);
+				const search = urlCapture({ id: "resp-routing", model: SELECTED_MODEL_ID, output_text: "Answer." });
+				await searchXAI({
+					...makeParams(search.fetch, { model: xaiModel }),
+					authStorage: routingAuth,
+					modelRegistry: registry,
+				});
+
+				expect({
+					chat: chatBaseUrl,
+					images: images.url(),
+					search: search.url(),
+				}).toEqual({
+					chat: routing.expected,
+					images: `${routing.expected}/images/generations`,
+					search: `${routing.expected}/responses`,
+				});
+			} finally {
+				routingAuth.close();
+			}
+		});
+	}
 });

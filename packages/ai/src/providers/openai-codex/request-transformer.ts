@@ -86,7 +86,9 @@ export interface RequestBody {
 	client_metadata?: Record<string, string>;
 	max_output_tokens?: number;
 	max_completion_tokens?: number;
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
+	/** Explicit cyber access program for this request; see `openai-codex/access-programs.ts`. */
+	access_programs?: { cyber: string };
 	[key: string]: unknown;
 }
 

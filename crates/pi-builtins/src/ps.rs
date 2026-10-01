@@ -17,6 +17,8 @@ use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins}
 use clap::Parser;
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
+use crate::proc_snapshot::{ProcInfo, ThreadInfo};
+
 #[derive(Parser)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 /// Implements the `ps` process-status builtin.
@@ -40,6 +42,7 @@ struct PsOptions {
 	running_only:        bool,
 	no_headers:          bool,
 	custom_format:       bool,
+	threads:             bool,
 	pids:                Vec<i32>,
 	parents:             Vec<i32>,
 	groups:              Vec<i32>,
@@ -91,6 +94,8 @@ enum PsField {
 	MajorFaults,
 	CpuSeconds,
 	Size,
+	UserTime,
+	SystemTime,
 }
 
 impl PsField {
@@ -133,6 +138,8 @@ impl PsField {
 			Self::MajorFaults => "MAJFL",
 			Self::CpuSeconds => "TIME",
 			Self::Size => "SZ",
+			Self::UserTime => "UTIME",
+			Self::SystemTime => "STIME",
 		}
 	}
 
@@ -162,9 +169,24 @@ impl PsField {
 				| Self::MajorFaults
 				| Self::CpuSeconds
 				| Self::Size
+				| Self::UserTime
+				| Self::SystemTime
 		)
 	}
 }
+
+/// Columns Apple `ps -M` appends to the output format.
+const THREAD_COLUMNS: [(PsField, &str); 9] = [
+	(PsField::User, "USER"),
+	(PsField::Pid, "PID"),
+	(PsField::Tty, "TT"),
+	(PsField::CpuPercent, "%CPU"),
+	(PsField::State, "STAT"),
+	(PsField::Priority, "PRI"),
+	(PsField::SystemTime, "STIME"),
+	(PsField::UserTime, "UTIME"),
+	(PsField::Args, "COMMAND"),
+];
 
 #[derive(Clone)]
 struct PsColumn {
@@ -199,6 +221,15 @@ struct PsSort {
 	descending: bool,
 }
 
+/// How a short-flag group was written; `r` means different things in each.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlagForm {
+	/// `-axr`: Unix/Apple syntax (`-r` sorts by CPU).
+	Dashed,
+	/// `axr`: BSD syntax as procps reads it (`r` selects running processes).
+	Bare,
+}
+
 enum ParsePsResult {
 	Options(Box<PsOptions>),
 	Help,
@@ -223,7 +254,7 @@ struct PsProcessRow {
 	cpu_time:      Option<Duration>,
 	virtual_size:  Option<u64>,
 	resident_size: Option<u64>,
-	threads:       Option<u32>,
+	thread_count:  Option<u32>,
 	nice:          Option<i32>,
 	priority:      Option<i32>,
 	flags:         Option<u64>,
@@ -232,10 +263,25 @@ struct PsProcessRow {
 	wchan:         Option<String>,
 	command:       String,
 	args:          String,
+	/// Filled only under `-M`; each thread becomes its own output line.
+	threads:       Vec<ThreadInfo>,
+}
+
+/// One output line: a process, or under `-M` one of its threads.
+#[derive(Clone, Copy)]
+struct PsLine<'a> {
+	row:    &'a PsProcessRow,
+	/// Thread index within the process, and its details.
+	thread: Option<(usize, &'a ThreadInfo)>,
 }
 
 impl PsProcessRow {
-	fn from_process(process: crate::proc_snapshot::ProcInfo, now: SystemTime, command_only: bool) -> Self {
+	fn from_process(
+		process: ProcInfo,
+		threads: Vec<ThreadInfo>,
+		now: SystemTime,
+		command_only: bool,
+	) -> Self {
 		let command = crate::proc_snapshot::sanitize_process_command(process.command_name());
 		let argv = process.args();
 		let args = if command_only || argv.is_empty() {
@@ -264,7 +310,7 @@ impl PsProcessRow {
 			cpu_time: process.cpu_time(),
 			virtual_size: process.virtual_bytes(),
 			resident_size: process.resident_bytes(),
-			threads: process.thread_count(),
+			thread_count: process.thread_count(),
 			nice: process.nice(),
 			priority: process.priority(),
 			flags: process.flags(),
@@ -273,13 +319,28 @@ impl PsProcessRow {
 			wchan: process.wchan(),
 			command,
 			args,
+			threads,
 		}
+	}
+
+	/// Lines this process renders as: one per thread when threads were read.
+	fn lines(&self) -> impl Iterator<Item = PsLine<'_>> {
+		let process = self
+			.threads
+			.is_empty()
+			.then_some(PsLine { row: self, thread: None });
+		let threads = self
+			.threads
+			.iter()
+			.enumerate()
+			.map(|thread| PsLine { row: self, thread: Some(thread) });
+		process.into_iter().chain(threads)
 	}
 
 	fn cpu_percent(&self) -> Option<f64> {
 		let age = self.age?.as_secs_f64();
 		let cpu_time = self.cpu_time?.as_secs_f64();
-		(age > 0.0).then_some(100.0 * cpu_time / age)
+		Some(if age > 0.0 { 100.0 * cpu_time / age } else { 0.0 })
 	}
 
 	fn memory_percent(&self, total_memory: Option<u64>) -> Option<f64> {
@@ -316,7 +377,7 @@ impl builtins::Command for PsCommand {
 				return Ok(ExecutionExitCode::Interrupted.into());
 			}
 
-			let mut processes = crate::proc_snapshot::ProcInfo::all();
+			let mut processes = ProcInfo::all();
 			let current_pid = i32::try_from(std::process::id()).ok();
 			let current =
 				current_pid.and_then(|pid| processes.iter().find(|process| process.pid() == pid));
@@ -325,8 +386,8 @@ impl builtins::Command for PsCommand {
 					.effective_user_id()
 					.or_else(|| process.real_user_id())
 			});
-			let current_terminal = current.and_then(crate::proc_snapshot::ProcInfo::terminal_id);
-			let current_session = current.and_then(crate::proc_snapshot::ProcInfo::session_id);
+			let current_terminal = current.and_then(ProcInfo::terminal_id);
+			let current_session = current.and_then(ProcInfo::session_id);
 			processes.retain(|process| {
 				ps_process_selected(
 					process,
@@ -338,11 +399,24 @@ impl builtins::Command for PsCommand {
 				)
 			});
 
+			let mut threads = if options.threads {
+				crate::proc_snapshot::threads_by_pid(&processes)
+			} else {
+				HashMap::new()
+			};
 			let now = SystemTime::now();
 			let mut rows: Vec<_> = processes
 				.into_iter()
-				.map(|process| PsProcessRow::from_process(process, now, options.command_only))
+				.map(|process| {
+					let threads = threads.remove(&process.pid()).unwrap_or_default();
+					PsProcessRow::from_process(process, threads, now, options.command_only)
+				})
 				.collect();
+			// Filtered on the row's own read: a second read of a live state can
+			// disagree with the STAT column it prints.
+			if options.running_only {
+				rows.retain(|row| row.state == 'R');
+			}
 			sort_ps_rows(&mut rows, &options.sort);
 			let columns = ps_columns(&options);
 			let output = render_ps_table(&rows, &columns, options.no_headers);
@@ -549,8 +623,7 @@ fn parse_ps_args(argv: &[String]) -> std::result::Result<ParsePsResult, (u8, Str
 				if group.is_empty() {
 					return Err((1, "invalid option '-'".to_string()));
 				}
-				let bsd = group.contains('x');
-				parse_ps_flag_group(group, bsd, argv, &mut index, &mut options)?;
+				parse_ps_flag_group(group, FlagForm::Dashed, argv, &mut index, &mut options)?;
 			},
 			_ if arg
 				.chars()
@@ -559,7 +632,7 @@ fn parse_ps_args(argv: &[String]) -> std::result::Result<ParsePsResult, (u8, Str
 				parse_i32_list(arg, &mut options.pids)?;
 			},
 			_ if arg.chars().all(|character| character.is_ascii_alphabetic()) => {
-				parse_ps_flag_group(arg, true, argv, &mut index, &mut options)?;
+				parse_ps_flag_group(arg, FlagForm::Bare, argv, &mut index, &mut options)?;
 			},
 			_ => return Err((1, format!("unsupported operand '{arg}'"))),
 		}
@@ -590,11 +663,12 @@ fn take_ps_value(
 
 fn parse_ps_flag_group(
 	group: &str,
-	bsd: bool,
+	form: FlagForm,
 	argv: &[String],
 	index: &mut usize,
 	options: &mut PsOptions,
 ) -> std::result::Result<(), (u8, String)> {
+	let bsd = form == FlagForm::Bare || group.contains('x');
 	if bsd {
 		options.bsd_syntax = true;
 	}
@@ -619,8 +693,23 @@ fn parse_ps_flag_group(
 			'u' if bsd => options.user_format = true,
 			'w' => {},
 			'c' => options.command_only = true,
+			'r' if form == FlagForm::Dashed => {
+				options.sort.push(PsSort { field: PsSortField::Cpu, descending: true });
+			},
 			'r' => options.running_only = true,
+			'm' if form == FlagForm::Dashed => {
+				options.sort.push(PsSort { field: PsSortField::Mem, descending: true });
+			},
 			'h' => options.no_headers = true,
+			'M' => {
+				options.threads = true;
+				options.custom_format = true;
+				options.columns.extend(
+					THREAD_COLUMNS
+						.iter()
+						.map(|&(field, header)| PsColumn::with_header(field, header)),
+				);
+			},
 			'o' => {
 				let value =
 					take_ps_value(argv, index, (!remainder.is_empty()).then_some(remainder), "-o")?;
@@ -778,16 +867,13 @@ fn parse_ps_sort(value: &str, sort: &mut Vec<PsSort>) -> std::result::Result<(),
 }
 
 fn ps_process_selected(
-	process: &crate::proc_snapshot::ProcInfo,
+	process: &ProcInfo,
 	options: &PsOptions,
 	current_pid: Option<i32>,
 	current_user: Option<u32>,
 	current_terminal: Option<u64>,
 	current_session: Option<i32>,
 ) -> bool {
-	if options.running_only && process.state() != 'R' {
-		return false;
-	}
 	let has_selectors = !options.pids.is_empty()
 		|| !options.parents.is_empty()
 		|| !options.groups.is_empty()
@@ -995,12 +1081,13 @@ fn render_ps_table(rows: &[PsProcessRow], columns: &[PsColumn], no_headers: bool
 	}
 	let values: Vec<Vec<String>> = rows
 		.iter()
-		.map(|row| {
+		.flat_map(PsProcessRow::lines)
+		.map(|line| {
 			columns
 				.iter()
 				.map(|column| {
 					render_ps_value(
-						row,
+						line,
 						column.field,
 						total_memory,
 						timezone.as_ref(),
@@ -1060,7 +1147,7 @@ fn write_ps_line<'a>(
 }
 
 fn render_ps_value(
-	row: &PsProcessRow,
+	line: PsLine<'_>,
 	field: PsField,
 	total_memory: Option<u64>,
 	timezone: Option<&TimeZone>,
@@ -1068,6 +1155,12 @@ fn render_ps_value(
 	user_names: &HashMap<u32, String>,
 	group_names: &HashMap<u32, String>,
 ) -> String {
+	if let Some((index, thread)) = line.thread
+		&& let Some(value) = render_ps_thread_value(index, thread, field)
+	{
+		return value;
+	}
+	let row = line.row;
 	match field {
 		PsField::User => row
 			.user
@@ -1129,7 +1222,7 @@ fn render_ps_value(
 			.nice
 			.map_or_else(|| "?".to_string(), |value| value.to_string()),
 		PsField::Threads => row
-			.threads
+			.thread_count
 			.map_or_else(|| "?".to_string(), |value| value.to_string()),
 		PsField::Priority => row
 			.priority
@@ -1174,7 +1267,34 @@ fn render_ps_value(
 			.map_or_else(|| "?".to_string(), |(bytes, page)| bytes.div_ceil(page).to_string()),
 		PsField::Command => row.command.clone(),
 		PsField::Args => row.args.clone(),
+		// Only threads split CPU time into user and system.
+		PsField::UserTime | PsField::SystemTime => "?".to_string(),
 	}
+}
+
+/// Thread-scoped `-M` values, as Apple `ps` prints them: USER, TT and the
+/// command only on a process's first thread line; scheduler columns per
+/// thread. `None` falls through to the process-wide value.
+fn render_ps_thread_value(index: usize, thread: &ThreadInfo, field: PsField) -> Option<String> {
+	let known = |value: Option<String>| value.unwrap_or_else(|| "?".to_string());
+	Some(match field {
+		PsField::User | PsField::Tty | PsField::Command | PsField::Args if index > 0 => String::new(),
+		PsField::State => thread.state.to_string(),
+		PsField::CpuPercent => known(thread.cpu_percent.map(|percent| format!("{percent:.1}"))),
+		PsField::Priority => known(thread.priority.map(|priority| match thread.policy {
+			Some(policy) => format!("{priority}{policy}"),
+			None => priority.to_string(),
+		})),
+		PsField::UserTime => known(thread.user_time.map(format_ps_thread_time)),
+		PsField::SystemTime => known(thread.system_time.map(format_ps_thread_time)),
+		_ => return None,
+	})
+}
+
+/// CPU time as `M:SS.cc`, Apple `ps`'s UTIME/STIME format.
+fn format_ps_thread_time(time: Duration) -> String {
+	let centis = (time.as_micros() + 5_000) / 10_000;
+	format!("{}:{:02}.{:02}", centis / 6_000, centis / 100 % 60, centis % 100)
 }
 
 fn format_ps_state(row: &PsProcessRow) -> String {
@@ -1187,7 +1307,9 @@ fn format_ps_state(row: &PsProcessRow) -> String {
 	if row.sid == Some(row.pid) {
 		state.push('s');
 	}
-	if row.threads.is_some_and(|threads| threads > 1) {
+	// procps marks multithreaded processes; Apple `ps` has no such flag.
+	#[cfg(not(target_os = "macos"))]
+	if row.thread_count.is_some_and(|threads| threads > 1) {
 		state.push('l');
 	}
 	if row.terminal.is_some() && row.tpgid.is_some() && row.tpgid == row.pgid {
@@ -1397,7 +1519,9 @@ fn write_ps_help(mut output: impl Write) -> io::Result<()> {
 		 LIST     select effective users\n-U, --User LIST     select real users\n-t, --tty LIST      \
 		 select terminals\n\nOutput:\n-f                  full format\n-l                  long \
 		 format\n-o, --format LIST   custom columns\n--sort LIST     sort by columns; prefix \
-		 descending keys with '-'\n--no-headers    omit column headings\n\nBSD forms such as 'ps \
+		 descending keys with '-'\n-r                  sort by CPU usage, highest first\n-m                  \
+		 sort by memory usage, highest first\n--no-headers    omit column headings\n-M                  one \
+		 line per thread (USER PID TT %CPU STAT PRI STIME UTIME COMMAND)\n\nBSD forms such as 'ps \
 		 ax', 'ps aux', and 'ps axo pid,command' are supported."
 	)
 }
@@ -1432,6 +1556,26 @@ mod tests {
 	}
 
 	#[test]
+	fn dashed_r_sorts_by_cpu_while_bare_r_selects_running() {
+		for argv in [&["-Ao", "pid,comm", "-r"][..], &["-axr"][..]] {
+			let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+			let ParsePsResult::Options(options) = parse_ps_args(&argv).expect("valid -r") else {
+				panic!("expected parsed options");
+			};
+			assert!(!options.running_only, "{argv:?}");
+			assert!(matches!(options.sort[..], [PsSort { field: PsSortField::Cpu, descending: true }]));
+		}
+
+		let ParsePsResult::Options(options) =
+			parse_ps_args(&["axr".to_string()]).expect("valid bare r")
+		else {
+			panic!("expected parsed options");
+		};
+		assert!(options.running_only);
+		assert!(options.sort.is_empty());
+	}
+
+	#[test]
 	fn parses_sort_keys_and_directions() {
 		let mut sort = Vec::new();
 		parse_ps_sort("-pcpu,+pid command", &mut sort).expect("valid sort keys");
@@ -1453,6 +1597,14 @@ mod tests {
 		assert_eq!(format_ps_elapsed(Duration::from_secs(65)), "01:05");
 		assert_eq!(format_ps_elapsed(Duration::from_secs(3_661)), "01:01:01");
 		assert_eq!(format_ps_elapsed(Duration::from_secs(90_061)), "1-01:01:01");
+	}
+
+	#[test]
+	fn formats_thread_time_with_centisecond_rounding() {
+		assert_eq!(format_ps_thread_time(Duration::from_micros(4_999)), "0:00.00");
+		assert_eq!(format_ps_thread_time(Duration::from_micros(5_000)), "0:00.01");
+		assert_eq!(format_ps_thread_time(Duration::from_micros(59_995_000)), "1:00.00");
+		assert_eq!(format_ps_thread_time(Duration::from_secs(3_725)), "62:05.00");
 	}
 
 	#[test]

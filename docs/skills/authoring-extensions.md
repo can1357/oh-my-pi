@@ -5,7 +5,7 @@ description: Use when creating a new omp extension. Covers ExtensionAPI, factory
 
 # Authoring Extensions
 
-Extensions are the primary way to add capabilities to `oh-my-pi`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file. Its default factory may initialize synchronously or return a promise.
+Extensions are the primary way to add capabilities to `omp`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file. Its default factory may initialize synchronously or return a promise.
 
 ## Minimum viable extension
 
@@ -78,15 +78,18 @@ export default function myExtension(pi: ExtensionAPI) {
 omp loads extension modules from these sources:
 
 1. Native `.omp` locations discovered through the capability system:
-   - `<cwd>/.omp/extensions/`
+   - project/ancestor `.omp/extensions/` directories within the discovery boundary
    - `~/.omp/agent/extensions/`
    - legacy extension paths listed in `.omp/settings.json#extensions` or `~/.omp/agent/settings.json#extensions`
-2. Enabled installed plugins under `~/.omp/plugins/node_modules` or a project plugin root — including npm, marketplace, and `omp plugin link` installs — via their `omp.extensions`/`pi.extensions` manifests.
-3. Explicit configured paths passed by the CLI (`omp --extension ./my-ext.ts`, also `-e`; `--hook` is treated as an alias) and by the `extensions:` setting in config.
+2. Discovered JavaScript/TypeScript hook factories (`hooks/pre/` and `hooks/post/`), bound through the extension runner.
+3. Enabled installed plugins under `~/.omp/plugins/node_modules` or a project plugin root — including npm, marketplace, and `omp plugin link` installs — via their `omp.extensions`/`pi.extensions` manifests.
+4. Explicit configured paths passed by the CLI (`omp --extension ./my-ext.ts`, also `-e`; `--hook` is treated as an alias) and by the `extensions:` setting in config.
 
 The runtime de-duplicates by resolved absolute path — first seen wins.
 
-The user directory is the active profile's agent directory: the default is `~/.omp/agent`, while `omp --profile <name>` uses `~/.omp/profiles/<name>/agent` (and `PI_CODING_AGENT_DIR` overrides it).
+`--no-extensions` disables ambient discovery but still permits explicit `--extension`/`--hook` paths and their bundled capabilities. For an exact module-file allowlist, repeat `--trusted-extension /absolute/path/to/module.ts`: paths must exist and be files, ambient extension discovery is disabled, and those files are not treated as package roots for sibling capability discovery. It cannot be combined with `--extension`, `-e`, or `--hook`; a trusted-module load error aborts startup. This is discovery control, not a sandbox for extension code.
+
+The user directory is the active profile's agent directory: the default is `~/.omp/agent`, while `omp --profile <name>` uses `~/.omp/profiles/<name>/agent` under the default layout. `PI_CODING_AGENT_DIR` overrides the default profile's agent directory; named profiles derive their own directory instead. Initialized XDG roots can change these locations.
 
 When a path points to a directory, omp resolves the entry point in this order:
 
@@ -148,7 +151,7 @@ pi.registerCommand("my-cmd", {
 });
 ```
 
-`ExtensionCommandContext` session-control methods (safe to call from commands only):
+`ExtensionCommandContext` session-control methods:
 
 | Method | Effect |
 |---|---|
@@ -158,7 +161,9 @@ pi.registerCommand("my-cmd", {
 | `branch(entryId)` | Fork from a specific history entry |
 | `navigateTree(id, opts?)` | Jump to a different point in the session tree |
 | `reload()` | Reload the session runtime |
-| `compact(opts?)` | Compact the current context |
+| `compact(instructionsOrOptions?)` | Compact the current context; also available on the base `ExtensionContext` |
+
+Use command contexts for switching, branching, tree navigation, and reload. `compact()` accepts either an instruction string or `CompactOptions`.
 
 ## Registering tools
 
@@ -179,9 +184,9 @@ pi.registerTool({
   }),
   async execute(toolCallId, params, signal, onUpdate, ctx) {
     if (signal?.aborted) {
-      return { content: [{ type: "text", text: "Cancelled" }] };
+      return { content: [{ type: "text", text: "Cancelled" }], details: { query: params.query, count: 0 } };
     }
-    onUpdate?.({ content: [{ type: "text", text: "Searching..." }] });
+    onUpdate?.({ content: [{ type: "text", text: "Searching..." }], details: { query: params.query, count: 0 } });
     // ... do work ...
     return {
       content: [{ type: "text", text: `Found N results for "${params.query}"` }],
@@ -191,7 +196,7 @@ pi.registerTool({
 });
 ```
 
-Tool definitions may also set `loadMode: "essential" | "discoverable"` (`"discoverable"` by default), `approval: "read" | "write" | "exec"` (`"exec"` by default), and `strict` for provider structured-output grammar behavior.
+Tool definitions may also set `loadMode: "essential" | "discoverable"` (`"discoverable"` by default), `approval: "read" | "write" | "exec"` (`"exec"` by default), and `strict` for provider structured-output grammar behavior. Set `readsSkillUris: true` only for tools that can read skill instruction URLs; this capability allows the system prompt to expose discovered skills. `hidden` requires explicit tool selection; `defaultInactive` leaves activation to the extension's `setActiveTools()`.
 
 ## Subscribing to events
 
@@ -228,7 +233,7 @@ Full event catalog: see [extension authoring guide](../extensions.md).
 | Registering a provider, shortcut, or CLI flag | **Extension only** |
 | Shipping as a marketplace plugin | **Extension** (use `package.json` manifest) |
 
-Extensions are a strict superset of hooks. New authoring should use `ExtensionAPI`.
+New authoring should use `ExtensionAPI`. Discovered JS/TS hook factories are loaded through this API in normal sessions; the standalone `HookRunner` remains for legacy SDK consumers. Shared event names do not imply identical result-chaining behavior in both runners.
 
 ## Debugging
 

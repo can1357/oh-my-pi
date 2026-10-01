@@ -8,7 +8,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
-import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
@@ -215,7 +215,10 @@ export async function getLogText(): Promise<string> {
  */
 async function collectSameDayLogs(linesPerFile: number): Promise<string> {
 	const logsDir = getLogsDir();
-	const today = new Date().toISOString().slice(0, 10);
+	// Log files are named with the local day (see localDay / RotatingFileSink),
+	// so match them with the local day too — the UTC key misses the live log
+	// between local midnight and UTC midnight.
+	const today = localDay(new Date());
 	const sameDay: Array<{ name: string; mtimeMs: number }> = [];
 	try {
 		const entries = await fs.readdir(logsDir, { withFileTypes: true });

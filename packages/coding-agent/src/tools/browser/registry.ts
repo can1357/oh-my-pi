@@ -20,14 +20,23 @@ import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
+import type { TernKind } from "./tern/kind";
+import { TernSocketClient } from "./tern/wire";
 
 export type PuppeteerBrowserKind =
-	| { kind: "headless"; headless: boolean }
+	| {
+			kind: "headless";
+			headless: boolean;
+			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
+			ignoreHttpsErrors?: boolean;
+			/** Process-local file access launch flag, unsupported by an already-running shared browser. */
+			allowFileAccess?: boolean;
+	  }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
 
-export type BrowserKind = PuppeteerBrowserKind | CmuxKind;
+export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind;
 
 export type BrowserKindTag = BrowserKind["kind"];
 
@@ -63,7 +72,14 @@ export interface CmuxBrowserHandle extends BrowserHandleCommon {
 	surface?: string;
 }
 
-export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle;
+/** A connection to the Tern daemon whose browser PiPs host this handle's tabs. */
+export interface TernBrowserHandle extends BrowserHandleCommon {
+	kind: TernKind;
+	/** The daemon connection every tab of this handle drives its PiP through. */
+	tern: TernSocketClient;
+}
+
+export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle;
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {
@@ -79,7 +95,7 @@ const pendingOpens = new Map<string, Promise<BrowserHandle>>();
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}`;
+			return `headless:${kind.headless ? "1" : "0"}:${kind.ignoreHttpsErrors ? "tls" : ""}:${kind.allowFileAccess ? "file" : ""}`;
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
@@ -88,6 +104,8 @@ export function browserKey(kind: BrowserKind): string {
 			return `relay:${kind.cdpUrl}`;
 		case "cmux":
 			return `cmux:${kind.socketPath}`;
+		case "tern":
+			return `tern:${kind.socketPath}:${kind.pane}`;
 	}
 }
 
@@ -104,7 +122,7 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 		const existing = browsers.get(key);
 		if (existing) {
 			if ("client" in existing) return existing;
-			if (existing.browser.connected) return existing;
+			if ("tern" in existing ? existing.tern.connected : existing.browser.connected) return existing;
 			browsers.delete(key);
 			await disposeBrowserHandle(existing, { kill: false });
 			continue;
@@ -169,6 +187,11 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			refCount: 0,
 		};
 	}
+	if (kind.kind === "tern") {
+		const tern = new TernSocketClient({ socketPath: kind.socketPath });
+		await tern.connect();
+		return { key: browserKey(kind), kind, tern, refCount: 0 };
+	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
 		// worker host) MUST go through the project-shared broker-owned Chromium:
@@ -181,6 +204,8 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const { browser, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
+			ignoreHttpsErrors: kind.ignoreHttpsErrors,
+			allowFileAccess: kind.allowFileAccess,
 		});
 		return {
 			key: browserKey(kind),
@@ -330,13 +355,17 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		handle.client.close();
 		return;
 	}
+	if ("tern" in handle) {
+		handle.tern.close();
+		return;
+	}
 	if (handle.kind.kind === "headless") {
 		if (handle.sharedDaemon) {
 			// The broker owns the Chromium; this process only drops its CDP
 			// connection. `kill` is scoped to spawned-app browsers — stopping the
 			// shared daemon here would tear down every other session's tabs. The
 			// daemon dies with the last omp client in the project (broker idle
-			// teardown), or via an explicit hub stop.
+			// teardown), or via an explicit stop (`write proc://<name>/kill`).
 			if (handle.browser.connected) {
 				try {
 					handle.browser.disconnect();
@@ -400,6 +429,11 @@ async function openSharedHeadlessHandle(
 	kind: Extract<PuppeteerBrowserKind, { kind: "headless" }>,
 	opts: AcquireBrowserOptions,
 ): Promise<PuppeteerBrowserHandle> {
+	if (kind.allowFileAccess) {
+		throw new ToolError(
+			"browser.open({ allow_file_access:true }) requires a process-local Chromium launch and cannot be applied to the project-shared browser. Use app.path to launch a dedicated browser.",
+		);
+	}
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	try {
 		const shared = await ensureSharedBrowser({
@@ -410,7 +444,7 @@ async function openSharedHeadlessHandle(
 		});
 		if (!shared) {
 			throw new ToolError(
-				"Shared browser daemon unavailable (broker start or Chromium launch failed); check `hub ps` for omp.browser.* daemons and ~/.omp/logs for details",
+				"Shared browser daemon unavailable (broker start or Chromium launch failed); check `omp ps` for omp.browser.* daemons and ~/.omp/logs for details",
 			);
 		}
 		const puppeteer = await loadPuppeteer();

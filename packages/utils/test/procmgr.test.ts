@@ -13,6 +13,21 @@ describe("getShellConfig", () => {
 			`Custom shell path not found: ${missingShell}\nPlease update shellPath in ${configPath}`,
 		);
 	});
+
+	it("falls back to the default shell once a custom shell path is cleared", () => {
+		const defaultShell = getShellConfig().shell;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-custom-shell-"));
+		try {
+			const customShell = path.join(dir, "bash");
+			fs.writeFileSync(customShell, "");
+			expect(getShellConfig(customShell).shell).toBe(customShell);
+			const cleared = getShellConfig();
+			expect(cleared.shell).toBe(defaultShell);
+			expect(cleared.env.SHELL).toBe(defaultShell);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("isPosixShell", () => {

@@ -1,14 +1,29 @@
+import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
 	type ResolveCliModelResult,
 } from "../config/model-resolver";
-import type { SettingPath, Settings } from "../config/settings";
+import type { Settings } from "../config/settings";
+import {
+	applyModelPreset,
+	deleteModelPreset,
+	formatModelPresetSwitch,
+	getModelPresetNames,
+	isValidModelPresetName,
+	modelPresetSavedMessage,
+	type ModelPresetSession,
+	saveModelPreset,
+} from "../config/model-presets";
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
+import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import {
 	CLI_THINKING_LEVELS,
@@ -20,6 +35,19 @@ import { availableEffortSelectors } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+
+import {
+	cfgComputerDisplay,
+	cfgComputerEnabled,
+	cfgComputerMaxHeight,
+	cfgComputerMaxWidth,
+	cfgRatchetEnabled,
+} from "../tools/settings";
+import { cfgSkillful } from "../session/settings";
+import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
+import { cfgExtendedContext } from "../session/context-settings";
+import { cfgGoalEnabled } from "../goals/settings";
+import { cfgPlanEnabled } from "../plan-mode/settings";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -56,7 +84,14 @@ async function runWithDetachedModeDraft(
 	if (!runtime.draftDetached) editor.clearDraft();
 	try {
 		const submitted = await run();
-		if (!submitted && ((runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0)) {
+		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
+		if (!submitted && hasAttachments) {
+			if (runtime.draftDetached) {
+				// Newer typing may already sit in the editor: merge the submission
+				// back beside it so each draft's image markers keep their images.
+				restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				return;
+			}
 			editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];
 			editor.pendingImageLinks = [
 				...(runtime.input?.imageLinks ?? runtime.input?.images?.map(() => undefined) ?? []),
@@ -65,6 +100,14 @@ async function runWithDetachedModeDraft(
 			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
 		}
 	} catch (error) {
+		if (runtime.draftDetached) {
+			// The caller already took this draft out of the editor before
+			// dispatch (Ctrl+Enter's `handleFollowUp`, or `onSubmit` for these
+			// mode commands); it owns restoring the submission and reporting
+			// the error so a submission that failed after newer text was typed
+			// merges with it once, instead of being silently dropped here.
+			throw error;
+		}
 		if (!editor.getText() && editor.pendingImages.length === 0) {
 			editor.setText(command.text);
 			editor.pendingImages = runtime.input?.images ? [...runtime.input.images] : [];
@@ -75,31 +118,94 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
+	if (session.isUltrafastModeEnabled()) return "ultra";
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
+
+/**
+ * `/fast [on|ultra|off|status]` for the active model: `on` selects the
+ * family's `priority` tier, `ultra` the OpenAI `ultrafast` tier, `off` clears
+ * either. Bare invocation toggles between off and priority. Returns the
+ * user-facing reply, or `undefined` for an unknown argument.
+ */
+function runFastCommand(arg: string, session: AgentSession): string | undefined {
+	switch (arg) {
+		case "":
+		case "toggle":
+			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "on":
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		case "ultra":
+		case "ultrafast":
+			return session.setUltrafastMode(true)
+				? "Ultrafast mode enabled."
+				: "Ultrafast is unavailable for the current model.";
+		case "off":
+			session.setFastMode(false);
+			return "Fast mode disabled.";
+		case "status":
+			return `Fast mode is ${formatFastModeStatus(session)}.`;
+		default:
+			return undefined;
+	}
+}
+
+const SLOW_UNSUPPORTED =
+	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and low priority on Anthropic subscriptions.";
+
+/**
+ * `/slow [on|off|status]` for the active model: the `flex` service tier on
+ * OpenAI/Google, subscription low priority (`providers.anthropic.slowMode`
+ * `auto`/`off`) on Anthropic. Bare invocation toggles. Returns the user-facing
+ * reply, or `undefined` for an unknown argument.
+ */
+function runSlowCommand(arg: string, session: AgentSession): string | undefined {
+	if (arg !== "" && arg !== "toggle" && arg !== "on" && arg !== "off" && arg !== "status") return undefined;
+	const anthropic = session.model?.provider === "anthropic";
+	if (arg === "status") {
+		const label = anthropic ? session.getAnthropicSlowModeLabel() : undefined;
+		if (!session.isSlowModeEnabled()) return label ? `Slow mode is off (${label}).` : "Slow mode is off.";
+		if (!anthropic) return "Slow mode is on (flex tier).";
+		return label ? `Slow mode is on (${label}).` : "Slow mode is on (low priority at the Claude session limit).";
+	}
+	const enabled = arg === "on" || (arg !== "off" && !session.isSlowModeEnabled());
+	if (!session.setSlowMode(enabled)) return SLOW_UNSUPPORTED;
+	if (!session.isSlowModeEnabled()) {
+		return anthropic
+			? "Slow mode off: at your Claude usage limit, requests may get a short wrap-up allowance, then wait for the limit to reset."
+			: "Slow mode off.";
+	}
+	if (!anthropic) return "Slow mode on: requests use the flex tier (lower cost, higher latency).";
+	const resetsAtSec = session.getAnthropicSlowModeLane()?.activeResetsAtSec();
+	return resetsAtSec !== undefined
+		? `Slow mode on: continuing at low priority until your limit resets at ${formatSlowModeResetClock(resetsAtSec)}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.`
+		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers low priority, requests switch to it after any wrap-up allowance.";
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
 function formatExtendedContextStatus(settings: Settings): string {
-	return settings.get("extendedContext") ? "on" : "off";
+	return cfgExtendedContext.get(settings) ? "on" : "off";
 }
 
 /** Applies an `/extended-context` argument and returns its operator feedback. */
 function applyExtendedContextCommand(settings: Settings, args: string): string | undefined {
 	const arg = args.trim().toLowerCase();
-	const current = settings.get("extendedContext");
+	const current = cfgExtendedContext.get(settings);
 	if (!arg || arg === "toggle") {
 		const enabled = !current;
-		settings.set("extendedContext", enabled);
+		cfgExtendedContext.set(settings, enabled);
 		return `Extended context ${enabled ? "enabled" : "disabled"}.`;
 	}
 	if (arg === "on") {
-		settings.set("extendedContext", true);
+		cfgExtendedContext.set(settings, true);
 		return "Extended context enabled.";
 	}
 	if (arg === "off") {
-		settings.set("extendedContext", false);
+		cfgExtendedContext.set(settings, false);
 		return "Extended context disabled.";
 	}
 	if (arg === "status") return `Extended context is ${formatExtendedContextStatus(settings)}.`;
@@ -108,12 +214,12 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 
 /** Detailed, session-effective `/computer status` diagnostics. */
 function formatComputerUseStatus(session: AgentSession): string {
-	const enabled = session.settings.get("computer.enabled");
+	const enabled = cfgComputerEnabled.get(session.settings);
 	const active = session.getEvalPreludes().some(definition => definition.name === "computer");
 	const configured = {
-		display: session.settings.get("computer.display"),
-		maxWidth: session.settings.get("computer.maxWidth"),
-		maxHeight: session.settings.get("computer.maxHeight"),
+		display: cfgComputerDisplay.get(session.settings),
+		maxWidth: cfgComputerMaxWidth.get(session.settings),
+		maxHeight: cfgComputerMaxHeight.get(session.settings),
 	};
 	return [
 		`Computer use: ${enabled ? "enabled" : "disabled"}`,
@@ -123,25 +229,41 @@ function formatComputerUseStatus(session: AgentSession): string {
 }
 
 /**
- * Apply a session-scoped computer-use toggle and rebuild the current prompt.
+ * Apply a session-scoped computer-use toggle; the session's setting listener
+ * reconciles the prompt without a mid-session cache-busting rebuild.
  * The override is never persisted to settings.json.
  */
-async function applyComputerUseToggle(session: AgentSession, enable: boolean): Promise<string> {
-	const previous = session.settings.get("computer.enabled");
-	session.settings.override("computer.enabled", enable);
+function applyComputerUseToggle(session: AgentSession, enable: boolean): string {
+	const previous = cfgComputerEnabled.get(session.settings);
+	cfgComputerEnabled.override(session.settings, enable);
 	if (enable && !session.getEvalPreludes().some(definition => definition.name === "computer")) {
-		session.settings.override("computer.enabled", previous);
+		cfgComputerEnabled.override(session.settings, previous);
 		return "Computer use is unavailable in this session.";
-	}
-	try {
-		await session.refreshBaseSystemPrompt();
-	} catch (error) {
-		session.settings.override("computer.enabled", previous);
-		throw error;
 	}
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
+}
+
+/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
+const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
+
+/**
+ * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
+ * render the kickoff prompt carrying the user's request as data.
+ */
+function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
+	const tools = session.getEnabledToolNames();
+	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
+	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
+	const previous = cfgRatchetEnabled.get(session.settings);
+	if (!previous) cfgRatchetEnabled.override(session.settings, true);
+	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
+		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
+		return { error: "The ratchet eval prelude is unavailable in this session." };
+	}
+	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
+	return { kickoff };
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -183,7 +305,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -201,7 +323,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			} else {
 				runtime.ctx.showWarning(`Usage: /${command.name} [providers]`);
 			}
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -211,7 +333,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (!runtime.ctx.settings.get("plan.enabled" as SettingPath)) return "Plan: disabled in settings";
+			if (!cfgPlanEnabled.get(runtime.ctx.settings)) return "Plan: disabled in settings";
 			if (runtime.ctx.planModeEnabled) {
 				const planFile = runtime.ctx.planModePlanFilePath;
 				return `Plan: on${planFile ? ` (${path.basename(planFile)})` : ""}`;
@@ -233,7 +355,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.openPlanReview();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -269,7 +391,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[objective]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (!runtime.ctx.settings.get("goal.enabled" as SettingPath)) return "Goal: disabled in settings";
+			if (!cfgGoalEnabled.get(runtime.ctx.settings)) return "Goal: disabled in settings";
 			if (runtime.ctx.planModeEnabled) return "Goal: blocked by plan mode";
 			const state = runtime.ctx.session.getGoalModeState();
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
@@ -295,8 +417,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "loop",
 		icon: "loop",
-		description:
-			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with `--until '<cmd>'` / `--while '<cmd>'` — the command's exit status decides whether the next iteration runs. Esc cancels the current iteration; /loop again to disable.",
+		get description() {
+			return `Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with \`--until '<cmd>'\` / \`--while '<cmd>'\` — the command's exit status decides whether the next iteration runs. ${formatKeyHint("escape")} suspends the ongoing loop; /loop again to disable.`;
+		},
 		inlineHint: "[count|duration] [--while|--until '<cmd>'] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -312,7 +435,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			const prompt = await runtime.ctx.handleLoopCommand(command.args);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			// Surface any inline prompt so the dispatcher returns it and the normal
 			// submit flow runs the first loop iteration (recording it as the loop prompt).
 			if (prompt) return { prompt };
@@ -325,7 +448,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "<message>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleQueueCommand(command.args);
+			await runtime.ctx.handleQueueCommand(
+				command.args,
+				runtime.draftDetached ? { ...runtime.input, text: command.text } : undefined,
+			);
 		},
 	},
 	{
@@ -369,13 +495,15 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
 		name: "switch",
 		icon: "swap",
-		description: "Switch model for this session (same as alt+p); accepts fuzzy ids, provider/id, @role, :level",
+		get description() {
+			return `Switch model for this session (same as ${formatKeyHint("alt+p")}); accepts fuzzy ids, provider/id, @role, :level`;
+		},
 		acpDescription: "Switch model for this session only",
 		acpInputHint: "[model]",
 		inlineHint: "[model]",
@@ -406,7 +534,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const selector = command.args.trim();
 			if (!selector) {
 				runtime.ctx.showModelSelector({ temporaryOnly: true });
@@ -424,71 +552,57 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+		description:
+			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
 		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|off|status]",
+		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode" },
+			{ name: "on", description: "Enable fast mode (priority tier)" },
+			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
 			{ name: "off", description: "Disable fast mode" },
 			{ name: "status", description: "Show fast mode status" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.session.toggleFastMode();
-				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				return commandConsumed();
-			}
-			if (arg === "on") {
-				const supported = runtime.session.setFastMode(true);
-				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
-				return commandConsumed();
-			}
-			if (arg === "off") {
-				runtime.session.setFastMode(false);
-				await runtime.output("Fast mode disabled.");
-				return commandConsumed();
-			}
-			if (arg === "status") {
-				await runtime.output(`Fast mode is ${formatFastModeStatus(runtime.session)}.`);
-				return commandConsumed();
-			}
-			return usage("Usage: /fast [on|off|status]", runtime);
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage(FAST_USAGE, runtime);
+			await runtime.output(message);
+			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.ctx.session.toggleFastMode();
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "on") {
-				const supported = runtime.ctx.session.setFastMode(true);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(
-					supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.",
-				);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "off") {
-				runtime.ctx.session.setFastMode(false);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus("Fast mode disabled.");
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "status") {
-				runtime.ctx.showStatus(`Fast mode is ${formatFastModeStatus(runtime.ctx.session)}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
-			runtime.ctx.editor.setText("");
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? FAST_USAGE);
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "slow",
+		icon: "fast",
+		description:
+			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at low priority after the Claude session limit",
+		acpDescription: "Toggle slow mode",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Flex tier, or Anthropic low priority at the session limit (auto)" },
+			{ name: "off", description: "Standard service; stop Anthropic low priority" },
+			{ name: "status", description: "Show slow mode status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isSlowModeEnabled() ? "Slow mode: on" : "Slow mode: off",
+		handle: async (command, runtime) => {
+			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage("Usage: /slow [on|off|status]", runtime);
+			await runtime.output(message);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? "Usage: /slow [on|off|status]");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -504,12 +618,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>
-			`Skill listing: ${runtime.ctx.session.settings.get("skillful") ? "on" : "off"}`,
+			`Skill listing: ${cfgSkillful.get(runtime.ctx.session.settings) ? "on" : "off"}`,
 		handle: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
 				await runtime.output(
-					`Skill listing: ${runtime.session.settings.get("skillful") ? "on" : "off"} (session override; default from the skillful setting).`,
+					`Skill listing: ${cfgSkillful.get(runtime.session.settings) ? "on" : "off"} (session override; default from the skillful setting).`,
 				);
 				return commandConsumed();
 			}
@@ -528,8 +642,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
-				runtime.ctx.showStatus(`Skill listing: ${runtime.ctx.session.settings.get("skillful") ? "on" : "off"}.`);
-				runtime.ctx.editor.setText("");
+				runtime.ctx.showStatus(`Skill listing: ${cfgSkillful.get(runtime.ctx.session.settings) ? "on" : "off"}.`);
+				clearSubmittedText(runtime);
 				return;
 			}
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
@@ -540,11 +654,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							? await runtime.ctx.session.setSkillful(false)
 							: await runtime.ctx.session.toggleSkillful();
 				runtime.ctx.showStatus(`Skill listing ${enabled ? "enabled" : "disabled"} for this session.`);
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /skillful [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -571,7 +685,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const output = applyExtendedContextCommand(runtime.ctx.settings, command.args);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.showStatus(output ?? "Usage: /extended-context [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -587,7 +701,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime =>
-			`Computer: ${runtime.ctx.session.settings.get("computer.enabled") ? "on" : "off"}`,
+			`Computer: ${cfgComputerEnabled.get(runtime.ctx.session.settings) ? "on" : "off"}`,
 		handle: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
@@ -595,8 +709,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
-				const enable = arg === "off" ? false : arg === "on" || !runtime.session.settings.get("computer.enabled");
-				await runtime.output(await applyComputerUseToggle(runtime.session, enable));
+				const enable = arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.session.settings);
+				await runtime.output(applyComputerUseToggle(runtime.session, enable));
 				return commandConsumed();
 			}
 			return usage("Usage: /computer [on|off|status]", runtime);
@@ -605,18 +719,52 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
 				runtime.ctx.showStatus(formatComputerUseStatus(runtime.ctx.session));
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
 				const enable =
-					arg === "off" ? false : arg === "on" || !runtime.ctx.session.settings.get("computer.enabled");
-				runtime.ctx.showStatus(await applyComputerUseToggle(runtime.ctx.session, enable));
-				runtime.ctx.editor.setText("");
+					arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.ctx.session.settings);
+				runtime.ctx.showStatus(applyComputerUseToggle(runtime.ctx.session, enable));
+				clearSubmittedText(runtime);
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "ratchet",
+		icon: "loop",
+		description: "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended",
+		inlineHint: "[flow and goal]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			const armed = prepareRatchet(runtime.session, command.args);
+			if ("error" in armed) return usage(armed.error, runtime);
+			return { prompt: armed.kickoff };
+		},
+		handleTui: async (command, runtime) => {
+			const { session } = runtime.ctx;
+			const armed = prepareRatchet(session, command.args);
+			clearSubmittedText(runtime);
+			if ("error" in armed) {
+				runtime.ctx.showWarning(armed.error);
+				return;
+			}
+			// Same delivery as /guided-goal: the kickoff is a hidden developer message queued behind
+			// any in-flight run; the agent's batched `ask` is the first thing the user sees.
+			const images = runtime.input?.images?.length ? runtime.input.images : undefined;
+			if (session.isStreaming) {
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+				return;
+			}
+			try {
+				await session.prompt(armed.kickoff, images ? { synthetic: true, images } : { synthetic: true });
+			} catch (error) {
+				if (!(error instanceof AgentBusyError)) throw error;
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+			}
 		},
 	},
 	{
@@ -712,4 +860,118 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 	},
+	{
+		name: "modelpreset",
+		icon: "model",
+		description: "Save and switch model presets (role models + thinking level)",
+		acpDescription: "Manage model presets",
+		acpInputHint: "[list|save|switch|delete] [name]",
+		inlineHint: "[save|switch|delete|list] [name]",
+		subcommands: [
+			{ name: "list", description: "List saved presets" },
+			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
+			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
+			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const count = getModelPresetNames(runtime.ctx.settings).length;
+			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
+		},
+		handle: async (command, runtime) => {
+			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
+			if (outcome.usage) return usage(outcome.message, runtime);
+			await runtime.output(outcome.message);
+			if (outcome.switched) await runtime.notifyTitleChanged?.();
+			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			let args = command.args;
+			if (!args.trim()) {
+				const names = getModelPresetNames(ctx.settings);
+				if (names.length === 0) {
+					ctx.showStatus(NO_PRESETS_MESSAGE);
+					return;
+				}
+				const picked = await ctx.showHookSelector("Switch to model preset", names);
+				if (picked === undefined) return;
+				args = `switch ${picked}`;
+			}
+			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
+			if (outcome.switched) {
+				ctx.statusLine.invalidate();
+				ctx.updateEditorBorderColor();
+			}
+			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
+			else ctx.showStatus(outcome.message);
+			ctx.ui.requestRender();
+		},
+	},
 ];
+
+const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
+const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
+
+interface PresetsCommandOutcome {
+	message: string;
+	usage?: boolean;
+	failed?: boolean;
+	switched?: boolean;
+	changedConfig?: boolean;
+}
+
+/** Shared by the ACP and TUI handlers of `/modelpreset`; `args` is everything after the command name. */
+async function runPresetsCommand(
+	args: string,
+	settings: Settings,
+	session: ModelPresetSession,
+): Promise<PresetsCommandOutcome> {
+	const [sub = "list", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+	const name = rest.join(" ");
+	switch (sub) {
+		case "list": {
+			const names = getModelPresetNames(settings);
+			return { message: names.length > 0 ? `Model presets: ${names.join(", ")}` : NO_PRESETS_MESSAGE };
+		}
+		case "save": {
+			if (!name) return { message: "Usage: /modelpreset save <name>", usage: true };
+			if (!isValidModelPresetName(name)) {
+				return {
+					message: `Invalid preset name "${name}": use a letter, then letters, digits, - or _`,
+					usage: true,
+				};
+			}
+			saveModelPreset(settings, name);
+			return { message: modelPresetSavedMessage(settings, name), changedConfig: true };
+		}
+		case "switch": {
+			if (!name) return { message: "Usage: /modelpreset switch <name>", usage: true };
+			const result = await applyModelPreset(settings, session, name);
+			const message = formatModelPresetSwitch(name, result);
+			const wroteRoles = result.kind === "switched" || result.kind === "failed";
+			return {
+				message,
+				failed: result.kind !== "switched" || result.shadowed.length > 0 || result.shadowedThinking !== undefined,
+				switched: result.kind === "switched",
+				changedConfig: wroteRoles,
+			};
+		}
+		case "delete": {
+			if (!name) return { message: "Usage: /modelpreset delete <name>", usage: true };
+			const result = deleteModelPreset(settings, name);
+			if (result === "deleted") return { message: `Deleted model preset "${name}"`, changedConfig: true };
+			if (result === "project") {
+				return {
+					message: `Preset "${name}" is defined by a project or --config file; remove it there`,
+					failed: true,
+				};
+			}
+			return { message: `Preset not found: ${name}`, failed: true };
+		}
+		default:
+			return { message: PRESETS_USAGE, usage: true };
+	}
+}

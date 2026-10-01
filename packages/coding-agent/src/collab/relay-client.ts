@@ -3,10 +3,13 @@
  *
  * Connects to a relay room, seals/opens AES-GCM frames, and reconnects with
  * exponential backoff on transient drops. Guests also survive the relay's
- * host-drop room teardown while the host recreates the room; other fatal relay
- * close codes (host conflict, room full) and guest decryption failures never
- * reconnect. Hosts discard undecryptable guest frames without closing the room.
+ * host-drop room teardown while the host recreates the room, and a host whose
+ * connection dropped outlasts the relay still holding that connection; other
+ * fatal relay close codes (host conflict, room full) and guest decryption
+ * failures never reconnect. Hosts discard undecryptable guest frames without
+ * closing the room.
  */
+import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { logger } from "@oh-my-pi/pi-utils";
 import { open, sealSerialized } from "./crypto";
 import type { CollabFrame, RelayControlMessage } from "./protocol";
@@ -21,6 +24,30 @@ const RELAY_CLOSE_REASONS: Record<number, string> = {
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+/**
+ * How long after a transient drop a host keeps retrying the relay's duplicate-host
+ * close (4009). The client can see its connection end before the relay does, and
+ * the relay refuses the reconnect until its liveness check retires the old socket:
+ * the public relay took about 40 s for a connection that went silent, and Bun's
+ * default WebSocket idle timeout, which the reference relay inherits, is 120 s. A
+ * refusal after this window, or on a first connect, is a real second host.
+ */
+export const HOST_RECLAIM_WINDOW_MS = 150_000;
+/**
+ * Backoff cap for those reclaim retries. Each one is a single upgrade the relay
+ * refuses at once, so a short cap costs little and lands the reclaim within a few
+ * seconds of the relay retiring the old socket instead of up to 30 s later.
+ */
+export const HOST_RECLAIM_BACKOFF_MAX_MS = 5_000;
+/**
+ * How long a reclaim-time open stays provisional. The relay refuses a duplicate
+ * host from its open handler, so the 4009 close frame follows the upgrade
+ * response directly; an open that outlives this (or delivers any relay message
+ * first) is accepted. Until then the room reset, `onOpen` and the send queue stay
+ * untouched, so a refusal cannot drop the guest roster or drain the backlog into
+ * a doomed socket.
+ */
+export const HOST_RECLAIM_CONFIRM_MS = 1_000;
 const MAX_PENDING_SENDS = 256;
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
@@ -76,6 +103,17 @@ export class CollabSocket {
 	#retryMissingRoom = false;
 	/** Set while a transient drop is being retried; the next open is a new room. */
 	#rejoining = false;
+	/**
+	 * Until when a host takes the relay's duplicate-host close to be its own dropped connection.
+	 * Left set after a reclaim holds: only a reconnect can draw a 4009, and every reconnect
+	 * starts from the transient-drop path, which re-arms the window from that drop.
+	 */
+	#hostReclaimUntil: number | undefined;
+	/** Backoff for those retries: the relay completes each upgrade before refusing it, so `onopen` cannot reset it. */
+	#reclaimAttempt = 0;
+	/** A reclaim-time open not yet confirmed by the relay: not writable, not reported open. */
+	#provisional: WebSocket | undefined;
+	#confirmTimer: NodeJS.Timeout | undefined;
 	#sending = false;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
@@ -115,7 +153,7 @@ export class CollabSocket {
 	}
 
 	get isOpen(): boolean {
-		return this.#ws?.readyState === WebSocket.OPEN;
+		return this.#isWritable(this.#ws);
 	}
 
 	/**
@@ -135,6 +173,7 @@ export class CollabSocket {
 		if (this.#ws || this.#retryTimer) return;
 		this.#closed = false;
 		this.#retryMissingRoom = false;
+		this.#hostReclaimUntil = undefined;
 		this.#attempt = 0;
 		this.#openSocket();
 	}
@@ -341,8 +380,7 @@ export class CollabSocket {
 			const ws = await this.#waitForWritable(generation);
 			if (!ws || this.#closed || generation !== this.#sendGeneration) return "stop";
 			if (pending.cancelled) return "cancelled";
-			if (ws !== this.#ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD)
-				continue;
+			if (ws !== this.#ws || !this.#isWritable(ws) || ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD) continue;
 			ws.send(envelope);
 			return "sent";
 		}
@@ -353,11 +391,11 @@ export class CollabSocket {
 		let threshold = WS_BACKPRESSURE_THRESHOLD;
 		while (!this.#closed && generation === this.#sendGeneration) {
 			const ws = this.#ws;
-			if (ws?.readyState === WebSocket.OPEN && !(ws.bufferedAmount >= threshold)) return ws;
+			if (this.#isWritable(ws) && !(ws.bufferedAmount >= threshold)) return ws;
 			const wake = Promise.withResolvers<void>();
 			this.#wakeSender = wake.resolve;
 			let timer: NodeJS.Timeout | undefined;
-			if (ws?.readyState === WebSocket.OPEN) {
+			if (this.#isWritable(ws)) {
 				threshold = WS_BACKPRESSURE_DRAIN_THRESHOLD;
 				timer = setTimeout(wake.resolve, WS_BACKPRESSURE_DRAIN_RETRY_MS);
 				this.#backpressureDrainTimer = timer;
@@ -416,6 +454,7 @@ export class CollabSocket {
 	close(): void {
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
+		this.#clearProvisional();
 		const wasClosed = this.#closed;
 		this.#closed = true;
 		this.#retryMissingRoom = false;
@@ -443,25 +482,29 @@ export class CollabSocket {
 
 	#openSocket(): void {
 		this.#clearBackpressureDrain();
-		const ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
+		const url = `${this.#opts.wsUrl}?role=${this.#opts.role}`;
+		const options = {
+			proxy: getProxyForUrl("collab", new URL(url)),
+		} satisfies Bun.WebSocketOptions;
+		const ws: WebSocket = Reflect.construct(WebSocket, [url, options]);
 		ws.binaryType = "arraybuffer";
 		this.#ws = ws;
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
-			if (!this.#retryMissingRoom) this.#attempt = 0;
-			// Before waking the sender, or it resumes a stale targeted iterator.
-			if (this.#rejoining) {
-				this.#rejoining = false;
-				this.#resetForRecreatedRoom();
-				// Before onOpen, and before onmessage can dispatch anything: the owner
-				// keys permissions off peer ids the relay is about to reissue.
-				this.onRoomRecreated?.();
+			if (this.#rejoining && this.#hostReclaimUntil !== undefined && Date.now() < this.#hostReclaimUntil) {
+				// The relay may still refuse this socket as a duplicate host; commit only
+				// once it has had the chance to.
+				this.#provisional = ws;
+				this.#confirmTimer = setTimeout(() => this.#commitOpen(ws), HOST_RECLAIM_CONFIRM_MS);
+				return;
 			}
-			this.#wakeSender?.();
-			this.onOpen?.();
+			this.#commitOpen(ws);
 		};
 		ws.onmessage = (event: MessageEvent) => {
 			if (this.#ws !== ws) return;
+			// The relay only talks to a host it accepted; commit before dispatching so
+			// the room reset still precedes every frame.
+			if (this.#provisional === ws) this.#commitOpen(ws);
 			this.#handleMessage(ws, event.data);
 		};
 		ws.onerror = () => {
@@ -470,9 +513,38 @@ export class CollabSocket {
 		ws.onclose = (event: CloseEvent) => {
 			if (this.#ws !== ws) return;
 			this.#clearBackpressureDrain();
+			this.#clearProvisional();
 			this.#ws = null;
 			this.#handleClose(event.code, event.reason);
 		};
+	}
+
+	#commitOpen(ws: WebSocket): void {
+		if (this.#ws !== ws) return;
+		this.#clearProvisional();
+		if (!this.#retryMissingRoom) this.#attempt = 0;
+		// Before waking the sender, or it resumes a stale targeted iterator.
+		if (this.#rejoining) {
+			this.#rejoining = false;
+			this.#resetForRecreatedRoom();
+			// Before onOpen, and before onmessage can dispatch anything: the owner
+			// keys permissions off peer ids the relay is about to reissue.
+			this.onRoomRecreated?.();
+		}
+		this.#wakeSender?.();
+		this.onOpen?.();
+	}
+
+	#isWritable(ws: WebSocket | null | undefined): ws is WebSocket {
+		return ws?.readyState === WebSocket.OPEN && ws !== this.#provisional;
+	}
+
+	#clearProvisional(): void {
+		if (this.#confirmTimer !== undefined) {
+			clearTimeout(this.#confirmTimer);
+			this.#confirmTimer = undefined;
+		}
+		this.#provisional = undefined;
 	}
 
 	#handleMessage(ws: WebSocket, data: unknown): void {
@@ -564,6 +636,15 @@ export class CollabSocket {
 
 	#handleClose(code: number, reason: string): void {
 		if (this.#closed) return;
+		if (code === 4009 && this.#hostReclaimUntil !== undefined && Date.now() < this.#hostReclaimUntil) {
+			logger.debug("collab: relay still holds this host's dropped connection; retrying", {
+				attempt: this.#reclaimAttempt,
+			});
+			this.#rejoining = true;
+			this.onClose?.("the relay still holds this host's previous connection", true);
+			this.#scheduleRetry(this.#reclaimAttempt++, HOST_RECLAIM_BACKOFF_MAX_MS);
+			return;
+		}
 		const fatalReason = RELAY_CLOSE_REASONS[code];
 		const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
 		const retryRoom = this.#opts.role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
@@ -571,7 +652,7 @@ export class CollabSocket {
 			this.#retryMissingRoom = true;
 			this.#rejoining = true;
 			this.onClose?.(closeReason, true);
-			this.#scheduleRetry();
+			this.#scheduleRetry(this.#attempt++);
 			return;
 		}
 		if (fatalReason !== undefined) {
@@ -582,8 +663,12 @@ export class CollabSocket {
 		}
 		this.#clearBackpressureDrain();
 		this.#rejoining = true;
+		if (this.#opts.role === "host") {
+			this.#hostReclaimUntil = Date.now() + HOST_RECLAIM_WINDOW_MS;
+			this.#reclaimAttempt = 0;
+		}
 		this.onClose?.(closeReason, true);
-		this.#scheduleRetry();
+		this.#scheduleRetry(this.#attempt++);
 	}
 
 	/** Decryption failure: wrong key or corrupted frame. Never reconnect. */
@@ -591,6 +676,7 @@ export class CollabSocket {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#clearRetry();
+		this.#clearProvisional();
 		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
@@ -604,9 +690,8 @@ export class CollabSocket {
 		this.onClose?.(reason, false);
 	}
 
-	#scheduleRetry(): void {
-		const base = Math.min(BACKOFF_BASE_MS * 2 ** this.#attempt, BACKOFF_MAX_MS);
-		this.#attempt++;
+	#scheduleRetry(attempt: number, maxMs = BACKOFF_MAX_MS): void {
+		const base = Math.min(BACKOFF_BASE_MS * 2 ** attempt, maxMs);
 		const delay = base * (0.75 + Math.random() * 0.5);
 		this.#retryTimer = setTimeout(() => {
 			this.#retryTimer = undefined;

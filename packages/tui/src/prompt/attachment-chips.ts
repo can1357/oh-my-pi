@@ -12,6 +12,10 @@ import {
 	visibleWidth,
 } from "../index";
 import { fileHyperlink } from "../render/hyperlink";
+import { registerNativeBlob } from "../native/blobs";
+import { node, row, span } from "../native/describe";
+import { plainText } from "../native/spans";
+import type { DescribeContext, NativeNode } from "../native/node";
 import { convertImageToPng } from "../chat/image-loading";
 import { attachmentSgr } from "./composer-attachments";
 import { cachedImageDimensions, setCachedImageDimensions } from "./image-references";
@@ -29,9 +33,12 @@ const RESET_FG = "\x1b[39m";
  *  (pastes are usually re-encoded JPEG/WebP) convert before transmit — the same pipeline
  *  the transcript uses. `null` = conversion in flight or failed. */
 const kImagePng = Symbol("omp.imagePng");
+/** Content address of the draft image's decoded bytes, registered once for TSP `image` nodes. */
+const kImageBlob = Symbol("omp.imageBlob");
 
 interface ImageContentWithPng extends ImageContent {
 	[kImagePng]?: ImageContent | null;
+	[kImageBlob]?: string;
 }
 
 /**
@@ -49,6 +56,59 @@ export class AttachmentChipsBand implements Component {
 		private readonly budget: ImageBudget,
 		private readonly requestRender: () => void,
 	) {}
+
+	#native: { chips: readonly ComposerChipDescriptor[]; node: NativeNode } | undefined;
+
+	/**
+	 * A wrapping `row` of chip `card`s (`omp.composer.chip`) titled with the
+	 * buffer token (`<icon> #N`): images and videos show the image itself,
+	 * pastes their leading lines; the caption carries pixel size or line/char
+	 * count. Hidden while nothing is staged.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const chips = this.editor.composerChips();
+		if (this.#native?.chips === chips) return this.#native.node;
+		const cards: NativeNode[] = [];
+		for (const chip of chips) {
+			const icon = theme.symbol(
+				chip.kind === "paste" ? "chip.paste" : chip.kind === "video" ? "chip.video" : "chip.image",
+			);
+			const title = `${icon} #${chip.n}`;
+			let content: NativeNode;
+			let caption: string;
+			if (chip.kind === "paste") {
+				caption = chip.text.lineCount > 1 ? `+${chip.text.lineCount} lines` : `${chip.text.charCount} chars`;
+				content = node("text", {
+					spans: [span(plainText(chip.text.content.split("\n", 4).join("\n")), "muted")],
+					wrap: "none",
+					lines: 4,
+				});
+			} else {
+				const dims = this.#imageDims(chip.image);
+				caption = dims ? `${dims.width}x${dims.height}` : "";
+				const image = chip.image as ImageContentWithPng;
+				const blob = image[kImageBlob] ?? registerNativeBlob(Buffer.from(image.data, "base64"), image.mimeType);
+				image[kImageBlob] = blob;
+				content = node("image", {
+					blob,
+					alt: title,
+					w: dims?.width,
+					h: dims?.height,
+					max: { w: "12ch", h: "4lines" },
+				});
+			}
+			const head =
+				chip.kind !== "paste" && chip.link ? [span(title, "strong", { href: chip.link })] : [span(title, "strong")];
+			const children: NativeNode[] = [content];
+			if (caption) children.push(node("text", { spans: [span(caption, "dim")], wrap: "none" }));
+			cards.push(
+				node("card", { role: "omp.composer.chip", tone: "accent", head }, children, `${chip.kind}:${chip.n}`),
+			);
+		}
+		const described = row(cards, { gap: "sm", wrap: true, role: "omp.composer.chips", hidden: cards.length === 0 });
+		this.#native = { chips, node: described };
+		return described;
+	}
 
 	render(width: number): readonly string[] {
 		const chips = this.editor.composerChips();

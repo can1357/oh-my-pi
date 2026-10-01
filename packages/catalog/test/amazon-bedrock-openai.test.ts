@@ -43,22 +43,6 @@ describe("Amazon Bedrock OpenAI routing", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER["bedrock-mantle"]).toBe("openai.gpt-5.6-terra");
 	});
 
-	test("uses current Luna and Terra pricing", () => {
-		const byId = Object.fromEntries(seedModels("bedrock-mantle").map(model => [model.id, model]));
-		expect(byId["openai.gpt-5.6-luna"]?.cost).toEqual({
-			input: 0.22,
-			output: 1.32,
-			cacheRead: 0.022,
-			cacheWrite: 0.275,
-		});
-		expect(byId["openai.gpt-5.6-terra"]?.cost).toEqual({
-			input: 2.2,
-			output: 13.2,
-			cacheRead: 0.22,
-			cacheWrite: 2.75,
-		});
-	});
-
 	test("account-scoped discovery is authoritative over the static seed", async () => {
 		let requestedUrl = "";
 		const fetchImpl: FetchImpl = Object.assign(

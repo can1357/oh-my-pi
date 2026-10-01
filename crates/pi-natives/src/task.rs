@@ -87,13 +87,30 @@ impl From<()> for CancelToken {
 	}
 }
 
+/// Returns whether a JavaScript abort signal has already been aborted.
+///
+/// Invalid values are tolerated so optional cancellation never rejects an
+/// otherwise valid native operation.
+pub fn signal_aborted(signal: &Unknown) -> bool {
+	signal
+		.coerce_to_object()
+		.and_then(|object| object.get_named_property::<bool>("aborted"))
+		.unwrap_or(false)
+}
+
 impl CancelToken {
 	/// Create a new cancel token from optional timeout and abort signal.
 	pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {
 		let mut result = Self { core: core_cancel::CancelToken::new(timeout_ms) };
-		if let Some(signal) = signal.and_then(|value| AbortSignal::from_unknown(value).ok()) {
-			let abort_token = result.emplace_abort_token();
-			signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+		if let Some(raw_signal) = signal {
+			// `on_abort` only fires for a future JS `abort` event. Do not wrap an
+			// already-aborted signal: napi's wrapper replaces its `onabort` handler.
+			if signal_aborted(&raw_signal) {
+				result.emplace_abort_token().abort(AbortReason::Signal);
+			} else if let Ok(signal) = AbortSignal::from_unknown(raw_signal) {
+				let abort_token = result.emplace_abort_token();
+				signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+			}
 		}
 		result
 	}
@@ -127,6 +144,13 @@ impl CancelToken {
 	/// Check if already aborted (non-blocking).
 	pub fn aborted(&self) -> bool {
 		self.core.aborted()
+	}
+
+	/// Return explicit abort-flag state, without treating an elapsed deadline
+	/// as an abort. Result settlement can be delayed by a busy JS thread after
+	/// work already completed within its time budget.
+	pub fn abort_reason(&self) -> Option<AbortReason> {
+		self.core.abort_reason().map(Into::into)
 	}
 
 	pub fn into_core(self) -> core_cancel::CancelToken {
@@ -202,9 +226,25 @@ where
 		}
 	}
 
-	fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+	fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+		if let Some(reason) = self.cancel_token.abort_reason() {
+			return Err(abort_error(env, reason));
+		}
 		Ok(output)
 	}
+}
+
+/// Construct the same named rejection napi uses when an `AbortSignal` cancels
+/// async work. This path handles cancellation observed after `compute` has
+/// already returned successfully.
+pub fn abort_error(env: Env, reason: AbortReason) -> Error {
+	let message = format!("Aborted: {reason:?}");
+	let built: Result<Error> = (|| {
+		let mut error = env.create_error(Error::new(Status::Cancelled, message.clone()))?;
+		error.set_named_property("name", "AbortError")?;
+		Ok(Error::from(error.to_unknown()))
+	})();
+	built.unwrap_or_else(|_| Error::new(Status::Cancelled, message))
 }
 
 /// Dispose of a caught panic payload without any possibility of a second
@@ -251,6 +291,7 @@ where
 	/// Domain error stashed by `compute` for `reject` to convert with `Env`.
 	error:        Option<E>,
 	reject_hook:  fn(Env, E) -> Error,
+	cancel_hook:  fn(Env, AbortReason) -> Error,
 }
 /// Boxed work closure for [`BlockingMapped`].
 type MappedWork<T, E> = Box<dyn FnOnce(CancelToken) -> std::result::Result<T, E> + Send>;
@@ -301,7 +342,10 @@ where
 		}
 	}
 
-	fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+	fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+		if let Some(reason) = self.cancel_token.abort_reason() {
+			return Err((self.cancel_hook)(env, reason));
+		}
 		Ok(output)
 	}
 }
@@ -316,6 +360,7 @@ pub fn blocking_mapped<T, E, F>(
 	tag: &'static str,
 	cancel_token: impl Into<CancelToken>,
 	reject_hook: fn(Env, E) -> Error,
+	cancel_hook: fn(Env, AbortReason) -> Error,
 	work: F,
 ) -> MappedPromise<T, E>
 where
@@ -329,6 +374,7 @@ where
 		work: Some(Box::new(work)),
 		error: None,
 		reject_hook,
+		cancel_hook,
 	})
 }
 

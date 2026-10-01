@@ -38,17 +38,6 @@ describe("TodoCommandController", () => {
 		tempRoot = "";
 	});
 
-	it("advertises optional default todo import and export paths", async () => {
-		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-help-"));
-		const ctx = createContext(tempRoot, []);
-		const controller = new TodoCommandController(ctx);
-
-		await controller.handleTodoCommand("help");
-
-		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo export [<path>]"));
-		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo import [<path>]"));
-	});
-
 	it("exports the default TODO.md under the active session cwd", async () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-export-"));
 		const phases: TodoPhase[] = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];

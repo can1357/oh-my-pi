@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createConfigHeaderResolver } from "./resolve-config-value";
 import type { ModelOverride } from "./models-config-schema";
@@ -155,8 +156,15 @@ export function providersWithAuthoritativeProjectCatalog(models: readonly Model<
 	return providers;
 }
 
-export function dropProviderModels(models: readonly Model<Api>[], providers: ReadonlySet<string>): Model<Api>[] {
-	return models.filter(model => !providers.has(model.provider));
+/** Removes a registry layer's provider models, optionally limited to one catalog kind. */
+export function dropProviderModels(
+	models: readonly Model<Api>[],
+	providers: ReadonlySet<string>,
+	options?: { kind?: ModelKind },
+): Model<Api>[] {
+	return models.filter(
+		model => !providers.has(model.provider) || (options?.kind !== undefined && modelKind(model) !== options.kind),
+	);
 }
 
 /**
@@ -232,7 +240,10 @@ export interface ModelPatch {
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
+	promptCache?: Model<Api>["promptCache"];
 	contextWindow?: number;
+	/** Registry-only window preference; never patches the provider-advertised maximum. */
+	maxContextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
 	/** Whether Codex requests should prefer WebSocket transport. */
@@ -263,6 +274,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
+	if (patch.promptCache !== undefined) {
+		result.promptCache = patch.promptCache;
+		result.promptCacheConfig = patch.promptCache;
+	}
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
@@ -297,6 +312,12 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.headers = patch.headers;
 		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
+		// A same-id definition replaces an earlier configured lifetime even when
+		// it omits one; the rebuild then falls back to catalog policy.
+		if (patch.promptCache === undefined && base.promptCacheConfig !== undefined) {
+			delete result.promptCache;
+			delete result.promptCacheConfig;
+		}
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);
 	if (patch.thinking !== undefined && built.thinking !== undefined) {
