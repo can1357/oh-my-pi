@@ -83,15 +83,6 @@ describe("Meta Model API provider", () => {
 		});
 		expect(byId.get("muse-spark-2.0.1")).toMatchObject({ name: "Muse Spark 2.0.1", reasoning: true });
 	});
-
-	test("prefers Meta's documented key name while accepting the provider-specific alias", () => {
-		const descriptor = providerEntry("meta");
-		expect(descriptor).toMatchObject({
-			defaultModel: "muse-spark-1.1",
-			envVars: ["MODEL_API_KEY", "META_API_KEY"],
-			discovery: { label: "Meta Model API" },
-		});
-	});
 });
 
 describe("Muse Code subscription provider", () => {

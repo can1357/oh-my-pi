@@ -1,7 +1,13 @@
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
 import { replaceTabs, truncateToWidth, shortenPath } from "../render/render-utils";
-import type { ToolRenderer } from "./renderer";
+import type { TspTone } from "@oh-my-pi/pi-wire";
+import { ansi, compact, kv, node, row, span, text } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { errorView, resultText, toolHead } from "./native-view";
+import type { NativeToolView, ToolRenderer, ToolRenderResult } from "./renderer";
 import type { TruncationResult } from "./streaming-output";
 
 /** Whether a lower or higher metric is better. */
@@ -155,6 +161,35 @@ export interface InitExperimentDetails {
 	baselineCommit: string | null;
 }
 
+/** Tone of an experiment disposition: kept succeeds, discarded warns, the rest fail. */
+function experimentTone(status: ExperimentStatus): TspTone {
+	return status === "keep" ? "success" : status === "discard" ? "warning" : "error";
+}
+
+/** Plain first line of a free-form argument, for single-line heads. */
+function firstLine(value: string | undefined): string {
+	return (
+		plainText(value ?? "")
+			.trim()
+			.split("\n")[0] ?? ""
+	);
+}
+
+/** Result text as a wrapped body, or an error card. */
+function describeTextResult(
+	title: string,
+	result: ToolRenderResult<unknown>,
+	style?: string,
+): NativeToolView | undefined {
+	const output = resultText(result);
+	if (result.isError) return errorView(title, output);
+	const body = plainText(output).trimEnd();
+	return body ? { body: [text(style ? [span(body, style)] : body, { wrap: "word" })] } : undefined;
+}
+
+const logResultMemo = new OwnerMemo<NativeToolView | undefined>();
+const runResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
 function renderInitCall(name: string, theme: Theme): string {
 	return `${theme.fg("toolTitle", theme.bold("init_experiment"))} ${theme.fg("accent", truncateToWidth(replaceTabs(name), 100))}`;
 }
@@ -168,7 +203,41 @@ export const initExperimentToolRenderer = {
 		const text = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
 		return new Text(text, 0, 0);
 	},
+	describeCall(args): NativeToolView {
+		return { head: toolHead("init_experiment", span(firstLine(args.name), "accent")) };
+	},
+	describeResult(result): NativeToolView | undefined {
+		return describeTextResult("init_experiment", result);
+	},
 } satisfies ToolRenderer<{ name: string }, InitExperimentDetails>;
+
+/** Native log summary: disposition badge, description, and metric/baseline grid. */
+function describeSummary(details: LogDetails): NativeToolView {
+	const { experiment, state } = details;
+	const tone = experimentTone(experiment.status);
+	const deviations = details.scopeDeviations.length;
+	return {
+		tone,
+		body: compact([
+			row(
+				[
+					node("badge", { text: experiment.status.toUpperCase(), tone }),
+					text([span(plainText(experiment.description), "muted")], { wrap: "word", grow: 1 }),
+				],
+				{ gap: "sm" },
+			),
+			kv([
+				[plainText(state.metricName), [span(formatNum(experiment.metric, state.metricUnit), "accent num")]],
+				[
+					"baseline",
+					state.bestMetric !== null ? [span(formatNum(state.bestMetric, state.metricUnit), "num")] : undefined,
+				],
+				["confidence", state.confidence !== null ? [span(`${state.confidence.toFixed(1)}x`, "num")] : undefined],
+				["deviations", deviations > 0 ? [span(String(deviations), "warning")] : undefined],
+			]),
+		]),
+	};
+}
 
 function renderSummary(details: LogDetails, theme: Theme): string {
 	const { experiment, state } = details;
@@ -205,7 +274,45 @@ export const logExperimentToolRenderer = {
 		}
 		return new Text(renderSummary(details, theme), 0, 0);
 	},
+	describeCall(args): NativeToolView {
+		return {
+			head: toolHead(
+				"log_experiment",
+				args.status ? span(args.status, experimentTone(args.status)) : undefined,
+				span(firstLine(args.description), "muted"),
+			),
+		};
+	},
+	describeResult(result): NativeToolView | undefined {
+		return logResultMemo.get(result, [], () => {
+			const details = result.details;
+			if (result.isError || !details) return describeTextResult("log_experiment", result);
+			return describeSummary(details);
+		});
+	},
 } satisfies ToolRenderer<{ status: ExperimentStatus; description: string }, LogDetails>;
+
+/** Native run status: TIMEOUT/FAIL/PASS badge with duration and primary metric. */
+function describeStatus(details: RunDetails): { tone: TspTone; node: NativeNode } {
+	const duration = `${details.durationSeconds.toFixed(1)}s`;
+	let tone: TspTone = "success";
+	let label = "PASS";
+	let meta = duration;
+	if (details.timedOut) {
+		tone = "error";
+		label = "TIMEOUT";
+	} else if (details.exitCode !== 0) {
+		tone = "error";
+		label = "FAIL";
+		meta = `exit=${details.exitCode} ${duration}`;
+	} else if (details.parsedPrimary !== null) {
+		meta = `${duration} ${plainText(details.metricName)}=${formatNum(details.parsedPrimary, details.metricUnit)}`;
+	}
+	return {
+		tone,
+		node: row([node("badge", { text: label, tone }), text([span(meta, tone)], { truncate: "end" })], { gap: "sm" }),
+	};
+}
 
 function renderStatus(details: RunDetails, theme: Theme): string {
 	if (details.timedOut) {
@@ -263,6 +370,40 @@ export const runExperimentToolRenderer = {
 				: "";
 		return new Text(preview ? `${statusText}\n${theme.fg("dim", preview)}${suffix}` : statusText, 0, 0);
 	},
+	describeCall(): NativeToolView {
+		return { head: toolHead("run_experiment", span(DEFAULT_HARNESS_COMMAND, "muted")) };
+	},
+	describeResult(result): NativeToolView | undefined {
+		return runResultMemo.get(result, [], () => {
+			const details = result.details;
+			if (isProgressDetails(details)) {
+				const output = resultText(result);
+				return {
+					tone: "warning",
+					preview: { lines: 6 },
+					body: compact([
+						node("spinner", { label: [span(`Running ${plainText(details.elapsed)}…`, "warning")] }),
+						output.trim() ? ansi(output, { follow: true }) : undefined,
+					]),
+				};
+			}
+			if (result.isError || !details || !isRunDetails(details)) return describeTextResult("run_experiment", result);
+			const status = describeStatus(details);
+			return {
+				tone: status.tone,
+				preview: { lines: 6 },
+				body: compact([
+					status.node,
+					details.tailOutput.trim() ? ansi(details.tailOutput, { follow: true }) : undefined,
+					details.truncation && details.fullOutputPath
+						? text([span("Full output: ", "warning"), span(shortenPath(details.fullOutputPath), "path")], {
+								truncate: "middle",
+							})
+						: undefined,
+				]),
+			};
+		});
+	},
 } satisfies ToolRenderer<unknown, RunDetails | RunExperimentProgressDetails>;
 
 /** Persisted experiment notes after an update. */
@@ -283,5 +424,12 @@ export const updateNotesToolRenderer = {
 	renderResult(result, _options, theme: Theme): Text {
 		const text = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
 		return new Text(theme.fg("muted", text), 0, 0);
+	},
+	describeCall(args): NativeToolView {
+		const preview = args.append_idea ?? args.body?.slice(0, 100);
+		return { head: toolHead("update_notes", span(firstLine(preview), "muted")) };
+	},
+	describeResult(result): NativeToolView | undefined {
+		return describeTextResult("update_notes", result, "muted");
 	},
 } satisfies ToolRenderer<{ body: string; append_idea?: string }, UpdateNotesDetails>;

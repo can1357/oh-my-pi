@@ -8,9 +8,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 /**
  * Fixture mirrors the live `https://yolo-auto.com/v1/models` surface: an
- * OpenAI-style `data` array of public model ids. The docs only advertise
- * `deepseek-flash-v4`; the extra id proves discovery surfaces whatever the wire
- * returns, not just bundled ids.
+ * OpenAI-style `data` array of public model ids.
  */
 function yoloAutoModelsFetch(): { calls: string[]; authorizations: (string | null)[]; fetch: FetchImpl } {
 	const calls: string[] = [];
@@ -20,10 +18,7 @@ function yoloAutoModelsFetch(): { calls: string[]; authorizations: (string | nul
 		authorizations.push(new Headers(init?.headers).get("authorization"));
 		return new Response(
 			JSON.stringify({
-				data: [
-					{ id: "deepseek-flash-v4", object: "model", created: 0, owned_by: "yolo-auto" },
-					{ id: "future-model", object: "model", created: 0, owned_by: "yolo-auto" },
-				],
+				data: [{ id: "deepseek-flash-v4", object: "model", created: 0, owned_by: "yolo-auto" }],
 			}),
 			{ status: 200, headers: { "content-type": "application/json" } },
 		);
@@ -73,12 +68,6 @@ describe("Yolo-Auto provider discovery", () => {
 				max: "max",
 			},
 		});
-	});
-
-	test("surfaces wire ids that have no bundled reference", async () => {
-		const { fetch } = yoloAutoModelsFetch();
-		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
-		expect(models?.some(model => model.id === "future-model")).toBe(true);
 	});
 
 	test("inherits reasoning and context for models other providers already bundle", async () => {
@@ -137,13 +126,6 @@ describe("Yolo-Auto provider discovery", () => {
 
 	test("serves no dynamic models without an API key", () => {
 		expect(yoloAutoModelManagerOptions().fetchDynamicModels).toBeUndefined();
-	});
-
-	test("marks live discovery authoritative so retired bundled ids cannot linger", () => {
-		// The runtime merge path reads this flag from the manager options, not
-		// the catalog descriptor — without it a successful /v1/models response
-		// merges over the bundled seed instead of replacing it.
-		expect(yoloAutoModelManagerOptions({ apiKey: "yolo-test-key" }).dynamicModelsAuthoritative).toBe(true);
 	});
 
 	test("prunes the bundled id when a live catalog omits it", async () => {

@@ -15,11 +15,16 @@ import {
 	buildExecutionFrame,
 	buildStatusFooter,
 	clampDisplayLine,
+	describeExecutionCard,
+	describeExecutionTool,
 	type ExecutionColorKey,
 	type ExecutionStatus,
 	PREVIEW_LINES,
 	resolveExecutionStatus,
 } from "./execution-shared";
+import { code, span } from "../native/describe";
+import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { Memo } from "../native/memo";
 
 export type EvalExecutionLanguage = "python" | "js";
 
@@ -40,6 +45,11 @@ export class EvalExecutionComponent extends Container {
 	readonly #code: string;
 	readonly #excludeFromContext: boolean;
 	readonly #language: EvalExecutionLanguage;
+	readonly #startedAt = performance.now();
+	#endedAt: number | undefined;
+	// Bumped whenever the output pane's text changes.
+	#outputVersion = 0;
+	readonly #native = new Memo();
 
 	#highlightLang(): "python" | "javascript" {
 		return this.#language === "js" ? "javascript" : "python";
@@ -107,9 +117,54 @@ export class EvalExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/**
+	 * The agent's eval `tool` frame (role `omp.eval`) with a `you` badge: the
+	 * cell source in the head, its output as an `ansi` mini terminal. Terminals
+	 * without the `tool` kind get a `card` with the cell as `code` over the output.
+	 */
+	override describe(cx?: DescribeContext): NativeNode {
+		const dataFirst = cx?.supports("tool") === true;
+		const key = [dataFirst, this.#outputVersion, this.#status, this.#expanded];
+		return this.#native.get(key, () => {
+			const title = this.#language === "js" ? "JavaScript" : "Python";
+			const common = {
+				role: "omp.eval",
+				status: this.#status,
+				startedAt: this.#startedAt,
+				expanded: this.#expanded,
+				output: this.#outputPane.getText(),
+				exitCode: this.#exitCode,
+				truncation: this.#truncation,
+				artifactError: this.#artifactError,
+			};
+			return dataFirst
+				? describeExecutionTool({
+						...common,
+						name: "eval",
+						title,
+						command: this.#code,
+						lang: this.#highlightLang(),
+						excluded: this.#excludeFromContext,
+						endedAt: this.#endedAt,
+					})
+				: describeExecutionCard({
+						...common,
+						head: [span(title, `${this.#excludeFromContext ? "dim" : "pythonMode"} strong`)],
+						muted: this.#excludeFromContext,
+						lead: [code(this.#code, { lang: this.#highlightLang(), key: "code" })],
+					});
+		});
+	}
+
 	appendOutput(chunk: string): void {
 		// Chunk is pre-sanitized by OutputSink.push() — no need to sanitize again.
 		this.#outputPane.append(chunk);
+		this.#outputVersion++;
 		this.#updateDisplay();
 	}
 
@@ -120,12 +175,14 @@ export class EvalExecutionComponent extends Container {
 	): void {
 		this.#exitCode = exitCode;
 		this.#status = resolveExecutionStatus(exitCode, cancelled);
+		this.#endedAt ??= performance.now();
 		this.#truncation = options?.truncation;
 		this.#artifactError = options?.artifactError;
 		this.#outputPane.finish();
 		if (options?.output !== undefined) {
 			this.#setOutput(options.output);
 		}
+		this.#outputVersion++;
 
 		this.#loader.stop();
 		this.#updateDisplay();

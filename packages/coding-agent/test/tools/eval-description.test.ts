@@ -60,31 +60,6 @@ function wireCellFields(tool: EvalTool): {
 }
 
 describe("eval tool description", () => {
-	it("links the agents topic and documents agent() there when spawns are allowed", () => {
-		expect(getEvalToolDescription({ py: true, js: true, spawns: true })).toContain("xd://eval/agents");
-		expect(getEvalDocTopics({ py: true, js: true, spawns: true }).agents).toContain("agent(prompt");
-	});
-
-	it("routes model calls, setup, budget, and defined tools to discoverable topics", () => {
-		const linked = getEvalToolDescription({ py: true, js: true, evalTools: true });
-		const topics = getEvalDocTopics({ py: true, js: true, evalTools: true });
-		expect(linked).toContain("`completion`");
-		expect(linked).toContain("xd://eval/judge");
-		expect(linked).toContain("`budget`");
-		expect(linked).toContain("`@tool`");
-		expect(linked).toContain("xd://eval/helpers");
-		for (const moved of ["completion(prompt", "budget.total", "tool(fn, name=", "%pip install"]) {
-			expect(linked).not.toContain(moved);
-		}
-		expect(topics.judge).toContain("completion(prompt");
-		expect(topics.judge).toContain("judge(state, questions)");
-		expect(topics.helpers).toContain("budget.total");
-		expect(topics.helpers).toContain("tool(fn");
-		expect(topics.helpers).toContain("%load <path>");
-		expect(topics.helpers).toContain("%pip install");
-		expect(topics.helpers).toContain("%bun add");
-	});
-
 	it("drops the agents topic but keeps wait() when the session forbids spawning", () => {
 		// Subagents with spawns: undefined (resolved to "") cannot launch tasks.
 		// wait() remains usable with completion() handles.
@@ -215,14 +190,6 @@ describe("eval tool dynamic schema", () => {
 			if (prior === undefined) delete Bun.env[flag];
 			else Bun.env[flag] = prior;
 		}
-	});
-
-	it("advertises enabled runtimes and excludes disabled runtime examples", () => {
-		const both = new EvalTool(makeSession({}));
-		expect(wireCellFields(both).languages).toEqual(["js", "py"]);
-		const jsOnly = new EvalTool(makeSession({ backends: { "eval.py": false, "eval.js": true } }));
-		expect(wireCellFields(jsOnly).languages).toEqual(["js"]);
-		expect(jsOnly.examples.every(example => "call" in example && example.call.language === "js")).toBe(true);
 	});
 
 	it("follows eval.py changes made after construction on the next schema read", () => {

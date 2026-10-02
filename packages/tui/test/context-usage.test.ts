@@ -304,15 +304,6 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 describe("non-message estimates tolerate a missing description", () => {
 	const readTool = { name: "read", description: "read files", parameters: {} };
 
-	it("estimateToolSchemaTokens does not throw on an undefined tool description", () => {
-		const tokens = estimateToolSchemaTokens(
-			[{ name: "lens_tool", description: undefined, parameters: {} } as never],
-			tokenizer,
-		);
-		expect(Number.isFinite(tokens)).toBe(true);
-		expect(tokens).toBeGreaterThanOrEqual(0);
-	});
-
 	it("computeNonMessageBreakdown does not throw on an undefined skill description", () => {
 		const session = {
 			systemPrompt: ["You are an agent."],

@@ -3,6 +3,8 @@
  * transcript components. Built-in renderers live beside this file; the
  * coding-agent tools implement the matching `*Details` payloads.
  */
+import type { TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+import type { NativeChild } from "../native/node";
 import type { Component } from "../tui";
 import type { Theme } from "../theme/theme";
 
@@ -63,6 +65,54 @@ export interface ToolActivityContext {
 }
 
 /**
+ * The data head of a tool call (NATIVE_REDESIGN §7.2): what the terminal
+ * draws in the `tool` kind's head. Each fact appears once — a target named
+ * here is never repeated in the body.
+ */
+export interface NativeToolHead {
+	/** The verb ("Bash", "Edit"); defaults to the tool's label. */
+	readonly title?: TspText;
+	/** The primary argument, shown once: command, path, pattern, query. */
+	readonly target?: TspText;
+	readonly targetKind?: TspToolProps["targetKind"];
+	/** Language for `command` targets. */
+	readonly lang?: string;
+	/** `file://` link for path targets. */
+	readonly href?: string;
+	/** Short facts after the target (`+8 −1`, `5 matches · 2 files`). */
+	readonly meta?: readonly TspText[];
+	readonly badges?: TspToolProps["badges"];
+	/** A one-word state note ("timed out", "partial"). */
+	readonly note?: TspText;
+	/** A non-zero exit code (error chip). */
+	readonly exit?: number | null;
+}
+
+/**
+ * A tool's semantic presentation for Tern Surface Protocol terminals.
+ * `ToolExecutionComponent` wraps it in a `tool` node (terminals that list
+ * the kind) or, as the fallback, a `card` (role `omp.tool.<name>`, status,
+ * elapsed timer, collapse): the renderer supplies only the head data and the
+ * body nodes, never frames, padding or width math.
+ */
+export interface NativeToolView {
+	/** The data head; the fallback card's head spans derive from it when {@link head} is absent. */
+	readonly tool?: NativeToolHead;
+	/** Header spans for the fallback card (and the `tool` title when {@link tool} is absent). */
+	readonly head?: TspText;
+	/** Body: sections, never frames. */
+	readonly body?: readonly NativeChild[];
+	/** Tone override; the frame otherwise derives it from the call status. */
+	readonly tone?: TspTone;
+	/** Body clamp while collapsed; `{tail}` keeps the end (terminal output). Defaults to the transcript's preview size. */
+	readonly preview?: TspPreview | { readonly tail: number } | "none";
+	/** Render frameless (`frame:"inline"`): a head line plus a disclosed body. */
+	readonly inline?: boolean;
+	/** Head actions offered on hover (`copy`, `retry`). */
+	readonly tools?: TspToolProps["tools"];
+}
+
+/**
  * A tool's transcript presentation: call preview, result view, and repaint/animation hints.
  * Method signatures are intentionally bivariant so a renderer typed over its own
  * `TArgs`/`TDetails` is assignable to the untyped registry entry. Either render
@@ -76,6 +126,17 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
 		theme: Theme,
 		args?: TArgs,
 	): Component | undefined;
+	/**
+	 * Semantic call preview for TSP terminals. When a renderer implements the
+	 * describe hooks, the native backend never calls `renderCall`/`renderResult`.
+	 */
+	describeCall?(args: TArgs, options: RenderResultOptions): NativeToolView | undefined;
+	/** Semantic result view for TSP terminals; merged with the call view when {@link mergeCallAndResult}. */
+	describeResult?(
+		result: ToolRenderResult<TDetails>,
+		options: RenderResultContextOptions,
+		args?: TArgs,
+	): NativeToolView | undefined;
 	mergeCallAndResult?: boolean;
 	/** Describes current activity without coupling a renderer to terminal layout. */
 	activitySummary?(args: TArgs, context: ToolActivityContext): ToolActivitySummary;

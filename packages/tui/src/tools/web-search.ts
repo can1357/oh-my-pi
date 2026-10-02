@@ -1,4 +1,4 @@
-import type { ToolRenderer } from "./renderer";
+import type { NativeToolView, ToolRenderer, ToolRenderResult } from "./renderer";
 /**
  * Web Search TUI Rendering
  *
@@ -22,6 +22,12 @@ import {
 } from "../render/render-utils";
 import { renderStatusLine, renderTreeList, urlHyperlink } from "../render";
 import { framedToolCard } from "../render/tool-card";
+import { getSearchProviderLabel, type SearchResponse } from "./web-search-types";
+import { compact, md, node, span, text } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { errorText, noteText, resultText } from "./native-view";
 
 const MAX_COLLAPSED_ITEMS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 
@@ -240,175 +246,116 @@ export function renderSearchCall(
 	return new Text(text, 0, 0);
 }
 
+type SearchRenderArgs = { query?: string; [key: string]: unknown };
+
+const SEARCH_TITLE = "Web search";
+
+function searchHead(query: string | undefined, meta?: string, badge?: { text: string; title?: string }) {
+	return {
+		title: SEARCH_TITLE,
+		target: query ? plainText(query) : undefined,
+		targetKind: "query" as const,
+		meta: meta ? [meta] : undefined,
+		badges: badge ? [badge] : undefined,
+	};
+}
+
+/** One cited source row: domain-initial mark, linked title, muted `domain · age`. */
+function sourceRow(src: SearchResponse["sources"][number], index: number): NativeChild {
+	const url = typeof src.url === "string" ? src.url : "";
+	const title = typeof src.title === "string" && src.title.trim() ? src.title : url.trim() ? url : "Untitled";
+	const domain = url ? getDomain(url) : "";
+	const age =
+		formatAge(src.ageSeconds).replace(/ ago$/, "") ||
+		(typeof src.publishedDate === "string" ? src.publishedDate : "");
+	const meta = [domain, age].filter(Boolean).join(" · ");
+	const initial = (domain.replace(/^www\./, "")[0] ?? "?").toUpperCase();
+	return node(
+		"row",
+		{ gap: "sm", align: "baseline", role: "omp.tool.source", href: url || undefined },
+		compact([
+			node("badge", { text: initial, title: domain || undefined }),
+			text([span(plainText(title), "link", url ? { href: url } : undefined)], { lines: 1, truncate: "end" }),
+			meta ? text([span(plainText(meta), "muted")], { lines: 1 }) : undefined,
+		]),
+		`${index}:${url}`,
+	);
+}
+
+function describeSearchResult(
+	result: ToolRenderResult<SearchRenderDetails>,
+	args: SearchRenderArgs | undefined,
+): NativeToolView {
+	const details = result.details;
+	const argQuery = typeof args?.query === "string" ? args.query : undefined;
+	if (details?.error) {
+		const provider = details.response?.provider;
+		const label = provider && provider !== "none" ? getSearchProviderLabel(provider) : undefined;
+		return {
+			tool: searchHead(argQuery, label),
+			tone: "error",
+			body: [errorText(plainText(details.error).trim() || "Web search failed")],
+		};
+	}
+
+	const rawText = resultText(result).trim();
+	const response = details?.response;
+	if (!response) {
+		return {
+			tool: searchHead(argQuery),
+			tone: "warning",
+			body: [noteText(rawText || "No response data")],
+		};
+	}
+
+	const sources = Array.isArray(response.sources) ? response.sources : [];
+	const searchQueries = Array.isArray(response.searchQueries)
+		? response.searchQueries.filter(entry => typeof entry === "string")
+		: [];
+	const providerLabel = response.provider !== "none" ? getSearchProviderLabel(response.provider) : "None";
+	const query = argQuery || searchQueries[0];
+	const answer = (typeof response.answer === "string" ? response.answer.trim() : "") || rawText;
+
+	const authShort =
+		response.authMode === "oauth" ? "OAuth" : response.authMode === "api_key" ? "API" : response.authMode;
+	let providerInfo = response.model ? `${response.model} @ ${providerLabel}` : providerLabel;
+	if (authShort) providerInfo += ` (${authShort})`;
+	const usage = response.usage;
+	const usageParts: string[] = [];
+	if (usage?.inputTokens !== undefined) usageParts.push(`in ${usage.inputTokens}`);
+	if (usage?.outputTokens !== undefined) usageParts.push(`out ${usage.outputTokens}`);
+	if (usage?.totalTokens !== undefined) usageParts.push(`total ${usage.totalTokens}`);
+	if (usage?.searchRequests !== undefined) usageParts.push(`search ${usage.searchRequests}`);
+	const tooltip = plainText([providerInfo, usageParts.join(" · ")].filter(Boolean).join("\n"));
+	const badge = response.model ? { text: plainText(response.model), title: tooltip } : undefined;
+
+	return {
+		tool: searchHead(query, `${providerLabel} · ${formatCount("source", sources.length)}`, badge),
+		tone: sources.length > 0 ? undefined : "warning",
+		body: compact([
+			answer ? { ...md(plainText(answer), { title: tooltip }), key: "answer" } : noteText("No answer text returned"),
+			sources.length > 0
+				? node("col", { role: "omp.tool.files" }, sources.map(sourceRow), "sources")
+				: noteText("No sources returned"),
+		]),
+	};
+}
+
+const searchResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
 /** Render web search queries, answers, and cited sources. */
 export const webSearchToolRenderer = {
 	renderCall: renderSearchCall,
 	renderResult: renderSearchResult,
+	describeCall(args: SearchRenderArgs): NativeToolView {
+		return { tool: searchHead(typeof args.query === "string" ? args.query : undefined), inline: true };
+	},
+	describeResult(
+		result: ToolRenderResult<SearchRenderDetails>,
+		_options: RenderResultOptions,
+		args?: SearchRenderArgs,
+	): NativeToolView | undefined {
+		return searchResultMemo.get(result, [args?.query ?? ""], () => describeSearchResult(result, args));
+	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<{ query?: string; [key: string]: unknown }, SearchRenderDetails>;
-
-/**
- * Web Search Types
- *
- * Unified types for web search responses across supported providers.
- */
-
-export const SEARCH_PROVIDER_OPTIONS = [
-	{
-		value: "auto",
-		label: "Auto",
-		description: "Automatically uses the first configured web-search provider",
-	},
-	{
-		value: "parallel",
-		label: "Parallel",
-		description: "Uses API auth when configured; otherwise searches through the keyless public MCP",
-	},
-	{
-		value: "perplexity",
-		label: "Perplexity",
-		description: "Uses auth when configured; explicit selection falls back to anonymous search",
-	},
-	{
-		value: "gemini",
-		label: "Gemini",
-		description: "Google Search grounding via Gemini (uses google-gemini-cli or google-antigravity OAuth)",
-	},
-	{
-		value: "anthropic",
-		label: "Anthropic",
-		description: "Claude's native web_search tool (uses Anthropic OAuth or ANTHROPIC_API_KEY)",
-	},
-	{
-		value: "codex",
-		label: "OpenAI",
-		description: "OpenAI's native web_search (uses ChatGPT OAuth via /login openai-codex)",
-	},
-	{
-		value: "xai",
-		label: "xAI",
-		description:
-			"Grok web search via xAI Responses API (uses SuperGrok/X Premium+ OAuth via /login xai-oauth, or XAI_API_KEY)",
-	},
-	{
-		value: "openrouter",
-		label: "OpenRouter",
-		description: "OpenRouter plugins-based web search with model-selected grounding",
-	},
-	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
-	{ value: "exa", label: "Exa", description: "API via /login exa or EXA_API_KEY; explicit keyless fallback via MCP" },
-	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
-	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
-	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
-	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
-	{
-		value: "firecrawl",
-		label: "Firecrawl",
-		description: "Uses Firecrawl API when FIRECRAWL_API_KEY is set; falls back to keyless mode",
-	},
-	{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
-	{
-		value: "kimi",
-		label: "Kimi",
-		description:
-			"Kimi Code search (requires a Kimi Code Console key via KIMI_SEARCH_API_KEY/MOONSHOT_SEARCH_API_KEY or /login kimi-code; not MOONSHOT_API_KEY)",
-	},
-	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
-	{ value: "ollama", label: "Ollama", description: "Requires OLLAMA_CLOUD_API_KEY" },
-	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
-	{
-		value: "startpage",
-		label: "Startpage",
-		description: "Credential-free scrape of Startpage (Google-backed) results; may be bot-challenged",
-	},
-	{
-		value: "duckduckgo",
-		label: "DuckDuckGo",
-		description: "Credential-free best-effort fallback; may be bot-challenged on datacenter/shared-egress IPs",
-	},
-	{
-		value: "ecosia",
-		label: "Ecosia",
-		description: "Credential-free browser-backed scrape of Ecosia (Google-backed) results",
-	},
-	{
-		value: "google",
-		label: "Google",
-		description: "Credential-free browser-backed fallback; slower and may be bot-challenged",
-	},
-	{
-		value: "mojeek",
-		label: "Mojeek",
-		description: "Credential-free browser-backed scrape of Mojeek's independent index",
-	},
-	{
-		value: "public",
-		label: "Public Web",
-		description: "Queries every credential-free engine in parallel and consolidates deduplicated results",
-	},
-] as const;
-
-/** Supported web search providers (every option except `auto`). */
-export type SearchProviderId = Exclude<(typeof SEARCH_PROVIDER_OPTIONS)[number]["value"], "auto">;
-
-/** Display labels, derived from {@link SEARCH_PROVIDER_OPTIONS}. */
-export const SEARCH_PROVIDER_LABELS = Object.fromEntries(
-	SEARCH_PROVIDER_OPTIONS.flatMap(option => (option.value === "auto" ? [] : [[option.value, option.label] as const])),
-) as Record<SearchProviderId, string>;
-
-/** Source returned by search (all providers) */
-export interface SearchSource {
-	title: string;
-	url: string;
-	snippet?: string;
-	/** ISO date string or relative ("2d ago") */
-	publishedDate?: string;
-	/** Age in seconds for consistent formatting */
-	ageSeconds?: number;
-	author?: string;
-}
-
-/** Citation with text reference (LLM-mediated providers) */
-export interface SearchCitation {
-	url: string;
-	title: string;
-	citedText?: string;
-}
-
-/** Usage metrics */
-export interface SearchUsage {
-	inputTokens?: number;
-	outputTokens?: number;
-	/** Anthropic: number of web search requests made */
-	searchRequests?: number;
-	/** Perplexity: combined token count */
-	totalTokens?: number;
-}
-
-/** Unified response across providers */
-export interface SearchResponse {
-	provider: SearchProviderId | "none";
-	/** Synthesized answer text (LLM-mediated providers) */
-	answer?: string;
-	/** Search result sources */
-	sources: SearchSource[];
-	/** Text citations with context */
-	citations?: SearchCitation[];
-	/** Intermediate search queries (anthropic) */
-	searchQueries?: string[];
-	/** Follow-up question suggestions (provider-dependent) */
-	relatedQuestions?: string[];
-	/** Token usage metrics */
-	usage?: SearchUsage;
-	/** Model used */
-	model?: string;
-	/** Request ID for debugging */
-	requestId?: string;
-	/** Authentication mode used by the provider (e.g. oauth, api-key) */
-	authMode?: string;
-}
-
-/** Cheap, sync metadata accessor — never triggers a provider load. */
-export function getSearchProviderLabel(id: SearchProviderId): string {
-	return SEARCH_PROVIDER_LABELS[id] ?? id;
-}

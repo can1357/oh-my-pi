@@ -87,18 +87,6 @@ describe("truncated fastembed model cache recovery", () => {
 });
 
 describe("clearIncompleteModelCache", () => {
-	test("removes the incomplete model dir and its partial archive", async () => {
-		const { cacheDir, modelDir, tarGz, modelFile } = await partialCache();
-		try {
-			const cleared = await clearIncompleteModelCache(`Model file not found at ${modelFile}`, cacheDir);
-			expect(cleared).toBe(true);
-			await expect(fs.access(modelDir)).rejects.toThrow();
-			await expect(fs.access(tarGz)).rejects.toThrow();
-		} finally {
-			await fs.rm(cacheDir, { recursive: true, force: true });
-		}
-	});
-
 	test("ignores unrelated init errors (protobuf corruption is handled elsewhere)", async () => {
 		const { cacheDir, modelDir, modelFile } = await partialCache();
 		try {

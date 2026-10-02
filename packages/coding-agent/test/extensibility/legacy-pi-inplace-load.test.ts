@@ -1028,6 +1028,38 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		expect(mod.observed.updates).toEqual(["remote output"]);
 	});
 
+	it("runs a legacy bash spawn hook against the real tool, not only the operations override", async () => {
+		// Regression: the shim forwarded the hook's env as bash tool input, which
+		// the tool accepts only for a named service, so every agent bash call from
+		// an extension registering bash this way failed with
+		// "ready and env require a service name." The operations branch above never
+		// caught it because it bypasses the registry tool.
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "legacy-bash-spawn-ext", version: "1.0.0" }),
+			"index.ts": [
+				'import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";',
+				"const tool = createBashToolDefinition(process.cwd(), {",
+				"  spawnHook(context) {",
+				"    return { ...context, command: 'echo hooked', env: { ...context.env, SENTINEL: 'yes' } };",
+				"  },",
+				"});",
+				"const result = await tool.execute('call-1', { command: 'echo original' });",
+				"export const observed = {",
+				"  text: result.content.find(block => block.type === 'text')?.text ?? '',",
+				"  isError: result.isError === true,",
+				"};",
+				"export default function (pi) { pi.registerTool(tool); }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			observed: { text: string; isError: boolean };
+		};
+
+		expect(mod.observed.isError).toBe(false);
+		expect(mod.observed.text).toContain("hooked");
+	});
+
 	it("preserves relative paths from legacy find operations", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "legacy-find-ops-ext", version: "1.0.0" }),

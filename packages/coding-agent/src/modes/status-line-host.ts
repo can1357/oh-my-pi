@@ -1,5 +1,5 @@
 import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-line/host";
-import { settings } from "../config/settings";
+import { Settings, settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
 import { limitMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
@@ -47,7 +47,8 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	}),
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
-	getSettingsRevision: () => settings.revision,
+	// Read per frame: skip the `settings` proxy trap and hit the instance getter directly.
+	getSettingsRevision: () => Settings.instance.revision,
 	getSessionSettingsIdentity: session => session.settings,
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),

@@ -2,7 +2,8 @@
 //!
 //! This backend recursively builds a writable directory tree at `merged` from
 //! `lower`. Directories and symlinks are recreated, while regular files are
-//! cloned with the Linux `FICLONE` ioctl so filesystems such as btrfs, XFS,
+//! cloned with [`cow::clone_file`](crate::cow::clone_file) (the Linux
+//! `FICLONE` ioctl) so filesystems such as btrfs, XFS,
 //! OCFS2, and bcachefs can share extents until either side is modified. There
 //! is no mount or kernel state to undo, so [`stop`](IsolationBackend::stop) is
 //! a recursive remove.
@@ -79,22 +80,15 @@ impl IsolationBackend for LinuxReflinkBackend {
 mod imp {
 	use std::{
 		ffi::CString,
-		fs::{self, File, OpenOptions},
-		os::{
-			fd::AsRawFd,
-			unix::{
-				ffi::OsStrExt,
-				fs::{MetadataExt, PermissionsExt},
-			},
+		fs,
+		os::unix::{
+			ffi::OsStrExt,
+			fs::{MetadataExt, PermissionsExt},
 		},
 		path::{Path, PathBuf},
 	};
 
-	use crate::{IsoError, IsoResult};
-
-	// `libc::Ioctl` is `c_int` on musl and `c_ulong` on glibc; the constant fits
-	// both.
-	const FICLONE: libc::Ioctl = 0x4004_9409;
+	use crate::{IsoError, IsoResult, cow};
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
 		let lower = canonical_existing_dir(lower)?;
@@ -232,34 +226,14 @@ mod imp {
 	fn clone_file(src: &Path, dst: &Path) -> IsoResult<()> {
 		let meta = fs::symlink_metadata(src)
 			.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?;
-		let src_file = File::open(src)
-			.map_err(|err| IsoError::other(format!("open {}: {err}", src.display())))?;
-		let dst_file = OpenOptions::new()
-			.write(true)
-			.create_new(true)
-			.open(dst)
-			.map_err(|err| IsoError::other(format!("create {}: {err}", dst.display())))?;
-
-		// SAFETY: both file descriptors are valid for the duration of the call.
-		// FICLONE copies metadata into `dst_file` and does not retain either fd.
-		let rc = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
-		if rc != 0 {
-			let err = std::io::Error::last_os_error();
-			let _ = fs::remove_file(dst);
-			return Err(map_clone_error(src, dst, err));
-		}
-
+		cow::clone_file(src, dst).map_err(|err| map_clone_error(src, dst, &err))?;
 		preserve_permissions(dst, &meta)?;
 		let _ = set_times_nofollow(dst, &meta);
 		Ok(())
 	}
 
-	fn map_clone_error(src: &Path, dst: &Path, err: std::io::Error) -> IsoError {
-		if let Some(code) = err.raw_os_error()
-			&& matches!(
-				code,
-				libc::EXDEV | libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL | libc::ENOSYS
-			) {
+	fn map_clone_error(src: &Path, dst: &Path, err: &std::io::Error) -> IsoError {
+		if cow::is_unsupported(err) {
 			return IsoError::unavailable(format!(
 				"FICLONE unsupported for {} -> {}: {err}",
 				src.display(),

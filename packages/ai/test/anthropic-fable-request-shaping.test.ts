@@ -166,7 +166,7 @@ describe("Anthropic preserved-thinking request shaping", () => {
 			cacheRetention: "long",
 		});
 
-		expect(payload.system?.[1]?.cache_control?.ttl).toBe("1h");
+		expect(payload.system?.at(-1)?.cache_control?.ttl).toBe("1h");
 		const messageContent = payload.messages?.[0]?.content;
 		if (!Array.isArray(messageContent)) throw new Error("expected block message content");
 		expect(messageContent.at(-1)?.cache_control?.ttl).toBe("1h");
@@ -320,6 +320,40 @@ describe("Anthropic adaptive-only thinking disable", () => {
 		});
 		expect(payload.thinking).toBeUndefined();
 		expect(payload.output_config?.effort).toBe("low");
+	});
+
+	it("turns thinking off with between_tools on Sonnet 5.5, without an effort pin or block_binding", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-sonnet-5-5"), {
+			thinkingEnabled: false,
+		});
+		expect(payload.thinking).toEqual({ type: "between_tools" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	it("keeps Sonnet 5 on adaptive-only omission, never sending between_tools", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-sonnet-5"), {
+			thinkingEnabled: false,
+		});
+		expect(payload.thinking?.type).not.toBe("between_tools");
+	});
+
+	it("falls back to default adaptive when Sonnet 5.5 has xhigh effort in force (between_tools 400s above high)", async () => {
+		const model = makeAnthropicModel("claude-sonnet-5-5");
+		const first = await captureTurn(model, { thinkingEnabled: true, reasoning: Effort.XHigh });
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: false },
+			{
+				...CONTEXT,
+				messages: [
+					...CONTEXT.messages,
+					answered("sunny", first),
+					{ role: "user", content: "continue", timestamp: Date.now() },
+				],
+			},
+		);
+		expect(first.payload.output_config?.effort).toBe("xhigh");
+		expect(payload.thinking).toBeUndefined();
 	});
 
 	it("still sends thinking.type:'disabled' for budget-based (non-adaptive) models", async () => {

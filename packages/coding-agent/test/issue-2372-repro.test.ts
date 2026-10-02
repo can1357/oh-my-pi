@@ -211,4 +211,22 @@ describe("issue #2372 pre-streaming chat rebuild preserves optimistic submission
 		expect(addMessageSpy).toHaveBeenCalledTimes(callsAfterCancel);
 		expect(mode.optimisticUserMessageSignature).toBeUndefined();
 	});
+
+	it("recovers a cancelled submission without losing text and images added after Enter", () => {
+		const submittedImage = { type: "image" as const, data: "YQ==", mimeType: "image/png" };
+		const laterImage = { type: "image" as const, data: "Yg==", mimeType: "image/png" };
+		mode.editor.setText("");
+		mode.startPendingSubmission(
+			{ text: "first [Image #1]", images: [submittedImage], imageLinks: ["file:///first.png"] },
+			{ clearEditor: false },
+		);
+		mode.editor.pendingImages = [laterImage];
+		mode.editor.pendingImageLinks = ["file:///later.png"];
+		mode.editor.setCollapsedText("later [Image #1]");
+
+		expect(mode.cancelPendingSubmission()).toBe(true);
+		expect(mode.editor.getExpandedText()).toBe("first [Image #1]\nlater [Image #2]");
+		expect(mode.editor.pendingImages).toEqual([submittedImage, laterImage]);
+		expect(mode.editor.pendingImageLinks).toEqual(["file:///first.png", "file:///later.png"]);
+	});
 });

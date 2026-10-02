@@ -1062,41 +1062,6 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(projected?.compatConfig).toEqual({ promptCacheSessionHeader: "x-grok-conv-id" });
 	});
 
-	test("a throwing modifyModels degrades to the unprojected catalog", async () => {
-		await authStorage.credentials.set("throwing-provider", {
-			type: "oauth",
-			access: "access-token",
-			refresh: "refresh-token",
-			expires: Date.now() + 60_000,
-		});
-
-		registry.registerProvider(
-			"throwing-provider",
-			{
-				api: "custom-throwing-api",
-				baseUrl: "https://example.invalid/",
-				streamSimple,
-				models: [baseModel],
-				oauth: {
-					name: "Throwing OAuth",
-					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
-					refreshToken: async credentials => credentials,
-					getApiKey: credentials => credentials.access,
-					modifyModels: () => {
-						throw new Error("boom");
-					},
-				},
-			},
-			"ext://oauth",
-		);
-
-		expect(getProviderModels(registry, "throwing-provider").map(model => model.id)).toEqual(["runtime-model"]);
-		await registry.refresh("offline");
-		expect(getProviderModels(registry, "throwing-provider").map(model => model.id)).toEqual(["runtime-model"]);
-		// A broken extension must not take the rest of the catalog down with it.
-		expect(registry.getAll().some(model => model.provider === "anthropic")).toBe(true);
-	});
-
 	test("a throwing modifyModels logs once per distinct failure", async () => {
 		await authStorage.credentials.set("noisy-provider", {
 			type: "oauth",

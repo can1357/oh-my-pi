@@ -108,6 +108,35 @@ describe("listClaudeResetCredits", () => {
 		});
 	});
 
+	it("parses discovery quota evidence with the same normalized model windows as ordinary usage", async () => {
+		const { fetch, calls } = recordingFetch(() =>
+			json(200, {
+				...cedarPayload(),
+				five_hour: { utilization: 100 },
+				seven_day: { utilization: 40 },
+				limits: [{ kind: "weekly_scoped", percent: 70, scope: { model: { display_name: "Fable" } } }],
+			}),
+		);
+		const result = await listClaudeResetCredits({
+			accessToken: "token",
+			accountId: "account_1",
+			email: "a@example.com",
+			orgId: "org_1",
+			fetch,
+		});
+		expect(result?.report?.limits.map(limit => [limit.id, limit.amount?.usedFraction])).toEqual([
+			["anthropic:5h", 1],
+			["anthropic:7d", 0.4],
+			["anthropic:7d:fable", 0.7],
+		]);
+		expect(result?.report?.metadata).toMatchObject({
+			accountId: "account_1",
+			email: "a@example.com",
+			orgId: "org_1",
+		});
+		expect(calls).toHaveLength(1);
+	});
+
 	it("falls back to the Juniper reset arm without claiming a weekly reset exists", async () => {
 		const { fetch, calls } = recordingFetch(url => {
 			if (url.searchParams.has("cedar_ember")) {

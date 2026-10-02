@@ -14,14 +14,15 @@ export const DEFAULT_MAX_BYTES = 50 * 1024;
 export const DEFAULT_MAX_COLUMN = 512;
 
 /**
- * Default artifact-on-disk cap for {@link OutputSink}.
- *
- * `0` means unbounded: by default, `artifact://<id>` references preserve the
- * complete raw stream instead of a capped head/tail sample.
+ * Default artifact-on-disk cap for {@link OutputSink}: 16 MiB, split into a
+ * {@link ARTIFACT_DEFAULT_HEAD_BYTES} head and a rolling tail. `0` means
+ * unbounded (the complete raw stream is preserved).
  */
-export const ARTIFACT_DEFAULT_MAX_BYTES = 0;
+export const ARTIFACT_DEFAULT_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB
 /** Default head budget; the remainder becomes the rolling tail window. */
 export const ARTIFACT_DEFAULT_HEAD_BYTES = 3 * 1024 * 1024; // 3 MiB
+/** Upper bound on how far the rolling artifact tail may outgrow its budget between trims. */
+const ARTIFACT_TAIL_MAX_SLACK_BYTES = 4 * 1024 * 1024;
 
 const NL = "\n";
 const CR = "\r";
@@ -54,6 +55,11 @@ export interface OutputSummary {
 	columnMax?: number;
 	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
 	artifactId?: string;
+	/**
+	 * Bytes the artifact cap dropped from the middle of the saved file. When
+	 * set, `artifact://<id>` holds a head/tail sample, not the full output.
+	 */
+	artifactElidedBytes?: number;
 	/** Full raw output was not completely saved; artifactId is unavailable. */
 	artifactError?: OutputArtifactError;
 }
@@ -86,17 +92,18 @@ export interface OutputSinkOptions {
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
 	/**
-	 * Optional cap on bytes written to the artifact-on-disk file. When the cap
-	 * is hit, the head window is preserved verbatim and subsequent output feeds
-	 * a rolling tail window; on close, the sink writes a single
+	 * Cap on bytes written to the artifact-on-disk file. When the cap is hit,
+	 * the head window is preserved verbatim and subsequent output feeds a
+	 * rolling tail window; on close, the sink writes a single
 	 * `[ARTIFACT TRUNCATED: …]` notice between them. Default
-	 * {@link ARTIFACT_DEFAULT_MAX_BYTES} (unbounded).
+	 * {@link ARTIFACT_DEFAULT_MAX_BYTES} (16 MiB); `0` = unbounded.
 	 */
 	artifactMaxBytes?: number;
 	/**
 	 * Bytes reserved for the head window of the capped artifact file. The
 	 * tail window receives `artifactMaxBytes - artifactHeadBytes`. Default
-	 * {@link ARTIFACT_DEFAULT_HEAD_BYTES}; clamped to `[0, artifactMaxBytes]`.
+	 * {@link ARTIFACT_DEFAULT_HEAD_BYTES}, but at most half of
+	 * `artifactMaxBytes`; clamped to `[0, artifactMaxBytes]`.
 	 */
 	artifactHeadBytes?: number;
 }
@@ -718,6 +725,12 @@ const MAX_PENDING = 10;
 export class TailBuffer {
 	#pending: string[] = [];
 	#pos = 0; // byte count of the currently-held tail (after trims)
+	// `#pending[0]` and its byte count. Clean = well-formed and `#headBytes` is its exact
+	// UTF-8 length (a head compacted from chunks that split a surrogate pair is neither).
+	#headBytes = 0;
+	#headClean = true;
+	// Every chunk after `#pending[0]` is well-formed (no lone surrogates).
+	#restWellFormed = true;
 
 	constructor(readonly maxBytes: number) {}
 
@@ -726,8 +739,7 @@ export class TailBuffer {
 
 		const max = this.maxBytes;
 		if (max === 0) {
-			this.#pending.length = 0;
-			this.#pos = 0;
+			this.#setHead("", 0, true);
 			return;
 		}
 
@@ -736,19 +748,17 @@ export class TailBuffer {
 		// If the incoming chunk alone is >= budget, it fully dominates the tail.
 		if (n >= max) {
 			const { text: t, bytes } = truncateTailBytes(text, max);
-			this.#pending[0] = t;
-			this.#pending.length = 1;
-			this.#pos = bytes;
+			// A chunk of exactly `max` bytes comes back verbatim, lone surrogates included.
+			this.#setHead(t, bytes, t.isWellFormed());
 			return;
 		}
 
-		this.#pos += n;
-
 		if (this.#pending.length === 0) {
-			this.#pending[0] = text;
-			this.#pending.length = 1;
+			this.#setHead(text, n, text.isWellFormed());
 		} else {
+			this.#pos += n;
 			this.#pending.push(text);
+			if (this.#restWellFormed && !text.isWellFormed()) this.#restWellFormed = false;
 			if (this.#pending.length > MAX_PENDING) this.#compact();
 		}
 
@@ -770,9 +780,22 @@ export class TailBuffer {
 
 	// -- private ---------------------------------------------------------------
 
+	/** Replace the whole buffer with a single chunk. */
+	#setHead(text: string, bytes: number, clean: boolean): void {
+		this.#pending[0] = text;
+		this.#pending.length = 1;
+		this.#pos = bytes;
+		this.#headBytes = bytes;
+		this.#headClean = clean;
+		this.#restWellFormed = true;
+	}
+
 	#compact(): void {
 		this.#pending[0] = this.#pending.join("");
 		this.#pending.length = 1;
+		this.#headBytes = this.#pos;
+		this.#headClean = this.#headClean && this.#restWellFormed;
+		this.#restWellFormed = true;
 	}
 
 	#flush(): string {
@@ -783,17 +806,64 @@ export class TailBuffer {
 
 	#trimTo(max: number): void {
 		if (max === 0) {
-			this.#pending.length = 0;
-			this.#pos = 0;
+			this.#setHead("", 0, true);
 			return;
 		}
 		if (this.#pos <= max) return;
 
-		const joined = this.#flush();
-		const { text, bytes } = truncateTailBytes(joined, max);
-		this.#pos = bytes;
-		this.#pending[0] = text;
-		this.#pending.length = 1;
+		// Steady state (one `text()` per appended chunk): the overflow lies inside the
+		// already-trimmed head, so only the head's front is cut and the chunks after it
+		// are kept verbatim instead of re-encoding the whole window. Those chunks must be
+		// well-formed: the full path round-trips them through UTF-8, which rewrites lone
+		// surrogates (and heals pairs split across chunk boundaries).
+		const restBytes = this.#pos - this.#headBytes;
+		if (restBytes < max && this.#restWellFormed) {
+			const head = this.#pending[0];
+			const keep = max - restBytes;
+			const drop = this.#headBytes - keep;
+			if (head.length === this.#headBytes) {
+				// All-ASCII head: byte offsets are char offsets and every byte is a boundary.
+				this.#pending[0] = head.slice(drop);
+				this.#headBytes = keep;
+			} else if (this.#headClean && drop <= keep) {
+				// Walk code points to the first boundary at or after `drop` bytes.
+				let dropped = 0;
+				let index = 0;
+				while (dropped < drop) {
+					const code = head.charCodeAt(index);
+					if (code < 0x80) {
+						dropped += 1;
+						index += 1;
+					} else if (code < 0x800) {
+						dropped += 2;
+						index += 1;
+					} else if (code >= 0xd800 && code <= 0xdbff) {
+						// Well-formed, so a high surrogate always starts a pair.
+						dropped += 4;
+						index += 2;
+					} else {
+						dropped += 3;
+						index += 1;
+					}
+				}
+				this.#pending[0] = head.slice(index);
+				this.#headBytes -= dropped;
+			} else {
+				// A head that already fits comes back verbatim, lone surrogates included.
+				const { text, bytes } = truncateTailBytes(head, keep);
+				this.#pending[0] = text;
+				this.#headBytes = bytes;
+				this.#headClean = text.isWellFormed();
+				this.#pos = this.#headBytes + restBytes;
+				return;
+			}
+			this.#headClean = true;
+			this.#pos = this.#headBytes + restBytes;
+			return;
+		}
+
+		const { text, bytes } = truncateTailBytes(this.#flush(), max);
+		this.#setHead(text, bytes, text.isWellFormed());
 	}
 }
 
@@ -849,20 +919,24 @@ export class OutputSink {
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
-	// Optional artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink
-	// owns a head budget + a rolling tail buffer; once the head is closed,
-	// subsequent chunks are diverted into `#artifactTailRing` (bounded by
-	// `#artifactTailBudget`). On `dump()` the tail is flushed back to the sink
-	// behind a `[ARTIFACT TRUNCATED: …]` notice. The default cap is disabled so
-	// advertised `artifact://<id>` captures are lossless.
+	// Artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink owns a
+	// head budget + a rolling tail buffer; once the head is closed, subsequent
+	// chunks are diverted into `#artifactTailRing` (trimmed back to
+	// `#artifactTailBudget` whenever it outgrows the budget by
+	// `#artifactTailSlack`). On `dump()` the tail is flushed back to the sink
+	// behind a `[ARTIFACT TRUNCATED: …]` notice. `0` disables the cap.
 	readonly #artifactMaxBytes: number;
 	readonly #artifactHeadBudget: number;
 	readonly #artifactTailBudget: number;
+	/** Overshoot tolerated before trimming, so trimming costs amortized O(1) per byte instead of O(budget) per chunk. */
+	readonly #artifactTailSlack: number;
 	#artifactHeadBytesWritten = 0;
 	#artifactHeadClosed = false;
 	#artifactTailRing = "";
 	#artifactTailRingBytes = 0;
 	#artifactTailIncomingBytes = 0;
+	/** Bytes the cap dropped from the artifact middle, recorded when the tail is flushed. */
+	#artifactElidedBytes = 0;
 	constructor(options?: OutputSinkOptions) {
 		const {
 			artifactPath,
@@ -873,7 +947,7 @@ export class OutputSink {
 			onChunk,
 			chunkThrottleMs = 0,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
-			artifactHeadBytes = ARTIFACT_DEFAULT_HEAD_BYTES,
+			artifactHeadBytes,
 		} = options ?? {};
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
@@ -883,8 +957,13 @@ export class OutputSink {
 		this.#onChunk = onChunk;
 		this.#chunkThrottleMs = chunkThrottleMs;
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
-		this.#artifactHeadBudget = Math.max(0, Math.min(artifactHeadBytes, this.#artifactMaxBytes));
+		// The default head yields to the rolling tail on small caps: it takes at
+		// most half, so the most recent output is always kept.
+		const headBytesRequested =
+			artifactHeadBytes ?? Math.min(ARTIFACT_DEFAULT_HEAD_BYTES, Math.floor(this.#artifactMaxBytes / 2));
+		this.#artifactHeadBudget = Math.max(0, Math.min(headBytesRequested, this.#artifactMaxBytes));
 		this.#artifactTailBudget = Math.max(0, this.#artifactMaxBytes - this.#artifactHeadBudget);
+		this.#artifactTailSlack = Math.min(this.#artifactTailBudget, ARTIFACT_TAIL_MAX_SLACK_BYTES);
 	}
 
 	/**
@@ -1188,11 +1267,14 @@ export class OutputSink {
 		}
 		this.#artifactTailRing += chunk;
 		this.#artifactTailRingBytes += chunkBytes;
-		if (this.#artifactTailRingBytes > budget) {
-			const { text, bytes } = truncateTailBytes(this.#artifactTailRing, budget);
-			this.#artifactTailRing = text;
-			this.#artifactTailRingBytes = bytes;
-		}
+		if (this.#artifactTailRingBytes > budget + this.#artifactTailSlack) this.#trimArtifactTail();
+	}
+
+	#trimArtifactTail(): void {
+		if (this.#artifactTailRingBytes <= this.#artifactTailBudget) return;
+		const { text, bytes } = truncateTailBytes(this.#artifactTailRing, this.#artifactTailBudget);
+		this.#artifactTailRing = text;
+		this.#artifactTailRingBytes = bytes;
 	}
 
 	#recordArtifactError(operation: OutputArtifactError): void {
@@ -1350,11 +1432,13 @@ export class OutputSink {
 	#flushArtifactTailIfCapped(): void {
 		if (!this.#file || this.#artifactError) return;
 		if (this.#artifactMaxBytes === 0) return;
+		this.#trimArtifactTail();
 		const tailBytes = this.#artifactTailRingBytes;
 		const droppedBytes = Math.max(0, this.#artifactTailIncomingBytes - tailBytes);
 		if (tailBytes === 0 && droppedBytes === 0) return;
 
 		if (droppedBytes > 0) {
+			this.#artifactElidedBytes = droppedBytes;
 			const headWritten = this.#artifactHeadBytesWritten;
 			const totalCapped = headWritten + this.#artifactTailIncomingBytes;
 			const headSep = headWritten > 0 ? "\n" : "";
@@ -1442,6 +1526,10 @@ export class OutputSink {
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
 			artifactId: this.#artifactError ? undefined : this.#file?.artifactId,
+			artifactElidedBytes:
+				this.#artifactError || !this.#file?.artifactId || this.#artifactElidedBytes === 0
+					? undefined
+					: this.#artifactElidedBytes,
 			artifactError: this.#artifactError,
 		};
 	}

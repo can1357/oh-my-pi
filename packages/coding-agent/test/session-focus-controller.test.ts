@@ -90,7 +90,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		},
 		pendingMessagesContainer,
 		compactionQueuedMessages: [],
-		keybindings: { getDisplayString: () => "Alt+Up" },
+		keybindings: { getKeys: () => ["alt+up"] },
 		unsubscribe: () => {
 			mainUnsubscribe++;
 		},

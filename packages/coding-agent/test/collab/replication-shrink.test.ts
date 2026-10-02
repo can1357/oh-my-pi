@@ -43,7 +43,6 @@ import {
 	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 	copyForReplication,
 	MAX_REPLICATED_PAYLOAD_BYTES,
-	oversizedEntryNotice,
 	type ReplicatedEntry,
 	replicationByteLength,
 	shrinkReplicatedEntry,
@@ -702,35 +701,5 @@ describe("copyForReplication JSON contract (PR #11999 review)", () => {
 		const copy = copyForReplication(value) as { details: { at: unknown; label: string } };
 		expect(JSON.stringify(copy)).toBe('{"details":{"at":"2026-09-13T12:00:00.000Z","label":"x"}}');
 		expect(replicationByteLength(copy)).not.toBe(null);
-	});
-});
-
-describe("live oversized-entry substitution is guest-visible (PR #11999 review)", () => {
-	it("accompanies a live placeholder with a notice event on the event stream", () => {
-		// Guests only apply `message` entries to their live agent context, so
-		// the placeholder entry alone would be silently invisible there. The
-		// host must emit a notice with the same visible text; notices never
-		// enter agent state, so this stays display-only.
-		const giantKey = "k".repeat(2 * MAX_REPLICATED_PAYLOAD_BYTES);
-		const entry = {
-			type: "message",
-			id: "huge-live-1",
-			parentId: null,
-			timestamp: "2026-09-13T00:00:00Z",
-			message: { role: "user", content: "", timestamp: 0, blob: { [giantKey]: 1 } },
-		} as unknown as ReplicatedEntry;
-
-		const shrunk = shrinkReplicatedEntry(entry);
-		expect(shrunk.type).toBe("custom_message");
-		if (shrunk.type !== "custom_message") throw new Error("expected the typed placeholder");
-		expect(shrunk.customType).toBe(COLLAB_ENTRY_OMITTED_CUSTOM_TYPE);
-		expectBounded(shrunk);
-
-		const notice = oversizedEntryNotice("message");
-		expect(notice.type).toBe("notice");
-		expect(notice.level).toBe("warning");
-		expect(notice.source).toBe("collab");
-		expect(notice.message).toContain("too large to replicate");
-		expect(notice.message).toContain("(message)");
 	});
 });

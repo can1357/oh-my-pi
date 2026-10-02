@@ -1,4 +1,6 @@
 import { Text } from "../components/text";
+import { ansi } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
@@ -114,6 +116,28 @@ export function formatOutputPaneLines(options: OutputPaneFormatOptions, theme: T
 	return { lines, hiddenCount, hasSixel };
 }
 
+/** Display policy for {@link describeOutputLines}. */
+export interface NativeOutputOptions {
+	expanded: boolean;
+	collapsedMaxLines: number;
+	expandedMaxLines?: number;
+	edge?: OutputPaneEdge;
+	key?: string;
+}
+
+/**
+ * Raw output rows as a native `ansi` mini-terminal: the terminal wraps and
+ * styles them. The row cap becomes a `preview` clamp (with its own "N more"
+ * affordance); a tail edge follows the stream.
+ */
+export function describeOutputLines(lines: readonly string[], options: NativeOutputOptions): NativeNode {
+	const limit = options.expanded ? options.expandedMaxLines : options.collapsedMaxLines;
+	const preview =
+		limit !== undefined && Number.isFinite(limit) ? { lines: Math.max(0, Math.floor(limit)) } : undefined;
+	const described = ansi(lines.join("\n"), { follow: options.edge === "tail" ? true : undefined, preview });
+	return options.key === undefined ? described : { ...described, key: options.key };
+}
+
 /** Mutable options for a live {@link OutputPane}. */
 export interface OutputPaneOptions extends Omit<OutputPaneFormatOptions, "lines"> {
 	paddingX?: number;
@@ -135,6 +159,7 @@ export class OutputPane implements Component {
 	#pendingCarriageReturn = false;
 	#text: Text;
 	#renderKey = "";
+	#native: NativeNode | undefined;
 
 	constructor(theme: Theme, options: OutputPaneOptions, text = "") {
 		this.#theme = theme;
@@ -240,6 +265,17 @@ export class OutputPane implements Component {
 		return this.#lines.join("\n");
 	}
 
+	/** The retained rows as an `ansi` node; streamed appends grow its text, so the reconciler sends `text append`. */
+	describe(_cx: DescribeContext): NativeNode {
+		this.#native ??= describeOutputLines(this.#lines, {
+			expanded: this.#options.expanded,
+			collapsedMaxLines: this.#options.collapsedMaxLines,
+			expandedMaxLines: this.#options.expandedMaxLines,
+			edge: this.#options.edge,
+		});
+		return this.#native;
+	}
+
 	render(width: number): readonly string[] {
 		const paddingX = getPaddingX(this.#options.paddingX ?? 0);
 		const contentWidth = Math.max(1, width - paddingX * 2);
@@ -262,6 +298,7 @@ export class OutputPane implements Component {
 
 	invalidate(): void {
 		this.#renderKey = "";
+		this.#native = undefined;
 		this.#text.invalidate();
 	}
 

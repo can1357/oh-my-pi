@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import { formatDimensionNote, formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 
 describe("formatScreenshot", () => {
 	function fakeResized(
@@ -207,19 +207,6 @@ describe("resizeImage defaults", () => {
 		expect(result.buffer.length).toBeLessThanOrEqual(150 * 1024);
 	});
 
-	it("respects custom maxBytes override even when dimensions already fit", async () => {
-		// 200x200 sits within every dimension cap, but a byte budget below the
-		// source size (after the /4 fast-path headroom) forces a re-encode.
-		const originalBytes = Buffer.from(smallPng, "base64").length;
-
-		const result = await resizeImage({ type: "image", data: smallPng, mimeType: "image/png" }, { maxBytes: 1024 });
-
-		// Either the result fits the budget, or the algorithm exhausted its
-		// fallbacks and shipped its smallest variant — but in both cases the
-		// output must not be larger than the original.
-		expect(result.buffer.length).toBeLessThanOrEqual(originalBytes);
-	});
-
 	it("uses lossy WebP or JPEG (not PNG) for oversized inputs", async () => {
 		// Oversized red strip exceeds the dimension cap, triggering encodeSmallest.
 		// Lossy formats (JPEG/WebP) should win over PNG for a solid-color image
@@ -328,21 +315,18 @@ describe("resizeImage minimum dimension", () => {
 		expect(result.height).toBe(64);
 	});
 
-	it("stretches a degenerate aspect ratio so both edges clear the floor and stay within the cap", async () => {
-		// 1x1600 strip: the cap pulls the long edge to 1568 while the short edge
-		// stays at 1px, so a uniform scale can't satisfy both bounds — the floor
-		// must be reached by fill-stretching the short edge.
-		const strip = await makeRedPng(1, 1600);
+	it("keeps the aspect ratio of a strip the cap stops short of the floor", async () => {
+		// 690x61 toolbar crop: the 1568 cap halts the uniform upscale at 1568x139;
+		// the short edge stays below the floor rather than being stretched to it.
+		const strip = await makeRedPng(690, 61);
 		const result = await resizeImage({ type: "image", data: strip, mimeType: "image/png" });
 
-		expect(result.wasResized).toBe(true);
-		expect(result.width).toBeGreaterThanOrEqual(200);
-		expect(result.height).toBeGreaterThanOrEqual(200);
-		expect(result.width).toBeLessThanOrEqual(1568);
-		expect(result.height).toBeLessThanOrEqual(1568);
+		expect(result.width).toBe(1568);
+		expect(result.height).toBe(139);
 		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
-		expect(meta.width).toBeGreaterThanOrEqual(200);
-		expect(meta.height).toBeGreaterThanOrEqual(200);
+		expect(meta.width).toBe(1568);
+		expect(meta.height).toBe(139);
+		expect(formatDimensionNote(result)).toContain("Multiply coordinates by 0.44");
 	});
 });
 

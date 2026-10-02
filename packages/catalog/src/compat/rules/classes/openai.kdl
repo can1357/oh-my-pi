@@ -59,3 +59,25 @@ class "openai" {
 		}
 	}
 }
+
+// Hosted Responses tools are a GPT-5+ lineage capability on any
+// Responses-compatible host, so proxies exposing these ids inherit them. The
+// swap targets resolve on the same provider only; when a host lacks them the
+// session model runs the tool itself.
+class "openai" {
+	on-api "openai-responses" {
+		revision ">=5" {
+			web-search "openai"
+			web-search-model "gpt-5.6-luna"
+			hosted-image #true
+			image-model "gpt-image-2"
+		}
+	}
+	on-api "openai-codex-responses" {
+		revision ">=5" {
+			web-search-model "gpt-5.6-luna"
+			hosted-image #true
+			image-model "gpt-image-2"
+		}
+	}
+}
