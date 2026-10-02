@@ -103,6 +103,7 @@ import {
 	prompt,
 	Snowflake,
 	stringProperty,
+	toError,
 	withTimeout,
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
@@ -132,7 +133,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { formatEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
-import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
+import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -260,6 +261,7 @@ import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-sessi
 import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
+	AsyncJobInspection,
 	AsyncJobSnapshot,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
@@ -385,6 +387,7 @@ import {
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
+	type AdvisorCatchupOptions,
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
 	SessionAdvisors,
@@ -567,6 +570,11 @@ const noOpUIContext: ExtensionUIContext = {
 // ============================================================================
 // AgentSession Class
 // ============================================================================
+
+type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
+
+/** How a settle describes what happens next; see {@link AgentSession} `#settleAgentEnd`. */
+type AgentEndSettleOptions = { willContinue?: boolean; awaitingAsyncWork?: boolean };
 
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
@@ -758,6 +766,10 @@ export class AgentSession implements SettingsScope {
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
+	/** Epoch ms the current run went `running`; undefined while idle. */
+	#runStartedAt: number | undefined;
+	/** The last `agent_end` that {@link #settleAgentEnd} published; a failed maintenance pass settles any other. */
+	#settledAgentEnd: AgentEndEvent | undefined;
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
@@ -2612,6 +2624,7 @@ export class AgentSession implements SettingsScope {
 			type: job.type,
 			status: job.status,
 			label: job.label,
+			command: job.process?.command,
 			startTime: job.startTime,
 			agentId: job.agentId,
 		}));
@@ -2620,12 +2633,50 @@ export class AgentSession implements SettingsScope {
 			type: job.type,
 			status: job.status,
 			label: job.label,
+			command: job.process?.command,
 			startTime: job.startTime,
 			endTime: job.endTime,
 			agentId: job.agentId,
 		}));
 		const delivery = manager.getDeliveryState(ownerFilter);
 		return { running, recent, delivery };
+	}
+
+	/**
+	 * Inspect one async job this session owns: its command, live pids, exit
+	 * status and output. Undefined when the job is unknown, owned by another
+	 * agent, or evicted.
+	 */
+	inspectAsyncJob(id: string): AsyncJobInspection | undefined {
+		const job = this.#ownedAsyncJob(id);
+		if (!job) return undefined;
+		const details = job.latestDetails;
+		const reported = typeof details?.exitCode === "number" ? details.exitCode : undefined;
+		// Bash reports only non-zero exits; a completed command exited 0.
+		const exitCode = reported ?? (job.type === "bash" && job.status === "completed" ? 0 : undefined);
+		const output =
+			job.status === "running" ? job.progressText : (job.resultText ?? job.errorText ?? job.progressText);
+		return {
+			command: job.process?.command,
+			cwd: job.process?.cwd,
+			pids: job.status === "running" ? (job.process?.pids() ?? []) : [],
+			exitCode,
+			output,
+			artifactId: details?.meta?.truncation?.artifactId,
+		};
+	}
+
+	/** Cancel a running async job this session owns; false when there is none by that id. */
+	cancelAsyncJob(id: string): boolean {
+		const job = this.#ownedAsyncJob(id);
+		return job !== undefined && this.#asyncJobManager?.cancel(id, { ownerId: job.ownerId }) === true;
+	}
+
+	/** A listed job by id, under the same owner scope as {@link getAsyncJobSnapshot}. */
+	#ownedAsyncJob(id: string): AsyncJob | undefined {
+		const job = this.#asyncJobManager?.getJob(id);
+		if (!job || job.foreground) return undefined;
+		return !this.#agentId || job.ownerId === this.#agentId ? job : undefined;
 	}
 
 	/**
@@ -2865,6 +2916,8 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#emitRunState(state: "running" | "idle"): void {
+		if (state === "idle") this.#runStartedAt = undefined;
+		else this.#runStartedAt ??= Date.now();
 		for (const listener of this.#runStateListeners) {
 			try {
 				listener(state);
@@ -3092,6 +3145,14 @@ export class AgentSession implements SettingsScope {
 		this.#trackPostPromptTask(promise);
 		try {
 			await this.#processAgentEvent(event);
+		} catch (error) {
+			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
+			// publishing the settle. Without it the run never reports idle and every
+			// surface keeps showing a working turn that will never finish.
+			const message = toError(error).message;
+			logger.error("agent_end maintenance failed", { error: message });
+			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
+			if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
 		} finally {
 			resolve();
 		}
@@ -3794,27 +3855,8 @@ export class AgentSession implements SettingsScope {
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
-			const emitAgentEndNotification = async (options?: { willContinue?: boolean; awaitingAsyncWork?: boolean }) => {
-				this.#emitRunState("idle");
-				// Public agent_end is held out of the eager display pass and emitted
-				// here after maintenance routing, tagged isTerminal so subscribers can
-				// tell final settles from scheduled continuations, and `yielded` so
-				// they can tell the agent's own follow-up work (retries, reminders,
-				// compaction) from a finished turn that only background work resumes.
-				// `awaitingAsyncWork` singles out that last case: `yielded` alone also
-				// covers queued steer/follow-up and IRC continuations, which
-				// `#flushPendingAgentEnd` re-tags non-terminal.
-				const awaitingAsyncWork = options?.willContinue === true && options.awaitingAsyncWork === true;
-				await this.#emitSessionEvent({
-					...event,
-					isTerminal: !options?.willContinue,
-					yielded: !options?.willContinue || awaitingAsyncWork,
-					...(awaitingAsyncWork ? { awaitingAsyncWork } : {}),
-				});
-				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
-					logger.error("Agent end extension notification failed", { err });
-				});
-			};
+			const emitAgentEndNotification = (options?: AgentEndSettleOptions) =>
+				this.#settleAgentEnd(event, activeMessages, options);
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
 				currentUsage: {
@@ -4636,6 +4678,37 @@ export class AgentSession implements SettingsScope {
 		return undefined;
 	}
 
+	/**
+	 * Publish a run's settle: report idle, emit the public `agent_end` (held out
+	 * of the eager display pass until maintenance routing decides whether the
+	 * agent continues), then notify extensions. Every `agent_end` MUST reach this
+	 * exactly once; `#dispatchAgentEvent` calls it when maintenance throws first.
+	 */
+	async #settleAgentEnd(
+		event: AgentEndEvent,
+		activeMessages: AgentMessage[],
+		options?: AgentEndSettleOptions,
+	): Promise<void> {
+		this.#settledAgentEnd = event;
+		this.#emitRunState("idle");
+		// Tagged isTerminal so subscribers can tell final settles from scheduled
+		// continuations, and `yielded` so they can tell the agent's own follow-up
+		// work (retries, reminders, compaction) from a finished turn that only
+		// background work resumes. `awaitingAsyncWork` singles out that last case:
+		// `yielded` alone also covers queued steer/follow-up and IRC continuations,
+		// which `#flushPendingAgentEnd` re-tags non-terminal.
+		const awaitingAsyncWork = options?.willContinue === true && options.awaitingAsyncWork === true;
+		await this.#emitSessionEvent({
+			...event,
+			isTerminal: !options?.willContinue,
+			yielded: !options?.willContinue || awaitingAsyncWork,
+			...(awaitingAsyncWork ? { awaitingAsyncWork } : {}),
+		});
+		void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
+			logger.error("Agent end extension notification failed", { err });
+		});
+	}
+
 	async #emitAgentEndNotification(messages: AgentMessage[], options?: { willContinue?: boolean }): Promise<void> {
 		await this.#extensionRunner?.emit({
 			type: "agent_end",
@@ -4880,6 +4953,14 @@ export class AgentSession implements SettingsScope {
 	subscribeRunState(listener: (state: "running" | "idle") => void): () => void {
 		this.#runStateListeners.add(listener);
 		return () => this.#runStateListeners.delete(listener);
+	}
+
+	/**
+	 * Epoch ms the current run started, stable across retries within the run and
+	 * across UI focus switches; undefined while idle.
+	 */
+	get runStartedAt(): number | undefined {
+		return this.#runStartedAt;
 	}
 
 	/**
@@ -5388,6 +5469,7 @@ export class AgentSession implements SettingsScope {
 			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
 		}
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
+		releaseShellSessions(this.sessionManager.getSessionId());
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
@@ -5833,9 +5915,10 @@ export class AgentSession implements SettingsScope {
 	 * Wait for active advisor reviews and their emitted card events before a
 	 * headless caller disposes the session. Returns `false` and logs work disposal
 	 * will abandon when the shared deadline expires or an advisor fails;
-	 * `waitThroughRecovery` waits through a failing advisor's fallback recovery.
+	 * `waitThroughRecovery` waits through a failing advisor's fallback recovery and
+	 * `strictWithoutDeadline` waits on `strict` advisors past the deadline.
 	 */
-	waitForAdvisorCatchup(timeoutMs: number, options?: { waitThroughRecovery?: boolean }): Promise<boolean> {
+	waitForAdvisorCatchup(timeoutMs: number, options?: AdvisorCatchupOptions): Promise<boolean> {
 		return this.#advisors.waitForAdvisorCatchup(timeoutMs, options);
 	}
 
@@ -7242,10 +7325,17 @@ export class AgentSession implements SettingsScope {
 			isUserInvokedSkillPrompt(customMessage) &&
 			Array.isArray(customMessage.content) &&
 			customMessage.content.some(part => part.type === "image");
+		const preparationGeneration = this.#promptGeneration;
 		const preparedMessage = hasSkillImages ? await this.#normalizeAgentMessageImages(customMessage) : customMessage;
 		const descriptionNotice = hasSkillImages
 			? await this.#buildSkillImageDescriptionNotice(preparedMessage)
 			: undefined;
+		// Same drop as #dispatchPrompt: abort() during normalization or the vision
+		// description must not publish the skill or start a turn afterwards.
+		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
+			outcome.sessionClaimed = false;
+			return true;
+		}
 
 		// Image normalization and the vision-description call suspend after the
 		// isStreaming check above, so a concurrent submission can start a turn in

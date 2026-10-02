@@ -207,7 +207,13 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(terminal).toContain("…");
 		expect(terminal).not.toContain("FINAL-WORDS");
 
-		const cx: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
 		const card = component.describe(cx);
 		expect(card.p).toMatchObject({ head: "Custom answer" });
 		expect(card.c?.[0]).toMatchObject({ k: "md", p: { text: question, role: "omp.ask.question" } });

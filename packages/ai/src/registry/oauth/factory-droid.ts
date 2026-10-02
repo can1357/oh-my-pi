@@ -39,10 +39,23 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 			},
 			signal,
 		});
+		if (!response.ok && context.phase === "login") {
+			throw new AIError.OAuthError(`Factory identity check failed (${response.status}): ${await response.text()}`, {
+				kind: "validation",
+				provider: context.provider,
+				status: response.status,
+			});
+		}
 		if (response.ok) {
 			const body: unknown = await response.json();
 			if (isRecord(body)) {
 				const orgId = typeof body.orgId === "string" && body.orgId ? body.orgId : identity.orgId;
+				if (context.phase === "login" && !orgId) {
+					throw new AIError.OAuthError("Factory login did not resolve an organization", {
+						kind: "validation",
+						provider: context.provider,
+					});
+				}
 				// A different organization must not inherit the stored scope.
 				const carried = !orgId || !identity.orgId || orgId === identity.orgId ? identity : undefined;
 				const region = body.region === "eu" || body.region === "global" ? body.region : carried?.region;
@@ -53,10 +66,17 @@ export const attachFactoryDroidRegion: AfterExchangeHook = async (credentials, c
 				return { ...identity, orgId, region, inferenceRegion };
 			}
 		}
-	} catch {
+	} catch (error) {
 		if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
+		if (context.phase === "login") throw error;
 		// Preserve identity only when this is still the same selected organization.
 	}
 	if (context.signal?.aborted) throw new AIError.LoginCancelledError("Login cancelled");
+	if (context.phase === "login" && !identity.orgId) {
+		throw new AIError.OAuthError("Factory login did not resolve an organization", {
+			kind: "validation",
+			provider: context.provider,
+		});
+	}
 	return identity;
 };

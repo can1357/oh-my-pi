@@ -164,7 +164,11 @@ describe("native composer", () => {
 		const chipFor = (thinking: string) =>
 			byRole(composer({ running: false, thinking }).describe(legacy), "omp.composer.effort")!;
 		expect(nodes(chipFor("high")).some(n => n.k === "effort")).toBe(false);
-		expect(nodes(chipFor("high")).find(n => n.k === "meter")?.p).toMatchObject({ value: 0.75, style: "blocks", steps: 4 });
+		expect(nodes(chipFor("high")).find(n => n.k === "meter")?.p).toMatchObject({
+			value: 0.75,
+			style: "blocks",
+			steps: 4,
+		});
 		expect(nodes(chipFor("off")).find(n => n.k === "meter")?.p).toMatchObject({ value: 0 });
 		expect(nodes(chipFor("auto")).find(n => n.k === "meter")?.p).toMatchObject({ value: null });
 	});
@@ -302,7 +306,10 @@ describe("native composer without a status strip", () => {
 
 			// The context hairline leads the composer; the bar closes it.
 			const [first] = (described.c ?? []).filter(isNode);
-			expect(first).toMatchObject({ k: "meter", p: { role: "omp.composer.context", style: "bar" } });
+			expect(first).toMatchObject({
+				k: "meter",
+				p: { role: "omp.composer.context", style: "bar", actions: { click: "status.context" } },
+			});
 			const bar = byRole(described, "omp.composer.bar")!;
 			expect(
 				(bar.c ?? []).filter(isNode).map(n => (n.p !== undefined && "role" in n.p ? n.p.role : undefined)),
@@ -319,7 +326,7 @@ describe("native composer without a status strip", () => {
 			// Path and branch belong to Tern's pane header; the rest stays as a fact.
 			const extras = byRole(bar, "omp.composer.extras")!;
 			expect((extras.c ?? []).filter(isNode).map(n => n.key)).toEqual(["hostname"]);
-			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.context" } });
+			expect(byRole(bar, "omp.composer.usage")?.p).toMatchObject({ actions: { click: "status.cost" } });
 		} finally {
 			composer.stop();
 		}

@@ -19,12 +19,17 @@ import {
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { col, compact, keyed, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
+import { Memo } from "@oh-my-pi/pi-tui/native/memo";
+import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
+import { actionBar, actionButton } from "@oh-my-pi/pi-tui/native/overlay";
 import {
 	type WordCompletionEngine,
 	WordCompletionProvider,
 	type WordPredictionBackend,
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { closeDaemonClients } from "../launch/client";
 import type { TextPredictMethod } from "../predict/protocol";
 import { closeTextPrediction, requestTextPrediction } from "../predict/client";
@@ -88,13 +93,27 @@ class Lane {
 	}
 
 	stats(): string {
-		if (this.pending > 0 && !this.answer) return chalk.dim("loading…");
+		const summary = this.#summary();
+		if (!summary) return "";
+		return summary.error ? chalk.red(summary.text) : chalk.dim(summary.text);
+	}
+
+	/** {@link stats} as spans for the native table cell. */
+	statsSpans(): TspSpan[] {
+		const summary = this.#summary();
+		if (!summary) return [];
+		return [span(summary.text, summary.error ? "error" : "dim")];
+	}
+
+	/** Loading, the error, or confidence and latency of the latest answer. */
+	#summary(): { text: string; error: boolean } | undefined {
+		if (this.pending > 0 && !this.answer) return { text: "loading…", error: false };
 		const answer = this.answer;
-		if (!answer) return "";
-		if (answer.error) return chalk.red(answer.error);
+		if (!answer) return undefined;
+		if (answer.error) return { text: answer.error, error: true };
 		const ms = answer.ms < 10 ? answer.ms.toFixed(1) : Math.round(answer.ms).toString();
 		const confidence = answer.confidence === undefined ? "—" : answer.confidence.toFixed(2);
-		return chalk.dim(`p ${confidence} · ${ms} ms${this.pending > 0 ? " …" : ""}`);
+		return { text: `p ${confidence} · ${ms} ms${this.pending > 0 ? " …" : ""}`, error: false };
 	}
 }
 
@@ -112,6 +131,7 @@ class PredictCompareComponent implements Component, Focusable {
 	readonly #input = new Input();
 	readonly #lanes: Lane[];
 	readonly #done = Promise.withResolvers<void>();
+	readonly #native = new Memo();
 	#focused = false;
 
 	constructor(ui: TUI) {
@@ -145,13 +165,149 @@ class PredictCompareComponent implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, "tab")) {
-			const value = this.#input.getValue();
-			const ghost = this.#lanes[0]?.provider.getWordCompletion([value], 0, value.length);
-			if (ghost) this.#input.setValue(`${value}${ghost} `);
+			this.#accept();
 		} else {
 			this.#input.handleInput(data);
 		}
 		this.#ui.requestRender();
+	}
+
+	/** Accept the first lane's ghost word (Tab). */
+	#accept(): void {
+		const value = this.#input.getValue();
+		const ghost = this.#lanes[0]?.provider.getWordCompletion([value], 0, value.length);
+		if (ghost) this.#input.setValue(`${value}${ghost} `);
+	}
+
+	/**
+	 * Pointer paths: the action bar accepts (Tab), clears (Enter) or quits
+	 * (Esc) through the key code; terminal-side edits on the field apply to
+	 * the input.
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "edit") {
+			this.#input.applyHostEdit(event);
+			return;
+		}
+		if (event.type !== "action") return;
+		switch (event.act) {
+			case "accept":
+				this.#accept();
+				break;
+			case "clear":
+				this.#input.submit();
+				break;
+			case "quit":
+				this.#done.resolve();
+				return;
+			default:
+				return;
+		}
+		this.#ui.requestRender();
+	}
+
+	/**
+	 * The comparison as a native page: a head (title, engine count, activity,
+	 * close), the prompt field showing the first lane's ghost, a table with
+	 * one row per engine (its ghost after the typed text, confidence and
+	 * latency), and an action bar mirroring the keys.
+	 */
+	describe(): NativeNode {
+		const value = this.#input.getValue();
+		const cursor = this.#input.getCursor();
+		const ghosts = this.#lanes.map(lane => lane.provider.getWordCompletion([value], 0, value.length) ?? "");
+		return this.#native.get(
+			[value, cursor, ...ghosts, ...this.#lanes.flatMap(lane => [lane.answer, lane.pending])],
+			() =>
+				col(
+					[
+						this.#describeHead(),
+						keyed(
+							node("input", {
+								text: value,
+								cursor,
+								prompt: this.#input.prompt,
+								placeholder: "Type to compare engines",
+								ghost: ghosts[0] || undefined,
+							}),
+							"input",
+						),
+						this.#describeLanes(value, ghosts),
+						actionBar([
+							actionButton(`Accept ${ENGINES[0]}`, "accept", { keys: "tab", tone: "accent" }),
+							actionButton("Clear", "clear", { keys: "enter" }),
+							null,
+							actionButton("Quit", "quit", { keys: "escape" }),
+						]),
+					],
+					{ role: "omp.app.predict", gap: "md", grow: 1 },
+				),
+		);
+	}
+
+	#describeHead(): NativeNode {
+		const pending = this.#lanes.some(lane => lane.pending > 0);
+		return keyed(
+			row(
+				[
+					row(
+						[
+							text("omp predict", { role: "omp.app.title" }),
+							text([span(`${this.#lanes.length} engines · comparison typing never teaches them`, "muted")], {
+								truncate: "end",
+							}),
+						],
+						{ gap: "sm", align: "center", role: "omp.app.where" },
+					),
+					row(
+						compact([
+							pending &&
+								row([node("spinner", { style: "dots" }), text([span("predicting", "dim")])], {
+									gap: "xs",
+									align: "center",
+									role: "omp.app.fresh",
+								}),
+							node("icon", {
+								name: "x",
+								role: "omp.app.ibtn",
+								title: "Quit  esc",
+								aria: "Quit",
+								actions: { click: "quit" },
+							}),
+						]),
+						{ gap: "md", align: "center", role: "omp.app.tools" },
+					),
+				],
+				{ justify: "between", align: "center", role: "omp.app.head" },
+			),
+			"head",
+		);
+	}
+
+	/** One table row per engine: setting (and what `auto` resolved to), typed text plus ghost, stats. */
+	#describeLanes(value: string, ghosts: readonly string[]): NativeNode {
+		const typed = replaceTabs(value);
+		return keyed(
+			node("table", {
+				cols: [
+					{ id: "engine", head: "Engine", truncate: "end" },
+					{ id: "completion", head: "Completion", truncate: "start", grow: 1 },
+					{ id: "stats", head: "Confidence · latency", align: "end", priority: 1 },
+				],
+				rows: this.#lanes.map((lane, index) => {
+					const ghost = ghosts[index] ?? "";
+					return {
+						id: ENGINES[index] ?? lane.label,
+						cells: {
+							engine: [span(lane.label, "accent")],
+							completion: compact([typed !== "" && span(typed, "muted"), ghost !== "" && span(ghost, "strong")]),
+							stats: lane.statsSpans(),
+						},
+					};
+				}),
+			}),
+			"lanes",
+		);
 	}
 
 	render(width: number): readonly string[] {

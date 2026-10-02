@@ -941,7 +941,7 @@ export class CustomEditor extends Editor {
 				}
 			}
 			for (const typo of this.#spelling.typoRanges(value, { editorText: text, lines, line, startCol: 0 })) {
-				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "mark" });
+				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "typo" });
 			}
 			lineStart += value.length + 1;
 		}

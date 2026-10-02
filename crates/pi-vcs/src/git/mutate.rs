@@ -19,7 +19,7 @@ use super::{
 use crate::{
 	error::{Error, Result},
 	types::{
-		CleanOptions, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions,
+		CleanOptions, CommitAuthor, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions,
 		WorktreeAddOptions, WorktreeAddResult, WorktreeClone,
 	},
 };
@@ -203,21 +203,10 @@ impl GitRepo {
 			.committer()
 			.ok_or_else(|| Error::backend("git commit", "committer identity is not configured"))?
 			.map_err(|err| Error::backend("git commit", err))?;
-		let override_author;
+		let override_author = options.author.as_ref().map(signature_for).transpose()?;
 		let mut author_time = gix::date::parse::TimeBuf::default();
-		let author = if let Some(author) = &options.author {
-			let time = match &author.date {
-				Some(date) => {
-					gix::date::parse(date, None).map_err(|err| Error::backend("git commit", err))?
-				},
-				None => gix::date::Time::now_local_or_utc(),
-			};
-			override_author = gix::actor::Signature {
-				name: author.name.clone().into(),
-				email: author.email.clone().into(),
-				time,
-			};
-			override_author.to_ref(&mut author_time)
+		let author = if let Some(author) = override_author.as_ref() {
+			author.to_ref(&mut author_time)
 		} else if let Some(author) = inherited_author.as_ref() {
 			author.to_ref(&mut author_time)
 		} else {
@@ -263,6 +252,42 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit", err))?;
 		let _ = run_commit_hook(self, "post-commit", &[]);
 		Ok(id.to_hex().to_string())
+	}
+
+	/// Write a commit object for `tree` on top of `parents` without touching
+	/// HEAD, the index, any ref, or the worktree (`git commit-tree`). No hooks
+	/// run. Returns the new commit id.
+	pub fn commit_tree(
+		&self,
+		tree: &str,
+		parents: &[String],
+		message: &str,
+		author: Option<&CommitAuthor>,
+	) -> Result<String> {
+		let repo = self.gix()?;
+		let tree = resolve_tree(&repo, tree)?;
+		let parents = parents
+			.iter()
+			.map(|parent| resolve_commit(&repo, parent))
+			.collect::<Result<Vec<_>>>()?;
+		let committer = repo
+			.committer()
+			.ok_or_else(|| Error::backend("git commit-tree", "committer identity is not configured"))?
+			.map_err(|err| Error::backend("git commit-tree", err))?;
+		let override_author = author.map(signature_for).transpose()?;
+		let mut author_time = gix::date::parse::TimeBuf::default();
+		let author = if let Some(author) = override_author.as_ref() {
+			author.to_ref(&mut author_time)
+		} else {
+			repo
+				.author()
+				.ok_or_else(|| Error::backend("git commit-tree", "author identity is not configured"))?
+				.map_err(|err| Error::backend("git commit-tree", err))?
+		};
+		let commit = repo
+			.new_commit_as(committer, author, message, tree, parents)
+			.map_err(|err| Error::backend("git commit-tree", err))?;
+		Ok(commit.id.to_hex().to_string())
 	}
 
 	/// Checkout a branch or detached revision without overwriting local changes.
@@ -601,19 +626,46 @@ impl GitRepo {
 		let linked_repo = linked.gix()?;
 		checkout_tree(&linked, &linked_repo, id, true)?;
 		if options.keep_changes {
-			self.seed_worktree_changes(path, &admin)?;
+			self.seed_worktree_changes(path, &admin, id)?;
 		}
 		Ok(WorktreeAddResult { cloned_with: None, clone_error })
 	}
 
-	/// Replicate the source checkout's uncommitted state onto a freshly
-	/// materialized worktree at `path`: copy every dirty tracked and
-	/// untracked file (deleting what the source deleted), then install the
-	/// source index so staged hunks stay staged.
-	fn seed_worktree_changes(&self, path: &Path, admin: &Path) -> Result<()> {
+	/// Replicate the source checkout's uncommitted state onto a worktree at
+	/// `path` freshly checked out at the source `HEAD` (`head_commit`): copy
+	/// every staged, dirty tracked, and untracked file (deleting what the
+	/// source deleted), then install the source index so staged hunks stay
+	/// staged, with its stat cache rebased onto the files now on disk.
+	fn seed_worktree_changes(
+		&self,
+		path: &Path,
+		admin: &Path,
+		head_commit: gix::hash::ObjectId,
+	) -> Result<()> {
 		let repo = self.gix()?;
 		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
-		for relative in dirty_tracked.iter().chain(untracked.iter()) {
+		// One snapshot of the source index decides which paths to copy and is
+		// what gets installed, so a concurrent `git add` in the source cannot
+		// split the two.
+		let source_index = if self.info().git_dir.join("index").is_file() {
+			Some(load_index_or_empty(&repo, "git worktree add")?)
+		} else {
+			None
+		};
+		// The checkout wrote `HEAD` content, so paths whose index entry differs
+		// from `HEAD` (staged edits, additions, and deletions) need the source
+		// bytes too, even when the source worktree matches its index.
+		let staged = match &source_index {
+			Some(source_index) => {
+				let head_index = repo
+					.index_from_tree(&commit_tree(&repo, &head_commit)?)
+					.map_err(|err| Error::backend("git worktree add", err))?;
+				index_diff_paths(source_index, &head_index)
+			},
+			None => BTreeSet::new(),
+		};
+
+		for relative in dirty_tracked.iter().chain(&untracked).chain(&staged) {
 			let relative = relative.to_path_lossy();
 			let src = self.root().join(&relative);
 			let dst = path.join(&relative);
@@ -640,11 +692,17 @@ impl GitRepo {
 				Err(err) => return Err(err.into()),
 			}
 		}
-		let source_index = self.info().git_dir.join("index");
-		if source_index.is_file() {
-			fs::copy(source_index, admin.join("index"))?;
-		}
-		Ok(())
+		let Some(mut index) = source_index else {
+			return Ok(());
+		};
+		// The source stat cache describes the source files. Checkout filters
+		// (e.g. `core.autocrlf`) can write clean files at a different size, and
+		// git reports a size mismatch as modified without hashing the content.
+		refresh_clean_index_stats(&mut index, path, &dirty_tracked)?;
+		index.set_path(admin.join("index"));
+		index
+			.write(INDEX_WRITE)
+			.map_err(|err| Error::backend("git worktree add", err))
 	}
 
 	fn worktree_add_cloned(
@@ -683,18 +741,7 @@ impl GitRepo {
 			// index carries its staged state. Only the stat cache is stale
 			// (new inodes); refresh it for entries the source reports clean so
 			// dirty files still hash on the next status.
-			for (entry, entry_path) in current.entries_mut_with_paths() {
-				if dirty_tracked.contains(entry_path) {
-					continue;
-				}
-				let Ok(metadata) = gix::index::fs::Metadata::from_path_no_follow(
-					&path.join(entry_path.to_path_lossy()),
-				) else {
-					continue;
-				};
-				entry.stat = gix::index::entry::Stat::from_fs(&metadata)
-					.map_err(|err| Error::backend("git worktree add", err))?;
-			}
+			refresh_clean_index_stats(&mut current, path, &dirty_tracked)?;
 			return current
 				.write(INDEX_WRITE)
 				.map_err(|err| Error::backend("git worktree add", err));
@@ -704,34 +751,26 @@ impl GitRepo {
 			.index_from_tree(&tree)
 			.map_err(|err| Error::backend("git worktree add", err))?;
 
-		let current_paths: BTreeSet<BString> = current
-			.entries()
-			.iter()
-			.map(|entry| entry.path(&current).to_owned())
-			.collect();
-		let target_paths: BTreeSet<BString> = target
-			.entries()
-			.iter()
-			.map(|entry| entry.path(&target).to_owned())
-			.collect();
-		let mut delete = current_paths
-			.difference(&target_paths)
-			.cloned()
-			.collect::<BTreeSet<_>>();
+		let differing = index_diff_paths(&current, &target);
+		let (write_paths, removed): (BTreeSet<BString>, BTreeSet<BString>) = differing
+			.into_iter()
+			.partition(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_some());
+		let mut delete = removed;
 		delete.extend(untracked);
-		delete.extend(dirty_tracked.difference(&target_paths).cloned());
+		delete.extend(
+			dirty_tracked
+				.iter()
+				.filter(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_none())
+				.cloned(),
+		);
 
-		let mut write = BTreeSet::new();
-		for entry in target.entries() {
-			let path = entry.path(&target);
-			if current
-				.entry_by_path(path)
-				.is_none_or(|old| old.id != entry.id || old.mode != entry.mode)
-				|| dirty_tracked.contains(path)
-			{
-				write.insert(path.to_owned());
-			}
-		}
+		let mut write = write_paths;
+		write.extend(
+			dirty_tracked
+				.iter()
+				.filter(|entry_path| target.entry_by_path(entry_path.as_bstr()).is_some())
+				.cloned(),
+		);
 
 		for relative in &delete {
 			let full = path.join(relative.to_path_lossy());
@@ -1029,6 +1068,21 @@ pub fn detach_git_dir(
 		detached.read_tree("HEAD", None)?;
 	}
 	Ok(DetachGitDirResult::Detached)
+}
+
+/// Author signature for an explicit [`CommitAuthor`]; a missing date means now.
+fn signature_for(author: &CommitAuthor) -> Result<gix::actor::Signature> {
+	let time = match &author.date {
+		Some(date) => {
+			gix::date::parse(date, None).map_err(|err| Error::backend("git commit", err))?
+		},
+		None => gix::date::Time::now_local_or_utc(),
+	};
+	Ok(gix::actor::Signature {
+		name: author.name.clone().into(),
+		email: author.email.clone().into(),
+		time,
+	})
 }
 
 fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectId> {
@@ -1525,6 +1579,50 @@ fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 	let mut bytes = Vec::new();
 	config.write_to(&mut bytes)?;
 	fs::write(path, bytes)?;
+	Ok(())
+}
+
+/// Paths whose entry differs between `left` and `right` (blob id or mode), or
+/// that exist on only one side.
+fn index_diff_paths(left: &gix::index::File, right: &gix::index::File) -> BTreeSet<BString> {
+	let mut paths = BTreeSet::new();
+	for entry in left.entries() {
+		let entry_path = entry.path(left);
+		if right
+			.entry_by_path(entry_path)
+			.is_none_or(|other| other.id != entry.id || other.mode != entry.mode)
+		{
+			paths.insert(entry_path.to_owned());
+		}
+	}
+	for entry in right.entries() {
+		let entry_path = entry.path(right);
+		if left.entry_by_path(entry_path).is_none() {
+			paths.insert(entry_path.to_owned());
+		}
+	}
+	paths
+}
+
+/// Point the stat cache of every index entry outside `dirty` at the file now
+/// under `root`, so entries whose content matches the index read as clean.
+fn refresh_clean_index_stats(
+	index: &mut gix::index::File,
+	root: &Path,
+	dirty: &BTreeSet<BString>,
+) -> Result<()> {
+	for (entry, entry_path) in index.entries_mut_with_paths() {
+		if dirty.contains(entry_path) {
+			continue;
+		}
+		let Ok(metadata) =
+			gix::index::fs::Metadata::from_path_no_follow(&root.join(entry_path.to_path_lossy()))
+		else {
+			continue;
+		};
+		entry.stat = gix::index::entry::Stat::from_fs(&metadata)
+			.map_err(|err| Error::backend("git worktree add", err))?;
+	}
 	Ok(())
 }
 
@@ -2631,6 +2729,50 @@ mod tests {
 				WorktreeAddOptions { detach: true, clone, keep_changes: true },
 			);
 			assert!(rejected.is_err(), "keep_changes must require the source HEAD as target");
+			let _ = repo.worktree_remove(&linked, true);
+		}
+	}
+
+	#[test]
+	fn worktree_add_keep_changes_carries_staged_only_state_without_phantom_edits() {
+		for clone in [WorktreeClone::Auto, WorktreeClone::Off] {
+			let (temp, repo) = fixture();
+			fs::write(temp.path().join("c"), "three\n").unwrap();
+			git(temp.path(), &["add", "c"]);
+			git(temp.path(), &["commit", "-qm", "add c"]);
+			// The source keeps its LF files; a plain checkout under autocrlf
+			// writes CRLF, so clean files land at a different size.
+			git(temp.path(), &["config", "core.autocrlf", "true"]);
+			fs::write(temp.path().join("a"), "staged only\n").unwrap();
+			git(temp.path(), &["add", "a"]);
+			git(temp.path(), &["rm", "-q", "b"]);
+			fs::write(temp.path().join("added"), "staged add\n").unwrap();
+			git(temp.path(), &["add", "added"]);
+			let source_status = git(temp.path(), &["status", "--porcelain"]);
+			assert_eq!(source_status, "M  a\nA  added\nD  b");
+			git(temp.path(), &["branch", "kept-staged"]);
+
+			let linked = temp.path().join(format!("../linked-keep-staged-{clone:?}"));
+			let _ = fs::remove_dir_all(&linked);
+			let result = repo
+				.worktree_add(&linked, "kept-staged", WorktreeAddOptions {
+					detach: false,
+					clone,
+					keep_changes: true,
+				})
+				.unwrap();
+			if clone == WorktreeClone::Off {
+				assert!(result.cloned_with.is_none());
+			}
+
+			assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "staged only\n");
+			assert_eq!(fs::read_to_string(linked.join("added")).unwrap(), "staged add\n");
+			assert!(!linked.join("b").exists());
+			assert_eq!(
+				git(&linked, &["status", "--porcelain"]),
+				source_status,
+				"clean and staged-only files must not read as unstaged edits"
+			);
 			let _ = repo.worktree_remove(&linked, true);
 		}
 	}

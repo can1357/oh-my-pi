@@ -203,7 +203,7 @@ function jobsRenderResult(
 	options: RenderResultOptions,
 	uiTheme: Theme,
 ): Component {
-	let jobs = result.details?.jobs ?? [];
+	const jobs = result.details?.jobs ?? [];
 	const agents = result.details?.agents ?? [];
 
 	if (jobs.length === 0 && agents.length === 0) {
@@ -212,15 +212,7 @@ function jobsRenderResult(
 		return new Text([header, formatEmptyMessage(fallback, uiTheme)].join("\n"), 0, 0);
 	}
 
-	// Agent-carrying results (jobs snapshot / empty-wait roster) are real
-	// snapshots, not displaceable waiting frames — only agentless waits
-	// collapse their still-running rows once sealed.
-	if (!options.isPartial && agents.length === 0) {
-		jobs = jobs.filter(job => job.status !== "running");
-		if (jobs.length === 0) {
-			return new Text("", 0, 0);
-		}
-	}
+	// Sealing freezes the snapshot; still-running rows remain meaningful history.
 
 	const counts = { completed: 0, failed: 0, cancelled: 0, running: 0 };
 	for (const job of jobs) counts[job.status]++;
@@ -582,8 +574,8 @@ export function createIrcMessageCard(
 }
 
 /** One job row: type badge, id + label, terminal-clocked duration (live while running), preview below. */
-function describeJob(job: JobSnapshot): NativeNode {
-	const running = job.status === "running";
+function describeJob(job: JobSnapshot, isPartial: boolean): NativeNode {
+	const running = job.status === "running" && isPartial;
 	const label = job.label.trim() !== job.id ? plainText(job.label.split(/\r?\n/)[0] ?? "") : "";
 	const spans: TspSpan[] = [
 		span(plainText(job.id), running ? "accent" : "toolOutput", running ? { fx: "shimmer" } : undefined),
@@ -632,7 +624,7 @@ function describeJobsResult(
 	result: ToolRenderResult<CoordinationDetails>,
 	isPartial: boolean,
 ): NativeToolView | undefined {
-	let jobs = result.details?.jobs ?? [];
+	const jobs = result.details?.jobs ?? [];
 	const agents = result.details?.agents ?? [];
 	if (jobs.length === 0 && agents.length === 0) {
 		return {
@@ -640,10 +632,6 @@ function describeJobsResult(
 			tone: "warning",
 			body: [text([span(plainText(resultText(result) || "No jobs to process"), "dim")])],
 		};
-	}
-	if (!isPartial && agents.length === 0) {
-		jobs = jobs.filter(job => job.status !== "running");
-		if (jobs.length === 0) return undefined;
 	}
 	const counts = { completed: 0, failed: 0, cancelled: 0, running: 0 };
 	for (const job of jobs) counts[job.status]++;
@@ -662,7 +650,7 @@ function describeJobsResult(
 	if (counts.cancelled > 0) head.push(span(` ${counts.cancelled} cancelled`, "warning"));
 	const order: Record<JobSnapshot["status"], number> = { running: 0, failed: 1, cancelled: 2, completed: 3 };
 	const sorted = [...jobs].sort((a, b) => order[a.status] - order[b.status] || b.durationMs - a.durationMs);
-	const body: NativeNode[] = sorted.map(describeJob);
+	const body: NativeNode[] = sorted.map(job => describeJob(job, isPartial));
 	for (const agent of agents) {
 		const spans: TspSpan[] = [span(plainText(agent.id), "muted")];
 		if (agent.activity) spans.push(span(` ${plainText(agent.activity)}`, "toolOutput"));
@@ -677,7 +665,7 @@ function describeJobsResult(
 						tone: agent.live ? "accent" : "warning",
 					}),
 					text(spans, { truncate: "end", grow: 1 }),
-					elapsed(agent.ageMs, !agent.live),
+					elapsed(agent.ageMs, !agent.live || !isPartial),
 				],
 				`agent:${agent.id}`,
 			),

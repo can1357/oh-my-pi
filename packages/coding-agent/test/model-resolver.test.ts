@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { logger } from "@oh-my-pi/pi-utils";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
@@ -2004,6 +2005,37 @@ describe("resolveModelScope", () => {
 		expect(scoped).toHaveLength(1);
 		expect(scoped[0].model.provider).toBe("openai");
 		expect(scoped[0].model.id).toBe("gpt-5.5");
+	});
+
+	test("keeps non-chat runners out of the scope without reporting them as unmatched (#14016)", async () => {
+		const runnerSpec = (provider: string, id: string, kind: Model["kind"]) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				kind,
+				provider,
+				baseUrl: "https://example.com",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 1024,
+			});
+		const judge = runnerSpec("openrouter", "~typesafe/jev-latest", "judge");
+		const search = runnerSpec("web", "exa", "search");
+		const chat = openaiGpt55Models;
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const scoped = await resolveModelScope(
+				["openrouter/~typesafe/jev-latest", "web/*", "openai/gpt-5.5", "nonexistent-model"],
+				{ getAvailable: kind => (kind === "all" ? [...chat, judge, search] : chat) },
+			);
+			expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["openai/gpt-5.5"]);
+			expect(warn.mock.calls.map(call => call[0])).toEqual(['No models match pattern "nonexistent-model"']);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	test("resolves role aliases in --models scope to the role's model with its thinking level", async () => {

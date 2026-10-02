@@ -116,6 +116,72 @@ describe("FileSessionStorage writer", () => {
 		void writer.close();
 	});
 
+	it("appends without creating or removing a lockfile beside the session", () => {
+		const sessionPath = path.join(tempDir, "no-lockfile.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// Each transcript line used to claim `.<session>.lock` (create, record,
+		// stat, close) and unlink it again: two directory mutations per append.
+		// The OS gate alone serializes current writers, so appends must leave
+		// the session directory untouched apart from the transcript itself.
+		const openSpy = vi.spyOn(fs, "openSync");
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync");
+		for (const line of ["one\n", "two\n", "three\n"]) appendSync(line);
+		const touched = [...openSpy.mock.calls, ...unlinkSpy.mock.calls].map(call => String(call[0]));
+		vi.restoreAllMocks();
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\nthree\n");
+		expect(touched.filter(file => file.endsWith(".lock"))).toEqual([]);
+		void writer.close();
+	});
+
+	it("fails an append closed while a previous-binary publisher holds the lockfile", async () => {
+		const sessionPath = path.join(tempDir, "legacy-held.jsonl");
+		fs.writeFileSync(sessionPath, "old\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// A binary that predates the OS gate publishes under the lockfile alone:
+		// it claimed the name and passed its size check, and its rename will
+		// replace this file. Appending now would land a line that rename erases.
+		fs.writeFileSync(path.join(tempDir, ".legacy-held.jsonl.lock"), `${process.pid}:${Date.now()}\n`);
+		expect(() => appendSync("new-entry\n")).toThrow(SessionLockError);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("old\n");
+		await expect(writer.close()).rejects.toBeInstanceOf(SessionLockError);
+	});
+
+	it("re-appends a line a previous-binary publisher renamed away mid-append", () => {
+		const sessionPath = path.join(tempDir, "legacy-race.jsonl");
+		const lockPath = path.join(tempDir, ".legacy-race.jsonl.lock");
+		const stagedPath = path.join(tempDir, ".legacy-race.jsonl.staged.tmp");
+		fs.writeFileSync(sessionPath, "old\n");
+		fs.writeFileSync(stagedPath, "old\nrewrite\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// The previous binary claims the lockfile after our check, sizes the
+		// session before our line lands, then publishes its rewrite over the path
+		// and releases: the line is now only in the replaced inode. Publishing
+		// moves the old file aside first, as Windows publishers do when a writer
+		// still holds it open.
+		const existsSync = fs.existsSync;
+		let published = false;
+		vi.spyOn(fs, "existsSync").mockImplementation((file: fs.PathLike) => {
+			if (!published && String(file) === lockPath && fs.readFileSync(sessionPath, "utf8") === "old\nnew-entry\n") {
+				published = true;
+				fs.renameSync(sessionPath, path.join(tempDir, "legacy-race.jsonl.bak"));
+				fs.renameSync(stagedPath, sessionPath);
+			}
+			return existsSync(file);
+		});
+		appendSync("new-entry\n");
+		vi.restoreAllMocks();
+		expect(published).toBe(true);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("old\nrewrite\nnew-entry\n");
+		expect(fs.existsSync(lockPath)).toBe(false);
+		void writer.close();
+	});
+
 	it("preserves append order through flush and close", async () => {
 		const sessionPath = path.join(tempDir, "ordered.jsonl");
 		const writer = storage.openWriter(sessionPath, { flags: "w" });

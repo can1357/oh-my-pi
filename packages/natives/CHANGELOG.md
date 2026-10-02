@@ -29,6 +29,25 @@ Completeness reporting is Linux-only. **macOS and Windows descendant walks and p
 - A process group recorded for termination is a bare number, and the wave signals it as one: PTY cancellation and background-job cleanup both record the group id and then send `TERM` and `KILL` to it with nothing established about whose group it now is, so a group that empties and has its id reused takes the wave. The pinned process target alongside it does not cover this — the group is a separate target with its own signal. This is the group-shaped twin of the bare-pid case above, and the identity guards added elsewhere cannot be routed onto it: authenticating a group needs a reference to its leader pinned when the group was recorded, and with no such anchor the leader check refuses every group instead of the reused ones. The fix therefore belongs at the recording site, the same move that replaced a bare pid with a pinned handle for the PTY child. Deferred rather than done here, because it changes destructive group semantics.
 - `kill` and `pkill` derive the ancestor chain they refuse to signal from an unchecked process-table snapshot, so a short snapshot can leave an ancestor unprotected; Windows `kill -0` answers process existence from the same snapshot.
 - A cancelled shell run counts the children it could never pin and reports that count nowhere. Plumbing is not what blocks it: all three cancellation paths already await the termination bridge (`shell.rs:347`, `:417`, `:483`) and all three normal paths abort and then await it (`:359-360`, `:428-429`, `:494-495`), so a value can come back without restructuring. The cost is result handling in the three cancellation arms, six result literals (`:348`, `:368`, `:418`, `:433`, `:484`, `:499` — `ShellExecuteResult` at `:143` is an alias of the same struct, not a second one), two native fixtures, and a new field on each of two parallel structs — the serde wire type in `pi-shell` and the `#[napi(object)]` in `pi-natives` that converts from it. What actually defers it is the decision at the end: on the cancellation path the JS caller never reads the native result at all, quarantining the pending run and returning a synthetic cancellation notice, so surfacing the count means first deciding what a cancelled run should tell the agent about children it could not account for. Deferred with the `kill`/`pkill` residual above.
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- Fixed the embedded shell sometimes hanging on a pipeline with a stage that stopped (for example with `kill -STOP $$`) before the shell began waiting on it; the pipeline now becomes a stopped job ([#14023](https://github.com/can1357/oh-my-pi/pull/14023) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `readTextFromClipboard()` for reading plain text from the system clipboard without starting a subprocess.
+- Added `Shell.pids()` to retrieve the IDs of still-running processes spawned by an in-flight shell command.
+
+## [18.4.7] - 2026-10-01
+
+### Fixed
+
+- Fixed omp 18.4.3 and later crashing with a segmentation fault at startup on Apple silicon Macs running macOS older than 27; Apple Foundation Models support now loads only on macOS 27 and later
+
 ## [18.4.5] - 2026-09-30
 
 ### Fixed

@@ -2,10 +2,19 @@
 
 ## [Unreleased]
 
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- `streamProxy` no longer finalizes a cut-off tool-call argument buffer into an executable auto-closed preview; such a call gets the parse-error arguments, so the tool is not run and the model receives the parse error ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
+- OpenAI remote compaction no longer sends stored native tool calls whose names are blank, longer than 128 characters, or contain whitespace or control characters. The outputs that answer those calls are dropped as well ([#13985](https://github.com/can1357/oh-my-pi/pull/13985) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.4.6] - 2026-10-01
+
 ### Added
 
-- Added `Agent.moveFollowUpsToSteering()` to move queued follow-ups into steering with a single queue-change notification ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
-- Added `additionalContext` to `afterToolCall` results, allowing trusted post-tool guidance to reach the next provider request outside tool output, including after failed results ([#13266](https://github.com/can1357/oh-my-pi/pull/13266) by [@andrebrait](https://github.com/andrebrait)).
+- Added APIs for improving agent follow-up and steering workflow management, including moving queued follow-ups into steering with a single queue-change notification.
+- Added support for trusted post-tool guidance via `afterToolCall` results, allowing additional context to be included in the next provider request, including after tool failures.
 
 ## [18.4.4] - 2026-09-29
 

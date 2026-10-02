@@ -8,6 +8,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
+	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
@@ -118,7 +119,11 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
-import { createSkillDescriptionCompressor, SkillDescriptionCatalog } from "./extensibility/skill-descriptions";
+import {
+	createSkillDescriptionCompressor,
+	openSessionSkillDescriptionStore,
+	SkillDescriptionCatalog,
+} from "./extensibility/skill-descriptions";
 import { resolvePath } from "./extensibility/utils";
 import {
 	type LoadSkillsOptions,
@@ -174,7 +179,7 @@ import {
 	formatCredentialDisabledNotice,
 } from "./session/credential-disabled-notice";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
-import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
+import { createInterruptedToolResults, createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
 import {
 	type CustomMessage,
@@ -268,7 +273,7 @@ import { resolveYieldReportText } from "./tools/yield";
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
-import { createRatchetPrelude } from "./ratchet/prelude";
+import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
 import { imageGenTool } from "./tools/image-gen";
@@ -1839,6 +1844,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let existingBranch = logger.time("getSessionBranch", () => sessionManager.getBranch());
 	const interruptedTurnAbort = createInterruptedTurnAbortMessage(existingBranch);
 	if (interruptedTurnAbort) {
+		for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
 		sessionManager.appendMessage(interruptedTurnAbort);
 		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
 	}
@@ -3189,6 +3195,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				model: model.id,
 			});
 			if (selectedModelAbort) {
+				for (const result of createInterruptedToolResults(existingBranch)) sessionManager.appendMessage(result);
 				sessionManager.appendMessage(selectedModelAbort);
 				existingBranch = logger.time("getRecoveredUserTailBranch", () => sessionManager.getBranch());
 				existingSession = logger.time("loadRecoveredUserTailContext", () =>
@@ -3641,9 +3648,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
+		// The process agent dir uses the process-wide store; a session rooted in
+		// another agent dir keeps its own, closed when the session is disposed.
+		const ownedSkillDescriptionStore =
+			path.resolve(agentDir) === path.resolve(getAgentDir())
+				? undefined
+				: openSessionSkillDescriptionStore(agentDir);
 		const skillDescriptions = new SkillDescriptionCatalog({
-			dbPath: path.join(agentDir, "skill-descriptions.db"),
-			compress: createSkillDescriptionCompressor(modelRegistry, settings),
+			store: ownedSkillDescriptionStore,
+			// Like the other one-shot model calls, each compression request resolves
+			// its own telemetry handle, so its usage stays out of the run summary.
+			// The first requests can start before `agent` is constructed; they use
+			// the telemetry config and session id the agent is constructed with.
+			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
+				agent
+					? resolveTelemetry(agent.telemetry, agent.sessionId)
+					: resolveTelemetry(options.telemetry, providerSessionId),
+			),
 		});
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
@@ -4553,6 +4574,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		hasSession = true;
 		credentialNoticeSession = session;
+		if (ownedSkillDescriptionStore) {
+			// Let in-flight compressions land before releasing the file.
+			session.addDisposer(
+				() => void skillDescriptions.waitForPending().finally(() => ownedSkillDescriptionStore.close()),
+			);
+		}
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
 		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the

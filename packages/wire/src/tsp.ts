@@ -99,7 +99,9 @@ export type TspEffect = "shimmer" | "pulse" | "none";
  * One styled run of text. `s` holds space-separated semantic tokens
  * (`muted`, `dim`, `strong`, `em`, `accent`, `success`, `warning`, `error`,
  * `info`, `code`, `mono`, `path`, `key`, `link`, `num`, `ins`, `del`, `mark`,
- * `icon`, `hide`) or omp theme token names (`thinkingText`, `toolTitle`, …).
+ * `typo`, `icon`, `hide`) or omp theme token names (`thinkingText`,
+ * `toolTitle`, …). `mark` highlights (a match, the selected row); `typo` is a
+ * misspelled word, which the terminal underlines as its own spell checker does.
  * `icon` marks a run of icon glyphs (Nerd Font / Private Use Area codepoints):
  * the terminal draws it in its icon face and spaces it from neighbouring text
  * itself, so senders omit padding spaces around icons. `hide` takes the run
@@ -481,8 +483,11 @@ export interface TspPickerGroup {
  * selected item's preview. A picker under `layer` is itself the modal sheet.
  */
 export interface TspPickerProps {
-	/** What is being picked, e.g. "Models" (plain: it is also the common `title` prop, which a picker does not use as a tooltip). */
-	title: string;
+	/**
+	 * What is being picked, e.g. "Models" (plain: it is also the common `title` prop, which a picker does not use as a
+	 * tooltip). Absent: the head is the icon and the search, and the placeholder names the sheet.
+	 */
+	title?: string;
 	subtitle?: TspText;
 	icon?: string;
 	/** Plural noun for counts and empty copy ("models", "sessions"). */
@@ -718,6 +723,18 @@ export interface TspEffortProps {
 	level: string;
 }
 
+/**
+ * A tick on a meter's track (compaction threshold, speculation point). A bar mark's `icon`
+ * (a symbol name, e.g. `context.compaction`) sits on the track, which breaks for it.
+ */
+export interface TspMeterMark {
+	/** Position, 0–1. */
+	at: number;
+	tone?: TspTone;
+	title?: string;
+	icon?: string;
+}
+
 /** A value drawn as a bar, ring or block grid (§8.2): context %, usage windows, agent context. */
 export interface TspMeterProps {
 	/** 0–1, or null for unknown. */
@@ -727,11 +744,13 @@ export interface TspMeterProps {
 	steps?: number;
 	/** Stacked parts instead of one fill (context breakdown); values sum to ≤ 1. */
 	parts?: readonly { value: number; token?: string; label?: string; hatch?: boolean }[];
-	/** Tick marks on the track (compaction threshold, speculation point). */
-	marks?: readonly { at: number; tone?: TspTone; title?: string }[];
+	marks?: readonly TspMeterMark[];
 	/** Tone switches: at or above `warn` → warning, `bad` → error. */
 	thresholds?: { warn?: number; bad?: number };
+	/** The value as text (`74%`). */
 	label?: TspText;
+	/** The whole the track spans as text (a context window's `200K`). */
+	total?: TspText;
 	size?: "sm" | "md" | "lg";
 }
 /** Series data drawn natively: the usage heatmap, app dashboards (§9.2). */
@@ -828,8 +847,16 @@ export type TspOp =
 	| readonly [op: "settle", id: string]
 	| readonly [op: "focus", id: string | null]
 	| readonly [op: "reveal", id: string, where: "start" | "end" | "nearest"]
+	| readonly [op: "scroll", id: string, by: TspScrollBy]
 	| readonly [op: "suspend"]
 	| readonly [op: "resume"];
+
+/**
+ * How far a `scroll` op moves the scroller holding a node: a line, a
+ * viewport less a line, or to an end (`end` makes a following `ansi` block
+ * follow again). Sent only when `hello.features` lists `scroll`.
+ */
+export type TspScrollBy = "line-up" | "line-down" | "page-up" | "page-down" | "start" | "end";
 
 /** Verb `f`: an atomic batch of ops for one surface. */
 export interface TspFrame {
@@ -919,5 +946,11 @@ export type TspEvent =
 	 * text length the terminal saw, a mismatch makes the edit stale).
 	 */
 	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
+	/**
+	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
+	 * a `prefs` sheet while the focus is outside it): the program moves its
+	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).
+	 */
+	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

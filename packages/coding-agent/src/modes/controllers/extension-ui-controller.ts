@@ -710,7 +710,11 @@ export class ExtensionUiController {
 				queueMicrotask(restoreAskDialog);
 			};
 
-			const openPrompt = (prompt: AskDialogPrompt, prefill: string | undefined, options: HookEditorOptions): void => {
+			const openPrompt = (
+				prompt: AskDialogPrompt,
+				prefill: string | undefined,
+				options: HookEditorOptions,
+			): void => {
 				promptEditor = new HookEditorComponent(
 					this.ctx.ui,
 					prompt.title,
