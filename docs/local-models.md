@@ -235,8 +235,6 @@ Kokoro and the transformers.js Whisper models read `providers.tinyModelDevice` /
 - Auto-thinking, Smart unexpected-stop detection, typed Eval judgments, and AI-assisted git staging use the `judge` role. Assign `typesafe/jev-latest` for TypeSafe or a compatible local tiny model for on-device judgment; order alternatives under `retry.fallbackChains.judge`.
 - Managed memory extraction uses the shared line-format, small-talk-guarded system prompt on both local and online transports. A local primary additionally selects the local consolidation prompt. Explicit external Mnemopi endpoints remain authoritative instead of being replaced by the memory role.
 
-- The memory local path applies the refined line-format and small-talk-guarded extraction prompt plus the hardened consolidation prompt; selecting an online chat model for the role keeps the online transport path.
-
 ## Task 3: Local judgments (`modelRoles.judge`)
 
-`local/julia-1` is an opt-in on-device judge: a 144M decision model answering typed choice/noul/score questions with native probabilities instead of generated keywords. Enable it with `modelRoles.judge: local/julia-1` (or under `retry.fallbackChains.judge`); nothing selects it automatically. The first use downloads ~577 MB of fp32 ONNX weights (CPU-only) into the shared tiny-model worker cache.
+`local/julia-1` is an opt-in on-device judge: a 144M decision model answering typed choice/noul/score questions with native probabilities instead of generated keywords. Enable it with `modelRoles.judge: local/julia-1` (or under `retry.fallbackChains.judge`); nothing selects it automatically, and it is never picked via `@tiny`/`@smol`. The first use downloads ~577 MB of fp32 ONNX weights (CPU-only; `tinyModelDevice`/`tinyModelDtype` do not apply) into the shared tiny-model worker cache.

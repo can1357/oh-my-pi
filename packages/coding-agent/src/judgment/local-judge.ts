@@ -102,6 +102,15 @@ function toAnswer(id: string, question: Question, logits: number[] | undefined):
 	}
 }
 
+/**
+ * On-device decision-model judge (Julia-1): answers choice/noul/score from
+ * native per-option probabilities over the shared tiny-model worker.
+ *
+ * Score shape differs from the keyword-classification path: score answers
+ * carry a probability-weighted float plus per-level probabilities (not a
+ * discrete level with confidence 1), so thresholds on the same role change
+ * when flipping between a tiny keyword model and julia-1.
+ */
 export class LocalJudge implements Judge {
 	readonly label: string;
 	readonly #modelId: string;

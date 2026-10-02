@@ -188,14 +188,21 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 /**
  * The `judge` role's candidates in attempt order, drawn from credentialed
  * judge-capable models. From the first native candidate on, only native
- * candidates remain: a prompted model never stands in for a failed native
- * judgment, whose calibrated probabilities it cannot reproduce.
+ * candidates and logits-based local decision models remain: a prompted or
+ * keyword-classified model never stands in for a failed native judgment,
+ * whose calibrated probabilities it cannot reproduce. A local decision model
+ * (native per-option probabilities) can.
  */
 function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
 	const chain = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
 	const firstNative = chain.findIndex(candidate => kindOf(candidate) === "native");
 	if (firstNative < 0) return chain;
-	return chain.filter((candidate, index) => index < firstNative || kindOf(candidate) === "native");
+	return chain.filter(
+		(candidate, index) =>
+			index < firstNative ||
+			kindOf(candidate) === "native" ||
+			(kindOf(candidate) === "local" && isTinyJudgeLocalModelKey(candidate.model.id)),
+	);
 }
 
 /**

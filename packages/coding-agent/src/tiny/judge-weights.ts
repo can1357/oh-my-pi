@@ -46,7 +46,7 @@ export async function ensureJuliaJudgeFiles(
 	reply: JudgeDownloadTransport,
 	requestId: string,
 ): Promise<string> {
-	const dir = path.join(getTinyModelsCacheDir(), modelKey);
+	const dir = path.join(getTinyModelsCacheDir(), modelKey, JULIA_JUDGE_REVISION.slice(0, 12));
 	// Atomic `.part` + rename downloads make present files complete — no
 	// network on warm start, works offline.
 	const cached = await Promise.all(
