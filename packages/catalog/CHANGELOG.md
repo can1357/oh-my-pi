@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed the bundled xai-oauth catalog drifting from its curated seed: the live `grok-imagine-video-1.5-lite` runner is now tracked in the seed, so the bundle/seed regression test passes on clean regens.
+
 - Fixed new sessions on Fireworks failing with HTTP 404 on the first turn: the Fireworks default model is now `kimi-k3`, because Fireworks no longer serves `kimi-k2.7-code` ([#14068](https://github.com/can1357/oh-my-pi/pull/14068) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.4.10] - 2026-10-02
