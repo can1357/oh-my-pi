@@ -1514,7 +1514,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
-	readonly #goalToolInitiallyEnabled: boolean;
+	/** Whether `goal` was in the launch tool set (`--tools=...,goal`), read once at {@link init}. */
+	#goalToolInitiallyEnabled = false;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
 	// tool use means it was abandoned for real work), the kickoff fails, or the
@@ -1724,7 +1725,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
-		this.#goalToolInitiallyEnabled = session.getEnabledToolNames().includes("goal");
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings),
@@ -2029,6 +2029,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		// Read before any goal can add the tool, so a later exit can tell a requested
+		// `goal` tool (kept) from one goal mode added (removed again).
+		this.#goalToolInitiallyEnabled = this.session.getEnabledToolNames().includes("goal");
 
 		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
 		// Before first paint, so hints the user already learned never flash on.
