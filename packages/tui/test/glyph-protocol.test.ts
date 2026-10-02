@@ -131,11 +131,14 @@ function setupProcessTerminal() {
 		return true;
 	});
 
-	const terminal = new ProcessTerminal();
+	// conpty: false keeps the registration bundle a single write. isConPTYHosted()
+	// is true under WSL, where #safeWrite would chunk it and hide the exact bytes
+	// these assertions inspect.
+	const terminal = new ProcessTerminal({ conpty: false });
 	terminal.onGlyphProtocolReport(supported => reports.push(supported));
 	terminal.start(
 		data => received.push(data),
-		() => {},
+		() => { },
 	);
 	return { terminal, writes, received, reports };
 }
