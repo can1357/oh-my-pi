@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `task.isolation.allowNested` (default `false`) to reject nested isolated subagent spawns; inside an isolated session the `isolated` field is hidden from the `task` tool and eval `agent()`, and an explicit `isolated: true` fails preflight with a clear error. Set it to `true` to restore nested isolation ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
+- Added `task.isolation.allowNested` (default `false`) to reject nested isolated subagent spawns; inside an isolated session the `task` tool and eval `agent()` constrain `isolated` to `false`, and an explicit `isolated: true` fails preflight with a clear error. Set it to `true` to restore nested isolation ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
 - Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
 - Added a `goal` command for RPC hosts (`--mode rpc` and `rpc-ui`) to create, read, pause, resume and drop goals, the current goal in `get_state`, and opt-in automatic goal continuation with `goal.continuationModes: ["rpc"]` ([#13952](https://github.com/can1357/oh-my-pi/pull/13952) by [@shawnkoh](https://github.com/shawnkoh))
 - Added `--goal <objective>` for interactive launches: it starts a fresh session in goal mode and begins working on the objective immediately, without typing `/goal` ([#13879](https://github.com/can1357/oh-my-pi/pull/13879) by [@shawnkoh](https://github.com/shawnkoh))

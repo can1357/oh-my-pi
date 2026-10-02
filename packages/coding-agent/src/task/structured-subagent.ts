@@ -44,7 +44,7 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { resolveSpawnPolicy } from "./spawn-policy";
+import { isIsolationAvailable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
 import type {
 	AgentProgress,
@@ -63,7 +63,6 @@ import {
 	cfgTaskAgentServiceTierOverrides,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableLsp,
-	cfgTaskIsolationAllowNested,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
@@ -380,18 +379,17 @@ export async function resolveEffectiveSubagentPolicy(
 			`Invalid value for \`isolated\`: expected boolean, got ${typeof request.isolation.requested}.`,
 		);
 	}
-	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
+	// Plan mode rejects affirmative isolation controls above via assertPlanControlsAllowed;
+	// isIsolationAvailable covers the remaining enabled/nested gates so schema exposure
+	// and the preflight cannot drift.
+	const isolationAvailable = isIsolationAvailable(request.session, planMode);
 	const isIsolated = request.isolation?.requested === true;
-	if (isIsolated && !isolationEnabled) {
+	if (isIsolated && !isolationAvailable) {
 		throw new StructuredSubagentError(
 			"preflight",
-			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
-		);
-	}
-	if (isIsolated && request.session.isIsolated && cfgTaskIsolationAllowNested.get(request.session.settings) !== true) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Subagent isolated execution inside an already-isolated agent requires task.isolation.allowNested to be enabled.",
+			request.session.isIsolated === true && cfgTaskIsolationEnabled.get(request.session.settings) === true
+				? "Subagent isolated execution inside an already-isolated agent requires task.isolation.allowNested to be enabled."
+				: "Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
 	}
 	return {
