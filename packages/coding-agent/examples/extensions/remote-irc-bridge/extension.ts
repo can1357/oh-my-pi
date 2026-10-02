@@ -21,7 +21,7 @@
  *   OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json omp -e examples/extensions/remote-irc-bridge/extension.ts
  */
 import type { ExtensionAPI, IrcDeliveryReceipt, IrcMessage, RemoteTransport } from "@oh-my-pi/pi-coding-agent";
-import { type BridgeMessage, encodeLine, LineDecoder, type PeerMessage, parseRoster, type Roster } from "./protocol";
+import { type BridgeMessage, LineDecoder, LineWriter, type PeerMessage, parseRoster, type Roster } from "./protocol";
 
 /** How long an outbound message waits for the peer's ack before failing the receipt. */
 const ACK_TIMEOUT_MS = 10_000;
@@ -42,15 +42,11 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 	let reconnectDelay = RECONNECT_MIN_MS;
 	let reconnectTimer: Timer | undefined;
 	const pendingAcks = new Map<string, { to: string; resolve: (receipt: IrcDeliveryReceipt) => void; timer: Timer }>();
-
-	// Lines are short JSON records on a local unix socket, so the kernel buffer absorbs them and a
-	// partial write is not handled here. A bridge carrying large bodies over a real network link
-	// must queue on `write()`'s return value and resume on `drain`.
-	const write = (message: BridgeMessage): boolean => {
-		if (!socket) return false;
-		socket.write(encodeLine(message));
-		return true;
-	};
+	// Records are queued and drained rather than written blind: a long body or a backed-up peer can
+	// make `socket.write` accept a prefix, and a truncated line would time out its ack and corrupt
+	// the next record (see LineWriter).
+	const writer = new LineWriter();
+	const write = (message: BridgeMessage): boolean => writer.write(message);
 
 	const failPendingAcks = (error: string): void => {
 		for (const pending of pendingAcks.values()) {
@@ -63,7 +59,7 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 	/** Outbound: `write agent://@<ns>/<peer>` → one JSON line → the peer's ack becomes the receipt. */
 	const transport: RemoteTransport = {
 		send(message: IrcMessage, opts): Promise<IrcDeliveryReceipt> {
-			if (!socket) {
+			if (!writer.connected) {
 				return Promise.resolve({
 					to: message.to,
 					outcome: "failed",
@@ -131,15 +127,20 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 			socket: {
 				open(connected) {
 					socket = connected;
+					writer.attach(connected);
 					reconnectDelay = RECONNECT_MIN_MS;
 					write({ type: "hello", agentId, namespace: roster?.namespace ?? "" });
 					pi.logger.info("remote-irc-bridge: connected", { socket: path });
+				},
+				drain() {
+					writer.flush();
 				},
 				data(_connected, chunk) {
 					for (const message of decoder.push(chunk)) void handlePeerMessage(message);
 				},
 				close() {
 					socket = undefined;
+					writer.detach();
 					failPendingAcks("remote-irc-bridge: peer disconnected before acking");
 					scheduleReconnect();
 				},
@@ -183,5 +184,6 @@ export default function remoteIrcBridge(pi: ExtensionAPI): void {
 		failPendingAcks("remote-irc-bridge: session shut down");
 		socket?.end();
 		socket = undefined;
+		writer.detach();
 	});
 }

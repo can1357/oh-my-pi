@@ -21,7 +21,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { type BridgeMessage, encodeLine, LineDecoder, type PeerMessage, type Roster } from "./protocol";
+import { type BridgeMessage, LineDecoder, LineWriter, type PeerMessage, type Roster } from "./protocol";
 
 const { values } = parseArgs({
 	options: {
@@ -53,13 +53,11 @@ let bridgeAgentId = "Main";
 let nextId = 1;
 /** Inbound messages sent with `expectsReply`, keyed by peer name: the next outbound to that peer is the reply. */
 const awaitingReply = new Map<string, string>();
+// Acks and inbound lines go through a drain-aware writer, like the bridge's side (see LineWriter).
+const writer = new LineWriter();
 
 const send = (message: PeerMessage): void => {
-	if (!bridge) {
-		console.log("(no omp session connected yet)");
-		return;
-	}
-	bridge.write(encodeLine(message));
+	if (!writer.write(message)) console.log("(no omp session connected yet)");
 };
 
 const handleBridgeMessage = (message: BridgeMessage): void => {
@@ -69,6 +67,22 @@ const handleBridgeMessage = (message: BridgeMessage): void => {
 			console.log(`omp session "${message.agentId}" connected; it addresses us as @${message.namespace}/<peer>`);
 			return;
 		case "outbound": {
+			// Routing is prefix-authoritative: omp forwards `write agent://@demo/<anyone>` whether or not
+			// a proxy is registered, so a target this terminal does not play must fail, not read as
+			// delivered.
+			if (!roster.peers.includes(message.toName)) {
+				console.log(`[${message.from} → ${message.to}] rejected: no such peer here`);
+				send({
+					type: "ack",
+					id: message.id,
+					receipt: {
+						to: message.to,
+						outcome: "failed",
+						error: `@${roster.namespace}/${message.toName} is not a rostered peer (${roster.peers.join(", ")})`,
+					},
+				});
+				return;
+			}
 			const replyTo = awaitingReply.get(message.toName);
 			if (replyTo) {
 				awaitingReply.delete(message.toName);
@@ -97,7 +111,6 @@ const newDecoder = (): LineDecoder<BridgeMessage> =>
 // the next session's first line.
 const decoders = new WeakMap<Bun.Socket, LineDecoder<BridgeMessage>>();
 
-// Lines are short JSON records on a local unix socket; partial writes are not handled (see extension.ts).
 Bun.listen({
 	unix: roster.socket,
 	socket: {
@@ -107,7 +120,11 @@ Bun.listen({
 				bridge.end();
 			}
 			bridge = socket;
+			writer.attach(socket);
 			decoders.set(socket, newDecoder());
+		},
+		drain(socket) {
+			if (bridge === socket) writer.flush();
 		},
 		data(socket, chunk) {
 			const decoder = decoders.get(socket);
@@ -118,6 +135,7 @@ Bun.listen({
 			decoders.delete(socket);
 			if (bridge === socket) {
 				bridge = undefined;
+				writer.detach();
 				console.log("omp session disconnected");
 			}
 		},
