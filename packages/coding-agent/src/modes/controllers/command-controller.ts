@@ -10,7 +10,16 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Loader,
+	Markdown,
+	padding,
+	Spacer,
+	Text,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -32,14 +41,15 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memor
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
-import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 import { moveDirectorySource } from "../move-directory-source";
-import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { ContextUsageView, contextUsageHead } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import type { OverlayHandle } from "@oh-my-pi/pi-tui";
+import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
@@ -96,21 +106,107 @@ function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
-	const block = new TranscriptBlock();
-	block.addChild(new DynamicBorder());
-	block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
-	block.addChild(new Spacer(1));
-	block.addChild(new Markdown(markdown.trim(), 1, 1, getMarkdownTheme()));
-	block.addChild(new DynamicBorder());
-	ctx.presentCommandOutput(block);
-}
-
 export class CommandController {
-	/** The last `/context` card mounted, reused so repeated runs never stack cards. */
-	#contextView: ContextUsageView | undefined;
+	/** The open native report sheet. */
+	#reportSheet: OverlayHandle | undefined;
+	/** The editor sat on the bottom row when the text-mode report above it opened. */
+	#reportOpenedAtBottom = false;
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
+
+	/**
+	 * Esc: take away the report shown above the editor (text mode); false when
+	 * none is shown. While open it may have pushed rows into the terminal's
+	 * scrollback that cannot come back, so an editor that sat on the bottom
+	 * row before is pinned there again instead of jumping up the screen.
+	 */
+	dismissCommandReport(): boolean {
+		if (!this.#clearReport()) return false;
+		if (this.#reportOpenedAtBottom) this.ctx.pinComposerToBottom();
+		this.#reportOpenedAtBottom = false;
+		return true;
+	}
+
+	/**
+	 * Drop any report — the one above the editor, or a focused sheet/page —
+	 * without pinning anything: the transcript or session under it was reset,
+	 * and its contents describe what is gone.
+	 */
+	clearCommandReport(): void {
+		this.#clearReport();
+		this.#closeReportSheet();
+		this.#reportOpenedAtBottom = false;
+	}
+
+	#clearReport(): boolean {
+		const docked = this.ctx.reportContainer;
+		if (docked.children.length === 0) return false;
+		docked.dispose();
+		docked.clear();
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
+	#closeReportSheet(): void {
+		const sheet = this.#reportSheet;
+		if (!sheet) return;
+		this.#reportSheet = undefined;
+		sheet.hide();
+		this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Show a read-only report, replacing the previous one. In text mode one that
+	 * fits the rows above the editor shows there like `/btw`: the editor keeps
+	 * focus and its Esc takes the report away. A taller one opens as a
+	 * full-screen page on the terminal's alternate screen, scrolled with the
+	 * arrow/page keys and the wheel, so the main screen is never touched and
+	 * Esc returns to it as it was. Natively it is a focused sheet like
+	 * `/usage`, its body scrolled by the terminal once it is long, closed by
+	 * Esc or Close.
+	 */
+	#showReport(options: { title: string; head?: TspText; body: Component }): void {
+		// A replacement keeps where the editor sat before the first report.
+		const openedAtBottom =
+			this.ctx.reportContainer.children.length > 0 ? this.#reportOpenedAtBottom : this.ctx.composerInputAtBottom();
+		this.#clearReport();
+		this.#closeReportSheet();
+		const terminal = this.ctx.ui.terminal;
+		const inline = this.ctx.commandReportRows() ?? terminal.rows;
+		let fullScreen = false;
+		const report = new ReportPanel({
+			...options,
+			closeKey: appKey(this.ctx.keybindings, "app.interrupt"),
+			onClose: () => this.#closeReportSheet(),
+			maxRows: () => (fullScreen ? terminal.rows : this.ctx.commandReportRows()),
+		});
+		if (isNativeRendering()) {
+			report.holdFocus();
+			this.#reportSheet = this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.ctx.ui.setFocus(report);
+		} else if (report.heightAt(terminal.columns) > inline) {
+			fullScreen = true;
+			report.holdFocus();
+			this.#reportSheet = this.ctx.ui.showOverlay(report, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			this.ctx.ui.setFocus(report);
+		} else {
+			this.ctx.reportContainer.addChild(report);
+			this.#reportOpenedAtBottom = openedAtBottom;
+		}
+		this.ctx.ui.requestRender();
+	}
+
+	/** A titled markdown report; see {@link #showReport}. */
+	#showMarkdownPanel(title: string, markdown: string): void {
+		this.#showReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
+	}
 
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
@@ -504,7 +600,7 @@ export class CommandController {
 	async handleAdvisorStatusCommand(): Promise<void> {
 		const stats = this.ctx.session.getAdvisorStats();
 		if (!stats.configured) {
-			this.ctx.presentCommandOutput([new Spacer(1), new Text("Advisor is disabled.", 1, 0)]);
+			this.#showReport({ title: "Advisor Status", body: new Text("Advisor is disabled.", 0, 0) });
 			return;
 		}
 		// Fetch live quota data (cached 5 min by the auth-gateway) so we can show
@@ -527,7 +623,7 @@ export class CommandController {
 		// none are live (all paused/no-model). The old code returned a generic
 		// message that hid the per-advisor state the user needs to act on.
 		if (stats.advisors.length > 1 || (stats.configured && !stats.active)) {
-			let info = `${theme.bold("Advisor Status")} (${stats.advisors.length} advisors)\n`;
+			let info = "";
 			for (const a of stats.advisors) {
 				const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
 				const label = CommandController.#advisorStatusLabel[a.status] ?? a.status;
@@ -568,12 +664,15 @@ export class CommandController {
 				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
 				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
 			}
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+			this.#showReport({
+				title: `Advisor Status (${stats.advisors.length} advisors)`,
+				body: new Text(info.trim(), 0, 0),
+			});
 			return;
 		}
 		// Single active advisor — detailed view.
 		const model = stats.model;
-		let info = `${theme.bold("Advisor Status")}\n\n`;
+		let info = "";
 		if (stats.advisors.length === 1) {
 			const a = stats.advisors[0];
 			const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
@@ -615,7 +714,7 @@ export class CommandController {
 			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
 		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+		this.#showReport({ title: "Advisor Status", body: new Text(info.trim(), 0, 0) });
 	}
 
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
@@ -713,19 +812,13 @@ export class CommandController {
 				? ""
 				: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
 
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme()));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		this.#showMarkdownPanel(title, changelogMarkdown + hint);
 	}
 
 	handleHotkeysCommand(): void {
 		const bindings = { keybindings: this.ctx.keybindings };
 		if (isNativeRendering()) {
-			// A native terminal gets a dismissable sheet with keycaps instead of a transcript table.
+			// A native terminal gets a dismissable sheet with keycaps instead of a markdown table.
 			const sheet = new HotkeysSheetComponent(bindings, () => {
 				handle.hide();
 				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
@@ -736,7 +829,7 @@ export class CommandController {
 			this.ctx.ui.requestRender();
 			return;
 		}
-		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
+		this.#showMarkdownPanel("Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
 	}
 
 	handleToolsCommand(): void {
@@ -744,7 +837,7 @@ export class CommandController {
 			tools: this.ctx.session.agent.state.tools,
 			xdevTools: this.ctx.session.getXdevToolEntries(),
 		});
-		showMarkdownPanel(this.ctx, "Available Tools", tools);
+		this.#showMarkdownPanel("Available Tools", tools);
 	}
 
 	handleContextCommand(): void {
@@ -753,25 +846,12 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		const chat = this.ctx.chatContainer;
-		const prev = this.#contextView;
-		// Identity check: a handle left over from a cleared/switched transcript is ignored.
-		if (prev && chat.children.includes(prev) && chat.canRemoveBlock(prev)) {
-			if (chat.children.at(-1) === prev) {
-				prev.setBreakdown(breakdown);
-				this.ctx.ui.requestRender();
-				return;
-			}
-			chat.removeChild(prev);
-		}
-		const view = new ContextUsageView(breakdown, theme);
-		this.ctx.presentCommandOutput(view);
-		this.#contextView = view;
-	}
-
-	/** Forget the tracked `/context` card (the transcript it lived in was reset). */
-	resetContextView(): void {
-		this.#contextView = undefined;
+		// Natively the body is `/context`'s own card (meters, legend, compaction mark).
+		this.#showReport({
+			title: "Context Usage",
+			head: contextUsageHead(breakdown),
+			body: new ContextUsageView(breakdown, theme),
+		});
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -786,13 +866,7 @@ export class CommandController {
 				this.ctx.showWarning("Memory payload is empty (memory backend off, disabled, or no memory available).");
 				return;
 			}
-			const block = new TranscriptBlock();
-			block.addChild(new DynamicBorder());
-			block.addChild(new Text(theme.bold(theme.fg("accent", "Memory Injection Payload")), 1, 0));
-			block.addChild(new Spacer(1));
-			block.addChild(new Markdown(payload, 1, 1, getMarkdownTheme()));
-			block.addChild(new DynamicBorder());
-			this.ctx.presentCommandOutput(block);
+			this.#showMarkdownPanel("Memory Injection Payload", payload);
 			return;
 		}
 
@@ -827,7 +901,7 @@ export class CommandController {
 					this.ctx.showWarning(`Memory queue is not available for the ${backend.id} backend.`);
 					return;
 				}
-				showMarkdownPanel(this.ctx, "Memory Queue", payload);
+				this.#showMarkdownPanel("Memory Queue", payload);
 			} catch (error) {
 				this.ctx.showError(`Memory queue failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -852,7 +926,7 @@ export class CommandController {
 					this.ctx.showWarning(memoryStatsUnavailableMessage(backend.id, action));
 					return;
 				}
-				showMarkdownPanel(this.ctx, `Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
+				this.#showMarkdownPanel(`Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
 			} catch (error) {
 				this.ctx.showError(`Memory ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -928,7 +1002,7 @@ export class CommandController {
 				.slice()
 				.sort((a, b) => a.id.localeCompare(b.id))
 				.map(summarizeMentalModel);
-			showMarkdownPanel(this.ctx, `Mental Models — ${state.bankId}`, lines.join("\n"));
+			this.#showMarkdownPanel(`Mental Models — ${state.bankId}`, lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`mm list failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -945,11 +1019,7 @@ export class CommandController {
 			const refreshed = model.last_refreshed_at ? `\n_last refreshed: ${model.last_refreshed_at}_` : "";
 			const sourceQuery = model.source_query ? `\n\n**Source query:** ${model.source_query}` : "";
 			const content = (model.content ?? "_(empty — background reflect may still be running)_").trim();
-			showMarkdownPanel(
-				this.ctx,
-				model.name,
-				`**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`,
-			);
+			this.#showMarkdownPanel(model.name, `**id:** \`${model.id}\`${tags}${refreshed}${sourceQuery}\n\n${content}`);
 		} catch (error) {
 			this.ctx.showError(`mm show failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -1036,7 +1106,7 @@ export class CommandController {
 				const diff = diffMentalModelContent(before, after);
 				sections.push(`### ${history[i].changed_at}\n\n\`\`\`diff\n${diff}\n\`\`\``);
 			}
-			showMarkdownPanel(this.ctx, `History — ${model.name}`, sections.join("\n\n"));
+			this.#showMarkdownPanel(`History — ${model.name}`, sections.join("\n\n"));
 		} catch (error) {
 			this.ctx.showError(`mm history failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
