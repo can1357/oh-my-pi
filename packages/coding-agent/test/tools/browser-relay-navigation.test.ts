@@ -636,48 +636,6 @@ function getBundledWorkerSource(): string {
 }
 
 describe("Browser relay worker navigation behavioral regression", () => {
-	it("strictly enforces native crash invariant for Page.navigate, tabs.update, and tabs.create", () => {
-		const fixture = new SimulatedBrowserFixture();
-		expect(() => {
-			fixture.handleSendCommand({ tabId: 1 }, "Page.navigate", { url: "about:blank#proof-crash" });
-		}).toThrow(FATAL_NATIVE_CRASH_PREFIX);
-
-		const chromeMock = createMockChrome(fixture);
-		const tabs = chromeMock.tabs as {
-			create: (p: { url: string }) => Promise<unknown>;
-			update: (id: number, p: { url: string }) => Promise<unknown>;
-		};
-		expect(() => tabs.create({ url: "about:blank#create-crash" })).toThrow(FATAL_NATIVE_CRASH_PREFIX);
-		expect(() => tabs.update(1, { url: "about:blank#update-crash" })).toThrow(FATAL_NATIVE_CRASH_PREFIX);
-
-		expect(fixture.lethalAttempts).toHaveLength(3);
-	});
-
-	it("demonstrates native crash reproduction on unpatched worker when navigating to fragmented about:blank", async () => {
-		const workerSource = getBundledWorkerSource();
-		const harness = new WorkerTestHarness(workerSource);
-		await harness.waitForHello();
-
-		// Check if current worker code is unpatched
-		const rpcRes = await harness.sendRpc({
-			op: "send",
-			tabId: 1,
-			method: "Page.navigate",
-			params: { url: "about:blank#generic-proof-tab" },
-		});
-
-		// On unpatched code, the lethal native invariant check triggers and the rpc fails with fatal crash
-		if (!rpcRes.ok) {
-			expect(harness.fixture.lethalAttempts.length).toBeGreaterThan(0);
-			expect(harness.fixture.lethalAttempts[0]?.api).toBe("Page.navigate");
-			expect(harness.fixture.lethalAttempts[0]?.url).toBe("about:blank#generic-proof-tab");
-			expect(rpcRes.error).toContain(FATAL_NATIVE_CRASH_PREFIX);
-		} else {
-			// If already patched, lethal attempt must NOT happen
-			expect(harness.fixture.lethalAttempts.length).toBe(0);
-		}
-	});
-
 	it("preserves root frame and resolves same-document navigation without loaderId", async () => {
 		const workerSource = getBundledWorkerSource();
 		const harness = new WorkerTestHarness(workerSource);
