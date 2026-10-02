@@ -296,6 +296,10 @@ selection, even when the runtime `promptCache` is omitted: the actual effective
 model's catalog defaults apply instead of the YAML lifetime. Without a runtime
 replacement, the matching YAML lifetime applies, or catalog defaults if absent.
 
+The ordinary `bun run gen:models` command recomputes bundled prompt-cache
+lifetimes from current catalog policy; there is no separate cache-regeneration
+command.
+
 Direct Anthropic keeps its existing 5 min / 1 h lifetimes (`short: 300`, `long: 3600`),
 defaulting to 5 min for API keys and 1 h for OAuth subscriber sessions; API keys can
 explicitly select `long`. Claude on native Amazon Bedrock Converse has a 5 min TTL; 1 h is
@@ -404,10 +408,14 @@ If every metadata route is unavailable, discovery falls back to the OpenAI-compa
 
 `openai-models-list` reads `{baseUrl}/v1/models` by default (without adding a second `/v1`).
 `discovery.injectV1: false` treats the configured URL as the complete API root. Reported
-`max_model_len` wins over `context_length`; silent endpoints can inherit bundled-reference limits,
-reasoning, and input modalities, with 128,000 context and 32,768 output as generic chat defaults.
-Output caps are bounded by the discovered context; Anthropic-routed models use an 8,192-token
-fallback output cap.
+`max_model_len` wins over `context_length`. If both are absent, nested
+`limits.max_input_tokens` and `limits.max_output_tokens` supply their sum as context only when both
+are positive safe integers and the sum is safe. A valid `max_output_tokens` independently sets the
+chat output cap, clamped to the resolved context; an incomplete or invalid context pair does not
+discard a valid output limit. Otherwise, context follows the existing native/reference/default fallback.
+Silent endpoints can inherit bundled-reference limits, reasoning, and input modalities; unknown models
+use 128,000 context and 32,768 output as generic chat defaults. Output caps are bounded by the resolved context;
+Anthropic-routed models use an 8,192-token fallback output cap.
 
 A row advertising only image output becomes an image-generation runner; embedding-only output
 becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
@@ -652,7 +660,9 @@ Related settings:
 - `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`
-accept exact selectors, globs, and fuzzy matches.
+accept exact selectors, globs, and fuzzy matches. The resulting scope restricts chat models only
+(Ctrl+P cycling, the startup model, chat roles in `/model`); judge, search, image, and speech
+models stay available for their roles, so entries naming them are accepted but have no effect.
 
 `enabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
 

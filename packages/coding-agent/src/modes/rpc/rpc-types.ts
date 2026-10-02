@@ -17,6 +17,8 @@ import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
+import type { GoalModeState } from "../../goals/state";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -43,6 +45,13 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| {
+			id?: string;
+			type: "goal";
+			op: RpcGoalOp;
+			objective?: string;
+			token_budget?: number;
+	  }
 	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
@@ -92,6 +101,7 @@ export type RpcCommand =
 	| { id?: string; type: "export_html"; outputPath?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "branch"; entryId: string }
+	| { id?: string; type: "fork"; entryId?: string }
 	| { id?: string; type: "get_branch_messages" }
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
@@ -151,6 +161,8 @@ export interface RpcSessionState {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Current goal-mode state; `null` when the session has no goal. */
+	goal: GoalModeState | null;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -302,6 +314,7 @@ export type RpcResponse =
 			success: true;
 			data: { enabled: boolean; active: boolean };
 	  }
+	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
 	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
 	| {
 			id?: string;
@@ -429,6 +442,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "branch"; success: true; data: { text: string; cancelled: boolean } }
+	| { id?: string; type: "response"; command: "fork"; success: true; data: { cancelled: boolean } }
 	| {
 			id?: string;
 			type: "response";

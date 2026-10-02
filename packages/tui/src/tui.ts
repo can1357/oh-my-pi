@@ -244,6 +244,10 @@ export interface Component {
 	 */
 	render(width: number): readonly string[];
 
+	/** Inline decision panels must keep displaced settled transcript rows in
+	 * native scrollback even when mounted inside a transient editor container. */
+	readonly retireDisplacedTranscript?: boolean;
+
 	/**
 	 * Describe the component semantically for a Tern Surface Protocol
 	 * terminal (see `native/node.ts`). Called instead of `render()` when the

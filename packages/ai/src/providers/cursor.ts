@@ -5341,7 +5341,9 @@ export function processInteractionUpdate(
  * summed 22 against a final 36 — and never report input, cache, or reasoning
  * tokens, so every bucket the final frame reports replaces the streamed
  * estimate. Unreported counters decode as `undefined`; a frame that reports
- * nothing at all leaves the streamed totals untouched.
+ * nothing at all leaves the streamed totals untouched. `inputTokens` counts the
+ * whole prompt, cache hits and writes included, so fresh input is what remains
+ * after both are taken out.
  */
 function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	const input = Number(update.inputTokens ?? 0n);
@@ -5350,7 +5352,7 @@ function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	const cacheWrite = Number(update.cacheWriteTokens ?? 0n);
 	const reasoning = Number(update.reasoningTokens ?? 0n);
 	if (input <= 0 && output <= 0 && cacheRead <= 0 && cacheWrite <= 0) return;
-	if (input > 0) usage.input = input;
+	if (input > 0) usage.input = Math.max(input - cacheRead - cacheWrite, 0);
 	if (output > 0) usage.output = output;
 	if (cacheRead > 0) usage.cacheRead = cacheRead;
 	if (cacheWrite > 0) usage.cacheWrite = cacheWrite;

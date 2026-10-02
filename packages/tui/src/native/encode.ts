@@ -169,6 +169,8 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
+	// `value` varies by control (boolean, number, string, string[], null): the handler checks it.
+	change: { id: "string", item: "string" },
 	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
 	focus: { id: "string" },
 	error: { msg: "string" },

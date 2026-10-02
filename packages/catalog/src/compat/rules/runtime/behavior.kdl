@@ -172,7 +172,7 @@ behavior {
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
-		exact="grok-imagine-video" exact="grok-imagine-video-1.5" prefix="grok-stt-" prefix="grok-voice-"
+		prefix="grok-imagine-video" prefix="grok-stt-" prefix="grok-voice-"
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
@@ -356,6 +356,16 @@ behavior {
 	// xai equivalent, so the exact-id price mirror misses them.
 	pricing-peer provider="xai-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
+	}
+	// Token Plan rows report zero cost upstream; like the Antigravity and
+	// SuperGrok rules above, they show the pay-as-you-go equivalent (Credits
+	// overflow is billed at the PAYG list price). MiniMax-M3.1-Flash-Preview has
+	// no published price and borrows the MiniMax-M3 rate as an estimate.
+	pricing-peer provider="minimax-code" peers="minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
+	}
+	pricing-peer provider="minimax-code-cn" peers="minimax-cn" "minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
 	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"

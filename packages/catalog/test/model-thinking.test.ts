@@ -806,7 +806,7 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
-	it("keeps Sonnet 5.5 binding controls off Vertex, which rejects thinking.block_binding", () => {
+	it("keeps Sonnet 5.5 binding controls and per-message effort off Vertex, which rejects both", () => {
 		const direct = createModel({ id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" });
 		const vertex = createModel({
 			id: "claude-sonnet-5-5@default",
@@ -815,8 +815,19 @@ describe("model thinking derivation", () => {
 		});
 
 		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
-		expect(vertex.compat.supportsPerMessageEffort).toBe(true);
+		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+	});
+
+	it("keeps per-message effort off every Vertex Claude line that takes it on the Claude API", () => {
+		for (const id of ["claude-fable-5-1", "claude-opus-5"]) {
+			const direct = createModel({ id, api: "anthropic-messages", provider: "anthropic" });
+			const vertex = createModel({ id: `${id}@default`, api: "anthropic-messages", provider: "google-vertex" });
+
+			expect(direct.compat.supportsPerMessageEffort).toBe(true);
+			expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+		}
 	});
 
 	it("uses Bedrock Fable 5.1's five supported effort levels", () => {

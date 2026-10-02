@@ -1057,13 +1057,7 @@ describe("runEvalAgent isolation", () => {
 
 	function mockIsolationContext(): { repoRoot: string } {
 		const repoRoot = "/repo-root";
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-			repoRoot,
-			baseline: {
-				root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
-				nested: [],
-			},
-		});
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot });
 		return { repoRoot };
 	}
 
