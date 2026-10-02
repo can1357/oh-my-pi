@@ -24,13 +24,16 @@ export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
 	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
-	| { op: "createTab"; url: string }
+	/** Create a tab; when `group` is set, the extension moves it into that per-window group in the same RPC. */
+	| { op: "createTab"; url: string; group?: { title: string; color: string } }
 	| { op: "removeTab"; tabId: number }
 	| { op: "activateTab"; tabId: number }
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */
 	| { op: "group"; tabIds: number[]; title: string; color: string }
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
-	| { op: "ungroup"; tabIds: number[] };
+	| { op: "ungroup"; tabIds: number[] }
+	/** Flip the tab's omp group title between "⏳omp" (driving) and "✅omp" (burst finished). */
+	| { op: "setBusy"; tabId: number; busy: boolean };
 
 /** Messages sent relay → extension. */
 export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };

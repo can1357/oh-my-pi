@@ -2,11 +2,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- omp tabs are now created in the background (`active: false`, `autoDiscardable: false`): opening one never switches your visible tab, and Chrome's memory saver cannot discard an idle agent tab.
+- The omp tab group is now sticky and all-or-nothing: membership follows the tab's lifetime, not the driving session's. Releasing a tab or losing the relay connection no longer ungroups (previously the group was dissolved on disconnect while its tabs stayed behind); the group shrinks only as tabs close or are dragged out by hand.
+- Group matching now recognizes every title form (busy "⏳omp" / done "✅omp"), so concurrent sessions converge on the single omp group per window instead of minting parallel ones whenever the title was mid-rename; duplicate omp groups are folded into the first.
+
 ## [18.3.1] - 2026-09-25
 
 ### Fixed
 
 - Fixed browser relay support when multiple browser instances, such as Chrome and Edge, are connected simultaneously, ensuring tabs and relay requests remain associated with the correct browser while preserving single-browser compatibility for extensions without an instance identifier.
+### Added
+
+- 0.2.3: group title marks move to the front and gain a done state — "⏳omp" while driving, "✅omp" once the burst ends (plain "omp" again on release). In-page affordances (busy frame, virtual cursor, ripple, element outline) now use Chrome's own tab-group cyan (#007b83 light / #78d9ec dark) per color-scheme instead of orange.
+- Busy affordances matching Claude in Chrome: the extension now pins a small "⏳" badge on the toolbar icon of the exact tab being driven (complementing the existing "⏳" group-title suffix), while the CLI's tab worker pulses a frame along all four viewport edges of the page and glides a virtual cursor between interaction points for the whole duration of a driving burst.
+
 
 ## [18.0.7] - 2026-08-26
 
