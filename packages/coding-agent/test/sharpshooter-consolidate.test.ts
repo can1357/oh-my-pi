@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -257,6 +258,103 @@ describe("runSharpshooterConsolidation", () => {
 		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
 		expect(state.lastConsolidatedAt).toBeGreaterThan(0);
 		expect(state.lastError).toBeUndefined();
+	});
+
+	it("refuses a reply that returns only some of the files and keeps its deltas", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-partial-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const listed = await listSharpshooterDeltas(harness.agentDir, harness.cwd);
+		const listedFiles = listed.flatMap(group => group.deltas.map(item => item.file));
+		const bankDir = sharpshooterBankDir(harness.agentDir, harness.cwd);
+		await Bun.write(path.join(bankDir, "product.md"), "old product");
+		await Bun.write(path.join(bankDir, "style.md"), "old style");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			completion([{ name: "architecture.md", content: "new architecture" }]),
+		);
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		// Writing the returned file and consuming every delta would lose any decision
+		// meant for product.md or style.md, with nothing recording that it existed.
+		expect(result.ran).toBe(false);
+		expect(result.error).toContain("product.md, style.md");
+		expect(await Bun.file(path.join(bankDir, "architecture.md")).exists()).toBe(false);
+		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
+		expect(await Bun.file(path.join(bankDir, "style.md")).text()).toBe("old style");
+		for (const file of listedFiles) expect(await Bun.file(file).exists()).toBe(true);
+	});
+
+	it("aborts when an existing memory file cannot be read", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-unreadable-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const bankDir = sharpshooterBankDir(harness.agentDir, harness.cwd);
+		await Bun.write(path.join(bankDir, "architecture.md"), "old architecture");
+		// A directory fails the read with EISDIR for any user, where mode 000 is
+		// readable as root and on a runner holding CAP_DAC_OVERRIDE.
+		await fs.mkdir(path.join(bankDir, "product.md"), { recursive: true });
+		// A complete reply, so only the read error can end this run. An incomplete one
+		// would also mention product.md and the assertions would pass either way.
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(completion(completeFiles));
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		expect(result.ran).toBe(false);
+		expect(result.reason).toBe("error");
+		expect(result.error).toContain("cannot read product.md");
+		// The read precedes the model call, so an abort here costs no tokens.
+		expect(completeSpy).not.toHaveBeenCalled();
+		expect(await Bun.file(path.join(bankDir, "architecture.md")).text()).toBe("old architecture");
+	});
+
+	it("refuses an incomplete reply even when it empties a file that still has content", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-partial-wipe-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const listed = await listSharpshooterDeltas(harness.agentDir, harness.cwd);
+		const listedFiles = listed.flatMap(group => group.deltas.map(item => item.file));
+		const bankDir = sharpshooterBankDir(harness.agentDir, harness.cwd);
+		await Bun.write(path.join(bankDir, "architecture.md"), "old architecture");
+		await Bun.write(path.join(bankDir, "product.md"), "old product");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			completion([
+				{ name: "architecture.md", content: "" },
+				{ name: "product.md", content: "kept product" },
+			]),
+		);
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		expect(result.ran).toBe(false);
+		expect(result.error).toContain("style.md");
+		// Nothing written, nothing consumed: the next cycle gets another attempt.
+		expect(await Bun.file(path.join(bankDir, "architecture.md")).text()).toBe("old architecture");
+		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
+		for (const file of listedFiles) expect(await Bun.file(file).exists()).toBe(true);
+		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
+		expect(state.lastError?.message).toContain("style.md");
+	});
+
+	it("still lets a complete reply empty one file", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-complete-empty-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const bankDir = sharpshooterBankDir(harness.agentDir, harness.cwd);
+		await Bun.write(path.join(bankDir, "style.md"), "old style");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			completion([
+				{ name: "architecture.md", content: "new architecture" },
+				{ name: "product.md", content: "new product" },
+				{ name: "style.md", content: "" },
+			]),
+		);
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		// A reply that considered all three may empty one; the admission law allows it.
+		expect(result.ran).toBe(true);
+		expect(await Bun.file(path.join(bankDir, "style.md")).text()).toBe("");
 	});
 });
 

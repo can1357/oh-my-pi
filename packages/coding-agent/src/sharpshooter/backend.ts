@@ -1,10 +1,20 @@
 import { rm } from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { MemoryBackend, MemoryBackendSearchItem, MemoryBackendStatus } from "../memory-backend/types";
+import type {
+	MemoryBackend,
+	MemoryBackendSearchItem,
+	MemoryBackendStartOptions,
+	MemoryBackendStatus,
+} from "../memory-backend/types";
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
 import { runSharpshooterConsolidation } from "./consolidate";
-import { maybeStartSharpshooterExtraction, resolveSharpshooterModel } from "./extract";
+import {
+	clearPendingSharpshooterExtraction,
+	maybeStartSharpshooterExtraction,
+	resolveSharpshooterModel,
+	takePendingSharpshooterQueue,
+} from "./extract";
 import {
 	readSharpshooterState,
 	sharpshooterBankDir,
@@ -39,6 +49,11 @@ interface SharpshooterAgentSession extends AgentSession {
 /** Release session-owned extraction and scheduler subscriptions. */
 export function releaseSharpshooterSession(session: AgentSession): void {
 	const ownedSession = session as SharpshooterAgentSession;
+	// Before the no-resources return: queued prompts belong to the pairing being
+	// released, so a release that has nothing left to unsubscribe still has to
+	// drop them. Otherwise the in-flight extraction's `finally` retries a prompt
+	// for a session whose pairing is gone (e.g. `sharpshooter.enabled` off here).
+	clearPendingSharpshooterExtraction(session);
 	const resources = ownedSession[kSharpshooterSessionResources];
 	if (!resources) return;
 	delete ownedSession[kSharpshooterSessionResources];
@@ -74,46 +89,85 @@ function formatTimestamp(timestamp: number | undefined): string {
 	return timestamp ? new Date(timestamp).toISOString() : "never";
 }
 
+/**
+ * Install this session's Sharpshooter resources, replacing any it already has.
+ *
+ * `options.reason` decides the catch-up. At startup the backend can race the
+ * first turn's events (print mode submits while `resolveMemoryBackend` is still
+ * importing us), so a transcript already ending in a user prompt has to be
+ * caught up or that prompt is never extracted.
+ *
+ * A cwd rebind is the other reason, and there the catch-up is wrong: after
+ * `/move` the newest transcript entry is still the source project's prompt, so
+ * catching up would extract it against the destination and file a decision the
+ * destination never earned. An interrupted or failed turn is enough to leave the
+ * transcript in exactly that shape. Every path a move can take to `start` -- the
+ * paired leg, a full re-apply, the nested apply a backend-changing move runs
+ * through `rebuildPrimaryStateOnScopeChange` -- therefore carries `"rebind"`.
+ */
+function installSharpshooterSession(options: MemoryBackendStartOptions): void {
+	if (options.taskDepth > 0) return;
+	const catchUpOnLatestPrompt = options.reason !== "rebind";
+	const { session, settings, modelRegistry, agentDir } = options;
+	try {
+		// Pairing-disabled release keeps the destructive clear: with no pairing
+		// left, a retry would extract a prompt for a project this session no
+		// longer pairs with. A leg restart that keeps pairing (a `/move` into a
+		// paired project, or a backend switch) is the other case, and there the
+		// clear loses prompts outright: the new leg cancels the catch-up for a
+		// rebind, so nothing re-enrolls a prompt that only ever reached the
+		// queue. Take that queue across the release and hand it to the new leg
+		// below.
+		const carried = takePendingSharpshooterQueue(session);
+		releaseSharpshooterSession(session);
+		const disposeScheduler = startSharpshooterScheduler({
+			agentDir,
+			cwd: settings.getCwd(),
+			settings,
+			modelRegistry,
+			sessionId: session.sessionId,
+		});
+		try {
+			const unsubscribe = session.subscribe(event => {
+				// message_start is the only event that carries the committed user
+				// prompt itself (agent_start fires before the transcript appends),
+				// and it also covers mid-turn steering prompts.
+				if (event.type !== "message_start" || event.message.role !== "user") return;
+				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: event.message });
+			});
+			const latest = session.messages.at(-1);
+			if (catchUpOnLatestPrompt && latest?.role === "user") {
+				// Pin the message the guard just accepted. The catch-up can be
+				// queued behind an in-flight extraction, and a drain that re-read
+				// the transcript then would extract whichever prompt landed since.
+				maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: latest });
+			}
+			(session as SharpshooterAgentSession)[kSharpshooterSessionResources] = {
+				unsubscribe,
+				disposeScheduler,
+			};
+			// After the resources: a carried prompt that re-queues (the slot its
+			// predecessor held is still busy) must land on a leg that can drain
+			// it. Each item re-enters the normal guard with the project it was
+			// dropped in, so enrollment at slot acquisition leaves nothing to
+			// double-extract.
+			for (const pending of carried) {
+				maybeStartSharpshooterExtraction(pending.options, pending.cwd);
+			}
+		} catch (error) {
+			disposeScheduler();
+			throw error;
+		}
+	} catch (error) {
+		logger.warn("Sharpshooter: backend startup failed; memory backend inert.", { error: String(error) });
+	}
+}
+
 export const sharpshooterBackend: MemoryBackend = {
 	id: "sharpshooter",
 
 	start(options): void {
-		if (options.taskDepth > 0) return;
-		const { session, settings, modelRegistry, agentDir } = options;
-		try {
-			releaseSharpshooterSession(session);
-			const disposeScheduler = startSharpshooterScheduler({
-				agentDir,
-				cwd: settings.getCwd(),
-				settings,
-				modelRegistry,
-				sessionId: session.sessionId,
-			});
-			try {
-				const unsubscribe = session.subscribe(event => {
-					// message_start is the only event that carries the committed user
-					// prompt itself (agent_start fires before the transcript appends),
-					// and it also covers mid-turn steering prompts.
-					if (event.type !== "message_start" || event.message.role !== "user") return;
-					maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir, message: event.message });
-				});
-				// Backend startup can race the first turn's events (print mode
-				// submits while resolveMemoryBackend is still importing us).
-				// Catch up when the newest transcript message is already a user prompt.
-				if (session.messages.at(-1)?.role === "user") {
-					maybeStartSharpshooterExtraction({ session, settings, modelRegistry, agentDir });
-				}
-				(session as SharpshooterAgentSession)[kSharpshooterSessionResources] = {
-					unsubscribe,
-					disposeScheduler,
-				};
-			} catch (error) {
-				disposeScheduler();
-				throw error;
-			}
-		} catch (error) {
-			logger.warn("Sharpshooter: backend startup failed; memory backend inert.", { error: String(error) });
-		}
+		installSharpshooterSession(options);
 	},
 
 	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {

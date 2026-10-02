@@ -27,3 +27,15 @@ export const cfgSharpshooterInjectionTokenLimit = register({
 	type: "number",
 	default: 15000,
 });
+
+export const cfgSharpshooterEnabled = register({
+	id: "sharpshooter.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "memory",
+		group: "Sharpshooter",
+		label: "Run Sharpshooter Alongside",
+		description: "Also run Sharpshooter next to the selected memory backend",
+	},
+});
