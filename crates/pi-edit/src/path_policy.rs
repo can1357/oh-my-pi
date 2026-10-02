@@ -984,6 +984,9 @@ mod tests {
 		);
 	}
 
+	// POSIX paths have no prefix component, so `\\?\C:\…` is an ordinary
+	// relative path there and the strip is correctly a no-op.
+	#[cfg(windows)]
 	#[test]
 	fn strips_verbatim_prefix_from_windows_paths() {
 		assert_eq!(

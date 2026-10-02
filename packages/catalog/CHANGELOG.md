@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed the bundled xai-oauth catalog drifting from its curated seed: the live `grok-imagine-video-1.5-lite` runner is now tracked in the seed, so the bundle/seed regression test passes on clean regens.
-
 ## [18.4.11] - 2026-10-02
 
 ### Fixed
