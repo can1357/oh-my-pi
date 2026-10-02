@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
+import { getSessionOwnersDir } from "@oh-my-pi/pi-utils/dirs";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import { type FileLockHandle, tryAcquireFileLock, withFileLockSync } from "@oh-my-pi/pi-utils/file-lock";
 import { type FsError, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { openCloexecSync } from "@oh-my-pi/pi-utils/fs-open";
@@ -10,7 +13,12 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { isAssistantMessageLine } from "./session-entries";
-import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import {
+	overlayTitleSlotContent,
+	parseTitleSlotFromContent,
+	type SessionTitleUpdate,
+	serializeTitleSlot,
+} from "./session-title-slot";
 
 /** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
@@ -170,13 +178,16 @@ export interface SessionStorage {
 	 */
 	withSessionFileLockSync?<T>(sessionPath: string, operation: () => T): T;
 	/**
-	 * Claim this process's ownership of a session file it writes, until the
-	 * returned release callback runs. Returns `null` while another live process
-	 * holds the claim; `SessionManager` then moves its session to a sibling
-	 * instead of writing that file. Optional because only backends with a
-	 * process-owned lock can tell that another process writes a session.
+	 * Claim this process's ownership of the session `sessionId` it writes to
+	 * `sessionPath`, until the returned release callback runs. Returns `null`
+	 * while another live process holds the claim, or when `sessionPath` now
+	 * holds a different session (another session was moved onto it), so the
+	 * caller's appends would land in that session's journal; `SessionManager`
+	 * then moves its session to a sibling instead of writing that file.
+	 * Optional because only backends with a process-owned lock can tell that
+	 * another process writes a session.
 	 */
-	claimSessionFile?(sessionPath: string): (() => void) | null;
+	claimSession?(sessionId: string, sessionPath: string): (() => void) | null;
 	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
@@ -451,20 +462,103 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * This process's ownership leases, shared by every `FileSessionStorage`
- * instance: managers in one process share one lease per session file and only
- * ever contend with other processes. The OS reclaims a lease when its process
- * exits, so a crashed owner never blocks a later claim.
+ * This process's ownership leases by session id, shared by every
+ * `FileSessionStorage` instance: managers in one process share one lease per
+ * session and only ever contend with other processes. The OS reclaims a lease
+ * when its process exits, so a crashed owner never blocks a later claim.
  */
-const sessionFileLeases = new Map<string, { lease: FileLockHandle; holders: number }>();
+const sessionLeases = new Map<string, { lease: FileLockHandle; holders: number }>();
+
+const TEST_SESSION_OWNERS_DIR_ENV = "PI_TEST_SESSION_OWNERS_DIR";
 
 /**
- * Lock name of a session file's ownership lease: a process writing the session
- * holds it (see `FileSessionStorage.claimSessionFile`) until it exits.
+ * A test run never touches the real state dir for session ownership leases:
+ * bun test processes use one per-user directory in the OS temp dir. It is
+ * exported when this module loads, before a test can spawn an omp process,
+ * so spawned processes meet the same leases. Session ids are unique, so
+ * concurrent test processes can share it, and it is reused across runs (bun
+ * test fires no exit hook to remove it).
  */
-export function sessionOwnerLeasePath(sessionPath: string): string {
-	const resolved = path.resolve(sessionPath);
-	return path.join(path.dirname(resolved), `.${path.basename(resolved)}.owner`);
+function testSessionOwnersDir(): string | undefined {
+	const exported = process.env[TEST_SESSION_OWNERS_DIR_ENV];
+	if (exported || !isBunTestRuntime()) return exported;
+	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+	const dir = path.join(os.tmpdir(), `omp-test-session-owners-${uid}`);
+	process.env[TEST_SESSION_OWNERS_DIR_ENV] = dir;
+	return dir;
+}
+testSessionOwnersDir();
+
+function sessionOwnersDir(): string {
+	return testSessionOwnersDir() ?? getSessionOwnersDir();
+}
+
+/** Bytes read to find a header at claim time: the title slot plus a header line fit well inside. */
+const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
+
+/**
+ * The session id in the header of the file at `sessionPath`, read
+ * synchronously from a bounded prefix (past the title slot), or `undefined`
+ * when there is no readable file or no header in that prefix.
+ */
+function readSessionHeaderIdSync(sessionPath: string): string | undefined {
+	let prefix: string;
+	try {
+		const fd = fs.openSync(sessionPath, "r");
+		try {
+			const buf = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
+			prefix = buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
+	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
+	const end = prefix.indexOf("\n");
+	if (end === -1) return undefined;
+	try {
+		const entry: unknown = JSON.parse(prefix.slice(0, end));
+		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
+			return typeof entry.id === "string" ? entry.id : undefined;
+		}
+	} catch {}
+	return undefined;
+}
+
+/**
+ * Take a session's ownership lease without waiting, or `null` while another
+ * process holds it. A process writing the session holds it (see
+ * `FileSessionStorage.claimSession`) until it exits; `omp gc` probes it to tell
+ * whether a session is live. Keyed by the session id from the journal's
+ * header, not by the file's path, so every process that reaches the journal
+ * (through a symlink, a hard link, or after a move) meets the same lease. Ids
+ * read from a file are untrusted: anything but a plain token is hashed so it
+ * cannot name a path outside the directory. Throws when the lock cannot be
+ * probed.
+ */
+export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null {
+	const name = /^[A-Za-z0-9_-]{1,128}$/.test(sessionId)
+		? sessionId
+		: `h-${Bun.hash.wyhash(sessionId).toString(16).padStart(16, "0")}`;
+	const lockPath = path.join(sessionOwnersDir(), name);
+	// Linux (abstract socket) and Windows (named mutex) locks never touch the
+	// filesystem; elsewhere the lock is a `flock` sidecar in that directory. The
+	// sidecars are empty and never removed: unlinking a flock file can split one
+	// lease between a holder of the old inode and a creator of a new one.
+	if (process.platform !== "linux" && process.platform !== "win32") {
+		const dir = path.dirname(lockPath);
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		// The test-run dir sits in the shared OS temp dir, where another local
+		// user could pre-create it or plant a symlink: refuse anything but a
+		// directory this user owns that nobody else can enter.
+		const st = fs.lstatSync(dir);
+		const uid = process.getuid?.();
+		if (!st.isDirectory() || (uid !== undefined && st.uid !== uid) || (st.mode & 0o077) !== 0) {
+			throw new Error(`Session ownership lease directory ${dir} is not a private directory owned by this user`);
+		}
+	}
+	return tryAcquireFileLock(lockPath);
 }
 
 export class FileSessionStorage implements SessionStorage {
@@ -991,27 +1085,26 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * The lease is an OS lock (`flock` sidecar, abstract socket, or named mutex)
-	 * beside the session file, so the kernel drops a dead owner's claim. Never
-	 * throws: a lock that cannot be taken for another reason counts as owned,
-	 * so it never moves a session off its file.
+	 * The lease is an OS lock (abstract socket, named mutex, or `flock` sidecar
+	 * under ~/.omp/run/session-owners), so the kernel drops a dead owner's claim.
+	 * Never throws: a lock that cannot be taken for another reason counts as
+	 * owned, so it never moves a session off its file.
 	 */
-	claimSessionFile(sessionPath: string): (() => void) | null {
-		const key = path.resolve(sessionPath);
-		let held = sessionFileLeases.get(key);
+	claimSession(sessionId: string, sessionPath: string): (() => void) | null {
+		const onDisk = readSessionHeaderIdSync(sessionPath);
+		if (onDisk !== undefined && onDisk !== sessionId) return null;
+		let held = sessionLeases.get(sessionId);
 		if (!held) {
 			let lease: FileLockHandle | null;
 			try {
-				// Like the publish lock: the directory may not exist before the first write.
-				this.ensureDirSync(path.dirname(key));
-				lease = tryAcquireFileLock(sessionOwnerLeasePath(key));
+				lease = tryAcquireSessionLease(sessionId);
 			} catch (err) {
-				logger.debug("Session ownership lease unavailable", { sessionFile: key, error: toError(err).message });
+				logger.debug("Session ownership lease unavailable", { sessionId, error: toError(err).message });
 				return () => {};
 			}
 			if (!lease) return null;
 			held = { lease, holders: 0 };
-			sessionFileLeases.set(key, held);
+			sessionLeases.set(sessionId, held);
 		}
 		const claim = held;
 		claim.holders++;
@@ -1020,7 +1113,7 @@ export class FileSessionStorage implements SessionStorage {
 			if (released) return;
 			released = true;
 			if (--claim.holders > 0) return;
-			sessionFileLeases.delete(key);
+			sessionLeases.delete(sessionId);
 			claim.lease.release();
 		};
 	}

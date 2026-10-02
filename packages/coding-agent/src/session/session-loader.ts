@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { ConcatSink, getBlobsDir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
 import {
@@ -111,6 +111,32 @@ export function parseSessionContent(content: string): SessionLoadResult {
 		sourceSize: Buffer.byteLength(content, "utf8"),
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
 	};
+}
+
+/** Upper bound on the bytes read to find a header: real headers (and the title slot before them) are far smaller. */
+const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
+
+/**
+ * The session id in `filePath`'s header, or `undefined` when there is no file
+ * there or it does not start with a valid session header. Reads at most one
+ * record and {@link SESSION_HEADER_READ_LIMIT} bytes.
+ */
+export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
+	let id: string | undefined;
+	try {
+		await visitEntriesFromFileStream(
+			filePath,
+			entry => {
+				if (isValidSessionHeader(entry)) id = entry.id;
+				return false;
+			},
+			{ maxRecords: 1, maxBytes: SESSION_HEADER_READ_LIMIT },
+		);
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
+		throw err;
+	}
+	return id;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
