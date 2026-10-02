@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { encodeTspMessage, parseTspMessage, splitTspMessage, TspReader } from "@oh-my-pi/pi-tui/native/encode";
+import type { TspEvent } from "@oh-my-pi/pi-wire";
 
 const encoder = new TextEncoder();
 
@@ -53,7 +54,7 @@ describe("TSP framing", () => {
 
 	it("decodes prefs change events whatever their value", () => {
 		for (const value of [true, 50, "branch", ["c", "a"], null]) {
-			const event = { ev: "change", sf: "s:1", id: "pf", item: "task.isolation.merge", value };
+			const event: TspEvent = { ev: "change", sf: "s:1", id: "pf", item: "task.isolation.merge", value };
 			expect(parseTspMessage(`\x1b_tsp;e;${JSON.stringify(event)}\x1b\\`)).toEqual({ verb: "e", event });
 		}
 		expect(parseTspMessage('\x1b_tsp;e;{"ev":"change","sf":"s:1","id":"pf"}\x1b\\')).toBeNull();
