@@ -113,7 +113,9 @@ export type NativeUiEvent =
 			readonly value: boolean | number | string | readonly string[] | null;
 	  }
 	/** An edit over the terminal's own selection in an `editor`/`input` node (see {@link NativeTextEdit}). */
-	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit);
+	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit)
+	/** Undo the last change to an `editor`/`input` node's text (the terminal's ⌃Z); a no-op with no history. */
+	| { readonly type: "undo"; readonly key: string };
 
 /**
  * A primitive edit the terminal made over its own text selection (cut,
