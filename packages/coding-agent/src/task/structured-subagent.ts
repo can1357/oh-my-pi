@@ -9,7 +9,13 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import {
+	filterAvailableModelsByEnabledPatterns,
+	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
+	resolveModelOverride,
+} from "../config/model-resolver";
+import { cfgEnabledModels } from "../config/model-settings";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
@@ -358,7 +364,23 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
+	const { settings, modelRegistry } = request.session;
+	const enabledPatterns = cfgEnabledModels.get(settings);
+	if (enabledPatterns.length > 0 && modelOverride.length > 0 && modelRegistry) {
+		const available = modelRegistry.getAvailable();
+		// Discovery may still be warming up; execution resolves the same scope
+		// again once models are available.
+		if (available.length > 0) {
+			const scopedModels = filterAvailableModelsByEnabledPatterns(available, enabledPatterns, settings);
+			if (!resolveModelOverride(modelOverride, { getAvailable: () => scopedModels }, settings).model) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`No enabled model matches the subagent selection: ${JSON.stringify(modelOverride)}. Check enabledModels.`,
+				);
+			}
+		}
+	}
+	const isolationEnabled = cfgTaskIsolationEnabled.get(settings);
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
 		throw new StructuredSubagentError(

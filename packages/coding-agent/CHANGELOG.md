@@ -90,6 +90,10 @@
 - Fixed the native composer showing the main session's effort level instead of the selected subagent's level.
 - Fixed the `omp predict` comparison view and MCP authorization prompt rendering with their full native interfaces, including clickable link actions.
 
+### Fixed
+
+- Subagent model requests, agent overrides, and frontmatter selections now respect the active `enabledModels` scope, including parent-model auth fallback ([#12345](https://github.com/can1357/oh-my-pi/pull/12345) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
