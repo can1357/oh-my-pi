@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Limited retained edit snapshot buffers to 64 MiB, including Unicode text and read provenance.
+
 ## [18.4.10] - 2026-10-02
 
 ### Fixed
