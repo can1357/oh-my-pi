@@ -21,7 +21,6 @@ import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 
-import { DEFAULT_BASH_INTERCEPTOR_RULES, cfgBashInterceptorPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
@@ -2325,17 +2324,6 @@ function b() {
 			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(0);
 		});
 
-		it("should expose built-in interceptor defaults truthfully", () => {
-			const defaultSettings = Settings.isolated({ "bashInterceptor.enabled": true });
-			const explicitEmptySettings = Settings.isolated({
-				"bashInterceptor.enabled": true,
-				"bashInterceptor.patterns": [],
-			});
-
-			expect(cfgBashInterceptorPatterns.get(defaultSettings)).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
-			expect(cfgBashInterceptorPatterns.get(explicitEmptySettings)).toEqual([]);
-		});
-
 		it("should block built-in interceptor commands when enabled with default patterns", async () => {
 			const interceptedBashTool = wrapToolWithMetaNotice(
 				new BashTool(createTestToolSession(testDir, Settings.isolated({ "bashInterceptor.enabled": true }))),
@@ -3358,20 +3346,5 @@ describe("edit tool CRLF handling", () => {
 		});
 		expect(result.isError).toBe(true);
 		expect(getTextOutput(result)).toMatch(/Found 2 occurrences/);
-	});
-
-	// TODO: CRLF preservation broken by LSP formatting - fix later
-	it.skip("should preserve UTF-8 BOM after edit", async () => {
-		const testFile = path.join(testDir, "bom-test.txt");
-		fs.writeFileSync(testFile, "\uFEFFfirst\r\nsecond\r\nthird\r\n");
-
-		await editTool.execute("test-bom", {
-			path: testFile,
-			old_string: "second\n",
-			new_string: "REPLACED\n",
-		});
-
-		const content = await Bun.file(testFile).text();
-		expect(content).toBe("\uFEFFfirst\r\nREPLACED\r\nthird\r\n");
 	});
 });

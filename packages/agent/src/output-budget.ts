@@ -18,6 +18,17 @@ export const MIN_FITTED_OUTPUT_TOKENS = 1024;
 const PROMPT_ESTIMATE_MARGIN_DIVISOR = 10;
 
 /**
+ * Absolute headway subtracted from the remaining room (unconditionally, on anchored and
+ * fully-local counts alike). Proportional padding covers
+ * tokenizer drift that scales with the prompt, but a host can still count a few tokens more
+ * than any local estimate can see (chat-template framing, reasoning wrappers). Measured
+ * against a 262,144-token host: fitted caps landed +11 to +42 tokens over and were rejected
+ * with 400s. 64 tokens covers the observed drift with margin to spare; the
+ * {@link MIN_FITTED_OUTPUT_TOKENS} floor still applies.
+ */
+export const OUTPUT_FIT_HEADWAY_TOKENS = 64;
+
+/**
  * Output cap for a request, so prompt plus output stays inside the model's
  * context window.
  *
@@ -41,7 +52,8 @@ const PROMPT_ESTIMATE_MARGIN_DIVISOR = 10;
  * OpenRouter-hosted model with no caller cap: the transport omits the catalog
  * default there so each upstream self-caps, and a fitted value would turn into
  * an explicit cap that filters upstreams). Otherwise returns
- * the remaining room (never below {@link MIN_FITTED_OUTPUT_TOKENS}); a
+ * the remaining room minus {@link OUTPUT_FIT_HEADWAY_TOKENS} (never below
+ * {@link MIN_FITTED_OUTPUT_TOKENS}); a
  * prompt that fills the whole window still overflows and is left to the
  * caller's compaction. Near a full window the floor means a turn can stop on
  * `length` instead of failing with a 400.
@@ -67,7 +79,7 @@ export function fitOutputTokensToContextWindow(
 	if (!requested || !contextWindow || contextWindow <= 0) return maxTokens;
 	if (stopsOutputAtContextWindow(model)) return maxTokens;
 
-	const room = contextWindow - countPromptTokens(context, tokenizer);
+	const room = contextWindow - countPromptTokens(context, tokenizer) - OUTPUT_FIT_HEADWAY_TOKENS;
 	if (room >= requested) return maxTokens;
 	return Math.max(MIN_FITTED_OUTPUT_TOKENS, room);
 }

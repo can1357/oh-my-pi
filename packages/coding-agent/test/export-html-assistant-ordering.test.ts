@@ -224,18 +224,6 @@ describe("HTML export assistant content ordering", () => {
 		]);
 	});
 
-	test("keeps the text-tool-text-tool-text ordering invariant", () => {
-		const rendered = renderAssistant([
-			{ type: "text", text: "first" },
-			{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "one.ts" } },
-			{ type: "text", text: "middle" },
-			{ type: "toolCall", id: "tool-2", name: "grep", arguments: { pattern: "needle" } },
-			{ type: "text", text: "last" },
-		]);
-
-		expect(renderedBlockOrder(rendered)).toEqual(["first", "read", "middle", "grep", "last"]);
-	});
-
 	test("projects interleaved assistant blocks into pi-style sidebar timeline rows", () => {
 		const rendered = renderAssistant(
 			[

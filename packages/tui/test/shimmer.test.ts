@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import { setShimmerMode, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
+import { setShimmerMode, shimmerSegments, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
 
 const testTheme = {
 	bold(text: string): string {
@@ -63,6 +63,37 @@ describe("shimmerText", () => {
 
 		const rendered = shimmerText("🎉🌟✨🚀", testTheme);
 		expect(Bun.stripANSI(rendered)).toBe("🎉🌟✨🚀");
+	});
+});
+
+describe("shimmerSegments frame boundaries", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		setShimmerMode("classic");
+	});
+
+	it("preserves disabled palette boundaries without emitting ANSI for an all-empty frame", () => {
+		setShimmerMode("disabled");
+		const palette = {
+			low: { ansi: "\x1b[31m" },
+			mid: { ansi: "\x1b[32m" },
+			high: { ansi: "\x1b[33m" },
+		};
+
+		expect(shimmerSegments([{ text: "", palette }, { text: "" }], testTheme)).toBe("");
+		expect(shimmerSegments([{ text: "", palette }, { text: "😀\ud800" }, { text: "", palette }], testTheme)).toBe(
+			"\x1b[32m\x1b[39m\x1b[90m😀\ud800\x1b[39m\x1b[32m\x1b[39m",
+		);
+	});
+
+	it("keeps a one-code-point KITT head bright across time and empty palette segments", () => {
+		setShimmerMode("kitt");
+		const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+		const segments = [{ text: "" }, { text: "😀" }, { text: "" }];
+
+		expect(shimmerSegments(segments, testTheme)).toBe("\x1b[1m\x1b[36m😀\x1b[22m\x1b[39m");
+		clock.mockReturnValue(1_234_567);
+		expect(shimmerSegments(segments, testTheme)).toBe("\x1b[1m\x1b[36m😀\x1b[22m\x1b[39m");
 	});
 });
 

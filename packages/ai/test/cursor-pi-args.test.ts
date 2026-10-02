@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import {
-	cursorEditOwnedReadPath,
+	cursorExecReadPath,
 	cursorRawReadPath,
 	omitUndefinedArgs,
 	piGrepSkip,
@@ -108,6 +108,6 @@ describe("cursorRawReadPath", () => {
 
 	it("does not stack a second :raw when a range is composed onto a raw path", () => {
 		expect(piReadPath("/tmp/note.txt:raw", 2, 1)).toBe("/tmp/note.txt:raw:2+1");
-		expect(cursorEditOwnedReadPath("/tmp/note.txt", 2, 1)).toBe("/tmp/note.txt:raw:2+1");
+		expect(cursorExecReadPath("/tmp/note.txt", 2, 1)).toBe("/tmp/note.txt:raw:2+1");
 	});
 });

@@ -29,6 +29,14 @@ export default class Usage extends Command {
 			default: false,
 		}),
 		days: Flags.integer({ char: "d", description: "History window in days (with --history or clients)", default: 7 }),
+		extension: Flags.string({
+			char: "e",
+			description: "Load an extension file before fetching usage (repeatable)",
+			multiple: true,
+		}),
+		"no-extensions": Flags.boolean({
+			description: "Disable extension discovery (explicit -e paths still work)",
+		}),
 	};
 
 	static examples = [
@@ -51,6 +59,8 @@ export default class Usage extends Command {
 			redact: flags.redact,
 			history: flags.history,
 			days: flags.days,
+			extensions: flags.extension,
+			noExtensions: flags["no-extensions"],
 		});
 	}
 }

@@ -156,6 +156,43 @@ describe("credential pins", () => {
 		expect(active?.accountId).toBe("account-a");
 	});
 
+	test("seeding advances a same-account sticky that is older than the session-file pin", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
+		manager.appendCredentialPin("anthropic", hash!);
+		const pinLastUsedAt = manager.getCredentialPins().get("anthropic")!.lastUsedAt;
+		const accountB = storage.oauth
+			.accounts("anthropic", sessionId)
+			.find(account => account.accountId === "account-b");
+		// A lazily-persisted sticky for the same account, older than the session's last turn.
+		storage.sessions.pin("anthropic", sessionId, accountB!.credentialId, { restoredAtMs: pinLastUsedAt - 600_000 });
+
+		seedCredentialPins(storage, manager, sessionId);
+
+		const active = storage.oauth.accounts("anthropic", sessionId).find(account => account.active);
+		expect(active?.accountId).toBe("account-b");
+		expect(active?.lastUsedAtMs).toBe(pinLastUsedAt);
+	});
+
+	test("seeding never rewinds a same-account sticky that is newer than the pin", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
+		manager.appendCredentialPin("anthropic", hash!);
+		const newerUse = manager.getCredentialPins().get("anthropic")!.lastUsedAt + 60_000;
+		const accountB = storage.oauth
+			.accounts("anthropic", sessionId)
+			.find(account => account.accountId === "account-b");
+		storage.sessions.pin("anthropic", sessionId, accountB!.credentialId, { restoredAtMs: newerUse });
+
+		seedCredentialPins(storage, manager, sessionId);
+
+		expect(storage.oauth.accounts("anthropic", sessionId).find(account => account.active)?.lastUsedAtMs).toBe(
+			newerUse,
+		);
+	});
+
 	test("seeding is a no-op when the pinned account is no longer stored", () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();

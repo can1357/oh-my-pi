@@ -34,6 +34,7 @@ import { vi } from "bun:test";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
@@ -267,6 +268,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		optimisticSkillMessagePending: false,
 		locallySubmittedUserSignatures: new Set<string>(),
 		mcpTestEscapeHandlers: new Set<() => void>(),
+		keybindings: KeybindingsManager.inMemory(),
 		todoPhases: [],
 		init: vi.fn(async () => {}),
 		present: vi.fn(mount),

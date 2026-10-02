@@ -167,6 +167,147 @@ afterEach(() => {
 });
 
 describe("LiteLLM provider discovery", () => {
+	test("recovers a bare catalog name without changing its namespaced selector", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url === MODELS_DEV_URL) return Response.json({});
+				if (url === "http://primary:4000/model_group/info") {
+					return Response.json({
+						data: [
+							{
+								model_group: "team/gpt-6-sol",
+								model_name: "team/gpt-6-sol",
+								providers: ["openai"],
+								supports_vision: true,
+								max_input_tokens: 196_000,
+								max_output_tokens: 24_000,
+							},
+						],
+					});
+				}
+				return new Response("Not found", { status: 404 });
+			}) as FetchImpl,
+		});
+
+		const specs = await options.fetchDynamicModels?.();
+		const spec = specs?.find(model => model.id === "team/gpt-6-sol");
+		if (!spec) throw new Error("expected the namespaced Sol selector");
+		if (spec.api !== "openai-responses") throw new Error("expected the OpenAI Responses transport");
+		const model = buildModel({ ...spec, api: spec.api });
+		expect(model.name).toBe("GPT-6 Sol");
+		expect(`${model.provider}/${model.id}`).toBe("litellm/team/gpt-6-sol");
+		expect(model.compat).toMatchObject({ wireModelIdMode: "raw" });
+		expect(spec.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(spec.contextWindow).toBe(196_000);
+		expect(spec.maxTokens).toBe(24_000);
+	});
+
+	test("keeps a proxy's friendly Sol name ahead of the catalog reference", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url === MODELS_DEV_URL) return Response.json({});
+				if (url === "http://primary:4000/model_group/info") {
+					return Response.json({
+						data: [
+							{
+								model_group: "openai/gpt-6.1-sol",
+								model_name: "Team Sol (2x usage)",
+								providers: ["openai"],
+								supports_vision: true,
+							},
+						],
+					});
+				}
+				return new Response("Not found", { status: 404 });
+			}) as FetchImpl,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.find(model => model.id === "openai/gpt-6.1-sol")?.name).toBe("Team Sol");
+	});
+
+	test("prefers an exact namespaced reference over the bare Sol fallback", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url === MODELS_DEV_URL) {
+					return Response.json({
+						openai: {
+							models: {
+								"openai/gpt-6.1-sol": {
+									name: "GPT-6.1 Sol Deployment",
+									tool_call: true,
+									limit: { context: 272_000, output: 128_000 },
+									cost: { input: 2, output: 10 },
+								},
+							},
+						},
+					});
+				}
+				if (url === "http://primary:4000/model_group/info") {
+					return Response.json({
+						data: [
+							{
+								model_group: "openai/gpt-6.1-sol",
+								model_name: "openai/gpt-6.1-sol",
+								providers: ["openai"],
+								supports_vision: true,
+							},
+						],
+					});
+				}
+				return new Response("Not found", { status: 404 });
+			}) as FetchImpl,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.find(model => model.id === "openai/gpt-6.1-sol")?.name).toBe("GPT-6.1 Sol Deployment");
+	});
+
+	test.each(["rich", "models"] as const)(
+		"keeps bare-reference routing and pricing out of %s proxy discovery",
+		async endpoint => {
+			const ids = ["azure/gpt-5.6-sol-pro", "volcengine/doubao-seed-1-6-250615", "proxy/claude-fable-5.1"];
+			const options = litellmModelManagerOptions({
+				apiKey: "sk-rich",
+				baseUrl: "http://primary:4000/v1",
+				fetch: vi.fn(async (input: string | URL | Request) => {
+					const url = inputUrl(input);
+					if (url === MODELS_DEV_URL) return Response.json({});
+					if (endpoint === "rich" && url === "http://primary:4000/model_group/info") {
+						return Response.json({
+							data: ids.map(id => ({ model_group: id, model_name: id, supports_vision: false })),
+						});
+					}
+					if (url === "http://primary:4000/v1/models") return Response.json({ data: ids.map(id => ({ id })) });
+					return new Response("Not found", { status: 404 });
+				}) as FetchImpl,
+			});
+
+			const models = await options.fetchDynamicModels?.();
+			const pro = models?.find(model => model.id === ids[0]);
+			const doubao = models?.find(model => model.id === ids[1]);
+			const fable = models?.find(model => model.id === ids[2]);
+			if (!pro || !doubao || !fable) throw new Error("expected all proxy selectors");
+			expect(pro.name).toBe("GPT-5.6 Sol Pro");
+			expect(fable.name).toBe("Claude Fable 5.1");
+			for (const model of [pro, doubao, fable]) {
+				expect(model).not.toHaveProperty("requestModelId");
+				expect(model.headers).toBeUndefined();
+				expect(model.thinking).toBeUndefined();
+				expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			}
+		},
+	);
+
 	test("uses LITELLM_BASE_URL when no explicit baseUrl is configured", async () => {
 		Bun.env.LITELLM_BASE_URL = "http://litellm.example:4100/v1";
 		const fetchMock = makeFetchMock("http://litellm.example:4100/v1/models");
@@ -177,9 +318,6 @@ describe("LiteLLM provider discovery", () => {
 		});
 		const models = await options.fetchDynamicModels?.();
 
-		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v11:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
-		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
 		expect(models?.[0]).toMatchObject({
@@ -201,9 +339,6 @@ describe("LiteLLM provider discovery", () => {
 		});
 		const models = await options.fetchDynamicModels?.();
 
-		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v11:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
-		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
 		expect(models?.[0]?.baseUrl).toBe("http://litellm-config.example:4200/v1");

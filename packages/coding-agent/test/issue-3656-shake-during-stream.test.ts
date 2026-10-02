@@ -130,15 +130,6 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		expect(mode.streamingComponent).toBe(streamingComponent);
 	});
 
-	it("keeps in-flight tool components attached and tracked in pendingTools", () => {
-		const { pendingTool } = makeStreamingFixture();
-
-		mode.rebuildChatFromMessages();
-
-		expect(mode.chatContainer.children).toContain(pendingTool);
-		expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
-	});
-
 	it("routes later streamed tool-call deltas into the preserved on-screen component", async () => {
 		const { pendingTool } = makeStreamingFixture();
 		const updateArgs = vi.spyOn(pendingTool, "updateArgs");

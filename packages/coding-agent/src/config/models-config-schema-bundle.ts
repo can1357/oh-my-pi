@@ -84,6 +84,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
 		"replayUnsignedThinking?": "boolean",
+		"bedrockMessagesApi?": "boolean",
 	} as const;
 
 	const OpenAICompatFieldsSchema = type(OpenAICompatFields);
@@ -207,6 +208,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 			cacheRead: "number",
 			cacheWrite: "number",
 		},
+		"promptCache?": {
+			"short?": "number",
+			"long?": "number",
+		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",
 		"maxContextWindow?": "number",
@@ -259,6 +264,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"output?": "number",
 			"cacheRead?": "number",
 			"cacheWrite?": "number",
+		},
+		"promptCache?": {
+			"short?": "number",
+			"long?": "number",
 		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",

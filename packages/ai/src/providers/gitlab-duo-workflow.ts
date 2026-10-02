@@ -5,6 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
@@ -785,14 +786,8 @@ function mapGitLabDuoWorkflowMcpToolCall(args: Record<string, unknown>): {
 function parseGitLabDuoWorkflowMcpArguments(value: unknown): Record<string, unknown> {
 	if (value === undefined) return {};
 	if (typeof value === "string") {
-		try {
-			const parsed = JSON.parse(value) as unknown;
-			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-				? (parsed as Record<string, unknown>)
-				: {};
-		} catch {
-			return {};
-		}
+		const parsed = parseToolCallArguments(value);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 	}
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }

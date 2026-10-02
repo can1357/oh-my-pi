@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { MessageAttribution } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	type CustomMessage,
 	type CustomMessageContent,
@@ -68,6 +68,22 @@ export function isUserRequestEntry(entry: TranscriptEntryLike | { type: string }
 	return false;
 }
 
+/**
+ * Recent transcript tail starting at a user-request boundary, so tool calls
+ * and results stay together. ChatTranscriptBuilder drops a tool result whose
+ * initiating call was sliced away, so a tail of orphaned results can leave
+ * the picker without any target.
+ *
+ * A whole user turn may exceed `limit`; paginate rendering if one turn grows too large.
+ */
+export function recentTranscriptEntries(entries: TranscriptEntryLike[], limit = 600): TranscriptEntryLike[] {
+	if (entries.length <= limit) return entries;
+	for (let index = entries.length - limit; index > 0; index--) {
+		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
+	}
+	return entries;
+}
+
 /** Editable user request text, preserving skill invocation syntax. */
 export function userTurnDraft(entry: TranscriptEntryLike): string | undefined {
 	const message = transcriptEntryMessage(entry);
@@ -88,6 +104,15 @@ export function textContent(content: string | ReadonlyArray<{ type: string; text
 		boundary = separator;
 	}
 	return text;
+}
+
+/** Well-formed image blocks in order: a `[Image #N]` marker in the text names the Nth. */
+export function imageContent(content: string | ReadonlyArray<TextContent | ImageContent>): ImageContent[] {
+	if (typeof content === "string") return [];
+	return content.filter(
+		(block): block is ImageContent =>
+			block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string",
+	);
 }
 
 /** Join text blocks with spaces and collapse whitespace into a single-line label. */

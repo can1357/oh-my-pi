@@ -98,6 +98,41 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.premiumRequests).toBe(3);
 	});
 
+	it("tracks task-result cost as the subagent portion of total cost", () => {
+		const session = SessionManager.inMemory();
+		const usage = (total: number) => ({
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total },
+		});
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: usage(0.38),
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "task output" }],
+			details: { usage: usage(0.12) },
+			isError: false,
+			timestamp: 2,
+		});
+
+		const stats = session.getUsageStatistics();
+		expect(stats.cost).toBeCloseTo(0.5);
+		expect(stats.subagentCost).toBeCloseTo(0.12);
+	});
+
 	it("keeps orchestration usage out of ordinary input while preserving total tokens", () => {
 		const session = SessionManager.inMemory();
 

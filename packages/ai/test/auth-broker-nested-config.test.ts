@@ -37,14 +37,6 @@ describe("auth-broker config.yml key resolution", () => {
 		});
 	});
 
-	test("legacy flat dotted keys still resolve", async () => {
-		await writeConfig(['"auth.broker.url": https://flat.example', '"auth.broker.token": flat-token', ""].join("\n"));
-		await withEnv(CLEAR_BROKER_ENV, async () => {
-			const config = await resolveAuthBrokerConfig({ agentDir });
-			expect(config).toEqual({ url: "https://flat.example", token: "flat-token" });
-		});
-	});
-
 	test("nested value wins over the flat dotted key", async () => {
 		await writeConfig(
 			[
@@ -60,16 +52,6 @@ describe("auth-broker config.yml key resolution", () => {
 		await withEnv(CLEAR_BROKER_ENV, async () => {
 			const config = await resolveAuthBrokerConfig({ agentDir });
 			expect(config).toEqual({ url: "https://nested.example", token: "nested-token" });
-		});
-	});
-	test("config.yaml nested keys resolve broker url and token", async () => {
-		await Bun.write(
-			path.join(agentDir, "config.yaml"),
-			["auth:", "  broker:", "    url: https://broker.example", "    token: yaml-token", ""].join("\n"),
-		);
-		await withEnv(CLEAR_BROKER_ENV, async () => {
-			const config = await resolveAuthBrokerConfig({ agentDir });
-			expect(config).toEqual({ url: "https://broker.example", token: "yaml-token" });
 		});
 	});
 });

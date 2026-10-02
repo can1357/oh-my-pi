@@ -1,9 +1,15 @@
+import { formatKeyHint } from "../app-keybindings";
 import type { Component } from "../tui";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { type KeyId, matchesKey } from "../keys";
 import { sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { type ThemeColor, theme } from "../theme/theme";
+import type { TspTone } from "@oh-my-pi/pi-wire";
+import { card, node, row, span, text } from "../native/describe";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton } from "../native/overlay";
+import { Memo } from "../native/memo";
 
 /** Distinct states of a realtime call connection. */
 export type LivePhase = "connecting" | "listening" | "working" | "speaking" | "muted" | "error";
@@ -24,7 +30,17 @@ const PHASE_COLORS: Record<LivePhase, ThemeColor> = {
 	muted: "dim",
 	error: "error",
 };
+const PHASE_TONES: Record<LivePhase, TspTone> = {
+	connecting: "muted",
+	listening: "success",
+	working: "warning",
+	speaking: "accent",
+	muted: "muted",
+	error: "error",
+};
 const SPECTRUM_BLOCKS = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
+/** Native mic meter resolution: the level snaps to 1/20 steps so decay ticks don't rebuild every frame. */
+const METER_STEPS = 20;
 
 /** Configuration callbacks for user interactions in the visualizer. */
 export interface LiveVisualizerOptions {
@@ -55,6 +71,7 @@ export class LiveVisualizer implements Component {
 	#displayLevel = 0;
 	#frame = 0;
 	#userTranscript = "";
+	readonly #native = new Memo();
 
 	#cache:
 		| {
@@ -134,6 +151,55 @@ export class LiveVisualizer implements Component {
 		this.#panel.invalidate();
 	}
 
+	/** The call panel's buttons run the same code as their keys. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		if (event.act === "mute") this.#options.onToggleMute();
+		else if (event.act === "end") this.#options.onStop();
+	}
+
+	/**
+	 * Native call panel: phase status (a spinner while working), the mic level
+	 * as a `meter` (a `progress` bar on terminals without it), the streaming
+	 * transcript and the Mute/End buttons. The spectrum animation is
+	 * ANSI-only; frame ticks leave this node unchanged.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		const energy = this.#phase === "muted" ? 0 : Math.min(1, Math.sqrt(this.#displayLevel * 5));
+		const level = Math.round(energy * METER_STEPS) / METER_STEPS;
+		const meter = cx.supports("meter");
+		return this.#native.get([this.#phase, level, this.#userTranscript, meter], () => {
+			const phase = this.#phase;
+			const status =
+				phase === "working"
+					? node("spinner", { label: [span(phase, PHASE_COLORS[phase])], tone: PHASE_TONES[phase] })
+					: text([span(`${PHASE_ICONS[phase]} ${phase}`, PHASE_COLORS[phase])]);
+			const tone = phase === "muted" ? "muted" : phase === "error" ? "error" : "success";
+			return card({ role: "omp.app.live", tone: PHASE_TONES[phase] }, [
+				node("row", { gap: "sm", align: "center" }, [status], "head"),
+				meter
+					? row(
+							[
+								text([span("mic", "muted")]),
+								node("meter", { value: level, style: "bar", size: "md", tone, grow: 1 }),
+							],
+							{
+								gap: "sm",
+								align: "center",
+								role: "omp.app.live.level",
+							},
+						)
+					: node("progress", { value: level, tone, label: [span("mic", "muted")] }),
+				text([span(this.#userTranscript, "accent")], { wrap: "none", truncate: "start" }),
+				actionBar([
+					null,
+					actionButton(phase === "muted" ? "Unmute" : "Mute", "mute", { keys: "space" }),
+					actionButton("End call", "end", { keys: "escape", tone: "error" }),
+				]),
+			]);
+		});
+	}
+
 	/** Renders the microphone spectrum into a compact fixed-height panel. */
 	render(width: number): readonly string[] {
 		if (
@@ -197,7 +263,7 @@ export class LiveVisualizer implements Component {
 		const frames = theme.spinnerFrames;
 		const icon = this.#phase === "working" ? frames[this.#frame % frames.length] : PHASE_ICONS[this.#phase];
 		const status = `${icon} ${this.#phase}`;
-		const fullLabel = ` ${status} · space mute · esc end `;
+		const fullLabel = ` ${status} · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `;
 		const shortLabel = ` ${status} `;
 		const label =
 			innerWidth >= visibleWidth(fullLabel) + 1

@@ -60,6 +60,8 @@ const host: SessionToolsHost = {
 	emitNotice: () => {},
 	notifyCommandMetadataChanged: () => {},
 	localProtocolOptions: () => ({}),
+	evalPreludes: () => [],
+	sessionAgents: () => [],
 };
 const sessionTools = new SessionTools(host, {
 	baseSystemPrompt: [],

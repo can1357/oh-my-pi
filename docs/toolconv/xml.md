@@ -15,7 +15,14 @@ tools:
 
 `tools.format: xml` forces the generic XML owned dialect for the session. `auto` does **not** choose generic XML as its unknown-family fallback: when a model has `supportsTools: false`, the resolver chooses the known model-family dialect or GLM if there is no specific affinity. Use `xml` explicitly when this grammar is required. See [`tools.format`](../settings.md#tools-and-approvals).
 
-When selected, OMP removes native structured tools from the provider request, appends the in-band tool catalog and XML guide to the system prompt, converts prior structured calls/results to text, and scans assistant text back into structured tool-call events.
+`PI_DIALECT=xml` is also supported as a fallback when configuration resolves
+to no owned dialect. Unset it when choosing `native`, since it still applies
+after `tools.format` resolves to native tools. Selection runs per request.
+
+With a non-empty tool list, OMP removes native structured tools and tool choice
+from the request, appends the in-band catalog and XML guide to the system
+prompt, converts prior calls/results to text, and scans assistant text back
+into structured tool-call events.
 
 ## Tool definitions and prompt injection
 
@@ -54,8 +61,8 @@ The renderer uses the supplied tool schema to decide whether a value is a litera
 | Declared/value kind | Rendered body | Default scanner result |
 | --- | --- | --- |
 | Schema-declared string whose runtime value is a string | Verbatim, whitespace preserved | Verbatim string |
-| Number, boolean, `null`, array, or object | JSON | Parsed JSON value |
-| Runtime string not identified as a string argument | JSON string, including quotes | Parsed string |
+| Non-string runtime value for a schema-treated string argument | JSON | That JSON text retained as a string |
+| Argument not treated as a string | JSON, including quotes around runtime strings | Parsed JSON when valid |
 
 Example:
 
@@ -63,12 +70,20 @@ Example:
 <invoke name="write"><parameter name="path">notes/a & b.txt</parameter><parameter name="options">{"append":false,"tags":["draft","xml"]}</parameter></invoke>
 ```
 
-The default scanner accepts a `string` override on each parameter:
+String classification uses the supplied schemas or an explicit `stringArgs`
+callback. Nullable string schemas still count as strings; enums, constants,
+and union branches also contribute to type detection. The default scanner
+accepts a `string` override on each parameter:
 
 - `string="true"` (or any value other than `false`, `0`, or `no`) forces the raw body to remain a string.
 - `string="false"`, `string="0"`, or `string="no"` forces JSON parsing even when the schema declares a string.
 
 Non-string bodies are trimmed for parsing and passed through OMP's repair-capable JSON parser. If repair fails, the original body is retained as a string. Empty bodies remain empty strings. A parameter without a usable name is discarded.
+
+The scanner does not validate tool membership or full argument schemas.
+Repeated parameter names overwrite earlier values at call completion. Attribute
+values are not entity-decoded, so tool/argument names requiring entity escaping
+do not round-trip through this delimiter parser as they would through XML.
 
 ## Multiple and parallel calls
 
@@ -117,7 +132,19 @@ reasoning text
 </thinking>
 ```
 
-For the normal owned-tool stream, `parseThinking` is enabled. With the default Anthropic tagset, `<thinking>`, `<think>`, and `<scratchpad>` (including supported prefixed forms) become separate thinking events and do not appear in visible text. A direct scanner consumer that leaves `parseThinking` false sees those tags as text. An unterminated thinking block is logically closed on flush and retains its content.
+When the input consists entirely of complete `<thinking>` wrappers,
+`renderThinking` and the direct transcript renderer flatten nested/adjacent
+wrappers before adding this delimiter pair. Normal history conversion of a
+call-bearing assistant message keeps prose and rendered calls but drops its
+original thinking blocks.
+
+For the normal owned-tool stream, `parseThinking` is enabled. With the default
+Anthropic tagset, `<thinking>`, `<think>`, and `<scratchpad>` (including supported
+prefixed forms) become separate thinking events and do not appear in visible
+text. A direct scanner defaults to thinking parsing disabled; those tags then
+remain ordinary text outside wrappers. Non-call text inside wrappers is
+discarded. An unterminated thinking block is logically closed on flush and
+retains its content.
 
 Visible prose may appear before or between unwrapped invokes. Inside a recognized `<tool_calls>` or `<function_calls>` wrapper, non-call text is discarded.
 
@@ -173,7 +200,7 @@ Failure behavior is explicit:
 - an invoke with a missing/blank name emits no tool lifecycle;
 - a parameter with a missing/blank name is ignored;
 - malformed JSON falls back to the original text;
-- parameter content is capped at 1,000,000 JavaScript string code units, with an explicit truncation marker appended on overflow;
+- retained parameter values and argument deltas are capped at 1,000,000 JavaScript string code units, with an explicit marker appended to the completed value on overflow; `rawBlock` still captures the full invoke, so total input/raw capture is not bounded by that limit;
 - an incomplete parameter or invoke emits no `toolEnd` when flushed; and
 - complete invokes remain valid even when the outer wrapper never closes.
 
@@ -183,9 +210,17 @@ OMP's stream projector creates a canonical call at `toolStart`, before `toolEnd`
 
 The DSML scanner also streams each parameter as keyed deltas and emits `toolEnd` only at `</｜DSML｜invoke>` or its ASCII equivalent. An incomplete DSML parameter resets the partial call on flush without a completed event. Because `xmlTagset: dsml` is a direct scanner option rather than the normal owned-renderer path, callers consuming those events own the handling of an unmatched `toolStart`.
 
+In DSML mode, orphan invoke/parameter close tags are stripped from visible
+text, along with recognized DeepSeek control tokens. This recovery behavior
+does not apply to the default Anthropic tagset.
+
 ### Fabricated results
 
 For the generic XML dialect, the first model-authored `<tool_response>` is treated as a fabricated-result boundary. OMP preserves calls/text before it and stops projection there. The default `tools.abortOnFabricatedResult: true` aborts provider generation; disabling the setting drains but discards the fabricated continuation.
+
+If the provider still emits native structured calls, the first named native
+or in-band call selects the channel for that turn. The other channel is
+discarded to prevent double dispatch.
 
 ## End-to-end example
 
@@ -238,4 +273,6 @@ The assistant then answers normally or emits another sequence of invokes.
 - `packages/ai/src/dialect/rendering.ts`, `history.ts`, and `owned-stream.ts` — result rendering, history conversion, projection, and fabricated-result handling.
 - `packages/ai/src/utils/stream-markup-healing.ts` — current DSML scanner integration.
 - `packages/coding-agent/src/sdk.ts` — `tools.format` resolution.
+- `packages/agent/src/agent-loop.ts` — environment fallback, non-empty-tool gating, and native-tool-choice suppression.
+- `packages/ai/src/dialect/coercion.ts` — schema-based string classification.
 - `packages/ai/test/inband-tools.test.ts` and `dialect-thinking.test.ts` — round trips, chunked argument deltas, raw blocks, result rendering, and thinking behavior.

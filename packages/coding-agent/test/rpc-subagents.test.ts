@@ -72,6 +72,7 @@ type SessionChangeStubOptions = {
 	newSession?: boolean;
 	switchSession?: boolean;
 	branch?: { selectedText: string; selectedImages: ImageContent[]; cancelled: boolean };
+	fork?: boolean;
 };
 
 function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessionChangeSession {
@@ -80,6 +81,7 @@ function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessi
 		switchSession: async (_sessionPath: string) => options.switchSession ?? true,
 		branch: async (_entryId: string) =>
 			options.branch ?? { selectedText: "branched text", selectedImages: [], cancelled: false },
+		fork: async (_entryId?: string) => options.fork ?? true,
 	};
 }
 
@@ -173,25 +175,6 @@ describe("RPC subagent registry", () => {
 		registry.dispose();
 	});
 
-	test("clears stale snapshots when the active RPC session changes", () => {
-		const eventBus = new EventBus();
-		const registry = new RpcSubagentRegistry(eventBus, () => {});
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id: "SubagentA",
-			index: 0,
-			agent: "task",
-			agentSource: "bundled",
-			status: "started",
-			sessionFile: "/tmp/subagent.jsonl",
-		} satisfies SubagentLifecyclePayload);
-
-		expect(registry.getSubagents()).toHaveLength(1);
-		registry.clear();
-
-		expect(registry.getSubagents()).toHaveLength(0);
-		registry.dispose();
-	});
-
 	test("clears stale snapshots after successful RPC session changes", async () => {
 		const cases: Array<{
 			command: RpcSessionChangeCommand;
@@ -214,6 +197,11 @@ describe("RPC subagent registry", () => {
 					branch: { selectedText: "Branch text", selectedImages: [], cancelled: false },
 				}),
 				expected: { type: "branch", data: { text: "Branch text", cancelled: false } },
+			},
+			{
+				command: { type: "fork", entryId: "entry-1" },
+				session: createSessionChangeSession({ fork: true }),
+				expected: { type: "fork", data: { cancelled: false } },
 			},
 		];
 
@@ -253,6 +241,11 @@ describe("RPC subagent registry", () => {
 				command: { type: "branch", entryId: "entry-1" },
 				session: createSessionChangeSession({ branch: { selectedText: "", selectedImages: [], cancelled: true } }),
 				expected: { type: "branch", data: { text: "", cancelled: true } },
+			},
+			{
+				command: { type: "fork" },
+				session: createSessionChangeSession({ fork: false }),
+				expected: { type: "fork", data: { cancelled: true } },
 			},
 		];
 
@@ -316,7 +309,16 @@ describe("RPC subagent registry", () => {
 
 		expect(frames).toHaveLength(1);
 		expect(frames[0]).toEqual({ type: "subagent_event", payload: eventPayload });
+		registry.setSubscriptionLevel("progress");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(1);
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(2);
 		registry.dispose();
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(2);
 	});
 });
 
