@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `display.userMessageShape` setting (`block`, `box`, `plain`) to support framed and plain user prompt styles in the chat transcript ([#13927](https://github.com/can1357/oh-my-pi/pull/13927) by [@ryaminal](https://github.com/ryaminal)).
 - `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
