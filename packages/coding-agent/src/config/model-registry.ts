@@ -218,6 +218,11 @@ function isExtendedContextEnabledFromSettings(settingsInstance?: Settings): bool
 	}
 }
 
+/** Rows of a registry layer owned by `providerFilter`, or the whole layer when unfiltered. */
+function selectProviderModels<T extends { provider: string }>(models: T[], providerFilter?: ReadonlySet<string>): T[] {
+	return providerFilter ? models.filter(model => providerFilter.has(model.provider)) : models;
+}
+
 /**
  * Extra knobs for {@link ModelRegistry.refresh} / {@link ModelRegistry.refreshProvider}.
  * Online discovery (`strategy: "online"`) is independent of credential minting:
@@ -245,6 +250,13 @@ export type ResolvedRequestAuth =
 export class ModelRegistry {
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
+	/**
+	 * Full-snapshot input to `#projectBaseModels`: resolved built-in, cached, and
+	 * discovered models before custom overlays, overrides, and transport
+	 * projections. Refreshes merge onto this, never onto `#unprojectedModels`,
+	 * so each projection wraps header resolvers exactly once per refresh.
+	 */
+	#baseModels: Model<Api>[] = [];
 	#hasFullSnapshot = false;
 	#cachedStandardModelsByProvider: Map<string, Model<Api>[]> = new Map();
 	#pendingStandardCacheProviders: Set<string> = new Set();
@@ -747,6 +759,14 @@ export class ModelRegistry {
 			this.#unprojectedModels = this.#unprojectedModels.map(candidate =>
 				candidate.provider === unprojected.provider && candidate.id === unprojected.id ? patchedBase : candidate,
 			);
+			// Later refreshes rebuild from the base snapshot; carry the patch there too.
+			const base = resolveProviderModelReference(current.provider, current.id, this.#baseModels);
+			if (base) {
+				const patchedResolved = applyModelPatch(base, patch, "merge");
+				this.#baseModels = this.#baseModels.map(candidate =>
+					candidate.provider === base.provider && candidate.id === base.id ? patchedResolved : candidate,
+				);
+			}
 			this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			return resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
 		}
@@ -910,6 +930,7 @@ export class ModelRegistry {
 	#resetStaticComposition(): void {
 		this.#models = [];
 		this.#unprojectedModels = [];
+		this.#baseModels = [];
 		this.#hasFullSnapshot = false;
 		this.#cachedStandardModelsByProvider.clear();
 		this.#pendingStandardCacheProviders.clear();
@@ -1032,9 +1053,8 @@ export class ModelRegistry {
 		logger.warn("extension model projection failed; serving unprojected catalog", { provider, error });
 	}
 
-	#composeUnprojectedStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
-		const select = <T extends { provider: string }>(models: readonly T[]): T[] =>
-			providerFilter ? models.filter(model => providerFilter.has(model.provider)) : [...models];
+	/** Built-in and cached models, before runtime discoveries and every projection. */
+	#composeCachedBaseModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		const cachedStandardModels = this.#getCachedStandardModels(providerFilter);
 		let builtInModels = this.#applyHardcodedModelPolicies(
 			this.#loadBuiltInModels(this.#providerOverrides, providerFilter),
@@ -1042,16 +1062,50 @@ export class ModelRegistry {
 		if (this.#cachedAuthoritativeProviders.size > 0) {
 			builtInModels = dropProviderModels(builtInModels, this.#cachedAuthoritativeProviders, { kind: "chat" });
 		}
-		let resolvedDefaults = this.#mergeResolvedModels(
+		return this.#mergeResolvedModels(
 			this.#mergeResolvedModels(builtInModels, cachedStandardModels),
-			select(this.#cachedDiscoverableModels),
+			selectProviderModels(this.#cachedDiscoverableModels, providerFilter),
 		);
+	}
+
+	/** The `#baseModels` stage: cached base models plus runtime discoveries. */
+	#composeBaseModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		let resolvedDefaults = this.#composeCachedBaseModels(providerFilter);
 		if (this.#runtimeAuthoritativeProviders.size > 0) {
 			resolvedDefaults = dropProviderModels(resolvedDefaults, this.#runtimeAuthoritativeProviders, { kind: "chat" });
 		}
-		resolvedDefaults = this.#mergeResolvedModels(resolvedDefaults, select(this.#runtimeDiscoveredModels));
-		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
-		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
+		return this.#mergeResolvedModels(
+			resolvedDefaults,
+			selectProviderModels(this.#runtimeDiscoveredModels, providerFilter),
+		);
+	}
+
+	/**
+	 * Entries a discovered model inherits headers and transport from: cached
+	 * base models with custom overlays, without earlier discoveries or override
+	 * projections. Referencing a projected or previously discovered row would
+	 * nest its header resolver one level deeper on every refresh.
+	 */
+	#composeDiscoveryReferenceModels(providerFilter: ReadonlySet<string>): Model<Api>[] {
+		return this.#mergeCustomModels(
+			this.#mergeCustomModels(
+				this.#composeCachedBaseModels(providerFilter),
+				selectProviderModels(this.#customModelOverlays, providerFilter),
+			),
+			selectProviderModels(this.#runtimeModelOverlays, providerFilter),
+		);
+	}
+
+	/** Applies custom overlays and every override projection to a `#baseModels` stage. */
+	#projectBaseModels(baseModels: Model<Api>[], providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		const withConfigModels = this.#mergeCustomModels(
+			baseModels,
+			selectProviderModels(this.#customModelOverlays, providerFilter),
+		);
+		const combined = this.#mergeCustomModels(
+			withConfigModels,
+			selectProviderModels(this.#runtimeModelOverlays, providerFilter),
+		);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
 		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
 		return this.#applyDiscoveryPolicies(this.#applyRuntimeProviderOverrides(withProviderBedrock));
@@ -1061,7 +1115,8 @@ export class ModelRegistry {
 		// A modifier is a whole-catalog transform. Build and project the full catalog
 		// before narrowing a lazy lookup, matching getAll() followed by filtering.
 		const projectFullCatalog = providerFilter !== undefined && this.#runtimeModelModifiers.size > 0;
-		const unprojected = this.#composeUnprojectedStaticModels(projectFullCatalog ? undefined : providerFilter);
+		const compositionFilter = projectFullCatalog ? undefined : providerFilter;
+		const unprojected = this.#projectBaseModels(this.#composeBaseModels(compositionFilter), compositionFilter);
 		const projected = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(unprojected));
 		const selected = projectFullCatalog ? projected.filter(model => providerFilter.has(model.provider)) : projected;
 		return this.#internStaticModels(selected);
@@ -1069,7 +1124,8 @@ export class ModelRegistry {
 
 	#ensureFullSnapshot(): Model<Api>[] {
 		if (!this.#hasFullSnapshot) {
-			this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+			this.#baseModels = this.#composeBaseModels();
+			this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
 			this.#models = this.#internStaticModels(
 				this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels)),
 			);
@@ -1701,14 +1757,12 @@ export class ModelRegistry {
 		for (const provider of replacedConfiguredProviders) touchedProviders.add(provider);
 		for (const provider of builtInDiscovery.replaceRuntimeProviders) touchedProviders.add(provider);
 		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
-		const existingModels = this.#hasFullSnapshot
-			? this.#unprojectedModels
-			: this.#composeUnprojectedStaticModels(touchedProviders);
+		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
 		const discoveredModels = this.#applyHardcodedModelPolicies(
 			discovered.map(model =>
 				mergeDiscoveredModel(
 					model,
-					resolveProviderModelReference(model.provider, model.id, existingModels),
+					resolveProviderModelReference(model.provider, model.id, referenceModels),
 					this.#providerOverrides.get(model.provider),
 				),
 			),
@@ -1744,22 +1798,18 @@ export class ModelRegistry {
 		}
 		if (!this.#hasFullSnapshot) return;
 
-		let baseModels = this.#unprojectedModels;
+		let baseModels = this.#baseModels;
 		if (replacedProviderSet.size > 0) {
 			baseModels = this.#mergeResolvedModels(
 				dropProviderModels(baseModels, replacedProviderSet),
-				this.#composeUnprojectedStaticModels(replacedProviderSet),
+				this.#composeBaseModels(replacedProviderSet),
 			);
 		}
 		if (authoritativeProviders.size > 0) {
 			baseModels = dropProviderModels(baseModels, authoritativeProviders, { kind: "chat" });
 		}
-		const resolved = this.#mergeResolvedModels(baseModels, discoveredModels);
-		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
-		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
-		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
-		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
-		this.#unprojectedModels = this.#applyDiscoveryPolicies(this.#applyRuntimeProviderOverrides(withProviderBedrock));
+		this.#baseModels = this.#mergeResolvedModels(baseModels, discoveredModels);
+		this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
 		this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 	}
 
@@ -3182,6 +3232,8 @@ export class ModelRegistry {
 			// Update the unprojected snapshot, then rerun every whole-catalog
 			// projection exactly once. Incremental projection is not safe because one
 			// provider's hook may inspect or suppress another provider's models.
+			// Refresh projections re-add this provider's runtime overlays to the base.
+			this.#baseModels = this.#baseModels.filter(model => model.provider !== providerName);
 			const nextModels = this.#unprojectedModels.filter(model => model.provider !== providerName);
 			for (const overlay of newOverlays) {
 				nextModels.push(finalizeCustomModel(overlay, { useDefaults: true }));

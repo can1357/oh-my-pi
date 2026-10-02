@@ -23,6 +23,7 @@ import type {
 import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
@@ -483,6 +484,22 @@ export class ModelHubComponent implements Component {
 		return this.#settings.knownRoleIds.filter(role => !this.#settings.getRoleInfo(role).hidden);
 	}
 
+	/**
+	 * Models a `--models`/`enabledModels` scope exposes. The scope only resolves
+	 * chat models (it feeds Ctrl+P cycling), so available non-chat runners
+	 * (judge, search, image, …) join from the registry — runtime role
+	 * resolution ignores the scope for them as well.
+	 */
+	#scopedPool(): Model[] {
+		const pool = this.#scopedModels.map(scoped => scoped.model);
+		for (const model of this.#registry.getAvailable("all")) {
+			if (modelKind(model) === "chat") continue;
+			if (this.#scopedModels.some(scoped => modelsAreEqual(scoped.model, model))) continue;
+			pool.push(model);
+		}
+		return pool;
+	}
+
 	/** Resolve every known role: configured values first, auto-selection for the rest. */
 	#reloadRoles(autoCandidates: ReadonlyArray<Model>): void {
 		const allModels = this.#scopedModels.length > 0 ? autoCandidates : this.#registry.getAll("all");
@@ -499,9 +516,14 @@ export class ModelHubComponent implements Component {
 		let allModels: ReadonlyArray<Model>;
 		let availableModels: ReadonlyArray<Model>;
 		if (this.#scopedModels.length > 0) {
-			allModels = this.#scopedModels.map(scoped => scoped.model);
-			availableModels = allModels;
 			this.#configError = undefined;
+			try {
+				allModels = this.#scopedPool();
+			} catch (error) {
+				this.#configError = error instanceof Error ? error.message : String(error);
+				allModels = this.#scopedModels.map(scoped => scoped.model);
+			}
+			availableModels = allModels;
 		} else {
 			const loadError = this.#registry.getError();
 			this.#configError = loadError ? String(loadError) : undefined;
@@ -1081,8 +1103,7 @@ export class ModelHubComponent implements Component {
 	#roleForScope(role: string, scope: ModelRoleSelectionScope): ResolvedModelRoleValue {
 		const roleValue =
 			scope === "project" ? this.#settings.getProjectModelRole(role) : this.#settings.getGlobalModelRole(role);
-		const allModels =
-			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.#registry.getAll("all");
+		const allModels = this.#scopedModels.length > 0 ? this.#scopedPool() : this.#registry.getAll("all");
 		const roleLookup: ModelRoleLookup = {
 			getModelRole: scopedRole =>
 				scope === "project"

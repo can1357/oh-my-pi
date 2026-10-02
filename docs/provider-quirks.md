@@ -1270,6 +1270,7 @@ The MiniMax Token Plan provider (`minimax-code`, alongside its mainland China re
 ### Catalog model handling
 - **Provider entry (`minimax-code`)**: `packages/catalog/src/compat/rules/providers/minimax-code.kdl` declares default model `MiniMax-M3`. Environment keys: `MINIMAX_CODE_API_KEY`.
 - **1M Context Tier Override**: Policy generation (`packages/catalog/scripts/generated-policies.ts`) explicitly overrides `MiniMax-M3` context windows for `minimax-code` and `minimax-code-cn` to report the documented 1,000,000-token tier instead of the upstream 512,000-token pricing boundary.
+- **Pay-as-you-go equivalent pricing**: Upstream reports $0 for every Token Plan model. The `minimax-code` / `minimax-code-cn` `pricing-peer` rules in `runtime/behavior.kdl` price rows at their `minimax` / `minimax-cn` list prices at build time (Credits overflow is billed at the PAYG list price), so usage and `omp stats` show PAYG-equivalent cost. `MiniMax-M3.1-Flash-Preview` has no published price and borrows the `MiniMax-M3` rate as an estimate. `applyPricingPeerFallback` (`packages/catalog/scripts/generated-policies.ts`) fills only zero-cost rows and tries a rule's alias `peer-id` before the row's own id, across peers in declared order.
 - **Host Matching**: Provider host mapping in `packages/catalog/src/hosts.ts` associates `urlMarkers` `api.minimax.io` and `api.minimaxi.com` with `minimax`, `minimax-code`, and `minimax-code-cn`.
 
 ## MiniMax Token Plan (China) (`minimax-code-cn`)

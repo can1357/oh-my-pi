@@ -6,8 +6,11 @@
  * deliver Shift+Enter as a bare `\r` (indistinguishable from Enter) and
  * Ctrl+Enter as `\n`. Enabling `CSI ? 9001 h` makes the console host serving
  * this process report every key as `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, which
- * carries the full modifier state. Paste text, mouse reports and terminal
- * replies keep arriving as plain VT, so only key records need translating.
+ * carries the full modifier state. Mouse reports and terminal replies keep
+ * arriving as plain VT. Pasted text mostly does too, but the console host
+ * re-encodes some pasted characters (line breaks) as key records inside the
+ * bracketed paste; {@link Win32InputModeDecoder.decodePaste} turns those back
+ * into text.
  *
  * Unmodified and legacy-expressible keys translate to the bytes a legacy
  * terminal sends; chords legacy encoding loses (modified Enter/Tab/Escape,
@@ -16,6 +19,7 @@
  */
 
 const W32IM_PATTERN = /^\x1b\[([\d;]*)_$/;
+const W32IM_RECORDS = /\x1b\[[\d;]*_/g;
 
 const RIGHT_ALT_PRESSED = 0x0001;
 const LEFT_ALT_PRESSED = 0x0002;
@@ -187,6 +191,26 @@ export class Win32InputModeDecoder {
 		const encoded = encodeKey(record);
 		if (encoded === null) return [];
 		return Array.from({ length: record.repeat }, () => encoded);
+	}
+
+	/**
+	 * Replace the key records embedded in bracketed paste `content` with the
+	 * text they type, so a pasted line break stays a line break instead of
+	 * acting as Enter. Key-downs yield their character (`\r` for Enter);
+	 * releases and keys without text yield nothing. Text that merely looks like
+	 * a record without ESC is left alone.
+	 */
+	decodePaste(content: string): string {
+		if (!content.includes("\x1b[")) return content;
+		this.#pendingHighSurrogate = 0;
+		const decoded = content.replace(W32IM_RECORDS, match => {
+			const record = parseRecord(match);
+			if (!record) return match;
+			if (!record.down) return "";
+			return this.#emitText(record.uc, record.repeat).join("");
+		});
+		this.#pendingHighSurrogate = 0;
+		return decoded;
 	}
 
 	#emitText(codeUnit: number, repeat = 1): string[] {

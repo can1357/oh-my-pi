@@ -178,12 +178,13 @@ Handled by `AgentProtocolHandler` over registered active session artifact direct
 - `write agent://<id>` sends a peer message when IRC is available; `agent://all` is write-only broadcast, not an output file
 - a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
 - extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
+- an id with no `<id>.md` yet that is registered in the agent registry (the registry `write agent://<id>` delivers to) resolves to a progress document instead of an error: the agent's status, every accepted `yield` payload so far (non-terminal sections included), and its latest assistant text, read from the live session or else its retained session file. Once `<id>.md` exists it wins. JSON-path extraction on such an id throws `Output <id> is not published yet`
 
 Failure behavior:
 
-- if no artifact directories are registered: throws `No session - agent outputs unavailable`,
-- if registered directories exist but none are present on disk: throws `No artifacts directory found`,
-- missing output throws `Not found: <id>` with available `.md` output IDs when directory listing succeeds.
+- if no artifact directories are registered and the id is not a registered agent: throws `No session - agent outputs unavailable`,
+- if registered directories exist but none are present on disk and the id is not a registered agent: throws `No artifacts directory found`,
+- an unknown id throws `Not found: <id>` followed by at most five near ids (`Did you mean: …`, fuzzy-matched against `.md` output ids and registered agents), or a pointer to `history://` when nothing is close.
 
 Read tool integration:
 

@@ -16,6 +16,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { cfgContextPromotionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -74,7 +75,7 @@ function weakRefToLiveSession(id: string): WeakRef<AgentSession> {
 	return new WeakRef(session);
 }
 
-async function collected(ref: WeakRef<AgentSession>, deadlineMs: number): Promise<boolean> {
+async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
 	const deadline = Date.now() + deadlineMs;
 	for (;;) {
 		Bun.gc(true);
@@ -84,7 +85,16 @@ async function collected(ref: WeakRef<AgentSession>, deadlineMs: number): Promis
 	}
 }
 
-it("releases a parked keep-alive subagent's session while the agent stays revivable", async () => {
+/** Makes a settings write in the live session's own overlay, then observes the overlay weakly (outside the test body). */
+function writeAndObserveLiveSettings(id: string): WeakRef<Settings> {
+	const session = AgentRegistry.global().get(id)?.session;
+	if (!session) throw new Error(`subagent ${id} has no live session to observe`);
+	cfgContextPromotionEnabled.set(session, true);
+	return new WeakRef(session.settings);
+}
+
+/** Runs `AGENT_ID` to a finished keep-alive state; `release` drops the mock's session-bound recordings. */
+async function runKeptAliveSubagent(): Promise<{ release(): void; close(): void }> {
 	const cwd = path.join(root, "work");
 	const artifactsDir = path.join(root, "artifacts");
 	await fs.mkdir(cwd, { recursive: true });
@@ -103,7 +113,6 @@ it("releases a parked keep-alive subagent's session while the agent stays reviva
 	const availableSpy = vi
 		.spyOn(modelRegistry, "getAvailable")
 		.mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
-
 	try {
 		const result = await runSubprocess({
 			cwd,
@@ -115,6 +124,7 @@ it("releases a parked keep-alive subagent's session while the agent stays reviva
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
+			inheritedSessionAgents: () => [],
 			settings: Settings.isolated({
 				// No TTL timer: the test parks explicitly through the same path the timer takes.
 				"task.agentIdleTtlMs": 0,
@@ -131,20 +141,53 @@ it("releases a parked keep-alive subagent's session while the agent stays reviva
 			enableIrc: false,
 		});
 		expect(result.exitCode).toBe(0);
+	} catch (error) {
+		authStorage.close();
+		throw error;
+	}
+	return {
+		// Recorded mock calls carry stream options with closures bound to the session.
+		release: () => {
+			mock.reset();
+			availableSpy.mockRestore();
+		},
+		close: () => authStorage.close(),
+	};
+}
 
+it("releases a parked keep-alive subagent's session while the agent stays revivable", async () => {
+	const run = await runKeptAliveSubagent();
+	try {
 		const sessionRef = weakRefToLiveSession(AGENT_ID);
 		await AgentLifecycleManager.global().park(AGENT_ID);
 		expect(AgentRegistry.global().get(AGENT_ID)).toMatchObject({ status: "parked", session: null });
 		expect(AgentLifecycleManager.global().has(AGENT_ID)).toBe(true);
 
-		// Recorded mock calls carry stream options with closures bound to the session.
-		mock.reset();
-		availableSpy.mockRestore();
+		run.release();
 		expect(await collected(sessionRef, COLLECT_DEADLINE_MS)).toBe(true);
 		// Still adopted after collection: the release did not come from dropping the reviver.
 		expect(AgentLifecycleManager.global().has(AGENT_ID)).toBe(true);
 	} finally {
-		authStorage.close();
+		run.close();
+	}
+}, 20_000);
+
+it("parks without retaining the run's settings overlay and revives with the settings it wrote", async () => {
+	const run = await runKeptAliveSubagent();
+	try {
+		// A write the subagent made to its own settings during the run.
+		const settingsRef = writeAndObserveLiveSettings(AGENT_ID);
+
+		await AgentLifecycleManager.global().park(AGENT_ID);
+		run.release();
+		// The reviver held the run's whole overlay — merged view, memoized values, listener buckets —
+		// for as long as the parked agent stayed adopted.
+		expect(await collected(settingsRef, COLLECT_DEADLINE_MS)).toBe(true);
+
+		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
+	} finally {
+		run.close();
 	}
 }, 20_000);
 

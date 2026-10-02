@@ -442,6 +442,7 @@ prompt-template expansion, and queue insertion:
 | Submission | `source` |
 |---|---|
 | Main-session Enter or Ctrl+Enter | `"interactive"` |
+| `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,

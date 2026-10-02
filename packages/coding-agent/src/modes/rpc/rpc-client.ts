@@ -300,6 +300,8 @@ export class RpcClient {
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
+	/** Same-id failures that arrive after the success ack removed the pending request. */
+	#promptErrorWaiters = new Map<string, (error: Error) => void>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -1229,7 +1231,14 @@ export class RpcClient {
 		const events: AgentEvent[] = [];
 		const { promise, resolve, reject } = Promise.withResolvers<AgentEvent[]>();
 		const unsubscribe = this.onEvent(event => events.push(event));
-		this.#promptResultWaiters.set(id, () => resolve(events));
+		this.#promptResultWaiters.set(id, result => {
+			if (result.status === "error") {
+				reject(new Error(result.error?.message ?? "Prompt failed"));
+				return;
+			}
+			resolve(events);
+		});
+		this.#promptErrorWaiters.set(id, reject);
 		let timeoutId: NodeJS.Timeout | undefined;
 		try {
 			const response = await this.#send({ type: "prompt", message, images }, 30_000, id);
@@ -1243,6 +1252,7 @@ export class RpcClient {
 			unsubscribe();
 			clearTimeout(timeoutId);
 			this.#promptResultWaiters.delete(id);
+			this.#promptErrorWaiters.delete(id);
 		}
 	}
 
@@ -1259,6 +1269,14 @@ export class RpcClient {
 				this.#pendingRequests.delete(id);
 				pending.resolve(data);
 				return;
+			}
+			if (id && data.success === false) {
+				const rejectLate = this.#promptErrorWaiters.get(id);
+				if (rejectLate) {
+					this.#promptErrorWaiters.delete(id);
+					rejectLate(new RpcCommandError(data.error, data.command, data.code));
+					return;
+				}
 			}
 		}
 

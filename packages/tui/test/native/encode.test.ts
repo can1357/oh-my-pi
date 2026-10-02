@@ -51,6 +51,15 @@ describe("TSP framing", () => {
 		});
 	});
 
+	it("decodes prefs change events whatever their value", () => {
+		for (const value of [true, 50, "branch", ["c", "a"], null]) {
+			const event = { ev: "change", sf: "s:1", id: "pf", item: "task.isolation.merge", value };
+			const decoded: unknown = parseTspMessage(`\x1b_tsp;e;${JSON.stringify(event)}\x1b\\`);
+			expect(decoded).toEqual({ verb: "e", event });
+		}
+		expect(parseTspMessage('\x1b_tsp;e;{"ev":"change","sf":"s:1","id":"pf"}\x1b\\')).toBeNull();
+	});
+
 	it("rejects malformed replies and events", () => {
 		expect(parseTspMessage('\x1b_tsp;r;{"r":"hello","v":1,"term":"tern"}\x1b\\')).toBeNull();
 		expect(parseTspMessage('\x1b_tsp;e;{"ev":"ack"}\x1b\\')).toBeNull();

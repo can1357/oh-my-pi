@@ -106,6 +106,9 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 }
 
 export class CommandController {
+	/** The last `/context` card mounted, reused so repeated runs never stack cards. */
+	#contextView: ContextUsageView | undefined;
+
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	async #restoreAfterMoveFailure(
@@ -733,7 +736,25 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		this.ctx.presentCommandOutput(new ContextUsageView(breakdown, theme));
+		const chat = this.ctx.chatContainer;
+		const prev = this.#contextView;
+		// Identity check: a handle left over from a cleared/switched transcript is ignored.
+		if (prev && chat.children.includes(prev) && chat.canRemoveBlock(prev)) {
+			if (chat.children.at(-1) === prev) {
+				prev.setBreakdown(breakdown);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			chat.removeChild(prev);
+		}
+		const view = new ContextUsageView(breakdown, theme);
+		this.ctx.presentCommandOutput(view);
+		this.#contextView = view;
+	}
+
+	/** Forget the tracked `/context` card (the transcript it lived in was reset). */
+	resetContextView(): void {
+		this.#contextView = undefined;
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
