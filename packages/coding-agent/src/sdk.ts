@@ -3086,6 +3086,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
+		// The identity extension loads serve: a `main` root keys its IRC namespace claims by this id
+		// (independent roots sharing one registry co-own a claim), a `sub` only shares its root's.
+		const extensionAgent: ExtensionAgentIdentity = Object.freeze({
+			kind: isSubagentSession ? "sub" : "main",
+			id: resolvedAgentId,
+			name: resolvedAgentName,
+			depth: taskDepth,
+			...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
+		});
 		if (!restrictToolNames && options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
@@ -3112,7 +3121,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eventBus,
 				undefined,
 				agentRegistry,
-				agentKind === "main",
+				extensionAgent,
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to bind extension", { path, error });
@@ -3127,7 +3136,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eventBus,
 				undefined,
 				agentRegistry,
-				agentKind === "main",
+				extensionAgent,
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -3144,7 +3153,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eventBus,
 				undefined,
 				agentRegistry,
-				agentKind === "main",
+				extensionAgent,
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -3179,13 +3188,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
-			Object.freeze({
-				kind: isSubagentSession ? "sub" : "main",
-				id: resolvedAgentId,
-				name: resolvedAgentName,
-				depth: taskDepth,
-				...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
-			}),
+			extensionAgent,
 			createAnnotationsAPI,
 		);
 		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
@@ -3226,7 +3229,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					extensionsResult.runtime,
 					sourceId,
 					agentRegistry,
-					agentKind === "main",
+					extensionAgent,
 				);
 				extensionsResult.extensions.push(loaded);
 				if (i < rebindableInlineExtensionCount) {
@@ -6190,7 +6193,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					eventBus,
 					runtime,
 					agentRegistry,
-					agentKind === "main",
+					extensionAgent,
 				);
 				const storage = settings.getStorage();
 				if (storage) await recordStartupVerdicts(storage, loaded.extensions);

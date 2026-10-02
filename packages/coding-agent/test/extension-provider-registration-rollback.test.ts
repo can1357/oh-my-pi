@@ -3,8 +3,12 @@ import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai";
 import { unregisterOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { IrcApi, ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { emitSessionShutdownEvent, ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type {
+	ExtensionAgentIdentity,
+	IrcApi,
+	ProviderConfig,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -391,9 +395,7 @@ describe("extension provider registration rollback", () => {
 				runtime,
 				"ok-bridge-extension",
 			);
-			const ref = AgentRegistry.global().get("@cluster-a/beatrice");
-			expect(ref?.kind).toBe("remote");
-			expect(ref?.ownerToken?.startsWith("ok-bridge-extension:")).toBe(true);
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")?.kind).toBe("remote");
 		} finally {
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
@@ -527,12 +529,12 @@ describe("extension provider registration rollback", () => {
 		}
 	});
 
-	test("session_shutdown releases a successful load's IRC claim + proxies (symmetric with rollback)", async () => {
+	test("session shutdown releases a successful load's IRC claim + proxies (symmetric with rollback)", async () => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			const runtime = new ExtensionRuntime();
-			const events = new EventBus();
 			const extension = await loadExtensionFromFactory(
 				pi => {
 					pi.irc.setRemoteTransport?.("cluster-a", {
@@ -543,7 +545,7 @@ describe("extension provider registration rollback", () => {
 					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 				},
 				process.cwd(),
-				events,
+				new EventBus(),
 				runtime,
 				"bridge-extension",
 			);
@@ -552,10 +554,16 @@ describe("extension provider registration rollback", () => {
 			expect(IrcBus.global().hasRemoteTransport()).toBe(true);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")?.kind).toBe("remote");
 
-			// The load armed a session_shutdown teardown; running it releases its IRC state.
-			const handlers = extension.handlers.get("session_shutdown") ?? [];
-			expect(handlers.length).toBeGreaterThan(0);
-			for (const handler of handlers) await handler();
+			// The session's shutdown path releases the load's IRC state — with no session_shutdown
+			// handler registered by anyone, so the release is not riding on the handler walk.
+			const runner = new ExtensionRunner(
+				[extension],
+				runtime,
+				process.cwd(),
+				SessionManager.inMemory(),
+				new ModelRegistry(authStorage),
+			);
+			expect(await emitSessionShutdownEvent(runner)).toBe(false);
 
 			// Transport + claim gone (namespace re-claimable), proxy unregistered — symmetric with the
 			// factory-failure rollback.
@@ -573,20 +581,95 @@ describe("extension provider registration rollback", () => {
 				),
 			).not.toThrow();
 		} finally {
+			authStorage.close();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		}
 	});
 
-	test("rejects IRC installs/registrations after the safety-net teardown released the load (#7401)", async () => {
+	test("suspending a bridge (live disabledExtensions) releases its IRC claim and keeps it inert through resume and shutdown (#14071)", async () => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const runtime = new ExtensionRuntime();
+			let irc: IrcApi | undefined;
+			const bridge = await loadExtensionFromFactory(
+				pi => {
+					irc = pi.irc;
+					pi.irc.setRemoteTransport?.("cluster-a", {
+						async send(message) {
+							return { to: message.to, outcome: "injected" };
+						},
+					});
+					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+					pi.on("session_shutdown", async () => {});
+				},
+				process.cwd(),
+				new EventBus(),
+				runtime,
+				"/ext/bridge.ts",
+			);
+			const other = await loadExtensionFromFactory(
+				() => {},
+				process.cwd(),
+				new EventBus(),
+				runtime,
+				"/ext/other.ts",
+			);
+			const runner = new ExtensionRunner(
+				[bridge, other],
+				runtime,
+				process.cwd(),
+				SessionManager.inMemory(),
+				new ModelRegistry(authStorage),
+			);
+
+			// A live `disabledExtensions` edit suspends the bridge: it leaves the active handler walk,
+			// and its claim, transport and proxies go with it — a disabled bridge neither routes nor
+			// injects.
+			const { suspended } = runner.setSuspendedExtensions(extension => extension.path === "/ext/bridge.ts");
+			expect(suspended).toEqual([bridge]);
+			expect(runner.hasHandlers("session_shutdown")).toBe(false);
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
+			const inbound = await irc!.deliverInbound({ from: "@cluster-a/beatrice", to: "Main", body: "still there?" });
+			expect(inbound.receipt).toMatchObject({ outcome: "failed", error: expect.stringContaining("released") });
+			// Nothing re-fires session_start on resume, so the released load stays inert.
+			runner.setSuspendedExtensions(() => false);
+			expect(() =>
+				irc!.setRemoteTransport?.("cluster-a", {
+					async send(message) {
+						return { to: message.to, outcome: "injected" };
+					},
+				}),
+			).toThrow(/released/);
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+
+			// Shutdown with the bridge still out of the handler walk is clean: the runner's release pass
+			// covers every load — suspended or not — and is idempotent for the one already released.
+			runner.setSuspendedExtensions(extension => extension.path === "/ext/bridge.ts");
+			expect(await emitSessionShutdownEvent(runner)).toBe(false);
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+		} finally {
+			authStorage.close();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	test("rejects IRC installs/registrations/inbound after shutdown released the load (#7401)", async () => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			const transport: RemoteTransport = {
 				async send(message) {
 					return { to: message.to, outcome: "injected" };
 				},
 			};
+			const runtime = new ExtensionRuntime();
 			let irc: IrcApi | undefined;
 			const extension = await loadExtensionFromFactory(
 				pi => {
@@ -596,19 +679,29 @@ describe("extension provider registration rollback", () => {
 				},
 				process.cwd(),
 				new EventBus(),
-				new ExtensionRuntime(),
+				runtime,
 				"bridge-extension",
 			);
 
-			// The safety net releases the load's IRC state AND closes its surface.
-			for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler();
+			// Shutdown releases the load's IRC state AND closes its surface.
+			const runner = new ExtensionRunner(
+				[extension],
+				runtime,
+				process.cwd(),
+				SessionManager.inMemory(),
+				new ModelRegistry(authStorage),
+			);
+			await emitSessionShutdownEvent(runner);
 			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 
 			// A post-teardown reconnect must not re-establish state no teardown will ever release:
-			// install throws, registration no-ops, and nothing leaks back onto the bus/registry.
-			expect(() => irc?.setRemoteTransport?.("cluster-a", transport)).toThrow(/released at session shutdown/);
+			// install throws, registration no-ops, inbound fails, and nothing leaks back onto the
+			// bus/registry.
+			expect(() => irc?.setRemoteTransport?.("cluster-a", transport)).toThrow(/released/);
 			expect(irc?.registerRemotePeer?.({ name: "carol", displayName: "carol" })).toBeUndefined();
+			const inbound = await irc!.deliverInbound({ from: "@cluster-a/beatrice", to: "Main", body: "late" });
+			expect(inbound.receipt.outcome).toBe("failed");
 			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
 			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
 			expect(
@@ -617,17 +710,55 @@ describe("extension provider registration rollback", () => {
 					.some(ref => ref.kind === "remote"),
 			).toBe(false);
 		} finally {
+			authStorage.close();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		}
 	});
 
-	test("session_shutdown clear is idempotent when the safety net releases first (concurrent emit)", async () => {
+	test("a factory that claims, leaves a reconnect callback running, then throws cannot re-claim after rollback (#14071)", async () => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 		try {
+			const transport: RemoteTransport = {
+				async send(message) {
+					return { to: message.to, outcome: "injected" };
+				},
+			};
+			let reconnect: (() => void) | undefined;
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.setRemoteTransport?.("cluster-a", transport);
+						// An async connect that will try to (re)install once it settles.
+						reconnect = () => pi.irc.setRemoteTransport?.("cluster-a", transport);
+						throw new Error("factory boom");
+					},
+					process.cwd(),
+					new EventBus(),
+					new ExtensionRuntime(),
+					"bridge-extension",
+				),
+			).rejects.toThrow("factory boom");
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+
+			// The rollback closed the discarded API's surface: the stranded callback is refused, so no
+			// claim with no loaded extension to release it ever exists.
+			expect(() => reconnect?.()).toThrow(/released/);
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	test("a bridge's own session_shutdown clear never throws against the runner's release", async () => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
 			const runtime = new ExtensionRuntime();
-			const events = new EventBus();
 			let cleared = false;
 			const extension = await loadExtensionFromFactory(
 				pi => {
@@ -638,9 +769,7 @@ describe("extension provider registration rollback", () => {
 					});
 					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 					// The bridge's own cleanup awaits (e.g. flushing a socket) before clearing its
-					// transport. session_shutdown handlers run concurrently (ExtensionRunner Promise.all),
-					// so the internal safety net can release the claim first — the clear must then be a
-					// no-op, not a throw.
+					// transport; the runner releases the claim once every handler has settled.
 					pi.on("session_shutdown", async () => {
 						await Promise.resolve();
 						pi.irc.setRemoteTransport?.("cluster-a", undefined);
@@ -648,34 +777,37 @@ describe("extension provider registration rollback", () => {
 					});
 				},
 				process.cwd(),
-				events,
+				new EventBus(),
 				runtime,
 				"bridge-extension",
 			);
 
-			const handlers = extension.handlers.get("session_shutdown") ?? [];
-			expect(handlers.length).toBe(2); // internal safety net (armed at claim) + the extension's clear
-			// Emit like ExtensionRunner: start every handler, then await all. The internal net releases
-			// (sync) while the extension's clear is still awaiting; the clear then resolves against an
-			// already-released namespace and must not throw.
-			await Promise.all(handlers.map(h => h()));
+			const runner = new ExtensionRunner(
+				[extension],
+				runtime,
+				process.cwd(),
+				SessionManager.inMemory(),
+				new ModelRegistry(authStorage),
+			);
+			expect(await emitSessionShutdownEvent(runner)).toBe(true);
 
 			expect(cleared).toBe(true); // the extension's clear completed without throwing
 			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
 			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 		} finally {
+			authStorage.close();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		}
 	});
 
-	test("a namespace claimed after the factory (runtime handler) still arms the teardown", async () => {
+	test("a namespace claimed after the factory (runtime handler) is released at shutdown", async () => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			const runtime = new ExtensionRuntime();
-			const events = new EventBus();
 			let claim: (() => void) | undefined;
 			const extension = await loadExtensionFromFactory(
 				pi => {
@@ -691,25 +823,28 @@ describe("extension provider registration rollback", () => {
 					};
 				},
 				process.cwd(),
-				events,
+				new EventBus(),
 				runtime,
 				"bridge-extension",
 			);
+			const runner = new ExtensionRunner(
+				[extension],
+				runtime,
+				process.cwd(),
+				SessionManager.inMemory(),
+				new ModelRegistry(authStorage),
+			);
 
-			// Nothing claimed during the factory, so no teardown handler yet.
-			expect(extension.handlers.get("session_shutdown") ?? []).toHaveLength(0);
-
-			// The delayed (post-factory) claim arms the teardown at claim time.
+			// The delayed (post-factory) claim is covered without any handler registration.
 			claim?.();
 			expect(IrcBus.global().hasClaimedNamespace()).toBe(true);
-			const handlers = extension.handlers.get("session_shutdown") ?? [];
-			expect(handlers).toHaveLength(1);
+			expect(runner.hasHandlers("session_shutdown")).toBe(false);
 
-			// session_shutdown then releases the delayed claim.
-			for (const h of handlers) await h();
+			await emitSessionShutdownEvent(runner);
 			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 		} finally {
+			authStorage.close();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		}
@@ -721,7 +856,7 @@ describe("extension provider registration rollback", () => {
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
-			const claim = () =>
+			const claim = (agent?: ExtensionAgentIdentity) =>
 				loadExtensionFromFactory(
 					pi => {
 						pi.irc.setRemoteTransport?.("cluster-a", {
@@ -734,15 +869,17 @@ describe("extension provider registration rollback", () => {
 					events,
 					runtime,
 					"/ext/bridge.ts",
+					AgentRegistry.global(),
+					agent,
 				);
 			// Parent load of the bridge claims the namespace.
 			await claim();
-			const owner = IrcBus.global().namespaceOwner("cluster-a");
-			expect(owner).toBeDefined();
-			// The SAME extension path re-loaded (a spawned subagent inheriting the bridge, fresh
-			// ownerToken) re-claims WITHOUT throwing, and does not steal ownership.
-			await expect(claim()).resolves.toBeDefined();
-			expect(IrcBus.global().namespaceOwner("cluster-a")).toBe(owner);
+			// The SAME extension path re-loaded by a spawned subagent inheriting the bridge re-claims
+			// WITHOUT throwing, and does not become an owner.
+			const child = await claim({ kind: "sub", id: "0-Scout", name: "scout", depth: 1, parentId: "Main" });
+			expect(child).toBeDefined();
+			child.releaseIrc?.();
+			expect(IrcBus.global().hasRemoteTransport()).toBe(true);
 			// A genuinely DIFFERENT extension (path) claiming the same namespace is still rejected.
 			await expect(
 				loadExtensionFromFactory(
