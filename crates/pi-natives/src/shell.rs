@@ -807,18 +807,19 @@ mod tests {
 	async fn timeout_drains_pipeline_output_before_stopping_reader() {
 		let shell = CoreShell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
-		// The producer writes five lines, signals readiness on stderr, then
-		// holds the pipe open. `tail` flushes its buffered lines only after
-		// timeout cancellation stops that producer. Waiting for readiness avoids
-		// cancelling before the producer starts under concurrent CI load.
+		// The downstream stage reads and writes exactly five complete lines
+		// before it emits READY, then blocks in a sixth read. READY therefore
+		// proves the reader, rather than merely the producer or pipe, consumed
+		// the asserted output. Cancellation makes the sixth read return EOF.
 		let mut cancel = CancelToken::default();
 		let abort = cancel.emplace_abort_token();
 		let handle = tokio::spawn(async move {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; printf 'READY\\n' >&2; sleep 30; \
-						             } | tail -5"
+						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; sleep 30; } | { for _ in 1 2 3 4 \
+						             5; do IFS= read -r line; printf '%s\\n' \"$line\"; done; printf \
+						             'READY\\n' >&2; read -r; }"
 							.to_string(),
 						cwd:        None,
 						env:        None,
@@ -831,7 +832,7 @@ mod tests {
 				.await
 		});
 		let mut output = String::new();
-		time::timeout(Duration::from_secs(10), async {
+		time::timeout(Duration::from_secs(30), async {
 			while !output.contains("READY") {
 				output.push_str(
 					&rx.recv_async()
@@ -842,9 +843,6 @@ mod tests {
 		})
 		.await
 		.expect("producer did not become ready");
-		// Give the downstream builtin a turn to consume the queued pipe data
-		// before cancellation closes the producer.
-		time::sleep(Duration::from_millis(200)).await;
 		abort.abort(AbortReason::Timeout);
 		let result = time::timeout(Duration::from_secs(10), handle)
 			.await

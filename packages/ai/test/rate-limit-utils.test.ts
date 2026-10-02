@@ -514,6 +514,18 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(undefined, "free limit reached on model x/y. try again in 5 minutes")).toBe(true);
 	});
 
+	it("rotates on Cursor prepaid-balance exhaustion but not on the changeable pricing gate", () => {
+		const prepaid =
+			"Cursor USAGE_PRICING_REQUIRED: Your prepaid balance is used up: Add funds or enable auto top-up in your billing settings to keep going.";
+		expect(parseRateLimitReason(prepaid)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, prepaid)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(prepaid, 429))).toBe(true);
+		expect(isUsageLimitOutcome(429, "Cursor USAGE_PRICING_REQUIRED: Usage-based pricing required")).toBe(true);
+		expect(matchesUsageLimitText("Cursor USAGE_PRICING_REQUIRED_CHANGEABLE: Switch to a different model")).toBe(
+			false,
+		);
+	});
+
 	it("keeps informative transient 429s in the upstream-backoff lane", () => {
 		// RATE_LIMIT_EXCEEDED — generic throttling.
 		expect(isUsageLimitOutcome(429, "Cloud Code Assist API error (429): Too many requests")).toBe(false);

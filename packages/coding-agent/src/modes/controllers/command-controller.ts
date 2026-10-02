@@ -76,6 +76,7 @@ import {
 	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
+import { formatDumpArchiveReport } from "../../session/session-dump-format";
 import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -106,6 +107,9 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 }
 
 export class CommandController {
+	/** The last `/context` card mounted, reused so repeated runs never stack cards. */
+	#contextView: ContextUsageView | undefined;
+
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	async #restoreAfterMoveFailure(
@@ -224,6 +228,22 @@ export class CommandController {
 			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+
+	async handleDumpAllCommand(): Promise<void> {
+		try {
+			const archive = await this.ctx.session.dumpSessionArchiveToTmpDir();
+			if (!archive) {
+				this.ctx.showError("No messages to dump yet.");
+				return;
+			}
+			await copyToClipboard(archive.path);
+			this.ctx.showStatus([...formatDumpArchiveReport(archive), "Archive path copied to clipboard"].join("\n"));
+		} catch (error: unknown) {
+			this.ctx.showError(
+				`Failed to write session dump: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
 		}
 	}
 
@@ -733,7 +753,25 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		this.ctx.presentCommandOutput(new ContextUsageView(breakdown, theme));
+		const chat = this.ctx.chatContainer;
+		const prev = this.#contextView;
+		// Identity check: a handle left over from a cleared/switched transcript is ignored.
+		if (prev && chat.children.includes(prev) && chat.canRemoveBlock(prev)) {
+			if (chat.children.at(-1) === prev) {
+				prev.setBreakdown(breakdown);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			chat.removeChild(prev);
+		}
+		const view = new ContextUsageView(breakdown, theme);
+		this.ctx.presentCommandOutput(view);
+		this.#contextView = view;
+	}
+
+	/** Forget the tracked `/context` card (the transcript it lived in was reset). */
+	resetContextView(): void {
+		this.#contextView = undefined;
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {

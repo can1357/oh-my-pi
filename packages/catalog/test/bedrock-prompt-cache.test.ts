@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { buildGeneratedModel } from "../scripts/generate-models";
 
 function bedrockSpec(
 	overrides: Partial<ModelSpec<"bedrock-converse-stream">> = {},
@@ -143,6 +144,25 @@ describe("Bedrock prompt-cache compat", () => {
 				expect(model.promptCache).toEqual(supportsLongRetention ? { short: 300, long: 3600 } : { short: 300 });
 			}
 		}
+	});
+
+	test("generation recomputes lifetimes from current policy instead of a previous snapshot row", () => {
+		const stale = { short: 999, long: 9999 };
+		const cached = buildGeneratedModel(bedrockSpec({ promptCache: stale, promptCacheConfig: stale }));
+		expect(cached.promptCache).toEqual({ short: 300 });
+		expect(cached.promptCacheConfig).toBeUndefined();
+
+		const uncached = buildGeneratedModel({
+			...bedrockSpec(),
+			id: "gpt-5.2",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			promptCache: stale,
+			promptCacheConfig: stale,
+		});
+		expect(uncached.promptCache).toBeUndefined();
+		expect(uncached.promptCacheConfig).toBeUndefined();
 	});
 
 	test("keeps Bedrock Converse cache, pricing, and limit rules on Bedrock Runtime", () => {

@@ -19,7 +19,7 @@ use super::{
 use crate::{
 	error::{Error, Result},
 	types::{
-		CleanOptions, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions,
+		CleanOptions, CommitAuthor, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions,
 		WorktreeAddOptions, WorktreeAddResult, WorktreeClone,
 	},
 };
@@ -203,21 +203,10 @@ impl GitRepo {
 			.committer()
 			.ok_or_else(|| Error::backend("git commit", "committer identity is not configured"))?
 			.map_err(|err| Error::backend("git commit", err))?;
-		let override_author;
+		let override_author = options.author.as_ref().map(signature_for).transpose()?;
 		let mut author_time = gix::date::parse::TimeBuf::default();
-		let author = if let Some(author) = &options.author {
-			let time = match &author.date {
-				Some(date) => {
-					gix::date::parse(date, None).map_err(|err| Error::backend("git commit", err))?
-				},
-				None => gix::date::Time::now_local_or_utc(),
-			};
-			override_author = gix::actor::Signature {
-				name: author.name.clone().into(),
-				email: author.email.clone().into(),
-				time,
-			};
-			override_author.to_ref(&mut author_time)
+		let author = if let Some(author) = override_author.as_ref() {
+			author.to_ref(&mut author_time)
 		} else if let Some(author) = inherited_author.as_ref() {
 			author.to_ref(&mut author_time)
 		} else {
@@ -263,6 +252,42 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit", err))?;
 		let _ = run_commit_hook(self, "post-commit", &[]);
 		Ok(id.to_hex().to_string())
+	}
+
+	/// Write a commit object for `tree` on top of `parents` without touching
+	/// HEAD, the index, any ref, or the worktree (`git commit-tree`). No hooks
+	/// run. Returns the new commit id.
+	pub fn commit_tree(
+		&self,
+		tree: &str,
+		parents: &[String],
+		message: &str,
+		author: Option<&CommitAuthor>,
+	) -> Result<String> {
+		let repo = self.gix()?;
+		let tree = resolve_tree(&repo, tree)?;
+		let parents = parents
+			.iter()
+			.map(|parent| resolve_commit(&repo, parent))
+			.collect::<Result<Vec<_>>>()?;
+		let committer = repo
+			.committer()
+			.ok_or_else(|| Error::backend("git commit-tree", "committer identity is not configured"))?
+			.map_err(|err| Error::backend("git commit-tree", err))?;
+		let override_author = author.map(signature_for).transpose()?;
+		let mut author_time = gix::date::parse::TimeBuf::default();
+		let author = if let Some(author) = override_author.as_ref() {
+			author.to_ref(&mut author_time)
+		} else {
+			repo
+				.author()
+				.ok_or_else(|| Error::backend("git commit-tree", "author identity is not configured"))?
+				.map_err(|err| Error::backend("git commit-tree", err))?
+		};
+		let commit = repo
+			.new_commit_as(committer, author, message, tree, parents)
+			.map_err(|err| Error::backend("git commit-tree", err))?;
+		Ok(commit.id.to_hex().to_string())
 	}
 
 	/// Checkout a branch or detached revision without overwriting local changes.
@@ -1043,6 +1068,21 @@ pub fn detach_git_dir(
 		detached.read_tree("HEAD", None)?;
 	}
 	Ok(DetachGitDirResult::Detached)
+}
+
+/// Author signature for an explicit [`CommitAuthor`]; a missing date means now.
+fn signature_for(author: &CommitAuthor) -> Result<gix::actor::Signature> {
+	let time = match &author.date {
+		Some(date) => {
+			gix::date::parse(date, None).map_err(|err| Error::backend("git commit", err))?
+		},
+		None => gix::date::Time::now_local_or_utc(),
+	};
+	Ok(gix::actor::Signature {
+		name: author.name.clone().into(),
+		email: author.email.clone().into(),
+		time,
+	})
 }
 
 fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectId> {

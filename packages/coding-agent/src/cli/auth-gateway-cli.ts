@@ -9,6 +9,8 @@
  *
  * Sub-verbs:
  *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the gateway against the configured broker.
+ *   - `stdio` — serves the same routes as JSON lines on stdin/stdout with this omp's own credentials
+ *     and model roles (`auth-gateway-stdio.ts`).
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
  *   - `status` — prints the locally-stored gateway token and bind hint.
  */
@@ -41,9 +43,10 @@ import {
 	loadEffectiveAuthAccountPolicyConfig,
 	resolveAuthBrokerConfig,
 } from "../session/auth-broker-config";
+import { runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
-export type AuthGatewayAction = "serve" | "token" | "status" | "check";
+export type AuthGatewayAction = "serve" | "stdio" | "token" | "status" | "check";
 
 export interface AuthGatewayCommandArgs {
 	action: AuthGatewayAction;
@@ -69,7 +72,7 @@ export interface AuthGatewayCommandArgs {
 	};
 }
 
-const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check"];
+const ACTIONS: readonly AuthGatewayAction[] = ["serve", "stdio", "token", "status", "check"];
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
@@ -479,6 +482,9 @@ export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs): Promis
 	switch (cmd.action) {
 		case "serve":
 			await runServe(cmd.flags);
+			return;
+		case "stdio":
+			await runAuthGatewayStdio();
 			return;
 		case "token":
 			await runToken(cmd.flags);

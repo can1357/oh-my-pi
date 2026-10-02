@@ -284,9 +284,10 @@ export class Input implements Component, Focusable {
 		this.#handlePaste(text);
 	}
 
-	/** Terminal-side selection edits on the `input` node (see {@link applyHostEdit}). */
+	/** Terminal-side selection edits and undo on the `input` node (see {@link applyHostEdit}). */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "edit") this.applyHostEdit(event);
+		else if (event.type === "undo") this.#undo();
 	}
 
 	/**
