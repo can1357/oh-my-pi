@@ -12,6 +12,7 @@
  * Throws on any failure (no judge, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
+import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { type ChoiceQuestion, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
@@ -19,7 +20,7 @@ import bucketQuestionInstructions from "../prompts/system/auto-thinking-bucket-q
 import levelQuestionTemplate from "../prompts/system/auto-thinking-level-question.md" with { type: "text" };
 import solutionSpaceQuestionTemplate from "../prompts/system/auto-thinking-solution-space-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
-import { type JudgmentUsage, resolveJudge } from "../judgment";
+import { type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -110,6 +111,7 @@ export interface ClassifyDifficultyDeps {
 	signal?: AbortSignal;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	onUsage?: (usage: JudgmentUsage) => void;
+	telemetry?: AgentTelemetryConfig;
 }
 
 /**
@@ -140,7 +142,10 @@ export async function classifyDifficulty(
 		sessionModel: deps.model,
 		sessionId: deps.sessionId,
 		metadataResolver: deps.metadataResolver,
+		purpose: "auto-thinking",
 		onUsage: deps.onUsage,
+		telemetry: deps.telemetry,
+		cache: sharedJudgmentCache(),
 	});
 	const solutionSpace = input.solutionSpace?.trim();
 	const state: Record<string, string> = solutionSpace

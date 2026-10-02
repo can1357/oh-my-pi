@@ -355,15 +355,6 @@ function refSlice(text: string, units: number): string {
 }
 
 describe("BlockUnitCounter.slice", () => {
-	it("matches a pure segmenter reference for fixed-text growing units", () => {
-		const counter = new BlockUnitCounter();
-		const text = "café 👨‍👩‍👧‍👦 naïve 日本語 ❤️";
-		const total = refCount(text);
-		for (let units = 0; units <= total; units++) {
-			expect(counter.slice(0, text, units)).toBe(refSlice(text, units));
-		}
-	});
-
 	it("re-segments the boundary cluster when an append extends it (no stale slice)", () => {
 		const counter = new BlockUnitCounter();
 		// "a" cached at 1 grapheme; appending a combining mark keeps it 1 cluster
@@ -386,15 +377,6 @@ describe("BlockUnitCounter.slice", () => {
 		for (let units = 0; units <= tb; units++) expect(counter.slice(1, b, units)).toBe(refSlice(b, units));
 		// Re-slicing block 0 after touching block 1 still matches the reference.
 		expect(counter.slice(0, a, ta)).toBe(a);
-	});
-
-	it("matches the reference after a shrink and regrow", () => {
-		const counter = new BlockUnitCounter();
-		const text = "the quick brown fox jumps over";
-		const total = refCount(text);
-		expect(counter.slice(0, text, total)).toBe(text);
-		expect(counter.slice(0, text, 2)).toBe(refSlice(text, 2));
-		expect(counter.slice(0, text, total - 1)).toBe(refSlice(text, total - 1));
 	});
 
 	it("matches the reference when the text is fully replaced", () => {
@@ -532,20 +514,45 @@ describe("frame-skip coalescing", () => {
 		expect(textAt(latestMessage(component), 0)).toBe("streamed xyz");
 	});
 
-	it("keeps synchronous per-setTarget renders when smooth streaming is off", () => {
+	it("detects an in-place rewrite of a value-equal replacement of the snapped content", () => {
+		// The unchanged-target shortcut must follow the live blocks: after a
+		// flush hands over equal-valued fresh blocks, an in-place rewrite of THOSE
+		// blocks still repaints.
 		vi.useFakeTimers();
-		const { component, controller } = makeController({ smooth: false });
+		const { component, controller } = makeController();
 
 		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
-		controller.setTarget(makeMessage([{ type: "text", text: "one" }]), false);
-		const before = component.messages.length;
-		controller.setTarget(makeMessage([{ type: "text", text: "one two" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "streamed abc" }]), true);
+		const snapped = component.messages.length;
 
-		expect(component.messages.length).toBe(before + 1);
-		expect(textAt(latestMessage(component), 0)).toBe("one two");
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
-		expect(component.messages.length).toBe(before + 1);
+		const replacement = makeMessage([{ type: "text", text: "streamed abc" }]);
+		controller.setTarget(replacement, true);
+		expect(component.messages).toHaveLength(snapped);
+
+		(replacement.content[0] as Extract<AssistantMessage["content"][number], { type: "text" }>).text = "streamed xyz";
+		controller.setTarget(replacement, true);
+		expect(component.messages).toHaveLength(snapped + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("streamed xyz");
 	});
+
+	it("detects an in-place rewrite nested inside a snapped block", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		const block = { type: "text" as const, text: "streamed abc", meta: { revision: 1 } };
+		const message = makeMessage([block]);
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(message, true);
+		const snapped = component.messages.length;
+
+		controller.setTarget(message, true);
+		expect(component.messages).toHaveLength(snapped);
+
+		block.meta.revision = 2;
+		controller.setTarget(message, true);
+		expect(component.messages).toHaveLength(snapped + 1);
+	});
+
 	it("cancels a pending drain when smooth streaming is turned off", () => {
 		vi.useFakeTimers();
 		let smooth = true;

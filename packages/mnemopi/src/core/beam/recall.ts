@@ -1,7 +1,10 @@
-import { normalizedRecallWeights, temporalHalflifeHours } from "../../config";
+import { normalizedRecallWeights, polyphonicRecallEnabled, temporalHalflifeHours } from "../../config";
 import { hasCjk, matchesWordForm } from "../../util/regex";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
+import { type OrchestratedRecallResult, orchestrateRecall } from "../orchestrator";
+import { POLYPHONIC_MAX_COMBINED_SCORE } from "../polyphonic-recall";
+import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
@@ -404,10 +407,17 @@ function factsHaveScopeColumn(beam: BeamMemoryState): boolean {
 
 function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where: string; params: DbValue[] } {
 	const prefix = tableAlias.length === 0 ? "" : `${tableAlias}.`;
-	if (factsHaveScopeColumn(beam)) {
-		return { where: `(${prefix}session_id = ? OR ${prefix}scope = 'global')`, params: [beam.sessionId] };
-	}
-	return { where: `${prefix}session_id = ?`, params: [beam.sessionId] };
+	const scope = factsHaveScopeColumn(beam)
+		? `(${prefix}session_id = ? OR ${prefix}scope = 'global')`
+		: `${prefix}session_id = ?`;
+	// A fact is a derivative of the working_memory row it was extracted from: once that row is
+	// explicitly superseded (`memory_edit invalidate`) or has expired, the fact must stop
+	// surfacing — otherwise an explicit invalidation is silently defeated at the fact layer.
+	// Correlated EXISTS probes the source's primary key (same shape as the fts_working /
+	// fts_episodes visibility predicates). Facts whose source row no longer exists stay
+	// visible: nothing contradicts them.
+	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
+	return { where: `${scope} AND ${sourceSuperseded}`, params: [beam.sessionId, nowIso()] };
 }
 
 function buildWhere(
@@ -977,11 +987,91 @@ function diversifyByCoverage(
 	return selected;
 }
 
+/** Upper bound on cached `recallEnhanced` rankings per beam. */
+const ENHANCED_RECALL_CACHE_MAX_ENTRIES = 256;
+/**
+ * Rankings also drift with wall-clock time (recency decay, `valid_until` expiry)
+ * without any write, so a cached ranking is only trusted briefly.
+ */
+const ENHANCED_RECALL_CACHE_TTL_SECONDS = 300;
+
+/**
+ * Enhanced recall: linear hybrid recall with synonyms, intent weighting and MMR,
+ * optionally merged with extracted facts.
+ *
+ * Two opt-in layers sit on top, each gated per instance (`BeamConfig`) with the
+ * `MNEMOPI_POLYPHONIC_RECALL` / `MNEMOPI_ENHANCED_RECALL` env vars winning:
+ * - polyphonic recall fuses this ranking with the vector, graph, fact and temporal
+ *   voices (see {@link orchestrateRecall});
+ * - the enhanced recall cache serves repeated or similar queries whose options all
+ *   match, and is dropped by any database write.
+ * With both off the linear path runs unchanged.
+ */
 export async function recallEnhanced(
 	beam: BeamMemoryState,
 	query: string,
 	topK = 40,
 	options: RecallEnhancedOptions & RecallOptionsInternal = {},
+): Promise<RecallResult[]> {
+	const polyphonic = polyphonicRecallEnabled(process.env, beam.config?.polyphonicRecall);
+	const cacheEnabled = isQueryCacheEnabled(options.useCache !== false, process.env, beam.config?.enhancedRecall);
+	if (!polyphonic && !cacheEnabled) return linearRecallEnhanced(beam, query, topK, options);
+
+	// Derive the query embedding once: it feeds the cache's semantic tiers, the linear
+	// ranking and the polyphonic vector voice. Same three-state contract as `recall()`.
+	let queryEmbedding = options.queryEmbedding;
+	if (queryEmbedding === undefined) {
+		const derived = query.length > 0 ? await embedQuery(query) : null;
+		queryEmbedding = derived === null ? null : Array.from(derived);
+	}
+	const runOptions: RecallEnhancedOptions & RecallOptionsInternal = {
+		...options,
+		queryEmbedding,
+		updateRecallCounts: false,
+	};
+	const countRecalls = options.updateRecallCounts !== false;
+
+	let cache: QueryCache<RecallResult> | null = null;
+	let token = "";
+	let scope = "";
+	if (cacheEnabled) {
+		beam.caches.queryCache ??= new QueryCache<RecallResult>({
+			maxSize: ENHANCED_RECALL_CACHE_MAX_ENTRIES,
+			ttlSeconds: ENHANCED_RECALL_CACHE_TTL_SECONDS,
+		});
+		cache = beam.caches.queryCache;
+		// Explicit hooks invalidate on this beam's own writes; the token also catches writes
+		// no hook covers (sleep, graph ingest) and commits from other connections.
+		token = databaseWriteToken(beam);
+		if (beam.caches.queryCacheToken !== token) {
+			cache.invalidate();
+			beam.caches.queryCacheToken = token;
+		}
+		scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
+		const cached = cache.get(query, queryEmbedding, scope);
+		if (cached !== null) {
+			const results = structuredClone(cached) as RecallResult[];
+			if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, token);
+			return results;
+		}
+	}
+
+	const results = polyphonic
+		? await polyphonicRecallEnhanced(beam, query, topK, runOptions)
+		: await linearRecallEnhanced(beam, query, topK, runOptions);
+	// A write committed while recall awaited may be missing from this ranking: skip the
+	// put and keep the stale token so the next lookup starts from an empty cache.
+	const cacheable = cache !== null && databaseWriteToken(beam) === token;
+	if (cacheable) cache?.put(query, structuredClone(results), queryEmbedding, scope);
+	if (countRecalls) countRecallsKeepingCache(beam, results, runOptions, cacheable ? token : null);
+	return results;
+}
+
+async function linearRecallEnhanced(
+	beam: BeamMemoryState,
+	query: string,
+	topK: number,
+	options: RecallEnhancedOptions & RecallOptionsInternal,
 ): Promise<RecallResult[]> {
 	const useSynonyms = options.useSynonyms !== false;
 	const enhancedOptions: RecallOptionsInternal = {
@@ -1002,6 +1092,132 @@ export async function recallEnhanced(
 	const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
 	if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
 	return finalResults;
+}
+
+/**
+ * Polyphonic recall: the linear enhanced ranking becomes the `hybrid` voice and is
+ * fused by reciprocal rank with the vector, graph, fact and temporal voices. Scores
+ * are rescaled to 0..1 (1 = ranked first by every voice) so they stay comparable
+ * across banks; the raw fusion score stays in `combined_score`.
+ */
+async function polyphonicRecallEnhanced(
+	beam: BeamMemoryState,
+	query: string,
+	topK: number,
+	options: RecallEnhancedOptions & RecallOptionsInternal,
+): Promise<RecallResult[]> {
+	if (topK <= 0) return [];
+	// A wider pool than requested so filters applied below still leave `topK` rows.
+	const pool = Math.max(topK * 2, topK);
+	const baseline = await linearRecallEnhanced(beam, query, pool, options);
+	const fused = await orchestrateRecall(beam, query, pool, {
+		...options,
+		includeFacts: options.includeFacts === true,
+		baseline,
+		forcePolyphonic: true,
+		// `recallEnhanced` promises `topK` rows, not a token budget.
+		contextBudget: Number.POSITIVE_INFINITY,
+	});
+	const previewChars = options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS;
+	const results: RecallResult[] = [];
+	for (const result of fused) {
+		if (results.length >= topK) break;
+		if (!matchesRecallFilters(result, options)) continue;
+		const mapped: RecallResult = {
+			...result,
+			score: round4((result.combined_score ?? 0) / POLYPHONIC_MAX_COMBINED_SCORE),
+		};
+		// Rows reached only through the graph/fact/temporal/vector voices are hydrated in full.
+		if (typeof mapped.truncated !== "boolean") {
+			const preview = clipRecallContent(mapped.content, previewChars);
+			mapped.content = preview.content;
+			mapped.truncated = preview.truncated;
+			mapped.full_length = preview.fullLength;
+		}
+		results.push(mapped);
+	}
+	return results;
+}
+
+/**
+ * The polyphonic voices only enforce session/channel visibility; apply the remaining
+ * linear-recall filters to the rows they contribute. Fact rows come from the linear
+ * ranking and already passed them.
+ */
+function matchesRecallFilters(result: OrchestratedRecallResult, options: RecallOptionsInternal): boolean {
+	if (result.tier_label === "fact") return true;
+	if (options.includeWorking === false && result.tier_label === "working") return false;
+	const timestamp = result.timestamp ?? "";
+	if (options.fromDate && timestamp < `${options.fromDate}T00:00:00`) return false;
+	if (options.toDate && timestamp > `${options.toDate}T23:59:59`) return false;
+	const required: ReadonlyArray<readonly [unknown, string | null | undefined]> = [
+		[result.source, options.source],
+		[result.source, options.topic],
+		[result.veracity, options.veracity],
+		[result.memory_type, options.memoryType],
+		[result.author_id, options.authorId],
+		[result.author_type, options.authorType],
+	];
+	return required.every(([actual, wanted]) => !wanted || actual === wanted);
+}
+
+/** Changes whenever any connection commits to the database or this connection changes a row. */
+function databaseWriteToken(beam: BeamMemoryState): string {
+	const version = beam.db.query("PRAGMA data_version").get() as { data_version: number };
+	const changes = beam.db.query("SELECT total_changes() AS changes").get() as { changes: number };
+	return `${version.data_version}:${changes.changes}`;
+}
+
+/**
+ * Bump recall counts for results served while the cache is valid against `validToken`,
+ * without letting that write invalidate the cache. The stored token only advances past
+ * our own UPDATE when nothing else changed: no commit from another connection before it
+ * (token still `validToken`) or during it (`data_version` unchanged), so the only
+ * `total_changes` delta is ours. Otherwise the stored token stays stale and the next
+ * lookup drops the cache. `null` means the cache is already known to be stale.
+ */
+function countRecallsKeepingCache(
+	beam: BeamMemoryState,
+	results: readonly RecallResult[],
+	options: RecallOptionsInternal,
+	validToken: string | null,
+): void {
+	const before = validToken === null ? null : databaseWriteToken(beam);
+	updateRecallCounts(beam, results, options);
+	if (before === null || before !== validToken) return;
+	const after = databaseWriteToken(beam);
+	if (after.split(":")[0] === before.split(":")[0]) beam.caches.queryCacheToken = after;
+}
+
+/**
+ * Cache scope for one `recallEnhanced` call: every input except the query text, so
+ * no cache tier can serve a ranking computed for a different limit, filter,
+ * visibility channel, anchor time, bank or ranking mode.
+ */
+function enhancedRecallCacheScope(
+	beam: BeamMemoryState,
+	topK: number,
+	options: RecallEnhancedOptions & RecallOptionsInternal,
+	polyphonic: boolean,
+): string {
+	const scope: Record<string, unknown> = {
+		bank: beam.dbPath ?? null,
+		sessionId: beam.sessionId,
+		polyphonic,
+		topK,
+	};
+	const record = options as Record<string, unknown>;
+	for (const key of Object.keys(record).sort()) {
+		const value = record[key];
+		if (key === "useCache" || key === "queryEmbedding" || value === undefined) continue;
+		scope[key] = value instanceof Date ? value.toISOString() : value;
+	}
+	// A caller-supplied embedding changes the ranking; a derived one is a function of the query.
+	if (options.queryEmbedding === null) scope.queryEmbedding = null;
+	else if (options.queryEmbedding !== undefined) {
+		scope.queryEmbedding = Bun.hash(JSON.stringify(options.queryEmbedding)).toString(36);
+	}
+	return JSON.stringify(scope);
 }
 
 function factRecallLimit(topK: number): number {

@@ -111,5 +111,15 @@
     "pageBg": "poimandresBg",
     "cardBg": "poimandresFocus",
     "infoBg": "poimandresFocus"
+  },
+  "terminal": {
+    "background": "poimandresBg",
+    "foreground": "poimandresGray",
+    "chrome": "poimandresBg",
+    "widget": "poimandresBg",
+    "ansi": [
+      "poimandresBg", "poimandresHotRed", "poimandresBrightMint", "poimandresBrightYellow", "poimandresLowerBlue", "poimandresPink", "poimandresLowerBlue", "poimandresWhite",
+      "poimandresGray", "poimandresHotRed", "poimandresBrightMint", "poimandresBrightYellow", "poimandresLightBlue", "poimandresPink", "poimandresLightBlue", "poimandresWhite"
+    ]
   }
 }

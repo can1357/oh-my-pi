@@ -42,9 +42,9 @@ interface ComputerAxQuery {
 	limit?: number;
 }
 
-/** Window filter: exact opaque `id`, or case-insensitive substrings of the owning app name and title. */
+/** Window filter: exact `id` (a number means the same id as its string), or case-insensitive substrings of the owning app name and title. */
 interface ComputerWindowFilter {
-	id?: string;
+	id?: string | number;
 	app?: string;
 	title?: string;
 }
@@ -166,8 +166,8 @@ interface ComputerWindow extends ComputerInputTarget {
 interface ComputerDesktop extends ComputerInputTarget {
 	displays(): Promise<ComputerDisplay[]>;
 	windows(filter?: ComputerWindowFilter): Promise<ComputerWindowInfo[]>;
-	/** Resolve exactly one window by opaque id or filter; ambiguous filters throw listing candidates. */
-	window(selector: string | ComputerWindowFilter): Promise<ComputerWindow>;
+	/** Resolve exactly one window by id (`"74"` or `74`) or filter; ambiguous filters throw listing candidates. */
+	window(selector: string | number | ComputerWindowFilter): Promise<ComputerWindow>;
 	focusedWindow(): Promise<ComputerWindow | null>;
 	/** Element under a global desktop coordinate. */
 	elementAt(x: number, y: number): Promise<ComputerElement | null>;

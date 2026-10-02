@@ -13,3 +13,14 @@ export function memoryToolRefs(mountedDevices: readonly { name: string }[] = [])
 		MEMORY_BACKEND_TOOL_NAMES.map(name => [name, mounted.has(name) ? `${XD_URL_PREFIX}${name}` : name]),
 	);
 }
+
+/**
+ * {@link memoryToolRefs} for a tool session. Reads mounted names only: xd://
+ * device entries compute catalog summaries from tool descriptions, which would
+ * recurse when called from a memory tool's own description getter.
+ */
+export function sessionMemoryToolRefs(session: {
+	xdev?: { mountedNames: ReadonlySet<string> };
+}): Record<string, string> {
+	return memoryToolRefs([...(session.xdev?.mountedNames ?? [])].map(name => ({ name })));
+}

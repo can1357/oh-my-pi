@@ -156,6 +156,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 
 	return (
 		<div className="sh-app">
+			<div className="sh-ambient" />
 			<HeaderBar
 				snapshot={snap}
 				subCount={subCount}
@@ -164,7 +165,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 				onLeave={onLeave}
 			/>
 			<main className="sh-main">
-				<section className="sh-content" data-rail={railOpen ? "true" : "false"}>
+				<section className="sh-panel" data-rail={railOpen ? "true" : "false"}>
 					<div className="sh-transcript">
 						<Transcript
 							entries={snap.entries}
@@ -176,6 +177,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							phase={snap.phase}
 						/>
 					</div>
+					<Composer client={client} snapshot={snap} />
 				</section>
 				{railOpen && (
 					<>
@@ -192,7 +194,6 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 					</>
 				)}
 			</main>
-			<Composer client={client} snapshot={snap} />
 			{drawerAgent && (
 				<>
 					<div className="ag-drawer-backdrop" onClick={() => setSelectedId(null)} />

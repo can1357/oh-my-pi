@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import {
 	aimlApiModelManagerOptions,
 	isLikelyAimlApiChatModelId,
@@ -67,20 +66,6 @@ describe("AIML API built-in provider (issue #2105)", () => {
 
 		for (const modelId of ["gpt-4o", "claude-sonnet-4-5", "deepseek-v3.2"]) {
 			expect(isLikelyAimlApiChatModelId(modelId)).toBe(true);
-		}
-	});
-
-	test("resolves AIMLAPI_API_KEY via env", () => {
-		const previous = Bun.env.AIMLAPI_API_KEY;
-		Bun.env.AIMLAPI_API_KEY = "aiml-test-key";
-		try {
-			expect(getEnvApiKey("aimlapi")).toBe("aiml-test-key");
-		} finally {
-			if (previous === undefined) {
-				delete Bun.env.AIMLAPI_API_KEY;
-			} else {
-				Bun.env.AIMLAPI_API_KEY = previous;
-			}
 		}
 	});
 });

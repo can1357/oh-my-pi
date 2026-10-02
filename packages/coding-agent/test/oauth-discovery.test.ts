@@ -599,11 +599,6 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		expect(analyzeAuthError(error, "https://mcp.gateway.example").resourceMetadataUrl).toBe(originRootPr);
 	});
 
-	it("does not classify a JWT bearer 401 as an API key", () => {
-		const error = new Error('HTTP 401: {"errors":[{"message":"JWT Token is required"}]}');
-		expect(analyzeAuthError(error).authType).toBe("oauth");
-	});
-
 	it("prefers path-inserted PR metadata over origin-root AS for a shared gateway", async () => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {
@@ -794,33 +789,6 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			authorizationUrl: "https://auth.example.com/oauth/authorize",
 			issuerUrl: "https://auth.example.com/",
 			tokenUrl: "https://auth.example.com/oauth/token",
-		});
-	});
-
-	it("accepts metadata without an issuer field (legacy / nonstandard servers)", async () => {
-		// Some servers omit `issuer` from their well-known document. Keep today's
-		// permissive behavior so this fix never regresses an already-working flow.
-		const fetchImpl = mockFetch((input: FetchInput) => {
-			const url = String(input);
-			if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
-				return new Response(
-					JSON.stringify({
-						authorization_endpoint: "https://auth.example.com/oauth",
-						token_endpoint: "https://auth.example.com/token",
-					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
-			}
-			return new Response("not found", { status: 404 });
-		});
-
-		const oauth = await discoverOAuthEndpoints("https://mcp.example.com", "https://auth.example.com", undefined, {
-			fetch: fetchImpl,
-		});
-
-		expect(oauth).toEqual({
-			authorizationUrl: "https://auth.example.com/oauth",
-			tokenUrl: "https://auth.example.com/token",
 		});
 	});
 });

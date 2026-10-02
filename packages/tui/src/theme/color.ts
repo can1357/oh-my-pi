@@ -18,11 +18,26 @@ export function detectColorMode(env: NodeJS.ProcessEnv = Bun.env): ColorMode {
 	return terminal.trueColor ? "truecolor" : "256color";
 }
 
+const ANSI_COLOR_CACHE_LIMIT = 256;
+const ANSI_COLOR_CACHE_MAX_LENGTH = 128;
+const ansiColorCaches: Record<ColorMode, Map<string, string>> = {
+	truecolor: new Map(),
+	"256color": new Map(),
+};
+
+/** Convert a theme color to foreground SGR at the requested depth; throws for invalid colors. */
 export function colorToAnsi(color: string, mode: ColorMode): string {
+	const cache = color.length <= ANSI_COLOR_CACHE_MAX_LENGTH ? ansiColorCaches[mode] : undefined;
+	const cached = cache?.get(color);
+	if (cached !== undefined) return cached;
 	const format = mode === "truecolor" ? "ansi-16m" : "ansi-256";
 	const ansi = Bun.color(color, format);
 	if (ansi === null) {
 		throw new Error(`Invalid color value: ${color}`);
+	}
+	if (cache) {
+		if (cache.size >= ANSI_COLOR_CACHE_LIMIT) cache.clear();
+		cache.set(color, ansi);
 	}
 	return ansi;
 }

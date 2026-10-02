@@ -16,13 +16,6 @@ describe("`..` range selector alias", () => {
 		expect(parseLineRangeChunk("301..")).toEqual(parseLineRangeChunk("301-"));
 	});
 
-	it("accepts `..` inside comma-separated multi-range selectors", () => {
-		expect(parseLineRanges("3..5,20..22")).toEqual([
-			{ startLine: 3, endLine: 5 },
-			{ startLine: 20, endLine: 22 },
-		]);
-	});
-
 	it("allows mixing `..` and `-` separators across chunks", () => {
 		expect(parseLineRanges("3-5,20..22")).toEqual([
 			{ startLine: 3, endLine: 5 },

@@ -538,19 +538,18 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 }
 
 /**
- * Cross-process lock identity for one upstream Codex account. Saved resets are
- * a ChatGPT-account balance, not a local credential row: credential stores
- * (SDK `agentDir`s) reuse row ids, so sessions share a fence exactly when they
- * share the account. Undefined when the account cannot be identified.
+ * Fence saved-reset spending by upstream provider, organization, and account,
+ * never by a credential row id that another store may reuse.
  */
-export function codexResetLockKey(identity: {
+export function resetAccountLockKey(identity: {
+	provider: string;
 	accountId?: string;
 	email?: string;
 	orgId?: string;
 }): string | undefined {
 	const account = (identity.accountId ?? identity.email)?.trim().toLowerCase();
 	if (!account) return undefined;
-	return `openai-codex|${identity.orgId?.trim().toLowerCase() ?? "-"}|${account}`;
+	return `${identity.provider}|${identity.orgId?.trim().toLowerCase() ?? "-"}|${account}`;
 }
 
 /** One attempt per (account, weekly-reset-minute) block episode. */
@@ -662,6 +661,12 @@ export function isTerminalRedeemOutcome(code: string): boolean {
 	return code === "reset" || code === "already_redeemed" || code === "no_credit";
 }
 
+/** A confirmed reset, or a safe eligibility read that must wait before retrying. */
+export interface ResetRecoveryResult {
+	restored: boolean;
+	retryAfterMs?: number;
+}
+
 /**
  * Process-wide (NOT per-session) coordinator state. Parallel sessions share
  * provider accounts and must not race a double-spend; Claude reuses the same
@@ -691,7 +696,7 @@ export interface CodexAutoRedeemCoordinator {
 	lastAttemptAtByAccount: Map<string, number>;
 	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
 	resetLockPath?: string;
-	inFlightByAccount: Map<string, Promise<boolean>>;
+	inFlightByAccount: Map<string, Promise<ResetRecoveryResult>>;
 	sweepInFlight: boolean;
 	lastSweepAt: number;
 	/** Settlement of the most recently scheduled sweep (never rejects). */

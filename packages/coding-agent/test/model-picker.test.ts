@@ -41,7 +41,7 @@ function installTestTheme(): void {
 }
 
 interface RegistryOverrides {
-	refresh?: (mode: string) => Promise<void>;
+	refreshIfStale?: () => Promise<boolean>;
 }
 
 interface PickerHarness {
@@ -62,7 +62,7 @@ function createPicker(options: {
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
 	const settings = options.settings ?? Settings.isolated({});
 	const registry = {
-		refresh: options.registry?.refresh ?? (async () => {}),
+		refreshIfStale: options.registry?.refreshIfStale ?? (async () => false),
 		getError: () => undefined,
 		getAvailable: modelsFn,
 		getAll: modelsFn,
@@ -142,20 +142,20 @@ describe("ModelPicker", () => {
 		expect(onPick.mock.calls[0]?.[2]).toEqual({ overContext: false });
 	});
 
-	test("uses cached models for Enter while the offline refresh is still pending", () => {
+	test("uses cached models for Enter while the catalog catch-up is still pending", () => {
 		const cached = makeModel("test", "cached-fast");
-		const refreshGate = Promise.withResolvers<void>();
-		const refresh = vi.fn(() => refreshGate.promise);
+		const refreshGate = Promise.withResolvers<boolean>();
+		const refreshIfStale = vi.fn(() => refreshGate.promise);
 		const { picker, onPick } = createPicker({
 			models: [cached],
-			registry: { refresh },
+			registry: { refreshIfStale },
 		});
 
 		picker.handleInput("\n");
 		expect(onPick).toHaveBeenCalledTimes(1);
 		expect(onPick.mock.calls[0]?.[0]).toBe(cached);
-		expect(refresh).toHaveBeenCalledTimes(1);
-		refreshGate.resolve();
+		expect(refreshIfStale).toHaveBeenCalledTimes(1);
+		refreshGate.resolve(true);
 	});
 
 	test("keeps the highlighted model when a background refresh reorders the list", async () => {
@@ -163,17 +163,17 @@ describe("ModelPicker", () => {
 		const modelCc = makeModel("test", "cc-model");
 		const modelAa = makeModel("test", "aa-model");
 		let available = [modelBb, modelCc];
-		const refreshGate = Promise.withResolvers<void>();
+		const refreshGate = Promise.withResolvers<boolean>();
 		const { picker, onPick } = createPicker({
 			models: () => available,
-			registry: { refresh: () => refreshGate.promise },
+			registry: { refreshIfStale: () => refreshGate.promise },
 		});
 
 		picker.handleInput(DOWN); // highlight cc-model
 		available = [modelAa, modelBb, modelCc];
-		refreshGate.resolve();
+		refreshGate.resolve(true);
 		// Not a tuned delay: one zero-length tick drains the component's
-		// refresh().then(...) continuation chain deterministically.
+		// refreshIfStale().then(...) continuation chain deterministically.
 		await Bun.sleep(0);
 		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-model");

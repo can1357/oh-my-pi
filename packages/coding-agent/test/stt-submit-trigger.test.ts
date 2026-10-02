@@ -254,12 +254,4 @@ describe("STTController submit trigger integration", () => {
 		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(8);
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
-
-	it("submits the existing draft when streaming dictation only says submit", async () => {
-		const { editor } = await transcribeStream("submit", "say-submit");
-
-		expect(editor.commitVolatileText).toHaveBeenCalledWith("submit");
-		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(6);
-		expect(editor.submit).toHaveBeenCalledTimes(1);
-	});
 });

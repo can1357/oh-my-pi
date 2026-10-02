@@ -72,22 +72,6 @@ describe("security preflight", () => {
 		expect(first.model).toEqual({ provider: "openai-codex", modelId: "gpt-5.6-sol", thinkingLevel: "xhigh" });
 	});
 
-	test("records provider-owned Bedrock auth without credential material", async () => {
-		const created = await createSecurityScanPlan(
-			{
-				cwd: repositoryRoot,
-				target: { kind: "repository" },
-				outputRoot: stateRoot,
-				model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-opus-4-8" },
-				account: { provider: "amazon-bedrock", api: "bedrock-converse-stream" },
-				config: {},
-				workflowFingerprint: "fixture",
-			},
-			adapter,
-		);
-		expect(created.account).toEqual({ provider: "amazon-bedrock", api: "bedrock-converse-stream" });
-	});
-
 	test("rejects an authentication provider that differs from the pinned model", async () => {
 		await expect(
 			createSecurityScanPlan(

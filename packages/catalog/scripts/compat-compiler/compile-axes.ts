@@ -68,7 +68,7 @@ function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 			return value;
 		}
 		case "array": {
-			if (node.args.length === 0 || node.children) malformed(node);
+			if ((node.args.length === 0 && axis.emptyArray !== true) || node.children) malformed(node);
 			return node.args.map(raw => {
 				const value = scalarValue(node, raw);
 				if (axis.values && !allowed(value)) {
