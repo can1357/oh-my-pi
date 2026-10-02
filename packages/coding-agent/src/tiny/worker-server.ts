@@ -20,11 +20,14 @@ export interface JsonLineServerOptions<Req, Res> {
 	subject: string;
 	/** Idle window (nothing {@link JsonLineServer.busy}, no request received) after which the process exits. */
 	idleMs: number;
-	/** Serve one `load`/`chat`/`judge`; `reply.send` reaches only the requesting client. Errors become `error` replies. */
-	handle(
-		request: Extract<TinyWorkerRequest, { type: "load" | "chat" | "judge" }>,
-		reply: { send(message: TinyWorkerResponse): void },
-	): Promise<void>;
+	/** Stdout line announcing the bound endpoint. */
+	banner(endpoint: string): string;
+	/** Handle one parsed request line; `reply` reaches only the requesting connection. */
+	onRequest(request: Req, reply: JsonLineReply<Res>): void;
+	/** Runs synchronously as stop begins, before connections and the listener close. */
+	beforeStop?(): void;
+	/** Runs once during stop, after the listener closes and before the socket file is removed. */
+	onStop?(): Promise<void>;
 }
 
 /**
