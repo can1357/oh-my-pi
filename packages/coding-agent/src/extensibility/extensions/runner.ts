@@ -47,6 +47,7 @@ import type {
 	AssistantMessageRewriteEvent,
 	AssistantMessageRewriteResult,
 	AssistantThinkingRenderer,
+	AssistantTextDisplayRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -264,6 +265,11 @@ function createHandlerContext(
 	const scoped: ExtensionContext = Object.create(ctx);
 	Object.defineProperty(scoped, "ui", {
 		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		enumerable: true,
+		configurable: true,
+	});
+	Object.defineProperty(scoped, "abortSignal", {
+		value: handlerSignal,
 		enumerable: true,
 		configurable: true,
 	});
@@ -1281,6 +1287,10 @@ export class ExtensionRunner {
 
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
+	}
+
+	getAssistantTextDisplayRenderers(): AssistantTextDisplayRenderer[] {
+		return this.extensions.flatMap(ext => ext.assistantTextDisplayRenderers);
 	}
 
 	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {

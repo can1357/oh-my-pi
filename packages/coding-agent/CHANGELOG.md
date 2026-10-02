@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added `omp.registerAssistantTextDisplay()` for display-only assistant text projections in the existing native and classic transcript component, while preserving source messages and withholding pending prose from immutable history.
+- Exposed `ctx.abortSignal` so extension handlers can cancel external work when their handler times out or the main turn is cancelled.
+- Added an opt-in output translator extension example with independent model selection, protected Markdown, and a read-only original-response viewer.
 - Added global and per-advisor review cadence, including final-yield reviews and intervals that accumulate skipped transcript updates ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added per-advisor catch-up policy and cancellable `strict` waiting, so asynchronous turn reviewers can run beside synchronous final reviewers ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added `/jobs full` to show each background bash job's full command line; plain `/jobs` still shortens it to fit the terminal ([#13980](https://github.com/can1357/oh-my-pi/pull/13980) by [@rickythefox](https://github.com/rickythefox))

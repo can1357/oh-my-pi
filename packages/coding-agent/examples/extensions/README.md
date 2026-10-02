@@ -34,15 +34,47 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ### Commands & UI
 
-| Extension          | Description                                                                    |
-| ------------------ | ------------------------------------------------------------------------------ |
-| `plan-mode.ts`     | Claude Code-style plan mode for read-only exploration with `/plan` command     |
-| `tools.ts`         | Interactive `/tools` command to enable/disable tools with session persistence  |
-| `handoff.ts`       | Transfer context to a new focused session via `/handoff <goal>`                |
-| `qna.ts`           | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
-| `status-line.ts`   | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
-| `thinking-note.ts` | Adds display-only supplemental UI below assistant thinking blocks              |
-| `snake.ts`         | Snake game with custom UI, keyboard handling, and session persistence          |
+| Extension                      | Description                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| `plan-mode.ts`                 | Claude Code-style plan mode for read-only exploration with `/plan` command                  |
+| `tools.ts`                     | Interactive `/tools` command to enable/disable tools with session persistence               |
+| `handoff.ts`                   | Transfer context to a new focused session via `/handoff <goal>`                             |
+| `qna.ts`                       | Extracts questions from last response into editor via `ctx.ui.setEditorText()`              |
+| `status-line.ts`               | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors                   |
+| `thinking-note.ts`             | Adds display-only supplemental UI below assistant thinking blocks                           |
+| `translator-output-preview.ts` | Opt-in Chinese assistant display in the original message; English context remains unchanged |
+| `snake.ts`                     | Snake game with custom UI, keyboard handling, and session persistence                       |
+
+### Output-only translator preview
+
+This example requires a custom OMP build with `registerAssistantTextDisplay`.
+It does not translate user input. Install the extension independently under
+`~/.omp/agent/extensions/translator/index.ts` alongside that matching build;
+new OMP sessions then discover `/translator` automatically. Do not load the
+example explicitly as well as installing it. For an isolated source checkout
+test without saving or resuming any session:
+
+```bash
+bun --cwd="$HOME/oh-my-pi" packages/coding-agent/src/cli.ts \
+  --no-session --no-extensions \
+  --extension packages/coding-agent/examples/extensions/translator-output-preview.ts \
+  --no-tools --no-lsp --no-title --no-skills --no-rules --hide-thinking
+```
+
+Choose a main model with working authentication, then run `/translator`.
+Chinese input stays in the original editor and is sent unchanged; the main
+model replies in English and Gemini translates the display. `/translator off`
+disables translation; `/translator original` opens the latest English original
+in a read-only OMP view; `/translator model provider/id` changes only the
+translator. Defaults to `google-antigravity/gemini-3.7-flash`. Translation sends
+English source prose to the selected provider. Published terminal scrollback
+cannot be repainted; the in-memory display cache does not survive a restart.
+The `--no-session` invocation never saves the test conversation.
+
+With the matching binary and extension already installed, `omp --no-session`
+is sufficient for manual testing. Existing running OMP processes are not
+upgraded in place. Preserve the display-interface commits when merging upstream;
+an official binary without that interface is not compatible with this extension.
 
 ### Git Integration
 
