@@ -3,7 +3,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
@@ -17,6 +17,11 @@ export interface IrcBridgeHost {
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
+	/**
+	 * Whether an idle wake turn's output is relayed back to the waking peer — true only while the
+	 * task executor's wake-turn monitor is installed (kept-alive subagents), never for a root.
+	 */
+	relaysWakeTurnOutput(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
 }
@@ -179,10 +184,11 @@ export class IrcBridge {
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = (this.#host.agentRegistry ?? AgentRegistry.global()).get(msg.to)?.parentId === msg.from;
-		// An idle subagent runs a monitored wake turn whose output is relayed
-		// back to the sender (task executor `relayWakeTurnOutput`); the main
-		// agent and mid-turn asides have no such relay.
-		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
+		// An idle kept-alive subagent runs a monitored wake turn whose output is relayed back to the
+		// sender (task executor `relayWakeTurnOutput`, installed via setIrcWakeTurnObserver). A root
+		// — `Main` or a custom-id main in an embedder registry — and mid-turn asides have no such
+		// relay, so the card must not promise one (#14071 review).
+		const relayOnStop = !streaming && !planModeIdle && this.#host.relaysWakeTurnOutput() && msg.wakeRelay !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
