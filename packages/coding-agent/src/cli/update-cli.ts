@@ -913,26 +913,48 @@ async function fetchLatestManifest(
 	const noCanary = () =>
 		new Error(`No canary release has been published for ${pkg} yet. Try \`${APP_NAME} update --stable\`.`);
 
+	const fromPackument = (packument: unknown): Record<string, unknown> => {
+		const distTags = isRecord(packument) ? packument["dist-tags"] : undefined;
+		const version = isRecord(distTags) ? distTags[tag] : undefined;
+		if (typeof version !== "string") {
+			if (channel === "canary") throw noCanary();
+			throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing dist-tags.${tag}`);
+		}
+		const versions = isRecord(packument) ? packument.versions : undefined;
+		const manifest = isRecord(versions) ? versions[version] : undefined;
+		if (!isRecord(manifest)) {
+			throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing versions.${version}`);
+		}
+		return manifest;
+	};
+	const isPackument = (body: unknown): boolean => isRecord(body) && isRecord(body["dist-tags"]);
+
 	let response = await get(npmRegistryPackageUrl(registry, pkg, tag));
 	let data: unknown;
-	if (!response.ok && origin && [400, 404, 405].includes(response.status)) {
+	let useFullPackument = false;
+	if (response.ok) {
+		try {
+			data = await response.json();
+		} catch (err) {
+			// Only a malformed body falls back; body-read timeouts and resets must surface.
+			if (!origin || !(err instanceof SyntaxError)) throw err;
+			useFullPackument = true;
+		}
+		if (isPackument(data)) {
+			// Some registries (e.g. Sonatype Nexus) answer the dist-tag shortcut
+			// with the full packument instead of the tagged version manifest.
+			data = fromPackument(data);
+		} else if (origin && !(isRecord(data) && typeof data.version === "string")) {
+			useFullPackument = true;
+		}
+	} else if (origin && [400, 404, 405].includes(response.status)) {
+		useFullPackument = true;
+	}
+	if (useFullPackument) {
 		// Not every registry implementation serves npmjs's `/<pkg>/<dist-tag>`
 		// shortcut; the full packument is the one endpoint all of them share.
 		response = await get(npmRegistryPackageUrl(registry, pkg));
-		if (response.ok) {
-			const packument: unknown = await response.json();
-			const distTags = isRecord(packument) ? packument["dist-tags"] : undefined;
-			const version = isRecord(distTags) ? distTags[tag] : undefined;
-			if (typeof version !== "string") {
-				if (channel === "canary") throw noCanary();
-				throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing dist-tags.${tag}`);
-			}
-			const versions = isRecord(packument) ? packument.versions : undefined;
-			data = isRecord(versions) ? versions[version] : undefined;
-			if (!isRecord(data)) {
-				throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing versions.${version}`);
-			}
-		}
+		data = response.ok ? fromPackument(await response.json()) : undefined;
 	}
 	if (!response.ok) {
 		if (response.status === 404 && channel === "canary") throw noCanary();
@@ -943,7 +965,6 @@ async function fetchLatestManifest(
 		);
 	}
 
-	data ??= await response.json();
 	if (!isRecord(data) || typeof data.version !== "string") {
 		throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing version`);
 	}

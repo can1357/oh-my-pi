@@ -949,6 +949,12 @@ export type TspEvent =
 	 */
 	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
 	/**
+	 * Undo the last change to the text of `editor`/`input` node `id` through the
+	 * program's own undo history (an applied `edit` is one unit, as typing is); a
+	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
+	 */
+	| { ev: "undo"; sf: string; id: string }
+	/**
 	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
 	 * a `prefs` sheet while the focus is outside it): the program moves its
 	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).

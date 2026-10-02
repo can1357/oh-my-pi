@@ -63,7 +63,7 @@ describe("TSP hello probe", () => {
 		const { terminal, writes, received, hellos } = setup();
 		try {
 			expect(writes.join("")).toContain(
-				'\x1b_tsp;q;{"q":"hello","v":[1],"app":"omp","features":["edit"]}\x1b\\\x1b[c',
+				'\x1b_tsp;q;{"q":"hello","v":[1],"app":"omp","features":["edit","undo"]}\x1b\\\x1b[c',
 			);
 			expect(terminal.tspProbePending).toBe(true);
 			process.stdin.emit("data", HELLO_REPLY.slice(0, 30));
