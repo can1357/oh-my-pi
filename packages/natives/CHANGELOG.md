@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Limited retained edit snapshot buffers to 64 MiB, including Unicode text and read provenance.
+- Limited retained edit snapshot buffers to 64 MiB, including Unicode text and read provenance ([#14106](https://github.com/can1357/oh-my-pi/pull/14106) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.4.10] - 2026-10-02
 
