@@ -20,8 +20,9 @@ import type { AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 
-export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
-	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
+/** What the gateway's routes need, whatever transport carries the requests. */
+export interface AuthGatewayRouteOptions {
+	/** Source of credentials: broker-backed for `serve`, the CLI's own for `stdio`. */
 	storage: AuthStorage;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
@@ -34,6 +35,9 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 }
+
+/** The HTTP server's options: the routes' plus its listener and inbound auth. */
+export interface AuthGatewayBootOptions extends AuthGatewayServerOptions, AuthGatewayRouteOptions {}
 
 /**
  * The client's own session key, or `undefined` when it sent none. A blank key

@@ -701,6 +701,8 @@ export interface TspAgentProps {
 		tokens?: number;
 		context?: number;
 		contextLabel?: string;
+		/** The agent's own completion estimate, 0–1; drawn while running. */
+		done?: number;
 		cost?: number;
 		age?: number;
 		took?: number;
@@ -946,6 +948,12 @@ export type TspEvent =
 	 * text length the terminal saw, a mismatch makes the edit stale).
 	 */
 	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
+	/**
+	 * Undo the last change to the text of `editor`/`input` node `id` through the
+	 * program's own undo history (an applied `edit` is one unit, as typing is); a
+	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
+	 */
+	| { ev: "undo"; sf: string; id: string }
 	/**
 	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
 	 * a `prefs` sheet while the focus is outside it): the program moves its

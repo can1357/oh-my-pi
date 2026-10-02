@@ -24,7 +24,14 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
-import { type Args, reportInvalidFlagValues, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
+import {
+	type Args,
+	reportInvalidFlagValues,
+	reportUnrecognizedFlags,
+	validateGoalLaunch,
+	validateGoalStartup,
+	validateToolNames,
+} from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -105,7 +112,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
+import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -129,6 +136,8 @@ import {
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
+import { cfgGoalEnabled } from "./goals/settings";
+import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
 import { cfgToolsApprovalMode } from "./tools/settings";
@@ -612,6 +621,7 @@ async function runInteractiveMode(
 	joinLink?: string,
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
+	startupGoal?: string,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -738,6 +748,15 @@ async function runInteractiveMode(
 			mode.stop();
 		}
 		throw error;
+	}
+
+	if (startupGoal !== undefined) {
+		session.maybeStartTitleGeneration(startupGoal);
+		try {
+			await mode.startGoalAtStartup(startupGoal);
+		} catch (error: unknown) {
+			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+		}
 	}
 
 	if (initialMessage !== undefined) {
@@ -870,7 +889,17 @@ async function moveMissingCwdSessionIfNeeded(
 	// move target equals the current project dir. moveTo never chdirs, so the
 	// stale cwd is only a relocation source, not a directory we enter.
 	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
-	await manager.moveTo(cwd, sessionDir);
+	try {
+		await manager.moveTo(cwd, sessionDir);
+	} catch (err) {
+		if (!(err instanceof SessionMoveRefusedError)) throw err;
+		await manager.close();
+		// Its directory is gone, so it cannot be resumed in place either.
+		throw new SessionResolutionError(
+			err.message,
+			"Close the session in the other omp process, then resume it again.",
+		);
+	}
 	return { status: "moved", manager };
 }
 
@@ -1237,7 +1266,8 @@ export async function createSessionManager(
 	// session exists. When a prior session is resumed, mark parsed.continue so
 	// buildSessionOptions restores the session's model/thinking instead of
 	// overriding them with CLI defaults.
-	if (cfgAutoResume.get(activeSettings)) {
+	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
+	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
 		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
 		if (manager.getEntries().length > 0) {
 			parsed.continue = true;
@@ -1769,6 +1799,10 @@ export async function runRootCommand(
 		const autoPrint =
 			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
 		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		// Before session resolution: resume, fork, and import act on these same
+		// startup-parse flags, so rejecting later would leave forked or imported
+		// transcripts (or an opened picker) behind a usage error.
+		validateGoalLaunch(parsedArgs, isInteractive);
 		// Without piped text the prompt must come from argv, which only the
 		// post-extension reparse can settle: an extension string flag's value
 		// (`--spawn-peer reviewer`) looks like a prompt here, and a boolean flag
@@ -2279,6 +2313,14 @@ export async function runRootCommand(
 				process.exit(2);
 			}
 			rejectNoUiWithoutRpc(parsedArgs);
+			if (initialArgs.goal !== undefined) {
+				validateGoalStartup(
+					initialArgs,
+					cfgGoalEnabled.get(settingsInstance),
+					pipedInput,
+					cfgPlanDefaultOnStartup.get(settingsInstance) && cfgPlanEnabled.get(settingsInstance),
+				);
+			}
 			if (autoPrintNeedsArgPrompt && initialArgs.messages.length === 0 && initialArgs.fileArgs.length === 0) {
 				exitWithoutTerminal();
 			}
@@ -2527,6 +2569,7 @@ export async function runRootCommand(
 						parsedArgs.join,
 						startDeferredStartupWork,
 						startupLease,
+						initialArgs.goal,
 					);
 				} finally {
 					startupLease?.dispose();

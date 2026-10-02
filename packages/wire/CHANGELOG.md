@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added support for agent completion estimates in the wire protocol.
+
 ## [18.4.9] - 2026-10-01
 
 ### Added

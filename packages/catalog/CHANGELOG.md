@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.11] - 2026-10-02
+
+### Fixed
+
+- Fixed new Fireworks sessions failing on the first turn by updating the default model to `kimi-k3`, which is currently supported by Fireworks.
+
 ## [18.4.10] - 2026-10-02
 
 ### Fixed

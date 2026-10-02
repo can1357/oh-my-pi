@@ -371,7 +371,7 @@ describe("interactive collaboration startup", () => {
 		const render = InteractiveMode.prototype.renderInitialMessages;
 		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
 			async function (this: InteractiveMode, options) {
-				if (this.sessionManager.getSessionId() === remote.sessionId)
+				if (this.sessionManager.getHeader()?.parentSession === remote.sessionId)
 					throw new Error("dedicated replica rendering failed");
 				await render.call(this, options);
 			},

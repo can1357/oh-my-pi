@@ -141,6 +141,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
+- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
@@ -222,12 +223,15 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "export_html", outputPath?: string }`
 - `{ id?, type: "switch_session", sessionPath: string }`
 - `{ id?, type: "branch", entryId: string }`
+- `{ id?, type: "fork", entryId?: string }`
 - `{ id?, type: "get_branch_messages" }`
 - `{ id?, type: "get_last_assistant_text" }`
 - `{ id?, type: "set_session_name", name: string }`
 - `{ id?, type: "handoff", customInstructions?: string }`
 
-`handoff` fails while a response is streaming. On success, its payload is `{ savedPath? }` or `null` when no handoff was produced. Session transitions (`new_session`, `switch_session`, `branch`, `open_session`) report cancellation when an extension prevents the transition.
+`handoff` fails while a response is streaming. On success, its payload is `{ savedPath? }` or `null` when no handoff was produced. Session transitions (`new_session`, `switch_session`, `branch`, `fork`, `open_session`) report cancellation when an extension prevents the transition.
+
+`fork` moves the process onto a new session file and returns `{ cancelled }`; read the new `sessionFile`/`sessionId` with `get_state`. With `entryId` (any `message` entry from `get_entries`, such as a user or assistant message), the new file holds the root-to-entry path including that entry plus the session's artifacts, so kept `artifact://` references still resolve, and its header's `parentSession` is the old session file. When `entryId` sits inside an assistant tool-call batch (the assistant message itself, or one of its tool results), the cut extends through the batch's recorded tool results so the fork never ends on tool calls whose results were dropped. This runs `session_before_branch`/`session_branch` hooks with reason `"fork"`, and the hook's `entryId` is the last kept entry. Without `entryId` it copies the whole session and its artifacts (`/fork`), records the old session id as `parentSession`, runs `session_before_switch`/`session_switch` with reason `"fork"`, and reports `cancelled: true` when the session is not persisted. A non-message `entryId` fails. Both variants fail with `code: "session_busy"` while a response is streaming or bash, eval, compaction, handoff, or retry work is running, including work that starts while the fork's hooks or flushes are awaited; a refused fork keeps the current session, its transcript, and its queued next-turn messages and background jobs. The Python client exposes `fork(entry_id=None) -> CancellationResult`.
 
 ### Messages
 
@@ -435,7 +439,8 @@ is re-armed.
     "tokens": 1100,
     "contextWindow": 200000,
     "percent": 0.55
-  }
+  },
+  "goal": null
 }
 ```
 
@@ -450,6 +455,52 @@ Clients should render the queue from these snapshots instead of tracking chips
 independently, and treat removal responses as confirmation rather than a second
 source of truth. `queuedMessageCount` also includes advisor cards and pending
 next-turn messages, so it is not necessarily the number of user-authored chips.
+
+### `goal` payload
+
+`goal` manages goal mode with the same lifecycle as the interactive `/goal` command.
+Every op answers `{ goal: Goal | null, state: GoalModeState | null }`; `get_state`
+carries the same state as `goal`. `goal_updated` events report every change,
+including those made by the agent's `goal` tool.
+
+- `get` only reads. It never starts a turn.
+- `create` needs `goal.enabled`, a non-empty `objective`, and no active or paused
+  goal. It is refused in plan mode, and `token_budget` must be a positive integer.
+  It adds the `goal` tool to the active tools.
+- `resume` resumes a paused goal (refused in plan mode). `pause` and `drop` restore
+  the active tools from before the goal started.
+- Failures are ordinary `success: false` responses.
+
+Goals do not continue on their own over RPC unless `goal.continuationModes`
+contains `"rpc"`; this covers both `--mode rpc` and `--mode rpc-ui`. When enabled,
+`create`/`resume` and each terminal `agent_end` decide whether to start another goal
+turn, sent as a hidden `goal-continuation` message.
+
+- The turn starts once the yielding run has fully unwound. At that moment the goal
+  must still be active, the session idle with nothing queued, plan mode off, open
+  todos not all blocked, and the session not being disposed.
+- While the turn is decided but not yet started, `get_state.isSettled`,
+  `prompt_result.sessionSettled` and `session_settled` treat the session as busy.
+  `session_settled` follows if the continuation is abandoned.
+- `abort` stops continuation before the abort takes effect and pauses the
+  interrupted goal, so a later prompt does not restart it; only `goal resume` does
+  (or `drop` and a new `create`).
+- Continuation also stops after a goal turn with no new tool activity. The next
+  turn that is not itself a goal continuation (a host prompt, steer or follow-up,
+  for example) re-arms it.
+- A session change leaves the previous goal and its tool behind and restores a goal
+  journaled in the target session. This covers `new_session`, `switch_session`,
+  `branch`, `fork` and `open_session`, and the same changes made by extension commands. As
+  in the TUI, an active goal stays active across such a change and continues; a goal
+  restored when the process starts is paused until `goal resume`. A change is
+  detected by the transcript id, so a host-pinned `--provider-session-id` does not
+  hide it. A goal turn that is waiting or becomes due while a change is in progress
+  is held. If the change is cancelled, or leaves the session unchanged (tree
+  navigation, reopening the open session), the goal continues. While such a turn is
+  held, the session is not reported as settled.
+
+When the agent completes the goal, the goal tool is removed again and
+`get_state.goal` becomes `null`.
 
 ### `set_fast_mode` payload
 
@@ -931,7 +982,7 @@ That means:
 - command acceptance != run completion
 - a prompt completes via `data.agentInvoked: false` on its response or via its own `prompt_result`
 - a run completes on an `agent_end` frame where `isTerminal !== false`; that frame carries no prompt identity, so correlate prompts through `prompt_result`
-- native `input` handlers run once, in submission order, before command, skill, or queue dispatch. Later input waits until the earlier submission is admitted, including an idle skill's vision description, and does not wait for its model turn. An `abort` cancels input received before it that is not yet admitted, even if that input is still in a hook. A successful `new_session`, `switch_session`, `branch` or `open_session` does the same for input received before it; a vetoed one cancels nothing, and input sent after the session change runs in the new session.
+- native `input` handlers run once, in submission order, before command, skill, or queue dispatch. Later input waits until the earlier submission is admitted, including an idle skill's vision description, and does not wait for its model turn. An `abort` cancels input received before it that is not yet admitted, even if that input is still in a hook. A successful `new_session`, `switch_session`, `branch`, `fork` or `open_session` does the same for input received before it; a vetoed one cancels nothing, and input sent after the session change runs in the new session.
 - the session is done only at `session_settled`: background jobs can wake the agent after it yields
 
 ### While streaming
