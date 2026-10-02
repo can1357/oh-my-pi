@@ -12,6 +12,7 @@ import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
 const cachedSnapshotPaths = new Map<string, string>();
+const pendingSnapshots = new Map<string, Promise<string | null>>();
 const SNAPSHOT_TIMEOUT_MS = 2_000;
 
 /**
@@ -232,6 +233,36 @@ export async function getOrCreateSnapshot(
 		return null;
 	}
 
+	// Only share work with callers using the same environment and startup budget.
+	// Keep the completed shell cache above unchanged, and discard this key on
+	// settlement so a failed or timed-out creation can be retried.
+	const snapshotEnv = sanitizeSnapshotEnv(env);
+	const pendingKey = JSON.stringify([
+		shell,
+		timeoutMs,
+		Object.entries(snapshotEnv)
+			.filter(([, value]) => value !== undefined)
+			.sort(([a], [b]) => a.localeCompare(b)),
+	]);
+	const pending = pendingSnapshots.get(pendingKey);
+	if (pending) return pending;
+
+	const creation = createSnapshot(shell, snapshotEnv, timeoutMs);
+	pendingSnapshots.set(pendingKey, creation);
+	try {
+		const snapshotPath = await creation;
+		if (snapshotPath) cachedSnapshotPaths.set(cacheKey, snapshotPath);
+		return snapshotPath;
+	} finally {
+		pendingSnapshots.delete(pendingKey);
+	}
+}
+
+async function createSnapshot(
+	shell: string,
+	env: Record<string, string | undefined>,
+	timeoutMs: number,
+): Promise<string | null> {
 	const rcFile = getShellConfigFile(shell, env);
 
 	// Snapshot dir is per-uid. `os.tmpdir()` is shared between accounts on Linux and
@@ -276,9 +307,8 @@ export async function getOrCreateSnapshot(
 
 	let succeeded = false;
 	try {
-		const snapshotEnv = sanitizeSnapshotEnv(env);
 		const spawnEnv: Record<string, string> = {};
-		for (const [key, value] of Object.entries(snapshotEnv)) {
+		for (const [key, value] of Object.entries(env)) {
 			if (value !== undefined) {
 				spawnEnv[key] = value;
 			}
@@ -304,7 +334,6 @@ export async function getOrCreateSnapshot(
 				// best-effort
 			}
 			scrubSnapshotInPlace(snapshotPath);
-			cachedSnapshotPaths.set(cacheKey, snapshotPath);
 			succeeded = true;
 			return snapshotPath;
 		}
