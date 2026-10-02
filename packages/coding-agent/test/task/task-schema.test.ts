@@ -73,6 +73,8 @@ function nestedSession(): ToolSession {
 		isIsolated: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getSessionAgents: () => [],
+		getPlanModeState: () => undefined,
 	} as unknown as ToolSession;
 }
 
@@ -156,13 +158,13 @@ describe("nested isolation gating", () => {
 		// loop's lenient raw-args fallthrough, which then surfaces the
 		// preflight error in execute().
 		const hiddenTool = await nestedTool(false);
-		const hidden = hiddenTool.parameters({ agent: "task", task: "x", isolated: true });
+		const hidden = hiddenTool.parameters({ agent: "task", task: "x", solutionSpace: "probe", isolated: true });
 		expect(hidden instanceof type.errors).toBe(true);
 
 		// With `task.isolation.allowNested` the isolated schema is exposed and
 		// accepts the field.
 		const visibleTool = await nestedTool(true);
-		const visible = visibleTool.parameters({ agent: "task", task: "x", isolated: true });
+		const visible = visibleTool.parameters({ agent: "task", task: "x", solutionSpace: "probe", isolated: true });
 		expect(visible instanceof type.errors).toBe(false);
 		if (!(visible instanceof type.errors)) {
 			expect((visible as { isolated?: boolean }).isolated).toBe(true);
@@ -171,7 +173,7 @@ describe("nested isolation gating", () => {
 
 	it("rejects an explicit nested isolated:true in execute() unless task.isolation.allowNested is enabled", async () => {
 		const tool = await nestedTool(false);
-		const result = await tool.execute("tool-call", { agent: "task", task: "x", isolated: true });
+		const result = await tool.execute("tool-call", { agent: "task", task: "x", solutionSpace: "probe", isolated: true });
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain(
 			"Subagent isolated execution inside an already-isolated agent requires task.isolation.allowNested to be enabled.",
@@ -180,7 +182,7 @@ describe("nested isolation gating", () => {
 
 	it("passes the nested preflight when task.isolation.allowNested is enabled", async () => {
 		const tool = await nestedTool(true);
-		const result = await tool.execute("tool-call", { agent: "task", task: "x", isolated: true });
+		const result = await tool.execute("tool-call", { agent: "task", task: "x", solutionSpace: "probe", isolated: true });
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		// The nested-isolation preflight passes; execution then fails later on
 		// worktree setup (`/tmp` is not a git repository) rather than on the gate.
@@ -204,10 +206,10 @@ describe("nested isolation gating", () => {
 		mockAgents([taskDefinition]);
 		const tool = await TaskTool.create(session);
 
-		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x" }], isolated: true });
+		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x", solutionSpace: "probe" }], isolated: true });
 		expect(parsed instanceof type.errors).toBe(true);
 
-		const result = await tool.execute("tool-call", { context: "ctx", tasks: [{ task: "x" }], isolated: true });
+		const result = await tool.execute("tool-call", { context: "ctx", tasks: [{ task: "x", solutionSpace: "probe" }], isolated: true });
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain("Top-level `isolated` is not part of the batch shape.");
 	});
@@ -229,7 +231,7 @@ describe("nested isolation gating", () => {
 
 		const result = await tool.execute("tool-call", {
 			context: "ctx",
-			tasks: [{ task: "x", isolated: false }],
+			tasks: [{ task: "x", solutionSpace: "probe", isolated: false }],
 			isolated: true,
 		});
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
@@ -255,12 +257,12 @@ describe("nested isolation gating", () => {
 		mockAgents([]);
 		const tool = await TaskTool.create(session);
 
-		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x" }], isolated: false });
+		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x", solutionSpace: "probe" }], isolated: false });
 		expect(parsed instanceof type.errors).toBe(false);
 
 		const result = await tool.execute("tool-call", {
 			context: "ctx",
-			tasks: [{ task: "x" }],
+			tasks: [{ task: "x", solutionSpace: "probe" }],
 			isolated: false,
 		});
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
@@ -285,7 +287,7 @@ describe("nested isolation gating", () => {
 
 		const result = await tool.execute("tool-call", {
 			context: "ctx",
-			tasks: [{ task: "x", isolated: false }],
+			tasks: [{ task: "x", solutionSpace: "probe", isolated: false }],
 			isolated: "true",
 		});
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
@@ -309,10 +311,10 @@ describe("nested isolation gating", () => {
 		mockAgents([taskDefinition]);
 		const tool = await TaskTool.create(session);
 
-		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x" }], isolated: true });
+		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x", solutionSpace: "probe" }], isolated: true });
 		expect(parsed instanceof type.errors).toBe(true);
 
-		const result = await tool.execute("tool-call", { context: "ctx", tasks: [{ task: "x" }], isolated: true });
+		const result = await tool.execute("tool-call", { context: "ctx", tasks: [{ task: "x", solutionSpace: "probe" }], isolated: true });
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain("Top-level `isolated` is not part of the batch shape.");
 	});
@@ -336,7 +338,7 @@ describe("nested isolation gating", () => {
 
 		const result = await tool.execute("tool-call", {
 			context: "ctx",
-			tasks: [{ task: "x", isolated: true }],
+			tasks: [{ task: "x", solutionSpace: "probe", isolated: true }],
 			isolated: "true",
 		});
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
