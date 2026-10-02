@@ -31,6 +31,8 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMCPEnabled,
+	parseMCPTimeout,
 	parseMCPToolFilters,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
@@ -117,59 +119,17 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		for (const [serverName, config] of Object.entries(data.mcpServers)) {
 			const serverConfig = config as Record<string, unknown>;
 
-			// Validate enabled: expand `${VAR}` first, then coerce the expanded
-			// value through one accept-set — booleans pass through, "true"/"1"
-			// (any case) coerce to true, "false"/"0" to false, everything else
-			// warns and stays undefined (fail-open). Filters stay literal (never
-			// expanded): a filter entry is a tool-name pattern, so expanding
-			// `${TOOL}` there would make the same config select a different tool
-			// depending on which file it came from.
-			const expandedEnabledValue = expandEnvVarsDeep(serverConfig.enabled);
-			let enabled: boolean | undefined;
-			if (expandedEnabledValue === undefined || expandedEnabledValue === null) {
-				enabled = undefined;
-			} else if (typeof expandedEnabledValue === "boolean") {
-				enabled = expandedEnabledValue;
-			} else if (typeof expandedEnabledValue === "string") {
-				const lower = expandedEnabledValue.toLowerCase();
-				if (lower === "false" || lower === "0") enabled = false;
-				else if (lower === "true" || lower === "1") enabled = true;
-				else {
-					logger.warn(`MCP server "${serverName}": invalid enabled value "${serverConfig.enabled}", ignoring`);
-					enabled = undefined;
-				}
-			} else {
-				logger.warn(`MCP server "${serverName}": invalid enabled type ${typeof serverConfig.enabled}, ignoring`);
-				enabled = undefined;
-			}
+			// Validate enabled: expand `${VAR}` first, then coerce through the shared
+			// accept-set (see parseMCPEnabled). Filters stay literal (never expanded):
+			// a filter entry is a tool-name pattern, so expanding `${TOOL}` there
+			// would make the same config select a different tool depending on which
+			// file it came from.
+			const enabled = parseMCPEnabled(serverName, serverConfig.enabled, expandEnvVarsDeep(serverConfig.enabled));
 
-			// Validate timeout: expand `${VAR}` first, then accept finite numbers
-			// and numeric strings; anything else warns and stays undefined. A
-			// non-numeric expansion (`${UNSET}`) stays literal, fails the coerce,
-			// and warns — same as a bad literal.
-			const expandedTimeoutValue = expandEnvVarsDeep(serverConfig.timeout);
-			let timeout: number | undefined;
-			if (expandedTimeoutValue === undefined || expandedTimeoutValue === null) {
-				timeout = undefined;
-			} else if (typeof expandedTimeoutValue === "number") {
-				if (Number.isFinite(expandedTimeoutValue) && expandedTimeoutValue >= 0) {
-					timeout = expandedTimeoutValue;
-				} else {
-					logger.warn(`MCP server "${serverName}": invalid timeout ${serverConfig.timeout}, ignoring`);
-					timeout = undefined;
-				}
-			} else if (typeof expandedTimeoutValue === "string") {
-				const parsed = Number(expandedTimeoutValue);
-				if (expandedTimeoutValue.length > 0 && Number.isFinite(parsed) && parsed >= 0) {
-					timeout = parsed;
-				} else {
-					logger.warn(`MCP server "${serverName}": invalid timeout "${serverConfig.timeout}", ignoring`);
-					timeout = undefined;
-				}
-			} else {
-				logger.warn(`MCP server "${serverName}": invalid timeout type ${typeof serverConfig.timeout}, ignoring`);
-				timeout = undefined;
-			}
+			// Validate timeout: expand `${VAR}` first, then coerce through the shared
+			// accept-set (see parseMCPTimeout). A non-numeric expansion (`${UNSET}`)
+			// stays literal, fails the coerce, and warns — same as a bad literal.
+			const timeout = parseMCPTimeout(serverName, serverConfig.timeout, expandEnvVarsDeep(serverConfig.timeout));
 
 			// Validate requestIdFormat: only the two documented encodings. The
 			// expanded value passes through the same parser the raw value does,

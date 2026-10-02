@@ -407,9 +407,13 @@ function keepsExaMCPServer(config: MCPServerConfig): boolean {
 	// denotes `web_fetch_exa`, which is not in the pool, so its selection is
 	// unknown here and the conservative direction keeps the server. This holds
 	// however many other entries DID match — `[web_search_exa, web_fetch_ex[a]]`
-	// still names a fetch tool. Only when every entry resolved to the native
-	// tool alone is the drop provable, as with `web_search_ex[a]`.
+	// still names a fetch tool. Grouping/alternation entries ({a,b}, (a|b),
+	// a|b) are likewise unresolvable: one branch may match the native name in
+	// the pool while another selects a non-native tool the pool never
+	// enumerates, so they keep the server too. Only when every entry resolved
+	// to the native tool alone is the drop provable, as with `web_search_ex[a]`.
 	if (unmatched.length > 0) return true;
+	if (allowlist.some(entry => /[{}\(\)|]/.test(entry))) return true;
 	return effective.some(tool => !isNativeExaMcpTool(tool));
 }
 

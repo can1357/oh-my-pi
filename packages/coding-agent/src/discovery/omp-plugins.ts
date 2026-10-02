@@ -34,6 +34,8 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	parseMCPEnabled,
+	parseMCPTimeout,
 	parseMCPToolFilters,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
@@ -347,30 +349,16 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command, cwd }, root.path);
-			const expandedPluginEnabled = expandEnvVarsDeep(cfg.enabled as unknown, pluginRootEnv) as unknown;
-			const pluginEnabled =
-				typeof expandedPluginEnabled === "boolean"
-					? expandedPluginEnabled
-					: typeof expandedPluginEnabled === "string"
-						? (() => {
-								const lower = (expandedPluginEnabled as string).toLowerCase();
-								if (lower === "true" || lower === "1") return true;
-								if (lower === "false" || lower === "0") return false;
-								return undefined;
-							})()
-						: undefined;
-			const expandedPluginTimeout = expandEnvVarsDeep(cfg.timeout as unknown, pluginRootEnv) as unknown;
-			const pluginTimeout =
-				typeof expandedPluginTimeout === "number" &&
-				Number.isFinite(expandedPluginTimeout) &&
-				expandedPluginTimeout >= 0
-					? expandedPluginTimeout
-					: typeof expandedPluginTimeout === "string" && (expandedPluginTimeout as string).length > 0
-						? (() => {
-								const parsed = Number(expandedPluginTimeout);
-								return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-							})()
-						: undefined;
+			const pluginEnabled = parseMCPEnabled(
+				serverName,
+				cfg.enabled,
+				expandEnvVarsDeep(cfg.enabled as unknown, pluginRootEnv),
+			);
+			const pluginTimeout = parseMCPTimeout(
+				serverName,
+				cfg.timeout,
+				expandEnvVarsDeep(cfg.timeout as unknown, pluginRootEnv),
+			);
 			const requestIdFormat = parseRequestIdFormat(
 				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat, pluginRootEnv),
 			);

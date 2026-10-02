@@ -198,6 +198,29 @@ describe("Exa MCP filtering", () => {
 		expect(Object.keys(result.configs).sort()).toEqual(["mixedWithNativeLiteral", "nonNativeGlob"]);
 	});
 
+	test("keeps an unrestricted exa server whose alternation entry may select a non-native tool", () => {
+		// `{web_search_exa,deep_research}` matches the native name through one
+		// branch while selecting a non-native tool through the other — a tool
+		// the probe pool never enumerates. The branches cannot be judged
+		// separately here, so the conservative direction keeps the server.
+		// A bare `|` alternation is treated the same way.
+		const configs: Record<string, MCPServerConfig> = {
+			alternation: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["{web_search_exa,deep_research}"],
+			},
+			pipeAlternation: {
+				type: "http",
+				url: "https://mcp.exa.ai/mcp",
+				enabledTools: ["web_search_exa|deep_research"],
+			},
+		};
+		const result = filterExaMCPServers(configs, { alternation: SOURCE, pipeAlternation: SOURCE });
+
+		expect(Object.keys(result.configs).sort()).toEqual(["alternation", "pipeAlternation"]);
+	});
+
 	test("does not read an inherited object member as native", () => {
 		// The native set is looked up by name, and a tool the server really
 		// advertises may be called `constructor` or `__proto__`. An ordinary

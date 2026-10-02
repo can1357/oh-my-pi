@@ -174,6 +174,46 @@ export function parseBoolean(value: unknown): boolean | undefined {
 }
 
 /**
+ * Coerce an MCP `enabled` value: booleans pass through, "true"/"1" and
+ * "false"/"0" (any case) coerce, everything else warns and stays undefined
+ * (fail-open). Warns with the raw configured value so a typo is diagnosable.
+ */
+export function parseMCPEnabled(serverName: string, rawValue: unknown, expandedValue: unknown): boolean | undefined {
+	if (expandedValue === undefined || expandedValue === null) return undefined;
+	if (typeof expandedValue === "boolean") return expandedValue;
+	if (typeof expandedValue === "string") {
+		const lower = expandedValue.toLowerCase();
+		if (lower === "false" || lower === "0") return false;
+		if (lower === "true" || lower === "1") return true;
+		logger.warn(`MCP server "${serverName}": invalid enabled value "${rawValue}", ignoring`);
+		return undefined;
+	}
+	logger.warn(`MCP server "${serverName}": invalid enabled type ${typeof rawValue}, ignoring`);
+	return undefined;
+}
+
+/**
+ * Coerce an MCP `timeout` value: finite non-negative numbers and numeric
+ * strings pass; anything else warns and stays undefined (fail-open).
+ */
+export function parseMCPTimeout(serverName: string, rawValue: unknown, expandedValue: unknown): number | undefined {
+	if (expandedValue === undefined || expandedValue === null) return undefined;
+	if (typeof expandedValue === "number") {
+		if (Number.isFinite(expandedValue) && expandedValue >= 0) return expandedValue;
+		logger.warn(`MCP server "${serverName}": invalid timeout ${rawValue}, ignoring`);
+		return undefined;
+	}
+	if (typeof expandedValue === "string") {
+		const parsed = Number(expandedValue);
+		if (expandedValue.length > 0 && Number.isFinite(parsed) && parsed >= 0) return parsed;
+		logger.warn(`MCP server "${serverName}": invalid timeout "${rawValue}", ignoring`);
+		return undefined;
+	}
+	logger.warn(`MCP server "${serverName}": invalid timeout type ${typeof rawValue}, ignoring`);
+	return undefined;
+}
+
+/**
  * Parse an MCP `requestIdFormat` value. Unrecognized values are dropped so a typo
  * degrades to the default integer ids rather than reaching a transport.
  */
