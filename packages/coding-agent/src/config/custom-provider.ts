@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, toError } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
@@ -8,7 +9,6 @@ import { isMap, isScalar, type Pair, parseDocument, YAMLMap } from "yaml";
 import { writeFileAtomically } from "../utils/atomic-file";
 import type { ConfigFile } from "./config-file";
 import type { ModelRegistry } from "./model-registry";
-import { ModelsConfigFile } from "./models-config";
 import type { ModelsConfig } from "./models-config-schema";
 
 const CHANGED_ON_DISK = "models.yml changed on disk; retry";
@@ -164,7 +164,7 @@ export interface CustomProviderContext {
 	refreshProvider(id: string): Promise<void>;
 	discoverySucceeded(id: string): boolean;
 	hasChatModels(id: string): boolean;
-	readonly config?: ConfigFile<ModelsConfig>;
+	readonly config: ConfigFile<ModelsConfig>;
 }
 
 /** The live registry as the context every custom-provider write runs against, on the file it reads. */
@@ -241,6 +241,24 @@ async function undoChange(change: PendingChange, cause: unknown): Promise<void> 
 	if (failures.length > 0) throw new Error(`Could not undo ${what}: ${failures.join("; ")}`, { cause });
 }
 
+/**
+ * Undo for the credential write that just happened. It snapshots what this change stored and refuses to
+ * undo once another login, logout or rotation (in this process or another) replaced it, so a failed edit
+ * never overwrites newer credentials. A different key is stored as a new row, so any rotation changes the
+ * snapshot; a concurrent login of the identical key is indistinguishable and is undone with this change.
+ */
+function undoUnlessReplaced(authStorage: AuthStorage, id: string, restore: () => Promise<void>): () => Promise<void> {
+	const { credentials } = authStorage;
+	const written = credentials.list(id);
+	return async () => {
+		await credentials.poll();
+		if (!isDeepStrictEqual(credentials.list(id), written)) {
+			throw new Error("credentials changed during provider editing; newer login/logout was preserved");
+		}
+		await restore();
+	};
+}
+
 /** Register a discoverable provider without leaving unusable config or credentials behind. */
 export async function addCustomProvider(input: CustomProviderInput, context: CustomProviderContext): Promise<void> {
 	const { id, apiKey } = input;
@@ -251,7 +269,7 @@ export async function addCustomProvider(input: CustomProviderInput, context: Cus
 	}
 	const baseUrl = parseEndpoint(input.baseUrl);
 
-	const configFile = context.config ?? ModelsConfigFile;
+	const configFile = context.config;
 	const { credentials } = context.authStorage;
 	if (credentials.has(id)) throw new Error(`Provider "${id}" is already configured.`);
 
@@ -261,13 +279,13 @@ export async function addCustomProvider(input: CustomProviderInput, context: Cus
 		...(apiKey ? {} : { auth: "none" as const }),
 		discovery: { type: "openai-models-list" as const },
 	};
-	let keySaved = false;
+	let undoCredential: (() => Promise<void>) | undefined;
 	let edit: ModelsEdit | undefined;
 	try {
 		// Credential first: a crash between the two steps leaves an unused key, not a provider without one.
 		if (apiKey) {
 			await credentials.set(id, { type: "api_key", key: apiKey, source: "login" });
-			keySaved = true;
+			undoCredential = undoUnlessReplaced(context.authStorage, id, () => credentials.remove(id));
 		}
 		edit = await editModelsConfig(configFile, id, providers => {
 			if (findPair(providers, id)) throw new Error(`Provider "${id}" is already configured.`);
@@ -285,7 +303,7 @@ export async function addCustomProvider(input: CustomProviderInput, context: Cus
 				configFile,
 				context,
 				edit,
-				undoCredential: keySaved ? () => credentials.remove(id) : undefined,
+				undoCredential,
 			},
 			error,
 		);
@@ -321,14 +339,15 @@ function findProvider(config: ModelsConfig | null | undefined, id: string): Prov
 	return providers && Object.hasOwn(providers, id) ? providers[id] : undefined;
 }
 
-function isBundledProvider(id: string): boolean {
-	return getBundledProviders().some(bundled => bundled === id);
+/** Whether a provider ID is built into the catalog (auth policies or bundled models) rather than a user custom provider. */
+export function isBuiltInProvider(id: string): boolean {
+	return Boolean(authPolicyFor(id)) || (getBundledProviders() as readonly string[]).includes(id);
 }
 
 /** Read a provider declared in a successfully loaded `models.yml`. */
 export function getCustomProvider(
 	id: string,
-	configFile: ConfigFile<ModelsConfig> = ModelsConfigFile,
+	configFile: ConfigFile<ModelsConfig>,
 	authStorage?: AuthStorage,
 ): CustomProviderInfo | undefined {
 	const loaded = configFile.tryLoad();
@@ -338,7 +357,7 @@ export function getCustomProvider(
 		id,
 		baseUrl: node.baseUrl,
 		hasKey: Boolean(node.apiKey) || (authStorage?.credentials.has(id) ?? false),
-		keepsKeyOnRemove: isBundledProvider(id),
+		keepsKeyOnRemove: isBuiltInProvider(id),
 	};
 }
 
@@ -361,7 +380,7 @@ export async function updateCustomProvider(
 	const { apiKey, clearApiKey } = update;
 	if (apiKey && clearApiKey) throw new Error("Cannot both set and clear the API key.");
 	const baseUrl = update.baseUrl === undefined ? undefined : parseEndpoint(update.baseUrl);
-	const configFile = context.config ?? ModelsConfigFile;
+	const configFile = context.config;
 	const node = requireProvider(id, configFile);
 	if (baseUrl === undefined && !apiKey && !clearApiKey) return;
 
@@ -379,15 +398,18 @@ export async function updateCustomProvider(
 	}
 
 	const previousCredentials = credentials.list(id).map(row => row.credential);
-	let credentialChanged = false;
+	let undoCredential: (() => Promise<void>) | undefined;
 	let edit: ModelsEdit | undefined;
+	// `set` replaces every stored row, so an undo restores the whole list.
+	const restore = () =>
+		previousCredentials.length > 0 ? credentials.set(id, previousCredentials) : credentials.remove(id);
 	try {
 		if (apiKey) {
 			await credentials.set(id, { type: "api_key", key: apiKey, source: "login" });
-			credentialChanged = true;
+			undoCredential = undoUnlessReplaced(context.authStorage, id, restore);
 		} else if (clearApiKey) {
 			await credentials.remove(id);
-			credentialChanged = true;
+			undoCredential = undoUnlessReplaced(context.authStorage, id, restore);
 		}
 		edit = await editModelsConfig(configFile, id, providers => {
 			const target = findPair(providers, id)?.value;
@@ -414,13 +436,7 @@ export async function updateCustomProvider(
 				configFile,
 				context,
 				edit,
-				undoCredential: credentialChanged
-					? async () => {
-							// `set` replaces every stored row, so restore the whole list.
-							if (previousCredentials.length > 0) await credentials.set(id, previousCredentials);
-							else await credentials.remove(id);
-						}
-					: undefined,
+				undoCredential,
 			},
 			error,
 		);
@@ -436,14 +452,14 @@ export async function removeCustomProvider(
 	id: string,
 	context: Pick<CustomProviderContext, "authStorage" | "refreshProvider" | "config">,
 ): Promise<void> {
-	const configFile = context.config ?? ModelsConfigFile;
+	const configFile = context.config;
 	requireProvider(id, configFile);
 	const edit = await editModelsConfig(configFile, id, providers => {
 		const pair = findPair(providers, id);
 		if (!pair) throw notDefined(id);
 		providers.delete(pair.key);
 	});
-	if (!isBundledProvider(id)) {
+	if (!isBuiltInProvider(id)) {
 		try {
 			await context.authStorage.credentials.remove(id);
 		} catch (error) {

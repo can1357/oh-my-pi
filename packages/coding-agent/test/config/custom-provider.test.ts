@@ -11,6 +11,7 @@ import {
 	type CustomProviderContext,
 	customProviderContext,
 	getCustomProvider,
+	isBuiltInProvider,
 	removeCustomProvider,
 	updateCustomProvider,
 } from "../../src/config/custom-provider";
@@ -23,8 +24,6 @@ interface Fixture {
 	directory: string;
 	/** Stand-in for the real agent dir for the whole test: nothing here may ever be written. */
 	agentDir: string;
-	/** Spy on the `ModelsConfigFile` singleton's path: any call means a write fell back to the user's own models.yml. */
-	singletonPath: Mock<() => string>;
 	authStorage: AuthStorage;
 	configPath: string;
 	refreshProvider: Mock<(id: string) => Promise<void>>;
@@ -45,14 +44,10 @@ async function createFixture(prefix: string): Promise<Fixture> {
 	const previousAgentDir = getAgentDir();
 	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 	setAgentDir(agentDir);
-	// `ModelsConfigFile` bakes the agent dir into its path when the module loads, so `setAgentDir` cannot redirect
-	// it. Should a write ever fall back to that singleton, land it in the stand-in dir instead of the user's models.yml.
-	const singletonPath = vi.spyOn(ModelsConfigFile, "path").mockReturnValue(path.join(agentDir, "models.yml"));
 
 	return {
 		directory,
 		agentDir,
-		singletonPath,
 		authStorage,
 		configPath,
 		refreshProvider,
@@ -131,7 +126,7 @@ describe("addCustomProvider", () => {
 
 	it("stores the key in AuthStorage and atomically writes a private provider config", async () => {
 		await addCustomProvider(input, context);
-		const config = context.config!.tryLoad();
+		const config = context.config.tryLoad();
 		expect(config.status).toBe("ok");
 		if (config.status !== "ok") return;
 		expect(config.value.providers?.[input.id]?.baseUrl).toBe("https://gateway.example/v1");
@@ -167,7 +162,6 @@ describe("addCustomProvider", () => {
 			() => "added",
 			(error: Error) => error.message,
 		);
-		expect(fixture.singletonPath).not.toHaveBeenCalled();
 		expect(outcome).toBe("added");
 		expect(await fs.readFile(configPath, "utf8")).toContain(`${input.id}:`);
 		expect(registry.find(input.id, "test-chat-model")).toBeDefined();
@@ -268,7 +262,7 @@ describe("addCustomProvider", () => {
 			},
 		);
 		expect(authStorage.credentials.has(input.id)).toBe(false);
-		const config = context.config!.tryLoad();
+		const config = context.config.tryLoad();
 		expect(config.status).toBe("ok");
 		if (config.status === "ok") expect(config.value.providers?.[input.id]?.auth).toBe("none");
 		expect(registry.getAvailable().some(model => model.provider === input.id)).toBe(true);
@@ -281,6 +275,19 @@ describe("addCustomProvider", () => {
 		expect(authStorage.credentials.has(input.id)).toBe(false);
 		// Once for the attempt, once to re-sync the registry with the restored file.
 		expect(refreshProvider).toHaveBeenCalledTimes(2);
+	});
+
+	it("a failed setup keeps a key another login stored meanwhile", async () => {
+		state.modelsFound = false;
+		const racing: CustomProviderContext = {
+			...context,
+			refreshProvider: async () => {
+				await authStorage.credentials.set(input.id, { type: "api_key", key: "newer", source: "login" });
+			},
+		};
+		await expect(addCustomProvider(input, racing)).rejects.toThrow("credentials changed during provider editing");
+		await expect(fs.stat(configPath)).rejects.toThrow();
+		expect(authStorage.credentials.get(input.id)).toMatchObject({ key: "newer" });
 	});
 
 	it("rejects cached chat models when the online discovery failed", async () => {
@@ -383,7 +390,7 @@ describe("editing and removing custom providers", () => {
 	].join("\n");
 
 	function loadProvider(name = id) {
-		const loaded = context.config!.tryLoad();
+		const loaded = context.config.tryLoad();
 		if (loaded.status !== "ok") throw new Error(`models.yml did not load: ${loaded.status}`);
 		return loaded.value.providers?.[name];
 	}
@@ -484,6 +491,58 @@ describe("editing and removing custom providers", () => {
 		// Once for the attempt, once to re-sync the registry with the restored file.
 		expect(refreshProvider).toHaveBeenCalledTimes(2);
 		expect(authStorage.credentials.get(id)).toMatchObject({ key: "k1" });
+	});
+
+	it.each(["logout", "rotation"] as const)("failed edits do not overwrite a concurrent %s", async action => {
+		await addCustomProvider({ id, baseUrl: "https://gateway.example/v1", apiKey: "k1" }, context);
+		const original = await fs.readFile(configPath, "utf8");
+		state.modelsFound = false;
+		let changed = false;
+		const concurrentContext: CustomProviderContext = {
+			...context,
+			refreshProvider: async () => {
+				if (changed) return;
+				changed = true;
+				if (action === "logout") await authStorage.credentials.remove(id);
+				else await authStorage.credentials.set(id, { type: "api_key", key: "rotated", source: "login" });
+			},
+		};
+		await expect(updateCustomProvider(id, { apiKey: "k2" }, concurrentContext)).rejects.toThrow(
+			"credentials changed during provider editing",
+		);
+		expect(await fs.readFile(configPath, "utf8")).toBe(original);
+		if (action === "logout") expect(authStorage.credentials.has(id)).toBe(false);
+		else expect(authStorage.credentials.get(id)).toMatchObject({ key: "rotated" });
+	});
+
+	it("a failed edit does not overwrite a key another process rotated meanwhile", async () => {
+		const dbPath = path.join(fixture.directory, "agent.db");
+		const ours = await AuthStorage.create(dbPath);
+		const theirs = await AuthStorage.create(dbPath);
+		try {
+			const shared: CustomProviderContext = { ...context, authStorage: ours };
+			await addCustomProvider({ id, baseUrl: "https://gateway.example/v1", apiKey: "k1" }, shared);
+			const original = await fs.readFile(configPath, "utf8");
+			state.modelsFound = false;
+			let rotated = false;
+			const racing: CustomProviderContext = {
+				...shared,
+				refreshProvider: async () => {
+					if (rotated) return;
+					rotated = true;
+					await theirs.credentials.set(id, { type: "api_key", key: "rotated", source: "login" });
+				},
+			};
+			await expect(updateCustomProvider(id, { apiKey: "k2" }, racing)).rejects.toThrow(
+				"credentials changed during provider editing",
+			);
+			expect(await fs.readFile(configPath, "utf8")).toBe(original);
+			await ours.credentials.poll();
+			expect(ours.credentials.get(id)).toMatchObject({ key: "rotated" });
+		} finally {
+			ours.close();
+			theirs.close();
+		}
 	});
 
 	it("update restores a cleared key when rediscovery fails", async () => {
@@ -613,7 +672,7 @@ describe("editing and removing custom providers", () => {
 	it("getCustomProvider reports the endpoint, whether a key is stored, and whether removal keeps it", async () => {
 		expect(getCustomProvider(id, context.config, authStorage)).toBeUndefined();
 		await fs.writeFile(configPath, seeded);
-		context.config!.invalidate();
+		context.config.invalidate();
 		expect(getCustomProvider(id, context.config, authStorage)).toEqual({
 			id,
 			baseUrl: "https://old.example/v1",
@@ -623,6 +682,12 @@ describe("editing and removing custom providers", () => {
 		await authStorage.credentials.set(id, { type: "api_key", key: "k1", source: "login" });
 		expect(getCustomProvider(id, context.config, authStorage)?.hasKey).toBe(true);
 		expect(getCustomProvider("absent", context.config, authStorage)).toBeUndefined();
+	});
+
+	it("isBuiltInProvider counts login-only and bundled-only providers as built in, custom ones not", () => {
+		expect(isBuiltInProvider("litellm")).toBe(true);
+		expect(isBuiltInProvider("minimax-cn")).toBe(true);
+		expect(isBuiltInProvider("custom-gateway")).toBe(false);
 	});
 
 	it("getCustomProvider returns undefined for an unloadable models.yml", async () => {
@@ -746,6 +811,16 @@ describe("editing and removing custom providers", () => {
 			await removeCustomProvider("anthropic", context);
 			expect(await fs.readFile(configPath, "utf8")).not.toContain("anthropic");
 			expect(authStorage.credentials.get("anthropic")).toMatchObject({ key: "sk-own" });
+		});
+
+		it("removing a discovery-only built-in provider's override keeps its stored credential", async () => {
+			const litellmOverride = "providers:\n  litellm:\n    baseUrl: http://127.0.0.1:4000\n";
+			await fs.writeFile(configPath, litellmOverride);
+			await authStorage.credentials.set("litellm", { type: "api_key", key: "sk-litellm-master", source: "login" });
+			expect(getCustomProvider("litellm", context.config, authStorage)?.keepsKeyOnRemove).toBe(true);
+			await removeCustomProvider("litellm", context);
+			expect(await fs.readFile(configPath, "utf8")).not.toContain("litellm");
+			expect(authStorage.credentials.get("litellm")).toMatchObject({ key: "sk-litellm-master" });
 		});
 	});
 });
