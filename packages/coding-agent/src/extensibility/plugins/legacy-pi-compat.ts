@@ -12,6 +12,7 @@ import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
 	isCompiledBinary,
+	isRecord,
 	logger,
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
@@ -795,14 +796,22 @@ function resolveBundledVirtualSpecifier(
 // scope name they happened to declare in their peerDependencies.
 const CANONICAL_PI_SCOPE = "@oh-my-pi";
 
-// Scopes that have historically been used to publish (or alias) the same set
-// of internal pi-* packages. `@oh-my-pi` is intentionally included so direct
+// Scopes that have historically been used to publish (or alias) internal host
+// packages. `@oh-my-pi` is intentionally included so direct
 // canonical imports still pass through the same host-bundled package resolution
 // path instead of pulling a duplicate copy from plugin node_modules.
 const PI_SCOPE_ALIASES = ["oh-my-pi", "mariozechner", "earendil-works"] as const;
 
-// Internal pi-* package basenames bundled inside the omp binary.
-const PI_PACKAGE_NAMES = ["pi-agent-core", "pi-ai", "pi-coding-agent", "pi-natives", "pi-tui", "pi-utils"] as const;
+// Internal host package basenames bundled inside the omp binary.
+const PI_PACKAGE_NAMES = [
+	"pi-agent-core",
+	"pi-ai",
+	"pi-catalog",
+	"pi-coding-agent",
+	"pi-natives",
+	"pi-tui",
+	"pi-utils",
+] as const;
 
 const PI_SCOPE_ALTERNATION = PI_SCOPE_ALIASES.join("|");
 const PI_PACKAGE_ALTERNATION = PI_PACKAGE_NAMES.join("|");
@@ -1201,10 +1210,6 @@ function toGraphImportSpecifier(resolvedPath: string, mtimeTag: string | null): 
 		return url.pathToFileURL(stripWindowsExtendedLengthPathPrefix(resolvedPath)).href;
 	}
 	return `${stripWindowsExtendedLengthPathPrefix(resolvedPath)}?mtime=${mtimeTag}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function pathExists(p: string): Promise<boolean> {

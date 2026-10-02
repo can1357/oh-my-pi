@@ -28,10 +28,10 @@ import {
 	type AgentRef,
 	type AgentRefExpectation,
 	AgentRegistry,
-	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 	type RegistryEvent,
 } from "./agent-registry";
+import { getAgentTombstonePath } from "./agent-tombstone";
 
 export type AgentReviver = (expected: AgentRef) => Promise<AgentSession>;
 

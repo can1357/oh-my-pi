@@ -83,7 +83,8 @@ export function formatSearchProviderFailures(
 	return failures.map(f => `${f.provider.id}: ${formatSearchProviderFailure(f.error, f.provider)}`).join("; ");
 }
 
-function isRegisteredSearchEngine(id: string): id is SearchEngineId {
+/** Whether `id` names a pure search engine exposed as a `web/<id>` catalog model. */
+export function isRegisteredSearchEngine(id: string): id is SearchEngineId {
 	return Object.hasOwn(PROVIDER_LOADERS, id);
 }
 

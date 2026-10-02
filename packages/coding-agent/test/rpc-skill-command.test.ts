@@ -20,7 +20,7 @@ describe("tryRunRpcSkillCommand", () => {
 		);
 
 		let message: Pick<CustomMessage, "attribution" | "content" | "customType" | "details" | "display"> | undefined;
-		let options: { streamingBehavior?: "steer" | "followUp" | "aside" } | undefined;
+		let options: { streamingBehavior?: "steer" | "followUp" | "aside"; queueChipText?: string } | undefined;
 
 		const handled = await tryRunRpcSkillCommand(
 			{
@@ -44,7 +44,7 @@ describe("tryRunRpcSkillCommand", () => {
 		expect(message?.content).toContain("focus on risks");
 		expect(message?.display).toBe(true);
 		expect(message?.attribution).toBe("user");
-		expect(options).toEqual({ streamingBehavior: "steer" });
+		expect(options).toEqual({ streamingBehavior: "steer", queueChipText: "/skill:reviewer focus on risks" });
 
 		await removeWithRetries(dir);
 	});
@@ -83,6 +83,52 @@ describe("tryRunRpcSkillCommand", () => {
 
 			expect(handled).toEqual({ agentInvoked: true });
 			expect(options?.streamingBehavior).toBe("followUp");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	test("preserves attached images in skill prompt messages", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
+		const skillPath = path.join(dir, "SKILL.md");
+		await Bun.write(
+			skillPath,
+			"---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code carefully.\n",
+		);
+
+		let message: Pick<CustomMessage, "attribution" | "content" | "customType" | "details" | "display"> | undefined;
+		const image = { type: "image" as const, data: "fake-png", mimeType: "image/png" };
+
+		try {
+			const handled = await tryRunRpcSkillCommand(
+				{
+					skillsSettings: { enableSkillCommands: true },
+					skills: [
+						{
+							name: "reviewer",
+							description: "Review code",
+							filePath: skillPath,
+							baseDir: dir,
+							source: "project",
+						},
+					],
+					async promptCustomMessage(nextMessage) {
+						message = nextMessage;
+						return true;
+					},
+				},
+				"/skill:reviewer inspect screenshot",
+				"steer",
+				[image],
+			);
+
+			expect(handled).toEqual({ agentInvoked: true });
+			expect(message?.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+			expect(Array.isArray(message?.content)).toBe(true);
+			expect(message?.content).toEqual([
+				{ type: "text", text: expect.stringContaining("Review the supplied code carefully.") },
+				image,
+			]);
 		} finally {
 			await removeWithRetries(dir);
 		}
@@ -160,7 +206,7 @@ function promptResultsFor(id: string, frames: object[] = []) {
 }
 
 describe("dispatchRpcSkillPrompt", () => {
-	test("answers the prompt command before the skill dispatch completes", async () => {
+	test("answers the prompt command once admitted, before the skill dispatch completes", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
 		const skillPath = path.join(dir, "SKILL.md");
 		await Bun.write(
@@ -177,8 +223,9 @@ describe("dispatchRpcSkillPrompt", () => {
 				skills: [
 					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
 				],
-				async promptCustomMessage() {
+				async promptCustomMessage(_message, options) {
 					promptCustomMessageCalls += 1;
+					options?.onPromptAdmitted?.();
 					await dispatchGate.promise;
 					return true;
 				},
@@ -189,14 +236,60 @@ describe("dispatchRpcSkillPrompt", () => {
 			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
 		});
 
-		// The answer does not wait for the dispatch pipeline: with the gate
-		// closed, awaiting the pipeline (usage preflight, compaction, provider
-		// calls) would hang this call forever — it returns regardless.
+		// The answer waits for admission (onPromptAdmitted, above) but not for the
+		// rest of the dispatch pipeline: with the gate still closed, awaiting the
+		// pipeline (usage preflight, compaction, provider calls) would hang this
+		// call forever — it returns once admitted regardless.
 		expect(result).toEqual({ agentInvoked: true });
 
 		dispatchGate.resolve();
 		await settleUntil(() => promptCustomMessageCalls === 1);
 		expect(promptCustomMessageCalls).toBe(1);
+
+		await removeWithRetries(dir);
+	});
+
+	test("does not answer before admission, unlike the pre-fix immediate ack", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
+		const skillPath = path.join(dir, "SKILL.md");
+		await Bun.write(skillPath, "---\nname: reviewer\ndescription: Review code\n---\n\nBody.\n");
+
+		const admissionGate = Promise.withResolvers<void>();
+		const promptCustomMessageCalled = Promise.withResolvers<void>();
+		let settled = false;
+		const resultPromise = dispatchRpcSkillPrompt({
+			...promptResultsFor("cmd-1b"),
+			session: {
+				skillsSettings: { enableSkillCommands: true },
+				skills: [
+					{ name: "reviewer", description: "Review code", filePath: skillPath, baseDir: dir, source: "project" },
+				],
+				async promptCustomMessage(_message, options) {
+					promptCustomMessageCalled.resolve();
+					await admissionGate.promise;
+					options?.onPromptAdmitted?.();
+					return true;
+				},
+			},
+			message: "/skill:reviewer go",
+			streamingBehavior: undefined,
+			onError: () => {},
+			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
+		});
+		void resultPromise.then(() => {
+			settled = true;
+		});
+
+		// Wait past the real SKILL.md read (I/O, not just a microtask) so the
+		// dispatch pipeline has actually reached admission, then flush pending
+		// microtasks: resultPromise is still blocked on admissionGate, which
+		// only resolve() below can release.
+		await promptCustomMessageCalled.promise;
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(settled).toBe(false);
+
+		admissionGate.resolve();
+		expect(await resultPromise).toEqual({ agentInvoked: true });
 
 		await removeWithRetries(dir);
 	});
@@ -315,5 +408,48 @@ describe("dispatchRpcSkillPrompt", () => {
 		]);
 
 		await removeWithRetries(dir);
+	});
+
+	test("forwards attached images to promptCustomMessage", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
+		const skillPath = path.join(dir, "SKILL.md");
+		await Bun.write(skillPath, "---\nname: reviewer\ndescription: Review code\n---\n\nBody.\n");
+
+		let message: Pick<CustomMessage, "attribution" | "content" | "customType" | "details" | "display"> | undefined;
+		const image = { type: "image" as const, data: "fake-png", mimeType: "image/png" };
+
+		try {
+			const result = await dispatchRpcSkillPrompt({
+				...promptResultsFor("cmd-img"),
+				session: {
+					skillsSettings: { enableSkillCommands: true },
+					skills: [
+						{
+							name: "reviewer",
+							description: "Review code",
+							filePath: skillPath,
+							baseDir: dir,
+							source: "project",
+						},
+					],
+					async promptCustomMessage(nextMessage, options) {
+						message = nextMessage;
+						options?.onPromptAdmitted?.();
+						return true;
+					},
+				},
+				message: "/skill:reviewer go",
+				streamingBehavior: undefined,
+				onError: () => {},
+				extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
+				images: [image],
+			});
+
+			expect(result).toEqual({ agentInvoked: true });
+			expect(Array.isArray(message?.content)).toBe(true);
+			expect(message?.content).toEqual([{ type: "text", text: expect.stringContaining("Body.") }, image]);
+		} finally {
+			await removeWithRetries(dir);
+		}
 	});
 });

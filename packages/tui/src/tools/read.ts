@@ -6,20 +6,38 @@ import * as path from "node:path";
 import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultOptions,
+	ToolActivityContext,
+	ToolActivitySummary,
+	ToolRenderer,
+} from "./renderer";
+import { ansi, compact, md } from "../native/describe";
+import { base64ImageNode } from "../native/blobs";
+import type { NativeChild, NativeNode } from "../native/node";
+import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-view";
+import { numberedCode } from "./grouped-file-output";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
 import { markFramedBlockComponent } from "../render/output-block";
 import { framedToolCard } from "../render/tool-card";
-import { type ReadUrlToolDetails, renderReadUrlCall, renderReadUrlResult } from "./fetch";
+import {
+	describeReadUrlCall,
+	describeReadUrlResult,
+	type ReadUrlToolDetails,
+	renderReadUrlCall,
+	renderReadUrlResult,
+} from "./fetch";
 import { formatFullOutputReference, formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
 import { formatBytes, sanitizeDisplayLines, shortenPath, wrapBrackets } from "../render/render-utils";
 
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
-import { renderProcRead, type ProcReadDetails } from "./proc-render";
-import { renderCfgRead, type CfgReadDetails } from "./cfg-render";
+import { describeProcRead, renderProcRead, type ProcReadDetails } from "./proc-render";
+import { describeCfgRead, renderCfgRead, type CfgReadDetails } from "./cfg-render";
 import type { CardToolResult } from "./result-card";
 import { type InternalUrlSchemeSpec, internalUrlSchemeSpec, splitUrlScheme } from "./url-scheme-host";
 
@@ -313,6 +331,102 @@ function formatReadPathLink(
 	return `${linkedPath}${selectorSuffix}`;
 }
 
+function readRawPath(args: ReadRenderArgs | undefined): string {
+	return typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+}
+
+/**
+ * Native read head (§7.3 read): `Read path:13-36` with the path as the
+ * target (shortened, plus the selector / legacy offset range), a `file://`
+ * link when the fs path is known, and a suffix correction as meta.
+ */
+function readNativeHead(rawPath: string, args: ReadRenderArgs | undefined, details?: ReadToolDetails): NativeToolHead {
+	const split = splitReadRenderPath(rawPath);
+	const suffix = details?.suffixResolution;
+	let target = suffix ? shortenPath(suffix.to) : shortenPath(split.path || rawPath);
+	if (split.sel) target += `:${split.sel}`;
+	if (args?.offset !== undefined || args?.limit !== undefined) {
+		const startLine = args.offset ?? 1;
+		const endLine = args.limit !== undefined ? startLine + args.limit - 1 : "";
+		target += `:${startLine}${endLine ? `-${endLine}` : ""}`;
+	}
+	const meta: string[] = [];
+	if (suffix) meta.push(`corrected from ${shortenPath(suffix.from)}`);
+	if (details?.summary) {
+		const n = details.summary.elidedSpans;
+		meta.push(`summary: ${n} elided span${n === 1 ? "" : "s"}`);
+	}
+	const conflicts = details?.conflictCount ?? 0;
+	return {
+		title: "Read",
+		target: target || "…",
+		targetKind: "path",
+		href: fileHref(details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details)),
+		meta,
+		badges:
+			conflicts > 0 ? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }] : undefined,
+	};
+}
+
+/**
+ * The first line a read shows: the selector's (or legacy `offset`'s) range
+ * start, so legacy results without `displayContent` still number from there.
+ */
+function readRangeStart(rawPath: string, args: ReadRenderArgs | undefined): number {
+	const sel = splitReadRenderPath(rawPath).sel;
+	return firstReadSelectorLine(sel) ?? args?.offset ?? 1;
+}
+
+/**
+ * Read content as numbered `code` (no path header: the head names the file).
+ * Numbers come from `lineNumbers` (`displayContent`'s per-line numbers,
+ * `null` for an elided block; runs split with `…` between) when they cover
+ * every line, else count up from `start`.
+ */
+export function readContentCode(
+	content: string,
+	start: number,
+	numbers: readonly (number | null)[] | undefined,
+	lang: string | undefined,
+): NativeNode[] {
+	const lines = content.split("\n");
+	return numberedCode(
+		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),
+		{ lang },
+	);
+}
+
+/** An image content block as the read tool emits it (base64 data + mime type). */
+interface ReadImageBlock {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
+function isImageBlock(block: { type: string }): block is ReadImageBlock {
+	return (
+		block.type === "image" &&
+		typeof (block as Partial<ReadImageBlock>).data === "string" &&
+		typeof (block as Partial<ReadImageBlock>).mimeType === "string"
+	);
+}
+
+/** Cached `image` node on its content block, so decoding and hashing happen once per block. */
+const kReadImageNode = Symbol("read.imageNode");
+
+interface TaggedReadImageBlock extends ReadImageBlock {
+	[kReadImageNode]?: NativeNode;
+}
+
+/** Native `image` node for a read image: registered blob, alt = displayed path, source pixel size when parseable. */
+function describeReadImage(block: TaggedReadImageBlock, alt: string): NativeNode {
+	const cached = block[kReadImageNode];
+	if (cached) return cached;
+	const described = base64ImageNode(block.data, block.mimeType, { alt: alt || "image", role: "omp.tool.read.image" });
+	block[kReadImageNode] = described;
+	return described;
+}
+
 /** Render file, image, and URL reads in the transcript. */
 export const readToolRenderer = {
 	activitySummary(args: unknown, _context: ToolActivityContext): ToolActivitySummary {
@@ -526,6 +640,87 @@ export const readToolRenderer = {
 				cachedLines = undefined;
 			},
 		});
+	},
+	describeCall(args: ReadRenderArgs): NativeToolView {
+		const rawPath = readRawPath(args);
+		const routed = readUrlCard(rawPath);
+		if (routed?.card.detailsKey === "proc") return describeProcRead(routed.target, undefined, undefined);
+		if (routed) return describeCfgRead(splitInternalUrlSel(rawPath).path, undefined, undefined);
+		if (isReadableUrlPath(rawPath)) return describeReadUrlCall({ path: rawPath, raw: args.raw });
+		return { tool: readNativeHead(rawPath, args), inline: true };
+	},
+
+	/**
+	 * Inline (§7.3 read): the head names the file and range; the content
+	 * (numbered from the range start, no path header) is the disclosed body.
+	 * An error shows its message in the head, never behind the disclosure.
+	 */
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails; isError?: boolean },
+		_options: RenderResultOptions,
+		args?: ReadRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		const rawPath = readRawPath(args);
+		const routed = readUrlCard(rawPath, details);
+		if (routed?.card.detailsKey === "proc") return describeProcRead(routed.target, result, details?.proc);
+		if (routed) return describeCfgRead(splitInternalUrlSel(rawPath).path, result, details?.cfg);
+		if (details?.kind === "url" || isReadableUrlPath(rawPath)) {
+			return describeReadUrlResult({
+				content: result.content,
+				details: result.details as ReadUrlToolDetails | undefined,
+				isError: result.isError,
+			});
+		}
+
+		if (result.isError) {
+			const message = (resultText(result) || "Unknown error").replace(/^Error:\s*/, "");
+			return inlineErrorView(readNativeHead(rawPath, args, details), message);
+		}
+
+		const suffix = details?.suffixResolution;
+		const head = readNativeHead(rawPath, args, details);
+		const truncation = details?.meta?.truncation;
+		const fallback = details?.truncation;
+		const firstLineTooLong = truncation !== undefined && fallback?.firstLineExceedsLimit === true;
+		const foot = footnoteText(
+			compact([
+				details?.resolvedPath !== undefined && `resolved ${shortenPath(details.resolvedPath)}`,
+				firstLineTooLong &&
+					`First line exceeds ${formatBytes(fallback.outputBytes ?? fallback.totalBytes)} limit${truncation.artifactId ? `. ${formatFullOutputReference(truncation.artifactId)}` : ""}`,
+			]),
+			firstLineTooLong ? { artifactError: details?.meta?.artifactError } : details?.meta,
+		);
+
+		const contentText = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
+		const imageBlock = result.content?.find(isImageBlock);
+		if (imageBlock) {
+			const detailText = contentText.trim();
+			return {
+				tool: head,
+				tone: suffix ? "warning" : undefined,
+				inline: true,
+				body: compact<NativeChild>([
+					describeReadImage(imageBlock, shortenPath(suffix?.to ?? splitReadRenderPath(rawPath).path)),
+					detailText.length > 0 && ansi(detailText),
+					foot,
+				]),
+			};
+		}
+
+		const renderPath = splitReadRenderPath(rawPath);
+		const rawRequested =
+			args?.raw === true || renderPath.sel?.split(":").some(chunk => chunk.toLowerCase() === "raw") === true;
+		const content: NativeChild[] =
+			details?.contentType === "text/markdown" && !rawRequested
+				? [md(contentText)]
+				: readContentCode(
+						contentText,
+						details?.displayContent?.startLine ?? readRangeStart(rawPath, args),
+						details?.displayContent?.lineNumbers,
+						getLanguageFromPath(renderPath.path),
+					);
+		return { tool: head, inline: true, body: compact<NativeChild>([...content, foot]) };
 	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<ReadRenderArgs, ReadToolDetails>;

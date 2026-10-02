@@ -17,7 +17,12 @@ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
  *   - Session artifacts for debugging
  */
 import path from "node:path";
-import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolSpeculationPolicy,
+} from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
@@ -56,6 +61,8 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import { SpawnRun, type SpawnPermit } from "./spawn-run";
+import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -68,6 +75,7 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
+	cfgTaskSpeculativeLaunch,
 } from "./settings";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -313,10 +321,34 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	return spawn;
 }
 
-/** One sync-executed spawn: its item, position in the original call, and (for mixed calls) a pre-claimed agent id. */
+/** A validated call's spawn list: its items and the per-spawn params each run receives. */
+interface SpawnPlan {
+	params: TaskParams;
+	items: TaskItem[];
+	spawns: TaskParams[];
+}
+
+/**
+ * Repair, validate, and normalize a call into its spawns. Returns the
+ * validation error the call reports instead when the shape is rejected. Shared
+ * by dispatch and the speculative launcher so both derive identical spawns.
+ */
+function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: string): SpawnPlan | string {
+	const params = repairTaskParams(rawParams as TaskParams);
+	const error = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
+	if (error) return error;
+	const items = resolveSpawnItems(params);
+	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
+}
+
+/**
+ * One sync-executed spawn: its item, position in the original call, (for mixed
+ * calls) a pre-claimed agent id, and a run already started speculatively.
+ */
 interface SyncSpawnRef {
 	item: TaskItem;
 	index: number;
+	run?: SpawnRun;
 	preAllocatedId?: string;
 }
 
@@ -526,7 +558,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const tasks: unknown[] = Array.isArray(params.tasks) ? params.tasks : [];
 		if (tasks.length > 0) {
-			const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+			const defaultAgent = this.#defaultAgent();
 			const effectiveAgent = (item: unknown): string => {
 				if (item && typeof item === "object" && "agent" in item) {
 					const agent = item.agent;
@@ -588,17 +620,53 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * spawns and work already parked in the semaphore queue.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
+	readonly #permit: SpawnPermit = {
+		acquire: signal => this.#getSpawnSemaphore().acquire(signal),
+		release: () => this.#releaseSpawnSemaphore(),
+	};
+	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
+	readonly #launchSessions = new Map<string, TaskLaunchSession>();
+	readonly #launcher: TaskLauncher = {
+		spawns: args => {
+			const plan = planSpawns(args, this.#isBatchEnabled(), this.#defaultAgent());
+			return typeof plan === "string" ? undefined : plan.spawns;
+		},
+		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
+	};
+
+	/**
+	 * Batch calls start each subagent as soon as its `tasks[]` item streams in;
+	 * see `./speculative-launch` for the abort/adoption contract.
+	 */
+	readonly speculation: ToolSpeculationPolicy = {
+		stream: {
+			open: async context => {
+				if (!cfgTaskSpeculativeLaunch.get(this.session.settings) || !this.#isBatchEnabled()) return undefined;
+				if (!context.coordinator.authorizeLaunch) return undefined;
+				const id = context.parentToolCallId;
+				const session = new TaskLaunchSession({
+					sink: context.coordinator,
+					tool: this,
+					launcher: this.#launcher,
+					onClose: () => {
+						if (this.#launchSessions.get(id) === session) this.#launchSessions.delete(id);
+					},
+				});
+				this.#launchSessions.set(id, session);
+				return session;
+			},
+		},
+	};
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && cfgTaskIsolationEnabled.get(this.session.settings);
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
-			defaultAgent,
+			defaultAgent: this.#defaultAgent(),
 		});
 	}
 
@@ -637,6 +705,71 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	#isBatchEnabled(): boolean {
 		return cfgTaskBatch.get(this.session.settings);
+	}
+
+	#defaultAgent(): string {
+		return resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+	}
+
+	/** Session-retained id allocator; async ids are claimed before job registration. */
+	#outputManager(): AgentOutputManager {
+		let manager = this.session.agentOutputManager;
+		if (!manager) {
+			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+			this.session.agentOutputManager = manager;
+		}
+		return manager;
+	}
+
+	/** Start one spawn's subagent run behind the session semaphore. */
+	#launch(spawn: {
+		toolCallId: string;
+		params: TaskParams;
+		index: number;
+		agentId?: string;
+		detached: boolean;
+	}): SpawnRun {
+		return new SpawnRun(
+			this.#permit,
+			run =>
+				this.#runSpawn(
+					spawn.toolCallId,
+					spawn.params,
+					run.signal,
+					run.onUpdate,
+					spawn.agentId,
+					spawn.index,
+					spawn.detached,
+					run.timing,
+					spawn.detached ? run.onArtifactsRetained : undefined,
+				),
+			{ agentId: spawn.agentId, detached: spawn.detached },
+		);
+	}
+
+	/**
+	 * Start a streamed item's run ahead of dispatch. Preflight and execution
+	 * mode mirror dispatch exactly; refuses (undefined) whenever dispatch would
+	 * reject the item, so a refusal halts further speculation for the call.
+	 */
+	async #startSpeculative(
+		toolCallId: string,
+		spawn: TaskParams,
+		index: number,
+		signal: AbortSignal,
+	): Promise<SpawnRun | undefined> {
+		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
+		let blocking: boolean;
+		try {
+			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
+		} catch {
+			return undefined;
+		}
+		const detached =
+			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
+		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
+		if (signal.aborted) return undefined;
+		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
 	#getSpawnSemaphore(): Semaphore {
@@ -691,18 +824,33 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		const params = repairTaskParams(rawParams as TaskParams);
+		const launchSession = this.#launchSessions.get(toolCallId);
+		this.#launchSessions.delete(toolCallId);
+		try {
+			return await this.#dispatch(toolCallId, rawParams, launchSession, signal, onUpdate);
+		} finally {
+			// No-op once dispatch adopted; otherwise nothing launched early may outlive the call.
+			launchSession?.discard("task call settled without adopting speculative launches");
+		}
+	}
+
+	async #dispatch(
+		toolCallId: string,
+		rawParams: unknown,
+		launchSession: TaskLaunchSession | undefined,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+	): Promise<AgentToolResult<TaskToolDetails>> {
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const defaultAgent = this.#defaultAgent();
 		const batchEnabled = this.#isBatchEnabled();
-		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
-		if (validationError) {
-			return createTaskModeError(validationError);
+		const plan = planSpawns(rawParams, batchEnabled, defaultAgent);
+		if (typeof plan === "string") {
+			return createTaskModeError(plan);
 		}
-
-		const spawnItems = resolveSpawnItems(params);
+		const { params, items: spawnItems, spawns: normalizedSpawnParams } = plan;
 		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) {
@@ -716,7 +864,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				);
 			}
 		}
-		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
 		// Resolve every item before choosing an execution path. No executor or
 		// job manager may observe a batch unless every effective policy is valid.
@@ -755,6 +902,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const asyncEnabled = cfgAsyncEnabled.get(this.session.settings);
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
 		const asyncItems = manager ? spawnItems.filter((_, index) => !itemBlocking[index]) : [];
+		// Runs started while the call streamed. An item runs detached iff it
+		// becomes a background job here; a run launched under the other mode
+		// (settings flipped mid-stream) cannot be re-homed and starts over.
+		const adopted = launchSession ? await launchSession.adopt(normalizedSpawnParams) : new Map<number, SpawnRun>();
+		for (const [index, run] of adopted) {
+			if (run.identity.detached === (manager !== undefined && !itemBlocking[index])) continue;
+			run.discard("task execution mode changed after speculative launch");
+			adopted.delete(index);
+		}
 		const depthCapacity = canSpawnAtDepth(
 			cfgTaskMaxRecursionDepth.get(this.session.settings),
 			this.session.taskDepth ?? 0,
@@ -784,7 +940,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
-				spawnItems.map((item, index) => ({ item, index })),
+				spawnItems.map((item, index) => ({ item, index, run: adopted.get(index) })),
 				defaultAgent,
 				signal,
 				onUpdate,
@@ -834,45 +990,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (!appended) content.push({ type: "text", text: advisory });
 			return { ...result, content };
 		};
-		if (asyncItems.length === 0) {
-			return withAdvisory(
-				await this.#executeSyncFanout(
-					toolCallId,
-					params,
-					spawnItems.map((item, index) => ({ item, index })),
-					defaultAgent,
-					signal,
-					onUpdate,
-				),
-			);
-		}
-
-		// Async IDs are claimed before job registration, so retain the fallback
-		// manager on the session rather than recreating it for every call.
-		let outputManager = this.session.agentOutputManager;
-		if (!outputManager) {
-			outputManager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
-			this.session.agentOutputManager = outputManager;
-		}
+		const outputManager = this.#outputManager();
 		const callStartedAt = Date.now();
 		const spawns: Array<{
 			agentId: string;
 			item: TaskItem;
 			index: number;
 			blocking: boolean;
+			run: SpawnRun | undefined;
 			progress: AgentProgress;
 		}> = [];
 		for (const [index, item] of spawnItems.entries()) {
 			const agentType = resolvedAgents[index]!;
 			const policy = policies[index]!;
 			const agentSource = policy.agent.source;
-			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+			const run = adopted.get(index);
+			const agentId =
+				run?.identity.agentId ?? (await outputManager.allocate(item.name?.trim() || generateTaskName()));
 			const assignment = (item.task ?? "").trim();
 			spawns.push({
 				agentId,
 				item,
 				index,
 				blocking: itemBlocking[index],
+				run,
 				progress: {
 					index,
 					id: agentId,
@@ -933,6 +1074,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					toolCallId,
 					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
+					run: spawn.run,
 					progress: spawn.progress,
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
@@ -946,6 +1088,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				started.push({ agentId: spawn.agentId, jobId });
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				// An adopted run already executes; without its job nothing would own it.
+				spawn.run?.discard(`background job registration failed: ${message}`);
 				failedSchedules.push(`${spawn.agentId}: ${message}`);
 				spawn.progress.status = "failed";
 				settledCount += 1;
@@ -1039,7 +1183,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			spawns: syncSpawns.map(spawn => ({ item: spawn.item, index: spawn.index, preAllocatedId: spawn.agentId })),
+			spawns: syncSpawns.map(spawn => ({
+				item: spawn.item,
+				index: spawn.index,
+				preAllocatedId: spawn.agentId,
+				run: spawn.run,
+			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						const spawn = spawns.find(candidate => candidate.index === index);
@@ -1097,14 +1246,26 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		toolCallId: string;
 		spawnParams: TaskParams;
 		agentId: string;
+		/** Run already started while the call streamed; the job adopts it instead of launching. */
+		run?: SpawnRun;
 		progress: AgentProgress;
 		ircEnabled: boolean;
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			agentId,
+			run,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1127,31 +1288,72 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agentId,
 			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
 				const startedAt = Date.now();
-				const semaphore = this.#getSpawnSemaphore();
-				let semaphoreHeld = false;
-				// Every release funnels through here: the flag flips before the
-				// release so no path — acquire-time abort, executor failure, or a
-				// future refactor that reorders the branches — can return a permit
-				// twice. Releasing a permit this job never acquired would steal one
-				// from a running job and let a later spawn start past
-				// task.maxConcurrency.
-				const releasePermit = () => {
-					if (!semaphoreHeld) return;
-					semaphoreHeld = false;
-					this.#releaseSpawnSemaphore();
+				const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
+					const nextProgress = update.details?.progress?.[0];
+					if (nextProgress) {
+						// The job body owns status and identity (id/index/agent);
+						// copy only the live metrics the subagent streams so the
+						// polling row reflects the resolved model, reasoning level,
+						// and running counters without reverting the "running"
+						// status back to the subagent's initial "pending" snapshot.
+						progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
+						progress.resolvedModel = nextProgress.resolvedModel;
+						progress.resolvedModelIdentity = nextProgress.resolvedModelIdentity;
+						progress.resolvedThinkingLevel = nextProgress.resolvedThinkingLevel;
+						progress.resolvedModelIsFallback = nextProgress.resolvedModel
+							? nextProgress.resolvedModelIsFallback
+							: undefined;
+						progress.advisor = nextProgress.advisor ?? progress.advisor;
+						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
+						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
+						progress.tokens = nextProgress.tokens;
+						progress.requests = nextProgress.requests;
+						progress.contextTokens = nextProgress.contextTokens;
+						progress.contextWindow = nextProgress.contextWindow;
+						progress.cost = nextProgress.cost;
+						progress.toolCount = nextProgress.toolCount;
+						progress.currentTool = nextProgress.currentTool;
+						progress.currentToolArgs = nextProgress.currentToolArgs;
+						progress.currentToolArgsKey = nextProgress.currentToolArgsKey;
+						progress.currentToolIntent = nextProgress.currentToolIntent;
+						progress.currentToolStartMs = nextProgress.currentToolStartMs;
+						progress.lastIntent = nextProgress.lastIntent;
+						progress.recentTools = nextProgress.recentTools.slice();
+						progress.recentOutput = nextProgress.recentOutput.slice();
+						progress.retryState = nextProgress.retryState;
+						progress.retryFailure = nextProgress.retryFailure;
+					}
+					const updateText =
+						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
+					await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
 				};
-				try {
-					await semaphore.acquire(runSignal);
-					semaphoreHeld = true;
-				} catch {
-					// Fall through so an acquire-time abort goes through the same
-					// path as the post-acquire race below: progress + onSettled
-					// have to fire even when the spawn never reached the executor,
-					// otherwise the batch aggregate state stays "running" forever.
-				}
-				const acquiredAt = Date.now();
-				if (!semaphoreHeld || runSignal.aborted) {
-					releasePermit();
+				const spawnRun =
+					run ?? this.#launch({ toolCallId, params: spawnParams, index: progress.index, agentId, detached: true });
+				spawnRun.attach({
+					signal: runSignal,
+					onUpdate: forwardSyncProgress,
+					onArtifactsRetained: cleanup => {
+						// Tie the retained temp directory's lifetime to this job
+						// row: the manager runs `cleanup` exactly once, on
+						// eviction or manager disposal, instead of it leaking
+						// for the process lifetime. Look up by the resolved
+						// `jobId`, not the requested `agentId` — `register()`
+						// suffixes `jobId` on collision, and looking up the
+						// requested id would hit an unrelated pre-existing row.
+						const job = manager.getJob(jobId);
+						if (job) job.retainedArtifactsCleanup = cleanup;
+						else void cleanup();
+					},
+				});
+				// An acquire-time abort and a post-acquire abort take the same
+				// path: progress + onSettled have to fire even when the spawn
+				// never reached the executor, otherwise the batch aggregate state
+				// stays "running" forever.
+				const permitHeld = await spawnRun.started.then(
+					() => true,
+					() => false,
+				);
+				if (!permitHeld || runSignal.aborted) {
 					progress.status = "aborted";
 					onSettled?.(true);
 					throw new Error("Aborted before execution");
@@ -1163,62 +1365,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						`Running background task ${agentId}...`,
 						buildDetails() as unknown as Record<string, unknown>,
 					);
-					const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
-						const nextProgress = update.details?.progress?.[0];
-						if (nextProgress) {
-							// The job body owns status and identity (id/index/agent);
-							// copy only the live metrics the subagent streams so the
-							// polling row reflects the resolved model, reasoning level,
-							// and running counters without reverting the "running"
-							// status back to the subagent's initial "pending" snapshot.
-							progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
-							progress.resolvedModel = nextProgress.resolvedModel;
-							progress.resolvedModelIdentity = nextProgress.resolvedModelIdentity;
-							progress.resolvedThinkingLevel = nextProgress.resolvedThinkingLevel;
-							progress.resolvedModelIsFallback = nextProgress.resolvedModel
-								? nextProgress.resolvedModelIsFallback
-								: undefined;
-							progress.advisor = nextProgress.advisor ?? progress.advisor;
-							progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
-							progress.tokens = nextProgress.tokens;
-							progress.requests = nextProgress.requests;
-							progress.contextTokens = nextProgress.contextTokens;
-							progress.contextWindow = nextProgress.contextWindow;
-							progress.cost = nextProgress.cost;
-							progress.toolCount = nextProgress.toolCount;
-							progress.currentTool = nextProgress.currentTool;
-							progress.lastIntent = nextProgress.lastIntent;
-							progress.recentTools = nextProgress.recentTools.slice();
-							progress.recentOutput = nextProgress.recentOutput.slice();
-							progress.retryState = nextProgress.retryState;
-							progress.retryFailure = nextProgress.retryFailure;
-						}
-						const updateText =
-							update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
-						await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
-					};
-					const result = await this.#executeSync(
-						toolCallId,
-						spawnParams,
-						runSignal,
-						forwardSyncProgress,
-						agentId,
-						progress.index,
-						true,
-						{ invokedAt: startedAt, acquiredAt },
-						cleanup => {
-							// Tie the retained temp directory's lifetime to this job
-							// row: the manager runs `cleanup` exactly once, on
-							// eviction or manager disposal, instead of it leaking
-							// for the process lifetime. Look up by the resolved
-							// `jobId`, not the requested `agentId` — `register()`
-							// suffixes `jobId` on collision, and looking up the
-							// requested id would hit an unrelated pre-existing row.
-							const job = manager.getJob(jobId);
-							if (job) job.retainedArtifactsCleanup = cleanup;
-							else void cleanup();
-						},
-					);
+					const result = await spawnRun.result;
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
 					// A missing result means the sync path failed at the tool level
@@ -1282,8 +1429,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
-				} finally {
-					releasePermit();
 				}
 			},
 			{
@@ -1314,24 +1459,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		if (spawns.length === 1) {
 			const spawn = spawns[0]!;
-			const semaphore = this.#getSpawnSemaphore();
-			const invokedAt = Date.now();
-			await semaphore.acquire(signal);
-			const acquiredAt = Date.now();
-			try {
-				return await this.#executeSync(
+			const run =
+				spawn.run ??
+				this.#launch({
 					toolCallId,
-					spawnParamsFor(params, spawn.item, defaultAgent),
-					signal,
-					onUpdate,
-					spawn.preAllocatedId,
-					spawn.index,
-					false,
-					{ invokedAt, acquiredAt },
-				);
-			} finally {
-				this.#releaseSpawnSemaphore();
-			}
+					params: spawnParamsFor(params, spawn.item, defaultAgent),
+					index: spawn.index,
+					agentId: spawn.preAllocatedId,
+					detached: false,
+				});
+			run.attach({ signal, onUpdate });
+			return await run.result;
 		}
 
 		const startTime = Date.now();
@@ -1394,44 +1532,42 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onItemProgress?: (index: number, progress: AgentProgress) => void;
 	}): Promise<(AgentToolResult<TaskToolDetails> | undefined)[]> {
 		const { toolCallId, params, defaultAgent, spawns, signal, onItemProgress } = args;
-		const semaphore = this.#getSpawnSemaphore();
 		const { results } = await mapWithConcurrencyLimitAllSettled(
 			spawns,
 			spawns.length,
 			async (spawn, _position, workerSignal) => {
-				const invokedAt = Date.now();
-				let semaphoreHeld = false;
-				try {
-					await semaphore.acquire(workerSignal);
-					semaphoreHeld = true;
-				} catch (error) {
-					if (workerSignal.aborted) return undefined;
-					throw error;
-				}
-				const acquiredAt = Date.now();
-				try {
-					const itemOnUpdate: AgentToolUpdateCallback<TaskToolDetails> | undefined = onItemProgress
+				const run =
+					spawn.run ??
+					this.#launch({
+						toolCallId,
+						params: spawnParamsFor(params, spawn.item, defaultAgent),
+						index: spawn.index,
+						agentId: spawn.preAllocatedId,
+						detached: false,
+					});
+				run.attach({
+					signal: workerSignal,
+					onUpdate: onItemProgress
 						? update => {
 								const progress = update.details?.progress?.[0];
 								if (progress) onItemProgress(spawn.index, progress);
 							}
-						: undefined;
-					return await this.#executeSync(
-						toolCallId,
-						spawnParamsFor(params, spawn.item, defaultAgent),
-						workerSignal,
-						itemOnUpdate,
-						spawn.preAllocatedId,
-						spawn.index,
-						false,
-						{ invokedAt, acquiredAt },
-					);
-				} finally {
-					if (semaphoreHeld) this.#releaseSpawnSemaphore();
+						: undefined,
+				});
+				try {
+					await run.started;
+				} catch (error) {
+					if (workerSignal.aborted) return undefined;
+					throw error;
 				}
+				return await run.result;
 			},
 			signal,
 		);
+		// A worker never invoked (call aborted first) never attached its adopted run.
+		spawns.forEach((spawn, position) => {
+			if (!results[position]) spawn.run?.discard("task call aborted before the spawn started");
+		});
 		return results.map((settled, position) => {
 			if (!settled) return undefined;
 			if (settled.status === "fulfilled") return settled.value;
@@ -1449,37 +1585,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 	}
 
-	/**
-	 * Synchronous execution of one spawn. Used as the body of every
-	 * async job and directly by the sync fallback (no job manager / blocking
-	 * agent) and by in-process callers that need the result inline (e.g. the
-	 * commit flow's analyze_files tool).
-	 */
-	async #executeSync(
-		toolCallId: string,
-		params: TaskParams,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
-		preAllocatedId?: string,
-		spawnIndex = 0,
-		detached = false,
-		launchTiming?: { invokedAt: number; acquiredAt: number },
-		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
-	): Promise<AgentToolResult<TaskToolDetails>> {
-		return this.#runSpawn(
-			toolCallId,
-			params,
-			signal,
-			onUpdate,
-			preAllocatedId,
-			spawnIndex,
-			detached,
-			launchTiming,
-			onArtifactsRetained,
-		);
-	}
-
-	/** Spawn a fresh subagent and run it to completion. */
+	/** Spawn a fresh subagent and run it to completion; the body of every {@link SpawnRun}. */
 	async #runSpawn(
 		toolCallId: string,
 		params: TaskParams,

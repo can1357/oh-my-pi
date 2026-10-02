@@ -26,6 +26,7 @@ import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { acquireModelRoleMutation, modelPresetSavedMessage, saveModelPreset } from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -110,7 +111,6 @@ import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "@oh-m
 import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-selector";
 import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
-import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
@@ -120,6 +120,7 @@ import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboa
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
+import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
@@ -190,14 +191,12 @@ export class SelectorController {
 		return handle;
 	}
 
-	#defaultRoleMutationTail = Promise.resolve();
-
+	/**
+	 * Serialize default-role mutations with `/modelpreset switch`, which holds the
+	 * same shared tail in `config/model-presets.ts` for its whole apply.
+	 */
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
-		const previous = this.#defaultRoleMutationTail;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#defaultRoleMutationTail = previous.then(() => promise);
-		await previous;
-		return resolve;
+		return acquireModelRoleMutation();
 	}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
@@ -308,6 +307,7 @@ export class SelectorController {
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
 						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
 					},
+					describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
 						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
@@ -371,9 +371,9 @@ export class SelectorController {
 		const dashboard = new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
-			renderDetail: width =>
+			renderDetail: (width, current) =>
 				renderUsageReports(
-					reports,
+					current,
 					theme,
 					Date.now(),
 					width,
@@ -382,6 +382,7 @@ export class SelectorController {
 					unavailableAccounts,
 				),
 			loadActivity: loadDailyActivity,
+			refresh: () => this.ctx.session.fetchUsageReports(),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});
@@ -430,6 +431,7 @@ export class SelectorController {
 				},
 				scopedModels: this.ctx.session.scopedModels,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
+				syncBacklog: cfgAdvisorSyncBacklog.get(this.ctx.settings),
 				defaultModelLabel: defaultAdvisorModel
 					? `${defaultAdvisorModel.provider}/${defaultAdvisorModel.id}`
 					: undefined,
@@ -721,10 +723,8 @@ export class SelectorController {
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						this.ctx.showModelCycleTrack(
-							renderSegmentTrack(
-								quickRoleOrder.map(role => ({ label: role })),
-								quickRoleOrder.indexOf(entry.role),
-							),
+							quickRoleOrder.map(role => ({ label: role })),
+							quickRoleOrder.indexOf(entry.role),
 						);
 						done();
 					} catch (error) {
@@ -981,10 +981,21 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onSavePreset: name => {
+					try {
+						saveModelPreset(this.ctx.settings, name);
+						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
 				onCancel: () => done(),
 			},
 			{
 				initialProviderId: hubOptions.initialProviderId,
+				currentSelector: this.ctx.session.model
+					? `${this.ctx.session.model.provider}/${this.ctx.session.model.id}`
+					: undefined,
 			},
 		);
 		const overlayHandle = this.#showFullscreenMenu(hub);
@@ -1447,6 +1458,7 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 				cfgTreeFilterMode.get(settings),
+				this.ctx.sessionManager.getSessionName(),
 			);
 			return { component: selector, focus: selector };
 		});

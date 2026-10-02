@@ -12,6 +12,7 @@
  * frame is observable.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
@@ -282,16 +283,20 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 
 const harnessCleanups: (() => Promise<void>)[] = [];
 let writeSpy: { mockRestore(): void } | null = null;
+let renameSpy: { mockRestore(): void } | null = null;
 
 beforeEach(() => {
 	installInMemoryRelay();
 	writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+	renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 });
 
 afterEach(async () => {
 	for (const cleanup of harnessCleanups.splice(0).reverse()) await cleanup();
 	writeSpy?.mockRestore();
+	renameSpy?.mockRestore();
 	writeSpy = null;
+	renameSpy = null;
 	uninstallInMemoryRelay();
 });
 

@@ -6,6 +6,8 @@
  * permits it. Falls back to plain text when disabled.
  */
 import * as url from "node:url";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { span } from "../native/describe";
 import { setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
 
 const OSC = "\x1b]";
@@ -173,6 +175,36 @@ export function urlHyperlinkAlways(url: string, displayText: string): string {
 	} catch {
 		return displayText;
 	}
+}
+
+/**
+ * A native link span to an HTTP(S) URL (`www.` inputs become `https://`).
+ * Unlike the OSC 8 wrappers this ignores terminal capability detection — a
+ * TSP terminal always handles `href` — but honours an explicit `off` policy.
+ * Non-HTTP(S) or unparsable URLs yield a plain span.
+ */
+export function urlLinkSpan(target: string, displayText: string, s = "link"): TspSpan {
+	if (hyperlinkMode === "off") return span(displayText, s);
+	const normalized = target.match(/^www\./i) ? `https://${target}` : target;
+	try {
+		const parsed = new URL(normalized);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return span(displayText, s);
+		const href = safeHyperlinkUri(parsed.href);
+		return href ? span(displayText, s, { href }) : span(displayText, s);
+	} catch {
+		return span(displayText, s);
+	}
+}
+
+/**
+ * A native link span to a filesystem path as a plain `file://` URI (the
+ * terminal opens it through the system; the location stays in the visible
+ * text). Honours an explicit `off` policy.
+ */
+export function fileLinkSpan(filePath: string, displayText: string, s = "path"): TspSpan {
+	if (hyperlinkMode === "off") return span(displayText, s);
+	const href = safeHyperlinkUri(url.pathToFileURL(filePath).href);
+	return href ? span(displayText, s, { href }) : span(displayText, s);
 }
 
 /**

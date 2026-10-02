@@ -2098,6 +2098,8 @@ async function streamAssistantResponse(
 						signal: requestSignal,
 					})
 				: undefined;
+			const speculationPlansFromStream =
+				!config.transformAssistantMessage || config.transformAssistantMessagePreservesToolCalls === true;
 
 			let providerStreamSettled = false;
 			let speculationSettled = false;
@@ -2327,15 +2329,11 @@ async function streamAssistantResponse(
 						case "toolcall_delta":
 						case "toolcall_end":
 							if (partialMessage) {
-								if (
-									event.type === "toolcall_start" &&
-									speculationCoordinator &&
-									!config.transformAssistantMessage
-								) {
+								if (event.type === "toolcall_start" && speculationCoordinator && speculationPlansFromStream) {
 									// Stream sessions plan from pre-transform arguments, exactly like
 									// direct candidates (see admitFinalized below): with a transformer
-									// installed the authoritative call may differ, so any speculative
-									// work started from the original would be phantom I/O.
+									// that may rewrite calls, the authoritative call may differ, so any
+									// speculative work started from the original would be phantom I/O.
 									speculationCoordinator.register(event.contentIndex);
 									const toolCall = event.partial.content[event.contentIndex];
 									if (toolCall?.type === "toolCall") {
@@ -2432,7 +2430,7 @@ async function streamAssistantResponse(
 								event.type === "toolcall_end" &&
 								speculationCoordinator &&
 								speculationConfig &&
-								!config.transformAssistantMessage
+								speculationPlansFromStream
 							) {
 								speculationCoordinator.admitFinalized(context, event.toolCall, config, requestSignal);
 							}
@@ -2909,13 +2907,14 @@ async function prepareToolCallDispatch(
 				}
 				return validateToolArguments(tool, { ...toolCall, arguments: args });
 			} catch (validationError) {
-				if (tool?.lenientArgValidation) {
+				// Lenience covers schema mismatches; a parse failure has no args to hand over.
+				const parseFailed = "__parseError" in args;
+				if (tool?.lenientArgValidation && !parseFailed) {
 					const fallback = { ...args };
-					delete fallback.__parseError;
 					delete fallback.__rawJson;
 					return fallback;
 				}
-				entry.args = "__parseError" in args ? { __parseError: args.__parseError } : args;
+				entry.args = parseFailed ? { __parseError: args.__parseError } : args;
 				entry.validationErrorMessage =
 					validationError instanceof Error ? validationError.message : String(validationError);
 				return undefined;
@@ -3472,6 +3471,9 @@ async function executeToolCalls(
 						});
 						result = coerced.result;
 						isError = coerced.malformed || (after.isError ?? isError);
+						if (isNonBlankContext(after.additionalContext)) {
+							record.reportedContext.push(after.additionalContext);
+						}
 					}
 				} catch (e) {
 					caughtError = e;

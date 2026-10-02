@@ -18,11 +18,16 @@ import { getDebugLogPath } from "@oh-my-pi/pi-utils/dirs";
 import { $flag } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
+import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
+import { col } from "./native/describe";
+import { TSP_PREFIX, type TspHello } from "./native/encode";
+import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
@@ -239,6 +244,51 @@ export interface Component {
 	 */
 	render(width: number): readonly string[];
 
+	/** Inline decision panels must keep displaced settled transcript rows in
+	 * native scrollback even when mounted inside a transient editor container. */
+	readonly retireDisplacedTranscript?: boolean;
+
+	/**
+	 * Describe the component semantically for a Tern Surface Protocol
+	 * terminal (see `native/node.ts`). Called instead of `render()` when the
+	 * native backend is active. Return the same node object while nothing
+	 * changed; return null to fall back to `render()` rows.
+	 */
+	describe?(cx: DescribeContext): NativeNode | null;
+
+	/**
+	 * Props for the native `overlay` wrapper when this component is shown as
+	 * an overlay: the sheet's `role` (Tern styles `omp.overlay.*` roles as
+	 * glass sheets, so the component's own root must not draw a second frame),
+	 * `head` spans for the sheet's title row, and `size`/`anchor` overriding
+	 * the ones derived from the overlay options.
+	 */
+	nativeOverlay?: {
+		role?: string;
+		head?: TspText;
+		size?: "sm" | "md" | "lg" | "full";
+		anchor?: "center" | "top" | "bottom";
+	};
+
+	/**
+	 * True when this component, shown as an overlay, describes a data-first
+	 * sheet (`picker`, `prefs`) that is its own frame: the backend puts it
+	 * directly in `layer` with no `overlay` wrapper. Usually
+	 * `cx.supports("picker")`, so older terminals keep the wrapped fallback.
+	 */
+	nativeSheet?(cx: DescribeContext): boolean;
+
+	/**
+	 * A fullscreen overlay that is a page of its own rather than one block:
+	 * the regions (and role) of the screen surface it fills, instead of the
+	 * default lone `main` child. Put the component itself in `dock` to keep
+	 * its focus target and events.
+	 */
+	describeScreen?(cx: DescribeContext): NativeScreen;
+
+	/** User actions on nodes this component described (toggle, select, activate, custom). */
+	handleNativeEvent?(event: NativeUiEvent): void;
+
 	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
@@ -450,6 +500,10 @@ export class Container implements Component {
 	#memoLines: string[] | undefined;
 	#memoChildLines: (readonly string[])[] = [];
 	#memoWidth = -1;
+	// Memoized native description: rebuilt only when the child list changes, so
+	// the reconciler can skip an unchanged container by reference.
+	#nativeNode: NativeNode | undefined;
+	#nativeChildren: readonly Component[] = [];
 
 	#ignoreTight = false;
 
@@ -534,6 +588,17 @@ export class Container implements Component {
 		}
 		this.#memoLines = lines;
 		return lines;
+	}
+
+	describe(_cx: DescribeContext): NativeNode | null {
+		const children = this.children;
+		const previous = this.#nativeChildren;
+		let unchanged = this.#nativeNode !== undefined && previous.length === children.length;
+		for (let i = 0; unchanged && i < children.length; i++) unchanged = previous[i] === children[i];
+		if (unchanged) return this.#nativeNode!;
+		this.#nativeChildren = children.slice();
+		this.#nativeNode = col(this.#nativeChildren);
+		return this.#nativeNode;
 	}
 }
 
@@ -915,12 +980,37 @@ export class TUI extends Container {
 	// atomically. It must survive a deferred Ghostty image frame.
 	#pendingAltExit = "";
 
+	// Tern Surface Protocol backend, created when the terminal answers the
+	// `hello` probe, or at start when the environment names Tern. Kept across
+	// stop/start so a restart adopts the surface.
+	#native: NativeBackend | undefined;
+	#nativeLive = false;
+	// Holds the first paint while the `hello` probe is outstanding, so a TSP
+	// terminal never sees a row paint it would have to erase.
+	#nativeHoldTimer: RenderTimer | undefined;
+	static readonly #NATIVE_PROBE_HOLD_MS = 300;
+	// Optimistic start (`TERM_PROGRAM=tern`): the surface is live on assumed
+	// capabilities until the real `hello` reply confirms it. Without a reply
+	// by the deadline the surface closes and rows repaint.
+	#nativeUnconfirmed = false;
+	#nativeConfirmTimer: RenderTimer | undefined;
+	static readonly #NATIVE_CONFIRM_MS = 1000;
+	// A deadline that fires this late ran after an event-loop stall (module
+	// loading), possibly with the reply already queued on stdin: re-arm for
+	// this long so input gets a turn before giving up.
+	static readonly #NATIVE_CONFIRM_GRACE_MS = 100;
+
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
 		component: Component;
 		options?: OverlayOptions;
 		preFocus: Component | null;
 		hidden: boolean;
+		/**
+		 * A sheet the user clicked away from (see {@link TUI.#focusFromPointer}):
+		 * it stays up but no longer holds the keys, until focus moves back into it.
+		 */
+		released: boolean;
 	}[] = [];
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, options?: TUIOptions) {
@@ -1039,12 +1129,14 @@ export class TUI extends Container {
 	}
 
 	setFocus(component: Component | null): void {
-		const topVisibleOverlay = this.#getTopmostVisibleOverlay();
-		if (topVisibleOverlay && !isOverlayFocusTarget(topVisibleOverlay.component, component)) {
+		const holder = this.#getKeyHolderOverlay();
+		if (holder && !isOverlayFocusTarget(holder.component, component)) {
 			const currentFocus = this.#focusedComponent;
-			component = isOverlayFocusTarget(topVisibleOverlay.component, currentFocus)
-				? currentFocus
-				: topVisibleOverlay.component;
+			component = isOverlayFocusTarget(holder.component, currentFocus) ? currentFocus : holder.component;
+		}
+		// Focus moving back into a released sheet makes it hold the keys again.
+		for (const entry of this.overlayStack) {
+			if (entry.released && isOverlayFocusTarget(entry.component, component)) entry.released = false;
 		}
 
 		const previousFocusedComponent = this.#focusedComponent;
@@ -1095,7 +1187,7 @@ export class TUI extends Container {
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
 		if (this.#isOverlayVisible(entry)) {
@@ -1113,8 +1205,7 @@ export class TUI extends Container {
 					this.overlayStack.splice(index, 1);
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						const topVisible = this.#getTopmostVisibleOverlay();
-						this.setFocus(topVisible?.component ?? entry.preFocus);
+						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
 					}
 					if (this.overlayStack.length === 0) {
 						this.terminal.hideCursor();
@@ -1128,10 +1219,9 @@ export class TUI extends Container {
 				entry.hidden = hidden;
 				// Update focus when hiding/showing
 				if (hidden) {
-					// If this overlay or one of its owned targets had focus, move focus to next visible or preFocus
+					// If this overlay or one of its owned targets had focus, move focus to the next one holding keys or preFocus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						const topVisible = this.#getTopmostVisibleOverlay();
-						this.setFocus(topVisible?.component ?? entry.preFocus);
+						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
 					}
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
@@ -1149,9 +1239,8 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();
 		if (!overlay) return;
-		// Find topmost visible overlay, or fall back to preFocus
-		const topVisible = this.#getTopmostVisibleOverlay();
-		this.setFocus(topVisible?.component ?? overlay.preFocus);
+		// Find the topmost visible overlay holding keys, or fall back to preFocus
+		this.setFocus(this.#getKeyHolderOverlay()?.component ?? overlay.preFocus);
 		if (this.overlayStack.length === 0) {
 			this.terminal.hideCursor();
 			this.#recordHardwareCursorHidden();
@@ -1231,6 +1320,39 @@ export class TUI extends Container {
 		return undefined;
 	}
 
+	/** The topmost visible overlay that holds the keys: not a sheet the user clicked away from. */
+	#getKeyHolderOverlay(): (typeof this.overlayStack)[number] | undefined {
+		for (let i = this.overlayStack.length - 1; i >= 0; i--) {
+			const entry = this.overlayStack[i];
+			if (!entry.released && this.#isOverlayVisible(entry)) return entry;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Moves keyboard focus where the user clicked (the terminal's `focus` event,
+	 * see {@link NativeHost.focusFromPointer}). A click inside an overlay gives it
+	 * the keys unless they are already inside it. A click on `field` under the
+	 * overlays focuses it only when every visible overlay is a `sheet` (a panel
+	 * beside the content, like `/settings` docked in Tern): those stay up but
+	 * stop holding the keys until focus moves back into one of them.
+	 */
+	#focusFromPointer(
+		owners: readonly Component[],
+		field: Component | null,
+		sheet: (overlay: Component) => boolean,
+	): void {
+		const visible = this.overlayStack.filter(entry => this.#isOverlayVisible(entry));
+		const overlay = visible.findLast(entry => owners.some(owner => isOverlayFocusTarget(entry.component, owner)));
+		if (overlay) {
+			if (!isOverlayFocusTarget(overlay.component, this.#focusedComponent)) this.setFocus(overlay.component);
+			return;
+		}
+		if (!field || field === this.#focusedComponent || !visible.every(entry => sheet(entry.component))) return;
+		for (const entry of visible) entry.released = true;
+		this.setFocus(field);
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
@@ -1246,7 +1368,12 @@ export class TUI extends Container {
 			this.#debugServer = new TuiDebugServer(this, debugPath);
 			this.#debugServer.start();
 		}
-		this.#inputDeferred = options?.deferInput === true;
+		// A terminal expected to speak TSP gets its surface from the first frame,
+		// and a live surface needs raw input from the start: its events (resize,
+		// acks) would otherwise be echoed into the grid by the cooked tty, and the
+		// `hello` query must go out now to confirm the surface.
+		const nativeExpected = this.terminal.tspExpected === true;
+		this.#inputDeferred = options?.deferInput === true && !nativeExpected;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -1275,9 +1402,16 @@ export class TUI extends Container {
 			this.invalidate();
 			this.requestRender(true);
 		});
+		this.terminal.onTspHello?.(hello => this.#onTspHello(hello));
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
+				if (this.#nativeLive) {
+					// The terminal lays the surface out: a resize only refreshes the
+					// width `rows` fallback nodes render at. No replay.
+					this.#native!.noteTerminalColumns(this.terminal.columns);
+					return;
+				}
 				if (this.#resizeProbe) {
 					// Warp echoes a height-only ±1 SIGWINCH on CSI ?1049l. The echo
 					// must not restart the alt borrow (that is the flicker loop),
@@ -1328,7 +1462,7 @@ export class TUI extends Container {
 				this.#beginResizeAltPaint();
 			},
 			() => this.stop(),
-			{ deferInput: this.#inputDeferred },
+			{ deferInput: this.#inputDeferred, isLoopStalled: () => this.#watchdog.isStalled() },
 		);
 		if (this.#stopped) return;
 		this.#cancelPostmortemRestore?.();
@@ -1346,7 +1480,194 @@ export class TUI extends Container {
 			this.#querySixelSupport();
 			this.#queryCellSize();
 		}
+		if (nativeExpected && this.terminal.tspProbePending && !this.#nativeLive) {
+			this.#startNative(assumedTspHello(this.terminal));
+			this.#nativeUnconfirmed = true;
+			this.#armNativeConfirm(TUI.#NATIVE_CONFIRM_MS);
+		} else if (this.terminal.tspProbePending && !this.#nativeLive) {
+			this.#nativeHoldTimer = this.#renderScheduler.scheduleRender(() => {
+				this.#nativeHoldTimer = undefined;
+				if (!this.#stopped && !this.#nativeLive) this.requestRender(true);
+			}, TUI.#NATIVE_PROBE_HOLD_MS);
+		}
 		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
+	}
+
+	/** Whether frames go to a Tern Surface Protocol surface instead of the row renderer. */
+	get nativeRendering(): boolean {
+		return this.#nativeLive;
+	}
+
+	/**
+	 * Close the TSP surfaces ahead of {@link stop}, before the exit drains
+	 * input: the terminal answers nothing once they are closed, and whatever it
+	 * already sent (acks, events) is read and dropped here instead of reaching
+	 * the shell as typed text. A render already requested (the exit's status
+	 * line) goes out first; none is forced, and nothing renders from now until
+	 * `stop()`.
+	 */
+	closeNative(): void {
+		if (!this.#nativeLive) return;
+		if (this.#renderRequested) {
+			this.#renderTimer?.cancel();
+			this.#runScheduledRender();
+		}
+		this.#native!.stop();
+	}
+
+	/** Reference document the TSP terminal should hold (debug mirror only). */
+	getNativeDocument(): TspNode | undefined {
+		return this.#nativeLive ? this.#native?.document() : undefined;
+	}
+
+	/** Most recent TSP frames sent (debug mirror only). */
+	getNativeFrames(count?: number): readonly TspFrame[] {
+		return this.#native?.recentFrames(count) ?? [];
+	}
+
+	/** `rows` fallback nodes in the last native frame. */
+	get nativeFallbackCount(): number {
+		return this.#native?.fallbackCount ?? 0;
+	}
+
+	#onTspHello(hello: TspHello | null): void {
+		const held = this.#nativeHoldTimer !== undefined;
+		this.#nativeHoldTimer?.cancel();
+		this.#nativeHoldTimer = undefined;
+		if (this.#stopped) return;
+		if (this.#nativeUnconfirmed) {
+			if (hello === null) {
+				this.#revokeNative("the DA1 sentinel came before a TSP hello reply, or the reply's version is unsupported");
+				return;
+			}
+			this.#clearNativeConfirm();
+			this.#native!.confirm(hello);
+			return;
+		}
+		if (this.#nativeLive) return;
+		if (hello === null) {
+			if (held) this.requestRender(true);
+			return;
+		}
+		this.#startNative(hello);
+	}
+
+	/** Switch to the surface (adopting the one a stop/start cycle closed). */
+	#startNative(hello: TspHello): void {
+		this.#eraseRowPaintForNative();
+		this.#nativeLive = true;
+		if (this.#native) {
+			this.#native.resume(hello);
+			return;
+		}
+		this.#native = new NativeBackend(this.#nativeHost(), hello, {
+			mirror: this.#debugServer !== undefined,
+			scheduler: this.#renderScheduler === DEFAULT_RENDER_SCHEDULER ? undefined : this.#renderScheduler,
+		});
+		this.#native.start();
+	}
+
+	/**
+	 * Deadline for the `hello` reply after an optimistic start. A deadline that
+	 * fired late ran after an event-loop stall, possibly with the reply already
+	 * queued on stdin, so it re-arms briefly to let input run first.
+	 */
+	#armNativeConfirm(delayMs: number): void {
+		const due = this.#renderScheduler.now() + delayMs;
+		this.#nativeConfirmTimer = this.#renderScheduler.scheduleRender(() => {
+			this.#nativeConfirmTimer = undefined;
+			if (!this.#nativeUnconfirmed || this.#stopped) return;
+			if (this.#renderScheduler.now() - due > TUI.#NATIVE_CONFIRM_GRACE_MS) {
+				this.#armNativeConfirm(TUI.#NATIVE_CONFIRM_GRACE_MS);
+				return;
+			}
+			this.#revokeNative(`no TSP hello reply within ${TUI.#NATIVE_CONFIRM_MS} ms`);
+		}, delayMs);
+	}
+
+	#clearNativeConfirm(): void {
+		this.#nativeUnconfirmed = false;
+		this.#nativeConfirmTimer?.cancel();
+		this.#nativeConfirmTimer = undefined;
+	}
+
+	/**
+	 * The optimistic surface was never confirmed: close it without keeping
+	 * anything and repaint every row. A reply that still arrives later switches
+	 * to a fresh surface the usual way.
+	 */
+	#revokeNative(reason: string): void {
+		this.#clearNativeConfirm();
+		logger.warn("TSP: terminal did not confirm the surface; falling back to rows", { reason });
+		this.#nativeLive = false;
+		this.#native?.stop(false);
+		this.#native = undefined;
+		this.requestRender(true);
+	}
+
+	/**
+	 * The handshake landed after the row renderer painted (deferred input):
+	 * leave the alternate screen if borrowed and erase the painted viewport so
+	 * the surface opens where the rows began.
+	 */
+	#eraseRowPaintForNative(): void {
+		this.#cancelResizeProbe();
+		this.#resizeSettleTimer?.cancel();
+		this.#resizeSettleTimer = undefined;
+		if (this.#altActive || this.#resizeAltActive) {
+			this.terminal.write(`${this.#keyboardEnhancementExit()}\x1b[?1049l`);
+			setAltScreenActive(false);
+			this.#altActive = false;
+			this.#resizeAltActive = false;
+		}
+		this.#setMouseTracking("off");
+		if (this.#previousFrameLength > 0) {
+			const lineDiff = this.#providerViewportTop - this.#hardwareCursorRow;
+			if (lineDiff > 0) this.terminal.write(`\x1b[${lineDiff}B`);
+			else if (lineDiff < 0) this.terminal.write(`\x1b[${-lineDiff}A`);
+			this.terminal.write("\r\x1b[J");
+			this.#previousFrameLength = 0;
+			this.#providerWindow = [];
+			this.#providerPreparedRows = [];
+		}
+		this.terminal.hideCursor();
+		this.#forgetHardwareCursorState();
+	}
+
+	#nativeHost(): NativeHost {
+		return {
+			terminal: this.terminal,
+			describeSurface: cx => {
+				const provider = this.#frameProvider as
+					| (TerminalFrameProvider & Partial<NativeSurfaceProvider>)
+					| undefined;
+				if (provider?.describeSurface) return provider.describeSurface(cx);
+				return { main: this.children, dock: [] };
+			},
+			overlays: () => {
+				const visible = [];
+				for (const entry of this.overlayStack) {
+					if (!this.#isOverlayVisible(entry)) continue;
+					visible.push({
+						component: entry.component,
+						options: entry.options,
+						focused: isOverlayFocusTarget(entry.component, this.#focusedComponent),
+					});
+				}
+				return visible;
+			},
+			focused: () => this.#focusedComponent,
+			focusFromPointer: (owners, field, sheet) => this.#focusFromPointer(owners, field, sheet),
+			requestRender: () => this.requestRender(),
+			appearanceChanged: () => {
+				this.terminal.refreshAppearance?.();
+			},
+			motionChanged: () => {
+				this.invalidate();
+				this.requestRender();
+			},
+			invalidate: () => this.invalidate(),
+		};
 	}
 	/**
 	 * Whether a resize repaints the visible window in place — no alternate-screen
@@ -1974,6 +2295,14 @@ export class TUI extends Container {
 		this.#cancelPostmortemRestore = undefined;
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
+		this.#nativeHoldTimer?.cancel();
+		this.#nativeHoldTimer = undefined;
+		this.#clearNativeConfirm();
+		const nativeWasLive = this.#nativeLive;
+		if (nativeWasLive) {
+			this.#native!.stop();
+			this.#nativeLive = false;
+		}
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
 		if (this.#resizeInPlaceActive && this.terminal.rows > 0) {
@@ -2021,7 +2350,8 @@ export class TUI extends Container {
 		// erase native history and re-stream the whole transcript at quit; drop
 		// the latch so the flush below writes only un-retired rows.
 		this.#clearScrollbackOnNextRender = false;
-		this.#flushHistoryBeforeStop();
+		// The surface already holds the transcript; there's no row history to retire.
+		if (!nativeWasLive) this.#flushHistoryBeforeStop();
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
@@ -2193,7 +2523,9 @@ export class TUI extends Container {
 		const adaptiveFloor = Math.min(TUI.#MAX_ADAPTIVE_RENDER_MS, this.#lastFrameCostMs * 2);
 		const adaptiveDelay = Math.max(0, adaptiveFloor - elapsed);
 		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
-		const delay = Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
+		// Native frames are paced by the terminal's acknowledgements (credits),
+		// not by the row renderer's cadence.
+		const delay = this.#nativeLive ? 0 : Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
 		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
 	}
 
@@ -2227,6 +2559,12 @@ export class TUI extends Container {
 	}
 
 	#handleInput(data: string): void {
+		// Tern Surface Protocol events (acks, pointer actions, resize, theme)
+		// are terminal reports, never keystrokes.
+		if (data.startsWith(TSP_PREFIX)) {
+			if (this.#nativeLive) this.#native!.handleInput(data);
+			return;
+		}
 		// Consume CPR replies (CSI row;col R) while an anchor probe is unanswered;
 		// they are terminal reports, never keystrokes, and must not reach the
 		// focused component.
@@ -2982,6 +3320,12 @@ export class TUI extends Container {
 	/** Render one frame: alt-screen modal, provider plan, or children fallback. */
 	#doRender(): void {
 		if (this.#stopped) return;
+		if (this.#nativeLive) {
+			this.#native!.render();
+			return;
+		}
+		// Awaiting the TSP hello: its resolution (or the hold timeout) repaints.
+		if (this.#nativeHoldTimer) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		if (this.#resizeAltActive) {

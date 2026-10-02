@@ -5,6 +5,7 @@ import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
+import { TSP_VERSION } from "@oh-my-pi/pi-wire";
 import {
 	encodeBundledGlyphRegistrations,
 	encodeGlyphCoverageQuery,
@@ -14,9 +15,11 @@ import {
 	parseGlyphProtocolReply,
 } from "./glyph-protocol";
 import { setKittyProtocolActive } from "./keys";
+import { encodeTspHelloQuery, parseTspMessage, TSP_PREFIX, type TspHello } from "./native/encode";
 import { StdinBuffer } from "./stdin-buffer";
 import {
 	isInsideTerminalMultiplexer,
+	isSshSession,
 	NotifyProtocol,
 	setCellDimensions,
 	setOsc99Supported,
@@ -26,14 +29,30 @@ import {
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
+import { Win32InputModeDecoder } from "./windows-input-mode";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
-function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	if (!env.SSH_CONNECTION && !env.SSH_TTY && !env.SSH_CLIENT) return true;
-	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
+
+/**
+ * Terminal → program TSP messages through a Windows ConPTY: its input parser
+ * discards APC strings but passes OSC through, so Tern writes
+ * `ESC ] 877 ; tsp;… ESC \` there instead of `ESC _ tsp;… ESC \`.
+ */
+const TSP_OSC_PREFIX = `\x1b]877;${TSP_PREFIX.slice(2)}`;
+
+/**
+ * The TSP message a reassembled input string holds, in APC form, or
+ * `undefined` while its terminator has not arrived. An OSC 877 message may end
+ * with ST or BEL (a JSON body never contains BEL).
+ */
+function completeTspInput(buffered: string): string | undefined {
+	if (!buffered.startsWith(TSP_OSC_PREFIX)) return buffered.endsWith("\x1b\\") ? buffered : undefined;
+	const terminator = buffered.endsWith("\x1b\\") ? 2 : buffered.endsWith("\x07") ? 1 : 0;
+	if (terminator === 0) return undefined;
+	return `${TSP_PREFIX}${buffered.slice(TSP_OSC_PREFIX.length, -terminator)}\x1b\\`;
 }
 
 function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): boolean {
@@ -429,6 +448,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[?5522l" + // Disable enhanced paste notifications
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
+					"\x1b[?9001l" + // Disable win32-input-mode fallback (Windows console)
 					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
@@ -460,6 +480,15 @@ export interface TerminalStartOptions {
 	 * echoes even while module loading blocks the event loop.
 	 */
 	deferInput?: boolean;
+	/**
+	 * Reports whether the event loop is stalled or just recovered from a
+	 * stall. Once the terminal confirms bracketed paste, an unmarked multiline
+	 * burst is an input-method commit (IME, dictation) delivered as one paste
+	 * on a responsive loop, but keystrokes a stall batched into one read —
+	 * replayed as keys so Enter submits — while this returns true. Without a
+	 * probe every such burst is treated as an input-method commit.
+	 */
+	isLoopStalled?: () => boolean;
 }
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
@@ -477,6 +506,12 @@ export type PrivateModeReportHandler = (mode: number, supported: boolean, confir
  * glossary, so a host can safely repaint — or switch to the nerd preset.
  */
 export type GlyphProtocolReportHandler = (supported: boolean) => void;
+/**
+ * Outcome of the Tern Surface Protocol `hello` probe: the terminal's reply,
+ * or null when it answered the DA1 sentinel first (no TSP) or the probe was
+ * skipped (`PI_TUI_NATIVE=0`, multiplexers).
+ */
+export type TspHelloHandler = (hello: TspHello | null) => void;
 
 /**
  * Cursor shapes addressable via DECSCUSR (`CSI <n> SP q`). `"default"` (0) hands the shape back to
@@ -645,6 +680,23 @@ export interface Terminal {
 	 * pi-tui versions keep working.
 	 */
 	onGlyphProtocolReport?(callback: GlyphProtocolReportHandler): void;
+	/**
+	 * Register a callback fired once the Tern Surface Protocol `hello` probe
+	 * resolves (see {@link TspHelloHandler}); a resolved outcome is replayed to
+	 * late subscribers. TSP events arriving afterwards are delivered through
+	 * `onInput` as complete `ESC _ tsp;e;… ESC \` strings. Optional so custom
+	 * Terminals built against older pi-tui versions keep working.
+	 */
+	onTspHello?(callback: TspHelloHandler): void;
+	/** True while the `hello` probe awaits its reply or DA1 sentinel. */
+	readonly tspProbePending?: boolean;
+	/**
+	 * The environment names a Tern Surface Protocol terminal
+	 * (`TERM_PROGRAM=tern`) and the `hello` probe will run: the TUI takes input
+	 * at start and opens its surface before the reply, which then confirms or
+	 * revokes it.
+	 */
+	readonly tspExpected?: boolean;
 }
 
 /**
@@ -667,7 +719,8 @@ type Da1SentinelOwner =
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
-	| { kind: "glyphProtocol"; phase: "support" | "confirm" };
+	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
+	| { kind: "tsp" };
 
 let nextOsc99ProbeId = 1;
 
@@ -706,6 +759,13 @@ export interface ProcessTerminalOptions {
 	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
 	 */
 	conpty?: boolean;
+	/**
+	 * Whether stdin is a native Windows console handle (win32, not WSL), whose
+	 * console host answers `CSI ? 9001 h` with win32-input-mode key records.
+	 * Defaults to `process.platform === "win32"`; only consulted when `conpty`
+	 * is also true.
+	 */
+	nativeWindowsConsole?: boolean;
 }
 
 /**
@@ -717,11 +777,15 @@ export class ProcessTerminal implements Terminal {
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
+	#isLoopStalled?: () => boolean;
 	#stdoutResizeListener?: () => void;
 	#kittyProtocolActive = false;
 	#kittyEnableSeq: string | null = null;
 	#modifyOtherKeysActive = false;
 	#modifyOtherKeysTimeout?: Timer;
+	// Windows console fallback when kitty is unavailable: key records arrive as
+	// win32-input-mode sequences and are decoded before reaching the handler.
+	#win32InputDecoder?: Win32InputModeDecoder;
 	#stdinBuffer?: StdinBuffer;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
@@ -754,6 +818,7 @@ export class ProcessTerminal implements Terminal {
 	// chunking (#safeWrite). Live-detected by default; tests inject a fixed
 	// value so WSL env does not change behavior. See {@link ProcessTerminalOptions}.
 	readonly #conpty: boolean;
+	readonly #nativeWindowsConsole: boolean;
 	#writeLogPath = $env.PI_TUI_WRITE_LOG || "";
 	#stdoutErrorCleanup?: () => void;
 	#stdoutErrorHandler = (err: Error) => {
@@ -803,6 +868,10 @@ export class ProcessTerminal implements Terminal {
 	#glyphProtocolReplyBuffer = "";
 	#glyphProtocolResult: boolean | undefined;
 	#glyphProtocolCallbacks: GlyphProtocolReportHandler[] = [];
+	#tspPending = false;
+	#tspResult: TspHello | null | undefined;
+	#tspCallbacks: TspHelloHandler[] = [];
+	#tspReplyBuffer = "";
 	#privateCsiResponseBuffer = "";
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
@@ -825,6 +894,7 @@ export class ProcessTerminal implements Terminal {
 
 	constructor(options?: ProcessTerminalOptions) {
 		this.#conpty = options?.conpty ?? isConPTYHosted();
+		this.#nativeWindowsConsole = options?.nativeWindowsConsole ?? process.platform === "win32";
 	}
 
 	get kittyProtocolActive(): boolean {
@@ -914,6 +984,26 @@ export class ProcessTerminal implements Terminal {
 		if (this.#glyphProtocolResult !== undefined) callback(this.#glyphProtocolResult);
 	}
 
+	onTspHello(callback: TspHelloHandler): void {
+		this.#tspCallbacks.push(callback);
+		if (this.#tspResult !== undefined) callback(this.#tspResult);
+	}
+
+	get tspProbePending(): boolean {
+		return this.#tspPending;
+	}
+
+	get tspExpected(): boolean {
+		// A multiplexer started from Tern can leave `TERM_PROGRAM=tern` behind
+		// while swallowing APC, even when `PI_TUI_NATIVE=1` forces the probe.
+		return (
+			$env.TERM_PROGRAM?.toLowerCase() === "tern" &&
+			!isInsideTerminalMultiplexer($env) &&
+			!isTerminalHeadless() &&
+			this.#shouldQueryTspSupport()
+		);
+	}
+
 	start(
 		onInput: (data: string) => void,
 		onResize: () => void,
@@ -923,6 +1013,7 @@ export class ProcessTerminal implements Terminal {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
+		this.#isLoopStalled = options?.isLoopStalled;
 		// The host terminal's cursor visibility is unknown until we write it.
 		this.#cursorVisible = undefined;
 
@@ -1055,6 +1146,10 @@ export class ProcessTerminal implements Terminal {
 		// without a patched font installed.
 		this.#queryGlyphProtocolSupport();
 
+		// Tern Surface Protocol `hello`, same DA1 sentinel FIFO. A reply switches
+		// the TUI to describing its UI instead of painting rows.
+		this.#queryTspSupport();
+
 		// Subscribe to Mode 2031 appearance change notifications.
 		// When the terminal reports a change, we re-query OSC 11 to get the
 		// actual background color (following Neovim convention) with 100ms debounce.
@@ -1081,9 +1176,10 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
 		// 2004 (bracketed paste) is queried only to confirm the terminal brackets
-		// pastes; once confirmed, the unbracketed raw-paste heuristic in
-		// StdinBuffer is disabled so keystrokes an event-loop stall batches into
-		// one read are never misclassified as a paste (#12540).
+		// pastes; once confirmed, StdinBuffer's unbracketed raw-paste heuristic
+		// consults the host's stall probe so keystrokes an event-loop stall
+		// batches into one read stay keys (#12540) while input-method commits
+		// still land as one paste (#13344).
 		this.#queryPrivateMode(2004);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
@@ -1198,7 +1294,8 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
-				this.#glyphProtocolReplyBuffer.length === 0
+				this.#glyphProtocolReplyBuffer.length === 0 &&
+				this.#tspReplyBuffer.length === 0
 			) {
 				if (this.#inputHandler) {
 					this.#inputHandler(sequence);
@@ -1364,6 +1461,11 @@ export class ProcessTerminal implements Terminal {
 						if (owner.phase === this.#glyphProtocolPhase) this.#resolveGlyphProtocolSupport(false);
 						break;
 					}
+					case "tsp": {
+						// DA1 before any `tsp;r` reply: the terminal doesn't speak TSP.
+						this.#resolveTspSupport(null);
+						break;
+					}
 				}
 				return;
 			}
@@ -1383,6 +1485,7 @@ export class ProcessTerminal implements Terminal {
 					this.#safeWrite("\x1b[>4;0m");
 					this.#modifyOtherKeysActive = false;
 				}
+				this.#disableWin32InputMode();
 				// Any reply to `\x1b[?u` means the terminal speaks the kitty keyboard
 				// protocol. The reported flag value is the *current* stack-top — fresh
 				// terminals report 0 — so support is implied by the reply itself, not by
@@ -1448,6 +1551,23 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
+			// Tern Surface Protocol APC (`ESC _ tsp ; … ESC \`), or its OSC 877
+			// framing through a ConPTY: the hello reply resolves the probe; events
+			// go to the input handler whole, in APC form, where the TUI routes them
+			// to the native backend before key matching.
+			if (this.#tspReplyBuffer || sequence.startsWith(TSP_PREFIX) || sequence.startsWith(TSP_OSC_PREFIX)) {
+				if (this.#tspReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#tspReplyBuffer = "";
+				} else {
+					this.#tspReplyBuffer += sequence;
+					const message = completeTspInput(this.#tspReplyBuffer);
+					if (message === undefined) return;
+					this.#tspReplyBuffer = "";
+					this.#handleTspMessage(message);
+					return;
+				}
+			}
+
 			// Glyph Protocol APC replies (`ESC _ 25a1 ; … ESC \`). Swallowed for
 			// the whole session, not just while the probe is outstanding: an APC is
 			// exclusively terminal->host data, and registrations use `reply=0`, so
@@ -1477,6 +1597,11 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 			if (this.#inputHandler) {
+				const win32Keys = this.#win32InputDecoder?.decode(sequence);
+				if (win32Keys !== undefined) {
+					for (const key of win32Keys) this.#inputHandler(key);
+					return;
+				}
 				// Windows console hosts drop AltGr text under kitty (AltGr+F → `CSI 102;3u`);
 				// recover it from the active layout before any keybinding sees an Alt chord.
 				const altGrText =
@@ -1490,10 +1615,12 @@ export class ProcessTerminal implements Terminal {
 		// Re-wrap paste content with bracketed paste markers for existing editor
 		// handling. An Enter that shared the paste's stdin read rides along so
 		// paste and submit reach the component focused right now, not one the
-		// paste itself is about to open.
+		// paste itself is about to open. Under win32-input-mode the console host
+		// encodes pasted line breaks as key records; decode them as text (#14065).
 		this.#stdinBuffer.on("paste", (content: string, enter?: string) => {
 			if (this.#inputHandler) {
-				this.#inputHandler(`\x1b[200~${content}\x1b[201~${enter ?? ""}`);
+				const text = this.#win32InputDecoder?.decodePaste(content) ?? content;
+				this.#inputHandler(`\x1b[200~${text}\x1b[201~${enter ?? ""}`);
 			}
 		});
 
@@ -1657,6 +1784,54 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	#shouldQueryTspSupport(): boolean {
+		const override = $env.PI_TUI_NATIVE;
+		if (override === "0") return false;
+		if (override === "1") return true;
+		// Multiplexers swallow APC, so the reply could never arrive.
+		if (isInsideTerminalMultiplexer($env)) return false;
+		return !isBunTestRuntime();
+	}
+
+	#queryTspSupport(): void {
+		this.#tspPending = false;
+		this.#tspResult = undefined;
+		this.#tspReplyBuffer = "";
+		if (this.#dead) return;
+		if (!this.#shouldQueryTspSupport()) {
+			this.#tspResult = null;
+			for (const cb of this.#tspCallbacks) cb(null);
+			return;
+		}
+		this.#tspPending = true;
+		this.#da1SentinelOwners.push({ kind: "tsp" });
+		this.#safeWrite(`${encodeTspHelloQuery()}\x1b[c`);
+	}
+
+	#handleTspMessage(sequence: string): void {
+		const message = parseTspMessage(sequence);
+		if (message?.verb === "r") {
+			if (message.reply.r === "hello") this.#resolveTspSupport(message.reply);
+			return;
+		}
+		this.#inputHandler?.(sequence);
+	}
+
+	#resolveTspSupport(hello: TspHello | null): void {
+		if (!this.#tspPending) return;
+		this.#tspPending = false;
+		const result = hello !== null && hello.v === TSP_VERSION ? hello : null;
+		if (hello !== null && result === null) logger.warn("TSP: unsupported protocol version", { v: hello.v });
+		this.#tspResult = result;
+		for (const cb of this.#tspCallbacks) {
+			try {
+				cb(result);
+			} catch (error) {
+				logger.warn("TSP: hello subscriber failed", { error: String(error) });
+			}
+		}
+	}
+
 	/** Finish the handshake in either phase and notify subscribers once. */
 	#resolveGlyphProtocolSupport(supported: boolean): void {
 		if (this.#glyphProtocolPhase === "idle") return;
@@ -1707,10 +1882,28 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#enableModifyOtherKeysFallback(): void {
-		if (this.#kittyProtocolActive || this.#modifyOtherKeysActive) return;
-		if (!shouldEnableModifyOtherKeysFallback()) return;
+		if (this.#kittyProtocolActive || this.#modifyOtherKeysActive || this.#win32InputDecoder) return;
+		const ssh = isSshSession();
+		if (this.#conpty && this.#nativeWindowsConsole && !ssh) {
+			// The Windows console host ignores modifyOtherKeys and folds Shift+Enter
+			// into a bare CR. win32-input-mode is answered by the console host
+			// serving this process, so it works under every local ConPTY terminal.
+			// Under sshd the console host is fed the remote terminal's VT stream,
+			// and the mode splits arrow keys into Escape plus literal text (#14034).
+			this.#safeWrite("\x1b[?9001h");
+			this.#win32InputDecoder = new Win32InputModeDecoder();
+			return;
+		}
+		// A remote terminal with no identifying env may not understand the request.
+		if (ssh && (TERMINAL.id === "base" || TERMINAL.id === "trueColor")) return;
 		this.#safeWrite("\x1b[>4;2m");
 		this.#modifyOtherKeysActive = true;
+	}
+
+	#disableWin32InputMode(): void {
+		if (!this.#win32InputDecoder) return;
+		this.#safeWrite("\x1b[?9001l");
+		this.#win32InputDecoder = undefined;
 	}
 
 	/**
@@ -1774,15 +1967,17 @@ export class ProcessTerminal implements Terminal {
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
 		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
-		// Confirmed bracketed-paste support makes the unbracketed raw-paste
-		// heuristic pure downside — turn it off so stall-batched keystrokes are
-		// not misread as a paste (#12540). `supported` is only true here after an
-		// explicit DECRPM reply (the DA1-sentinel fallback resolves unsupported).
+		// Confirmed bracketed-paste support means a genuine paste arrives
+		// wrapped, so an unmarked multiline burst is an input-method commit
+		// (#13344) unless an event-loop stall batched typed keys into one read
+		// (#12540). Let the host's stall probe decide per burst. `supported` is
+		// only true here after an explicit DECRPM reply (the DA1-sentinel
+		// fallback resolves unsupported).
 		if (mode === 2004 && supported) {
-			this.#stdinBuffer?.setRawPasteClassification(false);
+			this.#stdinBuffer?.setRawPasteStallProbe(this.#isLoopStalled);
 			// A terminal can reset this mode after the initial probe (for example,
 			// iTerm2's Terminal State toggle). Keep the mode asserted while we own
-			// the TTY, since the raw fallback is disabled after confirmation.
+			// the TTY, since a stalled loop now replays unmarked bursts as keys.
 			this.#bracketedPasteRefreshTimer ??= setInterval(() => {
 				if (this.#active && !this.#dead) this.#safeWrite("\x1b[?2004h");
 			}, 1000);
@@ -1888,6 +2083,7 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[>4;0m");
 			this.#modifyOtherKeysActive = false;
 		}
+		this.#disableWin32InputMode();
 
 		const previousHandler = this.#inputHandler;
 		this.#inputHandler = undefined;
@@ -2003,6 +2199,10 @@ export class ProcessTerminal implements Terminal {
 		this.#glyphProtocolReplyBuffer = "";
 		this.#glyphProtocolCallbacks = [];
 		setTerminalGlyphProtocol(false);
+		this.#tspPending = false;
+		this.#tspResult = undefined;
+		this.#tspReplyBuffer = "";
+		this.#tspCallbacks = [];
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
 		this.#da1SentinelOwners.length = 0;
@@ -2026,6 +2226,7 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[>4;0m");
 			this.#modifyOtherKeysActive = false;
 		}
+		this.#disableWin32InputMode();
 
 		this.#restoreWindowsVTInput();
 		// Clean up StdinBuffer

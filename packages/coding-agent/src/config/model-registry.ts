@@ -24,7 +24,7 @@ import {
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
-import { readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
 	fingerprintStaticModels,
@@ -135,6 +135,8 @@ import { cfgExtendedContext } from "../session/context-settings";
 // requests; the pi-ai provider resolves it just-in-time per request.
 setCodexAttestationProvider(generateCodexAttestation);
 
+/** One built-in discovery pass rewriting more payload rows than this is debug-logged. */
+const MODEL_CACHE_REWRITE_LOG_THRESHOLD = 5;
 const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(
 		[...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId), ...SPECIAL_MODEL_MANAGER_PROVIDER_IDS].map(
@@ -216,6 +218,11 @@ function isExtendedContextEnabledFromSettings(settingsInstance?: Settings): bool
 	}
 }
 
+/** Rows of a registry layer owned by `providerFilter`, or the whole layer when unfiltered. */
+function selectProviderModels<T extends { provider: string }>(models: T[], providerFilter?: ReadonlySet<string>): T[] {
+	return providerFilter ? models.filter(model => providerFilter.has(model.provider)) : models;
+}
+
 /**
  * Extra knobs for {@link ModelRegistry.refresh} / {@link ModelRegistry.refreshProvider}.
  * Online discovery (`strategy: "online"`) is independent of credential minting:
@@ -243,6 +250,13 @@ export type ResolvedRequestAuth =
 export class ModelRegistry {
 	#models: Model<Api>[] = [];
 	#unprojectedModels: Model<Api>[] = [];
+	/**
+	 * Full-snapshot input to `#projectBaseModels`: resolved built-in, cached, and
+	 * discovered models before custom overlays, overrides, and transport
+	 * projections. Refreshes merge onto this, never onto `#unprojectedModels`,
+	 * so each projection wraps header resolvers exactly once per refresh.
+	 */
+	#baseModels: Model<Api>[] = [];
 	#hasFullSnapshot = false;
 	#cachedStandardModelsByProvider: Map<string, Model<Api>[]> = new Map();
 	#pendingStandardCacheProviders: Set<string> = new Set();
@@ -288,7 +302,8 @@ export class ModelRegistry {
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
-	#runtimeProviderApiKeys: Map<string, string> = new Map();
+	// `fallback` ranks the key below stored login credentials (see registerProvider).
+	#runtimeProviderApiKeys: Map<string, { keyConfig: string; fallback: boolean }> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
 	// Command-backed values from registerProvider (apiKey + provider/model
 	// headers). Separate from #commandConfigsByProvider because static reload
@@ -392,9 +407,9 @@ export class ModelRegistry {
 		this.#reloadStaticModels();
 	}
 
-	#installProviderApiKey(provider: string, keyConfig: string): void {
+	#installProviderApiKey(provider: string, keyConfig: string, options?: { fallback?: boolean }): void {
 		this.#customProviderApiKeys.set(provider, keyConfig);
-		this.authStorage.keys.setConfig(provider, keyConfig);
+		this.authStorage.keys.setConfig(provider, keyConfig, options);
 	}
 
 	/**
@@ -542,6 +557,27 @@ export class ModelRegistry {
 		if (this.#backgroundRefresh) {
 			await this.#backgroundRefresh;
 		}
+	}
+
+	/**
+	 * Catch the catalog up for a view that just read it, rebuilding only when it
+	 * is actually stale: waits out an in-flight background refresh, then runs an
+	 * offline {@link refresh} if models.yml changed on disk since the last load.
+	 * Resolves `true` when either may have changed the catalog (the view should
+	 * re-read it), `false` without any rebuild when the in-memory catalog is
+	 * already current. Rejects when the offline rebuild fails.
+	 */
+	async refreshIfStale(): Promise<boolean> {
+		let changed = false;
+		if (this.#backgroundRefresh) {
+			await this.#backgroundRefresh;
+			changed = true;
+		}
+		if (this.#modelsConfigFile.getMtimeMs() !== this.#lastStaticLoadMtime) {
+			await this.refresh("offline");
+			changed = true;
+		}
+		return changed;
 	}
 
 	/**
@@ -723,6 +759,14 @@ export class ModelRegistry {
 			this.#unprojectedModels = this.#unprojectedModels.map(candidate =>
 				candidate.provider === unprojected.provider && candidate.id === unprojected.id ? patchedBase : candidate,
 			);
+			// Later refreshes rebuild from the base snapshot; carry the patch there too.
+			const base = resolveProviderModelReference(current.provider, current.id, this.#baseModels);
+			if (base) {
+				const patchedResolved = applyModelPatch(base, patch, "merge");
+				this.#baseModels = this.#baseModels.map(candidate =>
+					candidate.provider === base.provider && candidate.id === base.id ? patchedResolved : candidate,
+				);
+			}
 			this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			return resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
 		}
@@ -790,8 +834,8 @@ export class ModelRegistry {
 		this.authStorage.keys.clearConfig();
 		// Restore runtime API keys before #loadModels — survives because
 		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
-		for (const [k, v] of this.#runtimeProviderApiKeys) {
-			this.#installProviderApiKey(k, v);
+		for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
+			this.#installProviderApiKey(provider, keyConfig, { fallback });
 		}
 		this.#providerOverrides.clear();
 		this.#modelOverrides.clear();
@@ -886,6 +930,7 @@ export class ModelRegistry {
 	#resetStaticComposition(): void {
 		this.#models = [];
 		this.#unprojectedModels = [];
+		this.#baseModels = [];
 		this.#hasFullSnapshot = false;
 		this.#cachedStandardModelsByProvider.clear();
 		this.#pendingStandardCacheProviders.clear();
@@ -1008,9 +1053,8 @@ export class ModelRegistry {
 		logger.warn("extension model projection failed; serving unprojected catalog", { provider, error });
 	}
 
-	#composeUnprojectedStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
-		const select = <T extends { provider: string }>(models: readonly T[]): T[] =>
-			providerFilter ? models.filter(model => providerFilter.has(model.provider)) : [...models];
+	/** Built-in and cached models, before runtime discoveries and every projection. */
+	#composeCachedBaseModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		const cachedStandardModels = this.#getCachedStandardModels(providerFilter);
 		let builtInModels = this.#applyHardcodedModelPolicies(
 			this.#loadBuiltInModels(this.#providerOverrides, providerFilter),
@@ -1018,16 +1062,50 @@ export class ModelRegistry {
 		if (this.#cachedAuthoritativeProviders.size > 0) {
 			builtInModels = dropProviderModels(builtInModels, this.#cachedAuthoritativeProviders, { kind: "chat" });
 		}
-		let resolvedDefaults = this.#mergeResolvedModels(
+		return this.#mergeResolvedModels(
 			this.#mergeResolvedModels(builtInModels, cachedStandardModels),
-			select(this.#cachedDiscoverableModels),
+			selectProviderModels(this.#cachedDiscoverableModels, providerFilter),
 		);
+	}
+
+	/** The `#baseModels` stage: cached base models plus runtime discoveries. */
+	#composeBaseModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		let resolvedDefaults = this.#composeCachedBaseModels(providerFilter);
 		if (this.#runtimeAuthoritativeProviders.size > 0) {
 			resolvedDefaults = dropProviderModels(resolvedDefaults, this.#runtimeAuthoritativeProviders, { kind: "chat" });
 		}
-		resolvedDefaults = this.#mergeResolvedModels(resolvedDefaults, select(this.#runtimeDiscoveredModels));
-		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
-		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
+		return this.#mergeResolvedModels(
+			resolvedDefaults,
+			selectProviderModels(this.#runtimeDiscoveredModels, providerFilter),
+		);
+	}
+
+	/**
+	 * Entries a discovered model inherits headers and transport from: cached
+	 * base models with custom overlays, without earlier discoveries or override
+	 * projections. Referencing a projected or previously discovered row would
+	 * nest its header resolver one level deeper on every refresh.
+	 */
+	#composeDiscoveryReferenceModels(providerFilter: ReadonlySet<string>): Model<Api>[] {
+		return this.#mergeCustomModels(
+			this.#mergeCustomModels(
+				this.#composeCachedBaseModels(providerFilter),
+				selectProviderModels(this.#customModelOverlays, providerFilter),
+			),
+			selectProviderModels(this.#runtimeModelOverlays, providerFilter),
+		);
+	}
+
+	/** Applies custom overlays and every override projection to a `#baseModels` stage. */
+	#projectBaseModels(baseModels: Model<Api>[], providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		const withConfigModels = this.#mergeCustomModels(
+			baseModels,
+			selectProviderModels(this.#customModelOverlays, providerFilter),
+		);
+		const combined = this.#mergeCustomModels(
+			withConfigModels,
+			selectProviderModels(this.#runtimeModelOverlays, providerFilter),
+		);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
 		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
 		return this.#applyDiscoveryPolicies(this.#applyRuntimeProviderOverrides(withProviderBedrock));
@@ -1037,7 +1115,8 @@ export class ModelRegistry {
 		// A modifier is a whole-catalog transform. Build and project the full catalog
 		// before narrowing a lazy lookup, matching getAll() followed by filtering.
 		const projectFullCatalog = providerFilter !== undefined && this.#runtimeModelModifiers.size > 0;
-		const unprojected = this.#composeUnprojectedStaticModels(projectFullCatalog ? undefined : providerFilter);
+		const compositionFilter = projectFullCatalog ? undefined : providerFilter;
+		const unprojected = this.#projectBaseModels(this.#composeBaseModels(compositionFilter), compositionFilter);
 		const projected = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(unprojected));
 		const selected = projectFullCatalog ? projected.filter(model => providerFilter.has(model.provider)) : projected;
 		return this.#internStaticModels(selected);
@@ -1045,7 +1124,8 @@ export class ModelRegistry {
 
 	#ensureFullSnapshot(): Model<Api>[] {
 		if (!this.#hasFullSnapshot) {
-			this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+			this.#baseModels = this.#composeBaseModels();
+			this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
 			this.#models = this.#internStaticModels(
 				this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels)),
 			);
@@ -1677,14 +1757,12 @@ export class ModelRegistry {
 		for (const provider of replacedConfiguredProviders) touchedProviders.add(provider);
 		for (const provider of builtInDiscovery.replaceRuntimeProviders) touchedProviders.add(provider);
 		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
-		const existingModels = this.#hasFullSnapshot
-			? this.#unprojectedModels
-			: this.#composeUnprojectedStaticModels(touchedProviders);
+		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
 		const discoveredModels = this.#applyHardcodedModelPolicies(
 			discovered.map(model =>
 				mergeDiscoveredModel(
 					model,
-					resolveProviderModelReference(model.provider, model.id, existingModels),
+					resolveProviderModelReference(model.provider, model.id, referenceModels),
 					this.#providerOverrides.get(model.provider),
 				),
 			),
@@ -1720,22 +1798,18 @@ export class ModelRegistry {
 		}
 		if (!this.#hasFullSnapshot) return;
 
-		let baseModels = this.#unprojectedModels;
+		let baseModels = this.#baseModels;
 		if (replacedProviderSet.size > 0) {
 			baseModels = this.#mergeResolvedModels(
 				dropProviderModels(baseModels, replacedProviderSet),
-				this.#composeUnprojectedStaticModels(replacedProviderSet),
+				this.#composeBaseModels(replacedProviderSet),
 			);
 		}
 		if (authoritativeProviders.size > 0) {
 			baseModels = dropProviderModels(baseModels, authoritativeProviders, { kind: "chat" });
 		}
-		const resolved = this.#mergeResolvedModels(baseModels, discoveredModels);
-		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
-		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
-		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
-		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
-		this.#unprojectedModels = this.#applyDiscoveryPolicies(this.#applyRuntimeProviderOverrides(withProviderBedrock));
+		this.#baseModels = this.#mergeResolvedModels(baseModels, discoveredModels);
+		this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
 		this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 	}
 
@@ -1951,9 +2025,23 @@ export class ModelRegistry {
 		if (managerOptions.length === 0) {
 			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
 		}
+		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
 			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
 		);
+		const writesAfter = getModelCacheWriteStats();
+		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
+		if (rewrittenRows > MODEL_CACHE_REWRITE_LOG_THRESHOLD) {
+			// Unchanged snapshots only advance a small freshness row; a burst of
+			// full payload rewrites means catalogs really changed (or a cache
+			// policy switch replaced them) and is worth seeing in debug logs.
+			logger.debug("model refresh rewrote many model cache rows", {
+				rows: rewrittenRows,
+				bytes: writesAfter.payloadBytes - writesBefore.payloadBytes,
+				providers: writesAfter.recentPayloadProviders.slice(-rewrittenRows),
+				strategy,
+			});
+		}
 		const authoritativeProviders = new Set<string>();
 		const replaceRuntimeProviders = new Set<string>();
 		const models: Model<Api>[] = [];
@@ -2123,10 +2211,18 @@ export class ModelRegistry {
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
+				// Residency belongs to the token selected for discovery, not another
+				// stored account that happens to appear first in the pool.
+				const identity = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
+					credential => credential.access === apiKey,
+				);
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					region: identity?.region,
+					inferenceRegion: identity?.inferenceRegion,
+					orgId: identity?.orgId,
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
@@ -2445,50 +2541,58 @@ export class ModelRegistry {
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
 		return models.map(model => {
-			const maximum = resolveMaxContextWindow(model);
-			if (maximum !== undefined && model.contextWindow !== null) {
-				// Only extended-window models need a fresh policy baseline: a
-				// materialized cache row may carry an earlier applied window.
-				// Preserve valid standard capacity when an advertised maximum is
-				// smaller, without retaining an obsolete extended window.
-				const standardWindow = buildModel(toModelSpec(model)).contextWindow ?? model.contextWindow;
-				if (extendedContext) {
-					const window = Math.max(standardWindow, maximum);
-					if (window !== model.contextWindow) {
-						model = applyModelOverride(model, { contextWindow: window });
-					}
-				} else if (standardWindow < model.contextWindow) {
-					model = { ...model, contextWindow: standardWindow };
-				}
-			}
-			// Extended context off: cap models with a premium long-context price
-			// tier (e.g. GPT-5.6 bills 2x input above 272K) at the standard-pricing
-			// threshold so compaction fires before a request crosses into the tier.
-			// xai-oauth carries public xAI prices only for API-equivalent stats;
-			// SuperGrok requests remain subscription-backed, so its estimated tier
-			// must not constrain the runtime context window. Explicit per-model
-			// `contextWindow` overrides reapply later in composition and win over
-			// this cap.
-			if (!extendedContext && model.provider !== "xai-oauth") {
-				const threshold = model.cost.longContext?.inputThreshold;
-				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
-					model = applyModelOverride(model, { contextWindow: threshold });
-				}
-			}
+			// Hosts whose context window is authoritative (subscription limits that
+			// carry public price tiers only as estimates) skip every inferred
+			// window policy.
+			if (!model.contextWindowAuthoritative) model = this.#applyContextWindowPolicies(model, extendedContext);
 			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
 				model = applyModelOverride(model, { omitMaxOutputTokens: true });
 			}
-			if (model.id !== "gpt-5.4" || model.provider === "github-copilot") {
-				return model;
+			return model;
+		});
+	}
+
+	#applyContextWindowPolicies(model: Model<Api>, extendedContext: boolean): Model<Api> {
+		const maximum = resolveMaxContextWindow(model);
+		if (maximum !== undefined && model.contextWindow !== null) {
+			// Only extended-window models need a fresh policy baseline: a
+			// materialized cache row may carry an earlier applied window.
+			// Preserve valid standard capacity when an advertised maximum is
+			// smaller, without retaining an obsolete extended window.
+			const standardWindow = buildModel(toModelSpec(model)).contextWindow ?? model.contextWindow;
+			if (extendedContext) {
+				const window = Math.max(standardWindow, maximum);
+				if (window !== model.contextWindow) {
+					model = applyModelOverride(model, { contextWindow: window });
+				}
+			} else if (standardWindow < model.contextWindow) {
+				model = { ...model, contextWindow: standardWindow };
 			}
-			const overrides = this.#modelOverrides.get(model.provider)?.get(model.id);
-			if (!overrides) {
-				return applyModelOverride(model, { contextWindow: 1_000_000 });
+		}
+		// Extended context off: cap models with a premium long-context price
+		// tier (e.g. GPT-5.6 bills 2x input above 272K) at the standard-pricing
+		// threshold so compaction fires before a request crosses into the tier.
+		// xai-oauth carries public xAI prices only for API-equivalent stats;
+		// SuperGrok requests remain subscription-backed, so its estimated tier
+		// must not constrain the runtime context window. Explicit per-model
+		// `contextWindow` overrides reapply later in composition and win over
+		// this cap.
+		if (!extendedContext && model.provider !== "xai-oauth") {
+			const threshold = model.cost.longContext?.inputThreshold;
+			if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
+				model = applyModelOverride(model, { contextWindow: threshold });
 			}
-			return applyModelOverride(model, {
-				contextWindow: overrides.contextWindow ?? 1_000_000,
-				...overrides,
-			});
+		}
+		if (model.id !== "gpt-5.4" || model.provider === "github-copilot") {
+			return model;
+		}
+		const overrides = this.#modelOverrides.get(model.provider)?.get(model.id);
+		if (!overrides) {
+			return applyModelOverride(model, { contextWindow: 1_000_000 });
+		}
+		return applyModelOverride(model, {
+			contextWindow: overrides.contextWindow ?? 1_000_000,
+			...overrides,
 		});
 	}
 
@@ -3064,9 +3168,15 @@ export class ModelRegistry {
 			this.authStorage.usage.setProvider(providerName, config.usage, config.apiKey);
 		}
 		if (config.apiKey) {
-			this.#installProviderApiKey(providerName, config.apiKey);
+			// A provider that owns a /login flow must not let its default key
+			// reference shadow the credential that login stores. Its apiKey is
+			// typically an env-var name; unset, it resolves to its literal text
+			// and would otherwise be sent (and passed to fetchDynamicModels)
+			// instead of the saved key.
+			const fallback = config.oauth !== undefined;
+			this.#installProviderApiKey(providerName, config.apiKey, { fallback });
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
-			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
+			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: config.apiKey, fallback });
 		}
 		this.#recordRuntimeCommandConfigs(providerName, config);
 
@@ -3122,6 +3232,8 @@ export class ModelRegistry {
 			// Update the unprojected snapshot, then rerun every whole-catalog
 			// projection exactly once. Incremental projection is not safe because one
 			// provider's hook may inspect or suppress another provider's models.
+			// Refresh projections re-add this provider's runtime overlays to the base.
+			this.#baseModels = this.#baseModels.filter(model => model.provider !== providerName);
 			const nextModels = this.#unprojectedModels.filter(model => model.provider !== providerName);
 			for (const overlay of newOverlays) {
 				nextModels.push(finalizeCustomModel(overlay, { useDefaults: true }));
@@ -3310,6 +3422,7 @@ export interface ProviderConfigInput {
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;
+		promptCache?: Model<Api>["promptCache"];
 		/** Whether Codex requests should prefer WebSocket transport. */
 		preferWebsockets?: boolean;
 		headers?: Record<string, string>;

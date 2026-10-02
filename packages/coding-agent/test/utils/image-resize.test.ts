@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import { formatDimensionNote, formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 
 describe("formatScreenshot", () => {
 	function fakeResized(
@@ -315,21 +315,18 @@ describe("resizeImage minimum dimension", () => {
 		expect(result.height).toBe(64);
 	});
 
-	it("stretches a degenerate aspect ratio so both edges clear the floor and stay within the cap", async () => {
-		// 1x1600 strip: the cap pulls the long edge to 1568 while the short edge
-		// stays at 1px, so a uniform scale can't satisfy both bounds — the floor
-		// must be reached by fill-stretching the short edge.
-		const strip = await makeRedPng(1, 1600);
+	it("keeps the aspect ratio of a strip the cap stops short of the floor", async () => {
+		// 690x61 toolbar crop: the 1568 cap halts the uniform upscale at 1568x139;
+		// the short edge stays below the floor rather than being stretched to it.
+		const strip = await makeRedPng(690, 61);
 		const result = await resizeImage({ type: "image", data: strip, mimeType: "image/png" });
 
-		expect(result.wasResized).toBe(true);
-		expect(result.width).toBeGreaterThanOrEqual(200);
-		expect(result.height).toBeGreaterThanOrEqual(200);
-		expect(result.width).toBeLessThanOrEqual(1568);
-		expect(result.height).toBeLessThanOrEqual(1568);
+		expect(result.width).toBe(1568);
+		expect(result.height).toBe(139);
 		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
-		expect(meta.width).toBeGreaterThanOrEqual(200);
-		expect(meta.height).toBeGreaterThanOrEqual(200);
+		expect(meta.width).toBe(1568);
+		expect(meta.height).toBe(139);
+		expect(formatDimensionNote(result)).toContain("Multiply coordinates by 0.44");
 	});
 });
 

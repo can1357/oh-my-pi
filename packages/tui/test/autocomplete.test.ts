@@ -314,6 +314,22 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("/skill:".length);
 		});
 
+		it("completes a namespaced skill as a slash command, not a file path", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "skill:superpowers/tdd", description: "Test-driven development" }],
+				"/tmp",
+			);
+			const line = "/skill:superpowers/t";
+
+			const suggestions = await provider.getSuggestions([line], 0, line.length);
+			const item = suggestions?.items.find(entry => entry.value === "skill:superpowers/tdd");
+			expect(item).toBeDefined();
+			const result = provider.applyCompletion([line], 0, line.length, item!, suggestions!.prefix);
+
+			expect(result.lines[0]).toBe("/skill:superpowers/tdd ");
+			expect(result.cursorCol).toBe("/skill:superpowers/tdd ".length);
+		});
+
 		it("never sync-completes Enter to the bare skill namespace", () => {
 			const provider = new CombinedAutocompleteProvider(
 				[{ name: "skill:humanizer", description: "Remove signs of AI writing" }],

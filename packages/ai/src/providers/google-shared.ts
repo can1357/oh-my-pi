@@ -4,7 +4,7 @@
 
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson } from "@oh-my-pi/pi-utils";
+import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
@@ -140,7 +140,7 @@ export function retainThoughtSignature(existing: string | undefined, incoming: s
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
-const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;
@@ -828,8 +828,14 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	// Vertex AI ignores a body field and requires the
 	// `X-Vertex-AI-LLM-Shared-Request-Type` header instead (added in
 	// streamGoogleVertex), so only emit the body field for the direct API.
-	if (model.provider === "google" && shouldSendServiceTier(options.serviceTier, model.provider)) {
-		config.serviceTier = options.serviceTier;
+	const serviceTier = options.serviceTier;
+	// `!== "ultrafast"` narrows to the Gemini wire type; `shouldSendServiceTier` already rejects it for Google.
+	if (
+		model.provider === "google" &&
+		serviceTier !== "ultrafast" &&
+		shouldSendServiceTier(serviceTier, model.provider)
+	) {
+		config.serviceTier = serviceTier;
 	}
 
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {
@@ -1014,13 +1020,17 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			let body = await openStream();
 			stream.push({ type: "start", partial: output });
 
+			// Attach the observer only when a diagnostic listener exists: any
+			// observer turns on per-line raw capture in `readSseJson`.
+			const onSseEvent = options?.onSseEvent;
+			const sseObserver: SseEventObserver | undefined = onSseEvent
+				? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+				: undefined;
 			// Gemini occasionally finishes with `finishReason: STOP` while emitting only an empty
 			// text part and no tool call. Delivered as-is the agent receives a blank message and
 			// silently halts mid-task, so retry a bounded number of times before giving up.
 			for (let emptyAttempt = 0; ; emptyAttempt++) {
-				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, event =>
-					options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
-				);
+				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver);
 				await consumeGoogleStream({
 					googleStream,
 					output,
@@ -1125,7 +1135,7 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
  * hid both, so every billing 429 replayed as a transient rate limit (#13090).
  * The Cloud Code Assist path keeps the whole raw body for the same reason.
  */
-function extractGoogleErrorMessage(errorText: string, status: number): string {
+export function extractGoogleErrorMessage(errorText: string, status: number): string {
 	if (!errorText) return "Unknown error";
 	try {
 		const parsed = JSON.parse(errorText) as {

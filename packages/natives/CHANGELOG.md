@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- Fixed the embedded shell sometimes hanging on a pipeline with a stage that stopped (for example with `kill -STOP $$`) before the shell began waiting on it; the pipeline now becomes a stopped job ([#14023](https://github.com/can1357/oh-my-pi/pull/14023) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `readTextFromClipboard()` for reading plain text from the system clipboard without starting a subprocess.
+- Added `Shell.pids()` to retrieve the IDs of still-running processes spawned by an in-flight shell command.
+
+## [18.4.7] - 2026-10-01
+
+### Fixed
+
+- Fixed omp 18.4.3 and later crashing with a segmentation fault at startup on Apple silicon Macs running macOS older than 27; Apple Foundation Models support now loads only on macOS 27 and later
+
+## [18.4.5] - 2026-09-30
+
+### Fixed
+
+- Fixed macOS spell checking and Apple word completion adding a duplicate terminal icon to the Dock for every omp session ([#12491](https://github.com/can1357/oh-my-pi/issues/12491))
+- Fixed `computer.windows()` on macOS marking every window of the frontmost app as focused. One window is marked now: the app's accessibility focused window, or its frontmost window when Accessibility permission is not granted. With the permission, `computer.focusedWindow()` no longer returns a floating panel such as TextEdit's Fonts panel in front of the document ([#13673](https://github.com/can1357/oh-my-pi/pull/13673) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed non-Latin prompts that quote code in backticks or fences losing most of their prose score, which made the typing predictor's vocabulary refuse to learn them ([#13758](https://github.com/can1357/oh-my-pi/pull/13758) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed `computer.window(...).ax()` leaving out everything inside an unnamed container. On macOS, Reminders, Contacts, Notes and Font Book windows showed only their toolbar and window buttons, and Calendar lost its month grid; Windows and Linux trees now also keep content under unnamed containers such as custom panes, lists and fillers ([#13822](https://github.com/can1357/oh-my-pi/pull/13822) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed Wayland `computer.drag()` sending all waypoints in one burst, preventing HTML5 drag-and-drop targets from receiving `drop` ([#13860](https://github.com/can1357/oh-my-pi/issues/13860)).
+- Fixed Wayland computer input staying unavailable after a cancelled RemoteDesktop permission prompt or a disconnected input session ([#13857](https://github.com/can1357/oh-my-pi/issues/13857)).
+- Fixed Wayland `win.screenshot()` returning the top-left of the monitor for native Wayland windows whose position AT-SPI cannot report (Discord, Teams, Chromium); it now fails with `CaptureFailed` instead of capturing the wrong region ([#13854](https://github.com/can1357/oh-my-pi/issues/13854)).
+- Fixed `computer.focusedElement()` failing with `AxFailed: atspi: null reference` on Linux while a Chromium or Electron app (Spotify, Discord, Steam, …) is running ([#13855](https://github.com/can1357/oh-my-pi/issues/13855)).
+
+## [18.4.4] - 2026-09-29
+
+### Fixed
+
+- Fixed `computer.window(id).ax()` and `find()` failing with `AxFailed` on macOS sheets, popovers and open menus that `computer.windows()` lists, such as TextEdit's Save sheet or a Calendar event popover ([#13659](https://github.com/can1357/oh-my-pi/pull/13659) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed macOS 26 background scrolls moving twice the requested distance; background hovers, scrolls and right or middle clicks are now delivered once ([#13739](https://github.com/can1357/oh-my-pi/pull/13739) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed macOS `takeover` clicks and scrolls failing with `AX action 'AXRaise' failed (AXError(-25205))` on covered windows that do not support `AXRaise`, such as iPhone Mirroring, even when activation brings them forward; a window that stays covered still refuses before any input is sent ([#13737](https://github.com/can1357/oh-my-pi/pull/13737) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed `ps -r` in the in-process `ps` builtin: it now sorts by CPU usage, highest first, as on macOS/BSD, instead of filtering to running processes. Also added `ps -m`, which sorts by memory usage.
+- Fixed process states on macOS in the `ps`, `top`, and `pgrep`/`pkill -r` builtins: idle processes showed as running (`R`), which made `ps r` list nearly every process. States now come from each process's threads, as Apple `ps` does.
+- Removed the procps-only `l` (multithreaded) STAT flag from `ps` on macOS; Apple `ps` doesn't print it.
+
+## [18.4.3] - 2026-09-28
+
+### Changed
+
+- Lowered the macOS native addons' minimum supported macOS version to 12.0 (previously 15.5)
+- Reduced snapshot cost on every hashline read and grep: file-hash tagging no longer builds a normalized copy of the file, and the seen-line prefix regex is compiled once ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Fixed released Darwin arm64 addons omitting Apple Foundation Models support ([#13610](https://github.com/can1357/oh-my-pi/issues/13610)).
+- Fixed the edit tool's `replace block`/`delete block` operations in indentation-based languages such as Python extending a statement's block over every following statement in its body when a comment line at a different indentation came right after it ([#13358](https://github.com/can1357/oh-my-pi/pull/13358) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.4.2] - 2026-09-28
 
 ### Added

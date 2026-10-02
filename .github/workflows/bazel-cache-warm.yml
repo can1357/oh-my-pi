@@ -6,16 +6,14 @@ name: Warm bazel disk cache
 # misses every action on a hosted image) — so seed each hosted consumer from
 # the same image it runs on:
 #
-#   warm_darwin (macos-*)  -> scopes `release-darwin-*`, consumed by the
-#                             release_binary darwin jobs. Releases are the
-#                             only other producers for these scopes and a
-#                             release always changes CONFIG_HASH (version
-#                             bump rewrites Cargo.toml/Cargo.lock), so
-#                             without warming here every release rebuilt the
-#                             darwin addons cold (~40-50 min on
-#                             macos-15-intel — run 30357804722). Both scopes
-#                             now build on Apple silicon (darwin-x64 cross-
-#                             compiles; see release_binary_hosted in ci.yml).
+#   warm_darwin (macos-15/xcode-27) -> scopes `release-darwin-*`, consumed
+#                             by release_binary_hosted. Releases are the only
+#                             other producers for these scopes and a release
+#                             always changes CONFIG_HASH (version bump
+#                             rewrites Cargo.toml/Cargo.lock). The x64 addon
+#                             cross-builds on macos-15 Apple silicon; arm64
+#                             builds on xcode-27 for the Foundation Models
+#                             bridge (see ci.yml).
 #   warm_bun (ubuntu-22.04)-> the shared `bun-<os>-<lockhash>` store entry.
 #                             PR jobs restore it but never save (per-PR-ref
 #                             copies of the ~500 MB store once ate ~9.4 GB of
@@ -67,10 +65,10 @@ concurrency:
    cancel-in-progress: false
 
 jobs:
-   # Keeps the release_binary darwin scopes seeded near HEAD so a release's
-   # bazel build is the version-bump delta, not a cold graph. Scope, runner
-   # image, and target must stay in lockstep with the release_binary matrix
-   # in ci.yml — a mismatched scope warms an archive nobody restores.
+   # Keeps the release_binary_hosted darwin scopes seeded near HEAD so a
+   # release's bazel build is the version-bump delta, not a cold graph. Scope,
+   # runner image, and target must match the release_binary_hosted matrix in
+   # ci.yml; the arm64 Xcode 27 build has a separate cache from macos-15 x64.
    warm_darwin:
       name: "Seed darwin release bazel cache: ${{ matrix.target }}"
       if: inputs.only == '' || inputs.only == 'darwin'
@@ -78,8 +76,8 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { os: macos-15, target: darwin-x64-baseline, scope: release-darwin-x64, fallback: release-darwin-arm64-macos15 }
-               - { os: macos-15, target: darwin-arm64, scope: release-darwin-arm64-macos15, fallback: release-darwin-x64 }
+               - { os: macos-15, target: darwin-x64-baseline, scope: release-darwin-x64, fallback: "" }
+               - { os: xcode-27, target: darwin-arm64, scope: release-darwin-arm64-xcode27, fallback: "" }
       runs-on: ${{ matrix.os }}
       steps:
          - uses: actions/checkout@v4

@@ -32,6 +32,7 @@ import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1546,12 +1547,7 @@ export interface RoleChainCandidate {
 }
 
 /** Resolve a role's primary and retry candidates in effective attempt order. */
-export function resolveRoleChain(
-	role: string,
-	settings: Settings,
-	pool: Model<Api>[],
-	options?: { hoistProvider?: string },
-): RoleChainCandidate[] {
+export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
 	const primarySelector = configured || formatModelRoleAlias(role);
@@ -1578,16 +1574,7 @@ export function resolveRoleChain(
 		candidateByRoute.set(key, candidate);
 		candidates.push(candidate);
 	}
-
-	const hoistProvider = options?.hoistProvider;
-	if (!hoistProvider) return candidates;
-	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
-	const hoisted = nonExplicit.filter(candidate => candidate.model.provider === hoistProvider);
-	if (hoisted.length === 0) return candidates;
-	const remaining = nonExplicit.filter(candidate => candidate.model.provider !== hoistProvider);
-	const reordered = [...hoisted, ...remaining];
-	let reorderedIndex = 0;
-	return candidates.map(candidate => (candidate.explicit ? candidate : reordered[reorderedIndex++]!));
+	return candidates;
 }
 
 /**
@@ -1775,6 +1762,22 @@ export async function resolveModelScope(
 			explicitThinkingLevel: explicit,
 		});
 	};
+	// The scope is chat-only (it feeds Ctrl+P cycling and the initial model). A
+	// pattern naming an available non-chat runner (judge, search, image, …) is
+	// not a typo: the model hub and role resolution use runners outside the scope.
+	let runnerModels: Model<Api>[] | undefined;
+	const reportUnmatched = (pattern: string, glob: boolean) => {
+		runnerModels ??= modelRegistry.getAvailable("all").filter(model => modelKind(model) !== "chat");
+		const namesRunner = glob
+			? resolveGlobScopePattern(pattern, runnerModels).models.length > 0
+			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, preferences))
+					.model !== undefined;
+		if (namesRunner) {
+			logger.debug(`Scope pattern "${pattern}" names a non-chat model; it stays out of the chat scope`);
+			return;
+		}
+		logger.warn(`No models match pattern "${pattern}"`);
+	};
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
@@ -1788,7 +1791,7 @@ export async function resolveModelScope(
 			} = resolveGlobScopePattern(pattern, availableModels);
 
 			if (matchingModels.length === 0) {
-				logger.warn(`No models match pattern "${pattern}"`);
+				reportUnmatched(pattern, true);
 				continue;
 			}
 
@@ -1828,7 +1831,7 @@ export async function resolveModelScope(
 		}
 
 		if (!model) {
-			logger.warn(`No models match pattern "${pattern}"`);
+			reportUnmatched(pattern, false);
 			continue;
 		}
 

@@ -11,6 +11,7 @@
  * are stubbed.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
@@ -320,6 +321,8 @@ describe("collab chunked welcome (#3144)", () => {
 			wrote.resolve();
 			return Promise.reject(failure);
 		});
+		// Keep failed-write cleanup in the simulated write's microtask chain.
+		const unlinkSpy = spyOn(fsp, "unlink").mockResolvedValue(undefined);
 		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
 		const joinAttempt = guest.join(host.link);
 		try {
@@ -334,6 +337,7 @@ describe("collab chunked welcome (#3144)", () => {
 		} finally {
 			unregister();
 			writeSpy.mockRestore();
+			unlinkSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
