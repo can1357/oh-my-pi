@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getSkillDescriptionsDbPath()` and `getPredictStateDir()`, XDG-aware paths that adopt legacy data on first XDG resolution ([#13648](https://github.com/can1357/oh-my-pi/pull/13648) by [@Parsifa1](https://github.com/Parsifa1))
+
+### Fixed
+
+- Fixed the machine-global daemon runtime dir (e.g. the `text-predict` broker) bypassing XDG state resolution; it now lands under `$XDG_STATE_HOME/omp/run/daemons/global` when initialized, shared across profiles and custom agent dirs. A broker started by an older version under `~/.omp/run/daemons/global` is not reused and exits once idle ([#13648](https://github.com/can1357/oh-my-pi/pull/13648) by [@Parsifa1](https://github.com/Parsifa1))
+
 ## [18.4.10] - 2026-10-02
 
 ### Added

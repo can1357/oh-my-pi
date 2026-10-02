@@ -15,6 +15,7 @@ import type { AgentSessionEvent, SessionStats } from "../../session/agent-sessio
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -725,6 +726,7 @@ export class RpcClient {
 			...state,
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
+			goal: state.goal ?? null,
 			tokensPerSecond:
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
@@ -737,6 +739,20 @@ export class RpcClient {
 	 */
 	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
 		const response = await this.#send({ type: "set_fast_mode", enabled });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Read or change goal mode. `get` never mutates or starts a turn; `create`/`resume`
+	 * start a turn only when the server enables `goal.continuationModes: ["rpc"]`.
+	 */
+	async goal(op: RpcGoalOp, options?: { objective?: string; tokenBudget?: number }): Promise<RpcGoalResult> {
+		const response = await this.#send({
+			type: "goal",
+			op,
+			objective: options?.objective,
+			token_budget: options?.tokenBudget,
+		});
 		return this.#getData(response);
 	}
 

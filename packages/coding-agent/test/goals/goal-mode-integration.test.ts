@@ -176,6 +176,33 @@ describe("InteractiveMode goal mode integration", () => {
 		await harness.cleanup();
 	});
 
+	it("starts a CLI goal before the first model turn with its goal tool active", async () => {
+		const objective = "Inspect the importer";
+		const prompt = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+			expect(harness.mode.goalModeEnabled).toBe(true);
+			expect(harness.session.getGoalModeState()?.goal.objective).toBe(objective);
+			expect(harness.session.getGoalModeState()?.enabled).toBe(true);
+			expect(harness.session.getActiveToolNames()).toContain("goal");
+			return true;
+		});
+
+		await harness.mode.startGoalAtStartup(objective);
+
+		expect(prompt).toHaveBeenCalledWith(objective, { streamingBehavior: "steer" });
+		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
+	});
+
+	it("never submits a startup objective when plan mode blocks goal activation", async () => {
+		harness.mode.planModeEnabled = true;
+		const prompt = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+		await harness.mode.startGoalAtStartup("Inspect the importer");
+
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
 	it("toggles goal tool exposure when goal mode enters and pauses", async () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 

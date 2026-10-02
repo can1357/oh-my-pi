@@ -715,6 +715,7 @@ function renderAgentProgress(
 					? ` ${theme.fg("muted", previewLine(sanitizeText(progress.assignment ?? progress.task), 40))}`
 					: undefined,
 			stats: progress.status === "running" || progress.status === "completed" ? progress : undefined,
+			completionPercent: progress.completionPercent,
 		},
 		theme,
 	);
@@ -1837,6 +1838,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				requests: progress.requests || undefined,
 				tokens: progress.tokens || undefined,
 				...contextStats(progress.contextTokens, progress.contextWindow),
+				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
 				cost: progress.cost > 0 ? progress.cost : undefined,
 				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
 			},
@@ -2312,6 +2314,8 @@ export interface AgentProgress {
 	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
+	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbeMs` side request. */
+	completionPercent?: number;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
