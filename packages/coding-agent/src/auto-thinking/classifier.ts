@@ -139,18 +139,21 @@ function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
 }
 
 /**
- * The vendor's own default for `deps.model` — the effort it applies when a
- * request omits one — snapped onto the model's ladder at or below the auto
- * ceiling (highest tier not above the default, else the lowest tier). Unlike
- * classification there is no Low floor: the vendor's choice stands. Returns
- * `undefined` when no tier sits at or below the ceiling, like classification.
- * @throws when no vendor source documents a default for the model.
+ * Prefer the publisher's concrete default, then omp's per-model default, and
+ * snap it onto the model's ladder at or below the auto ceiling (highest tier
+ * not above the default, else the lowest tier). Unlike classification there
+ * is no Low floor. Returns `undefined` when no tier sits below the ceiling.
+ * A reported `none` is preserved in metadata but is not a concrete Auto effort.
+ * @throws when neither default is concrete, so the caller uses normal Auto fallback.
  */
 function resolveVendorDefaultEffort(deps: ClassifyDifficultyDeps): Effort | undefined {
 	const { model } = deps;
-	const vendorDefault = model.vendorDefaultEffort ?? model.thinking?.defaultLevel;
+	const vendorDefault =
+		model.vendorDefaultEffort === "none"
+			? model.thinking?.defaultLevel
+			: (model.vendorDefaultEffort ?? model.thinking?.defaultLevel);
 	if (vendorDefault === undefined) {
-		throw new Error(`No vendor default effort known for ${model.provider}/${model.id}`);
+		throw new Error(`No concrete default effort for ${model.provider}/${model.id}`);
 	}
 	const ceilingIndex = THINKING_EFFORTS.indexOf(autoEffortCeiling(deps));
 	const pool = getSupportedEfforts(model).filter(effort => THINKING_EFFORTS.indexOf(effort) <= ceilingIndex);

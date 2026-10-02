@@ -304,8 +304,8 @@ interface ParsedCodexModelEntry {
 	priority: number;
 	/** Advertised tier ids; `undefined` when the entry has no `service_tiers` array. */
 	serviceTiers: string[] | undefined;
-	/** `default_reasoning_level` as an effort; `undefined` when absent, `none`, or unknown. */
-	vendorDefaultEffort: Effort | undefined;
+	/** `default_reasoning_level` as an effort or `none`; `undefined` when absent or unknown. */
+	vendorDefaultEffort: Effort | "none" | undefined;
 }
 
 function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
@@ -352,7 +352,8 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
 		serviceTiers,
-		vendorDefaultEffort: THINKING_EFFORTS.find(effort => effort === defaultReasoningLevel),
+		vendorDefaultEffort:
+			defaultReasoningLevel === "none" ? "none" : THINKING_EFFORTS.find(effort => effort === defaultReasoningLevel),
 	};
 }
 
