@@ -467,17 +467,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			continue;
 		}
 
-		const skill: Skill = {
-			name: capSkill.name,
-			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-			filePath: capSkill.path,
-			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-			source: `${capSkill._source.provider}:${capSkill.level}`,
-			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
-			_source: capSkill._source,
-		};
+		const skill = capSkillToSkill(capSkill, `${capSkill._source.provider}:${capSkill.level}`);
 		if (admit(skill, capSkill.content, capSkill.frontmatter, skillNamespace(capSkill)) !== undefined)
 			realPathSet.add(resolvedPath);
 	}

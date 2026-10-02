@@ -175,6 +175,9 @@ export function clearBundledAgentsCache(): void {
  * child prompt renderer re-filters `hide !== true`, listing-hidden skills are
  * marked `hide: true` on the copies and `unhideSkills` clears the flag.
  *
+ * Globs follow `Bun.Glob` semantics: `*` does not cross `/`, so a namespaced
+ * collision alias (`ns/name`) needs an explicit `ns/*` or `**` pattern.
+ *
  * Precedence per skill (deny wins):
  *  1. `hideSkills` glob match → hidden (beats allowlist and `unhideSkills`);
  *  2. `skills` allowlist present and no match → hidden;

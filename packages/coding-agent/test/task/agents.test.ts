@@ -90,6 +90,17 @@ describe("resolveAgentSkills", () => {
 		expect(skills).toEqual(before);
 	});
 
+	test("star does not cross slash in skill globs", () => {
+		// Collision namespacing produces ns/name aliases; Bun.Glob star
+		// does not cross slash, so a bare-star denylist misses them while
+		// the allowlist direction fails closed.
+		const skills = [skill("alpha"), skill("ns/secret")];
+		expect(listed(resolveAgentSkills(skills, agent({ hideSkills: ["*"] })))).toEqual(["ns/secret"]);
+		expect(listed(resolveAgentSkills(skills, agent({ hideSkills: ["**"] })))).toEqual([]);
+		expect(listed(resolveAgentSkills(skills, agent({ skills: ["*"] })))).toEqual(["alpha"]);
+		expect(listed(resolveAgentSkills(skills, agent({ skills: ["**"] })))).toEqual(["alpha", "ns/secret"]);
+	});
+
 	test("unparseable glob pattern is tolerated and matches nothing", () => {
 		// `Bun.Glob` parses leniently, so this asserts the tolerated outcome
 		// for this shape — not a guaranteed fail-safe for every malformed
