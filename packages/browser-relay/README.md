@@ -26,3 +26,4 @@ That's it: the relay server auto-starts under omp's profile-independent global d
 - Chrome shows its "is debugging this browser" infobar while any tab is attached; dismissing it detaches that tab until it navigates again.
 - A tab with DevTools open can't be attached (one debugger per tab — the constraint the relay multiplexes around for its own clients).
 - Anything that can reach the relay port can drive your logged-in browser. The relay binds loopback only; use `omp browser-relay --token <secret>` (mirrored in the extension options) if untrusted local processes are a concern.
+- Navigating to fragmented `about:blank#<hash>` URLs is handled in-renderer via isolated-world script evaluation rather than native browser navigation, working around an upstream Chromium crash while preserving CDP navigation and lifecycle contracts.

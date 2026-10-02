@@ -10,6 +10,7 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { handleSafePageNavigate, parseFragmentedAboutBlank } from "./safe-navigation";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -184,14 +185,18 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
-		case "send":
-			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
-				msg.method,
-				msg.params,
-			);
+		case "send": {
+			const target = msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId };
+			if (msg.method === "Page.navigate") {
+				const sendCmd = (method: string, params?: Record<string, unknown>) =>
+					chrome.debugger.sendCommand(target, method, params);
+				return await handleSafePageNavigate(sendCmd, msg.params ?? {});
+			}
+			return await chrome.debugger.sendCommand(target, msg.method, msg.params);
+		}
 		case "createTab": {
-			const tab = await chrome.tabs.create({ url: msg.url });
+			const createUrl = parseFragmentedAboutBlank(msg.url).isFragmented ? "about:blank" : msg.url;
+			const tab = await chrome.tabs.create({ url: createUrl });
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };
