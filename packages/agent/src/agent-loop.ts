@@ -991,8 +991,13 @@ function endAgentStream(
 	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCount));
 	stream.end(newMessages);
 }
-function emitInputMessages(stream: EventStream<AgentEvent, AgentMessage[]>, messages: readonly AgentMessage[]): void {
+async function emitInputMessages(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	messages: readonly AgentMessage[],
+	config: AgentLoopConfig,
+): Promise<void> {
 	for (const message of messages) {
+		await config.beforeInputMessage?.(message);
 		stream.push({ type: "message_start", message });
 		stream.push({ type: "message_end", message });
 	}
@@ -1060,7 +1065,7 @@ async function runLoopBody(
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
-			emitInputMessages(stream, messagesToEmit);
+			await emitInputMessages(stream, messagesToEmit, config);
 			endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 			return;
 		}
@@ -1071,7 +1076,7 @@ async function runLoopBody(
 			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 		} catch (error) {
 			stream.push({ type: "turn_start" });
-			emitInputMessages(stream, messagesToEmit);
+			await emitInputMessages(stream, messagesToEmit, config);
 			throw error;
 		}
 		let harmonyRetryAttempt = 0;
@@ -1098,7 +1103,7 @@ async function runLoopBody(
 		const resumeTail = unpairedToolCallTail(currentContext.messages);
 		if (resumeTail) {
 			stream.push({ type: "turn_start" });
-			emitInputMessages(stream, messagesToEmit);
+			await emitInputMessages(stream, messagesToEmit, config);
 			messagesToEmit = [];
 			turnOpen = true;
 			const executionResult = await executeToolCalls(
@@ -1133,7 +1138,7 @@ async function runLoopBody(
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
 				if (isDeadlineExceeded(config.deadline)) {
-					emitInputMessages(stream, messagesToEmit);
+					await emitInputMessages(stream, messagesToEmit, config);
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
@@ -1198,7 +1203,7 @@ async function runLoopBody(
 				} catch (error) {
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
-						emitInputMessages(stream, turnMessages);
+						await emitInputMessages(stream, turnMessages, config);
 						turnOpen = true;
 					}
 					throw error;
@@ -1215,12 +1220,12 @@ async function runLoopBody(
 							config.onToolChoiceRejected?.();
 						} catch (error) {
 							stream.push({ type: "turn_start" });
-							emitInputMessages(stream, turnMessages);
+							await emitInputMessages(stream, turnMessages, config);
 							turnOpen = true;
 							throw error;
 						}
 					}
-					emitInputMessages(stream, turnMessages);
+					await emitInputMessages(stream, turnMessages, config);
 					if (turnOpen) {
 						const stopMessage = createGateStopMessage(preparedProviderCall.model, gateResult.reason);
 						currentContext.messages.push(stopMessage);
@@ -1246,7 +1251,7 @@ async function runLoopBody(
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
-					emitInputMessages(stream, turnMessages);
+					await emitInputMessages(stream, turnMessages, config);
 					turnOpen = true;
 				}
 

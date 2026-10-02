@@ -806,6 +806,8 @@ export class AgentSession {
 	#pruneToolDescriptions = false;
 	#fileHistory: FileHistory | undefined;
 	#fileHistoryBusy = false;
+	#detachFileHistoryInput: (() => void) | undefined;
+	#checkpointedInputs = new WeakSet<AgentMessage>();
 
 	#getFileHistory(): FileHistory {
 		const cwd = this.sessionManager.getCwd();
@@ -819,6 +821,11 @@ export class AgentSession {
 			);
 		}
 		return this.#fileHistory;
+	}
+
+	async declareFileHistoryPaths(paths: readonly string[]): Promise<void> {
+		if (this.#fileHistoryBusy) throw new Error("File recovery is in progress");
+		await this.#getFileHistory().declare(paths);
 	}
 
 	async fileHistoryCommand(args: string): Promise<string> {
@@ -850,7 +857,7 @@ export class AgentSession {
 	/** Restore files before committing an exact conversation leaf; old branches remain intact. */
 	async rewindFilesAndConversation(
 		turn?: string,
-		confirm: (changes: string[]) => Promise<boolean> = async () => true,
+		confirm: (changes: string[]) => Promise<boolean> = async () => false,
 		recover = false,
 	): Promise<boolean> {
 		if (this.isStreaming || this.#promptInFlightCount > 0 || this.#fileHistoryBusy)
@@ -872,6 +879,8 @@ export class AgentSession {
 					try {
 						if (leafId === null) this.sessionManager.resetLeaf();
 						else this.sessionManager.branch(leafId);
+						this.sessionManager.appendCustomEntry("filesnap_branch", {});
+						await this.sessionManager.flush();
 						this.#bash.markSessionTransition(transition);
 						committed = true;
 					} finally {
@@ -883,6 +892,7 @@ export class AgentSession {
 					this.#advisors.resetSessionState({ preserveCost: true });
 					this.#todo.syncFromBranch();
 					this.#closeCodexProviderSessionsForHistoryRewrite();
+					return this.sessionManager.getLeafId();
 				},
 				confirm,
 				recover,
@@ -1473,6 +1483,22 @@ export class AgentSession {
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
 		};
 		this.#recovery = new TurnRecovery(recoveryHost, { initialRetryFallback: config.initialRetryFallback });
+		this.#detachFileHistoryInput = this.agent.addBeforeInputMessageHook(async message => {
+			if (message.role !== "user" || this.#checkpointedInputs.has(message)) return;
+			const history = this.#getFileHistory();
+			if (!(await history.enabled())) return;
+			await this.#messageEndPersistenceTail;
+			const label =
+				typeof message.content === "string"
+					? message.content
+					: message.content
+							.filter(block => block.type === "text")
+							.map(block => block.text)
+							.join("\n");
+			const leafId = this.sessionManager.appendCustomEntry("filesnap_checkpoint", {});
+			await history.beginTurn({ leafId, label });
+			this.#checkpointedInputs.add(message);
+		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
 				!this.settings.get("retry.usageAwareFallback") ||
@@ -4089,14 +4115,12 @@ export class AgentSession {
 		const result = await this.#beforeToolCallExtensions(ctx, signal);
 		if (result?.block) return result;
 		const args = result?.args ?? ctx.args;
-		const isFileEdit = ctx.tool.name === "write" || ctx.tool.name === "edit" || ctx.tool.name === "apply_patch";
+		const isFileEdit = ctx.tool.name === "edit" || ctx.tool.name === "apply_patch";
 		const targets = isFileEdit ? (ctx.tool.matcherPaths?.(args) ?? []) : [];
 		const record = args && typeof args === "object" ? args : {};
 		const paths = targets.length
 			? targets
-			: (ctx.tool.name === "write" || ctx.tool.name === "edit") &&
-				  "path" in record &&
-				  typeof record.path === "string"
+			: ctx.tool.name === "edit" && "path" in record && typeof record.path === "string"
 				? [record.path]
 				: [];
 		await this.#getFileHistory().declare(
@@ -4623,6 +4647,8 @@ export class AgentSession {
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
+		this.#detachFileHistoryInput?.();
+		this.#detachFileHistoryInput = undefined;
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
@@ -6720,11 +6746,6 @@ export class AgentSession {
 				this.#planReferenceSent = true;
 			}
 			try {
-				const history = this.#getFileHistory();
-				if (await history.enabled()) {
-					const leafId = this.sessionManager.appendCustomEntry("filesnap_checkpoint", {});
-					await history.beginTurn({ leafId, label: expandedText });
-				}
 				if (this.#promptGeneration !== generation) return false;
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
@@ -7987,6 +8008,7 @@ export class AgentSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				if (options?.drop) await this.#getFileHistory().drop();
 				this.agent.reset();
 				if (options?.drop && previousSessionFile) {
 					try {

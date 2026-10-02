@@ -1785,6 +1785,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		const toolSession: ToolSession = {
+			declareFileHistoryPaths: paths => session.declareFileHistoryPaths(paths),
 			get cwd() {
 				return sessionManager.getCwd();
 			},

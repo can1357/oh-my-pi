@@ -429,6 +429,7 @@ export class Agent {
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeInputMessageHooks = new Set<(message: AgentMessage) => Promise<void>>();
 	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
@@ -812,6 +813,13 @@ export class Agent {
 		const registration = (signal?: AbortSignal) => hook(signal);
 		this.#beforeQueuedMessageDequeueHooks.add(registration);
 		return () => this.#beforeQueuedMessageDequeueHooks.delete(registration);
+	}
+
+	/** Register a checkpoint hook for direct and queued input messages before execution. */
+	addBeforeInputMessageHook(hook: (message: AgentMessage) => Promise<void>): () => void {
+		const registration = (message: AgentMessage) => hook(message);
+		this.#beforeInputMessageHooks.add(registration);
+		return () => this.#beforeInputMessageHooks.delete(registration);
 	}
 
 	/** Register an independently removable hook that runs immediately before each model call. */
@@ -1514,6 +1522,9 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
+			beforeInputMessage: async message => {
+				for (const hook of this.#beforeInputMessageHooks) await hook(message);
+			},
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),

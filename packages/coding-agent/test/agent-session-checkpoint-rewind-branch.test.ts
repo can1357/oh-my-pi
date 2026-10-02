@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
+import * as fs from "node:fs/promises";
+import * as utils from "@oh-my-pi/pi-utils";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, ThinkingContent } from "@oh-my-pi/pi-ai";
@@ -114,6 +116,7 @@ async function createHarness(
 	responses: MockResponseSource,
 	tools: AgentTool[] = [checkpointTool as AgentTool, rewindTool as AgentTool],
 	options?: {
+		persistent?: boolean;
 		onAgentEnd?: (willContinue: boolean | undefined) => void;
 		resolveFallbackTool?: (name: string) => AgentTool | undefined;
 	},
@@ -146,7 +149,11 @@ async function createHarness(
 		resolveFallbackTool: options?.resolveFallbackTool,
 	});
 
-	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const cwd = options?.persistent ? path.join(tempDir.path(), "workspace") : tempDir.path();
+	await fs.mkdir(cwd, { recursive: true });
+	const sessionManager = options?.persistent
+		? SessionManager.create(cwd, path.join(tempDir.path(), "sessions"))
+		: SessionManager.inMemory(cwd);
 	let extensionRunner: ExtensionRunner | undefined;
 	if (options?.onAgentEnd) {
 		const runtime = new ExtensionRuntime();
@@ -949,6 +956,111 @@ describe("workspace rewind picker", () => {
 			expect(await labels()).toEqual(["replace greeting", "write a hello world py", "ls", "pwd"]);
 		} finally {
 			savedPoints.mockRestore();
+		}
+	});
+});
+
+describe("file history session lifecycle", () => {
+	it("rewinds only a follow-up queued while streaming and keeps redo across reload", async () => {
+		const started = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		let file = "";
+		const { session, tempDir } = await createHarness(
+			(async function* () {
+				started.resolve();
+				await proceed.promise;
+				await Bun.write(file, "first result");
+				yield { content: ["first done"], stopReason: "stop" };
+				await Bun.write(file, "second result");
+				yield { content: ["second done"], stopReason: "stop" };
+			})() as MockResponseSource,
+			[],
+			{ persistent: true },
+		);
+		const dbPath = spyOn(utils, "getAgentDbPath").mockReturnValue(path.join(tempDir.path(), "data", "agent.db"));
+		try {
+			file = path.join(session.sessionManager.getCwd(), "a.txt");
+			await Bun.write(file, "initial");
+			const running = session.prompt("first");
+			await started.promise;
+			await session.prompt("second", { streamingBehavior: "followUp" });
+			proceed.resolve();
+			await running;
+			const points = await session.rewindPoints();
+			expect(points.map(point => point.label)).toEqual(["second", "first"]);
+			await session.rewindFilesAndConversation(points[0]!.turn, async () => true);
+			expect(await Bun.file(file).text()).toBe("first result");
+			expect(
+				session.messages.filter(message => message.role === "user").map(message => messageText(message as Message)),
+			).toEqual(["first"]);
+			const sessionFile = session.sessionManager.getSessionFile()!;
+			const reloaded = await SessionManager.open(sessionFile);
+			expect(reloaded.getLeafId()).toBe(session.sessionManager.getLeafId());
+			expect(
+				reloaded
+					.buildSessionContext()
+					.messages.filter(message => message.role === "user")
+					.map(message => messageText(message as Message)),
+			).toEqual(["first"]);
+			const history = new FileHistory(
+				session.sessionManager.getCwd(),
+				path.join(tempDir.path(), "data", "file-history"),
+				session.sessionId,
+			);
+			await history.change(
+				[],
+				reloaded.getLeafId(),
+				async leaf => {
+					if (leaf === null) reloaded.resetLeaf();
+					else reloaded.branch(leaf);
+					const marker = reloaded.appendCustomEntry("filesnap_branch", {});
+					await reloaded.flush();
+					return marker;
+				},
+				async () => true,
+			);
+			expect(await Bun.file(file).text()).toBe("second result");
+			expect(
+				reloaded
+					.buildSessionContext()
+					.messages.filter(message => message.role === "user")
+					.map(message => messageText(message as Message)),
+			).toEqual(["first", "second"]);
+		} finally {
+			proceed.resolve();
+			dbPath.mockRestore();
+		}
+	});
+
+	it("drop removes old history before changing session identity and preserves it for retry on cleanup failure", async () => {
+		const { session, tempDir } = await createHarness([{ content: ["done"], stopReason: "stop" }], [], {
+			persistent: true,
+		});
+		const dbPath = spyOn(utils, "getAgentDbPath").mockReturnValue(path.join(tempDir.path(), "data", "agent.db"));
+		try {
+			await session.prompt("save a checkpoint");
+			const oldId = session.sessionId;
+			const sessionFile = session.sessionFile!;
+			const failure = spyOn(FileHistory.prototype, "drop").mockRejectedValueOnce(new Error("cleanup unavailable"));
+			try {
+				await expect(session.newSession({ drop: true })).rejects.toThrow("cleanup unavailable");
+			} finally {
+				failure.mockRestore();
+			}
+			expect(session.sessionId).toBe(oldId);
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+			await session.newSession({ drop: true });
+			expect(session.sessionId).not.toBe(oldId);
+			expect(await Bun.file(sessionFile).exists()).toBe(false);
+			const oldHistory = new FileHistory(
+				session.sessionManager.getCwd(),
+				path.join(tempDir.path(), "data", "file-history"),
+				oldId,
+			);
+			expect(await oldHistory.points()).toEqual([]);
+			expect(await oldHistory.command("list")).toContain("No file checkpoints");
+		} finally {
+			dbPath.mockRestore();
 		}
 	});
 });

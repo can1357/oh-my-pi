@@ -203,7 +203,7 @@ export class FileHistory {
 	change(
 		points: FileHistoryPoint[],
 		sourceLeaf: string | null,
-		navigate: (leaf: string | null) => Promise<void>,
+		navigate: (leaf: string | null) => Promise<string | null | void>,
 		confirm: (changes: string[]) => Promise<boolean>,
 		recover = false,
 	): Promise<boolean> {
@@ -211,11 +211,11 @@ export class FileHistory {
 			const state = await this.#navigation();
 			const restore = async (point: RecoveryPoint) => {
 				await this.#run(["restore", "--turn", point.turn, "--ignore-rules-stdin"], "restore.done", point.policy);
-				await navigate(point.leafId);
+				return (await navigate(point.leafId)) ?? point.leafId;
 			};
 			if (recover) {
 				if (!state.pending) throw new Error("No interrupted rewind to recover");
-				await restore(state.pending);
+				state.atLeaf = await restore(state.pending);
 				delete state.pending;
 				await this.#saveNavigation(state);
 				return true;
@@ -245,7 +245,15 @@ export class FileHistory {
 			const current = verified
 				.filter(event => event.type === "prepare.change")
 				.map(event => `${event.action}: ${event.path}`);
-			if (JSON.stringify(changes) !== JSON.stringify(current))
+			const previewDone = preview.findLast(event => event.type === "prepare.done");
+			const verifiedDone = verified.findLast(event => event.type === "prepare.done");
+			if (typeof previewDone?.manifest !== "string" || typeof verifiedDone?.manifest !== "string")
+				throw new Error("Missing restore manifest");
+			if (
+				JSON.stringify(changes) !== JSON.stringify(current) ||
+				previewDone.manifest !== verifiedDone.manifest ||
+				previewDone.ignoreRules !== verifiedDone.ignoreRules
+			)
 				throw new Error("Files changed while confirming. Open /rewind again.");
 			const policy = verified.findLast(event => event.type === "prepare.done")?.ignoreRules;
 			if (typeof policy !== "string") throw new Error("Missing restore policy");
@@ -255,10 +263,10 @@ export class FileHistory {
 			try {
 				for (const target of targets)
 					await this.#run(["restore", "--turn", target, "--ignore-rules-stdin"], "restore.done", policy);
-				await navigate(leaf);
+				state.atLeaf = (await navigate(leaf)) ?? leaf;
 			} catch (error) {
 				try {
-					await restore(recovery);
+					state.atLeaf = await restore(recovery);
 					delete state.pending;
 					await this.#saveNavigation(state);
 				} catch (recoveryError) {
@@ -268,7 +276,6 @@ export class FileHistory {
 				}
 				throw error;
 			}
-			state.atLeaf = leaf;
 			if (redo) state.redo.pop();
 			else state.redo.push(recovery);
 			delete state.pending;
@@ -294,6 +301,22 @@ export class FileHistory {
 		});
 	}
 
+	/** Delete this session's snapshots and sidecars before discarding its identity. */
+	drop(): Promise<void> {
+		return this.#serialize(async () => {
+			await this.#deleteHistory();
+			await fs.rm(this.#statePath, { force: true });
+		});
+	}
+
+	async #deleteHistory(): Promise<void> {
+		await this.#run(["delete"], "delete.done");
+		await this.#run(["gc"], "gc.done");
+		for (const suffix of [".recovery", ".points", ".navigation"])
+			await fs.rm(`${this.#statePath}${suffix}`, { force: true });
+		this.#turn = undefined;
+	}
+
 	command(text: string): Promise<string> {
 		return this.#serialize(async () => {
 			const [action = "list", turn, ...extra] = text.trim().split(/\s+/).filter(Boolean);
@@ -307,12 +330,7 @@ export class FileHistory {
 				await Bun.write(tmp, JSON.stringify({ enabled: action === "on" }), { mode: 0o600 });
 				await fs.rename(tmp, this.#statePath);
 				if (action === "clear") {
-					await this.#run(["delete"], "delete.done");
-					await fs.rm(`${this.#statePath}.recovery`, { force: true });
-					await fs.rm(`${this.#statePath}.points`, { force: true });
-					await fs.rm(`${this.#statePath}.navigation`, { force: true });
-					this.#turn = undefined;
-					await this.#run(["gc"], "gc.done");
+					await this.#deleteHistory();
 					return "File history cleared for this session and automatic capture disabled. Workspace files and conversation unchanged.";
 				}
 				return action === "on"

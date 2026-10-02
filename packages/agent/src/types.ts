@@ -332,6 +332,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
+	/** Await host checkpointing immediately before each input message is emitted. */
+	beforeInputMessage?: (message: AgentMessage) => Promise<void>;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

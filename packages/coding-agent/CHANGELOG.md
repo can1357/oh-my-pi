@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `/rewind` now restores workspace files as well as conversation history and requires confirmation. Use `/branch` for the previous conversation-only behavior. `/redo` also requires confirmation before overwriting files. ([#11663](https://github.com/can1357/oh-my-pi/pull/11663) by [@S2thend](https://github.com/S2thend))
+
 ### Added
 
 - Automatic prompt checkpoints and native `/rewind`, `/redo`, and `/rewind-recover` restore files and the matching conversation with persistent multi-level redo. ([#11663](https://github.com/can1357/oh-my-pi/pull/11663) by [@S2thend](https://github.com/S2thend))

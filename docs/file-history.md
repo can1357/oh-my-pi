@@ -57,3 +57,7 @@ managing file history. New/forked sessions have independent histories.
 
 The existing model `checkpoint`/`rewind` tools continue to manage exploration
 context. File history does not change their meaning.
+
+## Migrating from conversation-only rewind
+
+`/rewind` previously aliased `/branch`. It now restores workspace files together with the conversation, after a file-change confirmation. Use `/branch` to keep workspace files untouched. `/redo` also previews changes and requires confirmation, including edits made in an external editor after a rewind.

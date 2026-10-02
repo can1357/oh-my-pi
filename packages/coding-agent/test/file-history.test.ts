@@ -162,3 +162,41 @@ test("cancel and failed conversation navigation preserve both original states", 
 	expect(await Bun.file(path.join(cwd, "a")).text()).toBe("after");
 	await history.beginTurn({ leafId: leaf, label: "continue after recovered failure" });
 });
+
+test("same-path edits made during confirmation are preserved and require a new preview", async () => {
+	const { cwd, history } = await fixture();
+	const file = path.join(cwd, "a");
+	await history.command("on");
+	await Bun.write(file, "before");
+	await history.beginTurn({ leafId: "old", label: "edit" });
+	await Bun.write(file, "after");
+	let navigated = false;
+	await expect(
+		history.change(
+			await history.points(),
+			"current",
+			async () => {
+				navigated = true;
+			},
+			async () => {
+				await Bun.write(file, "external edit");
+				return true;
+			},
+		),
+	).rejects.toThrow("Files changed while confirming");
+	expect(await Bun.file(file).text()).toBe("external edit");
+	expect(navigated).toBe(false);
+});
+
+test("drop removes only its session snapshots and all sidecars", async () => {
+	const { cwd, data, history } = await fixture();
+	await history.command("on");
+	await history.beginTurn({ leafId: "old", label: "edit" });
+	const other = new FileHistory(cwd, data, "other");
+	await other.command("on");
+	await history.drop();
+	expect(await history.points()).toEqual([]);
+	expect(await history.command("list")).toContain("No file checkpoints");
+	expect(await fs.readdir(path.join(data, "omp-file-history"))).toHaveLength(1);
+	expect(await other.command("list")).not.toContain("No file checkpoints");
+});

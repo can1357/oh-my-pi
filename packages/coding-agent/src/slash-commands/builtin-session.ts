@@ -1,4 +1,8 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { InteractiveModeContext } from "../modes/types";
+import { PREVIEW_LIMITS, shortenPath, TRUNCATE_LENGTHS } from "../tools/render-utils";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -136,6 +140,24 @@ async function handleSessionPinCommand(
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
 }
 
+function fileHistoryDisplayLine(text: string): string {
+	return truncateToWidth(replaceTabs(sanitizeText(text)).replace(/\s+/g, " "), TRUNCATE_LENGTHS.CONTENT);
+}
+
+async function confirmFileHistory(ctx: InteractiveModeContext, changes: string[]): Promise<boolean> {
+	const preview = changes.slice(0, PREVIEW_LIMITS.EXPANDED_LINES).map(change => {
+		const separator = change.indexOf(": ");
+		return fileHistoryDisplayLine(
+			separator < 0 ? change : `${change.slice(0, separator)}: ${shortenPath(change.slice(separator + 2))}`,
+		);
+	});
+	const choice = await ctx.showHookSelector(
+		`Restore files and conversation? ${changes.length} file changes\n${preview.join("\n")}`,
+		["Restore files and conversation", "Cancel"],
+	);
+	return choice === "Restore files and conversation";
+}
+
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "rewind",
@@ -151,19 +173,15 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			const labels = points.map(
-				(point, index) => `${index + 1}. ${point.label.replace(/\s+/g, " ").slice(0, 120) || "Untitled prompt"}`,
+				(point, index) => `${index + 1}. ${fileHistoryDisplayLine(point.label) || "Untitled prompt"}`,
 			);
 			const choice = await ctx.showHookSelector("Rewind — restore files and conversation", labels);
 			if (choice === undefined) return;
 			const point = points[labels.indexOf(choice)];
 			if (!point) return;
-			const restored = await ctx.session.rewindFilesAndConversation(point.turn, async changes => {
-				const choice = await ctx.showHookSelector(
-					`Restore files and conversation? ${changes.length} file changes\n${changes.slice(0, 12).join("\n")}`,
-					["Restore files and conversation", "Cancel"],
-				);
-				return choice === "Restore files and conversation";
-			});
+			const restored = await ctx.session.rewindFilesAndConversation(point.turn, changes =>
+				confirmFileHistory(ctx, changes),
+			);
 			if (!restored) return;
 			await ctx.renderInitialMessages({ clearTerminalHistory: true });
 			await ctx.reloadTodos();
@@ -175,7 +193,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "redo",
 		description: "Restore files and conversation from before the last rewind",
 		handleTui: async (_command, { ctx }) => {
-			await ctx.session.rewindFilesAndConversation();
+			if (!(await ctx.session.rewindFilesAndConversation(undefined, changes => confirmFileHistory(ctx, changes))))
+				return;
 			await ctx.renderInitialMessages({ clearTerminalHistory: true });
 			await ctx.reloadTodos();
 			ctx.editor.setText("");

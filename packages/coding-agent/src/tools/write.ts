@@ -853,6 +853,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		const absolutePath = entry.absolutePath;
+		await this.session.declareFileHistoryPaths?.([absolutePath]);
 		if (!(await fs.exists(absolutePath))) {
 			throw new ToolError(`Conflict #${entry.id} target '${entry.displayPath}' no longer exists.`);
 		}
@@ -1004,6 +1005,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const staleEntries: ConflictEntry[] = [];
 			let failure: string | undefined;
 			try {
+				await this.session.declareFileHistoryPaths?.([absolutePath]);
 				text = await Bun.file(absolutePath).text();
 			} catch (error) {
 				failedFiles.push({
@@ -1252,6 +1254,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
+				await this.session.declareFileHistoryPaths?.([resolvedArchivePath.absolutePath]);
 				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
@@ -1270,6 +1273,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
 
 				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
+				await this.session.declareFileHistoryPaths?.([
+					resolvedSqlitePath.absolutePath,
+					`${resolvedSqlitePath.absolutePath}-wal`,
+					`${resolvedSqlitePath.absolutePath}-shm`,
+				]);
 				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
 				if (stripped) {
 					const firstText = sqliteResult.content.find(
@@ -1298,6 +1306,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
+			await this.session.declareFileHistoryPaths?.([absolutePath]);
 			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
 			if (bridgeWrite) {
 				// `write` always replaces the whole file, so (unlike hashline's

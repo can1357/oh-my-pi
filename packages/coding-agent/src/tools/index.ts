@@ -154,6 +154,8 @@ export interface DeferredDiagnosticsEntry {
 
 /** Session context for tool factories */
 export interface ToolSession {
+	/** Preserve the resolved local write targets before mutation. */
+	declareFileHistoryPaths?: (paths: readonly string[]) => Promise<void>;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
