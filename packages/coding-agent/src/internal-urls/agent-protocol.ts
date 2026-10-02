@@ -419,10 +419,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	}
 
 	/**
-	 * Output ids (readable) plus messageable peers (write targets). Remote peers appear here, not
-	 * under history://, because `write agent://@ns/name` is the only thing one can do with them.
+	 * Output ids (readable) plus messageable peers (write targets) from the caller's registry — an
+	 * SDK/ACP session with its own `AgentRegistry` sees its `@namespace/name` peers, not the global
+	 * session's. Remote peers appear here, not under history://, because `write agent://@ns/name` is
+	 * the only thing one can do with them.
 	 */
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
 		for (const dir of artifactsDirsFromRegistry()) {
 			let files: string[];
@@ -437,7 +439,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 		}
 		const completions: UrlCompletion[] = [...ids].sort().map(value => ({ value }));
-		for (const ref of AgentRegistry.global().list()) {
+		for (const ref of (context?.agentRegistry ?? AgentRegistry.global()).list()) {
 			if (!isMessageablePeer(ref.kind) || ids.has(ref.id)) continue;
 			completions.push({ value: ref.id, description: `${ref.status} · ${ref.kind} · message with write` });
 		}

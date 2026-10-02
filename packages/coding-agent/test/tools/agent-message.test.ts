@@ -229,5 +229,13 @@ describe("write agent:// messaging", () => {
 		expect(agentCompletions.map(completion => completion.value)).toContain("@cluster-a/leia");
 		const historyCompletions = await new HistoryProtocolHandler().complete();
 		expect(historyCompletions.map(completion => completion.value)).not.toContain("@cluster-a/leia");
+		// A caller with its own registry (SDK/ACP) completes ITS peers, not the global session's.
+		const isolated = new AgentRegistry();
+		isolated.register({ id: "@mesh/han", displayName: "han", kind: "remote", session: null, status: "running" });
+		const isolatedCompletions = (await new AgentProtocolHandler().complete("", { agentRegistry: isolated })).map(
+			completion => completion.value,
+		);
+		expect(isolatedCompletions).toContain("@mesh/han");
+		expect(isolatedCompletions).not.toContain("@cluster-a/leia");
 	});
 });

@@ -7,7 +7,7 @@
  */
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistry } from "../registry/agent-registry";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -38,10 +38,14 @@ function previewHead(output: string): string {
 	return lastNewline >= FULL_OUTPUT_THRESHOLD / 2 ? slice.slice(0, lastNewline) : slice;
 }
 
-/** Render the `<task-result>` envelope for a settled run. */
+/**
+ * Render the `<task-result>` envelope for a settled run. `registry` is the one the subagent lives
+ * in (the spawning session's), so an adopted worker in an isolated SDK registry still reads as
+ * resumable.
+ */
 export function formatTaskResultSummary(
 	result: SingleResult,
-	options: { totalDurationMs: number; mergeSummary?: string },
+	options: { totalDurationMs: number; mergeSummary?: string; registry: AgentRegistry },
 ): string {
 	const status = result.aborted
 		? "cancelled"
@@ -63,7 +67,7 @@ export function formatTaskResultSummary(
 	// the parent so it can resume via irc instead of redoing the work. Isolated
 	// runs are parked without a reviver (their worktree is gone), so their
 	// "parked" status must not read as resumable.
-	const refStatus = AgentRegistry.global().get(result.id)?.status;
+	const refStatus = options.registry.get(result.id)?.status;
 	const resumable = result.aborted && !result.isolated && (refStatus === "idle" || refStatus === "parked");
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
