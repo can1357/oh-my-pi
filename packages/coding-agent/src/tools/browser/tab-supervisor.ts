@@ -1100,7 +1100,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.ownsPage) {
+	if (tab.ownsPage && (forced || tab.kindTag === "relay")) {
 		try {
 			// `false` is "not confirmed closed" (the CDP session could not be
 			// created, or `Target.getTargets` failed) — the same unconfirmed
@@ -1108,7 +1108,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			targetCloseFailed = !(await waitForTabCleanup(
 				tab,
 				timeoutMs,
-				`orphan CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
+				`owned CDP target ${JSON.stringify(tab.targetId)} (Target.closeTarget)`,
 				closeOrphanTarget(tab),
 			));
 		} catch (error) {
@@ -1753,8 +1753,13 @@ async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string
 			const result = await cdpBrowser._connection.send("Target.closeTarget", { targetId });
 			return result.success;
 		} catch (error) {
-			const { targetInfos } = await cdpBrowser._connection.send("Target.getTargets");
-			if (targetInfos.some(target => target.targetId === targetId)) throw error;
+			if (
+				!(error instanceof Error) ||
+				(!error.message.endsWith(`No target with id ${targetId}`) &&
+					!error.message.endsWith("No target with given id found"))
+			) {
+				throw error;
+			}
 			return true;
 		}
 	}

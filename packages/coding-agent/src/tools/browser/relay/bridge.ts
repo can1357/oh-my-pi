@@ -748,11 +748,11 @@ export class RelayBridge {
 		}
 		if (msg.method === "Target.closeTarget") {
 			await this.#handleBrowserCommand(conn, msg);
-			return;
+			return true;
 		}
 		if (msg.method === "Page.close" && !tab.createdByRelay) {
 			this.#replyError(conn, msg, "Refusing to close a borrowed user tab");
-			return;
+			return false;
 		}
 		const inst = this.#instances.get(tab.instanceId);
 		if (!inst || !inst.socket) {

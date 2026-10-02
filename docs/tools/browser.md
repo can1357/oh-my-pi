@@ -161,6 +161,8 @@ Relay and attached modes operate on real logged-in sessions; sites attribute act
 
 Each named tab permits one active run; Chromium-backed tabs have one worker, while Tern/cmux use their own backend. A timed-out or aborted run can recycle the worker and invalidate handles. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
 
+Closing a relay handle closes only its owned Chrome tab, including after debugger detachment. Explicitly borrowed tabs are released without being closed.
+
 By default, omp-owned managed Chromium tabs freeze at turn settle and unfreeze on next use (`browser.freezeOnTurnEnd = true`). Owned Chromium and Tern tabs idle for 1,800 seconds are closed (`browser.idleCloseSec`; `0` disables this). `persist: true` opts a tab out of both policies, but explicit close still releases it. Relay, connected, spawned, and cmux tabs are not auto-frozen or idle-closed.
 
 ## Common recovery
