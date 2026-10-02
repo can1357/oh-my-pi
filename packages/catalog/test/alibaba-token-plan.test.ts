@@ -43,6 +43,7 @@ describe("QwenCloud Token Plan provider", () => {
 						{ id: "qwen3.6-plus", owned_by: "qwencloud" },
 						{ id: "qwen3.8-max", owned_by: "qwencloud" },
 						{ id: "qwen3.8-flash", owned_by: "qwencloud" },
+						{ id: "qwen3.8-plus", owned_by: "qwencloud" },
 						{ id: "deepseek-v3.2", owned_by: "qwencloud" },
 						{ id: "glm-5.1", owned_by: "qwencloud" },
 						{ id: "glm-5", owned_by: "qwencloud" },
@@ -82,6 +83,7 @@ describe("QwenCloud Token Plan provider", () => {
 			"qwen3.7-plus",
 			"qwen3.8-flash",
 			"qwen3.8-max",
+			"qwen3.8-plus",
 		]);
 		const expectedLimits = [
 			["qwen3.6-plus", 1_000_000, 65_536],
@@ -141,6 +143,18 @@ describe("QwenCloud Token Plan provider", () => {
 					extraBody: { enable_thinking: true },
 				},
 			},
+		});
+		const plus = models?.find(model => model.id === "qwen3.8-plus");
+		if (!plus) throw new Error("qwen3.8-plus missing from discovery");
+		expect(plus).toMatchObject({
+			id: "qwen3.8-plus",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+		});
+		expect(buildModel(plus).compat).toMatchObject({
+			supportsReasoningEffort: true,
+			replayReasoningContent: true,
+			whenThinking: { thinkingFormat: "openai", extraBody: { enable_thinking: true } },
 		});
 		const flash = models?.find(model => model.id === "qwen3.8-flash");
 		if (!flash) throw new Error("qwen3.8-flash missing from discovery");

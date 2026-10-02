@@ -106,8 +106,21 @@ provider "alibaba-token-plan" {
 		revision ">=3.6 <3.8" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
+		// Every remote DashScope Qwen 3.8 SKU steers thinking depth through the
+		// OpenAI `reasoning_effort` control and replays reasoning_content across
+		// turns (preserve_thinking defaults on). The exact `qwen3.8-max` /
+		// `qwen3.8-flash` rows keep their reviewed ladders; discovered siblings
+		// (e.g. `qwen3.8-plus`) inherit this wire contract instead of silently
+		// dropping effort selections on the Qwen dialect.
 		revision ">=3.8 <3.9" {
 			supports-reasoning-effort #true
+			replay-reasoning-content #true
+			when-thinking {
+				extra-body {
+					enable_thinking #true
+				}
+				thinking-format "openai"
+			}
 		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
@@ -116,20 +129,21 @@ provider "alibaba-token-plan" {
 	}
 	// Max Preview rides only Alibaba's binary enable_thinking toggle: it stays on
 	// the Qwen dialect and must not emit an unsupported reasoning_effort field.
+	// (Upstream 1681ac702d narrowed the revision wire contract to exact max/flash
+	// ids for this reason; this PR re-widens it to cover discovered siblings, so
+	// preview inherits the class replay + when-thinking unless re-pinned. The
+	// pin below keeps preview wire-identical to its baked models.json row —
+	// replay off, Qwen dialect, no reasoning_effort — which the policy test and
+	// the payload path both assert. The baked row records no whenThinking
+	// object, so one compat-parity diff (present-vs-undefined whenThinking)
+	// remains; it is structural — any class when-thinking rule materializes the
+	// variant — and covered by the sibling regression tests, not the parity row.)
 	models "qwen3.8-max-preview" {
 		thinking-efforts "low" "high" "xhigh"
 		thinking-requires-effort #true
-	}
-	// Max and Flash steer thinking depth through the OpenAI reasoning_effort
-	// control and replay reasoning_content across turns (preserve_thinking
-	// defaults on for both).
-	models "qwen3.8-max" "qwen3.8-flash" {
-		replay-reasoning-content #true
+		replay-reasoning-content #false
 		when-thinking {
-			extra-body {
-				enable_thinking #true
-			}
-			thinking-format "openai"
+			thinking-format "qwen"
 		}
 	}
 	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its

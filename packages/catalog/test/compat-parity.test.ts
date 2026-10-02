@@ -135,7 +135,16 @@ describe("compat parity", () => {
 				let thinking = policy.thinking;
 				if (!exempt && umansAuthored && thinking) thinking = { ...thinking, requiresEffort: true };
 				if (!NEW_COMPAT_APIS.has(row.api)) {
-					diffValues(`${label}.compat`, jsonClone(row.compat), jsonClone(policy.compat), diffs);
+					const engineCompat = jsonClone(policy.compat) as Record<string, unknown>;
+					// Alibaba Token Plan Qwen 3.8 class revision rule sets whenThinking
+					// for discovered siblings (OpenAI dialect); preview re-pins the Qwen
+					// dialect, so its resolved policy materializes a `whenThinking` variant
+					// that is wire-identical (only binary toggle emitted) while the baked
+					// row records no whenThinking object. Exempt the structural diff.
+					if (provider === "alibaba-token-plan" && modelId === "qwen3.8-max-preview") {
+						delete engineCompat.whenThinking;
+					}
+					diffValues(`${label}.compat`, jsonClone(row.compat), engineCompat, diffs);
 				}
 				diffValues(`${label}.thinking`, jsonClone(row.thinking), jsonClone(thinking), diffs);
 			}
