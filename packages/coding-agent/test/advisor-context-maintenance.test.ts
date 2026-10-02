@@ -1044,4 +1044,26 @@ describe("AgentSession advisor context maintenance", () => {
 		if (secondSummary?.role !== "compactionSummary") throw new Error("Expected second advisor summary");
 		expect(secondSummary.historyRewriteAt).toBe(firstRewriteMarker);
 	});
+
+	it("ignores usage reported before the newest prune and anchors again on a later report", () => {
+		const { advisor, advisorMock } = createHarness();
+		const anchored = CACHE_READ_TOKENS + INPUT_TOKENS + OUTPUT_TOKENS;
+		const prunedAt = Date.now() - 500;
+		const pruned = {
+			role: "toolResult",
+			toolCallId: "advisor-read-pruned",
+			toolName: "read",
+			content: [{ type: "text", text: "[Stale result elided - 4000 tokens]" }],
+			isError: false,
+			timestamp: Date.now() - 2_000,
+			prunedAt,
+		} as AgentMessage;
+		// This report was made before the rewrite, so it still counts the removed bytes.
+		advisor.state.messages.push(pruned, usageAnchor(advisorMock, prunedAt - 500));
+		expect(session.getAdvisorStats().contextTokens).toBeLessThan(anchored);
+
+		// A report made after the rewrite describes the context as it is now.
+		advisor.state.messages.push(usageAnchor(advisorMock, prunedAt + 500));
+		expect(session.getAdvisorStats().contextTokens).toBeGreaterThanOrEqual(anchored);
+	});
 });

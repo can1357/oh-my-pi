@@ -58,14 +58,17 @@ describe("web model role resolution", () => {
 		});
 	});
 
-	it("builds the default web retry chain from catalog role priorities", () => {
-		const { pool, settings } = createRuntime();
-
-		const candidates = resolveRoleChain("web", settings, pool);
-
-		expect(candidates.slice(0, 2).map(candidate => candidate.model.id)).toEqual(["parallel", "perplexity"]);
-		expect(candidates.slice(0, 2).every(candidate => candidate.explicit === false)).toBe(true);
-		expect(candidates.some(candidate => candidate.model.id === "duckduckgo")).toBe(true);
+	it("admits supported direct OpenAI web models but excludes realtime from candidates", () => {
+		const authStorage = createInMemoryAuthStorage();
+		storages.add(authStorage);
+		authStorage.keys.setRuntime("openai", "test-openai-key");
+		const settings = Settings.isolated();
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
+		const openAiCandidates = roleCandidatePool("web", settings, modelRegistry).filter(
+			model => model.provider === "openai",
+		);
+		expect(openAiCandidates.some(model => model.id === "gpt-6-luna")).toBe(true);
+		expect(openAiCandidates.some(model => model.id === "gpt-realtime-2.1")).toBe(false);
 	});
 
 	it("marks configured primaries and configured fallbacks explicit", () => {

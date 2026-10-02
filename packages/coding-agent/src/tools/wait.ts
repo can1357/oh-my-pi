@@ -5,13 +5,14 @@ import {
 	type AgentToolUpdateCallback,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
+import waitNoMessageTemplate from "../prompts/tools/wait-no-message.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
 import { buildJobResult, nothingToWaitForResult, snapshotJobs, undeliveredJobs } from "../async/job-control";
-import { hasLiveOwnedService, listServices, waitForOwnedServiceCompletion } from "../launch/services";
+import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -23,6 +24,23 @@ import { cfgLaunchEnabled } from "./settings";
 const waitSchema = type({});
 const WAIT_MAX_MS = 30 * 60_000;
 const PROGRESS_INTERVAL_MS = 500;
+/**
+ * Window ladder (ms) for a wait only a peer message can end. A running peer
+ * owes no message — a parent blocked awaiting this very agent stays running —
+ * so such a wait hands the turn back on a short window instead of the job-wait
+ * cap. Consecutive waits climb the rungs so a tight wait loop backs off.
+ */
+const MESSAGE_WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+/** A gap this long since the last message-only wait means the agent did real work: restart at the floor. */
+const MESSAGE_WAIT_LADDER_RESET_MS = 60_000;
+/** Running peers named in a no-message result before collapsing the rest into a count. */
+const MESSAGE_WAIT_PEER_PREVIEW = 5;
+
+interface MessageWindow {
+	level: number;
+	openedAt: number;
+	deadline: number;
+}
 
 interface WaitMessaging {
 	registry: AgentRegistry;
@@ -32,6 +50,62 @@ interface WaitMessaging {
 function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | undefined {
 	if (!messaging) return undefined;
 	return drainPendingInbox(messaging.registry, messaging.senderId) ?? IrcBus.global().take(messaging.senderId);
+}
+
+/**
+ * Jobs some agent's `wait` is blocked on right now, refcounted per shared job
+ * manager. Delivery watches cannot answer "is the owner parked on this
+ * result?": a workpool watches every member turn while its owner keeps working.
+ */
+const blockedWaits = new WeakMap<AsyncJobManager, Map<string, number>>();
+
+/** Mark `jobIds` as blocked on until the returned release runs. */
+function holdBlockedWait(manager: AsyncJobManager, jobIds: string[]): () => void {
+	const held = blockedWaits.get(manager) ?? new Map<string, number>();
+	blockedWaits.set(manager, held);
+	for (const id of jobIds) held.set(id, (held.get(id) ?? 0) + 1);
+	return () => {
+		for (const id of jobIds) {
+			const count = (held.get(id) ?? 0) - 1;
+			if (count > 0) held.set(id, count);
+			else held.delete(id);
+		}
+	};
+}
+
+/**
+ * An elapsed message window: name the running peers that kept it open and,
+ * when the caller's own result job is blocked on by its owner's `wait`, say so —
+ * that owner is parked on this agent, the cycle a bare liveness check cannot see.
+ */
+function noMessageResult(
+	messaging: WaitMessaging | undefined,
+	manager: AsyncJobManager | undefined,
+	window: MessageWindow,
+): AgentToolResult<CoordinationDetails> {
+	const running = messaging
+		? messaging.registry
+				.listVisibleTo(messaging.senderId)
+				.filter(ref => messaging.registry.isRunning(ref))
+				.map(ref => ref.id)
+		: [];
+	const blocked = manager ? blockedWaits.get(manager) : undefined;
+	const awaitedBy =
+		messaging && manager && blocked
+			? manager.getRunningJobs().find(job => job.agentId === messaging.senderId && blocked.has(job.id))?.ownerId
+			: undefined;
+	const text = prompt.render(waitNoMessageTemplate, {
+		elapsed: formatDuration(Date.now() - window.openedAt),
+		peers: running.slice(0, MESSAGE_WAIT_PEER_PREVIEW),
+		more: Math.max(0, running.length - MESSAGE_WAIT_PEER_PREVIEW),
+		awaitedBy,
+	});
+	return {
+		content: [{ type: "text", text }],
+		details: { op: "wait", jobs: [] },
+		// An elapsed message window carries nothing once consumed.
+		useless: true,
+	};
 }
 
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
@@ -51,6 +125,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly loadMode = "essential";
 	readonly intent = "optional";
 
+	/** Rung and end time of the last message-only wait, for {@link MESSAGE_WAIT_LADDER_MS}. */
+	#lastMessageWait: { level: number; endedAt: number } | undefined;
+
 	constructor(private readonly session: ToolSession) {}
 
 	async execute(
@@ -67,38 +144,60 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
-		if (cfgLaunchEnabled.get(this.session.settings)) await listServices(this.session, signal);
+		// Refreshes owned-service tracking only; jobs and peers are in-process, so a
+		// hung broker must not turn every wait into an error.
+		if (cfgLaunchEnabled.get(this.session.settings)) await listServicesTolerant(this.session, signal);
 		const deadline = Date.now() + WAIT_MAX_MS;
-		for (;;) {
-			const queued = takeQueuedMessage(messaging);
-			if (queued && messaging) return messageResult(messaging.senderId, queued);
-			const jobs = manager?.getRunningJobs(ownerFilter) ?? [];
-			// An accepted completion whose delivery has not reached the transcript
-			// yet (queued, parked on the yield queue, or skipped while an earlier
-			// wait watched it) is exactly what this wait is for: return it now
-			// instead of reporting nothing to wait for.
-			const undelivered = manager ? undeliveredJobs(manager, senderId) : [];
-			if (manager && undelivered.length > 0) {
-				return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
+		// Opened by the first message-only block and kept across re-evaluations,
+		// so a peer stopping mid-window cannot restart it.
+		let messageWindow: MessageWindow | undefined;
+		try {
+			for (;;) {
+				const queued = takeQueuedMessage(messaging);
+				if (queued && messaging) return messageResult(messaging.senderId, queued);
+				const jobs = manager?.getRunningJobs(ownerFilter) ?? [];
+				// An accepted completion whose delivery has not reached the transcript
+				// yet (queued, parked on the yield queue, or skipped while an earlier
+				// wait watched it) is exactly what this wait is for: return it now
+				// instead of reporting nothing to wait for.
+				const undelivered = manager ? undeliveredJobs(manager, senderId) : [];
+				if (manager && undelivered.length > 0) {
+					return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
+				}
+				const serviceRunning = hasLiveOwnedService(this.session);
+				const runningPeer =
+					messaging?.registry.listVisibleTo(messaging.senderId).some(ref => messaging.registry.isRunning(ref)) ??
+					false;
+				if (jobs.length === 0 && !runningPeer && !serviceRunning) {
+					return nothingToWaitForResult(this.session);
+				}
+				const window =
+					jobs.length === 0 && !serviceRunning ? (messageWindow ??= this.#openMessageWindow()) : undefined;
+				const result = await this.#blockUntilWake({
+					jobs,
+					manager,
+					messaging,
+					serviceRunning,
+					deadline: window ? Math.min(window.deadline, deadline) : deadline,
+					messageWindow: window,
+					signal,
+					onUpdate,
+				});
+				if (result) return result;
 			}
-			const serviceRunning = hasLiveOwnedService(this.session);
-			const runningPeer =
-				messaging?.registry.listVisibleTo(messaging.senderId).some(ref => messaging.registry.isRunning(ref)) ??
-				false;
-			if (jobs.length === 0 && !runningPeer && !serviceRunning) {
-				return nothingToWaitForResult(this.session);
-			}
-			const result = await this.#blockUntilWake({
-				jobs,
-				manager,
-				messaging,
-				serviceRunning,
-				deadline,
-				signal,
-				onUpdate,
-			});
-			if (result) return result;
+		} finally {
+			if (messageWindow) this.#lastMessageWait = { level: messageWindow.level, endedAt: Date.now() };
 		}
+	}
+
+	#openMessageWindow(): MessageWindow {
+		const now = Date.now();
+		const last = this.#lastMessageWait;
+		const level =
+			!last || now - last.endedAt >= MESSAGE_WAIT_LADDER_RESET_MS
+				? 0
+				: Math.min(last.level + 1, MESSAGE_WAIT_LADDER_MS.length - 1);
+		return { level, openedAt: now, deadline: now + MESSAGE_WAIT_LADDER_MS[level] };
 	}
 
 	/**
@@ -112,10 +211,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		messaging: WaitMessaging | undefined;
 		serviceRunning: boolean;
 		deadline: number;
+		/** Set exactly when only a peer message can end this block. */
+		messageWindow: MessageWindow | undefined;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
 	}): Promise<AgentToolResult<CoordinationDetails> | undefined> {
-		const { jobs, manager, messaging, serviceRunning, signal, onUpdate } = args;
+		const { jobs, manager, messaging, serviceRunning, messageWindow, signal, onUpdate } = args;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
@@ -156,6 +257,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			});
 		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
 		if (jobs.length > 0) emitProgress();
+		const releaseBlockedWait = manager ? holdBlockedWait(manager, watchedIds) : undefined;
 		let wake: "job" | "message" | "service" | "timeout" | "abort";
 		try {
 			wake = await Promise.race([
@@ -167,6 +269,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			]);
 		} finally {
 			clearTimeout(timer);
+			releaseBlockedWait?.();
 			clearInterval(progressTimer);
 			busAbort?.abort(busCancelled);
 			serviceAbort.abort();
@@ -197,6 +300,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				throwIfAborted(signal);
 			}
 			if (manager && jobs.length > 0) return buildJobResult(this.session, manager, "wait", jobs, []);
+			if (wake === "timeout" && messageWindow) return noMessageResult(messaging, manager, messageWindow);
 			return {
 				content: [
 					{

@@ -22,23 +22,48 @@ import {
 	truncateToWidth,
 } from "../render/render-utils";
 import type { CoordinationDetails } from "./wait";
-import { renderAgentWrite, renderProcWrite, type ProcWriteAction, type ProcWriteDetails } from "./proc-render";
-import { renderCfgWrite, type CfgWriteDetails } from "./cfg-render";
+import {
+	describeAgentWrite,
+	describeProcWrite,
+	renderAgentWrite,
+	renderProcWrite,
+	type ProcWriteAction,
+	type ProcWriteDetails,
+} from "./proc-render";
+import type { TspTone } from "@oh-my-pi/pi-wire";
+import { code, compact, node, span } from "../native/describe";
+import { registerNativeBlob } from "../native/blobs";
+import type { NativeChild, NativeNode } from "../native/node";
+import { diagnosticsBadge, diagnosticsSection, displayPath, errorText, fileHref, resultText } from "./native-view";
+import { describeCfgWrite, renderCfgWrite, type CfgWriteDetails } from "./cfg-render";
 import type { FileDiagnosticsResult } from "./lsp";
 import type { OutputMeta } from "./output-meta";
 import type { CardToolResult } from "./result-card";
-import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultOptions,
+	ToolActivityContext,
+	ToolActivitySummary,
+	ToolRenderer,
+} from "./renderer";
 import { splitUrlScheme } from "./url-scheme-host";
 import { couldBecomeXdUrl, parseXdUrl } from "./xd-url";
 import {
+	describeXdevCall,
+	describeXdevResult,
 	renderXdevCall,
 	renderXdevResult,
 	xdevActivitySummary,
 	type XdevRenderDispatch,
 	type XdevMountedRenderer,
 } from "./xdev";
-import { isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
-import { REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
+import { describeResolutionDeviceCall, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
+import {
+	describeReportIssueDeviceCall,
+	REPORT_ISSUE_DEVICE_NAME,
+	renderReportIssueDeviceCall,
+} from "./report-tool-issue";
 import { pendingFileLinkPath } from "./read";
 
 /** Details returned by the write tool for transcript rendering. */
@@ -64,6 +89,39 @@ interface WriteRenderArgs {
 }
 
 const WRITE_PREVIEW_LINES = 6;
+/** Collapsed native write body: the first lines of the file (§7.3). */
+const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
+/** Tallest rendered SVG preview, in lines; collapsed, the card shows just the picture. */
+const NATIVE_SVG_PREVIEW_LINES = 16;
+
+/** A write tool result as the renderer receives it. */
+interface WriteResult {
+	content: Array<{ type: string; text?: string }>;
+	details?: WriteToolDetails;
+	isError?: boolean;
+}
+
+/** Cached SVG preview node on its result, so the content is encoded and hashed once per write. */
+const kSvgPreview = Symbol("write.svgPreview");
+
+interface TaggedWriteResult extends WriteResult {
+	[kSvgPreview]?: { content: string; node: NativeNode };
+}
+
+/** Native `image` node drawing written SVG `content`, cached on `result`. */
+function describeSvgPreview(result: TaggedWriteResult, content: string, alt: string): NativeNode {
+	const cached = result[kSvgPreview];
+	if (cached?.content === content) return cached.node;
+	const blob = registerNativeBlob(new TextEncoder().encode(content), "image/svg+xml");
+	const preview = node("image", {
+		blob,
+		alt,
+		role: "omp.tool.write.image",
+		max: { h: `${NATIVE_SVG_PREVIEW_LINES}lines` },
+	});
+	result[kSvgPreview] = { content, node: preview };
+	return preview;
+}
 
 function countLines(text: string): number {
 	if (!text) return 0;
@@ -416,6 +474,48 @@ function couldBecomeWriteCardUrl(lowerPath: string): boolean {
 	return false;
 }
 
+/** Native view of a `proc://`, `agent://` or `cfg://` write. */
+function describeWriteUrl(
+	routed: { card: WriteUrlCard; target: string },
+	url: string,
+	content: unknown,
+	result: CardToolResult | undefined,
+	details: WriteToolDetails | undefined,
+): NativeToolView {
+	const body = typeof content === "string" ? content : undefined;
+	switch (routed.card.detailsKey) {
+		case "message":
+			return describeAgentWrite(routed.target, body ?? "", result, details?.message);
+		case "proc": {
+			const { id, action } = procWriteTarget(routed.target);
+			return describeProcWrite(id, action, body, result, details?.proc);
+		}
+		case "cfg":
+			return describeCfgWrite(url, body, result, details?.cfg);
+	}
+}
+
+/** Native write head shared by the call and result: `Write · path · 22 lines`, executable/diagnostics chips. */
+function writeToolHead(
+	rawPath: string,
+	content: string,
+	details?: Pick<WriteToolDetails, "madeExecutable" | "resolvedPath" | "diagnostics">,
+): NativeToolHead {
+	const lineCount = countLines(content);
+	const badges: { text: string; tone?: TspTone }[] = [];
+	if (details?.madeExecutable) badges.push({ text: "executable", tone: "success" });
+	const diagnostics = diagnosticsBadge([details?.diagnostics]);
+	if (diagnostics) badges.push(diagnostics);
+	return {
+		title: "Write",
+		target: rawPath ? displayPath(rawPath) : undefined,
+		targetKind: "path",
+		href: fileHref(details?.resolvedPath),
+		meta: lineCount > 0 ? [`${lineCount} line${lineCount === 1 ? "" : "s"}`] : undefined,
+		badges: badges.length > 0 ? badges : undefined,
+	};
+}
+
 /** Render file writes and delegated tool-device calls. */
 export const writeToolRenderer = {
 	/** Compact one-line activity: device writes read as the mounted tool (`LSP · references foo`), file writes as `Write · <path>`. */
@@ -521,7 +621,7 @@ export const writeToolRenderer = {
 	},
 
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
+		result: WriteResult,
 		options: RenderResultOptions & { renderContext?: WriteRenderContext },
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
@@ -617,6 +717,80 @@ export const writeToolRenderer = {
 				borderColor: "borderMuted",
 			};
 		});
+	},
+	describeCall(
+		args: WriteRenderArgs,
+		options: RenderResultOptions & { renderContext?: WriteRenderContext },
+	): NativeToolView | undefined {
+		const rawPath =
+			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		// Same gating as renderCall: nothing until the path provably is not a device/card URL.
+		if (args.path === undefined && args.file_path === undefined) return undefined;
+		const pathSettled = args.content !== undefined || options.argsComplete === true;
+		const hasStringPath = typeof args.file_path === "string" || typeof args.path === "string";
+		if (hasStringPath && !pathSettled && couldBecomeWriteCardUrl(rawPath.toLowerCase())) return undefined;
+		const routed = writeUrlCard(rawPath);
+		if (routed) return describeWriteUrl(routed, rawPath, args.content, undefined, undefined);
+		if (rawPath && couldBecomeXdUrl(rawPath)) {
+			const xdev = parseXdUrl(rawPath);
+			if (!xdev?.name || args.content === undefined) return undefined;
+			if (isResolutionDeviceName(xdev.name)) return describeResolutionDeviceCall(xdev.name, args.content);
+			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return describeReportIssueDeviceCall(args.content);
+			return describeXdevCall(xdev.name, args.content, options, options.renderContext?.resolveXdevMounted);
+		}
+		const content = normalizeDisplayText(args.content);
+		return {
+			tool: writeToolHead(rawPath, content),
+			body: content
+				? [
+						code(content, {
+							lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
+							numbers: true,
+						}),
+					]
+				: [],
+			preview: NATIVE_WRITE_PREVIEW,
+		};
+	},
+
+	describeResult(
+		result: WriteResult,
+		options: RenderResultOptions & { renderContext?: WriteRenderContext },
+		args?: WriteRenderArgs,
+	): NativeToolView | undefined {
+		const cardPath =
+			typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : "";
+		const routed = writeUrlCard(cardPath, result.details);
+		if (routed) return describeWriteUrl(routed, cardPath, args?.content, result, result.details);
+		const xdev = result.details?.xdev;
+		if (xdev) return describeXdevResult(xdev, result, options, options.renderContext?.resolveXdevMounted);
+		const rawPath =
+			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+		const fileContent = normalizeDisplayText(args?.content);
+		const isPartial = options.isPartial === true;
+		const diagnostics = isPartial ? undefined : result.details?.diagnostics;
+		const tool = writeToolHead(rawPath, fileContent, {
+			madeExecutable: !isPartial && result.details?.madeExecutable === true,
+			resolvedPath: result.details?.resolvedPath,
+			diagnostics,
+		});
+		if (result.isError) return { tool, tone: "error", body: [errorText(resultText(result))] };
+		const progressText = resultText(result);
+		// A finished SVG write leads with the drawing; its source follows below the collapsed clamp.
+		const svg = !isPartial && fileContent.trim().length > 0 && rawPath.toLowerCase().endsWith(".svg");
+		const body = compact<NativeChild>([
+			isPartial &&
+				progressText.length > 0 &&
+				node("text", { spans: [span(progressText, "muted")], truncate: "end" }),
+			svg && describeSvgPreview(result, fileContent, displayPath(rawPath)),
+			fileContent.length > 0 &&
+				code(fileContent, {
+					lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
+					numbers: true,
+				}),
+			diagnosticsSection(diagnostics),
+		]);
+		return { tool, body, preview: svg ? { lines: NATIVE_SVG_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW };
 	},
 	mergeCallAndResult: true,
 	// The collapsed pending preview follows the streaming edge with a tail

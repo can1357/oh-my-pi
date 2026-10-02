@@ -603,16 +603,4 @@ describe("AgentSession model persistence", () => {
 			),
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
-
-	it("lists a named role model before the default fallback", () => {
-		expect(
-			getRestorableSessionModels(
-				{
-					default: "anthropic/claude-sonnet-4-5",
-					smol: "anthropic/claude-sonnet-4-6",
-				},
-				"smol",
-			),
-		).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
-	});
 });

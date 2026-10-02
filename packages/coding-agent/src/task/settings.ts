@@ -206,6 +206,19 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskSpeculativeLaunch = register({
+	id: "task.speculativeLaunch",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Speculative Task Launch",
+		description:
+			"Start each batch subagent as soon as its tasks[] item finishes streaming instead of waiting for the whole task call. Launched agents are aborted if the finished call fails validation, is blocked, or its arguments change. Requires auto-allowed task approval and no extension tool lifecycle handlers.",
+	},
+});
+
 export const cfgTaskEnableEffort = register({
 	id: "task.enableEffort",
 	type: "boolean",
@@ -291,6 +304,25 @@ export const cfgTaskMaxRuntimeMs = register({
 			{ value: "900000", label: "15 minutes" },
 			{ value: "1800000", label: "30 minutes" },
 			{ value: "3600000", label: "1 hour" },
+		],
+	},
+});
+
+export const cfgTaskCompletionProbeMs = register({
+	id: "task.completionProbeMs",
+	type: "number",
+	default: 120_000,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Completion Probe",
+		description:
+			"How often (ms) a working subagent is asked, through a cached side request like /btw, to estimate how complete its task is. The estimate shows next to the subagent in wait and task views. 0 disables it.",
+		options: [
+			{ value: "0", label: "Disabled" },
+			{ value: "120000", label: "2 minutes", description: "Default" },
+			{ value: "300000", label: "5 minutes" },
+			{ value: "600000", label: "10 minutes" },
 		],
 	},
 });

@@ -44,6 +44,7 @@ const GROUNDED_PROVIDER_LOADERS: ProviderRegistry<WebSearchGrounding> = {
 	codex: () => import("./providers/codex").then(m => new m.CodexProvider()),
 	xai: () => import("./providers/xai").then(m => new m.XAIProvider()),
 	openrouter: () => import("./providers/openrouter").then(m => new m.OpenRouterGroundedProvider()),
+	openai: () => import("./providers/openai").then(m => new m.OpenAIProvider()),
 };
 
 const providerInstances = new Map<string, Promise<SearchProvider>>();
@@ -82,7 +83,8 @@ export function formatSearchProviderFailures(
 	return failures.map(f => `${f.provider.id}: ${formatSearchProviderFailure(f.error, f.provider)}`).join("; ");
 }
 
-function isRegisteredSearchEngine(id: string): id is SearchEngineId {
+/** Whether `id` names a pure search engine exposed as a `web/<id>` catalog model. */
+export function isRegisteredSearchEngine(id: string): id is SearchEngineId {
 	return Object.hasOwn(PROVIDER_LOADERS, id);
 }
 

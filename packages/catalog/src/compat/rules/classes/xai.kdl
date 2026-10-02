@@ -43,3 +43,9 @@ class "xai" {
 	}
 	thinking-loop-guard "xai"
 }
+
+// Same-provider swap targets for hosted search and image generation.
+class "xai" {
+	web-search-model "grok-4.5"
+	image-model "grok-imagine-image"
+}

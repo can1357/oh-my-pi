@@ -1,7 +1,7 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { type Component, isFocusable, type OverlayOptions, type TUI } from "./tui";
-import { replaceTabs } from "./utils";
+import { plainText } from "./native/spans";
 
 export interface TuiDebugTreeNode {
 	kind: string;
@@ -63,10 +63,6 @@ const SPECIAL_KEYS: Readonly<Record<string, string>> = {
 	f12: "\x1b[24~",
 };
 
-function plainLine(line: string): string {
-	return replaceTabs(Bun.stripANSI(line)).replace(/[\x00-\x1f\x7f-\x9f]/g, "");
-}
-
 function errorMessage(error: unknown): string {
 	try {
 		return error instanceof Error ? error.message : String(error);
@@ -106,6 +102,9 @@ function modifiedSpecial(sequence: string, modifier: number): string {
 	if (ss3Final) return `\x1b[1;${modifier}${ss3Final[1]}`;
 	const tilde = sequence.match(/^\x1b\[(\d+)~$/);
 	if (tilde) return `\x1b[${tilde[1]};${modifier}~`;
+	// Enter/Space/Backspace/Escape have no legacy modified form: a plain byte
+	// would drop the modifier (Shift+Enter would submit), so use Kitty CSI u.
+	if (sequence.length === 1) return `\x1b[${sequence.charCodeAt(0)};${modifier}u`;
 	return sequence;
 }
 
@@ -144,7 +143,7 @@ function encodeChord(token: string): string {
 		if (alt && encoded === special) encoded = `\x1b${encoded}`;
 		return encoded;
 	}
-	if (Array.from(rest).length !== 1) throw new Error(`unknown key ${rest}`);
+	if (Array.from(rest).length !== 1) throw new Error(`unknown key ${rest} (quote literal text instead, e.g. ',')`);
 	let character = rest;
 	if (shift && /^[a-z]$/i.test(character)) character = character.toUpperCase();
 	if (ctrl) character = ctrlCharacter(character);
@@ -323,14 +322,25 @@ export class TuiDebugServer {
 				if (paint === undefined) return { ok: false, error: "no frame painted yet" };
 				return {
 					ok: true,
-					lines: paint.lines.map(plainLine),
+					lines: paint.lines.map(plainText),
 					window_top: paint.windowTop,
 					alt_screen: paint.altScreen,
 					...(paint.cursor === undefined ? {} : { cursor: paint.cursor }),
 				};
 			}
 			case "frame":
-				return { ok: true, lines: this.#tui.getDebugDocument().map(plainLine) };
+				return { ok: true, lines: this.#tui.getDebugDocument().map(plainText) };
+			case "doc": {
+				// The document a Tern Surface Protocol terminal should hold: every sent
+				// frame applied by the reference applier.
+				const doc = this.#tui.getNativeDocument();
+				if (doc === undefined) return { ok: false, error: "no native surface" };
+				return { ok: true, doc, rows: this.#tui.nativeFallbackCount };
+			}
+			case "tsp": {
+				const count = typeof request.n === "number" && request.n > 0 ? Math.trunc(request.n) : undefined;
+				return { ok: true, native: this.#tui.nativeRendering, frames: this.#tui.getNativeFrames(count) };
+			}
 			case "tree":
 				return { ok: true, tree: this.#tree() };
 			case "values":

@@ -1,19 +1,21 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
+import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 
-function session(manager?: AsyncJobManager): ToolSession {
+function session(manager?: AsyncJobManager, agentId = "Main", launch = false): ToolSession {
 	return {
 		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": false }),
+		settings: Settings.isolated({ "launch.enabled": launch }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
-		getAgentId: () => "Main",
+		getAgentId: () => agentId,
 	} as unknown as ToolSession;
 }
 
@@ -23,6 +25,8 @@ describe("wait", () => {
 		IrcBus.resetGlobalForTests();
 	});
 	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 	});
@@ -140,6 +144,113 @@ describe("wait", () => {
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "followup-done" });
 	});
 
+	test("a message-only wait hands the turn back on a growing window while its parent streams", async () => {
+		vi.useFakeTimers();
+		const registry = AgentRegistry.global();
+		const streaming = { isStreaming: true } as never;
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: streaming, status: "running" });
+		registry.register({
+			id: "Child",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "Main",
+			session: streaming,
+			status: "running",
+		});
+		registry.register({
+			id: "Sibling",
+			displayName: "Sibling",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "idle",
+		});
+		const tool = new WaitTool(session(undefined, "Child"));
+		const waitOut = async (ms: number) => {
+			const waiting = tool.execute("message-window", {});
+			vi.advanceTimersByTime(ms);
+			const result = await waiting;
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toStartWith(`No message within ${ms / 1000}.0s`);
+			// Nobody is blocked on this agent's result, so no owner is singled out.
+			expect(text).not.toContain("agent://Main");
+			expect(result.useless).toBe(true);
+		};
+		await waitOut(5_000);
+		await waitOut(10_000);
+		await waitOut(30_000);
+		// Stepping away from the wait loop restarts the ladder at its floor.
+		vi.advanceTimersByTime(60_000);
+		await waitOut(5_000);
+	});
+
+	test("an owned job that appears mid-wait is not cut off by the message window", async () => {
+		vi.useFakeTimers();
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
+		registry.register({
+			id: "EchoPeer",
+			displayName: "EchoPeer",
+			kind: "sub",
+			parentId: "Main",
+			session: { isStreaming: true } as never,
+			status: "running",
+		});
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const waiting = new WaitTool(session(manager)).execute("message-then-job", {});
+		vi.advanceTimersByTime(1_000);
+		const finalized = Promise.withResolvers<string>();
+		const id = manager.register("task", "EchoPeer", async () => finalized.promise, {
+			ownerId: "Main",
+			agentId: "EchoPeer",
+		});
+		registry.setStatus("EchoPeer", "idle");
+		await Promise.resolve();
+		// Past the top message rung: only the job-wait cap may end this wait.
+		vi.advanceTimersByTime(300_000);
+		finalized.resolve("late result");
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "late result" });
+	});
+
+	test("points a message-only wait at an owner blocked in wait on its result, not at a delivery watch", async () => {
+		vi.useFakeTimers();
+		const registry = AgentRegistry.global();
+		const streaming = { isStreaming: true } as never;
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: streaming, status: "running" });
+		registry.register({
+			id: "Child",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "Main",
+			session: streaming,
+			status: "running",
+		});
+		// Subagents share the process job manager with their owner.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const childRun = Promise.withResolvers<string>();
+		manager.register("task", "Child", async () => childRun.promise, {
+			id: "Child",
+			agentId: "Child",
+			ownerId: "Main",
+		});
+		const childWaitText = async () => {
+			const waiting = new WaitTool(session(manager, "Child")).execute("child-wait", {});
+			vi.advanceTimersByTime(5_000);
+			const result = await waiting;
+			return result.content[0]?.type === "text" ? result.content[0].text : "";
+		};
+		// A workpool watches each member turn to suppress auto-delivery while its owner keeps working.
+		manager.watchJobs(["Child"]);
+		expect(await childWaitText()).not.toContain("agent://Main");
+		const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+		const text = await childWaitText();
+		expect(text).toStartWith("No message within 5.0s");
+		expect(text).toContain("agent://Main");
+		childRun.resolve("migration API ready");
+		expect((await parentWait).details?.jobs?.[0]).toMatchObject({ id: "Child", status: "completed" });
+	});
+
 	test("returns an incoming peer message without any background jobs", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
@@ -170,5 +281,22 @@ describe("wait", () => {
 		expect(result.details?.waited).toMatchObject({ from: "Peer", body: "the file is yours" });
 		expect(manager.getJob(id)?.status).toBe("running");
 		manager.cancel(id);
+	});
+
+	test("a hung daemon broker does not fail the wait; the job result still arrives", async () => {
+		const hungBroker = {
+			request: async () => {
+				throw new Error("Daemon list request timed out");
+			},
+			onCompletion: () => () => {},
+		} as unknown as DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(hungBroker);
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const { promise, resolve } = Promise.withResolvers<string>();
+		const id = manager.register("bash", "build", async () => promise, { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager, "Main", true)).execute("wait-hung-broker", {});
+		resolve("build complete");
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "build complete" });
 	});
 });

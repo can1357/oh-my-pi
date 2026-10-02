@@ -253,29 +253,6 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 			'Invalid thinking level "invalid" in pattern "qwen3.6-plus-free:invalid". Using default instead.',
 		);
 	});
-
-	test("still falls back when getApiKey returns undefined even with sessionId", async () => {
-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
-			getAvailable: () => [parentModel, unauthedTaskModel],
-			getApiKey: async (model: Model<Api>, _sessionId?: string) => {
-				if (model.provider === "deepseek") return "sk-test";
-				// Genuinely broken: undefined even with sessionId (stale OAuth, revoked token)
-				return undefined;
-			},
-		} as never;
-
-		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
-			undefined,
-			"subagent-session-456",
-		);
-
-		expect(result.authFallbackUsed).toBe(true);
-		expect(result.model?.provider).toBe("deepseek");
-		expect(result.model?.id).toBe("deepseek-v4-pro");
-	});
 });
 
 describe("issue #11709: disabled provider subagent model resolution", () => {

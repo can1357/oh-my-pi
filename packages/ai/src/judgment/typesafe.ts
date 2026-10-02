@@ -86,8 +86,8 @@ const BACKOFF_MAX_MS = 5_000;
 interface SystemOneResponse {
 	model: string;
 	answers: Record<string, Answer>;
-	/** OpenRouter adds the billed `cost` in USD; TypeSafe reports tokens only. */
-	usage: { input_tokens: number; output_tokens: number; cost?: number };
+	/** OpenRouter adds the billed `cost` in USD; some routes omit token counts. */
+	usage: { input_tokens?: number; output_tokens?: number; cost?: number };
 }
 
 /** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */

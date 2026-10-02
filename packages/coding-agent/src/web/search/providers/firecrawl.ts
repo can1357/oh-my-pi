@@ -4,14 +4,7 @@
  * Calls Firecrawl's search API and maps web results into the unified
  * SearchResponse shape used by the web search tool.
  */
-import {
-	type AuthStorage,
-	type FetchImpl,
-	getEnvApiKey,
-	resolveApiKeyOnce,
-	seedApiKeyResolver,
-	withAuth,
-} from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { resolveFirecrawlUrl } from "../../firecrawl";
@@ -209,25 +202,8 @@ export class FirecrawlProvider extends SearchProvider {
 	readonly id = "firecrawl";
 	readonly label = "Firecrawl";
 
-	/**
-	 * Auto-chain admission requires either a credential or an explicitly
-	 * configured self-hosted endpoint. Hosted keyless mode remains explicit-only
-	 * so it does not displace providers the user configured.
-	 */
-	isAvailable(authStorage: AuthStorage): boolean {
-		const configuredBaseUrl = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-		return (
-			!!configuredBaseUrl?.trim() ||
-			authStorage.keys.source("firecrawl") !== undefined ||
-			!!getEnvApiKey("firecrawl")
-		);
-	}
-
-	/**
-	 * Firecrawl supports keyless mode, so an explicit user selection
-	 * (`webSearch: firecrawl`) works without any credential configured.
-	 */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	/** Always available: without a credential or self-hosted endpoint, search runs in keyless mode. */
+	isAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

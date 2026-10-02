@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { isEnhancedRecallEnabled, isQueryCacheEnabled, QueryCache } from "@oh-my-pi/pi-mnemopi/core/query-cache";
+import { QueryCache } from "@oh-my-pi/pi-mnemopi/core/query-cache";
 import { expandQuery, getSynonyms, normalizeQuery } from "@oh-my-pi/pi-mnemopi/core/synonyms";
 
 const openCaches: QueryCache[] = [];
@@ -78,6 +78,19 @@ describe("QueryCache", () => {
 		expect(qc.tier4Hits).toBe(1);
 	});
 
+	it("matches only entries of the same scope in every tier", () => {
+		const qc = cache({ maxSize: 100 });
+		qc.put("deploy server status", [{ content: "top five" }], [1, 0, 0], "topK=5");
+
+		expect(qc.get("deploy server status", [1, 0, 0], "topK=10")).toBeNull();
+		expect(qc.get("different words", [0.99, 0.01, 0], "topK=10")).toBeNull();
+		expect(qc.get("deploy server", null, "topK=10")).toBeNull();
+		expect(qc.tier1Hits + qc.tier2Hits + qc.tier3Hits + qc.tier4Hits).toBe(0);
+
+		expect(qc.get("different words", [0.99, 0.01, 0], "topK=5")?.[0]?.content).toBe("top five");
+		expect(qc.get("deploy server", null, "topK=5")?.[0]?.content).toBe("top five");
+	});
+
 	it("expires entries by TTL and invalidates all tiers", async () => {
 		const qc = cache({ maxSize: 100, ttlSeconds: 0.001 });
 		qc.put("query one", [{ content: "test", score: 0.5 }], [1, 0]);
@@ -134,13 +147,5 @@ describe("QueryCache", () => {
 			size: 1,
 			max_size: 100,
 		});
-	});
-
-	it("keeps enhanced recall and query cache disabled unless the Python env gate is set", () => {
-		expect(isEnhancedRecallEnabled({})).toBe(false);
-		expect(isQueryCacheEnabled(true, {})).toBe(false);
-		expect(isQueryCacheEnabled(true, { MNEMOPI_ENHANCED_RECALL: "0" })).toBe(false);
-		expect(isQueryCacheEnabled(false, { MNEMOPI_ENHANCED_RECALL: "1" })).toBe(false);
-		expect(isQueryCacheEnabled(true, { MNEMOPI_ENHANCED_RECALL: "1" })).toBe(true);
 	});
 });

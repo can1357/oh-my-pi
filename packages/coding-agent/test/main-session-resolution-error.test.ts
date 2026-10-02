@@ -25,6 +25,7 @@ function buildResumeArgs(resume: string, sessionDir?: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 
@@ -36,6 +37,7 @@ function buildContinueArgs(message: string, sessionDir?: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 function buildForkArgs(fork: string, noSession = false, sessionDir?: string): Args {
@@ -47,6 +49,7 @@ function buildForkArgs(fork: string, noSession = false, sessionDir?: string): Ar
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 

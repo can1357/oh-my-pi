@@ -10,8 +10,11 @@ import {
 	type Focusable,
 	TUI,
 } from "@oh-my-pi/pi-tui";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { StreamChatMessage } from "@oh-my-pi/pi-wire";
+import type { StreamChatMessage, TspSpan } from "@oh-my-pi/pi-wire";
+import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import { col, kbd, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import type { StreamConsoleEvent, StreamMuxHost } from "./streamer";
 
 const HISTORY_LIMIT = 50;
@@ -23,6 +26,8 @@ const CHAT_COLORS: readonly ((text: string) => string)[] = [
 	chalk.blue,
 	chalk.magenta,
 ];
+/** Semantic tokens standing in for {@link CHAT_COLORS}, index for index. */
+const CHAT_TOKENS: readonly string[] = ["info", "success", "warning", "link", "accent"];
 
 interface PaneSummary {
 	id: number;
@@ -44,6 +49,10 @@ class StreamConsoleComponent implements Component, Focusable {
 	readonly #logView = new ScrollView([], { height: 1, followTail: true, anchor: "end" });
 	readonly #input = new Input();
 	readonly #logLines: string[] = [];
+	/** Native twin of {@link #logLines}: one keyed text node per entry, built once. */
+	readonly #logNodes: NativeNode[] = [];
+	#native: { revision: number; node: NativeNode } | undefined;
+	#revision = 0;
 	readonly #panes = new Map<number, PaneSummary>();
 	readonly #history: string[] = [];
 	readonly #unsubscribe: () => void;
@@ -108,6 +117,68 @@ class StreamConsoleComponent implements Component, Focusable {
 		this.#ui.requestRender();
 	}
 
+	/**
+	 * Native console: status and details lines, the log (the terminal scrolls
+	 * and keeps the tail), the chat input and the key hints.
+	 */
+	describe(): NativeNode {
+		if (this.#native?.revision === this.#revision) return this.#native.node;
+		const header: TspSpan[] = [
+			this.#linkState === "live"
+				? span("● LIVE", "accent strong")
+				: span(`○ ${this.#linkState === "stopped" ? "offline" : this.#linkState}`, "dim"),
+			span(" "),
+			this.#channel ? span(`#${safeInline(this.#channel)}`) : span("identifying channel", "dim"),
+			span(" · ", "dim"),
+			span(safeInline(this.#title)),
+		];
+		if (this.#user) {
+			header.push(span(" · ", "dim"), span("streaming as "), span(`@${safeInline(this.#user)}`, "accent"));
+		}
+		const paneList =
+			this.#panes.size === 0
+				? "none"
+				: [...this.#panes.values()].map(pane => `${pane.id}:${safeInline(pane.title)}`).join(" ");
+		const details: TspSpan[] = [
+			this.#viewerUrl
+				? span(safeInline(this.#viewerUrl), "link", { href: safeInline(this.#viewerUrl) })
+				: span("waiting for stream server", "dim"),
+			span(" · ", "dim"),
+			span(`👁 ${this.#viewers} watching`),
+			span(" · ", "dim"),
+			span(`panes: ${paneList}`),
+		];
+		const hint = row(
+			[
+				text([span("/title <text> · /quit ·", "dim")]),
+				kbd("up", "up"),
+				kbd("down", "down"),
+				text([span("history ·", "dim")]),
+				kbd("ctrl+c", "quit"),
+				text([span("quit", "dim")]),
+			],
+			{ gap: "xs", align: "center", role: "omp.hint" },
+		);
+		const consoleNode = col(
+			[
+				text(header, { wrap: "none" }),
+				text(details, { wrap: "none" }),
+				col(this.#logNodes.slice(), { grow: 1, role: "omp.stream.log" }),
+				this.#input,
+				hint,
+			],
+			{ role: "omp.stream.console" },
+		);
+		this.#native = { revision: this.#revision, node: consoleNode };
+		return consoleNode;
+	}
+
+	/** Append one log entry in both presentations. */
+	#log(ansi: string, spans: readonly TspSpan[]): void {
+		this.#logLines.push(ansi);
+		this.#logNodes.push(node("text", { spans }, undefined, `${this.#logNodes.length}`));
+	}
+
 	render(width: number): readonly string[] {
 		const height = Math.max(4, this.#ui.terminal.rows);
 		const bodyHeight = Math.max(0, height - 4);
@@ -124,7 +195,9 @@ class StreamConsoleComponent implements Component, Focusable {
 				: [...this.#panes.values()].map(pane => `${pane.id}:${safeInline(pane.title)}`).join(" ");
 		const viewerUrl = this.#viewerUrl ? safeInline(this.#viewerUrl) : chalk.dim("waiting for stream server");
 		const details = `${viewerUrl} ${chalk.dim("·")} 👁 ${this.#viewers} watching ${chalk.dim("·")} panes: ${paneList}`;
-		const hint = chalk.dim("/title <text> · /quit · ↑/↓ history · Ctrl-C quit");
+		const hint = chalk.dim(
+			`/title <text> · /quit · ${formatKeyHints(["up", "down"])} history · ${formatKeyHint("ctrl+c")} quit`,
+		);
 
 		this.#logView.setLines(this.#logLines.map(line => truncateToWidth(line, width)));
 		this.#logView.setHeight(bodyHeight);
@@ -138,6 +211,7 @@ class StreamConsoleComponent implements Component, Focusable {
 	}
 
 	#submit(value: string): void {
+		this.#revision++;
 		const text = value.trim();
 		this.#input.setValue("");
 		if (!text) {
@@ -181,12 +255,15 @@ class StreamConsoleComponent implements Component, Focusable {
 
 	#quit(): void {
 		if (this.#quitting) return;
+		this.#revision++;
 		this.#quitting = true;
 		this.#ui.requestRender();
 		void this.#host.close("stream stopped").finally(() => this.#done.resolve());
 	}
 
 	#acceptEvent(event: StreamConsoleEvent): void {
+		this.#revision++;
+		const dim = (line: string): void => this.#log(chalk.dim(line), [span(line, "dim")]);
 		switch (event.t) {
 			case "link":
 				this.#linkState = event.state;
@@ -195,35 +272,33 @@ class StreamConsoleComponent implements Component, Focusable {
 					if (event.detail !== undefined) this.#viewerUrl = event.detail;
 				}
 				if (event.user !== undefined) this.#user = event.user;
-				this.#logLines.push(chalk.dim(formatLinkEvent(event)));
+				dim(formatLinkEvent(event));
 				break;
 			case "pane":
 				if (event.action === "attached") {
 					this.#panes.set(event.id, event);
-					this.#logLines.push(
-						chalk.dim(`pane attached: #${event.id} ${safeInline(event.title)} ${event.cols}x${event.rows}`),
-					);
+					dim(`pane attached: #${event.id} ${safeInline(event.title)} ${event.cols}x${event.rows}`);
 				} else {
 					this.#panes.delete(event.id);
-					this.#logLines.push(chalk.dim(`pane closed: #${event.id} ${safeInline(event.title)}`));
+					dim(`pane closed: #${event.id} ${safeInline(event.title)}`);
 				}
 				break;
 			case "viewers":
 				this.#viewers = event.n;
-				this.#logLines.push(chalk.dim(`viewers: ${event.n}`));
+				dim(`viewers: ${event.n}`);
 				break;
 			case "chat":
-				this.#logLines.push(formatChatEvent(event.msg));
+				this.#log(formatChatEvent(event.msg), describeChatEvent(event.msg));
 				break;
 			case "title":
 				this.#title = event.title;
-				this.#logLines.push(chalk.dim(`title: ${safeInline(event.title)}`));
+				dim(`title: ${safeInline(event.title)}`);
 				break;
 			case "error":
-				this.#logLines.push(chalk.red(safeInline(event.message)));
+				this.#log(chalk.red(safeInline(event.message)), [span(safeInline(event.message), "error")]);
 				break;
 			case "notice":
-				this.#logLines.push(chalk.dim(safeInline(event.message)));
+				dim(safeInline(event.message));
 				break;
 		}
 		this.#ui.requestRender();
@@ -248,6 +323,15 @@ function formatChatEvent(message: StreamChatMessage): string {
 		? chalk.bold(PURPLE(name))
 		: (CHAT_COLORS[stableNameHash(name) % CHAT_COLORS.length]?.(name) ?? name);
 	return `${chalk.dim(timestamp)} ${coloredName}: ${safeInline(message.text)}`;
+}
+
+/** Native {@link formatChatEvent}: the same line as styled spans. */
+function describeChatEvent(message: StreamChatMessage): TspSpan[] {
+	const time = new Date(message.ts);
+	const timestamp = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
+	const name = safeInline(message.name);
+	const nameToken = message.host ? "accent strong" : CHAT_TOKENS[stableNameHash(name) % CHAT_TOKENS.length];
+	return [span(timestamp, "dim"), span(" "), span(name, nameToken), span(`: ${safeInline(message.text)}`)];
 }
 
 function stableNameHash(name: string): number {

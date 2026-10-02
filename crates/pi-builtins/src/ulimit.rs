@@ -3,7 +3,7 @@ use std::{
 	str::FromStr,
 };
 
-use brush_core::{ExecutionResult, builtins};
+use brush_core::{ExecutionResult, builtins, rlimits::ResourceLimits};
 use clap::{
 	Parser,
 	builder::{IntoResettable, StyledStr},
@@ -37,24 +37,28 @@ enum Virtual {
 }
 
 impl Virtual {
-	fn get(self) -> std::io::Result<(u64, u64)> {
+	const fn vmem_resource() -> rlimit::Resource {
+		if rlimit::Resource::AS.is_supported() {
+			rlimit::Resource::AS
+		} else {
+			rlimit::Resource::VMEM
+		}
+	}
+
+	fn get(self, limits: &ResourceLimits) -> std::io::Result<(u64, u64)> {
 		match self {
 			Self::Pipe => {
 				let lim = nix::unistd::PathconfVar::PIPE_BUF as u64 * 512;
 				Ok((lim, lim))
 			},
-			Self::VMem => rlimit::Resource::AS
-				.get()
-				.or_else(|_| rlimit::Resource::VMEM.get()),
+			Self::VMem => limits.get(Self::vmem_resource()),
 		}
 	}
 
-	fn set(self, soft: u64, hard: u64) -> std::io::Result<()> {
+	fn set(self, limits: &mut ResourceLimits, soft: u64, hard: u64) -> std::io::Result<()> {
 		match self {
 			Self::Pipe => Err(std::io::Error::from(ErrorKind::Unsupported)),
-			Self::VMem => rlimit::Resource::AS
-				.set(soft, hard)
-				.or_else(|_| rlimit::Resource::VMEM.set(soft, hard)),
+			Self::VMem => limits.set(Self::vmem_resource(), soft, hard),
 		}
 	}
 
@@ -72,18 +76,21 @@ enum Resource {
 	Virt(Virtual),
 }
 
+/// Limits live in the shell, never the host process: the shell runs in-process
+/// and subshells are clones, so a host `setrlimit` would cap the host itself.
+/// The shell applies them to each external child between fork and exec.
 impl Resource {
-	fn get(self) -> std::io::Result<(u64, u64)> {
+	fn get(self, limits: &ResourceLimits) -> std::io::Result<(u64, u64)> {
 		match self {
-			Self::Phy(res) => res.get(),
-			Self::Virt(res) => res.get(),
+			Self::Phy(res) => limits.get(res),
+			Self::Virt(res) => res.get(limits),
 		}
 	}
 
-	fn set(self, soft: u64, hard: u64) -> std::io::Result<()> {
+	fn set(self, limits: &mut ResourceLimits, soft: u64, hard: u64) -> std::io::Result<()> {
 		match self {
-			Self::Phy(res) => res.set(soft, hard),
-			Self::Virt(res) => res.set(soft, hard),
+			Self::Phy(res) => limits.set(res, soft, hard),
+			Self::Virt(res) => res.set(limits, soft, hard),
 		}
 	}
 
@@ -253,8 +260,8 @@ impl ResourceDescription {
 		unit:        Unit::KBytes,
 	};
 
-	fn get(&self, hard: bool) -> std::io::Result<String> {
-		let (soft_limit, hard_limit) = self.resource.get()?;
+	fn get(&self, limits: &ResourceLimits, hard: bool) -> std::io::Result<String> {
+		let (soft_limit, hard_limit) = self.resource.get(limits)?;
 		let val = if hard { hard_limit } else { soft_limit };
 
 		if val == rlimit::INFINITY {
@@ -264,8 +271,8 @@ impl ResourceDescription {
 		}
 	}
 
-	fn set(&self, set_hard: bool, value: LimitValue) -> std::io::Result<()> {
-		let (soft, hard) = self.resource.get()?;
+	fn set(&self, limits: &mut ResourceLimits, set_hard: bool, value: LimitValue) -> std::io::Result<()> {
+		let (soft, hard) = self.resource.get(limits)?;
 		let value = match value {
 			LimitValue::Soft => soft,
 			LimitValue::Hard => hard,
@@ -275,9 +282,9 @@ impl ResourceDescription {
 		};
 
 		if set_hard {
-			self.resource.set(soft, value)
+			self.resource.set(limits, soft, value)
 		} else {
-			self.resource.set(value, hard)
+			self.resource.set(limits, value, hard)
 		}
 	}
 
@@ -299,7 +306,9 @@ impl ResourceDescription {
 			Unit::Number => format!("(-{})", self.short),
 			Unit::Seconds => format!("(seconds, -{})", self.short),
 		};
-		let resource = self.get(hard).unwrap_or_else(|e| format!("{e}"));
+		let resource = self
+			.get(context.shell.resource_limits(), hard)
+			.unwrap_or_else(|e| format!("{e}"));
 		writeln!(context.stdout(), "{:<26}{:>16} {}", self.description, unit, resource)
 	}
 
@@ -485,11 +494,12 @@ impl builtins::Command for ULimitCommand {
 		}
 
 		for (resource, value) in resources_to_set {
-			resource.set(self.hard, value)?;
+			resource.set(context.shell.resource_limits_mut(), self.hard, value)?;
 		}
 
 		if resources_to_get.len() == 1 {
-			writeln!(context.stdout(), "{}", resources_to_get[0].get(self.hard)?)?;
+			let limit = resources_to_get[0].get(context.shell.resource_limits(), self.hard)?;
+			writeln!(context.stdout(), "{limit}")?;
 		} else {
 			for resource in resources_to_get {
 				resource.print(&context, self.hard)?;

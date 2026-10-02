@@ -87,5 +87,15 @@
 		"pageBg": "#F8F1E6",
 		"cardBg": "#FFF7EC",
 		"infoBg": "#F1E6D2"
+	},
+	"terminal": {
+		"background": "savannaBg",
+		"foreground": "#3d3226",
+		"chrome": "savannaPanel",
+		"widget": "savannaSurface",
+		"ansi": [
+			"#3d3226", "errorRed", "acaciaGreen", "#a4802b", "#446b9c", "#944d77", "riverBlue", "savannaBorder",
+			"#988570", "#db4241", "#4e982e", "#a98302", "#5182c1", "#b55d92", "#4493a1", "savannaSurface"
+		]
 	}
 }

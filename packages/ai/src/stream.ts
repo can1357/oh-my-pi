@@ -18,15 +18,16 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import type { OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
-import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
+import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -62,7 +63,6 @@ import type {
 	FetchImpl,
 	Model,
 	OptionsForApi,
-	ProviderSessionState,
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
@@ -177,6 +177,9 @@ const PROVIDER_INFLIGHT_HEARTBEAT_MS = 5_000;
 const PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS = 250;
 const PROVIDER_INFLIGHT_HEARTBEAT_FLUSH_TIMEOUT_MS = 1_000;
 const PROVIDER_INFLIGHT_RELEASE_TIMEOUT_MS = 5_000;
+const PROVIDER_INFLIGHT_LOCK_RETRY_INITIAL_MS = 25;
+const PROVIDER_INFLIGHT_LOCK_RETRY_MAX_MS = 250;
+const PROVIDER_INFLIGHT_LOCK_RETRY_BUDGET_MS = 3_000;
 
 let configuredProviderMaxInFlightRequests: Record<string, number> = {};
 let providerInFlightRootOverride: string | undefined;
@@ -189,6 +192,9 @@ let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>)
 let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
 let providerInFlightLockCreatedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
 let providerInFlightLockIdentifiedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockMkdirOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockPlatformOverride: NodeJS.Platform | undefined;
+let providerInFlightLockRetryTimings: { budgetMs?: number; initialDelayMs?: number; maxDelayMs?: number } | undefined;
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -353,6 +359,42 @@ async function releaseProviderInFlightLockDirIfSame(
 	} catch {}
 }
 
+// On Windows, mkdir on a lock directory another process is concurrently deleting
+// (delete-pending while a watcher, antivirus, or indexer still holds it) fails
+// with ERROR_ACCESS_DENIED — mapped to EPERM/EACCES — instead of EEXIST, so
+// ordinary contention looks like a permission error. On win32 only, back off and
+// retry briefly; if the failure persists past the budget, rethrow the original
+// error so a real permission problem still surfaces. Every other outcome
+// (success, EEXIST, any other code) exits immediately, keeping non-win32 and
+// non-transient behavior unchanged.
+function isTransientProviderInFlightLockMkdirError(error: NodeJS.ErrnoException): boolean {
+	if ((providerInFlightLockPlatformOverride ?? process.platform) !== "win32") return false;
+	return error.code === "EPERM" || error.code === "EACCES";
+}
+
+async function mkdirProviderInFlightLockDir(lockDir: string, signal?: AbortSignal): Promise<void> {
+	const mkdir = providerInFlightLockMkdirOverride ?? ((dir: string) => fs.mkdir(dir));
+	let failures = 0;
+	let since = Date.now();
+	while (true) {
+		try {
+			await mkdir(lockDir);
+			return;
+		} catch (error) {
+			if (!isTransientProviderInFlightLockMkdirError(error as NodeJS.ErrnoException)) throw error;
+			const now = Date.now();
+			if (failures === 0) since = now;
+			const budgetMs = providerInFlightLockRetryTimings?.budgetMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_BUDGET_MS;
+			if (now - since >= budgetMs) throw error;
+			const initialMs = providerInFlightLockRetryTimings?.initialDelayMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_INITIAL_MS;
+			const maxMs = providerInFlightLockRetryTimings?.maxDelayMs ?? PROVIDER_INFLIGHT_LOCK_RETRY_MAX_MS;
+			const delayMs = Math.min(maxMs, initialMs * 2 ** failures);
+			failures++;
+			await untilAborted(signal, Bun.sleep(delayMs));
+		}
+	}
+}
+
 async function acquireProviderInFlightLock(provider: string, signal?: AbortSignal): Promise<() => Promise<void>> {
 	const lockDir = providerInFlightLockDir(provider);
 	await fs.mkdir(path.dirname(lockDir), { recursive: true });
@@ -360,7 +402,7 @@ async function acquireProviderInFlightLock(provider: string, signal?: AbortSigna
 	while (true) {
 		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 		try {
-			await fs.mkdir(lockDir);
+			await mkdirProviderInFlightLockDir(lockDir, signal);
 			await providerInFlightLockCreatedObserverOverride?.(lockDir);
 			let lockIdentity: ProviderInFlightLockIdentity;
 			try {
@@ -633,6 +675,15 @@ export const __providerInFlightForTesting = {
 	},
 	setLockIdentifiedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
 		providerInFlightLockIdentifiedObserverOverride = observer;
+	},
+	setLockMkdirOverride(mkdir: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockMkdirOverride = mkdir;
+	},
+	setLockPlatformOverride(platform: NodeJS.Platform | undefined): void {
+		providerInFlightLockPlatformOverride = platform;
+	},
+	setLockRetryTimings(timings: { budgetMs?: number; initialDelayMs?: number; maxDelayMs?: number } | undefined): void {
+		providerInFlightLockRetryTimings = timings;
 	},
 	providerDir(provider: string): string {
 		return providerInFlightDir(provider);
@@ -976,6 +1027,9 @@ function streamDispatch<TApi extends Api>(
 	if (model.api === "bedrock-converse-stream") {
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
+	if (model.api === "factory-droid-agent") {
+		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, requestOptions as FactoryDroidOptions);
+	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
 	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
@@ -1205,285 +1259,6 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 		stream.push(event);
 	}
 }
-
-const ANTHROPIC_CACHE_TTL_MS = 5 * 60_000;
-const ANTHROPIC_CACHE_REFRESH_LEAD_MS = 15_000;
-const ANTHROPIC_CACHE_REFRESH_LIMIT = 3;
-const ANTHROPIC_CACHE_REFRESH_STATE_KEY = "anthropic-cache-refresh";
-
-interface AnthropicCacheRefreshPlan {
-	refresh(controller: AbortController): Promise<number | undefined>;
-}
-
-class AnthropicCacheRefreshState implements ProviderSessionState {
-	#controller: AbortController | undefined;
-	#generation = 0;
-	#plan: AnthropicCacheRefreshPlan | undefined;
-	#refreshesRemaining = 0;
-	#timer: NodeJS.Timeout | undefined;
-
-	cancel(): void {
-		this.#generation++;
-		if (this.#timer !== undefined) {
-			clearTimeout(this.#timer);
-			this.#timer = undefined;
-		}
-		this.#controller?.abort();
-		this.#controller = undefined;
-		this.#plan = undefined;
-		this.#refreshesRemaining = 0;
-	}
-
-	arm(plan: AnthropicCacheRefreshPlan, cacheTouchedAtMs: number): void {
-		this.cancel();
-		this.#plan = plan;
-		this.#refreshesRemaining = ANTHROPIC_CACHE_REFRESH_LIMIT;
-		this.#schedule(cacheTouchedAtMs, this.#generation);
-	}
-
-	close(): void {
-		this.cancel();
-	}
-
-	#schedule(cacheTouchedAtMs: number, generation: number): void {
-		const refreshAtMs = cacheTouchedAtMs + ANTHROPIC_CACHE_TTL_MS - ANTHROPIC_CACHE_REFRESH_LEAD_MS;
-		this.#timer = setTimeout(
-			() => {
-				this.#timer = undefined;
-				void this.#refresh(generation);
-			},
-			Math.max(0, refreshAtMs - Date.now()),
-		);
-		this.#timer.unref?.();
-	}
-
-	async #refresh(generation: number): Promise<void> {
-		const plan = this.#plan;
-		if (generation !== this.#generation || !plan || this.#refreshesRemaining <= 0) return;
-
-		const controller = new AbortController();
-		this.#controller = controller;
-		let cacheTouchedAtMs: number | undefined;
-		try {
-			cacheTouchedAtMs = await plan.refresh(controller);
-		} catch (error) {
-			if (generation === this.#generation && !controller.signal.aborted) {
-				logger.debug("Anthropic prompt-cache refresh failed", { error: String(error) });
-			}
-		}
-		if (generation !== this.#generation) return;
-
-		this.#controller = undefined;
-		if (cacheTouchedAtMs === undefined) {
-			this.#plan = undefined;
-			this.#refreshesRemaining = 0;
-			return;
-		}
-
-		this.#refreshesRemaining--;
-		if (this.#refreshesRemaining <= 0) {
-			this.#plan = undefined;
-			return;
-		}
-		this.#schedule(cacheTouchedAtMs, generation);
-	}
-}
-
-function supportsAnthropicCacheRefresh<TApi extends Api>(model: Model<TApi>): boolean {
-	return (
-		model.api === "anthropic-messages" &&
-		model.provider === "anthropic" &&
-		model.transport !== "pi-native" &&
-		isLeakedThinkingHealExempt(model)
-	);
-}
-
-function isAnthropicRefreshPayload(payload: unknown): payload is MessageCreateParamsStreaming {
-	return (
-		typeof payload === "object" &&
-		payload !== null &&
-		"messages" in payload &&
-		Array.isArray(payload.messages) &&
-		"max_tokens" in payload &&
-		typeof payload.max_tokens === "number"
-	);
-}
-
-function isShortAnthropicCacheControl(cacheControl: unknown): boolean {
-	return (
-		typeof cacheControl === "object" &&
-		cacheControl !== null &&
-		"type" in cacheControl &&
-		cacheControl.type === "ephemeral" &&
-		(!("ttl" in cacheControl) || cacheControl.ttl !== "1h")
-	);
-}
-
-function hasShortAnthropicMessageBreakpoint(payload: MessageCreateParamsStreaming): boolean {
-	for (const message of payload.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if ("cache_control" in block && isShortAnthropicCacheControl(block.cache_control)) return true;
-		}
-	}
-	return false;
-}
-
-function isAnthropicGenerationEvent(event: AssistantMessageEvent): boolean {
-	switch (event.type) {
-		case "text_start":
-		case "thinking_start":
-		case "toolcall_start":
-		case "image_end":
-			return true;
-		case "text_delta":
-		case "thinking_delta":
-		case "toolcall_delta":
-			return event.delta.length > 0;
-		default:
-			return false;
-	}
-}
-
-function isAnthropicThinkingActive(model: Model<Api>, payload: MessageCreateParamsStreaming): boolean {
-	if (payload.thinking) return payload.thinking.type !== "disabled";
-	return model.thinking?.mode === "anthropic-adaptive" && payload.output_config?.effort != null;
-}
-
-function createAnthropicCacheRefreshPlan<TApi extends Api>(
-	model: Model<TApi>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-	payload: MessageCreateParamsStreaming,
-): AnthropicCacheRefreshPlan {
-	const thinkingEnabled = isAnthropicThinkingActive(model, payload);
-	return {
-		async refresh(controller) {
-			let cacheRead = 0;
-			let cacheWrite = 0;
-			let cacheTouchedAtMs: number | undefined;
-			let canceledAfterGenerationStarted = false;
-			const response = streamSimpleRequest(model, context, {
-				...options,
-				acceptEmptyResponse: true,
-				anthropicCacheRefreshRequest: !thinkingEnabled,
-				cacheRetention: "short",
-				maxTokens: thinkingEnabled ? options?.maxTokens : 0,
-				onPayload: () => ({
-					...payload,
-					max_tokens: thinkingEnabled ? payload.max_tokens : 0,
-				}),
-				onResponse: () => {
-					cacheTouchedAtMs = Date.now();
-				},
-				onSseEvent: undefined,
-				signal: controller.signal,
-			});
-
-			for await (const event of response) {
-				if ("partial" in event) {
-					cacheRead = event.partial.usage.cacheRead;
-					cacheWrite = event.partial.usage.cacheWrite;
-				}
-				if (event.type === "error") return undefined;
-				if (event.type === "done") {
-					cacheRead = event.message.usage.cacheRead;
-					cacheWrite = event.message.usage.cacheWrite;
-					return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0
-						? cacheTouchedAtMs
-						: undefined;
-				}
-				if (thinkingEnabled && isAnthropicGenerationEvent(event)) {
-					canceledAfterGenerationStarted = true;
-					controller.abort();
-					break;
-				}
-			}
-
-			if (canceledAfterGenerationStarted) {
-				try {
-					await response.result();
-				} catch (error) {
-					if (!controller.signal.aborted) throw error;
-				}
-			}
-			return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0 ? cacheTouchedAtMs : undefined;
-		},
-	};
-}
-
-function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
-	model: Model<TApi>,
-	context: Context,
-	options: SimpleStreamOptions | undefined,
-): AssistantMessageEventStream {
-	const providerSessionState = options?.providerSessionState;
-	if (!options?.anthropicCacheRefresh || !providerSessionState) {
-		return streamSimpleRequest(model, context, options);
-	}
-
-	const existingState = providerSessionState.get(ANTHROPIC_CACHE_REFRESH_STATE_KEY);
-	if (existingState instanceof AnthropicCacheRefreshState) {
-		existingState.cancel();
-	} else if (existingState) {
-		return streamSimpleRequest(model, context, options);
-	}
-	if (!supportsAnthropicCacheRefresh(model) || resolveCacheRetention(options.cacheRetention) !== "short") {
-		return streamSimpleRequest(model, context, options);
-	}
-
-	const refreshState = existingState ?? new AnthropicCacheRefreshState();
-	if (!existingState) providerSessionState.set(ANTHROPIC_CACHE_REFRESH_STATE_KEY, refreshState);
-
-	let cacheTouchedAtMs: number | undefined;
-	let capturedPayload: MessageCreateParamsStreaming | undefined;
-	const inner = streamSimpleRequest(model, context, {
-		...options,
-		onPayload: async (payload, payloadModel) => {
-			const replacement = await options?.onPayload?.(payload, payloadModel);
-			const finalPayload = replacement ?? payload;
-			if (isAnthropicRefreshPayload(finalPayload)) capturedPayload = finalPayload;
-			return replacement;
-		},
-		onResponse: async (response, responseModel) => {
-			cacheTouchedAtMs = Date.now();
-			await options?.onResponse?.(response, responseModel);
-		},
-	});
-	const outer = new AssistantMessageEventStream();
-	const armRefresh = (message: AssistantMessage): void => {
-		if (
-			message.stopReason === "error" ||
-			message.stopReason === "aborted" ||
-			message.usage.cacheRead + message.usage.cacheWrite <= 0 ||
-			cacheTouchedAtMs === undefined ||
-			capturedPayload === undefined ||
-			!hasShortAnthropicMessageBreakpoint(capturedPayload)
-		) {
-			return;
-		}
-		refreshState.arm(createAnthropicCacheRefreshPlan(model, context, options, capturedPayload), cacheTouchedAtMs);
-	};
-
-	void (async () => {
-		try {
-			for await (const event of inner) {
-				if (event.type === "done") armRefresh(event.message);
-				outer.push(event);
-				if (outer.done) return;
-			}
-			if (!outer.done) {
-				const result = await inner.result();
-				armRefresh(result);
-				outer.end(result);
-			}
-		} catch (error) {
-			outer.fail(error);
-		}
-	})();
-	return outer;
-}
-
 function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOptions {
 	if (options?.sessionId) return options;
 	return { ...options, sessionId: crypto.randomUUID() };
@@ -1496,7 +1271,7 @@ export function streamSimple<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
+		return streamSimpleRequest(model, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1509,7 +1284,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions));
 }
 
 /**
@@ -1546,7 +1321,11 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (apiKey?: string, credentialId?: number): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (
+			apiKey?: string,
+			credentialId?: number,
+			oauthIdentity?: OAuthRequestIdentity,
+		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1555,7 +1334,7 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -1623,10 +1402,12 @@ function streamSimpleRequest<TApi extends Api>(
 		void (async () => {
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
+			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1648,13 +1429,14 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
+				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1662,10 +1444,11 @@ function streamSimpleRequest<TApi extends Api>(
 					signal,
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
@@ -2071,6 +1854,7 @@ function mapOptionsForApi<TApi extends Api>(
 		signal: options?.signal,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
+		oauthIdentity: options?.oauthIdentity,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
@@ -2093,7 +1877,6 @@ function mapOptionsForApi<TApi extends Api>(
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
-		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
@@ -2138,11 +1921,21 @@ function mapOptionsForApi<TApi extends Api>(
 					? mapEffortToAnthropicAdaptiveEffort(model, reasoning)
 					: undefined;
 
+			// A caller's maxTokens is the output it asked for, but thinking spends the
+			// same max_tokens: adaptive thinking can use all of it and leave no answer.
+			// Give thinking its budget on top, as the budget-only path below does. An
+			// uncapped request keeps the provider default.
+			const maxTokensWithThinking =
+				base.maxTokens === undefined
+					? undefined
+					: maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
+
 			// For Opus 4.6+ and Sonnet 4.6+: use adaptive thinking with effort level
 			// For older models: use budget-based thinking
 			if (thinkingMode === "anthropic-adaptive") {
 				return castApi<"anthropic-messages">({
 					...base,
+					maxTokens: maxTokensWithThinking,
 					requestModelId: resolveWireModelId(model, reasoning),
 					thinkingEnabled: true,
 					effort,
@@ -2153,28 +1946,39 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 
 			if (ANTHROPIC_USE_INTERLEAVED_THINKING) {
-				return castApi<"anthropic-messages">({
-					...base,
-					requestModelId: resolveWireModelId(model, reasoning),
-					thinkingEnabled: true,
-					thinkingBudgetTokens: thinkingBudget,
-					effort,
-					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
-					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
-				});
+				if (
+					model.maxTokens !== null &&
+					model.maxTokens !== undefined &&
+					model.maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER
+				) {
+					thinkingBudget = model.maxTokens - OUTPUT_FALLBACK_BUFFER;
+				}
+				if (thinkingBudget >= ANTHROPIC_THINKING.minimal) {
+					return castApi<"anthropic-messages">({
+						...base,
+						maxTokens: maxTokensWithThinking,
+						requestModelId: resolveWireModelId(model, reasoning),
+						thinkingEnabled: true,
+						thinkingBudgetTokens: thinkingBudget,
+						effort,
+						toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+						thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+						serviceTier: options?.serviceTier,
+					});
+				}
 			}
 
 			// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 			const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
 
-			// If not enough room for thinking + output, reduce thinking budget
-			if (maxTokens <= thinkingBudget) {
-				thinkingBudget = maxTokens - MIN_OUTPUT_TOKENS;
+			// Keep the provider's output buffer after thinking, reducing the
+			// budget before its wire-level clamp could fall below the API minimum.
+			if (maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER) {
+				thinkingBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
 			}
 
 			// If thinking budget is too low, disable thinking
-			if (thinkingBudget <= 0) {
+			if (thinkingBudget < ANTHROPIC_THINKING.minimal) {
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
@@ -2214,8 +2018,25 @@ function mapOptionsForApi<TApi extends Api>(
 				guardrailTrace: model.guardrailTrace ?? options?.guardrailTrace,
 				requestMetadata: options?.requestMetadata,
 			};
-			// Effort modes send effort directly, no budget_tokens — skip budget inflation.
-			if (model.thinking?.mode === "effort" || model.thinking?.mode === "anthropic-adaptive") {
+			// Adaptive Claude shares max_tokens between thinking and the answer, like
+			// the anthropic-messages adaptive path: a caller's cap is the output it
+			// wants, so add the effort's budget on top. Uncapped requests keep the
+			// provider default.
+			if (model.thinking?.mode === "anthropic-adaptive") {
+				const reasoning = bedrockBase.reasoning;
+				const budget = reasoning
+					? (options?.thinkingBudgets?.[reasoning] ?? BEDROCK_CLAUDE_THINKING[reasoning])
+					: 0;
+				if (!model.reasoning || bedrockBase.maxTokens === undefined || budget <= 0) {
+					return castApi<"bedrock-converse-stream">(bedrockBase);
+				}
+				return castApi<"bedrock-converse-stream">({
+					...bedrockBase,
+					maxTokens: maxTokensWithThinkingBudget(bedrockBase.maxTokens, model.maxTokens, budget),
+				});
+			}
+			// Effort mode sends effort directly, no budget_tokens — skip budget inflation.
+			if (model.thinking?.mode === "effort") {
 				return castApi<"bedrock-converse-stream">(bedrockBase);
 			}
 			const budgetInfo = resolveBedrockThinkingBudget(model as Model<"bedrock-converse-stream">, options);
@@ -2499,6 +2320,26 @@ function mapOptionsForApi<TApi extends Api>(
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
 				wireModelId: resolveWireModelId(cursorModel, effort),
+			});
+		}
+
+		case "factory-droid-agent": {
+			const factoryModel = model as Model<"factory-droid-agent">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff
+					? requireSupportedEffort(factoryModel, options.reasoning)
+					: undefined;
+			return castApi<"factory-droid-agent">({
+				...base,
+				// The wrapper resolves native defaults for the selected OAuth
+				// account; do not turn the discovery scope's cap into a caller cap.
+				maxTokens: options?.maxTokens,
+				reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
+				textVerbosity: options?.textVerbosity,
+				serviceTier: options?.serviceTier,
+				toolChoice: options?.toolChoice,
 			});
 		}
 

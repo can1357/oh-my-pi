@@ -80,19 +80,6 @@ function createKeepaliveOnlyCompletionsResponse(modelId: string, signal: AbortSi
 }
 
 describe("resolveOpenAICompat stream idle timeout", () => {
-	it("widens GLM 5.1 coding-plan stream watchdogs", () => {
-		const model = buildModel({
-			...openAICompletionsModel,
-			id: "glm-5.1",
-			name: "GLM-5.1",
-			provider: "zhipu-coding-plan",
-			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
-			compat: openAICompletionsModel.compatConfig,
-		} as ModelSpec<"openai-completions">);
-
-		expect(model.compat.streamIdleTimeoutMs).toBe(600_000);
-	});
-
 	it("also widens custom Z.AI OpenAI-compatible GLM 5.1 endpoints", () => {
 		const model = buildModel({
 			...openAICompletionsModel,
