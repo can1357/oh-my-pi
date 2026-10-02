@@ -156,7 +156,6 @@ function runFastCommand(arg: string, session: AgentSession): string | undefined 
 	}
 }
 
-
 const SLOW_UNSUPPORTED =
 	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and subscription slow mode on Anthropic.";
 
@@ -1060,8 +1059,6 @@ async function runPresetsCommand(
 			return { message: PRESETS_USAGE, usage: true };
 	}
 }
-
-
 
 /**
  * Refuse persona enter/exit under an active plan/goal/vibe mode (TUI parity:
