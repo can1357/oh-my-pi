@@ -2418,6 +2418,7 @@ describe("buildWakeRelayBody", () => {
 			yielded: true,
 			result,
 			turnText: "",
+			registry: AgentRegistry.global(),
 			error: "[some-provider/some-model] 402 usage balance exhausted",
 			aborted: false,
 			abortReason: undefined,

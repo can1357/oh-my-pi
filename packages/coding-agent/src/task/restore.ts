@@ -107,7 +107,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
 					...softRequestBudgetFor(agentName, session.settings),
 				});
-				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs, registry });
 				const structuredOutput = result.structuredOutput;
 				if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
 					throw new AsyncJobError(text, structuredOutput);
