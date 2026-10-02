@@ -5,9 +5,24 @@ import * as url from "node:url";
 import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
+import type { BundledPiEntry } from "../../scripts/legacy-pi-virtual-module";
 
 const bundledEntries = await collectBundledPiEntries();
 const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
+
+async function runRegistryProbe(entries: BundledPiEntry[], source: string): Promise<unknown> {
+	// Bare package imports in the generated registry need the workspace links.
+	const packageRoot = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..", "..");
+	const registryPath = path.join(packageRoot, `.probe-legacy-pi-${Bun.randomUUIDv7()}.ts`);
+	await Bun.write(registryPath, `${__renderLegacyPiVirtualModule(entries)}\n${source}\n`);
+	try {
+		// Runtime-selected registry filename: static imports cannot exercise its generated module.
+		const registry = await import(url.pathToFileURL(registryPath).href);
+		return registry.observed;
+	} finally {
+		await fs.rm(registryPath, { force: true });
+	}
+}
 
 // Regression for issue #3442: extension validation in compiled-binary mode
 // failed to resolve `@earendil-works/pi-ai/oauth` because the override map
@@ -96,32 +111,31 @@ export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 		const entry = bundledEntries.find(candidate => candidate.key === key);
 		expect(entry).toBeDefined();
 
-		// The rendered registry imports by bare specifier, exactly as the real
-		// bundle does, so it must run somewhere those specifiers resolve — the
-		// package itself. A temp dir has no workspace links and would fail for
-		// a reason unrelated to the export map.
-		const packageRoot = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..", "..");
-		const registryPath = path.join(packageRoot, `.probe-legacy-pi-args-${Bun.randomUUIDv7()}.ts`);
-		await Bun.write(
-			registryPath,
-			`${__renderLegacyPiVirtualModule([entry!])}
-const mod = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
-export const observed = [
-	mod.piEscapeRegexLiteral("a.b*c"),
-	mod.piJoinPath("src", "*.ts"),
-];
-`,
-		);
-		try {
-			// The generated registry has a runtime-selected package-root path; importing it exercises bare resolution.
-			const registryModule = await import(url.pathToFileURL(registryPath).href);
-			expect(registryModule.observed).toEqual(["a\\.b\\*c", path.join("src", "*.ts")]);
-		} finally {
-			await fs.rm(registryPath, { force: true });
-		}
+		expect(
+			await runRegistryProbe(
+				[entry!],
+				`const mod = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
+export const observed = [mod.piEscapeRegexLiteral("a.b*c"), mod.piJoinPath("src", "*.ts")];`,
+			),
+		).toEqual(["a\\.b\\*c", path.join("src", "*.ts")]);
 
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
+	it("loads catalog root and provider-model exports from the bundled graph", async () => {
+		const root = bundledEntries.find(entry => entry.key === "@oh-my-pi/pi-catalog");
+		const provider = bundledEntries.find(entry => entry.key === "@oh-my-pi/pi-catalog/provider-models");
+		if (!root || !provider) throw new Error("Catalog imports are missing from the bundled registry");
+
+		const observed = await runRegistryProbe(
+			[root, provider],
+			`const catalog = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-catalog"]();
+const providers = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-catalog/provider-models"]();
+const result = await catalog.createModelManager(providers.anthropicModelManagerOptions()).refresh("offline");
+export const observed = result.models.some(model => model.id === "claude-3-5-sonnet-20240620");`,
+		);
+		expect(observed).toBe(true);
 	});
 
 	it("expands web search provider wildcard exports for compiled plugin imports", () => {

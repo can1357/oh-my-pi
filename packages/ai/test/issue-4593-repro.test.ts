@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { setBedrockProviderModule, streamBedrock } from "@oh-my-pi/pi-ai/providers/register-builtins";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -75,9 +75,12 @@ describe("idle watchdog local-work deferral (issue #4593)", () => {
 			for await (const item of iterateWithIdleTimeout(source(), {
 				idleTimeoutMs: 50,
 				errorMessage: "stalled",
-				hasPendingLocalWork: () => {
-					workDone.resolve();
-					return busy;
+				localWork: {
+					get hasPendingLocalWork() {
+						workDone.resolve();
+						return busy;
+					},
+					localWorkSettledAt: 0,
 				},
 			})) {
 				items.push(item);
@@ -104,10 +107,13 @@ describe("idle watchdog local-work deferral (issue #4593)", () => {
 			firstItemTimeoutMs: 50,
 			errorMessage: "stalled",
 			firstItemErrorMessage: "first event timed out",
-			hasPendingLocalWork: () => {
-				probeCalls++;
-				if (probeCalls >= 2) workDone.resolve();
-				return busy;
+			localWork: {
+				get hasPendingLocalWork() {
+					probeCalls++;
+					if (probeCalls >= 2) workDone.resolve();
+					return busy;
+				},
+				localWorkSettledAt: 0,
 			},
 		})) {
 			items.push(item);
@@ -155,5 +161,107 @@ describe("idle watchdog local-work deferral (issue #4593)", () => {
 		expect(source.probeCalls).toBeGreaterThanOrEqual(2);
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
+	});
+
+	it("gives the provider a full idle budget after local work that ends just before the deadline", async () => {
+		// The Cursor exec channel sends the tool result only when local work
+		// settles, so the provider cannot answer earlier. A tool that finished
+		// shortly before the idle deadline used to leave the provider only the
+		// remainder of the old window: a `hub wait` capped at the same 300 s as
+		// the watchdog aborted healthy turns a few milliseconds after returning.
+		const idleMs = 1000;
+		const toolDone = Promise.withResolvers<void>();
+		const replyReady = Promise.withResolvers<void>();
+		const source = new AssistantMessageEventStream();
+		let providerSignal: AbortSignal | undefined;
+		const settle = async () => {
+			for (let i = 0; i < 50; i++) await Promise.resolve();
+		};
+		vi.useFakeTimers();
+		try {
+			setBedrockProviderModule({
+				streamBedrock: (_model, _context, options) => {
+					providerSignal = options.signal;
+					void (async () => {
+						const partial = createAssistantMessage();
+						source.push({ type: "start", partial });
+						source.push({ type: "text_delta", contentIndex: 0, delta: "running a local tool", partial });
+						await source.trackLocalWork(toolDone.promise);
+						await replyReady.promise;
+						source.push({ type: "done", reason: "stop", message: createAssistantMessage() });
+					})();
+					return source;
+				},
+			});
+			const resultPromise = streamBedrock(createModel(), baseContext, { streamIdleTimeoutMs: idleMs }).result();
+			await settle();
+
+			// The tool result goes upstream 100 ms before the pre-tool deadline...
+			vi.advanceTimersByTime(idleMs - 100);
+			toolDone.resolve();
+			await settle();
+			// ...and the provider is still thinking when that deadline passes.
+			vi.advanceTimersByTime(200);
+			await settle();
+			replyReady.resolve();
+			await settle();
+			vi.advanceTimersByTime(idleMs);
+
+			const result = await resultPromise;
+			expect(providerSignal?.aborted).toBe(false);
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.stopReason).toBe("stop");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("still aborts a provider that stays silent for a full idle budget after local work settles", async () => {
+		// The fresh window after a tool is an upper bound, not an open-ended
+		// extension: silence past `settledAt + idleMs` is a real provider stall.
+		const idleMs = 1000;
+		const toolDone = Promise.withResolvers<void>();
+		const source = new AssistantMessageEventStream();
+		let providerSignal: AbortSignal | undefined;
+		const settle = async () => {
+			for (let i = 0; i < 50; i++) await Promise.resolve();
+		};
+		vi.useFakeTimers();
+		try {
+			setBedrockProviderModule({
+				streamBedrock: (_model, _context, options) => {
+					providerSignal = options.signal;
+					void (async () => {
+						const partial = createAssistantMessage();
+						source.push({ type: "start", partial });
+						source.push({ type: "text_delta", contentIndex: 0, delta: "running a local tool", partial });
+						await source.trackLocalWork(toolDone.promise);
+						// The provider never answers the tool result.
+					})();
+					return source;
+				},
+			});
+			const resultPromise = streamBedrock(createModel(), baseContext, { streamIdleTimeoutMs: idleMs }).result();
+			await settle();
+
+			vi.advanceTimersByTime(idleMs - 100);
+			toolDone.resolve();
+			await settle();
+			// One millisecond short of a full budget after the tool settled.
+			vi.advanceTimersByTime(idleMs - 1);
+			await settle();
+			expect(providerSignal?.aborted).toBe(false);
+
+			vi.advanceTimersByTime(2);
+			await settle();
+			// Checked before awaiting the result so a watchdog that keeps sliding
+			// fails here instead of hanging until the test timeout.
+			expect(providerSignal?.aborted).toBe(true);
+			const result = await resultPromise;
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Provider stream stalled while waiting for the next event");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

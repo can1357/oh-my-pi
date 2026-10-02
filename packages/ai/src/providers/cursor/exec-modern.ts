@@ -74,7 +74,7 @@ import type { ToolResultMessage } from "../../types";
  * and their translation are consumed together.
  */
 export {
-	cursorEditOwnedReadPath,
+	cursorExecReadPath,
 	cursorRawReadPath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,

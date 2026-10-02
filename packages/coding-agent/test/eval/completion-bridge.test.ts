@@ -137,7 +137,8 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 	const code = [
 		"import json",
 		'plain = completion("hi", model="smol").wait()',
-		'structured = completion("hi", schema={"type": "object"}).wait()',
+		// `await` resolves on a worker thread; it must keep the cell's run context.
+		'structured = await completion("hi", schema={"type": "object"})',
 		'print(json.dumps({"plain": plain, "structured": structured}))',
 	].join("\n");
 	await Bun.write(

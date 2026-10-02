@@ -12,6 +12,9 @@ beforeAll(async () => {
 
 interface CostCtxOptions {
 	cost?: number;
+	/** Task-result portion of `cost`. */
+	subagentCost?: number;
+	subagentTreeCost?: number;
 	advisorCost?: number;
 	model?: Model;
 	now?: Date;
@@ -30,8 +33,10 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 			cacheWrite: 0,
 			premiumRequests: options.premiumRequests ?? 0,
 			cost: options.cost ?? 0,
+			subagentCost: options.subagentCost,
 			tokensPerSecond: null,
 		},
+		subagentTreeCost: options.subagentTreeCost,
 		session: {
 			state: { model: options.model },
 			getAdvisorCost: () => options.advisorCost ?? 0,
@@ -116,5 +121,40 @@ describe("cost status-line segment", () => {
 		const rendered = stripVTControlCharacters(renderSegment("cost", ctx).content);
 		expect(rendered).toMatch(/1\.25.*↑ ★ 2 \+ .*0\.50/);
 		expect(rendered).not.toContain("↓");
+	});
+
+	it("splits subagent spend out of the session's own cost", () => {
+		const noop = () => {};
+		const render = (options: Partial<CostCtxOptions>) =>
+			stripVTControlCharacters(
+				renderSegment("cost", costCtx({ onAdvisorSubscriptionProbe: noop, ...options })).content,
+			);
+
+		// Task results inside `cost` move to the suffix; the `$` is printed once.
+		expect(render({ cost: 0.5, subagentCost: 0.12 })).toBe("$0.38 (+0.12)");
+		// The tree total (grandchildren, running/async agents) wins when larger.
+		expect(render({ cost: 0.5, subagentCost: 0.12, subagentTreeCost: 0.4 })).toBe("$0.38 (+0.40)");
+		// A lagging tree total (roster not hydrated yet) never drops below task results.
+		expect(render({ cost: 0.5, subagentCost: 0.12, subagentTreeCost: 0.05 })).toBe("$0.38 (+0.12)");
+		// Subscription spend keeps the icon only on the session's own amount.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		expect(render({ cost: 0.38, subagentTreeCost: 0.2, usingSubscription: true, model })).toMatch(
+			/0\.38 \(\+0\.20\)$/,
+		);
+		// No subagent spend: no suffix.
+		expect(render({ cost: 0.38 })).toBe("$0.38");
+	});
+
+	it("never repeats a billing unit symbol across session and advisor spend", () => {
+		const render = (options: Partial<CostCtxOptions>) =>
+			stripVTControlCharacters(
+				renderSegment("cost", costCtx({ onAdvisorSubscriptionProbe: () => {}, ...options })).content,
+			);
+		const metered = render({ cost: 0.42, subagentTreeCost: 0.1, advisorCost: 0.08 });
+		expect(metered.split("$")).toHaveLength(2);
+		expect(metered).toMatch(/^\$0\.42 \(\+0\.10\) \+ .*0\.08/);
+		// Differently billed advisor spend keeps its own unit.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		expect(render({ cost: 0.42, advisorCost: 0.08, usingSubscription: true, model })).toMatch(/\$0\.08/);
 	});
 });

@@ -92,6 +92,34 @@ describe("model mentions", () => {
 		}
 	});
 
+	test("child sessions retain parent model agents and reserve their pseudonyms", async () => {
+		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
+		const task = getBundledAgent("task");
+		if (!task) throw new Error("Missing bundled task agent");
+		const inheritedAgent = { ...task, name: "m1", model: ["b/y"] };
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: models[0], systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Child done"] }] }).stream,
+		});
+		const childSession = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: registry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			inheritedSessionAgents: [inheritedAgent],
+		});
+		try {
+			await childSession.prompt("ask ^a/x");
+			expect(childSession.getSessionAgents().map(candidate => [candidate.name, candidate.model])).toEqual([
+				["m1", ["b/y"]],
+				["m2", ["a/x"]],
+			]);
+		} finally {
+			await childSession.dispose();
+		}
+	});
+
 	test("mid-session tags ride a hidden notice instead of the task description", async () => {
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
 		const agent = new Agent({
@@ -187,5 +215,36 @@ describe("model mentions", () => {
 				agent => mentions.mentions.find(mention => mention.agent === agent)?.selector,
 			),
 		).toBe('^b/y <model agent="m9" name="Unknown"/>');
+	});
+
+	test("removeQueuedMessage matches raw text expanded with an already-authorized model mention", async () => {
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: models[0], systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [] }).stream,
+		});
+		const agentSession = new AgentSession({
+			agent,
+			sessionManager: session,
+			modelRegistry: registry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+		});
+		try {
+			// Force queueing instead of an actual turn: prompt() while streaming
+			// applies mention expansion before it queues the message.
+			agentSession.agent.state.isStreaming = true;
+			const raw = "ask ^b/y to help";
+			const queued = await agentSession.prompt(raw, { streamingBehavior: "steer" });
+			expect(queued).toBe(true);
+			expect(agentSession.getQueuedMessages().steering).toEqual(['ask <model agent="m1" name="Y"/> to help']);
+
+			// The RPC client that submitted `raw` only ever holds that raw text;
+			// removal must still find the mention-expanded queued chip.
+			expect(agentSession.removeQueuedMessage(raw, "steering")).toBe(true);
+			expect(agentSession.getQueuedMessages().steering).toEqual([]);
+		} finally {
+			agentSession.agent.state.isStreaming = false;
+			await agentSession.dispose();
+		}
 	});
 });

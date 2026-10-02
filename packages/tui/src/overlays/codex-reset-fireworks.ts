@@ -9,6 +9,11 @@ import {
 } from "../index";
 import { type ThemeColor, theme } from "../theme/theme";
 import { formatKeyHint } from "../app-keybindings";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import type { NativeNode, NativeUiEvent } from "../native/node";
+import { col, node, span, text } from "../native/describe";
+import { actionBar, actionButton } from "../native/overlay";
+import { isNativeRendering } from "../native/state";
 
 const FRAME_INTERVAL_MS = 85;
 const FRAME_COUNT = 34;
@@ -256,6 +261,40 @@ function drawBurst(
 	if (age <= 2) setCell(canvas, centerX, centerY, age === 0 ? "@" : "+", "white", 12);
 }
 
+/**
+ * The celebration for a TSP terminal: the banner's title as a terminal-clocked
+ * shimmer between pulsing sparks, over the event's subtitle. The particle sky
+ * is ANSI-only art.
+ */
+function describeCodexResetFireworks(event: CodexResetFireworksEvent): NativeNode {
+	const title = event.kind === "unscheduled-weekly-reset" ? "OpenAI reset" : "Saved reset";
+	const subtitle =
+		event.kind === "unscheduled-weekly-reset"
+			? "Weekly usage cleared early"
+			: event.added === 1
+				? `New reset banked · ${event.available} available`
+				: `${event.added} resets banked · ${event.available} available`;
+	const spark = (glyph: string, color: FireworkColor): TspSpan =>
+		span(glyph, FIREWORK_THEME_COLORS[color], { fx: "pulse" });
+	// The sheet is the frame (Tern bursts confetti from the pane's top edge for this role).
+	return col(
+		[
+			text([spark("✦ ", "pink"), spark("✧ ", "cyan"), spark("✦", "gold")]),
+			node("shimmer", {
+				text: title,
+				palette: {
+					low: FIREWORK_THEME_COLORS.violet,
+					mid: FIREWORK_THEME_COLORS.gold,
+					high: FIREWORK_THEME_COLORS.white,
+				},
+			}),
+			text([span(subtitle, FIREWORK_THEME_COLORS.cyan)]),
+			actionBar([null, actionButton("Close", "close", { keys: "escape" })]),
+		],
+		{ align: "center", gap: "sm" },
+	);
+}
+
 function renderCanvas(canvas: Array<Array<CanvasCell | undefined>>): string[] {
 	return canvas.map(row => {
 		let output = "";
@@ -300,6 +339,7 @@ class CodexResetFireworksComponent implements Component {
 	#done = Promise.withResolvers<void>();
 	#frame = 0;
 	#disposed = false;
+	#native: NativeNode | undefined;
 
 	constructor(
 		readonly host: CodexResetFireworksHost,
@@ -307,11 +347,14 @@ class CodexResetFireworksComponent implements Component {
 	) {}
 
 	run(): Promise<void> {
-		this.#timer ??= setInterval(() => {
-			if (this.#disposed) return;
-			this.#frame = (this.#frame + 1) % FRAME_COUNT;
-			this.host.ui.requestRender();
-		}, FRAME_INTERVAL_MS);
+		// Frames only repaint the particle sky; a native terminal clocks the described shimmer.
+		if (!isNativeRendering()) {
+			this.#timer ??= setInterval(() => {
+				if (this.#disposed) return;
+				this.#frame = (this.#frame + 1) % FRAME_COUNT;
+				this.host.ui.requestRender();
+			}, FRAME_INTERVAL_MS);
+		}
 		this.host.ui.requestRender();
 		return this.#done.promise;
 	}
@@ -328,6 +371,23 @@ class CodexResetFireworksComponent implements Component {
 
 	handleInput(data: string): void {
 		if (matchesKey(data, "escape") || matchesKey(data, "esc")) this.#done.resolve();
+	}
+
+	/** Close runs what Esc runs. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action" && event.act === "close") this.#done.resolve();
+	}
+
+	/** A glass sheet at the pane's top edge. */
+	readonly nativeOverlay = { role: "omp.overlay.fireworks", anchor: "top", size: "md" } as const;
+
+	invalidate(): void {
+		this.#native = undefined;
+	}
+
+	describe(): NativeNode {
+		this.#native ??= describeCodexResetFireworks(this.event);
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

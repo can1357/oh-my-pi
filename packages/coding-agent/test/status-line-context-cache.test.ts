@@ -20,6 +20,7 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import { initTheme, setSymbolPreset, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { cfgCompactionThresholdPercent } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { getSessionAccentAnsi } from "@oh-my-pi/pi-tui/theme/session-color";
 import { adjustHsv } from "@oh-my-pi/pi-utils";
 import { StatusLineTestComponents } from "./helpers/status-line";
@@ -563,6 +564,37 @@ describe("StatusLineComponent context breakdown", () => {
 		const plain = comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
 		expect(plain).toContain("┃");
 		expect(plain).not.toContain("╎");
+	});
+
+	it("moves the compaction marker when the session's threshold setting changes after a render", () => {
+		const sessionSettings = Settings.isolated();
+		cfgCompactionThresholdPercent.set(sessionSettings, 80);
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 10_000, contextWindow: 100_000, percent: 10 },
+			settings: sessionSettings,
+		});
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			separator: "none",
+			sessionAccent: false,
+			contextLine: "annotated",
+		});
+		const markerAt = (): number =>
+			comp
+				.getTopBorder(80)
+				.content.replaceAll(/\x1b\[[0-9;]*m/g, "")
+				.indexOf("┃");
+
+		const before = markerAt();
+		expect(before).toBeGreaterThanOrEqual(0);
+		cfgCompactionThresholdPercent.set(sessionSettings, 40);
+		const after = markerAt();
+		expect(after).toBeGreaterThanOrEqual(0);
+		expect(after).toBeLessThan(before);
 	});
 
 	it("standalone mode renders a plain bottom bar without powerline chrome", () => {

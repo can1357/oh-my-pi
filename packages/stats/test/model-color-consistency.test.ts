@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildModelColorLookup, MODEL_COLORS } from "../src/client/components/chart-shared";
+import { buildModelColorLookup, SERIES_COLORS } from "../src/client/data/colors";
 
 type ModelRequestRecord = Readonly<{
 	model: string;
@@ -21,12 +21,12 @@ describe("buildModelColorLookup", () => {
 
 		const lookup = buildModelColorLookup(records);
 
-		expect(lookup.get("Luna::provider-luna")).toBe(MODEL_COLORS[0]);
-		expect(lookup.get("Sol::provider-sol")).toBe(MODEL_COLORS[1]);
-		expect(lookup.get("Opus::provider-opus")).toBe(MODEL_COLORS[2]);
-		expect(lookup.get("Fable::provider-fable")).toBe(MODEL_COLORS[3]);
-		expect(lookup.get("Shared::provider-a")).toBe(MODEL_COLORS[4]);
-		expect(lookup.get("Shared::provider-z")).toBe(MODEL_COLORS[5]);
+		expect(lookup.get("Luna::provider-luna")).toBe(SERIES_COLORS[0]);
+		expect(lookup.get("Sol::provider-sol")).toBe(SERIES_COLORS[1]);
+		expect(lookup.get("Opus::provider-opus")).toBe(SERIES_COLORS[2]);
+		expect(lookup.get("Fable::provider-fable")).toBe(SERIES_COLORS[3]);
+		expect(lookup.get("Shared::provider-a")).toBe(SERIES_COLORS[4]);
+		expect(lookup.get("Shared::provider-z")).toBe(SERIES_COLORS[5]);
 		expect(lookup.get("Shared::provider-a")).not.toBe(lookup.get("Shared::provider-z"));
 		expect(records).toEqual(originalRecords);
 	});

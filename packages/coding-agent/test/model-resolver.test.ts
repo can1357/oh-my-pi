@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { logger } from "@oh-my-pi/pi-utils";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
@@ -870,15 +871,15 @@ describe("role priorities and chains", () => {
 	test("appends non-explicit web defaults after a configured primary", () => {
 		const exa = roleChainModel("web", "exa");
 		const parallel = roleChainModel("web", "parallel");
-		const perplexity = roleChainModel("web", "perplexity");
+		const duckduckgo = roleChainModel("web", "duckduckgo");
 		const settings = Settings.isolated({ modelRoles: { web: "web/exa" } });
 
-		const chain = resolveRoleChain("web", settings, [exa, parallel, perplexity]);
+		const chain = resolveRoleChain("web", settings, [exa, parallel, duckduckgo]);
 
 		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
 			["web/exa", true],
 			["web/parallel", false],
-			["web/perplexity", false],
+			["web/duckduckgo", false],
 		]);
 	});
 
@@ -917,43 +918,6 @@ describe("role priorities and chains", () => {
 		expect(resolveRoleChain("web", settings, [exa, parallel]).map(candidate => candidate.model.id)).toEqual(["exa"]);
 	});
 
-	test("hoists a provider within defaults without moving an explicit primary", () => {
-		const openai = roleChainModel("openai", "gpt-image-1");
-		const xai = roleChainModel("xai", "grok-imagine-image");
-		const defaults = resolveRoleChain("image", Settings.isolated(), [openai, xai], { hoistProvider: "xai" });
-		expect(defaults.map(candidate => candidate.model.provider)).toEqual(["xai", "openai"]);
-
-		const configured = resolveRoleChain(
-			"image",
-			Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } }),
-			[openai, xai],
-			{ hoistProvider: "xai" },
-		);
-		expect(configured.map(candidate => [candidate.model.provider, candidate.explicit])).toEqual([
-			["openai", true],
-			["xai", false],
-		]);
-
-		const google = roleChainModel("google-antigravity", "gemini-3-pro-image");
-		const explicitFallbacks = resolveRoleChain(
-			"image",
-			Settings.isolated({
-				modelRoles: { image: "openai/gpt-image-1" },
-				"retry.fallbackChains": {
-					image: ["google-antigravity/gemini-3-pro-image", "xai/grok-imagine-image"],
-				},
-			}),
-			[openai, google, xai],
-			{ hoistProvider: "xai" },
-		);
-		expect(explicitFallbacks.map(candidate => candidate.model.provider)).toEqual([
-			"openai",
-			"google-antigravity",
-			"xai",
-		]);
-		expect(explicitFallbacks.every(candidate => candidate.explicit)).toBe(true);
-	});
-
 	test("deduplicates by routed identity while retaining distinct upstream routes", () => {
 		const settings = Settings.isolated({
 			modelRoles: { routed: "openrouter/z-ai/glm-4.7@cerebras" },
@@ -972,8 +936,8 @@ describe("role priorities and chains", () => {
 
 	test("ignores configured kind roles during default chat-model resolution", () => {
 		const chat = roleChainModel("anthropic", "chat-model");
-		const image = roleChainModel("openai", "gpt-image-1");
-		const settings = Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } });
+		const image = roleChainModel("openai", "gpt-image-2");
+		const settings = Settings.isolated({ modelRoles: { image: "openai/gpt-image-2" } });
 
 		expect(resolveModelFromSettings({ settings, availableModels: [chat, image] })).toBe(chat);
 	});
@@ -981,7 +945,7 @@ describe("role priorities and chains", () => {
 	test("memory inherits configured tiny without kind roles inheriting configured default", () => {
 		const tiny = roleChainModel("local", "tiny-model");
 		const defaultModel = roleChainModel("local", "default-model");
-		const image = roleChainModel("openai", "gpt-image-1");
+		const image = roleChainModel("openai", "gpt-image-2");
 		const settings = Settings.isolated({
 			modelRoles: {
 				default: "local/default-model",
@@ -990,7 +954,7 @@ describe("role priorities and chains", () => {
 		});
 
 		expect(resolveRoleChain("memory", settings, [defaultModel, tiny])[0]?.model.id).toBe("tiny-model");
-		expect(resolveRoleChain("image", settings, [defaultModel, image])[0]?.model.id).toBe("gpt-image-1");
+		expect(resolveRoleChain("image", settings, [defaultModel, image])[0]?.model.id).toBe("gpt-image-2");
 	});
 });
 
@@ -2041,6 +2005,37 @@ describe("resolveModelScope", () => {
 		expect(scoped).toHaveLength(1);
 		expect(scoped[0].model.provider).toBe("openai");
 		expect(scoped[0].model.id).toBe("gpt-5.5");
+	});
+
+	test("keeps non-chat runners out of the scope without reporting them as unmatched (#14016)", async () => {
+		const runnerSpec = (provider: string, id: string, kind: Model["kind"]) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				kind,
+				provider,
+				baseUrl: "https://example.com",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 1024,
+			});
+		const judge = runnerSpec("openrouter", "~typesafe/jev-latest", "judge");
+		const search = runnerSpec("web", "exa", "search");
+		const chat = openaiGpt55Models;
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const scoped = await resolveModelScope(
+				["openrouter/~typesafe/jev-latest", "web/*", "openai/gpt-5.5", "nonexistent-model"],
+				{ getAvailable: kind => (kind === "all" ? [...chat, judge, search] : chat) },
+			);
+			expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["openai/gpt-5.5"]);
+			expect(warn.mock.calls.map(call => call[0])).toEqual(['No models match pattern "nonexistent-model"']);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	test("resolves role aliases in --models scope to the role's model with its thinking level", async () => {

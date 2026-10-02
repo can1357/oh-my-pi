@@ -87,6 +87,14 @@ export class CacheInvalidationMarkerComponent extends MessageDividerComponent {
 			labelColor: "muted",
 			ruleColor: "dim",
 			ruleWidth: 10,
+			role: "omp.marker.cache-miss",
+			native: {
+				icon: "database",
+				label: () =>
+					info.reprocessedTokens > 0
+						? `Cache miss · ${formatNumber(info.reprocessedTokens)} tokens`
+						: "Cache miss",
+			},
 			// Too narrow to frame — preserve the legacy bare label.
 			truncateWhenNarrow: false,
 		});

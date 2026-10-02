@@ -23,7 +23,7 @@ import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
 	MCPAuthChallenge,
 	MCPServerConnection,
@@ -132,6 +132,10 @@ async function resolveOutboundUrlArgs(
 	seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
 	if (typeof value === "string") {
+		// Only arguments that are themselves URLs: the router's repair of a
+		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
+		// mentions one.
+		if (!extractUriScheme(value)) return value;
 		const router = InternalUrlRouter.instance();
 		const url = router.normalize(value);
 		if (!router.canHandle(url)) return value;
@@ -691,6 +695,14 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
 	}
 
+	describeCall(args: unknown, _options: RenderResultOptions) {
+		return describeMCPCall(normalizeToolArgs(args), this.label);
+	}
+
+	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
+		return describeMCPResult(result, options, normalizeToolArgs(args));
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: unknown,
@@ -812,6 +824,14 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 
 	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
 		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
+	}
+
+	describeCall(args: unknown, _options: RenderResultOptions) {
+		return describeMCPCall(normalizeToolArgs(args), this.label);
+	}
+
+	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
+		return describeMCPResult(result, options, normalizeToolArgs(args));
 	}
 
 	async execute(

@@ -8,6 +8,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
+import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
@@ -1656,6 +1657,60 @@ describe("ModelRegistry", () => {
 			expect(headers?.["X-Model"]).toBeUndefined();
 		});
 
+		test.each([
+			["provider headers", "provider", true, { "X-Shared": "provider" }],
+			["model override headers", "modelOverride", true, { "X-Shared": "model", "X-Model": "model" }],
+			["runtime provider headers", "runtimeProvider", true, { "X-Shared": "runtime", "X-Runtime": "runtime" }],
+			["provider headers (lazy catalog)", "provider", false, { "X-Shared": "provider" }],
+			["model override headers (lazy catalog)", "modelOverride", false, { "X-Shared": "model", "X-Model": "model" }],
+			[
+				"runtime provider headers (lazy catalog)",
+				"runtimeProvider",
+				false,
+				{ "X-Shared": "runtime", "X-Runtime": "runtime" },
+			],
+		] as const)("refreshes keep discovered %s one resolver deep", async (_name, scenario, materialized, expected) => {
+			writeRawModelsJson({
+				proxy: {
+					baseUrl: "https://proxy.example/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					headers: { "X-Shared": "provider", "X-Provider": "provider" },
+					discovery: { type: "openai-models-list" },
+					models: [],
+					...(scenario === "modelOverride"
+						? { modelOverrides: { "gpt-5": { headers: { "X-Shared": "model", "X-Model": "model" } } } }
+						: {}),
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("https://proxy.example/v1/models", ["gpt-5"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			if (materialized) registry.getAll();
+			if (scenario === "runtimeProvider") {
+				registry.registerProvider("proxy", { headers: { "X-Shared": "runtime", "X-Runtime": "runtime" } });
+			}
+			// Every nested resolver layer re-resolves its sources, each behind one
+			// abort listener; the count is the resolver's depth.
+			const resolveCountingListeners = async () => {
+				const model = registry.find("proxy", "gpt-5");
+				const controller = new AbortController();
+				const addEventListener = spyOn(controller.signal, "addEventListener");
+				const headers = await model?.resolveHeaders?.(controller.signal);
+				return { headers, listeners: addEventListener.mock.calls.length };
+			};
+
+			await registry.refreshProvider("proxy", "online");
+			const first = await resolveCountingListeners();
+			for (let refresh = 0; refresh < 5; refresh++) {
+				await registry.refreshProvider("proxy", "online");
+			}
+			const sixth = await resolveCountingListeners();
+
+			expect(first.headers).toMatchObject({ ...expected, "X-Provider": "provider" });
+			expect(sixth.headers).toEqual(first.headers);
+			expect(sixth.listeners).toBe(first.listeners);
+		});
+
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
 			const model = minimaxReplace.find("minimax-code", "MiniMax-M2.5");
 			const compat = getOpenAICompat(model);
@@ -2151,6 +2206,75 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("Factory Droid account residency", () => {
+		test("uses the selected token's region instead of a sibling account's region", async () => {
+			await authStorage.credentials.set("factory-droid", [
+				{
+					type: "oauth",
+					access: "factory-global-token",
+					refresh: "factory-global-refresh",
+					expires: Date.now() + 60_000,
+					region: "global",
+				},
+				{
+					type: "oauth",
+					access: "factory-eu-token",
+					refresh: "factory-eu-refresh",
+					expires: Date.now() + 60_000,
+					region: "eu",
+				},
+			]);
+			authStorage.keys.setRuntime("factory-droid", "factory-eu-token");
+			const requestedUrls: string[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const url = input instanceof Request ? input.url : String(input);
+				requestedUrls.push(url);
+				const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+				expect(headers.get("Authorization")).toBe("Bearer factory-eu-token");
+				if (url.endsWith("/api/feature-flags")) return Response.json({ flags: {} });
+				if (url.endsWith("/api/organization/managed-settings")) {
+					return Response.json({ settings: { modelPolicy: { allowAllFactoryModels: true } } });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("factory-droid", "online");
+
+			expect(requestedUrls).toContain("https://api.eu.factory.ai/api/feature-flags");
+			expect(requestedUrls).toContain("https://api.eu.factory.ai/api/organization/managed-settings");
+			expect(registry.find("factory-droid", "gpt-5.4")?.baseUrl).toBe("https://api.eu.factory.ai/api/llm/o/v1");
+			expect(registry.find("factory-droid", "kimi-k3")).toBeUndefined();
+		});
+
+		test("preserves native capacity despite reference-price and direct-host heuristics", async () => {
+			const testSettings = Settings.isolated();
+			cfgExtendedContext.set(testSettings, false);
+			authStorage.keys.setRuntime("factory-droid", "factory-token");
+			const flags = Object.fromEntries(
+				factoryDroidRegistry().flatMap(({ policy }) =>
+					policy.entitlement.featureFlag ? [[policy.entitlement.featureFlag, true]] : [],
+				),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: testSettings,
+				fetch: async input =>
+					Response.json(
+						String(input).endsWith("/api/feature-flags")
+							? { flags }
+							: { settings: { modelPolicy: { allowAllFactoryModels: true } } },
+					),
+			});
+			await registry.refreshProvider("factory-droid", "online");
+			// Reference-price tiers cannot shrink subscription capacity, and
+			// direct-host capacity heuristics cannot inflate the native input limit.
+			for (const id of ["gpt-6-astra", "grok-4.7", "gpt-5.4"]) {
+				expect(registry.find("factory-droid", id)?.contextWindow).toBe(
+					resolveFactoryDroidPolicy({ id })?.limits.contextWindow,
+				);
+			}
+		});
+	});
+
 	describe("disabled provider filtering", () => {
 		test("getAvailable and getDiscoverableProviders exclude disabled providers from settings", async () => {
 			writeRawModelsJson({
@@ -2202,6 +2326,34 @@ describe("ModelRegistry", () => {
 				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
+		});
+
+		test("a disabled provider's model neither resolves by name nor gets a key", async () => {
+			// Every `resolved.model ?? find(...)` fallback (retry fallback candidates, advisors,
+			// restored and CLI models) and every request path goes through find() and getApiKey():
+			// a disabled provider reached through either would answer despite disabledProviders.
+			await authStorage.credentials.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_test_token_for_disabled",
+					refresh: "ghu_test_token_for_disabled",
+					expires: Date.now() + 60_000,
+				},
+			]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: Settings.isolated({ disabledProviders: ["github-copilot"] }),
+			});
+			const bundled = getBundledModels("github-copilot")[0];
+			if (!bundled) throw new Error("the bundled catalog has no github-copilot model");
+
+			expect(registry.find("github-copilot", bundled.id)).toBeUndefined();
+			expect(await registry.getApiKey(bundled)).toBeUndefined();
+			expect(await registry.getApiKeyForProvider("github-copilot")).toBeUndefined();
+
+			const enabled = new ModelRegistry(authStorage, modelsJsonPath, { settings: Settings.isolated({}) });
+			expect(enabled.find("github-copilot", bundled.id)?.id).toBe(bundled.id);
+			expect(await enabled.getApiKey(bundled)).toBeDefined();
+			expect(await enabled.getApiKeyForProvider("github-copilot")).toBeDefined();
 		});
 	});
 	describe("extended context", () => {
@@ -2265,6 +2417,20 @@ describe("ModelRegistry", () => {
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
+		});
+
+		test("keeps Copilot premium-tier flagships on the default pricing window until extended context is enabled", async () => {
+			// Copilot's long tier is the opt-in `-1m` sibling; the base rows carry
+			// its 1.05M ceiling and no `cost.longContext`, so before the KDL
+			// window rules nothing capped them and every session billed premium.
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("github-copilot", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("github-copilot", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			cfgExtendedContext.set(testSettings, true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("github-copilot", "gpt-5.6-sol")?.contextWindow).toBe(1_050_000);
 		});
 
 		test("custom provider models follow the extended-context toggle without retaining an earlier window", async () => {

@@ -1823,6 +1823,25 @@ impl SpawnRegistry {
 		}
 	}
 
+	/// Pids of recorded processes that are still alive, in spawn order.
+	///
+	/// Liveness is probed through each entry's pinned [`Process`] (pidfd on
+	/// Linux, start-time identity on macOS, open handle on Windows), so a
+	/// recycled pid never reports as one of this run's children. Entries whose
+	/// pin failed at spawn time are skipped — they already exited. The
+	/// recorded set is not mutated; pruning stays with `record`/`build_targets`.
+	#[must_use]
+	pub fn live_pids(&self) -> Vec<i32> {
+		let state = self.state.lock();
+		state
+			.spawned
+			.iter()
+			.filter_map(|entry| entry.process.as_ref())
+			.filter(|process| process.status() == ProcessStatus::Running)
+			.map(Process::pid)
+			.collect()
+	}
+
 	/// Build the kill set from the processes recorded so far. Re-read on every
 	/// signal wave so a child spawned during a grace window — between the
 	/// cancel firing and the next wave — is still reaped.

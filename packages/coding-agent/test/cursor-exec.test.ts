@@ -127,6 +127,49 @@ describe("CursorExecHandlers.grep bridge", () => {
 		expect((sensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 	});
 
+	it("uses independent legacy grep context widths and zero defaults instead of session settings", async () => {
+		const target = path.join(cwd, "context.txt");
+		await Bun.write(target, "before two\nbefore one\nneedle\nafter one\nafter two\n");
+		const settings = Settings.isolated({ "grep.contextBefore": 2, "grep.contextAfter": 2 });
+		const session = createTestSession(cwd, { settings });
+		const scopedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["grep", new GrepTool(session)]]),
+			createGrepTool: createBridgeGrepFactory(session, passthroughRunner()),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+		const search = async (args: { context?: number; contextBefore?: number; contextAfter?: number }) => {
+			const result = await scopedHandlers.grep({ toolCallId: "ctx", pattern: "needle", path: target, ...args });
+			expect(result.isError).toBe(false);
+			return result.content.map(c => (c.type === "text" ? c.text : "")).join("");
+		};
+
+		const plain = await search({});
+		expect(plain).toContain("needle");
+		expect(plain).not.toContain("before one");
+		expect(plain).not.toContain("after one");
+
+		const before = await search({ contextBefore: 2 });
+		expect(before).toContain("before two");
+		expect(before).toContain("before one");
+		expect(before).not.toContain("after one");
+
+		const after = await search({ contextAfter: 1 });
+		expect(after).not.toContain("before one");
+		expect(after).toContain("after one");
+		expect(after).not.toContain("after two");
+
+		const combined = await search({ context: 1, contextBefore: 0, contextAfter: 2 });
+		expect(combined).not.toContain("before one");
+		expect(combined).toContain("after two");
+
+		const symmetric = await search({ context: 1 });
+		expect(symmetric).toContain("before one");
+		expect(symmetric).toContain("after one");
+		expect(symmetric).not.toContain("before two");
+		expect(symmetric).not.toContain("after two");
+	});
+
 	it("honors pi_grep's requested match limit against real files", async () => {
 		// The frame's `limit` caps total surfaced matches. The model-facing schema
 		// has no such parameter, so without a per-call tool the cap is dropped and
@@ -1569,6 +1612,23 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
 
+	it("returns the deleted file size in details, including zero-byte files", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: true,
+			getToolContext: () => yoloToolContext(),
+		});
+		for (const content of ["café", ""]) {
+			const target = path.join(cwd, "size.txt");
+			await Bun.write(target, content);
+			const result = await handlers.delete(create(DeleteArgsSchema, { path: target }));
+			expect(result.isError).toBe(false);
+			expect(result.details).toEqual({ fileSize: Buffer.byteLength(content) });
+			expect(await Bun.file(target).exists()).toBe(false);
+		}
+	});
+
 	it("rechecks a live mutation grant after runtime tool activation", async () => {
 		const target = path.join(cwd, "victim.txt");
 		await Bun.write(target, "remove after upgrade");
@@ -1853,7 +1913,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 			{ path: "a.ts:raw:5+20" },
 			{ path: "a.ts:raw:5-" },
 			{ path: "a.ts:raw:1+20" },
-			{ path: "a.ts" },
+			{ path: "a.ts:raw" },
 			{ path: "a.ts:raw:1+20" },
 		]);
 	});
@@ -1927,6 +1987,85 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		} finally {
 			await removeWithRetries(cwd);
 		}
+	});
+
+	it("returns negative offsets from the end of large files through the real read tool", async () => {
+		const target = path.join(cwd, "long.txt");
+		await Bun.write(target, `${Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n")}\n`);
+		const session = createTestSession(cwd);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["read", new ReadTool(session)]]),
+		});
+		const legacy = await handlers.read(create(ReadArgsSchema, { path: target, offset: -4, limit: 2 }));
+		const modern = await handlers.piRead({
+			toolCallId: "negative-read",
+			args: { path: "long.txt", offset: -4, limit: 2 },
+		} as never);
+		for (const result of [legacy, modern]) {
+			expect(result.isError).toBe(false);
+			expect(result.content).toEqual([{ type: "text", text: "line997\nline998" }]);
+		}
+		const last = await handlers.piRead({
+			toolCallId: "last-line",
+			args: { path: "long.txt", offset: -1 },
+		} as never);
+		expect(last.isError).toBe(false);
+		expect(
+			last.content
+				.map(part => (part.type === "text" ? part.text : ""))
+				.join("")
+				.trimEnd(),
+		).toBe("line1000");
+	});
+
+	it("serves the final lines through the native read frame", async () => {
+		const target = path.join(cwd, "native-tail.txt");
+		await Bun.write(target, `${Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n")}\n`);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
+		});
+		const written: Buffer[] = [];
+		const h2Request = {
+			write(chunk: Buffer) {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 7,
+						execId: "tail-read",
+						message: {
+							case: "readArgs",
+							value: create(ReadArgsSchema, { path: target, offset: -4, limit: 4, toolCallId: "tail-read" }),
+						},
+					}),
+				},
+			}),
+			cursorAssistantMessage(),
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			h2Request,
+			handlers,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+		);
+		const frame = written[0];
+		if (!frame) throw new Error("expected read response");
+		const answer = fromBinary(AgentClientMessageSchema, frame.subarray(5, 5 + frame.readUInt32BE(1)));
+		if (answer.message.case !== "execClientMessage" || answer.message.value.message.case !== "readResult") {
+			throw new Error("expected read result");
+		}
+		const result = answer.message.value.message.value.result;
+		if (result.case !== "success" || result.value.output.case !== "content") throw new Error("expected read content");
+		expect(result.value.output.value.trimEnd()).toBe("line997\nline998\nline999\nline1000");
 	});
 
 	it("escapes pi_grep's pattern when the frame asks for a literal search", async () => {

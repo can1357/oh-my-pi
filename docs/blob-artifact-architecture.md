@@ -6,7 +6,7 @@ This document describes how coding-agent stores large/binary payloads outside se
 
 The runtime uses two different persistence mechanisms for different data shapes:
 
-- **Content-addressed blobs** (`blob:sha256:<hash>`): global storage used to externalize large image base64 payloads and provider image data URLs from persisted session entries.
+- **Content-addressed blobs** (`blob:sha256:<hash>`): global storage used to externalize image base64 payloads, preserved image/frame archives, generated-image results, and provider image data URLs from persisted session entries.
 - **Session-scoped artifacts** (files under `<sessionFile-without-.jsonl>/`): per-session text files used for full tool outputs and subagent outputs.
 
 They are intentionally separate:
@@ -73,11 +73,13 @@ Allocation behavior:
 
 If the artifact directory is missing, initialization creates it and allocation starts from `0`.
 
+`ArtifactManager.save()` uses `writeArtifact()`: writes to a temporary sibling, verifies byte count, file size, and readability, then publishes atomically. Failure removes the temporary file and preserves an existing destination.
+
 Non-persistent sessions without an adopted manager can store `saveArtifact(...)` content in memory under numeric IDs, but `artifact://` resolution is file-backed through registered artifact directories.
 
 ### Agent output IDs (`agent://`)
 
-`AgentOutputManager` allocates IDs from the requested name, used verbatim the first time and suffixed (`-2`, `-3`, …) only when repeated. Nested outputs use a dot-qualified parent prefix (for example `Parent.Child`). Initialization scans both `.md` outputs and `.jsonl` child-session files so resume cannot clobber either; the reserved advisor transcript stem is never allocated unchanged.
+`AgentOutputManager` allocates IDs from the requested name, used verbatim the first time and suffixed (`-2`, `-3`, …) only when repeated. Nested outputs use a dot-qualified parent prefix (for example `Parent.Child`). Initialization scans both `.md` outputs and `.jsonl` child-session files so resume cannot clobber either; the advisor transcript stem and pinned-HUD toggle sentinel are reserved.
 
 ## Persistence dataflow
 
@@ -87,10 +89,10 @@ Before a session entry is written — incremental append (`#appendToSessionFile`
 
 Key behaviors:
 
-1. **Large string truncation**: oversized strings are cut and suffixed with `"[Session persistence truncated large content]"`; signature fields (`thinkingSignature`, `thoughtSignature`, `textSignature`) are cleared instead of truncated.
-2. **Transient field stripping**: `partialJson` and `jsonlEvents` are removed from persisted entries.
+1. **Large string truncation**: ordinary strings exceeding 500,000 characters are cut and suffixed with `"[Session persistence truncated large content]"`. Signed blocks, signature fields, redacted/encrypted reasoning, Anthropic server-tool history, and Anthropic compaction carriers are preserved verbatim for valid provider replay.
+2. **Duplicate/transient field stripping**: `jsonlEvents` is removed. OpenAI Responses thinking signatures already covered by the native provider payload are omitted from the persisted copy, as is MCP `structuredContent` whose rendered output was spilled to an artifact. In-memory entries remain intact.
 3. **Image externalization to blobs**:
-   - image blocks in `content` arrays are externalized when `data` is not already a blob ref and base64 length is at least threshold (`BLOB_EXTERNALIZE_THRESHOLD = 1024`),
+   - image blocks in `content`, image payloads in `images[]`, snapcompact `frames[]`, and `image_generation_call.result` are externalized when not already blob refs and base64 length is at least threshold (`BLOB_EXTERNALIZE_THRESHOLD = 1024`),
    - provider-style `image_url` data URLs are externalized when they start with `data:image/` and contain `;base64,`,
    - image block `data` is stored as decoded binary bytes,
    - provider data URLs are stored as the original UTF-8 data URL string,
@@ -102,12 +104,14 @@ This keeps session JSONL compact while preserving recoverability.
 
 When opening a session (`setSessionFile`), after migrations, `SessionManager` runs `resolveBlobRefsInEntries()`.
 
-For message/custom-message image blocks with `blob:sha256:<hash>` and for persisted provider `image_url` fields with blob refs:
+For persisted image blocks/image payloads, generated-image results, and provider `image_url` fields with `blob:sha256:<hash>`:
 
 - reads blob bytes from blob store,
 - converts image-block bytes back to base64,
 - converts provider `image_url` blobs back to the original string,
 - mutates in-memory entry fields for runtime consumers.
+
+Snapcompact preserved frames remain blob references on eager load. Context rebuilding checks stored byte sizes and resolves only frames retained by the frame budget; missing frames are dropped rather than sent to a provider as storage references.
 
 If a blob is missing:
 
@@ -123,7 +127,7 @@ Behavior:
 
 1. Every chunk is sanitized with `sanitizeWithOptionalSixelPassthrough(..., sanitizeText)` and appended to in-memory accounting.
 2. Optional live `onChunk` receives sanitized pre-column-cap chunks, throttled if configured.
-3. A per-line column cap can drop bytes from long lines in the LLM-facing buffer; when this happens, artifact mirroring starts so the on-disk file keeps the full sanitized stream.
+3. A per-line column cap or a caller-supplied bounded `inline` representation can shorten the LLM-facing buffer; artifact mirroring then keeps the complete sanitized stream. Carriage-return progress updates are normalized to line boundaries, with split CRLF collapsed.
 4. When the in-memory tail buffer would exceed spill threshold (`DEFAULT_MAX_BYTES`, 50KB), sink marks output truncated and starts artifact mirroring if an artifact path is available.
 5. If a file sink is opened, it first writes the current buffer, then all queued/subsequent sanitized chunks.
 6. In-memory buffer is trimmed to a tail window, or to head + elision marker + tail when head retention is configured.
@@ -132,9 +136,9 @@ Behavior:
 Practical effect:
 
 - UI/tool return shows bounded output,
-- full sanitized output is preserved in artifact file and referenced as `artifact://<id>` when file-backed artifact mirroring succeeded.
+- full sanitized output (up to the artifact cap) is preserved in artifact file and referenced as `artifact://<id>` when file-backed artifact mirroring succeeded.
 
-If artifact I/O fails, the sink stops further capture attempts, retains the existing bounded inline output, and still closes its writer. The tool's execution result is unchanged; its output metadata and terminal warning state that full output was not saved completely, without advertising the incomplete artifact as a full recovery source. `dump()` and `dispose()` share completion so concurrent finalization cannot publish success before an asynchronous write or close failure settles. The streaming sink does not enable a disk cap or retry failed capture.
+If artifact I/O fails, the sink stops further capture attempts, retains the existing bounded inline output, and still closes its writer. The tool's execution result is unchanged; its output metadata and terminal warning state that full output was not saved completely, without advertising the incomplete artifact as a full recovery source. `dump()` and `dispose()` share completion so concurrent finalization cannot publish success before an asynchronous write or close failure settles. Failed capture is not retried. The sink caps the artifact file at `artifactMaxBytes` (default 16 MiB; tool executors pass `tools.artifactMaxBytes`, where `0` = unbounded): it keeps a head window (`artifactHeadBytes`, default 3 MiB but at most half the cap) plus a rolling tail, joined by an `ARTIFACT TRUNCATED` notice. When the cap drops bytes, `dump()` reports them as `artifactElidedBytes`, and the output notice labels `artifact://<id>` as a head/tail sample instead of full output.
 
 The capture warning also survives background job delivery, `wait` recovery, non-consuming `read proc://<id>` inspection, cancellation, and transcript rebuilds. Capture failures belong to individual jobs, not the aggregate report. Oversized recovery snapshots can persist the complete annotated report, including healthy jobs' results, and advertise it as a "full report" rather than a full original command log. Each source capture warning appears once in model-facing text and once on its own live or rebuilt terminal row. Individual incomplete captures are still not re-spilled and advertised as full original output.
 
@@ -170,19 +174,22 @@ Failure behavior:
 Handled by `AgentProtocolHandler` over registered active session artifact directories and `<artifactsDir>/<id>.md`:
 
 - `agent://<id>` returns markdown text; nested subagent outputs use the dotted id (`agent://Parent.Child` reads `Parent.Child.md`)
+- resolution refreshes persisted agent-roster references when a calling session file is available and searches that root session's artifact directory before process-global registry directories
+- `write agent://<id>` sends a peer message when IRC is available; `agent://all` is write-only broadcast, not an output file
 - a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
 - extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
+- an id with no `<id>.md` yet that is registered in the agent registry (the registry `write agent://<id>` delivers to) resolves to a progress document instead of an error: the agent's status, every accepted `yield` payload so far (non-terminal sections included), and its latest assistant text, read from the live session or else its retained session file. Once `<id>.md` exists it wins. JSON-path extraction on such an id throws `Output <id> is not published yet`
 
 Failure behavior:
 
-- if no artifact directories are registered: throws `No session - agent outputs unavailable`,
-- if registered directories exist but none are present on disk: throws `No artifacts directory found`,
-- missing output throws `Not found: <id>` with available `.md` output IDs when directory listing succeeds.
+- if no artifact directories are registered and the id is not a registered agent: throws `No session - agent outputs unavailable`,
+- if registered directories exist but none are present on disk and the id is not a registered agent: throws `No artifacts directory found`,
+- an unknown id throws `Not found: <id>` followed by at most five near ids (`Did you mean: …`, fuzzy-matched against `.md` output ids and registered agents), or a pointer to `history://` when nothing is close.
 
 Read tool integration:
 
 - `read` supports line-range and raw selectors for non-extraction internal URL reads
-- line selectors are rejected when an `agent://` URL contains path or query extraction syntax; extraction returns directly without pagination
+- line selectors are rejected for `agent://` JSON-path extraction; extraction returns directly without pagination
 
 ## Resume, fork, and move semantics
 
@@ -214,7 +221,7 @@ Blob implications after fork:
 
 `SessionManager.moveTo()` renames both session file and artifact directory to the new default session directory, with rollback logic if a later step fails. This preserves artifact identity while relocating session scope.
 
-When the destination artifact directory already exists — a session returning to a project it lived in before, whose old artifact path a subagent or eval subprocess kept writing to — the two directories are merged instead: entries move across, directories present on both sides merge recursively, and an entry whose name is already taken at the destination stays at the source (artifact IDs resolve by `<id>.` prefix, so neither copy is overwritten or renamed). A merged move is not rolled back by renaming the directory back; only the session-file rename is.
+When the destination artifact directory already exists — for example, a session returning to a project whose old artifact path a subprocess kept writing to — directories are merged recursively. Entries with a taken name, or numeric `<id>.<tool>.log` artifact ID, stay at the source; failed moves are also stranded and logged. Neither copy is overwritten or renumbered. A merged move is not rolled back by renaming the directory back; only the session-file move is. Cross-device relocation uses copy/remove fallbacks.
 
 ## Failure handling and fallback paths
 
@@ -244,7 +251,7 @@ The two systems intersect only indirectly: both reduce session JSONL bloat, but 
 
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — blob reference format, hashing, put/get, externalize/resolve helpers.
 - [`src/session/artifacts.ts`](../packages/coding-agent/src/session/artifacts.ts) — session artifact directory model and numeric artifact ID/path allocation.
-- [`src/session/streaming-output.ts`](../packages/coding-agent/src/session/streaming-output.ts) — `OutputSink` truncation/spill-to-file behavior and summary metadata.
+- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink` truncation/spill-to-file behavior and summary metadata.
 - [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts) — `BlobStore`/`ArtifactManager` construction, persistence-transform and blob-rehydration call sites, session fork/move interactions.
 - [`src/session/session-persistence.ts`](../packages/coding-agent/src/session/session-persistence.ts) — `prepareEntryForPersistence()`: large-string truncation, transient-field stripping, and synchronous image-blob externalization.
 - [`src/session/session-loader.ts`](../packages/coding-agent/src/session/session-loader.ts) — `resolveBlobRefsInEntries()`: blob-ref rehydration to base64 / data URLs on load.

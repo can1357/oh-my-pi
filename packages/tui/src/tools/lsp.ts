@@ -7,12 +7,14 @@
  * - Grouped references and symbols
  * - Collapsible/expandable views
  */
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { TspSpan, TspText, TspTone, TspTreeNode } from "@oh-my-pi/pi-wire";
+import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
 import { highlightCode as highlightThemeCode, type Theme } from "../theme/theme";
 import {
+	formatCount,
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
@@ -26,6 +28,13 @@ import {
 } from "../render/render-utils";
 import { renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
+import { ansi, code, col, compact, keyed, md, node, row, span, text } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { walkGroupedOutput } from "./grouped-file-output";
+import { diagnosticGlyph, fileHref, fileRow, inlineErrorView } from "./native-view";
+import { activeThemeSymbol } from "../theme/active-symbols";
 
 /** Display arguments for an LSP tool request. */
 export interface LspParams {
@@ -693,10 +702,318 @@ function severityToColor(severity: ParsedDiagnostic["severity"]): "error" | "war
 	}
 }
 
+// =============================================================================
+// Native (TSP) Description
+// =============================================================================
+
+/** The head verb for an LSP action (`type_definition` → `Type definition`). */
+function lspActionTitle(action: string | undefined): string {
+	if (!action || action === "request") return "LSP";
+	const words = action.replace(/_/g, " ");
+	return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Native head (§7.3 lsp): the action as the verb; the file (`:line`) as a
+ * path target, else the query; then the symbol and option facts, then the
+ * result `meta` (a count chip).
+ */
+function lspNativeHead(
+	request: Partial<LspParams> | undefined,
+	fallbackAction: string,
+	meta: readonly TspText[] = [],
+): NativeToolHead {
+	const facts: string[] = [];
+	const symbol = request?.symbol ? plainText(request.symbol).replaceAll(/\r?\n/g, " ") : undefined;
+	let target: string | undefined;
+	let targetKind: NativeToolHead["targetKind"];
+	if (request?.file) {
+		target = request.line !== undefined ? `${shortenPath(request.file)}:${request.line}` : shortenPath(request.file);
+		targetKind = "path";
+	} else if (request?.query) {
+		target = request.query;
+		targetKind = "query";
+	} else if (request?.line !== undefined) {
+		facts.push(`line ${request.line}`);
+	}
+	if (symbol) facts.push(symbol);
+	if (request?.query && target !== request.query) facts.push(`query:${request.query}`);
+	if (request?.new_name) facts.push(`\u2192 ${request.new_name}`);
+	if (request?.apply !== undefined) facts.push(`apply:${request.apply ? "true" : "false"}`);
+	return {
+		title: lspActionTitle(request?.action ?? fallbackAction),
+		target,
+		targetKind,
+		href: request?.file ? fileHref(request.file) : undefined,
+		meta: [...(facts.length > 0 ? [plainText(facts.join(" \u00b7 "))] : []), ...meta],
+	};
+}
+
+/** A diagnostics response, parsed: diagnostics, server failures and partial-failure warnings. */
+interface LspDiagnosticsParse {
+	diagnostics: ParsedDiagnostic[];
+	failures: string[];
+	warnings: string[];
+	/** Lines neither a diagnostic nor a status line (kept verbatim). */
+	other: string[];
+}
+
+const DIAGNOSTIC_AT_RE = /^\d+:\d+\s+\[/;
+const DIAGNOSTICS_SUMMARY_RE = /^\d+ \w+\(s\)(?:, \d+ \w+\(s\))*:?$/;
+/** A per-file status line's leading status glyph (`✘`, `⚠`, a Nerd Font glyph, ASCII `[!!]`). */
+const STATUS_GLYPH_RE = /^(?:\[[^\]\s]*\]|[^\p{L}\p{N}\s./~\\]+)\s+/u;
+/** Per-file summaries (`✗ a.ts: 2 error(s)`, `✓ a.ts: no issues`) repeat what the rows and head count. */
+const FILE_SUMMARY_RE = /: (?:no issues|\d+ \w+\(s\)(?:, \d+ \w+\(s\))*)$/;
+
+/**
+ * Parse a diagnostics response: grouped (`# dir/`, `## file`, `  12:5 [error] …`)
+ * or flat (`file:12:5 [error] …`) diagnostic lines, and the per-file status
+ * lines (`✗ file: all language servers failed (…)`, `⚠ …some servers failed`,
+ * `✓ file: no issues`, `✗ file: 2 error(s)`).
+ */
+function parseLspDiagnostics(lines: readonly string[]): LspDiagnosticsParse {
+	const out: LspDiagnosticsParse = { diagnostics: [], failures: [], warnings: [], other: [] };
+	let file: string | undefined;
+	for (const event of walkGroupedOutput(lines)) {
+		if (event.kind !== "line") {
+			file = event.kind === "file" ? event.path : undefined;
+			continue;
+		}
+		const line = event.text.trim();
+		if (line === "OK" || DIAGNOSTICS_SUMMARY_RE.test(line)) continue;
+		// Matched by wording, not glyph: a transcript may outlive the theme that wrote it.
+		if (/\ball language servers failed\b/.test(line)) {
+			out.failures.push(line.replace(STATUS_GLYPH_RE, ""));
+			continue;
+		}
+		if (/\bsome servers failed\b/.test(line)) {
+			out.warnings.push(line.replace(STATUS_GLYPH_RE, ""));
+			continue;
+		}
+		if (FILE_SUMMARY_RE.test(line)) continue;
+		const parsed = parseDiagnosticMessage(file && DIAGNOSTIC_AT_RE.test(line) ? `${file}:${line}` : line);
+		if (parsed) out.diagnostics.push(parsed);
+		else out.other.push(line);
+	}
+	return out;
+}
+
+/** `2 errors · 1 warning` in the severity tones, or undefined when there are none. */
+function diagnosticCounts(diagnostics: readonly ParsedDiagnostic[]): TspSpan[] | undefined {
+	const counts: Record<ParsedDiagnostic["severity"], number> = { error: 0, warning: 0, info: 0, hint: 0 };
+	for (const d of diagnostics) counts[d.severity]++;
+	const spans: TspSpan[] = [];
+	for (const severity of ["error", "warning", "info", "hint"] as const) {
+		const n = counts[severity];
+		if (!n) continue;
+		if (spans.length > 0) spans.push(span(" \u00b7 ", "dim"));
+		spans.push(span(formatCount(severity, n), severityTone(severity)));
+	}
+	return spans.length > 0 ? spans : undefined;
+}
+
+function severityTone(severity: ParsedDiagnostic["severity"]): TspTone {
+	switch (severity) {
+		case "error":
+			return "error";
+		case "warning":
+			return "warning";
+		case "info":
+			return "info";
+		default:
+			return "muted";
+	}
+}
+
+/** One diagnostic row (role `omp.tool.diagnostic`): severity icon, mono `file:line:col`, source chip, message. */
+function diagnosticRow(diag: ParsedDiagnostic, key: string): NativeNode {
+	const message: TspSpan[] = [span(diag.message)];
+	if (diag.code) message.push(span(` ${diag.code}`, "muted"));
+	return keyed(
+		row(
+			compact([
+				diagnosticGlyph(diag.severity),
+				text([span(`${diag.filePath}:${diag.line}:${diag.col}`, "mono muted")], { wrap: "none" }),
+				diag.source ? node("badge", { text: diag.source }) : undefined,
+				text(message, { wrap: "word", grow: 1 }),
+			]),
+			{ role: "omp.tool.diagnostic" },
+		),
+		key,
+	);
+}
+
+/** A server failure / partial-failure row: the status icon and the message, in its tone. */
+function statusRow(message: string, tone: "error" | "warning", key: string): NativeNode {
+	return keyed(
+		row([diagnosticGlyph(tone), text([span(plainText(message), tone)], { wrap: "word", grow: 1 })], {
+			role: tone === "error" ? "omp.tool.error" : "omp.tool.diagnostic",
+		}),
+		key,
+	);
+}
+
+/**
+ * Diagnostics view: a card when there are diagnostics or failures (rows of
+ * severity icon · `file:line:col` · source · message), an inline `No issues`
+ * otherwise. A failed server is an error row, never "No issues".
+ */
+function describeLspDiagnostics(request: Partial<LspParams> | undefined, fallbackAction: string, lines: string[]) {
+	const parsed = parseLspDiagnostics(lines);
+	const counts = diagnosticCounts(parsed.diagnostics);
+	const failed =
+		parsed.failures.length > 0 ? [span(formatCount("server failure", parsed.failures.length), "error")] : undefined;
+	const rows: NativeNode[] = [
+		...parsed.failures.map((message, i) => statusRow(message, "error", `x${i}`)),
+		...parsed.diagnostics.map((diag, i) => diagnosticRow(diag, `d${i}`)),
+		...parsed.warnings.map((message, i) => statusRow(message, "warning", `w${i}`)),
+	];
+	if (parsed.other.length > 0) rows.push(keyed(code(parsed.other.join("\n"), { wrap: true }), "other"));
+	const hasErrors = parsed.failures.length > 0 || parsed.diagnostics.some(d => d.severity === "error");
+	const meta = compact<TspText>([counts, failed, !counts && !failed && "No issues"]);
+	const head = lspNativeHead(request, fallbackAction, meta);
+	if (parsed.diagnostics.length === 0 && parsed.failures.length === 0) {
+		return { tool: head, inline: true, body: rows.length > 0 ? rows : undefined } satisfies NativeToolView;
+	}
+	return {
+		tool: head,
+		tone: hasErrors ? "error" : "warning",
+		body: rows,
+		preview: { lines: 8 },
+	} satisfies NativeToolView;
+}
+
+/** References grouped by file (§7.3): a file row with the count, then the `line:col` positions. */
+function describeLspReferences(lines: string[]): NativeNode[] {
+	const byFile = new Map<string, string[]>();
+	for (const loc of lines) {
+		const match = loc.trim().match(/^(.+):(\d+):(\d+)$/);
+		if (!match) continue;
+		const [, file, line, col] = match;
+		let locs = byFile.get(file);
+		if (!locs) {
+			locs = [];
+			byFile.set(file, locs);
+		}
+		locs.push(`${line}:${col}`);
+	}
+	const nodes: NativeNode[] = [];
+	for (const [file, locs] of byFile) {
+		const name = plainText(file);
+		nodes.push(
+			keyed(
+				col(
+					[
+						fileRow(name, { chip: { text: String(locs.length), title: formatCount("reference", locs.length) } }),
+						text([span(locs.join("  "), "mono muted")], { wrap: "word" }),
+					],
+					{ gap: "xs" },
+				),
+				name,
+			),
+		);
+	}
+	return nodes;
+}
+
+function describeLspSymbols(lines: string[]): NativeNode | undefined {
+	const roots: TspTreeNode[] = [];
+	const stack: { indent: number; children: TspTreeNode[] }[] = [];
+	let index = 0;
+	for (const line of lines) {
+		if (!line.includes("@") || !line.includes("line")) continue;
+		const symMatch = line.trim().match(/^(\S+)\s+(.+?)\s*@\s*line\s*(\d+)/);
+		if (!symMatch) continue;
+		const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
+		const children: TspTreeNode[] = [];
+		const treeNode: TspTreeNode = {
+			id: `${index++}`,
+			label: [
+				span(plainText(symMatch[1]), "accent"),
+				span(" "),
+				span(plainText(symMatch[2]), "accent"),
+				span(` line ${symMatch[3]}`, "muted"),
+			],
+			open: true,
+			children,
+		};
+		while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
+		(stack[stack.length - 1]?.children ?? roots).push(treeNode);
+		stack.push({ indent, children });
+	}
+	return roots.length > 0 ? node("tree", { nodes: roots }) : undefined;
+}
+
+function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspParams | undefined): NativeToolView {
+	const request = args ?? result.details?.request;
+	const fallbackAction = result.details?.action ?? "request";
+	const content = result.content?.[0];
+	const text = content?.type === "text" ? (content.text ?? "") : "";
+	if (result.isError) return inlineErrorView(lspNativeHead(request, fallbackAction), text || "LSP request failed");
+	if (!text) return { tool: lspNativeHead(request, fallbackAction, ["No result"]), tone: "warning", inline: true };
+
+	const lines = text.split("\n");
+	const statusError = activeThemeSymbol("status.error");
+	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
+	const symbolsMatch = text.match(/Symbols in (.+):/);
+
+	if (/```(\w*)\n([\s\S]*?)```/.test(text)) {
+		return { tool: lspNativeHead(request, fallbackAction), inline: true, body: [md(text)], preview: { lines: 4 } };
+	}
+	if (
+		/\d+\s+(?:error|warning)\(s\)/.test(text) ||
+		text.includes(statusError) ||
+		(request?.action ?? fallbackAction) === "diagnostics"
+	) {
+		return describeLspDiagnostics(request, fallbackAction, lines);
+	}
+	if (refMatch) {
+		const refCount = Number.parseInt(refMatch[1], 10);
+		const body = describeLspReferences(lines);
+		return {
+			tool: lspNativeHead(request, fallbackAction, [formatCount("reference", refCount)]),
+			tone: refCount > 0 ? undefined : "warning",
+			inline: true,
+			body: body.length > 0 ? body : undefined,
+			preview: { lines: 8 },
+		};
+	}
+	if (symbolsMatch) {
+		const body = describeLspSymbols(lines);
+		return {
+			tool: lspNativeHead(request, fallbackAction, [`in ${symbolsMatch[1]}`]),
+			inline: true,
+			body: body ? [body] : undefined,
+			preview: { lines: 8 },
+		};
+	}
+	const hasError = text.includes("Error:") || text.includes(statusError);
+	const hasSuccess = text.includes(activeThemeSymbol("status.success")) || text.includes("Applied");
+	return {
+		tool: lspNativeHead(request, fallbackAction),
+		tone: hasError && !hasSuccess ? "error" : undefined,
+		inline: true,
+		body: [ansi(text)],
+		preview: { lines: 4 },
+	};
+}
+
+const lspResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
 /** Render LSP requests and responses in the transcript. */
 export const lspToolRenderer = {
 	renderCall,
 	renderResult,
+	describeCall(args: LspParams): NativeToolView {
+		return { tool: lspNativeHead(args, "request"), inline: true };
+	},
+	describeResult(
+		result: ToolRenderResult<LspToolDetails>,
+		_options: RenderResultOptions,
+		args?: LspParams,
+	): NativeToolView | undefined {
+		return lspResultMemo.get(result, [], () => describeLspResult(result, args));
+	},
 	mergeCallAndResult: true,
 	inline: true,
 } satisfies ToolRenderer<LspParams, LspToolDetails>;

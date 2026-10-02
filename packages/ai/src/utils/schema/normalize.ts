@@ -1882,7 +1882,7 @@ function inferStrictPrimitiveTypeFromEnumOrConst(node: Record<string, unknown>):
  * repeated calls (different providers, retries, batching) reuse the same
  * computed pair without re-walking the tree.
  */
-const kStrictSchema = Symbol("pi.schema.strict");
+const kStrictSchema = Symbol("omp.schema.strict");
 
 /**
  * A boolean schema (`true`/`false`) or the empty object schema `{}`: an

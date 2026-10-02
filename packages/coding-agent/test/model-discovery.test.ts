@@ -11,7 +11,11 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
-import { discoverOllamaModels, discoveryProbeTimeoutMs } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
+import {
+	discoverOllamaModels,
+	discoverOpenAIModelsList,
+	discoveryProbeTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
@@ -28,6 +32,7 @@ describe("ModelRegistry runtime discovery", () => {
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
 	let originalAnthropicApiKey: string | undefined;
+	let originalLlamaCppBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -39,6 +44,9 @@ describe("ModelRegistry runtime discovery", () => {
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		delete Bun.env.ANTHROPIC_API_KEY;
+		// The developer's shell or ~/.omp/agent/.env must not redirect llama.cpp discovery probes.
+		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
+		delete Bun.env.LLAMA_CPP_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -70,6 +78,11 @@ describe("ModelRegistry runtime discovery", () => {
 			delete Bun.env.ANTHROPIC_API_KEY;
 		} else {
 			Bun.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
+		}
+		if (originalLlamaCppBaseUrl === undefined) {
+			delete Bun.env.LLAMA_CPP_BASE_URL;
+		} else {
+			Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
@@ -296,6 +309,31 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(newModelListCalls).toBe(1);
 		expect(registry.find("gateway", "new-model")).toBeDefined();
 		expect(registry.find("gateway", "old-model")).toBeUndefined();
+	});
+
+	test("refreshIfStale rebuilds only after models config changes on disk", async () => {
+		const gateway = (ids: string[]) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				models: ids.map(id => ({ id, reasoning: false, input: ["text"] })),
+			},
+		});
+		writeRawModelsJson(gateway(["first-model"]));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+		expect(await registry.refreshIfStale()).toBe(false);
+
+		const previousMtime = fs.statSync(modelsJsonPath).mtimeMs;
+		writeRawModelsJson(gateway(["first-model", "added-model"]));
+		const changedTime = new Date(previousMtime + 1_000);
+		fs.utimesSync(modelsJsonPath, changedTime, changedTime);
+
+		expect(registry.find("gateway", "added-model")).toBeUndefined();
+		expect(await registry.refreshIfStale()).toBe(true);
+		expect(registry.find("gateway", "added-model")).toBeDefined();
+		expect(await registry.refreshIfStale()).toBe(false);
 	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
@@ -1407,6 +1445,65 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 	});
 
+	test("lm-studio discovery bounds a loopback probe without shrinking a remote host's budget", async () => {
+		// Regression (#12945): the lm-studio/openai-models-list probe used the flat
+		// remote budget, so every launch with no LM Studio listening on
+		// 127.0.0.1:1234 waited out the full connect timeout instead of the
+		// loopback cap the other implicit local engines honor.
+		vi.useFakeTimers();
+		try {
+			const hang = Promise.withResolvers<Response>();
+			const ctx = {
+				fetch: () => hang.promise,
+				getBearerApiKeyResolver: async () => undefined,
+			};
+			const loopback = discoverOpenAIModelsList(
+				{
+					provider: "lm-studio",
+					api: "openai-completions",
+					baseUrl: "http://127.0.0.1:1234/v1",
+					discovery: { type: "lm-studio" },
+					optional: true,
+				},
+				ctx,
+			);
+			const remote = discoverOpenAIModelsList(
+				{
+					provider: "lm-studio-remote",
+					api: "openai-completions",
+					baseUrl: "http://lm-studio.example:1234/v1",
+					discovery: { type: "lm-studio" },
+					optional: true,
+				},
+				ctx,
+			);
+			const outcomes = new Map<string, string>();
+			for (const [host, probe] of [
+				["loopback", loopback],
+				["remote", remote],
+			] as const) {
+				void probe.then(
+					() => outcomes.set(host, "resolved"),
+					error => outcomes.set(host, error instanceof DOMException ? error.name : String(error)),
+				);
+			}
+
+			// Both probes resolve their credential lookup before arming a deadline,
+			// so drain those microtasks before moving the clock. The drains are
+			// generous on purpose: asserting recorded outcomes (rather than awaiting
+			// a promise that a regression leaves pending) keeps a broken cap a
+			// failure instead of a hang.
+			for (let flush = 0; flush < 50; flush++) await Promise.resolve();
+			vi.advanceTimersByTime(1_000);
+			for (let flush = 0; flush < 50; flush++) await Promise.resolve();
+
+			expect(outcomes.get("loopback")).toBe("TimeoutError");
+			expect(outcomes.get("remote")).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("configured llama.cpp Qwen model keeps its /v1 runtime URL despite a native-root baseUrl override", async () => {
 		writeRawModelsJson({
 			"llama.cpp": {
@@ -2345,6 +2442,79 @@ describe("ModelRegistry runtime discovery", () => {
 			.getAll()
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
+	});
+	test("openai-models-list uses nested token limits with existing context precedence", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "gpt-6.1-sol", limits: { max_input_tokens: 922_000, max_output_tokens: 128_000 } },
+							{
+								id: "openai-test/context-priority",
+								context_length: 100_000,
+								limits: { max_input_tokens: 922_000, max_output_tokens: 128_000 },
+							},
+							{ id: "openai-test/no-limits" },
+							{
+								id: "openai-test/malformed-limits",
+								limits: { max_input_tokens: "invalid", max_output_tokens: "invalid" },
+							},
+							{ id: "openai-test/incomplete-limits", limits: { max_input_tokens: 922_000 } },
+							{
+								id: "openai-test/overflowing-limits",
+								limits: { max_input_tokens: Number.MAX_SAFE_INTEGER, max_output_tokens: 32_768 },
+							},
+							{
+								id: "openai-test/output-limit-with-invalid-input",
+								limits: { max_input_tokens: "invalid", max_output_tokens: 64_000 },
+							},
+							{ id: "gpt-6-sol" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const aiproxyModel = registry.find("openai-test", "gpt-6.1-sol");
+		expect(aiproxyModel?.contextWindow).toBe(1_050_000);
+		expect(aiproxyModel?.maxTokens).toBe(128_000);
+
+		const contextPriority = registry.find("openai-test", "openai-test/context-priority");
+		expect(contextPriority?.contextWindow).toBe(100_000);
+		expect(contextPriority?.maxTokens).toBe(100_000);
+
+		for (const id of [
+			"openai-test/no-limits",
+			"openai-test/malformed-limits",
+			"openai-test/incomplete-limits",
+			"openai-test/overflowing-limits",
+		]) {
+			const model = registry.find("openai-test", id);
+			expect(model?.contextWindow).toBe(128_000);
+			expect(model?.maxTokens).toBe(32_768);
+		}
+
+		const independentOutputLimit = registry.find("openai-test", "openai-test/output-limit-with-invalid-input");
+		expect(independentOutputLimit?.contextWindow).toBe(128_000);
+		expect(independentOutputLimit?.maxTokens).toBe(64_000);
+
+		const legacyReference = registry.find("openai-test", "gpt-6-sol");
+		expect(legacyReference?.contextWindow).toBe(1_050_000);
+		expect(legacyReference?.maxTokens).toBe(128_000);
 	});
 
 	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {

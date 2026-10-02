@@ -100,9 +100,8 @@ async function collectDoneOrder(runner: Runner, ids: Set<string>): Promise<Runne
 	return dones;
 }
 
-// Eval sessions are shared across concurrent agents (subagents inherit the
-// parent's eval session id, per executor-base.ts), so multiple requests can be
-// in flight on one kernel at once. The runner must keep dispatching sibling
+// Auto-backgrounded cells, user Python shortcuts, and kernel-defined tool calls
+// from subagents can all be in flight on one kernel at once. The runner must keep dispatching sibling
 // requests while a cell is parked on a top-level await instead of blocking the
 // control channel until it finishes -- the regression that a naive fix for the
 // Windows numpy import hang (#7985) would introduce.

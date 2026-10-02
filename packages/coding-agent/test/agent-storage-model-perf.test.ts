@@ -6,7 +6,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const MODEL_PERF_FLUSH_DELAY_MS = 100;
+const MODEL_PERF_FLUSH_DELAY_MS = 60_000;
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const AGENT_STORAGE_MODULE = path.resolve(import.meta.dir, "../src/session/agent-storage.ts");
 
@@ -37,9 +37,7 @@ describe("AgentStorage model perf aggregates", () => {
 		vi.useRealTimers();
 		AgentStorage.close();
 		if (tempDir) {
-			try {
-				await tempDir.remove();
-			} catch {}
+			await tempDir.remove();
 			tempDir = undefined as unknown as TempDir;
 		}
 	});
@@ -72,6 +70,24 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(stats?.samples).toBe(2);
 		expect(stats?.tps).toBeCloseTo(1500000 / 9000, 5);
 		expect(stats?.ttftMs).toBeCloseTo(750, 5);
+	});
+
+	it("persists a still-batched sample when the storage closes before the window elapses", async () => {
+		const storage = await openStorage();
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		void storage.recordModelPerf("openai/gpt-5", { outputTokens: 600, durationMs: 3000 });
+
+		AgentStorage.close();
+		const reopened = await AgentStorage.open(dbPath);
+
+		expect(reopened.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(200, 5);
+	});
+
+	it("includes a still-batched sample in an in-process read without waiting for the window", async () => {
+		const storage = await openStorage();
+		void storage.recordModelPerf("openai/gpt-5", { outputTokens: 600, durationMs: 3000 });
+
+		expect(storage.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(200, 5);
 	});
 
 	it("records task subagent samples in the shared model performance aggregate", async () => {
@@ -164,7 +180,7 @@ describe("AgentStorage model perf aggregates", () => {
 			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
 			ttft INTEGER, stop_reason TEXT, timestamp INTEGER
 		)`);
-		const insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
 		const now = Date.now();
 		// Two valid turns totaling 1500 tokens over 8.5s, one with ttft missing.
 		insert.run("openai", "gpt-5", 1000, 6000, 1000, "stop", now - 5000);
@@ -199,7 +215,7 @@ describe("AgentStorage model perf aggregates", () => {
 			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
 			ttft INTEGER, stop_reason TEXT, timestamp INTEGER
 		)`);
-		const insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
 		const now = Date.now();
 		// 257 rows are the minimal cap-boundary fixture: the newest 256 run at
 		// 100 t/s and the one excluded oldest row is a wild 10000 t/s outlier.
@@ -227,8 +243,10 @@ describe("AgentStorage model perf aggregates", () => {
 		const env = {
 			...process.env,
 			HOME: homeDir,
+			USERPROFILE: homeDir,
 			OMP_PROFILE: "",
 			PI_CODING_AGENT_DIR: agentDir,
+			PI_CONFIG_DIR: ".omp",
 			PI_PROFILE: "",
 			XDG_CACHE_HOME: tempDir.join("xdg-cache"),
 			XDG_CONFIG_HOME: tempDir.join("xdg-config"),
@@ -284,4 +302,32 @@ describe("AgentStorage model perf aggregates", () => {
 			db.close();
 		}
 	});
+
+	it("lets a process exit naturally mid-window and still persists the pending batch", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-natural-exit-");
+		const dbPath = tempDir.join("agent.db");
+		const startedAt = Date.now();
+		const exiting = await runProbe(
+			[
+				`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
+				`const storage = await AgentStorage.open(${JSON.stringify(dbPath)});`,
+				'void storage.recordModelPerf("openai/natural-exit", { outputTokens: 10, durationMs: 1000 });',
+			].join("\n"),
+			{ ...process.env, HOME: tempDir.path(), USERPROFILE: tempDir.path() },
+		);
+		expect(exiting.exitCode, exiting.stderr).toBe(0);
+		// A referenced batch timer would hold the process open for the whole window.
+		expect(Date.now() - startedAt).toBeLessThan(MODEL_PERF_FLUSH_DELAY_MS / 2);
+
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			expect(
+				db
+					.query<{ samples: number }, []>("SELECT samples FROM model_perf WHERE model_key = 'openai/natural-exit'")
+					.get(),
+			).toEqual({ samples: 1 });
+		} finally {
+			db.close();
+		}
+	}, 30_000);
 });

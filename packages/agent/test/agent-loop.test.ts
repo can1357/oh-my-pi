@@ -544,6 +544,57 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
 	});
 
+	it("reports malformed JSON to the model instead of running a lenient tool with empty args", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			lenientArgValidation: true,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: {
+								__parseError: "Expected ',' or '}' in object",
+								__rawJson: '{"value":"ok" nope}',
+							},
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolResult = events.find(e => e.type === "message_start" && e.message.role === "toolResult");
+		if (toolResult?.type !== "message_start" || toolResult.message.role !== "toolResult") {
+			throw new Error("expected a tool result message");
+		}
+		expect(toolResult.message.isError).toBe(true);
+		const resultText = toolResult.message.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(resultText).toContain("Expected ',' or '}' in object");
+		expect(resultText).toContain('{"value":"ok" nope}');
+	});
+
 	it("runs completed tool calls after a transient stream_read_error", async () => {
 		const executedParams: Array<{ value: string }> = [];
 		const toolSchema = type({ value: "string" });
@@ -1123,6 +1174,45 @@ describe("agentLoop with AgentMessage", () => {
 		);
 	});
 
+	it("records fallback-resolved alias calls under the resolved tool's name", async () => {
+		// Providers reject `xd://recall` as a replayed function-call name, so the
+		// alias must not reach history, persistence, or the next request.
+		const toolSchema = type({ value: "string" });
+		const deviceTool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "recall",
+			label: "Recall",
+			description: "Mounted device tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `recall: ${params.value}` }], details: params };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "xd://recall", arguments: { value: "x" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			resolveFallbackTool: name => (name === "xd://recall" || name === "recall" ? deviceTool : undefined),
+		};
+
+		const messages = await agentLoop([createUserMessage("recall")], context, config, undefined, mock.stream).result();
+
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		expect(assistant?.content).toContainEqual(
+			expect.objectContaining({ type: "toolCall", id: "tool-1", name: "recall" }),
+		);
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(result).toMatchObject({ toolCallId: "tool-1", toolName: "recall", isError: false });
+		// The follow-up request replays the canonical name.
+		const replayed = mock.calls[1]?.context.messages.find((m): m is AssistantMessage => m.role === "assistant");
+		expect(replayed?.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: "recall" }));
+	});
+
 	it("hands resolveFallbackTool the request's advertised snapshot", async () => {
 		// A host that recovers a mis-spelled name must resolve it against the set
 		// THIS request advertised, not its own live tool state: an MCP
@@ -1522,7 +1612,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(unknownText).toContain("Tool nope not found");
 	});
 
-	it("runs shared tools in parallel and emits completion-ordered results", async () => {
+	it("runs shared tools in parallel and records results in call order", async () => {
 		const toolSchema = type({ value: "string" });
 		const startTimes: Record<string, number> = {};
 		const finishTimes: Record<string, number> = {};
@@ -1593,13 +1683,18 @@ describe("agentLoop with AgentMessage", () => {
 				e.type === "message_start" && e.message.role === "toolResult",
 		);
 		expect(toolResultStarts).toHaveLength(2);
-		expect((toolResultStarts[0].message as ToolResultMessage).toolCallId).toBe("tool-2");
-		expect((toolResultStarts[1].message as ToolResultMessage).toolCallId).toBe("tool-1");
+		expect((toolResultStarts[0].message as ToolResultMessage).toolCallId).toBe("tool-1");
+		expect((toolResultStarts[1].message as ToolResultMessage).toolCallId).toBe("tool-2");
+		// Live execution events still report the fast call as soon as it settles.
+		expect(events.flatMap(e => (e.type === "tool_execution_end" ? [e.toolCallId] : []))).toEqual([
+			"tool-2",
+			"tool-1",
+		]);
 
 		const turnEndEvent = events.find((e): e is Extract<AgentEvent, { type: "turn_end" }> => e.type === "turn_end");
 		expect(turnEndEvent).toBeDefined();
 		if (!turnEndEvent) return;
-		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-2", "tool-1"]);
+		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-1", "tool-2"]);
 	});
 
 	it("resolves function-form concurrency per call", async () => {
@@ -5057,6 +5152,53 @@ describe("agentLoop passive additionalContext", () => {
 		expect(contextEventIndex).toBeGreaterThan(Math.max(...resultEventIndices));
 	});
 
+	it("injects identical context from a batch once, at its first position", async () => {
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		let secondRequest: Context | undefined;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-a", name: "echo", arguments: { value: "a" } },
+						{ type: "toolCall", id: "tool-b", name: "echo", arguments: { value: "b" } },
+						{ type: "toolCall", id: "tool-c", name: "echo", arguments: { value: "c" } },
+					],
+				},
+				request => {
+					secondRequest = request;
+					return { content: ["done"] };
+				},
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: developerConverter,
+			beforeToolCall: async ({ args }) => ({
+				// "c" repeats "a" with a trailing newline: still the same guidance.
+				additionalContext:
+					args.value === "b" ? "context for b" : args.value === "c" ? "shared guidance\n" : "shared guidance",
+			}),
+		};
+		const stream = agentLoop([createUserMessage("echo thrice")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+		}
+
+		const developer = secondRequest?.messages.filter(message => message.role === "developer");
+		expect(developer?.map(message => message.content)).toEqual([
+			[{ type: "text", text: ["shared guidance", "context for b"].join("\n\n") }],
+		]);
+	});
+
 	it("hands the host tool context to the tool untouched and routes its sink through ToolCallContext", async () => {
 		const toolSchema = type({ value: "string" });
 		class HostToolContext {
@@ -5436,6 +5578,7 @@ describe("agentLoop passive additionalContext", () => {
 				return {
 					content: [{ type: "text", text: "rewritten" }],
 					isError: true,
+					additionalContext: "post-tool context survives the error override",
 				};
 			},
 		};
@@ -5466,6 +5609,14 @@ describe("agentLoop passive additionalContext", () => {
 			expect(toolResultMessage.isError).toBe(true);
 			expect(toolResultMessage.content).toEqual([{ type: "text", text: "rewritten" }]);
 		}
+
+		const contextMessage = events
+			.filter(e => e.type === "message_start")
+			.map(e => (e.type === "message_start" ? e.message : undefined))
+			.find((m): m is Extract<AgentMessage, { role: "developer" }> => m !== undefined && m.role === "developer");
+		expect(contextMessage?.content).toEqual([
+			{ type: "text", text: "post-tool context survives the error override" },
+		]);
 	});
 
 	it("fails closed when afterToolCall returns malformed computer provider metadata", async () => {
@@ -6111,6 +6262,71 @@ describe("agentLoop streaming snapshots", () => {
 		expect(cloned.nul).toBeNull();
 	});
 
+	it("isolates snapshots from providers that mutate streaming arguments in place", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createMockModel().model, convertToLlm: identityConverter };
+
+		// Owned-stream / GLM style: the live arguments object and its nested
+		// containers are mutated in place between deltas. `__proto__` arrives as
+		// an own data key the way JSON.parse produces it.
+		const args: Record<string, unknown> = JSON.parse('{"__proto__":{"k":1},"meta":{"tags":["a"]},"content":""}');
+		const toolCall = { type: "toolCall" as const, id: "tc-inplace", name: "noop", arguments: args };
+		const partial = createAssistantMessage([], "toolUse");
+		let advance = (): void => {};
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			if (turn++ > 0) {
+				const done = createAssistantMessage([{ type: "text", text: "ok" }], "stop");
+				stream.push({ type: "start", partial: done });
+				stream.push({ type: "done", reason: "stop", message: done });
+				return stream;
+			}
+			stream.push({ type: "start", partial });
+			const steps: (() => void)[] = [
+				() => {
+					partial.content.push(toolCall);
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+				},
+				...["x", "y", "z"].map(delta => () => {
+					args.content = `${args.content}${delta}`;
+					const meta = args.meta;
+					if (meta && typeof meta === "object" && "tags" in meta && Array.isArray(meta.tags))
+						meta.tags.push(delta);
+					stream.push({ type: "toolcall_delta", contentIndex: 0, delta, partial });
+				}),
+				() => stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial }),
+				() => stream.push({ type: "done", reason: "toolUse", message: partial }),
+			];
+			let step = 0;
+			advance = () => {
+				if (step < steps.length) steps[step++]!();
+			};
+			return stream;
+		};
+
+		const seen: { event: AgentEvent; json: string }[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, streamFn)) {
+			if (event.type === "message_update" && turn === 1) seen.push({ event, json: JSON.stringify(event) });
+			if (
+				(event.type === "message_start" && event.message.role === "assistant") ||
+				event.type === "message_update"
+			) {
+				advance();
+			}
+		}
+
+		expect(seen.length).toBe(5);
+		for (const { event, json } of seen) expect(JSON.stringify(event)).toBe(json);
+		const first = seen[1]!.event;
+		if (first.type !== "message_update" || first.message.role !== "assistant") throw new Error("expected update");
+		const block = first.message.content[0];
+		if (block?.type !== "toolCall") throw new Error("expected toolCall");
+		expect(block.arguments).toEqual({ meta: { tags: ["a", "x"] }, content: "x", ["__proto__"]: { k: 1 } });
+		expect(Object.hasOwn(block.arguments, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(block.arguments)).toBe(Object.prototype);
+	});
+
 	it("shares one immutable snapshot between message and assistantMessageEvent.partial on message_update", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
@@ -6561,85 +6777,93 @@ describe("speculative tool execution", () => {
 		]);
 	});
 
-	it("skips stream speculation sessions when a message transformer is configured", async () => {
-		const schema = type({ value: "string" });
-		const calls: string[] = [];
-		const tool: AgentTool<typeof schema> = {
-			name: "streamed",
-			label: "Streamed",
-			description: "Records stream session opens",
-			parameters: schema,
-			speculation: {
-				stream: {
-					open: ({ parentToolCallId }) => {
-						calls.push(`open:${parentToolCallId}`);
-						return {
-							update() {},
-							finalize() {},
-							commit() {},
-							discard() {},
-						};
+	it.each<{ preserves: boolean; expected: string[] }>([
+		{ preserves: false, expected: ["execute"] },
+		{ preserves: true, expected: ["open:stream-1", "execute"] },
+	])(
+		"opens stream sessions under a message transformer only when it preserves tool calls (%o)",
+		async ({ preserves, expected }) => {
+			const schema = type({ value: "string" });
+			const calls: string[] = [];
+			const tool: AgentTool<typeof schema> = {
+				name: "streamed",
+				label: "Streamed",
+				description: "Records stream session opens",
+				parameters: schema,
+				speculation: {
+					stream: {
+						open: ({ parentToolCallId }) => {
+							calls.push(`open:${parentToolCallId}`);
+							return {
+								update() {},
+								finalize() {},
+								commit() {},
+								discard() {},
+							};
+						},
 					},
 				},
-			},
-			async execute() {
-				calls.push("execute");
-				return { content: [{ type: "text", text: "ok" }] };
-			},
-		};
-		let turn = 0;
-		const streamFn = () => {
-			const response = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				if (turn++ === 0) {
-					const streamingToolCall = {
-						type: "toolCall" as const,
-						id: "stream-1",
-						name: "streamed",
-						arguments: {},
-					};
-					setStreamingPartialJson(streamingToolCall, '{"value":"ok"}');
-					const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
-					const toolCall = {
-						type: "toolCall" as const,
-						id: "stream-1",
-						name: "streamed",
-						arguments: { value: "ok" },
-					};
-					const finalPartial = createAssistantMessage([toolCall], "toolUse");
-					response.push({ type: "start", partial: streamingPartial });
-					response.push({ type: "toolcall_start", contentIndex: 0, partial: streamingPartial });
-					response.push({ type: "toolcall_delta", contentIndex: 0, delta: '"ok"}', partial: streamingPartial });
-					response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalPartial });
-					response.push({ type: "done", reason: "toolUse", message: finalPartial });
-					return;
-				}
-				const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
-				response.push({ type: "start", partial });
-				response.push({ type: "done", reason: "stop", message: partial });
-			});
-			return response;
-		};
+				async execute() {
+					calls.push("execute");
+					return { content: [{ type: "text", text: "ok" }] };
+				},
+			};
+			let turn = 0;
+			const streamFn = () => {
+				const response = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (turn++ === 0) {
+						const streamingToolCall = {
+							type: "toolCall" as const,
+							id: "stream-1",
+							name: "streamed",
+							arguments: {},
+						};
+						setStreamingPartialJson(streamingToolCall, '{"value":"ok"}');
+						const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
+						const toolCall = {
+							type: "toolCall" as const,
+							id: "stream-1",
+							name: "streamed",
+							arguments: { value: "ok" },
+						};
+						const finalPartial = createAssistantMessage([toolCall], "toolUse");
+						response.push({ type: "start", partial: streamingPartial });
+						response.push({ type: "toolcall_start", contentIndex: 0, partial: streamingPartial });
+						response.push({ type: "toolcall_delta", contentIndex: 0, delta: '"ok"}', partial: streamingPartial });
+						response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalPartial });
+						response.push({ type: "done", reason: "toolUse", message: finalPartial });
+						return;
+					}
+					const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
+					response.push({ type: "start", partial });
+					response.push({ type: "done", reason: "stop", message: partial });
+				});
+				return response;
+			};
 
-		// Even an identity transformer can rewrite or remove the call before
-		// dispatch, so stream sessions planning from pre-transform arguments
-		// must never open — matching the direct-admission guard.
-		await agentLoop(
-			[createUserMessage("stream")],
-			{ systemPrompt: [""], messages: [], tools: [tool] },
-			{
-				model: createMockModel({ responses: [] }).model,
-				convertToLlm: identityConverter,
-				getToolContext: () => ({}),
-				transformAssistantMessage: async () => {},
-				speculativeToolExecution: { enabled: true },
-			},
-			undefined,
-			streamFn,
-		).result();
+			// Even an identity transformer can rewrite or remove the call before
+			// dispatch, so stream sessions planning from pre-transform arguments
+			// open only when the transformer declares streamed calls untouched —
+			// matching the direct-admission guard.
+			await agentLoop(
+				[createUserMessage("stream")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+					getToolContext: () => ({}),
+					transformAssistantMessage: async () => {},
+					transformAssistantMessagePreservesToolCalls: preserves,
+					speculativeToolExecution: { enabled: true },
+				},
+				undefined,
+				streamFn,
+			).result();
 
-		expect(calls).toEqual(["execute"]);
-	});
+			expect(calls).toEqual(expected);
+		},
+	);
 
 	it("reconciles streamed calls when the provider iterator ends without a final event", async () => {
 		const schema = type({ value: "string" });

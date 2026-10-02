@@ -1,7 +1,13 @@
-import { describe, expect, it } from "bun:test";
-import { type AuthCredentialStore, AuthStorage } from "../src/auth-storage";
-import type { UsageFetchContext, UsageFetchParams } from "../src/usage";
+import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "../src/auth-storage";
+import { isUsageLimitReached } from "../src/auth/usage-report";
+import * as oauthUtils from "../src/registry/oauth";
+import type { UsageFetchContext, UsageFetchParams, UsageProvider, UsageReport } from "../src/usage";
 import { cursorUsageProvider, parseCursorIndividualUsage, parseCursorUsage } from "../src/usage/cursor";
+import { defaultRankingStrategy } from "../src/usage/registry";
 
 function createCursorAccessToken(sub: string): string {
 	const payload = btoa(JSON.stringify({ sub })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -425,6 +431,103 @@ describe("cursor usage provider", () => {
 		});
 	});
 
+	describe("credential ranking", () => {
+		it("does not let an exhausted Other Models pool block Grok or Composer", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: {
+						enabled: true,
+						limit: 2000,
+						autoPercentUsed: 11,
+						apiPercentUsed: 100,
+					},
+				},
+			});
+			if (!report) throw new Error("expected Cursor usage report");
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			const grokLimits = scopeLimits(report, { modelId: "grok-4.7-xhigh" });
+			const composerLimits = scopeLimits(report, { modelId: "composer-2.5" });
+			const otherLimits = scopeLimits(report, { modelId: "claude-opus-5-high" });
+
+			expect(grokLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+			expect(composerLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+			expect(otherLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-api"]);
+			expect(isUsageLimitReached(grokLimits)).toBe(false);
+			expect(isUsageLimitReached(composerLimits)).toBe(false);
+			expect(isUsageLimitReached(otherLimits)).toBe(true);
+		});
+
+		it("uses the combined pool when Cursor does not report split rails", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: {
+						enabled: true,
+						limit: 2000,
+						totalPercentUsed: 100,
+					},
+				},
+			});
+			if (!report) throw new Error("expected Cursor usage report");
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			const limits = scopeLimits(report, { modelId: "grok-4.7-xhigh" });
+			expect(limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-plan"]);
+			expect(isUsageLimitReached(limits)).toBe(true);
+		});
+
+		it("keeps an Other Models block from sidelining the account for Grok", async () => {
+			const splitReport = (autoPercentUsed: number, apiPercentUsed: number): UsageReport => {
+				const report = parseCursorIndividualUsage({
+					billingCycleEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+					individualUsage: { plan: { enabled: true, limit: 2000, autoPercentUsed, apiPercentUsed } },
+				});
+				if (!report) throw new Error("expected Cursor usage report");
+				return report;
+			};
+			const reports: Record<string, UsageReport> = {
+				"acct-a": splitReport(5, 100),
+				"acct-b": splitReport(95, 50),
+			};
+			const usageProvider: UsageProvider = {
+				id: "cursor",
+				async fetchUsage(params) {
+					return reports[params.credential.accountId ?? ""] ?? null;
+				},
+			};
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-cursor-pool-block-"));
+			const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+			const storage = new AuthStorage(store, {
+				usageProviderResolver: provider => (provider === "cursor" ? usageProvider : undefined),
+			});
+			vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+				const credential = credentials.cursor;
+				return credential ? { apiKey: `api-${credential.accountId}`, newCredentials: credential } : null;
+			});
+			try {
+				const expires = Date.now() + 60 * 60 * 1000;
+				await storage.credentials.set("cursor", [
+					{ type: "oauth", access: "access-a", refresh: "refresh-a", expires, accountId: "acct-a" },
+					{ type: "oauth", access: "access-b", refresh: "refresh-b", expires, accountId: "acct-b" },
+				]);
+
+				// Account A's Other Models pool is spent: third-party models must use B.
+				expect(await storage.keys.get("cursor", "session-other", { modelId: "claude-opus-5-high" })).toBe(
+					"api-acct-b",
+				);
+				// Account A's Cursor Models pool is nearly unused, so Grok still prefers it.
+				expect(await storage.keys.get("cursor", "session-grok", { modelId: "grok-4.7-xhigh" })).toBe("api-acct-a");
+			} finally {
+				vi.restoreAllMocks();
+				storage.close();
+				store.close();
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		});
+	});
+
 	describe("default registration", () => {
 		it("registers Cursor in AuthStorage's default usage resolver", async () => {
 			const store: AuthCredentialStore = {
@@ -572,6 +675,14 @@ describe("cursor usage provider", () => {
 					numRequests: 0,
 					maxRequestUsage: null,
 				},
+				"claude-3-5-sonnet": {
+					numRequests: 80,
+					maxRequestUsage: 500,
+				},
+				"gpt-4-32k": {
+					numRequests: 12,
+					maxRequestUsage: null,
+				},
 			};
 			const usageSummaryPayload = {
 				individualUsage: {
@@ -637,14 +748,19 @@ describe("cursor usage provider", () => {
 				accountId: "account_123",
 				projectId: "project_123",
 			});
-			// The legacy bucket is uncapped (`maxRequestUsage: null`) but still reported,
-			// so it merges ahead of the personal summary instead of vanishing (#6381).
+			// The legacy `gpt-4` bucket is uncapped and always zero on usage-based
+			// plans; next to the personal dollar rails it is dropped, not rendered
+			// as a meaningless "0 requests used" row. A capped legacy bucket still
+			// carries a quota, and an uncapped one with recorded requests still
+			// carries a count, so both stay.
 			expect(report?.limits.map(limit => limit.id)).toEqual([
-				"cursor:requests:gpt-4",
+				"cursor:requests:claude-3-5-sonnet",
+				"cursor:requests:gpt-4-32k",
 				"cursor:usd:individual-overall",
 			]);
-			expect(report?.limits[0]?.amount).toEqual({ used: 0, unit: "requests" });
-			expect(report?.limits[1]).toMatchObject({
+			expect(report?.limits[0]?.amount).toMatchObject({ used: 80, limit: 500, unit: "requests" });
+			expect(report?.limits[1]?.amount).toMatchObject({ used: 12, unit: "requests" });
+			expect(report?.limits[2]).toMatchObject({
 				id: "cursor:usd:individual-overall",
 				amount: {
 					used: 20,

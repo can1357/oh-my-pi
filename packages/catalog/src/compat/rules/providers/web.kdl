@@ -5,6 +5,14 @@ provider "web" {
 	allow-unauthenticated #true
 
 	seed api="web-search" base-url="web://search" bundle="always" {
+		// Placeholder resolved at search time to the session's active model, when it declares a grounding.
+		model "hosted" name="Session model" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "parallel" name="Parallel" {
 			reasoning #false
 			input "text"

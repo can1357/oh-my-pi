@@ -154,6 +154,10 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
 	/// History of commands executed in the shell.
 	history: Option<crate::history::History>,
+
+	/// Resource limits applied to spawned external commands (`ulimit`).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	resource_limits: crate::rlimits::ResourceLimits,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -193,6 +197,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			parser_impl: self.parser_impl,
 			key_bindings: self.key_bindings.clone(),
 			history: self.history.clone(),
+			resource_limits: self.resource_limits.clone(),
 			depth: self.depth + 1,
 		}
 	}
@@ -275,6 +280,17 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 }
 
 impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Returns the resource limits applied to spawned external commands.
+	pub const fn resource_limits(&self) -> &crate::rlimits::ResourceLimits {
+		&self.resource_limits
+	}
+
+	/// Returns a mutable reference to the resource limits applied to spawned
+	/// external commands.
+	pub const fn resource_limits_mut(&mut self) -> &mut crate::rlimits::ResourceLimits {
+		&mut self.resource_limits
+	}
+
 	/// Increments the interactive line offset in the shell by the indicated
 	/// number of lines.
 	///
