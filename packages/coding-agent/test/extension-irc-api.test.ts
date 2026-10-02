@@ -7,7 +7,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import type { IrcApi } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	Extension,
+	ExtensionAgentIdentity,
+	IrcApi,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -39,11 +43,25 @@ function injectingTransport(onSend?: (to: string, toName: string | undefined) =>
 	};
 }
 
-/** Load the bridge extension under a specific session role (root vs subagent) and source path, so the
- * root-only-claim + owner-only-peer rules can be exercised. Same `name` = same extension source. */
-async function loadBridge(opts: { name?: string; isRoot?: boolean; registry?: AgentRegistry }): Promise<IrcApi> {
+/** A root session identity for `loadBridge`; distinct ids model independent roots in one registry. */
+function rootAgent(id = "Main"): ExtensionAgentIdentity {
+	return { kind: "main", id, name: "main", depth: 0 };
+}
+
+/** A subagent identity spawned by `parentId`. */
+function subAgent(id: string, parentId: string): ExtensionAgentIdentity {
+	return { kind: "sub", id, name: "sub", depth: 1, parentId };
+}
+
+/** Load the bridge extension under a specific session identity (root vs subagent) and source path, so
+ * the root-only-claim + owner-only-peer + co-owner rules can be exercised. Same `name` = same source. */
+async function loadBridge(opts: {
+	name?: string;
+	agent?: ExtensionAgentIdentity;
+	registry?: AgentRegistry;
+}): Promise<{ irc: IrcApi; extension: Extension }> {
 	let irc: IrcApi | undefined;
-	await loadExtensionFromFactory(
+	const extension = await loadExtensionFromFactory(
 		pi => {
 			irc = pi.irc;
 		},
@@ -52,10 +70,10 @@ async function loadBridge(opts: { name?: string; isRoot?: boolean; registry?: Ag
 		new ExtensionRuntime(),
 		opts.name ?? "<inline>",
 		opts.registry,
-		opts.isRoot ?? true,
+		opts.agent,
 	);
 	if (!irc) throw new Error("pi.irc was not exposed to the extension");
-	return irc;
+	return { irc, extension };
 }
 
 describe("pi.irc (ExtensionAPI inbound surface)", () => {
@@ -122,7 +140,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(seenToName).toBe("beatrice");
 	});
 
-	it("registerRemotePeer seeds a `remote` ref at @ns/name attributed to the extension", async () => {
+	it("registerRemotePeer seeds a `remote` ref at @ns/name", async () => {
 		const irc = await captureIrc();
 		irc.setRemoteTransport?.("cluster-a", injectingTransport());
 		const id = irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
@@ -130,7 +148,6 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		const ref = AgentRegistry.global().get("@cluster-a/beatrice");
 		expect(ref?.kind).toBe("remote");
 		expect(ref?.displayName).toBe("beatrice");
-		expect(ref?.ownerToken?.startsWith("<inline>:")).toBe(true);
 	});
 
 	it("sanitizes a bridge-provided displayName to a bounded single line (prevents prompt injection)", async () => {
@@ -212,7 +229,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		).toBe(false);
 	});
 
-	it("unregisterRemotePeer retracts only the caller's own proxies (by composed id or bare name)", async () => {
+	it("unregisterRemotePeer retracts only proxies in the caller's own namespace (by composed id or bare name)", async () => {
 		// A proxy owned by a different extension (a different namespace) must not be retractable.
 		AgentRegistry.global().register({
 			id: "@other/foreign",
@@ -220,7 +237,6 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 			kind: "remote",
 			session: null,
 			status: "running",
-			ownerToken: "other-ext",
 		});
 		const irc = await captureIrc();
 		irc.setRemoteTransport?.("cluster-a", injectingTransport());
@@ -261,7 +277,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 				new ExtensionRuntime(),
 				"bridge.ts",
 				AgentRegistry.global(),
-				false, // isRootSession — a subagent load
+				subAgent("0-Scout", "Main"),
 			),
 		).rejects.toThrow(/top-level session may claim/);
 		expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
@@ -269,19 +285,80 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 
 	it("a subagent sharing the root's claim does not take over its remote peers (#7401)", async () => {
 		const registry = AgentRegistry.global();
-		// Root claims the namespace and seeds a peer (owned by the root load).
-		const rootIrc = await loadBridge({ name: "bridge.ts", isRoot: true, registry });
+		// Root claims the namespace and seeds a peer.
+		const { irc: rootIrc } = await loadBridge({ name: "bridge.ts", agent: rootAgent(), registry });
 		rootIrc.setRemoteTransport?.("cluster-a", injectingTransport());
-		expect(rootIrc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" })).toBe("@cluster-a/beatrice");
-		const ownerToken = registry.get("@cluster-a/beatrice")?.ownerToken;
-		expect(ownerToken).toBeTruthy();
+		expect(rootIrc.registerRemotePeer?.({ name: "beatrice", displayName: "Beatrice" })).toBe("@cluster-a/beatrice");
+		const seeded = registry.get("@cluster-a/beatrice");
+		expect(seeded?.displayName).toBe("Beatrice");
 
 		// The SAME bridge inherited by a subagent (same source, same shared registry) shares the claim...
-		const subIrc = await loadBridge({ name: "bridge.ts", isRoot: false, registry });
+		const { irc: subIrc } = await loadBridge({ name: "bridge.ts", agent: subAgent("0-Scout", "Main"), registry });
 		expect(() => subIrc.setRemoteTransport?.("cluster-a", injectingTransport())).not.toThrow();
-		// ...and re-seeding the peer is a no-op that KEEPS the root's ownership, so the subagent's own
-		// teardown never unregisters a peer the root still needs.
-		expect(subIrc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" })).toBe("@cluster-a/beatrice");
-		expect(registry.get("@cluster-a/beatrice")?.ownerToken).toBe(ownerToken);
+		// ...and re-seeding the peer is a read-only no-op that KEEPS the root's ref, so a passenger can
+		// neither clobber the owner's roster entry nor retract it.
+		expect(subIrc.registerRemotePeer?.({ name: "beatrice", displayName: "impostor" })).toBe("@cluster-a/beatrice");
+		expect(registry.get("@cluster-a/beatrice")).toBe(seeded);
+		expect(subIrc.unregisterRemotePeer?.("beatrice")).toBe(false);
+		expect(registry.get("@cluster-a/beatrice")).toBe(seeded);
+	});
+
+	it("independent roots in one registry co-own a same-source claim: each routes via its own transport and the roster outlives either (#14071)", async () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "root-a", displayName: "A", kind: "main", session: null, status: "idle" });
+		registry.register({ id: "root-b", displayName: "B", kind: "main", session: null, status: "idle" });
+		registry.register({
+			id: "0-Scout",
+			displayName: "Scout",
+			kind: "sub",
+			parentId: "root-b",
+			session: null,
+			status: "idle",
+		});
+		const viaA: string[] = [];
+		const viaB: string[] = [];
+
+		const a = await loadBridge({ name: "bridge.ts", agent: rootAgent("root-a"), registry });
+		a.irc.setRemoteTransport?.(
+			"cluster-a",
+			injectingTransport(to => viaA.push(to)),
+		);
+		expect(a.irc.registerRemotePeer?.({ name: "leia" })).toBe("@cluster-a/leia");
+
+		// Root B loads the same bridge for the same namespace: not a passenger, a co-owner.
+		const b = await loadBridge({ name: "bridge.ts", agent: rootAgent("root-b"), registry });
+		expect(() =>
+			b.irc.setRemoteTransport?.(
+				"cluster-a",
+				injectingTransport(to => viaB.push(to)),
+			),
+		).not.toThrow();
+		expect(b.irc.registerRemotePeer?.({ name: "han" })).toBe("@cluster-a/han");
+		expect(registry.get("@cluster-a/han")?.kind).toBe("remote");
+
+		// Each root's sends — and its subagents' — leave through that root's bridge.
+		const bus = IrcBus.forRegistry(registry);
+		expect((await bus.send({ from: "root-a", to: "@cluster-a/leia", body: "from a" })).outcome).toBe("injected");
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/leia", body: "from b" })).outcome).toBe("injected");
+		expect((await bus.send({ from: "0-Scout", to: "@cluster-a/han", body: "from b's scout" })).outcome).toBe(
+			"injected",
+		);
+		expect(viaA).toEqual(["@cluster-a/leia"]);
+		expect(viaB).toEqual(["@cluster-a/leia", "@cluster-a/han"]);
+
+		// Root A tears down: B keeps routing, and the shared roster — including A's entry — stays.
+		a.extension.releaseIrc?.();
+		expect(bus.hasClaimedNamespace()).toBe(true);
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/leia", body: "still here" })).outcome).toBe("injected");
+		expect(viaB).toHaveLength(3);
+		expect(registry.get("@cluster-a/leia")?.kind).toBe("remote");
+		expect(registry.get("@cluster-a/han")?.kind).toBe("remote");
+
+		// The last owner's release frees the namespace and retires its proxies.
+		b.extension.releaseIrc?.();
+		expect(bus.hasClaimedNamespace()).toBe(false);
+		expect(registry.get("@cluster-a/leia")).toBeUndefined();
+		expect(registry.get("@cluster-a/han")).toBeUndefined();
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/leia", body: "gone" })).outcome).toBe("failed");
 	});
 });

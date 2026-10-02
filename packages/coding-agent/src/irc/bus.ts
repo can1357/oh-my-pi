@@ -35,6 +35,22 @@ interface IrcWaiter {
 	cancel: () => void;
 }
 
+/** One extension load's stake in a namespace claim (see {@link IrcBus.setRemoteTransport}). */
+interface NamespaceOwner {
+	/** `main`-kind root id of the owning load's session; undefined for a bus-level caller with no root. */
+	rootId: string | undefined;
+	/** Installed outbound transport; undefined while cleared for a reconnect (claim retained). */
+	transport: RemoteTransport | undefined;
+}
+
+/** A claimed namespace: one extension source, one owner per independent root session. */
+interface NamespaceClaim {
+	/** Extension source path that owns the namespace; a different source is rejected. */
+	source: string;
+	/** Owners by `ownerToken`. Several only when independent roots share one registry. */
+	owners: Map<string, NamespaceOwner>;
+}
+
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
@@ -71,12 +87,8 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
-	/** Outbound transports keyed by globally-unique NAMESPACE (the `@<namespace>/` routing prefix). */
-	readonly #transports = new Map<string, RemoteTransport>();
-	/** namespace -> the load that claimed it: `ownerToken` (owner-scoped release) + `source` extension
-	 *  path — a re-load of the SAME extension (e.g. inherited by a subagent) shares the claim; a
-	 *  DIFFERENT extension is rejected (single-owner across the process). */
-	readonly #namespaceOwners = new Map<string, { ownerToken: string; source: string }>();
+	/** Namespace claims keyed by globally-unique NAMESPACE (the `@<namespace>/` routing prefix). */
+	readonly #claims = new Map<string, NamespaceClaim>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -88,14 +100,18 @@ export class IrcBus {
 
 	/**
 	 * Install, update, or clear the outbound transport for a globally-unique `namespace`, claimed by
-	 * the installing extension load's `ownerToken` (and its `source` extension path):
+	 * the installing extension load's `ownerToken` (its `source` extension path and, for a root
+	 * session's load, the root's `rootId`):
 	 * - unclaimed namespace: claim it for `ownerToken` and install `transport`;
 	 * - claimed by the SAME `ownerToken`: update `transport`, or (with `undefined`) clear ROUTING while
 	 *   KEEPING the claim + any registered peers, so the owner can reinstall after a reconnect;
-	 * - claimed by a DIFFERENT load of the SAME `source` extension (e.g. the bridge re-loaded in a
-	 *   spawned subagent sharing this registry): a no-op keeping the original claim + transport, so the
-	 *   child inherits routing and — being a non-owner — never releases the shared transport on its own
-	 *   teardown (only the original owner's {@link releaseTransportsForOwner} does, #7401 review);
+	 * - claimed by a DIFFERENT load of the SAME `source` extension:
+	 *   - from a subagent (no `rootId`) or from a root that already owns the claim: a no-op keeping the
+	 *     existing owners + transports, so the child inherits routing and — being a non-owner — never
+	 *     releases the shared transport on its own teardown (#7401 review);
+	 *   - from an INDEPENDENT root sharing this registry (a `rootId` no owner has): a co-owner with its
+	 *     own transport. Its sends route through its own transport, and the claim survives until the
+	 *     LAST owner releases, so disposing one root never strands the other (#14071 review);
 	 * - claimed by a DIFFERENT `source` extension: throw — a namespace is single-owner across the
 	 *   process, so two distinct bridges to the same external cluster must pick distinct namespaces.
 	 *
@@ -107,36 +123,73 @@ export class IrcBus {
 		transport: RemoteTransport | undefined,
 		ownerToken: string,
 		source: string = ownerToken,
+		rootId?: string,
 	): void {
-		const existing = this.#namespaceOwners.get(namespace);
-		if (existing !== undefined && existing.ownerToken !== ownerToken) {
-			// A different load claims a namespace someone else owns: same extension re-loading shares
-			// (keep the original owner + transport); a genuinely different extension is rejected.
-			if (existing.source !== source) {
-				throw new Error(
-					`IRC namespace "${namespace}" is already claimed by another extension; choose a distinct namespace.`,
-				);
-			}
-			return;
-		}
-		if (transport) {
-			this.#namespaceOwners.set(namespace, { ownerToken, source });
-			this.#transports.set(namespace, transport);
-		} else {
+		const claim = this.#claims.get(namespace);
+		if (claim === undefined) {
 			// A clear is only meaningful for a namespace this load already claimed (install → clear →
 			// reinstall, the reconnect flow). Reject a clear of an UNCLAIMED namespace so a
 			// clear-before-install can't mark it claimed on the ExtensionAPI side with no owner here.
-			if (existing === undefined) {
+			if (!transport) {
 				throw new Error(`IRC namespace "${namespace}" is not claimed; install a transport before clearing.`);
 			}
-			// Clear ROUTING only; the claim survives (reconnect-friendly). releaseTransportsForOwner drops it.
-			this.#transports.delete(namespace);
+			this.#claims.set(namespace, { source, owners: new Map([[ownerToken, { rootId, transport }]]) });
+			return;
 		}
+		if (claim.source !== source) {
+			throw new Error(
+				`IRC namespace "${namespace}" is already claimed by another extension; choose a distinct namespace.`,
+			);
+		}
+		const owner = claim.owners.get(ownerToken);
+		if (owner) {
+			// Update routing, or clear it while the claim survives (reconnect-friendly);
+			// releaseTransportsForOwner drops the claim.
+			owner.transport = transport;
+			return;
+		}
+		// A different load of the same extension: a passenger (subagent, or a re-load under a root that
+		// already owns the claim) shares silently; an independent root becomes a co-owner.
+		if (rootId === undefined) return;
+		for (const existing of claim.owners.values()) {
+			if (existing.rootId === rootId) return;
+		}
+		if (!transport) {
+			throw new Error(`IRC namespace "${namespace}" is not claimed; install a transport before clearing.`);
+		}
+		claim.owners.set(ownerToken, { rootId, transport });
+	}
+
+	/**
+	 * The transport that carries `from`'s send into `namespace`: the one installed by `from`'s own
+	 * root when independent roots co-own the claim, else any installed transport (a root whose bridge
+	 * is mid-reconnect still reaches the mesh through a sibling root's connection).
+	 */
+	#transportFor(namespace: string, from: string): RemoteTransport | undefined {
+		const claim = this.#claims.get(namespace);
+		if (!claim) return undefined;
+		if (claim.owners.size > 1) {
+			const rootId = this.rootIdFor(from);
+			if (rootId !== undefined) {
+				for (const owner of claim.owners.values()) {
+					if (owner.rootId === rootId && owner.transport) return owner.transport;
+				}
+			}
+		}
+		for (const owner of claim.owners.values()) {
+			if (owner.transport) return owner.transport;
+		}
+		return undefined;
 	}
 
 	/** Whether any outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
 	hasRemoteTransport(): boolean {
-		return this.#transports.size > 0;
+		for (const claim of this.#claims.values()) {
+			for (const owner of claim.owners.values()) {
+				if (owner.transport) return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -146,12 +199,17 @@ export class IrcBus {
 	 * signal — unlike `hasRemoteTransport`, which reports only a transport installed right now.
 	 */
 	hasClaimedNamespace(): boolean {
-		return this.#namespaceOwners.size > 0;
+		return this.#claims.size > 0;
 	}
 
-	/** The `ownerToken` currently claiming `namespace`, or undefined if unclaimed (owner-scoped clear). */
-	namespaceOwner(namespace: string): string | undefined {
-		return this.#namespaceOwners.get(namespace)?.ownerToken;
+	/** Whether `namespace` is currently claimed by any load. */
+	isNamespaceClaimed(namespace: string): boolean {
+		return this.#claims.has(namespace);
+	}
+
+	/** Whether `ownerToken` is one of the loads owning `namespace` (owner-scoped clear + roster writes). */
+	isNamespaceOwner(namespace: string, ownerToken: string): boolean {
+		return this.#claims.get(namespace)?.owners.has(ownerToken) === true;
 	}
 
 	/**
@@ -166,18 +224,23 @@ export class IrcBus {
 	}
 
 	/**
-	 * Release every namespace claimed by `ownerToken`: drop its transport AND its claim (freeing the
-	 * namespace for re-claim). Owner-scoped, so sibling loads are untouched; called on extension
-	 * load-failure rollback and runtime teardown. Distinct from a plain `setRemoteTransport(ns,
-	 * undefined, owner)` clear, which keeps the claim for reconnect.
+	 * Release `ownerToken`'s stake in every namespace it owns: drop its transport, and drop the claim
+	 * itself once no owner remains (freeing the namespace for re-claim). Owner-scoped, so sibling and
+	 * co-owner loads are untouched; called on extension load-failure rollback and runtime teardown.
+	 * Distinct from a plain `setRemoteTransport(ns, undefined, owner)` clear, which keeps the claim
+	 * for reconnect. Returns the namespaces that became unclaimed, so the caller can retire their
+	 * `remote` proxies — which belong to the claim, not to any one owner.
 	 */
-	releaseTransportsForOwner(ownerToken: string): void {
-		for (const [namespace, owner] of this.#namespaceOwners) {
-			if (owner.ownerToken === ownerToken) {
-				this.#namespaceOwners.delete(namespace);
-				this.#transports.delete(namespace);
+	releaseTransportsForOwner(ownerToken: string): string[] {
+		const freed: string[] = [];
+		for (const [namespace, claim] of this.#claims) {
+			if (!claim.owners.delete(ownerToken)) continue;
+			if (claim.owners.size === 0) {
+				this.#claims.delete(namespace);
+				freed.push(namespace);
 			}
 		}
+		return freed;
 	}
 
 	/**
@@ -247,7 +310,7 @@ export class IrcBus {
 					error: `Agent "${message.to}" was aborted and cannot be messaged.`,
 				};
 			}
-			const transport = this.#transports.get(namespace);
+			const transport = this.#transportFor(namespace, message.from);
 			if (!transport) {
 				return {
 					to: message.to,

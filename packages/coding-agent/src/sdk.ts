@@ -2585,6 +2585,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
+		// The identity extension loads serve: a `main` root keys its IRC namespace claims by this id
+		// (independent roots sharing one registry co-own a claim), a `sub` only shares its root's.
+		const extensionAgent: ExtensionAgentIdentity = Object.freeze({
+			kind: isSubagentSession ? "sub" : "main",
+			id: resolvedAgentId,
+			name: resolvedAgentName,
+			depth: taskDepth,
+			...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
+		});
 		if (!restrictToolNames && options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
@@ -2607,7 +2616,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
-				agentKind === "main",
+				extensionAgent,
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to bind extension", { path, error });
@@ -2621,7 +2630,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
-				agentKind === "main",
+				extensionAgent,
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -2637,7 +2646,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
-				agentKind === "main",
+				extensionAgent,
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -2672,13 +2681,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
-			Object.freeze({
-				kind: isSubagentSession ? "sub" : "main",
-				id: resolvedAgentId,
-				name: resolvedAgentName,
-				depth: taskDepth,
-				...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
-			}),
+			extensionAgent,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -2713,7 +2716,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					extensionsResult.runtime,
 					sourceId,
 					agentRegistry,
-					agentKind === "main",
+					extensionAgent,
 				);
 				extensionsResult.extensions.push(loaded);
 				if (i < rebindableInlineExtensionCount) {

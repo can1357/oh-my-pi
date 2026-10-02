@@ -429,12 +429,13 @@ export type SwitchSessionHandler = (sessionPath: string) => Promise<{ cancelled:
 export type ShutdownHandler = () => void;
 
 /**
- * Emit `session_shutdown`, dispose file-write-fallback registrations, and clear
- * timers owned by an extension runner.
+ * Emit `session_shutdown`, release every load's IRC state, dispose file-write-fallback
+ * registrations, and clear timers owned by an extension runner.
  *
- * Returns whether any shutdown handlers were present. Fallback disposal and timer
- * cleanup run even when a handler fails so extension background work — and a
- * fallback bound to this session's context — cannot outlive its host.
+ * Returns whether any shutdown handlers were present. IRC release, fallback disposal and
+ * timer cleanup run even when a handler fails — and for suspended loads, which the handler
+ * walk skips — so extension background work, a fallback bound to this session's context, or
+ * a namespace claim cannot outlive its host.
  */
 export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner | undefined): Promise<boolean> {
 	if (!extensionRunner) return false;
@@ -445,6 +446,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 		});
 		return true;
 	} finally {
+		extensionRunner.releaseExtensionIrc();
 		extensionRunner.disposeFileFallbacks();
 		extensionRunner.clearManagedTimers();
 	}
@@ -1051,7 +1053,10 @@ export class ExtensionRunner {
 	 * Suspend or resume loaded extensions in place (e.g. after a live `disabledExtensions`
 	 * edit). A suspended extension keeps its module state but stops contributing event
 	 * handlers, commands, tools, message renderers, shortcuts, flags, and file fallbacks
-	 * until resumed. Returns the extensions whose state changed.
+	 * until resumed, and its IRC state (namespace claim, transport, remote proxies) is
+	 * released outright: a disabled bridge must not keep routing or injecting, and nothing
+	 * re-fires `session_start` for it to re-claim on resume. Returns the extensions whose
+	 * state changed.
 	 */
 	setSuspendedExtensions(shouldSuspend: (extension: Extension) => boolean): {
 		suspended: Extension[];
@@ -1075,6 +1080,7 @@ export class ExtensionRunner {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
 		}
+		for (const extension of suspended) extension.releaseIrc?.();
 		return { suspended, resumed };
 	}
 
@@ -1458,6 +1464,16 @@ export class ExtensionRunner {
 	 */
 	disposeFileFallbacks(): void {
 		for (const dispose of this.#fileFallbackDisposers.splice(0)) dispose();
+	}
+
+	/**
+	 * Release every loaded extension's IRC state (namespace claims, transports, remote proxies) and
+	 * close its `pi.irc` surface — suspended loads included, since suspension drops them from the
+	 * `session_shutdown` handler walk. Called on session shutdown so a bridge's claim never
+	 * outlives its host; idempotent per load.
+	 */
+	releaseExtensionIrc(): void {
+		for (const extension of this.getLoadedExtensions()) extension.releaseIrc?.();
 	}
 
 	createCommandContext(): ExtensionCommandContext {

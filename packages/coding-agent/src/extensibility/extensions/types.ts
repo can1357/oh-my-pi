@@ -1374,7 +1374,15 @@ export interface IrcApi {
 	/**
 	 * Claim a globally-unique `namespace` and install (or, with `undefined`, clear) its outbound
 	 * transport. A send addressed to `@<namespace>/<name>` routes to this transport with the bare
-	 * `<name>` in `opts.toName`. Claiming a namespace already owned by another live extension throws.
+	 * `<name>` in `opts.toName`. Only a top-level session may originate a claim; a subagent that
+	 * reloads the same extension shares its root's claim. Claiming a namespace owned by a DIFFERENT
+	 * extension throws; another top-level session in the same registry loading this same extension
+	 * co-owns the claim with its own transport, and the claim (with its registered peers) lasts until
+	 * the last owner's session ends. Each root's sends leave through its own transport; while one
+	 * co-owner has cleared its transport for a reconnect, its sends fall back to a sibling root's
+	 * transport (the message's `from` is still the sender, so a bridge that attributes by connection
+	 * should read `from`). The claim is released — and this surface closed, so later calls throw — at
+	 * session shutdown, when the extension is disabled live, or when its factory throws.
 	 * OPTIONAL: present only on omp builds carrying the outbound/[3] transport seam (murmur-l5vv);
 	 * capability-detected by callers, absent on inbound-only builds.
 	 */
@@ -1385,15 +1393,16 @@ export interface IrcApi {
 	 * extension claimed via {@link IrcApi.setRemoteTransport} (call that first, else this returns
 	 * `undefined`). The bare `name` is composed into the id; `kind` is forced to `remote` and `session`
 	 * to `null`. Returns the composed `@ns/name` id (the caller can address it) or `undefined` on an
-	 * invalid name / no claimed namespace. Attributed to this load so a failed load or the extension's
-	 * own teardown rolls it back. Remote ids are disjoint from local ids and from other extensions'
-	 * namespaces, so registration is collision-free — no reserved-id or clobber guards. OPTIONAL:
-	 * outbound-seam builds only.
+	 * invalid name / no claimed namespace. The proxy belongs to the namespace claim: it is retired
+	 * when the claim's last owner releases, so a failed load or the extension's own teardown rolls
+	 * it back and co-owning sessions share one roster. Remote ids are disjoint from local ids and
+	 * from other extensions' namespaces, so registration is collision-free — no reserved-id or
+	 * clobber guards. OPTIONAL: outbound-seam builds only.
 	 */
 	registerRemotePeer?(peer: { name: string; displayName?: string; status?: AgentStatus }): string | undefined;
 
 	/**
-	 * Retract a `remote` proxy peer previously registered by THIS extension (ownership-checked, so one
+	 * Retract a `remote` proxy peer in the namespace THIS extension claimed (ownership-checked, so one
 	 * extension cannot evict another's peers). Accepts either the composed `@ns/name` id or the bare
 	 * `name` (composed against the claimed namespace). OPTIONAL: outbound-seam builds only.
 	 */
@@ -1988,6 +1997,13 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/**
+	 * Release this load's IRC state (its namespace claim + transport, and the claim's `remote` proxies
+	 * once no owner remains) and close its `pi.irc` surface. Set by the loader; run by the
+	 * ExtensionRunner on session shutdown for every load — suspended or not — and when a live
+	 * `disabledExtensions` edit suspends the load. Idempotent.
+	 */
+	releaseIrc?: () => void;
 }
 
 /**
