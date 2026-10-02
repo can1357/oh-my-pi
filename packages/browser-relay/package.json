@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/browser-relay",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"private": true,
 	"description": "Chrome extension that lets the omp browser tool drive your existing tabs (relay server lives in the omp CLI: `omp browser-relay`)",
 	"homepage": "https://omp.sh",
