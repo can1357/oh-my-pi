@@ -1076,6 +1076,10 @@ class RpcClient:
     def branch(self, entry_id: str) -> BranchResult:
         return parse_branch_result(self._request("branch", entryId=entry_id))
 
+    def fork(self, entry_id: str | None = None) -> CancellationResult:
+        """Fork into a new session file: history through `entry_id`, or the whole session."""
+        return parse_cancellation_result(self._request("fork", entryId=entry_id))
+
     def get_branch_messages(self) -> tuple[BranchMessage, ...]:
         return parse_branch_messages(self._request("get_branch_messages"))
 
