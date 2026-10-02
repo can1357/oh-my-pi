@@ -320,48 +320,6 @@ function lineRangeFetchCap(pathSpecs: readonly GrepPathSpec[], perFileKeep: numb
 	return Math.min(cap, NATIVE_GREP_MAX_FILE_BYTES);
 }
 
-async function resolveInternalSearchInputs(opts: {
-	signal?: AbortSignal;
-	archiveDisplayMap: ReadonlyMap<string, string>;
-	session: ToolSession;
-	resolvedPaths: string[];
-}): Promise<{ paths: string[]; immutableSourcePaths: Set<string> }> {
-	const internalRouter = InternalUrlRouter.instance();
-	const paths = opts.resolvedPaths.slice();
-	const immutableSourcePaths = new Set<string>();
-	const context = sessionResolveContext(opts.session, { signal: opts.signal, skipDirectoryListing: true });
-
-	for (let idx = 0; idx < paths.length; idx++) {
-		const rawPath = paths[idx];
-		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canResolve(rawPath)) {
-			continue;
-		}
-		// `ssh://[::1]/path` carries `[`/`]` in the IPv6 authority — glob metacharacters
-		// — so check only the path portion for ssh:// (the SSH handler reads a single
-		// remote file; there is no glob expansion). A glob in the remote path still trips.
-		const globTarget = /^ssh:\/\//i.test(rawPath) ? rawPath.replace(/^ssh:\/\/[^/]*/i, "") : rawPath;
-		if (hasGlobPathChars(globTarget)) {
-			throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
-		}
-		const resource = await internalRouter.resolve(rawPath, context);
-		// A directory listing with no backing local path (e.g. a remote ssh:// dir)
-		// has no real contents to grep — searching its listing text would be
-		// misleading. Local/skill/vault dir resources set `sourcePath` and skip this.
-		if (resource.isDirectory && !resource.sourcePath) {
-			throw new ToolError(
-				`grep cannot recurse the directory listing at ${rawPath}; grep a specific file under it (e.g. ${rawPath.replace(/\/+$/, "")}/<file>) or read ${rawPath} to list its entries`,
-			);
-		}
-		if (resource.sourcePath) {
-			paths[idx] = resource.sourcePath;
-			if (resource.immutable) {
-				immutableSourcePaths.add(path.resolve(resource.sourcePath));
-			}
-		}
-	}
-
-	return { paths, immutableSourcePaths };
-}
 type SearchParams = typeof searchSchema.infer;
 
 /**
@@ -478,15 +436,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				cleanup: cleanupArchiveScratch,
 			} = await resolveArchiveSearchPaths(pathSpecs, this.session.cwd);
 			try {
-				const internalResolution = await resolveInternalSearchInputs({
-					resolvedPaths,
-					archiveDisplayMap,
-					signal,
-					session: this.session,
-				});
-				const searchablePaths = internalResolution.paths;
-				const internalImmutableSourcePaths = internalResolution.immutableSourcePaths;
-
 				const rangesByAbsPath = new Map<string, LineRange[]>();
 
 				if (archiveUnreadable.length > 0 && resolvedPaths.length === archiveUnreadable.length) {
@@ -507,7 +456,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const effectiveMultiline = patternHasNewline;
 
 				const scope = await resolveToolSearchScope({
-					rawPaths: searchablePaths,
+					rawPaths: resolvedPaths,
 					cwd: this.session.cwd,
 					internalUrlAction: "search",
 					filesystem: urlFilesystem,
@@ -518,7 +467,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					multipathStatHint: " (`path` list entries must each exist relative to cwd)",
 				});
 				const { searchPath, isDirectory, multiTargets, exactFilePaths, missingPaths, globFilter } = scope;
-				const immutableSourcePaths = new Set([...internalImmutableSourcePaths, ...scope.immutableSourcePaths]);
+				const immutableSourcePaths = scope.immutableSourcePaths;
 				// Build the per-file line-range filter after URL materialization has run:
 				// archive entries are keyed by scratch path, external URL entries by read-cache
 				// content path, internal URLs by their URL, and ordinary files by their resolved path.
