@@ -1265,10 +1265,10 @@ export function resolveConfiguredModelPatterns(
 	});
 }
 export interface AgentModelPatternResolutionOptions {
-	/** Per-spawn selector, below configured agent policy but above bundled defaults. */
+	/** Invocation-local selector, taking precedence over settings and agent frontmatter. */
 	requestModel?: string | string[];
 	settingsOverride?: string | string[];
-	/** A custom agent definition (or explicitly configured role) takes precedence over the request. */
+	/** Treat a custom agent's default selector as frontmatter policy instead of inheriting the session model. */
 	agentModelPriority?: boolean;
 	agentModel?: string | string[];
 	settings?: Settings;
@@ -1295,12 +1295,15 @@ function resolveEffectiveAgentModelSelection(
 		fallbackModelPattern,
 	} = options;
 
+	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
+	if (requestPatterns.length > 0) {
+		return { source: requestModel, origin: "request", patterns: requestPatterns };
+	}
+
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
 		return { source: settingsOverride, origin: "settings", patterns: overridePatterns };
 	}
-
-	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
@@ -1312,12 +1315,6 @@ function resolveEffectiveAgentModelSelection(
 			!agentInheritsSessionModel ||
 			singleAgentPattern === formatModelRoleAlias("task") ||
 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`);
-	if (agentModelPriority && agentPatternsAvailable) {
-		return { source: agentModel, origin: "agent", patterns: configuredAgentPatterns };
-	}
-	if (requestPatterns.length > 0) {
-		return { source: requestModel, origin: "request", patterns: requestPatterns };
-	}
 	if (agentPatternsAvailable) {
 		return { source: agentModel, origin: "agent", patterns: configuredAgentPatterns };
 	}

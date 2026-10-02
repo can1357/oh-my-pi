@@ -382,9 +382,9 @@ describe("runEvalAgent", () => {
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("gives caller model candidates precedence and keeps their order", async () => {
+	it("dispatches caller candidates ahead of settings, custom frontmatter and parent models", async () => {
 		const fixture = await makeModelFixture();
-		mockAgents();
+		mockAgents([{ ...taskAgent, source: "project", model: ["frontmatter/model"] }]);
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		const session = makeSession({
 			modelRegistry: fixture.modelRegistry,
@@ -395,6 +395,7 @@ describe("runEvalAgent", () => {
 				"async.enabled": false,
 				"task.isolation.enabled": false,
 				"task.enableLsp": true,
+				"task.agentModelOverrides": { task: "settings/model" },
 			}),
 		});
 
@@ -405,18 +406,20 @@ describe("runEvalAgent", () => {
 
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(runSpy.mock.calls[0]?.[0].modelSelectionClosed).toBe(true);
 		expect(result.details.model).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
 	it("rejects unavailable caller models before registering a job or reserving its id", async () => {
 		const fixture = await makeModelFixture();
-		mockAgents();
+		mockAgents([{ ...taskAgent, source: "project", model: ["anthropic/claude-sonnet-4-5"] }]);
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		const outputManager = new AgentOutputManager(() => null);
 		const session = makeSession({
 			modelRegistry: fixture.modelRegistry,
 			authStorage: fixture.authStorage,
 			outputManager,
+			settings: Settings.isolated({ "task.agentModelOverrides": { task: "anthropic/claude-sonnet-4-5" } }),
 		});
 
 		await expect(

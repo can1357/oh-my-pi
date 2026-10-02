@@ -1160,8 +1160,7 @@ describe("resolveAgentModelPatterns", () => {
 			}),
 		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition", origin: "agent" });
 
-		// A configured override wins even when the request names the same model;
-		// the role identity must remain attached to the configuration source.
+		// Matching concrete patterns must not attach the settings role to a request.
 		expect(
 			resolveAgentModelSelection({
 				requestModel: "openai/gpt-4o",
@@ -1169,20 +1168,21 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: "override", origin: "settings" });
+		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined, origin: "request" });
 	});
 
-	test("custom agent definitions outrank requests; bundled defaults do not", () => {
+	test("caller models outrank settings and custom agent frontmatter", () => {
 		const settings = Settings.isolated();
 		const options = {
 			requestModel: "caller/model",
+			settingsOverride: "settings/model",
 			agentModel: "agent/model",
 			settings,
 		};
 		expect(resolveAgentModelSelection({ ...options, agentModelPriority: true })).toEqual({
-			patterns: ["agent/model"],
+			patterns: ["caller/model"],
 			role: undefined,
-			origin: "agent",
+			origin: "request",
 		});
 		expect(resolveAgentModelSelection(options)).toEqual({
 			patterns: ["caller/model"],
@@ -1191,17 +1191,54 @@ describe("resolveAgentModelPatterns", () => {
 		});
 	});
 
-	test("custom agent role selectors outrank a spawn model and parent", () => {
-		const settings = Settings.isolated({ modelRoles: { smol: "fast/model" } });
+	test("caller role selectors outrank custom frontmatter roles and parent", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "fast/model", caller: "caller/model" } });
 		expect(
 			resolveAgentModelSelection({
-				requestModel: "caller/model",
+				requestModel: "@caller",
 				agentModel: "@smol",
 				agentModelPriority: true,
 				settings,
 				activeModelPattern: "parent/model",
 			}),
-		).toEqual({ patterns: ["fast/model"], role: "smol", origin: "agent" });
+		).toEqual({ patterns: ["caller/model"], role: "caller", origin: "request" });
+	});
+
+	test("without a caller model, settings then frontmatter precede the parent", () => {
+		const options = {
+			settingsOverride: "settings/model",
+			agentModel: "agent/model",
+			agentModelPriority: true,
+			activeModelPattern: "parent/active",
+			fallbackModelPattern: "parent/configured",
+			settings: Settings.isolated({ modelRoles: { default: "parent/default" } }),
+		};
+		expect(resolveAgentModelSelection(options)).toEqual({
+			patterns: ["settings/model"],
+			role: undefined,
+			origin: "settings",
+		});
+		expect(resolveAgentModelSelection({ ...options, settingsOverride: undefined })).toEqual({
+			patterns: ["agent/model"],
+			role: undefined,
+			origin: "agent",
+		});
+		const inherited = { ...options, settingsOverride: undefined, agentModel: undefined };
+		expect(resolveAgentModelPatterns(inherited)).toEqual(["parent/active"]);
+		expect(resolveAgentModelPatterns({ ...inherited, activeModelPattern: undefined })).toEqual(["parent/configured"]);
+		expect(
+			resolveAgentModelPatterns({ ...inherited, activeModelPattern: undefined, fallbackModelPattern: undefined }),
+		).toEqual(["parent/default"]);
+	});
+
+	test("custom default frontmatter remains explicit while bundled defaults inherit the active model", () => {
+		const options = {
+			agentModel: "@default",
+			settings: Settings.isolated({ modelRoles: { default: "parent/default" } }),
+			activeModelPattern: "parent/active",
+		};
+		expect(resolveAgentModelPatterns({ ...options, agentModelPriority: true })).toEqual(["parent/default"]);
+		expect(resolveAgentModelPatterns(options)).toEqual(["parent/active"]);
 	});
 
 	test("falls back to the active session model when @task is unset", () => {

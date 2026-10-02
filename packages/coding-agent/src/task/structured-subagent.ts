@@ -376,11 +376,6 @@ export async function resolveEffectiveSubagentPolicy(
 				"Caller model candidates must contain at least one non-empty selector.",
 			);
 		}
-	}
-	const configuredModelWins =
-		selection.origin === "settings" || (selection.origin === "agent" && modelResolution.agentModelPriority);
-	if (request.model !== undefined && !configuredModelWins) {
-		const candidates = typeof request.model === "string" ? [request.model] : request.model;
 		const modelRegistry = request.session.modelRegistry;
 		if (!modelRegistry) {
 			throw new StructuredSubagentError(

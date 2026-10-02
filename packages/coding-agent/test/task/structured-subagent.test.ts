@@ -399,7 +399,7 @@ describe("structured subagent primitive", () => {
 		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("retains the configured role when settings outrank a caller model", async () => {
+	it("closes caller role candidates without inheriting the settings fallback role", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const roleSession = session({
@@ -412,8 +412,8 @@ describe("structured subagent primitive", () => {
 		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
 
 		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
-		expect(requestPolicy.modelRole).toBe("override");
-		expect(requestPolicy.modelSelectionClosed).toBe(false);
+		expect(requestPolicy.modelRole).toBeUndefined();
+		expect(requestPolicy.modelSelectionClosed).toBe(true);
 		expect(requestPolicy.modelOverride).toEqual(["openai/gpt-4o"]);
 
 		const overridePolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession }));
@@ -471,7 +471,7 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("uses per-agent settings before custom frontmatter and caller candidates", async () => {
+	it("dispatches caller candidates ahead of per-agent settings and custom frontmatter", async () => {
 		const agent = { ...AGENT, source: "project" as const, model: ["frontmatter/agent"] };
 		mockDiscovery(agent);
 		const models = [
@@ -491,15 +491,26 @@ describe("structured subagent primitive", () => {
 		const configured = await resolveEffectiveSubagentPolicy(
 			request({ session: childSession, model: "caller/model" }),
 		);
-		expect(configured.modelOverride).toEqual(["settings/override"]);
+		expect(configured.modelOverride).toEqual(["caller/model"]);
 		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
 		const dispatched = await runStructuredSubagent(request({ session: childSession, model: "caller/model" }));
-		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["settings/override"]);
-		expect(dispatched.policy.modelSelectionClosed).toBe(false);
-		expect(configured.modelSelectionClosed).toBe(false);
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["caller/model"]);
+		expect(runSpy.mock.calls[0]?.[0].modelSelectionClosed).toBe(true);
+		expect(dispatched.policy.modelSelectionClosed).toBe(true);
+		expect(configured.modelSelectionClosed).toBe(true);
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "missing/model" })),
+		).rejects.toThrow("Requested model candidates missing/model are unavailable");
+		const settingsPolicy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(settingsPolicy.modelOverride).toEqual(["settings/override"]);
+		expect(settingsPolicy.modelSelectionClosed).toBe(false);
 
 		cfgTaskAgentModelOverrides.override(childSession.settings, {});
-		const custom = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "missing/model" }));
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "missing/model" })),
+		).rejects.toThrow("Requested model candidates missing/model are unavailable");
+		const custom = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 		expect(custom.modelOverride).toEqual(["frontmatter/agent"]);
 		expect(custom.modelSelectionClosed).toBe(false);
 

@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fixed task and eval subagents ignoring invocation-local models when per-agent settings or custom frontmatter specify a different model.
+- Clarified subagent model selection instructions to preserve explicit role aliases such as `@cheap`, including their `@` prefix.
 - Fixed HTML export hanging when a session's subagent directory held a transcript named `..jsonl`; discovery now only descends into real child directories ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ## [18.4.12] - 2026-10-02
