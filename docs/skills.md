@@ -134,6 +134,32 @@ The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enabl
 - Custom-directory skills are merged after provider skills and outrank a same-named default-path provider skill regardless of admission order (#7190): the custom-directory skill keeps the bare name, and the provider skill is re-admitted under its namespaced name (suffixed if that slot is taken) when it differs or dropped when it is identical. Among two custom directories, the first one in `skills.customDirectories` keeps the bare name and the other is namespaced.
 - `disabledExtensions` (`skill:<name>`) and `skills.ignoredSkills` are applied to both the raw and the final name, so a namespaced alias cannot bypass an exclusion. `skills.includeSkills` is applied to the final listing only, after every name is resolved, so `second/*` selects a namespaced skill even though the bare skill it collided with is not itself included.
 
+### Startup diagnostics
+
+The interactive TUI shows a grouped startup notice when enabled skill sources
+contain conflicting same-name variants or distinct identical copies. Conflicts
+are warnings; successfully deduplicated copies are informational. Symlinks to the
+same real file do not count as redundant installations, and filtered-out variants
+do not produce conflict notices.
+
+Run `/skills diagnostics` to inspect the current resolution in a read-only report
+outside the transcript. It lists the bare default (when included), namespaced
+variants, redundant copies, their backing paths and sources, and the selection
+rule. A shared name does not establish that two skills have the same lineage.
+
+Startup notices are enabled by default, including when `startup.quiet` hides the
+welcome banner. Disable them in `/settings` → Tasks → Commands & Skills →
+**Skill Startup Notices**, or persist the setting from a shell:
+
+```bash
+omp config set skills.showStartupDiagnostics false
+```
+
+This setting only controls the automatic TUI notice. `/skills diagnostics`,
+`omp skill list [dir] --json`, skill selection, and existing discovery warnings
+are unchanged. Diagnostics are never added to model instructions or session
+history.
+
 ## Runtime usage behavior
 
 ### System prompt exposure
