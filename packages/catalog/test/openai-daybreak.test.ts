@@ -8,9 +8,10 @@ import type { Api, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { applyGeneratedModelPolicies } from "../scripts/generated-policies";
 
 const DAYBREAK_EFFORTS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
-// The openai seed also carries transcription and embedding runners; only the
-// Responses rows are Daybreak/GPT-5.6 chat models.
-const DAYBREAK_MODELS = seedModels("openai").filter(model => model.api === "openai-responses");
+// Keep the Daybreak/GPT-5.6 chat contract scoped to its intended response seeds.
+const DAYBREAK_MODELS = seedModels("openai").filter(
+	model => model.api === "openai-responses" && (model.id.startsWith("daybreak-") || model.id === "gpt-5.6-cyber"),
+);
 
 describe("OpenAI Daybreak and GPT-5.6 models", () => {
 	test("bakes off support and long-context pricing onto every first-party GPT-5.6 alias", () => {

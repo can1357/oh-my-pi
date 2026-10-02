@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI-compatible discovery of GPT-6.1 Sol reasoning metadata by restoring its source-authored reference while retaining gateway-local pricing ([#14079](https://github.com/can1357/oh-my-pi/pull/14079) by [@github-nicolas-stadler](https://github.com/github-nicolas-stadler)).
+
 ## [18.4.10] - 2026-10-02
 
 ### Fixed

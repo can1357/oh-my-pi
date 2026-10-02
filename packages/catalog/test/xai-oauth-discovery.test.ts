@@ -17,11 +17,20 @@ describe("xai-oauth grok-4.7 discovery", () => {
 			requestHeaders = init?.headers;
 			return Response.json({
 				object: "list",
-				data: [{ id: "grok-4.7" }, { id: "grok-4.6" }],
+				data: [
+					{ id: "grok-4.7" },
+					{ id: "grok-4.6" },
+					{ id: "grok-imagine-video" },
+					{ id: "grok-imagine-video-1.5-lite" },
+				],
 			});
 		});
 		const options = xaiOAuthModelManagerOptions({ apiKey: "xai-oauth-test", fetch: fetchMock });
 		const specs = await options.fetchDynamicModels?.();
+		const discoveredIds = specs?.map(model => model.id) ?? [];
+		expect(discoveredIds).toContain("grok-4.7");
+		expect(discoveredIds).not.toContain("grok-imagine-video");
+		expect(discoveredIds).not.toContain("grok-imagine-video-1.5-lite");
 		expect(fetchMock).toHaveBeenCalledWith("https://api.x.ai/v1/models", expect.objectContaining({ method: "GET" }));
 		expect(requestHeaders).toHaveProperty("Authorization", "Bearer xai-oauth-test");
 		const spec = specs?.find(model => model.id === "grok-4.7");

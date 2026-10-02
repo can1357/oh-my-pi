@@ -2503,7 +2503,7 @@ describe("ModelRegistry runtime discovery", () => {
 			Effort.XHigh,
 			Effort.Max,
 		]);
-		expect((refreshedSol?.compat as OpenAICompat | undefined)?.supportsReasoningEffort).toBe(true);
+		expect(refreshedSol).toMatchObject({ compat: { supportsReasoningEffort: true } });
 		expect(onlineRegistry.find("openai-test", "gpt-6-sol")).toBeDefined();
 
 		const reopenedRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: noNetwork });
@@ -2575,7 +2575,7 @@ describe("ModelRegistry runtime discovery", () => {
 			Effort.XHigh,
 			Effort.Max,
 		]);
-		expect((aiproxyModel?.compat as OpenAICompat | undefined)?.supportsReasoningEffort).toBe(true);
+		expect(aiproxyModel).toMatchObject({ compat: { supportsReasoningEffort: true } });
 		expect(aiproxyModel?.input).toEqual(["text", "image"]);
 		expect(aiproxyModel?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 

@@ -6,6 +6,10 @@
 
 - Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
 
+### Fixed
+
+- Restored the source-authored GPT-6.1 Sol reference so OpenAI-compatible discovery exposes reasoning support and the five-level effort ladder while retaining gateway-local pricing ([#14079](https://github.com/can1357/oh-my-pi/pull/14079) by [@github-nicolas-stadler](https://github.com/github-nicolas-stadler)).
+
 ## [18.4.10] - 2026-10-02
 
 ### Added
@@ -77,7 +81,6 @@
 - Reduced unnecessary disk writes and improved persistence efficiency across sessions, model data, configuration, and background jobs.
 - Fixed the native composer showing the main session's effort level instead of the selected subagent's level.
 - Fixed the `omp predict` comparison view and MCP authorization prompt rendering with their full native interfaces, including clickable link actions.
-- Restored the bundled OpenAI GPT-6.1 Sol reference metadata so OpenAI-compatible model discovery exposes its reasoning support and five-level effort ladder while retaining gateway-local pricing ([#14079](https://github.com/can1357/oh-my-pi/pull/14079) by [@github-nicolas-stadler](https://github.com/github-nicolas-stadler)).
 
 ## [18.4.6] - 2026-10-01
 
