@@ -258,7 +258,24 @@ export function createPersistedSubagentReviverFactory(
 				);
 			});
 			const revivedScope = withSiblingTools(declaredScope);
-			await session.setActiveToolsByName([...revivedScope, ...session.getMountedXdevToolNames()]);
+			// Session-managed builtins (manage_skill/learn/context_notes/new_context)
+			// and the requireYieldTool terminator are force-added by createAgentSession
+			// on every explicit list (sdk.ts), so they belong to the revived active
+			// set even though `declaredTools` never persisted them. Without this the
+			// cold path drops tools the identical warm-revived agent keeps.
+			// createAgentSession registers the full tool set on the revived session
+			// before this clamp runs, so re-admit the session-managed builtins the
+			// SDK force-adds to every explicit list (sdk.ts): without this the cold
+			// path drops tools the identical warm-revived agent keeps.
+			// Session-managed builtins (manage_skill/learn/context_notes/new_context)
+			// and the requireYieldTool terminator ride every explicit list via
+			// createAgentSession (sdk.ts), so union them back when the revived
+			// registry holds them — `declaredTools` never persisted them, and
+			// without this the cold path drops tools the warm path keeps.
+			const revivedManaged = ["manage_skill", "learn", "context_notes", "new_context", "yield"].filter(
+				name => !revivedScope.includes(name) && session.getToolByName(name) !== undefined,
+			);
+			await session.setActiveToolsByName([...revivedScope, ...revivedManaged, ...session.getMountedXdevToolNames()]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that

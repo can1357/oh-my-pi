@@ -1,7 +1,7 @@
 import { MCPManager } from "../mcp/manager";
 import type { MCPResourceReadResult } from "../mcp/types";
 import mcpDoc from "../prompts/internal-urls/mcp.md" with { type: "text" };
-import type { InternalResource, InternalUrl, ProtocolHandler, SchemeSpec } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
 
 function escapeRegex(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -134,7 +134,7 @@ export class McpProtocolHandler implements ProtocolHandler {
 		return mcpDoc.trim();
 	}
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const mcpManager = MCPManager.instance();
 		if (!mcpManager) {
 			throw new Error("No MCP manager available. MCP servers may not be configured.");
@@ -156,6 +156,14 @@ export class McpProtocolHandler implements ProtocolHandler {
 			throw new Error(
 				`No MCP server has resource "${uri}".\n\nAvailable resources:\n${formatAvailableResources(mcpManager)}`,
 			);
+		}
+		// Per-session MCP resource scope (review: gate at the handler, not per tool):
+		// the router is process-global and session-less, so judge the owning server
+		// against the calling session carried in context. Without this, glob/find,
+		// ast-grep, and bash reach scoped-out server resources through
+		// InternalUrlFilesystem while read/grep stay gated.
+		if (context?.session?.isMCPServerResourceAllowed?.(targetServer) === false) {
+			throw new Error(`No MCP server has resource "${uri}".`);
 		}
 
 		let result: MCPResourceReadResult | undefined;

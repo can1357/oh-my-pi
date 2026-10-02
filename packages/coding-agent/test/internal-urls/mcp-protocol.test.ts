@@ -556,6 +556,33 @@ describe("McpProtocolHandler", () => {
 		expect(allowed.isError ?? false).toBe(false);
 	});
 
+	it("refuses a scoped-out server through the filesystem path that glob/find use", async () => {
+		// Regression for the handler-level gate: glob, find, ast-grep, and bash
+		// reach MCP resources through InternalUrlFilesystem, not through read's
+		// `#handleInternalUrl`, so a per-tool gate in read/grep leaves them open.
+		const { InternalUrlFilesystem } = await import("@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem");
+		const { sessionResolveContext } = await import("@oh-my-pi/pi-coding-agent/internal-urls/context");
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("denied-server", {
+			resources: [{ uri: "test://secret", name: "secret" }],
+			templates: [],
+		});
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["denied-server"],
+				resources,
+				readResult: { contents: [{ uri: "test://secret", text: "classified", mimeType: "text/plain" }] },
+			}),
+		);
+		InternalUrlRouter.instance();
+		const scopedSession = createToolSession(server => server !== "denied-server");
+		const filesystem = new InternalUrlFilesystem({
+			context: sessionResolveContext(scopedSession),
+			tier: "read",
+		});
+		await expect(filesystem.readPrefix("mcp://test://secret", 1024)).rejects.toThrow(/No MCP server has resource/);
+	});
+
 	it("reads an MCP resource when the session has no scope gate", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("open-server", {

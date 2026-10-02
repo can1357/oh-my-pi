@@ -5099,8 +5099,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							)?.name ?? entry
 						);
 					};
+					// Canonicalize the declared entries against the live registry (not the tool
+					// name): a Claude-spelled `tools:` entry stays raw in the set when the tool
+					// was absent at startup, and only resolves now that this registration
+					// populated it — toolRegistry.set ran above, so the entry resolves against
+					// the registration being judged.
+					const allowlisted =
+						!enforceToolAllowlist ||
+						explicitlyRequestedToolNameSet?.has(name) === true ||
+						[...(explicitlyRequestedToolNameSet ?? [])].some(
+							entry => !entry.endsWith("*") && canonicalScopeEntry(entry) === name,
+						);
 					const scopedOut =
-						(enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(canonicalScopeEntry(name)) === false) ||
+						!allowlisted ||
 						isToolDisallowed(
 							name,
 							disallowedPatterns.map(canonicalScopeEntry),

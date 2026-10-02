@@ -21,9 +21,6 @@ import {
 import { getEditStore } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
-import { parseInternalUrl } from "../internal-urls/parse";
-import { extractResourceUri, resolveTargetServer } from "../internal-urls/mcp-protocol";
-import { MCPManager } from "../mcp/manager";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -323,31 +320,6 @@ function lineRangeFetchCap(pathSpecs: readonly GrepPathSpec[], perFileKeep: numb
 	return Math.min(cap, NATIVE_GREP_MAX_FILE_BYTES);
 }
 
-/**
- * Session gate for `grep <mcp-resource>`: mirrors read's `#handleInternalUrl` gate.
- * `mcp://<uri>` (and server-advertised native URIs like `ags://secret`) resolve
- * through the process-global router, which has no session, so a scoped subagent
- * could otherwise search any connected server's resource contents by URI even
- * though the scope excludes that server everywhere else. Resolution mirrors the
- * handler's own settle+re-resolve so both agree on which server owns the URI.
- */
-async function gateMcpResourceRead(router: InternalUrlRouter, rawPath: string, session: ToolSession): Promise<void> {
-	if (!router.routesToMcpResources(rawPath)) return;
-	const mcpManager = MCPManager.instance();
-	if (!mcpManager) return;
-	const urlMeta = parseInternalUrl(rawPath);
-	const uri = extractResourceUri(urlMeta);
-	let serverName = resolveTargetServer(mcpManager, uri);
-	if (serverName === undefined) {
-		await mcpManager.waitForPendingConnections();
-		await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
-		serverName = resolveTargetServer(mcpManager, uri);
-	}
-	if (serverName !== undefined && session.isMCPServerResourceAllowed?.(serverName) === false) {
-		throw new ToolError(`No MCP server has resource "${rawPath}".`);
-	}
-}
-
 async function resolveInternalSearchInputs(opts: {
 	signal?: AbortSignal;
 	archiveDisplayMap: ReadonlyMap<string, string>;
@@ -364,7 +336,6 @@ async function resolveInternalSearchInputs(opts: {
 		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canResolve(rawPath)) {
 			continue;
 		}
-		await gateMcpResourceRead(internalRouter, rawPath, opts.session);
 		// `ssh://[::1]/path` carries `[`/`]` in the IPv6 authority — glob metacharacters
 		// — so check only the path portion for ssh:// (the SSH handler reads a single
 		// remote file; there is no glob expansion). A glob in the remote path still trips.

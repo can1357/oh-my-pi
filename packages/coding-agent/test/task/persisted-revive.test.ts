@@ -1382,6 +1382,59 @@ describe("persisted allowlist revival", () => {
 		expect(activeToolNames).toEqual([["read", "late_tool", "yield"]]);
 	});
 
+	it("re-admits session-managed builtins the SDK force-adds to every explicit list", async () => {
+		// `createAgentSession` force-adds manage_skill/learn/context_notes/new_context
+		// (plus the requireYieldTool terminator) to every non-restricted explicit
+		// list, but `declaredTools` persists only the executor's declaration. The
+		// clamp must union them back when the revived registry holds them, or the
+		// cold path drops tools the identical warm-revived agent keeps.
+		const cwd = makeTempDir("@pi-managed-revive-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		manager.appendSessionInit({
+			systemPrompt: "persisted prompt",
+			task: "persisted task",
+			tools: ["read", "yield"],
+			declaredTools: ["read", "yield"],
+			enforceToolAllowlist: true,
+		});
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			content: [{ type: "text", text: "persisted" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await manager.close();
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+
+		const activeToolNames: string[][] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return {
+				session: createRevivedSession(activeToolNames, undefined, ["read", "yield", "manage_skill", "learn"])
+					.session,
+			} as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(activeToolNames).toEqual([["read", "yield", "manage_skill", "learn"]]);
+	});
+
 	it("keeps the checkpoint/rewind pair when reviving a declaration that named only one", async () => {
 		// `tools: [checkpoint]` is widened to include `rewind` during session
 		// construction (the pair is unusable apart), but `declaredTools` records

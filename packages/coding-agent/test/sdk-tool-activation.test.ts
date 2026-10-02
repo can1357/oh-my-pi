@@ -2292,6 +2292,49 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("admits a late extension tool named in the Claude Code spelling of the allowlist", async () => {
+		// The allowlist entry `mcp__seedpatch-client__bank` is canonicalized at
+		// startup only against tools already registered; an extension that
+		// registers the minted `mcp__seedpatch_client_bank` later (the exact case
+		// scheduleToolRegistration exists for) must still be admitted — the grant
+		// must not depend on registration timing.
+		const tempDir = makeTempDir();
+		const registered = createMCPToolName("seedpatch-client", "bank");
+		const lateExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: registered,
+					label: "Seedpatch Bank",
+					description: "MCP proxy tool from seedpatch-client",
+					parameters: type({}),
+					mcpServerName: "seedpatch-client",
+					mcpToolName: "bank",
+					async execute() {
+						return { content: [{ type: "text", text: "ok" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [lateExtension],
+			toolNames: ["read", "yield", "mcp__seedpatch-client__bank"],
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+			expect(session.getEnabledToolNames()).toContain(registered);
+			expect(session.getActiveToolNames()).toContain(registered);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("disallows a length-capped MCP tool by mcpServerName ownership", async () => {
 		// Regression for the 64-char minted-name cap: a server whose minted name is
 		// truncated + hash-suffixed no longer prefix-matches `mcp__<server>_*`, so

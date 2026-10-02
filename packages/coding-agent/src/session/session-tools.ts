@@ -1076,12 +1076,29 @@ export class SessionTools {
 		// name-prefix match misses the truncated + hashed registry key).
 		const mcpServerName = (this.#toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
 		const isBuiltIn = this.#builtInToolNames.has(name);
+		// A Claude-spelled allowlist entry (`mcp__srv-x__tool`) stays raw in the
+		// stored set when the tool was absent at startup; resolve declared entries
+		// against the live registry so the grant does not depend on registration
+		// timing. The set itself is left untouched — resolution is per-judgment.
+		let allowedToolNames = this.#allowedToolNames;
+		if (this.#enforceToolAllowlist && allowedToolNames?.has(name) !== true) {
+			const resolved = new Set(allowedToolNames ?? []);
+			for (const entry of allowedToolNames ?? []) {
+				if (entry.endsWith("*")) continue;
+				const canonical =
+					resolveMCPToolAlias(entry, candidate =>
+						this.#toolRegistry.has(candidate) ? { name: candidate } : undefined,
+					)?.name ?? entry;
+				if (canonical !== entry) resolved.add(canonical);
+			}
+			allowedToolNames = resolved;
+		}
 		return isToolScopedIn(
 			name,
 			this.#disallowedToolPatterns,
 			{
 				enforceToolAllowlist: this.#enforceToolAllowlist,
-				allowedToolNames: this.#allowedToolNames,
+				allowedToolNames,
 				isBuiltIn,
 			},
 			typeof mcpServerName === "string" ? mcpServerName : undefined,
