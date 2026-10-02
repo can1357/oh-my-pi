@@ -9519,6 +9519,11 @@ export class AgentSession implements SettingsScope {
 		return this.#models.cycleThinkingLevel();
 	}
 
+	/** Lists all selectable effort selectors for the active model. */
+	getAvailableEffortSelectors(): ConfiguredThinkingLevel[] {
+		return this.#models.getAvailableEffortSelectors();
+	}
+
 	/** Reports whether `/fast` is enabled for the active model family. */
 	isFastModeEnabled(): boolean {
 		return this.#models.isFastModeEnabled();
