@@ -61,6 +61,57 @@ export class LineDecoder<T> {
 	}
 }
 
+/**
+ * Writes JSON lines to a Bun socket without assuming a write completes. `Bun.Socket.write()` may
+ * accept fewer bytes than offered once the kernel buffer is full — an IRC body has no short-line
+ * bound, and a backed-up peer stalls the buffer — so the unwritten suffix is kept at the head of a
+ * backlog and flushed from the socket's `drain` callback. Records are written whole and in order,
+ * so a long line never truncates (acks would time out) or interleaves with the next record. One
+ * writer per connection: `attach` drops the backlog of a replaced socket, whose records nobody
+ * would ack.
+ */
+export class LineWriter {
+	readonly #backlog: Uint8Array[] = [];
+	#socket: Bun.Socket | undefined;
+
+	attach(socket: Bun.Socket): void {
+		this.#socket = socket;
+		this.#backlog.length = 0;
+	}
+
+	detach(): void {
+		this.#socket = undefined;
+		this.#backlog.length = 0;
+	}
+
+	get connected(): boolean {
+		return this.#socket !== undefined;
+	}
+
+	/** Queue one record and write as much as the socket accepts. False when no socket is attached. */
+	write(message: BridgeMessage | PeerMessage): boolean {
+		if (!this.#socket) return false;
+		this.#backlog.push(new TextEncoder().encode(encodeLine(message)));
+		this.flush();
+		return true;
+	}
+
+	/** Write the backlog head-first until the socket stops accepting; the `drain` callback calls this. */
+	flush(): void {
+		const socket = this.#socket;
+		if (!socket) return;
+		while (this.#backlog.length > 0) {
+			const head = this.#backlog[0];
+			const written = socket.write(head);
+			if (written < head.byteLength) {
+				if (written > 0) this.#backlog[0] = head.subarray(written);
+				return;
+			}
+			this.#backlog.shift();
+		}
+	}
+}
+
 /** Minimal structural validation of a roster file. Throws a message naming the offending field. */
 export function parseRoster(value: unknown): Roster {
 	if (typeof value !== "object" || value === null) throw new Error("roster must be a JSON object");
