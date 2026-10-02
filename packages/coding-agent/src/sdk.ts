@@ -201,6 +201,11 @@ import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import {
+	SessionPresencePublisher,
+	type SessionPresenceKind,
+	type SessionPresencePublication,
+} from "./session/session-presence";
+import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
 	type SettingsGatedToolDelta,
@@ -748,6 +753,15 @@ export interface CreateAgentSessionOptions {
 	bindProcessState?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/**
+	 * Presence kind published to the session registry for a top-level
+	 * file-backed session. Opt-in: without it the session publishes nothing, so
+	 * `omp -p`, ACP, RPC and third-party SDK embedders stay out of a registry
+	 * only the interactive TUI and the Telegram bridge need. Hosts set their
+	 * mode so other processes can label a live session (`/sessions`, Telegram
+	 * mirrors). Ignored for subagents and in-memory sessions.
+	 */
+	presenceKind?: SessionPresenceKind;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -4861,6 +4875,55 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
+		// Session presence: publish this process's live top-level session so other
+		// omp processes can discover it (Telegram mirrors, second-writer refusal,
+		// `/sessions`). Opt-in — only the interactive TUI and the Telegram bridge
+		// pass a kind, so `omp -p`, ACP, RPC and SDK embedders write nothing.
+		// Subagents and in-memory managers are not independently addressable —
+		// their owner publishes instead — and every write is fire-and-forget:
+		// session creation never waits on presence I/O.
+		let presence: SessionPresencePublisher | undefined;
+		let releasePresence: (() => void) | undefined;
+		{
+			const presenceKind = options.presenceKind;
+			const sessionFile = sessionManager.getSessionFile();
+			if (!isSubagentSession && presenceKind !== undefined && sessionFile) {
+				const publication: SessionPresencePublication = {
+					kind: presenceKind,
+					sessionId: sessionManager.getSessionId(),
+					sessionFile,
+					cwd: sessionManager.getCwd(),
+					sessionName: sessionManager.getSessionName() ?? null,
+				};
+				const publisher = new SessionPresencePublisher(publication);
+				presence = publisher;
+				publisher.publish();
+				const refresh = (): void => {
+					const currentFile = sessionManager.getSessionFile();
+					if (!currentFile) return;
+					publisher.update({
+						sessionId: sessionManager.getSessionId(),
+						sessionFile: currentFile,
+						cwd: sessionManager.getCwd(),
+						sessionName: sessionManager.getSessionName() ?? null,
+					});
+				};
+				// A switch only has its final identity once the transition settles
+				// (a rolled-back switch reverts to the previous session).
+				const unsubscribeSessionChange = session.registerSessionChangeCallback(() => {
+					void session.waitForSessionTransition().then(refresh);
+				});
+				const unsubscribeNameChange = sessionManager.onSessionNameChanged(refresh);
+				// Explicit dispose unlinks the record; a killed process leaves it to
+				// the readers' pid/start-token liveness check.
+				const cancelExitCleanup = postmortem.register(`session-presence:${sessionFile}`, () => publisher.remove());
+				releasePresence = () => {
+					unsubscribeSessionChange();
+					unsubscribeNameChange();
+					cancelExitCleanup();
+				};
+			}
+		}
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
 		// explicit-dispose (SDK embedders that reuse the process across sessions) and
@@ -4904,6 +4967,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoreProviderToggles?.();
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
+					releasePresence?.();
+					presence?.remove();
+					await presence?.settled();
 					for (const callback of disposeCallbacks) callback();
 					disposeCallbacks.clear();
 					// Drop refs so the process-global postmortem list doesn't retain

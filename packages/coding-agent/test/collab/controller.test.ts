@@ -310,6 +310,32 @@ describe("interactive collaboration startup", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view", generation: 1 }]);
 	});
 
+	it("registers the owned room as a remote dialog host for exactly its lifetime", async () => {
+		mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: new VirtualTerminal() }),
+		);
+		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		await mode.init({ suppressWelcomeIntro: true });
+		expect(mode.remoteDialogHosts.list()).toEqual([]);
+
+		const host = await mode.collabController.start({ access: "view" });
+
+		expect(mode.collabHost).toBe(host);
+		expect(mode.remoteDialogHosts.list()).toEqual([host]);
+
+		await mode.collabController.stop("test done");
+
+		expect(mode.collabHost).toBeUndefined();
+		expect(mode.remoteDialogHosts.list()).toEqual([]);
+	});
+
 	it.each(["/collab", "/join"])(
 		"%s recovers a real session whose persistence failed before notifying observers",
 		async command => {

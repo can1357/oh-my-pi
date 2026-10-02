@@ -6,6 +6,8 @@ import type { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
+import type { RemoteDialogHosts } from "./remote-dialogs";
+import type { TelegramController } from "../telegram/controller";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import type { Settings } from "../config/settings";
@@ -164,9 +166,17 @@ export interface InteractiveModeContext {
 	lspServers?: LspStartupServerInfo[];
 	/** Owns hosting: manual `/collab`, `collab.autoStart`, and room rotation on session switch. */
 	collabController: CollabController;
+	/** The Telegram bridge for the interactive session (`/telegram`, auto-start). */
+	telegramController: TelegramController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	/**
+	 * Remote surfaces (collab guests, Telegram chats, …) that may answer a
+	 * dialog the TUI is showing; the first `answered` result wins and the rest
+	 * are aborted. A remote host registers itself for its own lifetime.
+	 */
+	remoteDialogHosts: RemoteDialogHosts;
 	eventController: EventController;
 	eventBus?: EventBus;
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */

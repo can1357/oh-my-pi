@@ -1,7 +1,7 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
-import type { CollabHost } from "../../collab/host";
+import type { RemoteDialogHost } from "../../modes/remote-dialogs";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
@@ -60,14 +60,21 @@ async function editDialogExternally(text: string): Promise<string | null> {
 	return command ? openInEditor(command, text) : null;
 }
 
-interface CollabDialogWinner {
+interface RemoteDialogWinner {
 	source: "local" | "remote";
 	value: string | undefined;
 }
 
-interface CollabAskDialogWinner {
+interface RemoteAskDialogWinner {
 	source: "local" | "remote";
 	value: ExtensionAskDialogResult | undefined;
+}
+
+/** One accepted remote surface in a dialog race: its tagged settlement and the abort that cancels it. */
+interface RemoteAnswer<W> {
+	/** `unavailable` when the host could not answer (channel gone, request aborted before any answer). */
+	answer: Promise<W | "unavailable">;
+	abort(): void;
 }
 /** Tagged result from a guest UI request, distinguishing a real answer (even
  *  one whose literal value is "unavailable"), an explicit guest cancel, and a
@@ -124,7 +131,7 @@ export class ExtensionUiController {
 		// Create and set hook & tool UI context
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
-			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
+			select: (title, options, dialogOptions) => this.showRemoteAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
@@ -145,7 +152,7 @@ export class ExtensionUiController {
 			},
 			getEditorText: () => this.ctx.editor.getText(),
 			editor: (title, prefill, dialogOptions, editorOptions) =>
-				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
+				this.showRemoteAwareEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),
 			get theme() {
 				return theme;
@@ -598,7 +605,7 @@ export class ExtensionUiController {
 		this.ctx.ui.requestRender();
 	}
 
-	async showCollabAwareSelector(
+	async showRemoteAwareSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
@@ -614,19 +621,19 @@ export class ExtensionUiController {
 			markableCount: dialogOptions?.markableCount,
 			helpText: dialogOptions?.helpText,
 		};
-		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
+		return this.#raceRemoteDialog(request, dialogOptions?.signal, signal =>
 			this.showHookSelector(title, options, { ...dialogOptions, signal }, extra),
 		);
 	}
 
-	async showCollabAwareEditor(
+	async showRemoteAwareEditor(
 		title: string,
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = { kind: "editor", title, prefill };
-		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
+		return this.#raceRemoteDialog(request, dialogOptions?.signal, signal =>
 			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
 		);
 	}
@@ -640,22 +647,29 @@ export class ExtensionUiController {
 		// strings/arrays here instead of throwing inside `sanitizeCarriageReturns`
 		// on the guest path or taking down the local render.
 		const normalized = normalizeDialogQuestions(questions);
-		const host = this.ctx.collabHost;
-		if (!host) return this.#showLocalAskDialog(normalized, dialogOptions);
+		const hosts = this.ctx.remoteDialogHosts.list();
+		if (hosts.length === 0) return this.#showLocalAskDialog(normalized, dialogOptions);
 		const localAbort = new AbortController();
-		const remoteAbort = new AbortController();
 		const parentSignal = dialogOptions?.signal;
 		const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
-		const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
+		// Every host runs the whole ask on its own abort signal; a host that cannot
+		// take the request or whose channel went away resolves to the local winner,
+		// so only a genuine remote answer ends the race (the local user may be
+		// mid-keystroke in the local dialog, which keeps running).
+		const remotes: RemoteAnswer<RemoteAskDialogWinner>[] = hosts.map(host => {
+			const controller = new AbortController();
+			const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+			return {
+				answer: this.#runGuestAskDialog(host, normalized, remoteSignal).then(result =>
+					result === "unavailable" ? ("unavailable" as const) : ({ source: "remote", value: result } as const),
+				),
+				abort: () => controller.abort(),
+			};
+		});
 		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
-			(value): CollabAskDialogWinner => ({ source: "local", value }),
+			(value): RemoteAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(host, normalized, remoteSignal).then(
-			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
-		);
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
+		const winner = await this.#settleRemoteRace(localWinner, remotes, () => localAbort.abort());
 		return winner.value;
 	}
 
@@ -790,40 +804,79 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Race the local hook dialog against a mirrored guest ask. First *answer*
-	 * wins and cancels the other side. A remote `unavailable` settlement
-	 * (collab teardown, relay drop, abort) is NOT an answer: the local dialog
-	 * keeps running — the host user may be mid-keystroke in it — and its
-	 * eventual result is returned.
+	 * Race the local hook dialog against every registered remote host. First
+	 * *answer* wins and cancels the other surfaces. A remote `unavailable`
+	 * settlement (collab teardown, relay drop, Telegram abort) is NOT an answer:
+	 * the local dialog keeps running — the host user may be mid-keystroke in it —
+	 * and its eventual result is returned.
 	 */
-	async #raceCollabDialog(
+	async #raceRemoteDialog(
 		request: CollabUiRequestDraft,
 		signal: AbortSignal | undefined,
 		local: (signal: AbortSignal | undefined) => Promise<string | undefined>,
 	): Promise<string | undefined> {
-		const host = this.ctx.collabHost;
-		if (!host) return local(signal);
+		const hosts = this.ctx.remoteDialogHosts.list();
+		if (hosts.length === 0) return local(signal);
 		const localAbort = new AbortController();
-		const remoteAbort = new AbortController();
-		const remote = host.requestGuestUi(
-			request,
-			signal ? AbortSignal.any([signal, remoteAbort.signal]) : remoteAbort.signal,
-		);
-		if (!remote) return local(signal);
+		// A host returning `null` cannot take the request right now; skip it. Each
+		// accepted host gets its own abort so a losing host can be cancelled
+		// without killing the surface that answered.
+		const remotes: RemoteAnswer<RemoteDialogWinner>[] = [];
+		for (const host of hosts) {
+			const controller = new AbortController();
+			const remote = host.requestGuestUi(
+				request,
+				signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+			);
+			if (!remote) continue;
+			remotes.push({
+				answer: remote.then(result =>
+					result.kind === "answered" ? ({ source: "remote", value: result.value } as const) : "unavailable",
+				),
+				abort: () => controller.abort(),
+			});
+		}
+		if (remotes.length === 0) return local(signal);
 		const localWinner = local(signal ? AbortSignal.any([signal, localAbort.signal]) : localAbort.signal).then(
-			(value): CollabDialogWinner => ({ source: "local", value }),
+			(value): RemoteDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabDialogWinner> = remote.then(result =>
-			result.kind === "answered" ? { source: "remote", value: result.value } : localWinner,
-		);
-		const winner = await Promise.race([localWinner, remoteWinner]);
-		if (winner.source === "remote") localAbort.abort();
-		else remoteAbort.abort();
+		const winner = await this.#settleRemoteRace(localWinner, remotes, () => localAbort.abort());
 		return winner.value;
 	}
 
+	/**
+	 * Race the local dialog's eventual result against every remote answer. Only
+	 * a tagged remote *answer* wins: an `unavailable` settlement (channel gone,
+	 * request aborted before anyone answered) resolves to the local winner, so
+	 * the local dialog — which the host user may be mid-keystroke in — keeps
+	 * running. Once a winner exists, every losing surface is aborted: the local
+	 * dialog when a remote answered, and every remote other than the answerer.
+	 */
+	async #settleRemoteRace<W extends { source: "local" | "remote" }>(
+		localWinner: Promise<W>,
+		remotes: RemoteAnswer<W>[],
+		abortLocal: () => void,
+	): Promise<W> {
+		let winnerIndex = -1;
+		const answers = remotes.map((remote, index) =>
+			remote.answer.then((result): W | Promise<W> => {
+				if (result === "unavailable") return localWinner;
+				// First answer wins; a later answer in the same drain must not
+				// steal the abort bookkeeping from the surface that won.
+				if (winnerIndex === -1) winnerIndex = index;
+				return result;
+			}),
+		);
+		const winner = await Promise.race([localWinner, ...answers]);
+		if (winnerIndex >= 0) abortLocal();
+		for (const [index, remote] of remotes.entries()) {
+			if (index !== winnerIndex) remote.abort();
+		}
+		return winner;
+	}
+
 	async #runGuestAskDialog(
-		host: CollabHost,
+		host: RemoteDialogHost,
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
@@ -838,7 +891,7 @@ export class ExtensionUiController {
 	}
 
 	async #runGuestAskQuestion(
-		host: CollabHost,
+		host: RemoteDialogHost,
 		question: ExtensionAskDialogQuestion,
 		signal: AbortSignal,
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
@@ -965,7 +1018,7 @@ export class ExtensionUiController {
 	}
 
 	async #requestGuestUiString(
-		host: CollabHost,
+		host: RemoteDialogHost,
 		request: CollabUiRequestDraft,
 		signal: AbortSignal,
 	): Promise<GuestUiResult> {

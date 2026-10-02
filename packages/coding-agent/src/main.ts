@@ -114,6 +114,8 @@ import {
 	resolvePromptInput,
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
+import { createTelegramSessionFactory } from "./telegram/session-factory";
+import type { TelegramSessionFactory } from "./telegram/types";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
@@ -612,6 +614,7 @@ async function runInteractiveMode(
 	joinLink?: string,
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
+	telegramSessionFactory?: TelegramSessionFactory,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -632,6 +635,9 @@ async function runInteractiveMode(
 		startupLease?.dispose();
 		throw error;
 	}
+	// The controller builds topic sessions through the SDK factory; install it
+	// before any auto-start or `/telegram` handler can run.
+	if (telegramSessionFactory) mode.telegramController.setSessionFactory(telegramSessionFactory);
 
 	let setupWizard: typeof SetupWizardModule | undefined;
 	let setupScenes: SetupScene[] = [];
@@ -727,6 +733,8 @@ async function runInteractiveMode(
 		// Keep guest mutations gated through setup dialogs and transcript replay,
 		// not just init. Only a successful outer startup opens the room for input.
 		mode.collabController.startupComplete();
+		// Applies telegram.autoStart; unconfigured bots are skipped silently.
+		mode.telegramController.startupComplete();
 	} catch (error) {
 		// Init publishes before startup dialogs, so any later startup failure
 		// must withdraw the room before restoring the terminal.
@@ -734,6 +742,11 @@ async function runInteractiveMode(
 			await mode.collabController.shutdown("startup failed");
 		} catch (cleanupError) {
 			logger.warn("Failed to stop collaboration after startup failure", { error: String(cleanupError) });
+		}
+		try {
+			await mode.telegramController.shutdown("startup failed");
+		} catch (cleanupError) {
+			logger.warn("Failed to stop Telegram after startup failure", { error: String(cleanupError) });
 		} finally {
 			mode.stop();
 		}
@@ -1758,7 +1771,7 @@ export async function runRootCommand(
 		// Classify the host before opening auth or settings storage so every
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
-		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp" || mode === "telegram";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always
@@ -2145,6 +2158,10 @@ export async function runRootCommand(
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
+		// Presence is opt-in: only the interactive TUI publishes, read by other omp
+		// processes (mirrors, second-writer refusal). `omp -p`, ACP, RPC and SDK
+		// embedders stay out of the registry.
+		if (isInteractive) sessionOptions.presenceKind = "interactive";
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });
 			else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
@@ -2220,7 +2237,43 @@ export async function runRootCommand(
 			// appends to the timing tree for the life of the server.
 			logger.endTiming();
 			await runAcpMode(createAcpSession);
+		} else if (mode === "telegram") {
+			// Branch-only host runner: keep Telegram host and lifecycle code out of
+			// normal interactive startup, like the ACP/RPC branches above.
+			const [{ createTelegramHost }, { runTelegramHeadless }] = await Promise.all([
+				import("./telegram/host"),
+				import("./telegram/headless"),
+			]);
+			const createTelegramSession = createTelegramSessionFactory({
+				baseOptions: sessionOptions,
+				settings: settingsInstance,
+				authStorage,
+				modelRegistry,
+				bindProcessState: true,
+				createSession,
+			});
+			stopStartupWatchdog();
+			logger.endTiming();
+			await runTelegramHeadless({
+				settings: settingsInstance,
+				cwd,
+				sessionFactory: createTelegramSession,
+				createHost: createTelegramHost,
+			});
 		} else {
+			// Topic sessions built by `/telegram` must NOT inherit the TUI's
+			// process-state binding, UI flags, or the interactive-only warp event
+			// bridge, so snapshot the launch options before those are applied.
+			const telegramInteractiveFactory = isInteractive
+				? createTelegramSessionFactory({
+						baseOptions: { ...sessionOptions },
+						settings: settingsInstance,
+						authStorage,
+						modelRegistry,
+						bindProcessState: false,
+						createSession,
+					})
+				: undefined;
 			// Resolve extension-registered CLI flags before creating the session so a
 			// bad `@file` fails fast WITHOUT leaving a junk session/breadcrumb
 			// (createAgentSession writes the terminal breadcrumb eagerly). Loading the
@@ -2527,6 +2580,7 @@ export async function runRootCommand(
 						parsedArgs.join,
 						startDeferredStartupWork,
 						startupLease,
+						telegramInteractiveFactory,
 					);
 				} finally {
 					startupLease?.dispose();

@@ -30,6 +30,7 @@ import type {
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import { RemoteDialogHosts } from "@oh-my-pi/pi-coding-agent/modes/remote-dialogs";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
@@ -475,7 +476,17 @@ function makeHostContext(): InteractiveModeContext {
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
+		remoteDialogHosts: new RemoteDialogHosts(),
 	} as unknown as InteractiveModeContext;
+}
+
+/**
+ * Mirror the production owned-room slot: the room becomes `ctx.collabHost` and,
+ * for exactly that lifetime, one of the TUI's remote dialog hosts.
+ */
+function attachCollabHost(ctx: InteractiveModeContext, host: CollabHost): void {
+	ctx.collabHost = host;
+	ctx.remoteDialogHosts.add(host);
 }
 
 /** Raw wire-speaking guest with a configurable hello proto. */
@@ -581,7 +592,7 @@ describe("collab proto handshake (#4049)", () => {
 
 // ── Host dialog vs collab teardown (#4049 follow-up) ────────────────────────
 //
-// `ExtensionUiController.#raceCollabDialog` mirrors a hook dialog to writable
+// `ExtensionUiController.#raceRemoteDialog` mirrors a hook dialog to writable
 // guests and races the two surfaces. Teardown (/collab stop, non-reconnectable
 // relay drop) settles every pending guest ask as `unavailable`; that is NOT a
 // guest answer, so the local dialog the host user may be typing in must keep
@@ -635,13 +646,13 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		const ctx = makeHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new StubDialogController(ctx);
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 		const welcome = await guest.nextFrame();
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
-		const result = controller.showCollabAwareSelector("Deploy?", ["Yes", "No"]);
+		const result = controller.showRemoteAwareSelector("Deploy?", ["Yes", "No"]);
 		const requestFrame = await guest.nextFrame();
 		if (requestFrame.t !== "ui-request") throw new Error(`expected ui-request, got ${requestFrame.t}`);
 		const dialog = controller.localDialogs[0];
@@ -664,11 +675,11 @@ describe("collab host dialog vs teardown (#4049 follow-up)", () => {
 		const ctx = makeHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new StubDialogController(ctx);
 		let guest: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
 		try {
-			const result = controller.showCollabAwareSelector("Deploy later?", ["Yes", "No"]);
+			const result = controller.showRemoteAwareSelector("Deploy later?", ["Yes", "No"]);
 			const dialog = controller.localDialogs[0];
 			if (!dialog) throw new Error("expected the local dialog before a writer joined");
 
@@ -747,7 +758,7 @@ describe("guest ask unavailable literal answer (#4375)", () => {
 		const ctx = makeHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 			const welcome = await guest.nextFrame();
@@ -812,7 +823,7 @@ describe("guest ask room ownership", () => {
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const successor = new CollabHost(ctx);
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 		const abort = new AbortController();
@@ -824,7 +835,7 @@ describe("guest ask room ownership", () => {
 			// room cannot change this already answered promise to unavailable.
 			void response?.then(() => {
 				void host.stop("replaced");
-				ctx.collabHost = successor;
+				attachCollabHost(ctx, successor);
 				replaced.resolve();
 			});
 			return response;
@@ -887,7 +898,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new ExtensionUiController(ctx);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
@@ -937,7 +948,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new ExtensionUiController(ctx);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
@@ -978,7 +989,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new ExtensionUiController(ctx);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
@@ -1022,7 +1033,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new ExtensionUiController(ctx);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
@@ -1074,7 +1085,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
 		await host.start("ws://localhost:8787");
-		ctx.collabHost = host;
+		attachCollabHost(ctx, host);
 		const controller = new ExtensionUiController(ctx);
 		try {
 			const guest = await joinRawGuest(host.link, COLLAB_PROTO);

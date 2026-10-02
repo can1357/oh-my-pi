@@ -20,6 +20,13 @@ export type { BranchSummaryMessage, CompactionSummaryMessage } from "@oh-my-pi/p
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 
+/**
+ * Custom type of a Telegram sender's prompt relayed into an attached TUI
+ * session's transcript. Behaves like `collab-prompt`: a user-attributed turn
+ * initiator rendered with the sender's name.
+ */
+export const TELEGRAM_PROMPT_MESSAGE_TYPE = "telegram-prompt";
+
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
@@ -55,6 +62,12 @@ export interface BackgroundTanDispatchDetails {
 	work: string;
 	/** Forked clone session file, named `<agentId>.jsonl`; the Agent Hub reads its transcript. */
 	sessionFile: string;
+}
+
+/** Details persisted on a Telegram-relayed prompt entry (`telegram-prompt`). */
+export interface TelegramPromptDetails {
+	/** Telegram display name of the sender. */
+	from: string;
 }
 
 export interface SkillPromptDetails {
@@ -276,13 +289,15 @@ export function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
 
 /**
  * True for a custom message that initiates a user-attributed turn: a directly
- * invoked `/skill:` prompt or a writable-collab peer's prompt. Agent redirects,
- * reminders, and auto-continues are not turn starts.
+ * invoked `/skill:` prompt, a writable-collab peer's prompt, or a Telegram
+ * sender's relayed prompt. Agent redirects, reminders, and auto-continues are
+ * not turn starts.
  */
 export function isUserTurnInitiator(message: CustomMessage): boolean {
 	return (
 		isUserInvokedSkillPrompt(message) ||
-		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")
+		((message.customType === COLLAB_PROMPT_MESSAGE_TYPE || message.customType === TELEGRAM_PROMPT_MESSAGE_TYPE) &&
+			message.attribution === "user")
 	);
 }
 

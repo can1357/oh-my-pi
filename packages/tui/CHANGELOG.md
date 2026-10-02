@@ -4,7 +4,13 @@
 
 ### Added
 
+- Added the `telegram-prompt` custom message type: prompts relayed from Telegram render as the sender's prompt "via Telegram" in live and rebuilt transcripts ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
 - Added display of subagent completion percent in agent tree, task, and wait views
+
+### Changed
+
+- Renamed `CollabPromptMessageComponent` (`chat/collab-prompt-message`) to `RemotePromptMessageComponent` (`chat/remote-prompt-message`); it now renders collab and Telegram prompts and strips control sequences from the sender name ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
+
 ### Fixed
 
 - Fixed multiline paste on Windows inserting `[13;28;13;1;0;1_`-style codes instead of line breaks ([#14065](https://github.com/can1357/oh-my-pi/issues/14065))

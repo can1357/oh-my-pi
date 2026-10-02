@@ -70,6 +70,8 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
+import { RemoteDialogHosts } from "./remote-dialogs";
+import { TelegramController } from "../telegram/controller";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
@@ -1488,8 +1490,31 @@ export class InteractiveMode implements InteractiveModeContext {
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 	/** Owns hosting: manual `/collab`, `collab.autoStart`, and room rotation on session switch. */
 	readonly collabController: CollabController;
-	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
-	collabHost?: CollabHost;
+	/** The Telegram bridge for this process; started/stopped by the `/telegram` command. */
+	readonly telegramController: TelegramController;
+	/**
+	 * Remote surfaces (collab guests, Telegram chats, …) racing the local UI for
+	 * dialog answers. The collab room registers here exactly for its lifetime as
+	 * {@link collabHost}; every other host registers itself.
+	 */
+	readonly remoteDialogHosts = new RemoteDialogHosts();
+	#collabHost: CollabHost | undefined;
+	#unregisterCollabDialogHost: (() => void) | undefined;
+	/**
+	 * Owned room; use {@link collabController}.host for current-session reuse and
+	 * links. Assigning it is also what enters the room into
+	 * {@link remoteDialogHosts}, so the TUI dialog race sees it while — and only
+	 * while — it is the owned room.
+	 */
+	get collabHost(): CollabHost | undefined {
+		return this.#collabHost;
+	}
+	set collabHost(host: CollabHost | undefined) {
+		if (host === this.#collabHost) return;
+		this.#unregisterCollabDialogHost?.();
+		this.#unregisterCollabDialogHost = host ? this.remoteDialogHosts.add(host) : undefined;
+		this.#collabHost = host;
+	}
 	collabGuest?: CollabGuestLink;
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
@@ -1935,6 +1960,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
+		this.telegramController = new TelegramController(this);
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
@@ -6931,6 +6957,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Guests get goodbye and the registry entry disappears before the
 			// session is disposed, under the same still-closing progress notice.
 			await this.collabController.shutdown("host exited");
+			await this.telegramController.shutdown("host exited");
 			await this.#liveCommandController.stop();
 			await this.#btwController.dispose();
 			this.#omfgController.dispose();

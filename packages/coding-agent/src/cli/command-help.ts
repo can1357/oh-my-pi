@@ -146,6 +146,10 @@ export const tinyModelsHelp = {
 	description: "Download tiny local models (session titles, memory, word completion)",
 } satisfies CommandMetadata;
 
+export const telegramHelp = {
+	description: "Run the Telegram bridge in the foreground, or print its status",
+} satisfies CommandMetadata;
+
 export const tokenHelp = { description: "Get the API key or OAuth token for a provider" } satisfies CommandMetadata;
 
 export const toksHelp = {

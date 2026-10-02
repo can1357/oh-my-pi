@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a native Telegram bridge: pair a bot from the TUI with `/telegram pair` and every omp session gets its own Telegram topic — prompts, follow-ups, steering, stop, photos, documents, and agent questions answered in the chat — or run the same bridge headless with `omp telegram` (settings under Interaction → Telegram; see [docs/telegram.md](../../docs/telegram.md)) ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
 - Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
 
 ## [18.4.10] - 2026-10-02
