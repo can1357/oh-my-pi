@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fixed task and eval subagents ignoring invocation-local models when per-agent settings or custom frontmatter specify a different model.
+- Clarified subagent model selection instructions to preserve explicit role aliases such as `@cheap`, including their `@` prefix.
 - Fixed HTML export hanging when a session's subagent directory held a transcript named `..jsonl`; discovery now only descends into real child directories ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ## [18.4.12] - 2026-10-02
@@ -1440,6 +1442,7 @@
 - Added `icon.vimNormal`, `icon.vimInsert`, `icon.vimVisual`, and `icon.vimVisualLine` symbols, so the Vim mode icons follow the active symbol preset like every other status-line icon — Nerd Font (fa-square / fa-pencil / fa-eye / fa-bars), Unicode (`■` `▎` `◉` `≡`), or ascii (`N`/`I`/`V`/`L`) — and can be overridden per theme via the `symbols` map.
 - Added peak `↑` / off-peak `↓` indicators to the cost display for models with scheduled pricing (DeepSeek), refreshed automatically when the tariff changes.
 - Added plan autosave: enable `plan.autosave` to automatically save approved plans to `<project>/.omp/plans/` when plan mode completes (customize with `plan.autosaveDir`, which accepts `~`, absolute, and cwd-relative paths) ([#11599](https://github.com/can1357/oh-my-pi/pull/11599) by [@H4vC](https://github.com/H4vC)).
+- Task can now choose a model with model: "provider/model" or an ordered list of models. In batch tasks, each task can choose its own model. Eval agent() now supports the same model option in both JavaScript and Python. The agent checks that the selected model is available, enabled, and has valid credentials before starting. When several models are provided, it tries them in order and stays within that list. Added clearer instructions, validation, and regression tests. ([#11604](https://github.com/can1357/oh-my-pi/pull/11604) by [@mabinogi80503](https://github.com/mabinogi80503))
 
 ### Changed
 

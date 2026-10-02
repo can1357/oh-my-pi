@@ -42,6 +42,8 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const modelSelectorSchema = type("string.trim |> string > 0");
+const modelInputSchema = modelSelectorSchema.or(modelSelectorSchema.array().atLeastLength(1));
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -53,6 +55,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -63,6 +66,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -75,6 +79,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -86,16 +91,19 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelInputSchema,
 	"+": "delete",
 });
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	"model?": "never",
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
+	"model?": "never",
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -137,12 +145,14 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
+				"model?": modelInputSchema,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				"model?": "never",
 				"+": "delete",
 			});
 		}
@@ -155,11 +165,13 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"model?": modelInputSchema,
 			"+": "delete",
 		});
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
+			"model?": "never",
 			"+": "delete",
 		});
 	}
@@ -173,6 +185,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			"model?": modelInputSchema,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -186,6 +199,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		"model?": modelInputSchema,
 		"+": "delete",
 	});
 }

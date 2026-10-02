@@ -408,6 +408,8 @@ export interface ExecutorOptions {
 	 */
 	detached?: boolean;
 	modelOverride?: string | string[];
+	/** Caller candidates are a closed set and must not inherit parent/default fallbacks. */
+	modelSelectionClosed?: boolean;
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
@@ -3705,6 +3707,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		worktree,
 		modelOverride,
 		modelRole,
+		modelSelectionClosed,
 		thinkingLevel,
 		outputSchema,
 		enableLsp,
@@ -3948,8 +3951,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			checkAbort();
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+			if (modelSelectionClosed) {
+				// Record settings merge by key, so an empty map does not mask the
+				// parent's exact, wildcard, role, or default chains.
+				const inheritedChains = cfgRetryFallbackChains.get(subagentSettings);
+				cfgRetryFallbackChains.override(
+					subagentSettings,
+					Object.fromEntries(Object.keys(inheritedChains).map(key => [key, []])),
+				);
+			}
 			const inheritedRetryFallbackChain =
-				configuredModelPatterns.length === 1
+				!modelSelectionClosed && configuredModelPatterns.length === 1
 					? resolveSubagentInheritedRetryFallbackChain(
 							subagentSettings,
 							modelRegistry,
@@ -3965,7 +3977,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
 					modelPatterns,
-					options.parentActiveModelPattern,
+					modelSelectionClosed ? undefined : options.parentActiveModelPattern,
 					modelRegistry,
 					settings,
 					id,
@@ -4144,11 +4156,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+						modelSelectionClosed || model || modelOverride === undefined
+							? undefined
+							: options.parentActiveModelPattern,
 					modelPatternFallbackRole:
-						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+						modelSelectionClosed || model || modelOverride === undefined
+							? undefined
+							: subagentRetryFallbackRole(id),
 					modelPatternDefaultFallbackChain:
-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+						modelSelectionClosed || model || modelOverride === undefined
+							? undefined
+							: inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.

@@ -220,13 +220,14 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 ## Model and structured-output precedence
 
-For task dispatch, model precedence is:
+For both task dispatch and eval `agent()`, model precedence is:
 
-1. `task.agentModelOverrides[agentName]`
-2. the agent frontmatter's prioritized `model` list
-3. the parent's active model, then its configured/default model fallback
+1. the invocation-local `model` selector or ordered candidate list (per item for task batches)
+2. `task.agentModelOverrides[agentName]`
+3. the agent frontmatter's prioritized `model` list
+4. the parent's active model, then its configured/default model fallback
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+Role aliases are expanded through `modelRoles`. An explicit invocation-local `model` is validated before dispatch and restricts execution to its available candidates. If none are available, preflight fails without falling back to settings, frontmatter, or the parent model. Omitting `model` preserves the agent's existing role and session-inheritance behavior.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 

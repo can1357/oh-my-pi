@@ -12,6 +12,8 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 # Inputs
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name. `outputSchema` overrides agent/session schemas.
 `solutionSpace`: describe how open-ended the child's problem is: whether the fix or design is given, or which causes or designs remain open. Volume of work does not widen it; NEVER mention sibling agents or coordination. (`one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`; `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`)
+`model`: optional selector or ordered candidate list per spawn (batch: per item). Model priority: per-spawn `model` → `task.agentModelOverrides` → agent frontmatter → parent active/default model. Explicit candidates are tried in order; if none are available, the call fails without outside fallback.
+Preserve user-specified model selectors verbatim, including the `@` role-alias prefix and any thinking suffix. If the user requests `@cheap`, pass `model: "@cheap"`; NEVER strip `@`, replace the alias with a guessed model, or omit the explicit selection. `@cheap` resolves the configured role; bare `cheap` searches model IDs and is not equivalent. The resolver owns alias expansion and credential checks.
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
 {{/if}}`schemaMode`: default permissive warns after retries; strict fails.

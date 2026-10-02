@@ -22,6 +22,7 @@ import {
 	resolveModelFromSettings,
 	resolveModelFromString,
 	resolveModelOverride,
+	resolveStrictModelCandidates,
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveRoleChain,
@@ -29,6 +30,7 @@ import {
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 // Mock models for testing
@@ -1131,7 +1133,7 @@ describe("resolveAgentAdvisorSelection", () => {
 	});
 });
 describe("resolveAgentModelPatterns", () => {
-	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
+	test("pairs the highest configured source's role with its patterns, skipping aliases with no patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
 				empty: "",
@@ -1147,7 +1149,7 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: "override" });
+		).toEqual({ patterns: ["openai/gpt-4o"], role: "override", origin: "settings" });
 
 		expect(
 			resolveAgentModelSelection({
@@ -1156,10 +1158,9 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition" });
+		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition", origin: "agent" });
 
-		// An explicit selector carries no role identity, so the child must not
-		// capture the routing of a role that happens to name the same model.
+		// Matching concrete patterns must not attach the settings role to a request.
 		expect(
 			resolveAgentModelSelection({
 				requestModel: "openai/gpt-4o",
@@ -1167,7 +1168,77 @@ describe("resolveAgentModelPatterns", () => {
 				agentModel: ["@definition"],
 				settings,
 			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
+		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined, origin: "request" });
+	});
+
+	test("caller models outrank settings and custom agent frontmatter", () => {
+		const settings = Settings.isolated();
+		const options = {
+			requestModel: "caller/model",
+			settingsOverride: "settings/model",
+			agentModel: "agent/model",
+			settings,
+		};
+		expect(resolveAgentModelSelection({ ...options, agentModelPriority: true })).toEqual({
+			patterns: ["caller/model"],
+			role: undefined,
+			origin: "request",
+		});
+		expect(resolveAgentModelSelection(options)).toEqual({
+			patterns: ["caller/model"],
+			role: undefined,
+			origin: "request",
+		});
+	});
+
+	test("caller role selectors outrank custom frontmatter roles and parent", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "fast/model", caller: "caller/model" } });
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "@caller",
+				agentModel: "@smol",
+				agentModelPriority: true,
+				settings,
+				activeModelPattern: "parent/model",
+			}),
+		).toEqual({ patterns: ["caller/model"], role: "caller", origin: "request" });
+	});
+
+	test("without a caller model, settings then frontmatter precede the parent", () => {
+		const options = {
+			settingsOverride: "settings/model",
+			agentModel: "agent/model",
+			agentModelPriority: true,
+			activeModelPattern: "parent/active",
+			fallbackModelPattern: "parent/configured",
+			settings: Settings.isolated({ modelRoles: { default: "parent/default" } }),
+		};
+		expect(resolveAgentModelSelection(options)).toEqual({
+			patterns: ["settings/model"],
+			role: undefined,
+			origin: "settings",
+		});
+		expect(resolveAgentModelSelection({ ...options, settingsOverride: undefined })).toEqual({
+			patterns: ["agent/model"],
+			role: undefined,
+			origin: "agent",
+		});
+		const inherited = { ...options, settingsOverride: undefined, agentModel: undefined };
+		expect(resolveAgentModelPatterns(inherited)).toEqual(["parent/active"]);
+		expect(resolveAgentModelPatterns({ ...inherited, activeModelPattern: undefined })).toEqual(["parent/configured"]);
+		expect(
+			resolveAgentModelPatterns({ ...inherited, activeModelPattern: undefined, fallbackModelPattern: undefined }),
+		).toEqual(["parent/default"]);
+	});
+
+	test("custom default frontmatter remains explicit while bundled defaults inherit the active model", () => {
+		const options = {
+			agentModel: "@default",
+			settings: Settings.isolated({ modelRoles: { default: "parent/default" } }),
+			activeModelPattern: "parent/active",
+		};
+		expect(resolveAgentModelPatterns({ ...options, agentModelPriority: true })).toEqual(["parent/default"]);
+		expect(resolveAgentModelPatterns(options)).toEqual(["parent/active"]);
 	});
 
 	test("falls back to the active session model when @task is unset", () => {
@@ -1391,6 +1462,46 @@ describe("resolveModelOverride", () => {
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
+
+describe("resolveStrictModelCandidates", () => {
+	test("keeps ordered usable candidates and classifies unknown, disabled, and missing credentials", async () => {
+		const unknown = "missing/provider-model";
+		const disabled = mockModels[0];
+		const missingCredentials = mockModels[1];
+		const usable = mockOpenRouterModels[0];
+		const registry = {
+			getAvailable: () => [missingCredentials, usable],
+			getAll: () => [disabled, missingCredentials, usable],
+			getApiKey: async (model: Model<Api>) => (model === usable ? "test-key" : undefined),
+		};
+		const settings = Settings.isolated({ disabledProviders: ["anthropic"] });
+
+		const result = await resolveStrictModelCandidates(
+			[unknown, "anthropic/claude-sonnet-4-5", "openai/gpt-4o", "openrouter/qwen/qwen3-coder:exacto"],
+			registry,
+			settings,
+		);
+
+		expect(result.patterns).toEqual(["openrouter/qwen/qwen3-coder:exacto"]);
+		expect(result.failures).toEqual([
+			{ pattern: unknown, reason: "unknown" },
+			{ pattern: "anthropic/claude-sonnet-4-5", reason: "disabled-provider" },
+			{ pattern: "openai/gpt-4o", reason: "missing-credentials" },
+		]);
+	});
+
+	test("accepts keyless providers through the kNoAuth sentinel", async () => {
+		const keyless = mockOpenRouterModels[0];
+		const result = await resolveStrictModelCandidates(["openrouter/qwen/qwen3-coder:exacto"], {
+			getAvailable: () => [keyless],
+			getAll: () => [keyless],
+			getApiKey: async () => kNoAuth,
+		});
+
+		expect(result.patterns).toEqual(["openrouter/qwen/qwen3-coder:exacto"]);
+		expect(result.failures).toEqual([]);
 	});
 });
 describe("resolveCliModel", () => {
