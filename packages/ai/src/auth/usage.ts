@@ -34,7 +34,7 @@ import {
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { CredentialPool } from "./pool";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { OAUTH_REFRESH_SKEW_MS } from "./refresh";
+import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
@@ -64,6 +64,9 @@ export function buildRefreshableOauthCredential(credential: UsageCredential): OA
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		region: credential.region,
+		inferenceRegion: credential.inferenceRegion,
+		activeOrganizationId: credential.activeOrganizationId,
 	};
 }
 
@@ -82,8 +85,7 @@ export function mergeRefreshedUsageCredential(
 		email: refreshed.email ?? credential.email,
 		enterpriseUrl: refreshed.enterpriseUrl ?? credential.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? credential.apiEndpoint,
-		orgId: refreshed.orgId ?? credential.orgId,
-		orgName: refreshed.orgName ?? credential.orgName,
+		...mergeRefreshedOrganizationScope(credential, refreshed),
 	};
 }
 
@@ -103,12 +105,18 @@ export interface UsageServiceDeps {
 	logger: UsageLogger;
 }
 
+type UsageReportsOptions = {
+	baseUrlResolver?: (provider: Provider) => string | undefined;
+	signal?: AbortSignal;
+};
+
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
 	/** Runtime extension providers take precedence over the configured/default resolver. */
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
-	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
+	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
+	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	readonly fetch: typeof fetch;
@@ -183,8 +191,11 @@ export class UsageService implements UsageApi {
 			email: next.email ?? entry.credential.email,
 			enterpriseUrl: next.enterpriseUrl ?? entry.credential.enterpriseUrl,
 			apiEndpoint: next.apiEndpoint ?? entry.credential.apiEndpoint,
-			orgId: next.orgId ?? entry.credential.orgId,
-			orgName: next.orgName ?? entry.credential.orgName,
+			orgId: next.orgId,
+			orgName: next.orgName,
+			region: next.region,
+			inferenceRegion: next.inferenceRegion,
+			activeOrganizationId: next.activeOrganizationId,
 		});
 	}
 
@@ -260,9 +271,13 @@ export class UsageService implements UsageApi {
 		if (providerImpl.supports && !providerImpl.supports(params)) return null;
 
 		try {
+			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
+				this.#deps.cache.reportKey(request),
+			)?.value;
 			const report = await providerImpl.fetchUsage(params, {
 				fetch: this.fetch,
 				logger: this.logger,
+				...(previousReport ? { previousReport } : {}),
 			});
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
@@ -305,28 +320,46 @@ export class UsageService implements UsageApi {
 	/** Cache a credential report with jitter and failure cooldown. */
 	async #fetchUsageCached(
 		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number; forceRefresh?: boolean } = {},
+		options: { timeoutMs?: number } = {},
 	): Promise<UsageReport | null> {
 		const timeoutMs = options.timeoutMs;
-		const forceRefresh = options.forceRefresh ?? false;
 		const cacheKey = this.#deps.cache.reportKey(request);
-
+		const failureKey = this.#deps.cache.failureKey(cacheKey);
 		const now = Date.now();
-		const cached = forceRefresh ? undefined : this.#deps.cache.get<UsageReport | null>(cacheKey);
+		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
 		if (cached && cached.expiresAt > now) {
 			return cached.value;
 		}
 
+		const failure = this.#deps.cache.get<null>(failureKey);
+		if (failure && failure.expiresAt > now) {
+			return this.#deps.cache.getStale<UsageReport | null>(cacheKey)?.value ?? null;
+		}
+
+		// Invalidation must not fork an already-running credential probe. Share it;
+		// only a refresh that postdates its start (user refresh, confirmed reset)
+		// earns one successor probe.
+		const inFlight = this.#usageRequestInFlight.get(cacheKey);
+		if (inFlight) {
+			const report = await inFlight.promise;
+			return inFlight.refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
+				? report
+				: this.#fetchUsageCached(request, options);
+		}
 		const usageCacheEpoch = this.#deps.cache.epoch;
-		const inFlightKey = `${cacheKey}\0${usageCacheEpoch}`;
-		const inFlight = this.#usageRequestInFlight.get(inFlightKey);
-		if (inFlight) return inFlight;
+		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
+		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
 		const promise = (async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
-			if (usageCacheEpoch !== this.#deps.cache.epoch) return report;
-			const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
+			// Block marks bump the generation too: a report racing a fresh 429 may
+			// predate it, so it answers this probe but is neither cached nor used
+			// to heal blocks.
+			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch;
 			if (report !== null) {
+				if (invalidated) return report;
+				this.#deps.blocks.reconcileRequest(request, report);
+				const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
 				// Success: stagger per-credential cache expiry so all accounts don't
 				// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
 				// per source IP regardless of account, and synchronized 5-credential
@@ -337,7 +370,6 @@ export class UsageService implements UsageApi {
 					expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter,
 				});
 				this.#recordUsageHistory(request, report);
-				this.#deps.blocks.reconcileRequest(request, report);
 				return report;
 			}
 			// Failure: apply a short jittered cool-down so the credential doesn't
@@ -345,21 +377,31 @@ export class UsageService implements UsageApi {
 			// value through transient failures. Session-cookie providers can opt out
 			// so an expired login does not display stale quota indefinitely.
 			const providerImpl = this.providerFor(request.provider);
-			const retainLastGood = !forceRefresh && providerImpl?.retainLastGoodOnFailure !== false;
+			const retainLastGood = !invalidated && providerImpl?.retainLastGoodOnFailure !== false;
 			const lastGood = retainLastGood
 				? (this.#deps.cache.getStale<UsageReport | null>(cacheKey)?.value ?? null)
 				: null;
 			const failureBackoffMs = providerImpl?.failureBackoffMs ?? USAGE_FAILURE_BACKOFF_MS;
 			const backoffJitter = failureBackoffMs * (Math.random() * 0.5 - 0.25);
 			const coolDown = Date.now() + failureBackoffMs + backoffJitter;
-			this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
+			// Dropping snapshots is not recovery from a failed endpoint. Persist its
+			// cooldown even if a manual refresh or block update raced this probe.
+			// A confirmed reset is the exception: the old failure cannot suppress
+			// the first post-reset probe.
+			if (recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
+				this.#deps.cache.set(failureKey, { value: null, expiresAt: coolDown });
+			}
+			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
-			this.#usageRequestInFlight.delete(inFlightKey);
+			this.#usageRequestInFlight.delete(cacheKey);
 		});
 
-		this.#usageRequestInFlight.set(inFlightKey, promise);
-		return promise;
+		this.#usageRequestInFlight.set(cacheKey, { refreshEpoch, promise });
+		const report = await promise;
+		return refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
+			? report
+			: this.#fetchUsageCached(request, options);
 	}
 
 	/**
@@ -535,16 +577,19 @@ export class UsageService implements UsageApi {
 		return true;
 	}
 
-	/** Collect resolved account requests for all configured usage providers. */
-	async #collectUsageRequests(options?: {
-		baseUrlResolver?: (provider: Provider) => string | undefined;
-	}): Promise<UsageRequestDescriptor[]> {
+	/** Collect resolved account requests, restricted to runtime providers when the store owns aggregate reports. */
+	async #collectUsageRequests(
+		options?: UsageReportsOptions,
+		providerFilter?: ReadonlySet<Provider>,
+	): Promise<UsageRequestDescriptor[]> {
 		const requests: UsageRequestDescriptor[] = [];
-		const providers = new Set<string>([
-			...this.#deps.pool.providers(),
-			...this.#runtimeUsageProviderOverrides.keys(),
-			...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
-		]);
+		const providers =
+			providerFilter ??
+			new Set<string>([
+				...this.#deps.pool.providers(),
+				...this.#runtimeUsageProviderOverrides.keys(),
+				...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
+			]);
 
 		for (const providerId of providers) {
 			const provider = providerId as Provider;
@@ -690,8 +735,7 @@ export class UsageService implements UsageApi {
 		const tails = new Map<Provider, Promise<void>>();
 		return Promise.all(
 			requests.map(request => {
-				const forceRefresh = serializedProviders.has(request.provider);
-				if (!forceRefresh) {
+				if (!serializedProviders.has(request.provider)) {
 					return this.#fetchUsageCached(request, {
 						timeoutMs: this.requestTimeoutMs,
 					});
@@ -700,7 +744,6 @@ export class UsageService implements UsageApi {
 				const current = tail.then(() =>
 					this.#fetchUsageCached(request, {
 						timeoutMs: this.requestTimeoutMs,
-						forceRefresh: true,
 					}),
 				);
 				tails.set(
@@ -716,14 +759,9 @@ export class UsageService implements UsageApi {
 	}
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */
-	async reports(options?: {
-		baseUrlResolver?: (provider: Provider) => string | undefined;
-		/** Caller's cancel signal; only rejects this caller, never the shared upstream fetch. */
-		signal?: AbortSignal;
-	}): Promise<UsageReport[] | null> {
-		// Store-level hook > local per-credential fan-out. `RemoteAuthCredentialStore`
-		// implements the hook so a gateway backed by a broker routes usage to the
-		// broker without the caller wiring it explicitly.
+	async reports(options?: UsageReportsOptions): Promise<UsageReport[] | null> {
+		// The broker owns its providers' reports; runtime providers registered
+		// only in this process still need local per-credential probes.
 		const storeOverride = this.#deps.store.fetchUsageReports?.bind(this.#deps.store);
 		if (storeOverride) {
 			// Reuse the in-flight map so concurrent callers (widget poll + format
@@ -742,9 +780,28 @@ export class UsageService implements UsageApi {
 			}
 			const reports = await raceSignal(shared, options?.signal, "usage fetch aborted");
 			if (reports) this.#deps.blocks.reconcileReports(reports);
-			return reports;
+			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
+
+			// The broker owns its reported providers; only extension providers
+			// absent from its response need local credentials and a local probe.
+			const brokerProviders = new Set(reports.map(report => report.provider));
+			const localProviders = new Set<Provider>();
+			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+				if (!brokerProviders.has(provider)) localProviders.add(provider);
+			}
+			if (localProviders.size === 0) return reports;
+			const localReports = await this.#fetchLocalReports(options, localProviders);
+			return localReports?.length ? [...reports, ...localReports] : reports;
 		}
-		const requests = await this.#collectUsageRequests(options);
+		return this.#fetchLocalReports(options);
+	}
+
+	/** Probe only the selected providers locally, preserving per-credential caching and cooldowns. */
+	async #fetchLocalReports(
+		options?: UsageReportsOptions,
+		providerFilter?: ReadonlySet<Provider>,
+	): Promise<UsageReport[] | null> {
+		const requests = await this.#collectUsageRequests(options, providerFilter);
 		if (requests.length === 0) return [];
 
 		this.logger?.debug("Usage fetch requested", {
@@ -757,10 +814,11 @@ export class UsageService implements UsageApi {
 		// accounts can be missing from one fetch and present in the next; the
 		// aggregate cache freezes whichever set landed first).
 		const forcedRefresh = this.#deps.cache.forcedRefresh(requests);
-		const cacheKey = `${this.#deps.cache.reportsKey(requests)}\0${this.#deps.cache.epoch}`;
+		const usageCacheEpoch = this.#deps.cache.epoch;
+		const cacheKey = `${this.#deps.cache.reportsKey(requests)}\0${usageCacheEpoch}`;
 
 		const inFlight = this.#usageReportsInFlight.get(cacheKey);
-		if (inFlight) return inFlight;
+		if (inFlight) return raceSignal(inFlight, options?.signal, "usage fetch aborted");
 
 		const promise = (async () => {
 			for (const request of requests) {
@@ -794,20 +852,20 @@ export class UsageService implements UsageApi {
 					};
 				}),
 			});
-			this.#deps.cache.clearForceRefresh(forcedRefresh);
+			if (usageCacheEpoch === this.#deps.cache.epoch) this.#deps.cache.clearForceRefresh(forcedRefresh);
 			return resolved;
 		})().finally(() => {
 			this.#usageReportsInFlight.delete(cacheKey);
 		});
 
 		this.#usageReportsInFlight.set(cacheKey, promise);
-		return promise;
+		return raceSignal(promise, options?.signal, "usage fetch aborted");
 	}
 
 	/**
 	 * Discard cached usage reports before a user-requested refresh. The next
-	 * read probes upstream serially per provider; a failure reports no fresh
-	 * usage instead of replaying an invalidated last-good snapshot.
+	 * read probes upstream serially per provider unless a failure cooldown is
+	 * active. Failed probes never replay an invalidated last-good snapshot.
 	 */
 	async invalidate(provider?: string, signal?: AbortSignal): Promise<void> {
 		await this.#deps.cache.clearReports(provider, () => this.#collectUsageRequests());

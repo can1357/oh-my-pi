@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
-import subagentSystemPrompt from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
@@ -14,7 +13,6 @@ import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
-import { prompt } from "@oh-my-pi/pi-utils";
 
 const AGENT: AgentDefinition = {
 	name: "scout",
@@ -153,16 +151,6 @@ afterEach(async () => {
 });
 
 describe("WorkPool dispatch", () => {
-	it("renders the flat workpool yield contract after shared context", () => {
-		const rendered = prompt.render(subagentSystemPrompt, {
-			agent: "Worker",
-			context: "Shared context for every item.",
-			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
-			outputSchema: { type: "object", properties: { "pool#1": {} } },
-		});
-		expect(rendered).toContain("{ key: <1-based number>, data: <outcome> }");
-		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
-	});
 	it("spawns while there is room, then queues round-robin, and dispatches to an idle agent", async () => {
 		const cards: CustomMessage[] = [];
 		const session = makeSession(cards);

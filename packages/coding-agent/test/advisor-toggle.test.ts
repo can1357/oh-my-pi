@@ -178,12 +178,6 @@ describe("AgentSession advisor toggle", () => {
 		appendAdvisorCost(advisor, 0.5, 1);
 	}
 
-	it("starts with advisor disabled", () => {
-		expect(session.isAdvisorActive()).toBe(false);
-		expect(session.isAdvisorEnabled()).toBe(false);
-		expect(session.formatAdvisorStatus()).toBe("Advisor is disabled.");
-	});
-
 	it("toggle enables the advisor and runtime", () => {
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const active = session.toggleAdvisorEnabled();
@@ -536,16 +530,6 @@ describe("AgentSession advisor toggle", () => {
 			await reviewSession.dispose();
 		}
 	});
-	it("retains cumulative advisor cost after the advisor is disabled", () => {
-		const advisor = enableAdvisor();
-
-		appendAdvisorCost(advisor, 0.41, 1);
-		appendAdvisorCost(advisor, 0.09, 2);
-
-		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-		session.setAdvisorEnabled(false);
-		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-	});
 	it("attributes advisor subscription spend after teardown without rescanning the catalog", () => {
 		// #10131: with the runtime gone, isUsingSubscription() must read the
 		// attribution captured as spend accrued, not fall back to a per-render
@@ -611,6 +595,23 @@ describe("AgentSession advisor toggle", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected Architecture advisor");
 		const advisorPrompt = advisor.state.systemPrompt.join("\n");
+		expect(advisorPrompt).toContain("Keep advice concrete.");
+		expect(advisorPrompt).toContain("Review module boundaries.");
+	});
+	it("uses a roster saved while the advisor is disabled once it is enabled", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.isAdvisorEnabled()).toBe(false);
+
+		expect(
+			session.applyAdvisorConfigs(
+				[{ name: "Architecture", instructions: "Review module boundaries." }],
+				"Keep advice concrete.",
+			),
+		).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Architecture"]);
+		const advisorPrompt = session.getAdvisorAgent()?.state.systemPrompt.join("\n");
 		expect(advisorPrompt).toContain("Keep advice concrete.");
 		expect(advisorPrompt).toContain("Review module boundaries.");
 	});

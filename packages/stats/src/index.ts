@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 
 import { parseArgs } from "node:util";
-import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, formatPercent, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
 import { closeDb } from "./db";
+import { refreshRollups } from "./rollup";
 import { formatStatsDashboardUrl, startServer } from "./server";
 
 export {
@@ -16,8 +18,10 @@ export {
 	syncAllSessions,
 } from "./aggregator";
 export { closeDb } from "./db";
+export { refreshRollups } from "./rollup";
+export type { StatsJudge, StatsJudgeProvider } from "./frustration";
 export { getGainDashboardStats } from "./gain-aggregator";
-export { formatStatsDashboardUrl, startServer } from "./server";
+export { formatStatsDashboardUrl, type StartServerOptions, startServer } from "./server";
 export type { GainDashboardStats, GainSource, GainSourceTotals, GainTimeSeriesPoint } from "./shared-types";
 export type {
 	AggregatedStats,
@@ -42,20 +46,17 @@ function formatCost(n: number, unpricedRequests = 0): string {
 	return `$${n.toFixed(2)}`;
 }
 
-function normalizePremiumRequests(n: number): number {
-	return Math.round((n + Number.EPSILON) * 100) / 100;
-}
-
 /**
- * Print stats summary to console.
+ * Print the dashboard summary to the console. Shared by `omp stats --summary`
+ * and the standalone `omp-stats --sync`.
  */
-async function printStats(): Promise<void> {
+export async function printStatsSummary(): Promise<void> {
 	const stats = await getDashboardStats();
 	const { overall, byModel, byFolder } = stats;
 
-	console.log("\n=== AI Usage Statistics ===\n");
+	console.log(chalk.bold("\n=== AI Usage Statistics ===\n"));
 
-	console.log("Overall:");
+	console.log(chalk.bold("Overall:"));
 	console.log(`  Requests: ${formatNumber(overall.totalRequests)} (${formatNumber(overall.failedRequests)} errors)`);
 	console.log(`  Error Rate: ${formatPercent(overall.errorRate)}`);
 	console.log(`  Total Tokens: ${formatNumber(overall.totalInputTokens + overall.totalOutputTokens)}`);
@@ -72,7 +73,7 @@ async function printStats(): Promise<void> {
 	}
 
 	if (byModel.length > 0) {
-		console.log("\nBy Model (API-equivalent estimates):");
+		console.log(chalk.bold("\nBy Model (API-equivalent estimates):"));
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
 				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost, m.unpricedRequests)}, ${formatPercent(m.cacheRate)} cache rate, ${formatPercent(m.cacheSavings)} cache savings`,
@@ -81,7 +82,7 @@ async function printStats(): Promise<void> {
 	}
 
 	if (byFolder.length > 0) {
-		console.log("\nBy Folder (API-equivalent estimates):");
+		console.log(chalk.bold("\nBy Folder (API-equivalent estimates):"));
 		for (const f of byFolder.slice(0, 10)) {
 			console.log(
 				`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost, f.unpricedRequests)}`,
@@ -153,7 +154,20 @@ Examples:
 	}
 
 	try {
-		// Sync first
+		if (!values.json && !values.sync) {
+			// The dashboard ingests sessions in the background and streams progress to the page.
+			const { port: actualPort } = await startServer(values.port, values.host);
+			console.log(`Dashboard available at: ${formatStatsDashboardUrl(values.host, actualPort)}`);
+			console.log("Press Ctrl+C to stop\n");
+			process.on("SIGINT", () => {
+				console.log("\nShutting down...");
+				closeDb();
+				process.exit(0);
+			});
+			return;
+		}
+
+		// One-shot reports need fully ingested, fully rolled-up data before printing.
 		const tty = process.stderr.isTTY === true;
 		process.stderr.write("Syncing session files...\n");
 		let lastWidth = 0;
@@ -176,31 +190,15 @@ Examples:
 			},
 		});
 		if (tty && lastWidth > 0) process.stderr.write(`\r${" ".repeat(lastWidth)}\r`);
+		await refreshRollups();
 		const total = await getTotalMessageCount();
-		console.log(`Synced ${processed} new entries from ${files} files (${total} total)\n`);
+		process.stderr.write(`Synced ${processed} new entries from ${files} files (${total} total)\n\n`);
 
 		if (values.json) {
-			const stats = await getDashboardStats();
-			console.log(JSON.stringify(stats, null, 2));
-			return;
+			console.log(JSON.stringify(await getDashboardStats(), null, 2));
+		} else {
+			await printStatsSummary();
 		}
-
-		if (values.sync) {
-			await printStats();
-			return;
-		}
-
-		// Start server
-		const { port: actualPort } = await startServer(values.port, values.host);
-		console.log(`Dashboard available at: ${formatStatsDashboardUrl(values.host, actualPort)}`);
-		console.log("Press Ctrl+C to stop\n");
-
-		// Keep process running
-		process.on("SIGINT", () => {
-			console.log("\nShutting down...");
-			closeDb();
-			process.exit(0);
-		});
 	} catch (error) {
 		console.error("Error:", error);
 		closeDb();

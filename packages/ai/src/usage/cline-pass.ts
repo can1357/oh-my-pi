@@ -1,14 +1,8 @@
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import { ProviderHttpError } from "../error";
-import type {
-	UsageFetchContext,
-	UsageFetchParams,
-	UsageLimit,
-	UsageProvider,
-	UsageReport,
-	UsageStatus,
-} from "../usage";
+import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageProvider, UsageReport } from "../usage";
 import { isRecord } from "../utils";
+import { usageStatus } from "./shared";
 
 const PROVIDER = "cline-pass";
 const DEFAULT_BASE_URL = CLINEPASS_API_BASE_URL;
@@ -28,12 +22,6 @@ function parseResetTime(value: unknown): number | undefined {
 	if (typeof value !== "string") return undefined;
 	const timestamp = Date.parse(value);
 	return Number.isFinite(timestamp) ? timestamp : undefined;
-}
-
-function usageStatus(usedFraction: number): UsageStatus {
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
 }
 
 function parseLimit(raw: unknown, provider: UsageFetchParams["provider"]): UsageLimit | null {

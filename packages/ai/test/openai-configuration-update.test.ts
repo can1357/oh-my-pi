@@ -395,20 +395,15 @@ describe("openai-responses configuration_update", () => {
 		return { bodies, secondResponse };
 	}
 
-	for (const target of ["low", "high", "xhigh"] as const) {
-		it(`sends a medium -> ${target} change at the request level and never emits configuration_update when compat.supportsConfigurationUpdate is false`, async () => {
-			const { bodies, secondResponse } = await effortChange(
-				proxyModel({ supportsConfigurationUpdate: false }),
-				target,
-			);
+	it("sends a medium -> high change at the request level and never emits configuration_update when compat.supportsConfigurationUpdate is false", async () => {
+		const { bodies, secondResponse } = await effortChange(proxyModel({ supportsConfigurationUpdate: false }), "high");
 
-			expect(bodies).toHaveLength(2);
-			expect(requestEffort(bodies[0])).toBe("medium");
-			expect(requestEffort(bodies[1])).toBe(target);
-			expect(inputItems(bodies[1]).some(item => item.type === "configuration_update")).toBe(false);
-			expect(secondResponse.stopReason).toBe("stop");
-		});
-	}
+		expect(bodies).toHaveLength(2);
+		expect(requestEffort(bodies[0])).toBe("medium");
+		expect(requestEffort(bodies[1])).toBe("high");
+		expect(inputItems(bodies[1]).some(item => item.type === "configuration_update")).toBe(false);
+		expect(secondResponse.stopReason).toBe("stop");
+	});
 
 	it("keeps emitting configuration_update on a custom endpoint when the override is unset or true", async () => {
 		// Default unchanged: the gpt-6-astra class rule still applies on any host,

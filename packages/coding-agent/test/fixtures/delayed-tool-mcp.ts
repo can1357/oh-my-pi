@@ -5,9 +5,10 @@
  * `STARTUP_TIMEOUT_MS` (250 ms), then responds normally to `tools/list`.
  *
  * Without arguments every launch delays, exercising late background binding.
- * With a marker-file argument only the first launch delays; it writes the
- * marker before waiting so a reconnect responds immediately. This models a
- * transient startup timeout followed by recovery.
+ * With a marker-file argument the first launch never answers `initialize`, so
+ * it times out under any client timeout; it writes the marker first so a
+ * reconnect responds immediately. This models a transient startup timeout
+ * followed by recovery without racing the client timeout against the delay.
  *
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`):
  * one JSON object per line on stdin, one JSON response per line on stdout.
@@ -70,6 +71,7 @@ async function startServer(): Promise<void> {
 			}
 			if (msg.id === undefined || msg.id === null) return;
 			if (msg.method === "initialize" && delayInitialize) {
+				if (markerPath) return;
 				await Bun.sleep(INITIALIZE_DELAY_MS);
 			}
 			const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };

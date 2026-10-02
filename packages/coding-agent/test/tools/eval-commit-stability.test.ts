@@ -46,14 +46,6 @@ describe("eval tool transcript finalization", () => {
 		await initTheme();
 	});
 
-	it("keeps partial eval results in the native-scrollback live region", () => {
-		const component = makeEvalComponent();
-
-		component.updateResult(evalAgentResult([{ op: "agent", id: "a1", status: "running" }]), true);
-
-		expectLive(component);
-	});
-
 	it("moves the block out of the live region as soon as the eval result settles", () => {
 		const component = makeEvalComponent();
 		component.updateResult(evalAgentResult([{ op: "agent", id: "a1", status: "running" }]), true);

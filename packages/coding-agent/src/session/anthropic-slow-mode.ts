@@ -2,12 +2,20 @@
  * Anthropic subscription slow mode — omp's port of Claude Code's `/low-priority`,
  * enabled on Anthropic models by `/slow on` (`providers.anthropic.slowMode: auto`).
  *
- * When a Claude subscription hits its 5-hour session limit and Anthropic offers
- * the slow lane (`anthropic-ratelimit-unified-slow-offer: treatment`), requests
- * may continue on spare capacity by sending `anthropic-usage-limit: slow` until
- * the limit resets. Weekly usage still counts; responses may pause while the
- * server has no spare capacity (429 `slot_busy` / 529), which this controller
- * turns into server-paced waits bounded by the server's max-wait budget.
+ * Past a Claude subscription's usage limit, requests move through two stages:
+ *
+ * 1. Wrap-up: the server may keep serving on a small allowance drawn from the
+ *    weekly limit (`anthropic-ratelimit-unified-grace-*-utilization` > 0).
+ *    Tracked for every first-party OAuth account whatever the setting, so the
+ *    status line shows it and sessions can tell the model to wrap up when
+ *    nothing will continue the work afterwards ({@link AnthropicSlowModeController.wrapUpHintKey}).
+ * 2. Low priority: at the session-limit wall Anthropic may offer the slow lane
+ *    (`anthropic-ratelimit-unified-slow-offer: treatment`); with `/slow on`,
+ *    requests continue on spare capacity by sending `anthropic-usage-limit: slow`
+ *    until the limit resets. Weekly usage still counts; responses may pause
+ *    while the server has no spare capacity (429 `slot_busy` / 529), which this
+ *    controller turns into server-paced waits bounded by the server's max-wait
+ *    budget.
  *
  * State is per Claude account lane ({@link AnthropicSlowModeLanes}): the main
  * agent, subagents, and advisors on one account share its wall and offer, while
@@ -46,6 +54,12 @@ type NoticeLevel = "info" | "warning" | "error";
 /** Per-session wiring for {@link AnthropicSlowModeLanes.hooks}. */
 export interface AnthropicSlowModeHookOptions {
 	/**
+	 * Whether this session may use the low-priority lane (`/slow on`). When
+	 * false the lane is never entered or signalled, but wrap-up tracking and
+	 * offers still register. Omitted means enabled.
+	 */
+	lowPriority?: () => boolean;
+	/**
 	 * Final gate before auto-accepting (e.g. prefer rotating to a sibling
 	 * account with headroom). Omitted means always accept.
 	 */
@@ -57,6 +71,17 @@ export interface AnthropicSlowModeHookOptions {
 type Phase =
 	| { kind: "idle" }
 	| { kind: "active"; resetsAtSec: number; acceptedAtMs: number; requestsServed: number; requestsStandard: number };
+
+/** Requests running on the wrap-up allowance past a usage limit. */
+interface WrapUpWindow {
+	/** Which limit was passed; the low-priority lane never covers the weekly one. */
+	zone: "five_hour" | "seven_day";
+	resetsAtSec: number | undefined;
+	/** Extra usage serves the account once the allowance is spent. */
+	extraUsage: boolean;
+	/** Changes each time a fresh window opens; keys one hint per window. */
+	epoch: number;
+}
 
 // Server-directed timing is clamped to the same bounds Claude Code applies.
 const DEFAULT_RETRY_AFTER_MS = 20_000;
@@ -74,30 +99,36 @@ const RETRY_JITTER = 0.3;
 /** Upper bound on a budget-exhausted block (8 days) when the reset header is absurd. */
 const MAX_BUDGET_BLOCK_SEC = 691_200;
 
-/** Local wall-clock `HH:MM` for an epoch-seconds reset. */
-export function formatSlowModeResetClock(resetsAtSec: number): string {
-	return new Date(resetsAtSec * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/** Resets further out than this show a weekday, not just the time. */
+const SAME_DAY_RESET_MS = 20 * 3_600_000;
+
+/** Local wall-clock `HH:MM` for an epoch-seconds reset, with a weekday when it is not today-ish. */
+export function formatSlowModeResetClock(resetsAtSec: number, now = Date.now()): string {
+	const at = new Date(resetsAtSec * 1000);
+	return resetsAtSec * 1000 - now > SAME_DAY_RESET_MS
+		? at.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })
+		: at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 const END_NOTICES: Record<AnthropicSlowModeEndReason, { level: NoticeLevel; message: string } | undefined> = {
-	reset: { level: "info", message: "Claude session limit reset — lower-priority mode ended." },
+	reset: { level: "info", message: "Claude session limit reset — low priority ended." },
 	user: undefined,
 	weekly: {
 		level: "warning",
-		message: "Lower-priority mode ended: the weekly Claude limit is reached.",
+		message: "Low priority ended: the weekly Claude limit is reached.",
 	},
 	budget: {
 		level: "warning",
-		message: "Lower-priority mode ended: this week's lower-priority allowance is used up.",
+		message: "Low priority ended: this week's low-priority allowance is used up.",
 	},
-	off: { level: "warning", message: "Lower-priority mode ended: Anthropic turned it off for this account." },
-	ineligible: { level: "warning", message: "Lower-priority mode ended: this account is no longer eligible." },
-	wall: { level: "warning", message: "Lower-priority mode ended: Anthropic stopped serving the slow lane." },
+	off: { level: "warning", message: "Low priority ended: Anthropic turned it off for this account." },
+	ineligible: { level: "warning", message: "Low priority ended: this account is no longer eligible." },
+	wall: { level: "warning", message: "Low priority ended: Anthropic stopped serving the slow lane." },
 	max_wait: {
 		level: "warning",
-		message: "Lower-priority mode paused for 10 minutes after waiting too long for spare capacity.",
+		message: "Low priority paused for 10 minutes after waiting too long for spare capacity.",
 	},
-	extra_usage: { level: "info", message: "Lower-priority mode ended: extra usage is now serving requests." },
+	extra_usage: { level: "info", message: "Low priority ended: extra usage is now serving requests." },
 };
 
 /** Slow-mode state machine for one Claude account lane; see the module docs. */
@@ -113,6 +144,8 @@ export class AnthropicSlowModeController {
 	#budgetUtilization: number | undefined;
 	#retryAfterMs = DEFAULT_RETRY_AFTER_MS;
 	#maxWaitMs = DEFAULT_MAX_WAIT_MS;
+	#wrapUp: WrapUpWindow | undefined;
+	#wrapUpEpoch = 0;
 
 	/** Whether requests currently carry the slow header. Expires the window once its limit resets. */
 	isActive(now = Date.now()): boolean {
@@ -136,31 +169,67 @@ export class AnthropicSlowModeController {
 		return used === undefined ? undefined : Math.min(100, Math.max(0, 100 - Math.round(used * 100)));
 	}
 
-	/** Compact status-line label, or `undefined` when inactive. */
-	statusLabel(now = Date.now()): string | undefined {
-		const resetsAtSec = this.activeResetsAtSec(now);
-		if (resetsAtSec === undefined) return undefined;
-		const left = this.allowanceLeftPercent();
-		return `low priority until ${formatSlowModeResetClock(resetsAtSec)}${left === undefined ? "" : ` · ${left}% left`}`;
+	/** The open wrap-up window, if any. Expires it once its limit resets. */
+	#currentWrapUp(now: number): WrapUpWindow | undefined {
+		const wrapUp = this.#wrapUp;
+		if (wrapUp?.resetsAtSec !== undefined && now >= wrapUp.resetsAtSec * 1000) this.#wrapUp = undefined;
+		return this.#wrapUp;
+	}
+
+	/** Whether the low-priority lane could still pick up once the wrap-up allowance is spent. */
+	#laneCanFollow(wrapUp: WrapUpWindow, now: number): boolean {
+		if (wrapUp.zone === "seven_day") return false;
+		if (this.#blocked !== undefined && now < this.#blocked.untilSec * 1000) return false;
+		if (this.#coolingOffUntilMs !== undefined && now < this.#coolingOffUntilMs) return false;
+		return this.#stoppedResetsAtSec === undefined || this.#stoppedResetsAtSec * 1000 <= now;
+	}
+
+	/**
+	 * Key of the open wrap-up window when the model should be told to wrap up,
+	 * else undefined: no window, extra usage takes over, the lane already
+	 * serves, or (with `lowPriority`) the lane can still pick up the work.
+	 * Sessions hint once per key.
+	 */
+	wrapUpHintKey(lowPriority: boolean, now = Date.now()): number | undefined {
+		const wrapUp = this.#currentWrapUp(now);
+		if (!wrapUp || wrapUp.extraUsage) return undefined;
+		if (lowPriority && (this.isActive(now) || this.#laneCanFollow(wrapUp, now))) return undefined;
+		return wrapUp.epoch;
+	}
+
+	/**
+	 * Compact status-line label, or `undefined` outside both stages. The
+	 * low-priority label shows only when `lowPriority` (this session's `/slow`).
+	 */
+	statusLabel(now = Date.now(), lowPriority = true): string | undefined {
+		const resetsAtSec = lowPriority ? this.activeResetsAtSec(now) : undefined;
+		if (resetsAtSec !== undefined) {
+			const left = this.allowanceLeftPercent();
+			return `low priority until ${formatSlowModeResetClock(resetsAtSec, now)}${left === undefined ? "" : ` · ${left}% left`}`;
+		}
+		const wrapUp = this.#currentWrapUp(now);
+		if (!wrapUp) return undefined;
+		if (wrapUp.extraUsage) return "limit reached · wrap-up, then extra usage";
+		return `limit reached · wrapping up${wrapUp.resetsAtSec === undefined ? "" : ` · resets ${formatSlowModeResetClock(wrapUp.resetsAtSec, now)}`}`;
 	}
 
 	/** Whether the slow lane can be entered now, and on which window. */
 	availability(now = Date.now()): AnthropicSlowModeAvailability {
-		if (this.isActive(now)) return { kind: "unavailable", reason: "Lower-priority mode is already on." };
+		if (this.isActive(now)) return { kind: "unavailable", reason: "Low priority is already on." };
 		const blocked = this.#blocked;
 		if (blocked !== undefined && now < blocked.untilSec * 1000) {
 			return {
 				kind: "unavailable",
 				reason:
 					blocked.reason === "budget"
-						? "This week's lower-priority allowance is used up. It is offered again after your weekly limit resets."
-						: `Your weekly Claude limit is reached; lower-priority mode is unavailable until it resets at ${formatSlowModeResetClock(blocked.untilSec)}.`,
+						? "This week's low-priority allowance is used up. It is offered again after your weekly limit resets."
+						: `Your weekly Claude limit is reached; low priority is unavailable until it resets at ${formatSlowModeResetClock(blocked.untilSec, now)}.`,
 			};
 		}
 		if (this.#coolingOffUntilMs !== undefined && now < this.#coolingOffUntilMs) {
 			return {
 				kind: "unavailable",
-				reason: `Lower-priority mode is taking a break until ${formatSlowModeResetClock(Math.ceil(this.#coolingOffUntilMs / 1000))} after waiting too long for spare capacity.`,
+				reason: `Low priority is taking a break until ${formatSlowModeResetClock(Math.ceil(this.#coolingOffUntilMs / 1000), now)} after waiting too long for spare capacity.`,
 			};
 		}
 		const stopped = this.#stoppedResetsAtSec;
@@ -171,7 +240,7 @@ export class AnthropicSlowModeController {
 		return {
 			kind: "unavailable",
 			reason:
-				"Lower-priority mode isn't available right now. Anthropic offers it after a Claude subscription reaches its session limit.",
+				"Low priority isn't available right now. Anthropic offers it after a Claude subscription reaches its session limit.",
 		};
 	}
 
@@ -208,6 +277,8 @@ export class AnthropicSlowModeController {
 		this.#budgetUtilization = undefined;
 		this.#retryAfterMs = DEFAULT_RETRY_AFTER_MS;
 		this.#maxWaitMs = DEFAULT_MAX_WAIT_MS;
+		this.#wrapUp = undefined;
+		this.#wrapUpEpoch = 0;
 	}
 
 	#activate(resetsAtSec: number, now: number): void {
@@ -236,8 +307,59 @@ export class AnthropicSlowModeController {
 		if (signal.budgetUtilization !== undefined) this.#budgetUtilization = signal.budgetUtilization;
 	}
 
-	/** Observe a successful response's slow-lane headers on this lane. */
+	/** Track the wrap-up window from a response's unified-limit headers. */
+	#observeWrapUp(signal: AnthropicSlowModeSignal, options: AnthropicSlowModeHookOptions, now: number): void {
+		const grace = signal.graceUtilization;
+		if (!grace) return;
+		if (Math.max(grace.fiveHour, grace.sevenDay) <= 0) {
+			this.#wrapUp = undefined;
+			return;
+		}
+		// Past resets are stale; drop them.
+		const fiveHourReset =
+			signal.fiveHourResetAtSec !== undefined && signal.fiveHourResetAtSec * 1000 > now
+				? signal.fiveHourResetAtSec
+				: undefined;
+		const weeklyReset =
+			signal.weeklyResetAtSec !== undefined && signal.weeklyResetAtSec * 1000 > now
+				? signal.weeklyResetAtSec
+				: undefined;
+		// Same zone pick as Claude Code: the weekly zone unless the 5-hour
+		// allowance is in use and outlasts the weekly reset.
+		const zone =
+			grace.sevenDay > 0 &&
+			!(
+				grace.fiveHour > 0 &&
+				fiveHourReset !== undefined &&
+				(weeklyReset === undefined || fiveHourReset > weeklyReset)
+			)
+				? "seven_day"
+				: "five_hour";
+		const previous = this.#currentWrapUp(now);
+		const wrapUp: WrapUpWindow = {
+			zone,
+			resetsAtSec: zone === "seven_day" ? weeklyReset : fiveHourReset,
+			extraUsage: signal.overageInUse || signal.overageAllowed === true,
+			epoch: previous?.epoch ?? ++this.#wrapUpEpoch,
+		};
+		this.#wrapUp = wrapUp;
+		if (previous) return;
+		const resets =
+			wrapUp.resetsAtSec === undefined ? "" : ` (resets ${formatSlowModeResetClock(wrapUp.resetsAtSec, now)})`;
+		const lowPriority = options.lowPriority?.() ?? true;
+		options.notify?.(
+			"info",
+			wrapUp.extraUsage
+				? `Claude usage limit reached${resets} — a short wrap-up allowance runs first, then extra usage.`
+				: lowPriority && this.#laneCanFollow(wrapUp, now)
+					? `Claude usage limit reached${resets} — finishing on a short wrap-up allowance from your weekly limit; low priority takes over if Anthropic offers it.`
+					: `Claude usage limit reached${resets} — finishing on a short wrap-up allowance from your weekly limit; the agent will wrap up its current step.`,
+		);
+	}
+
+	/** Observe a successful response's slow-lane and wrap-up headers on this lane. */
 	observe(signal: AnthropicSlowModeSignal, options: AnthropicSlowModeHookOptions): void {
+		this.#observeWrapUp(signal, options, Date.now());
 		const phase = this.#phase;
 		if (phase.kind !== "active") return;
 		if (signal.fiveHourResetAtSec !== undefined && signal.fiveHourResetAtSec >= phase.resetsAtSec + RESET_GRACE_SEC) {
@@ -284,11 +406,17 @@ export class AnthropicSlowModeController {
 
 		if (!failure.sentSlow) {
 			if (!rateLimited) return undefined;
+			// A session-limit wall closes the wrap-up window: its allowance is spent.
+			const afterWrapUp = this.#currentWrapUp(now) !== undefined;
+			if (signal?.unifiedLimitClaim || signal?.offer !== undefined) this.#wrapUp = undefined;
+			const lowPriority = options.lowPriority?.() ?? true;
 			// Another request activated the lane while this one was in flight.
-			if (this.isActive(now)) return { delayMs: 0, capacityWait: false };
+			if (this.isActive(now)) return lowPriority ? { delayMs: 0, capacityWait: false } : undefined;
 			if (signal?.offer !== "treatment" || signal.unifiedResetAtSec === undefined) return undefined;
 			if (signal.unifiedResetAtSec * 1000 <= now) return undefined;
+			// Record the offer even with `/slow off`, so a later `/slow on` enters it right away.
 			this.#offerResetsAtSec = signal.unifiedResetAtSec;
+			if (!lowPriority) return undefined;
 			// An explicit `/slow off` stop holds for the rest of that window.
 			if (this.#stoppedResetsAtSec === signal.unifiedResetAtSec) return undefined;
 			if (this.availability(now).kind !== "available") return undefined;
@@ -297,9 +425,10 @@ export class AnthropicSlowModeController {
 			if (this.isActive()) return { delayMs: 0, capacityWait: false };
 			if (this.accept().kind !== "available") return undefined;
 			this.#applyTiming(signal);
+			const until = formatSlowModeResetClock(signal.unifiedResetAtSec, now);
 			options.notify?.(
 				"info",
-				`Claude session limit reached — continuing at lower priority until ${formatSlowModeResetClock(signal.unifiedResetAtSec)}. Your weekly limit still applies and responses may pause while waiting for spare capacity. Run /slow off to stop.`,
+				`${afterWrapUp ? "Wrap-up allowance used" : "Claude session limit reached"} — continuing at low priority until ${until}. Your weekly limit still applies and responses may pause while waiting for spare capacity. Run /slow off to stop.`,
 			);
 			return { delayMs: 0, capacityWait: false };
 		}
@@ -342,7 +471,7 @@ export class AnthropicSlowModeController {
 		if (failure.attempts === 0) {
 			options.notify?.(
 				"info",
-				`Working at lower priority — waiting for spare capacity (next try in ${Math.max(1, Math.round(delayMs / 1000))}s).`,
+				`Working at low priority — waiting for spare capacity (next try in ${Math.max(1, Math.round(delayMs / 1000))}s).`,
 			);
 		}
 		return { delayMs, capacityWait: true };
@@ -375,7 +504,7 @@ export class AnthropicSlowModeLanes {
 	 */
 	hooks(options: AnthropicSlowModeHookOptions & { onLane?: (lane: string) => void }): AnthropicSlowModeHooks {
 		return {
-			isActive: lane => this.lane(lane).isActive(),
+			isActive: lane => (options.lowPriority?.() ?? true) && this.lane(lane).isActive(),
 			observe: (signal, lane) => {
 				options.onLane?.(lane);
 				this.lane(lane).observe(signal, options);

@@ -364,14 +364,70 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
+}
+
+/** One word-completion engine running on its own thread. */
+export declare class TextPredictor {
+  /**
+   * Spawn the engine thread and start opening the engine; load errors
+   * surface from [`TextPredictor::ready`] and every later call.
+   *
+   * # Errors
+   * Returns an error when the engine thread cannot be spawned.
+   */
+  constructor(options: TextPredictorOptions)
+  /**
+   * Resolve once the engine has loaded.
+   *
+   * # Errors
+   * Rejects with the engine's load error (missing weights, corrupt state).
+   */
+  ready(): Promise<void>
+  /**
+   * Ghost text for `prefix` typed after `before`, or `null`.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  complete(before: string, prefix: string): Promise<PredictedWord | null>
+  /**
+   * Learn from submitted prompts, in submission order.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  observe(prompts: Array<string>): Promise<void>
+  /**
+   * Learn from a suggestion the user accepted (`true`) or typed past.
+   *
+   * # Errors
+   * Rejects when the engine failed to load.
+   */
+  feedback(before: string, prefix: string, suggestion: string, accepted: boolean): Promise<void>
+  /**
+   * Flush learned state to the state directory.
+   *
+   * # Errors
+   * Rejects when the engine failed to load or the state cannot be written.
+   */
+  persist(): Promise<void>
 }
 
 /**
  * Dedicated writer thread for one terminal fd.
  *
- * Constructed by the TUI's `ProcessTerminal` around stdout. The fd is
- * `dup(2)`'d at construction and closed on drop, so later manipulation of the
- * original descriptor does not affect the pump.
+ * `dup(2)`'d at construction and closed on drop. The duplicate keeps the
+ * pump's fd alive if the original is closed or replaced; file-status flags
+ * such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
  */
 export declare class TtyWriter {
   /**
@@ -507,6 +563,11 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Write a commit object for `tree` on `parents` without moving any ref or
+   * touching the index/worktree (`git commit-tree`).
+   */
+  commitTree(tree: string, parents: Array<string>, message: string, author?: VcsCommitAuthor | undefined | null, signal?: unknown | undefined | null): Promise<string>
   /** Checkout revision. */
   checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Create branch. */
@@ -633,24 +694,13 @@ export declare class VcsRepo {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
- * Version sentinel — exists solely so the JS loader can prove at load time
- * that the `.node` file on disk is from the same package release as the
- * `index.js` ESM wrapper invoking it.
+ * Release version stamped into this `.node` after linking.
  *
- * The `js_name` is bumped by `scripts/release.ts` to match the new
- * `Cargo.toml` / `package.json` version on every release. The JS loader
- * computes the expected name from `package.json#version` and refuses to use
- * a `.node` that doesn't expose it, turning the silent
- * `<sym> is not a function` crash from a locked-file update (the canonical
- * Windows `bun install -g` failure mode) into a clear load-time error.
- *
- * Bump policy: `__piNativesV{major}_{minor}_{patch}` — non-alphanumerics in
- * the version string are mapped to `_` to keep it a valid JS identifier.
- * MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
- * `packages/natives/native/index.js` (which derives the name from
- * `package.json#version`).
+ * `None` for an unstamped build. The JS loader compares it against
+ * `package.json#version` so a `.node` from another release fails at load time
+ * with an actionable error instead of a later `<sym> is not a function` crash.
  */
-export declare function __piNativesV18_3_1(): void
+export declare function __piNativesBuildVersion(): string | null
 
 /**
  * Reports whether the on-device model can generate, as an `availability`
@@ -1066,7 +1116,11 @@ export interface DesktopCapabilities {
   input: boolean
   ax: boolean
   backgroundWindowInput: boolean
-  deliveryModes: Array<string>
+  /**
+   * Whether window input accepts `takeover: true` (briefly activate the
+   * target and post real input).
+   */
+  takeover: boolean
   capturePermission: string
   inputPermission: string
   axPermission: string
@@ -1527,6 +1581,9 @@ export declare function execReplace(argv: Array<string>): void
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
 
+/** Expand Windows 8.3 components without resolving symlinks or junctions. */
+export declare function expandWindowsLongPath(path: string): string
+
 /** Locate `*** Edit File: path` payloads the model emitted as plain text. */
 export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
@@ -1603,6 +1660,9 @@ export interface FuzzyFindResult {
 
 /** Get list of supported languages. */
 export declare function getSupportedLanguages(): Array<string>
+
+/** Get the existing Windows 8.3 spelling; preserve the input when unavailable. */
+export declare function getWindowsShortPath(path: string): string
 
 /**
  * Get work profile data from the last N seconds.
@@ -1693,7 +1753,8 @@ export interface GlobResult {
  *
  * # Arguments
  * - `options`: Pattern, path, filters, and output mode.
- * - `on_match`: Optional callback invoked per match/result.
+ * - `on_match`: Optional callback invoked per returned match/result, after the
+ *   search (never called when `options.onMatches` streams instead).
  *
  * # Returns
  * Aggregated results across matching files.
@@ -1726,6 +1787,11 @@ export interface GrepOptions {
   path: string
   /** Glob filter for filenames (e.g., "*.ts"). */
   glob?: string
+  /**
+   * Match simple glob patterns at any depth (default: true; `*.ts` ->
+   * `**\/*.ts`). Set false when `glob` is already relative to `path`.
+   */
+  recursive?: boolean
   /** Filter by file type (e.g., "js", "py", "rust"). */
   type?: string
   /** Case-insensitive search. */
@@ -1765,6 +1831,17 @@ export interface GrepOptions {
    * absent).
    */
   filesystem?: ShellFilesystem
+  /**
+   * Stream results instead of returning them: called on the JS thread with
+   * batches (at most 1024 entries, files in no particular order) of what
+   * `matches` would hold, while the search runs. A slow callback pauses the
+   * search instead of buffering. Successful completion waits for every
+   * callback and carries counts with empty `matches`; cancellation also
+   * interrupts delivery waits, though already queued callbacks may still run.
+   * A throw rejects the search with it. Incompatible with `maxCount` and
+   * `offset`.
+   */
+  onMatches?: (matches: GrepMatch[]) => void
 }
 
 /** Output mode for [`search`] and [`grep`] (string values match JS callers). */
@@ -2107,14 +2184,6 @@ export declare function macOSAutocorrectWord(text: string, start: number, length
  */
 export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
 
-/**
- * Return macOS dictionary completions for one partial-word range.
- *
- * Returns an empty list when Apple's spelling service is unavailable.
- * On macOS, the lookup runs on the dedicated spelling thread.
- */
-export declare function macOSCompleteWord(text: string, start: number, length: number): Promise<Array<string>>
-
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean
 
@@ -2388,7 +2457,11 @@ export interface PointerOptions {
   button?: string
   count?: number
   modifiers?: Array<string>
-  deliveryMode?: string
+  /**
+   * Briefly activate the target window and post real input instead of the
+   * default background delivery.
+   */
+  takeover?: boolean
 }
 
 /**
@@ -2413,6 +2486,14 @@ export interface PowerAssertionOptions {
   user?: boolean
   /** `caffeinate -d`: prevent the display from idle-sleeping. */
   display?: boolean
+}
+
+/** Ghost text for the word being typed. */
+export interface PredictedWord {
+  /** Characters to paint after the typed prefix. */
+  suffix: string
+  /** Engine-calibrated probability that `suffix` is exactly right. */
+  confidence: number
 }
 
 /** Current state of a process reference. */
@@ -2520,6 +2601,17 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
@@ -3081,7 +3173,21 @@ export interface SpellingRange {
  */
 export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
 
+/**
+ * Summarize source structure synchronously on the calling thread.
+ *
+ * Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+ * the JS thread for the whole call.
+ */
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
+
+/**
+ * Summarize source structure on libuv's thread pool.
+ *
+ * Same result as [`summarize_code`], but the parse and summary run off the
+ * JS thread; only argument and result marshalling happen on it.
+ */
+export declare function summarizeCodeAsync(options: SummaryOptions): Promise<SummaryResult>
 
 export interface SummaryOptions {
   /** Source code to summarize. */
@@ -3136,6 +3242,18 @@ export interface SummarySegment {
  * mapping.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+/** Options for [`TextPredictor::new`]. */
+export interface TextPredictorOptions {
+  /** Engine: `ngram`, `smollm`, or `apple`. */
+  method: string
+  /** Private directory for persisted learned state. */
+  stateDir: string
+  /** Directory holding downloaded model weights (`smollm` only). */
+  modelDir?: string
+  /** Show threshold override; omit for the engine's tuned default. */
+  showThreshold?: number
+}
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.

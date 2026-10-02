@@ -12,7 +12,7 @@ use std::{ffi::OsStr, path::Component};
 #[cfg(windows)]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+use windows_sys::Win32::Storage::FileSystem::{GetLongPathNameW, GetShortPathNameW};
 
 /// Normalizes shell-facing path aliases before `std::fs` sees them.
 #[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
@@ -33,7 +33,7 @@ pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 /// form, leaving the path otherwise unchanged.
 #[cfg(windows)]
 pub fn expand_to_long_path(path: &Path) -> PathBuf {
-	expand_to_long_path_impl(path)
+	query_path_name(path, GetLongPathNameW)
 }
 
 /// Non-Windows: no 8.3 short names, return unchanged.
@@ -42,13 +42,25 @@ pub fn expand_to_long_path(path: &Path) -> PathBuf {
 	path.to_path_buf()
 }
 
-/// Windows implementation using `GetLongPathNameW`, which resolves short-name
-/// aliases but — unlike `std::fs::canonicalize` — does **not** resolve symlinks
-/// or junctions, so `cd` into a symlink keeps the symlink spelling (the
-/// shell's existing behavior). A path with no short names is returned
-/// unchanged; on failure the input is returned as-is.
+/// Return the existing Windows 8.3 spelling without resolving symlinks or junctions.
+/// If no short spelling is available, preserve the input.
 #[cfg(windows)]
-fn expand_to_long_path_impl(path: &Path) -> PathBuf {
+pub fn get_short_path(path: &Path) -> PathBuf {
+	query_path_name(path, GetShortPathNameW)
+}
+
+/// Non-Windows: preserve the input path.
+#[cfg(not(windows))]
+pub fn get_short_path(path: &Path) -> PathBuf {
+	path.to_path_buf()
+}
+
+/// Both Win32 name queries preserve symlinks and junctions, unlike canonicalize.
+#[cfg(windows)]
+fn query_path_name(
+	path: &Path,
+	query: unsafe extern "system" fn(*const u16, *mut u16, u32) -> u32,
+) -> PathBuf {
 	// Encode straight from the wide form: Windows `OsStr` is UTF-16 and may
 	// not round-trip through UTF-8, so a `to_str()` detour would silently skip
 	// expansion for those paths — exactly the identity split this function
@@ -57,16 +69,15 @@ fn expand_to_long_path_impl(path: &Path) -> PathBuf {
 
 	// First call with a null buffer returns the required size (including the
 	// terminating NUL); the fill call returns the length excluding the NUL.
-	// GetLongPathNameW returns 0 on failure (e.g. nonexistent path), in which
-	// case the input is returned unchanged.
-	let needed = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+	// Both APIs return 0 on failure (e.g. nonexistent path), in which case
+	// the input is returned unchanged.
+	let needed = unsafe { query(wide.as_ptr(), std::ptr::null_mut(), 0) };
 	if needed == 0 {
 		return path.to_path_buf();
 	}
 	let mut buf = vec![0u16; needed as usize];
 	loop {
-		let written =
-			unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+		let written = unsafe { query(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
 		if written == 0 {
 			return path.to_path_buf();
 		}
@@ -77,10 +88,10 @@ fn expand_to_long_path_impl(path: &Path) -> PathBuf {
 			buf.truncate(written);
 			break;
 		}
-		// The long form grew between the sizing call and the fill call:
+		// The result grew between the sizing call and the fill call:
 		// `written` is the new required size (including the NUL). Grow and
 		// retry rather than returning partial/zero-padded garbage.
-		buf = vec![0u16; written];
+		buf.resize(written, 0);
 	}
 	PathBuf::from(std::ffi::OsString::from_wide(&buf))
 }

@@ -1,6 +1,7 @@
+import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { UsageReport, UsageResetCredit, UsageResetCredits } from "../usage";
 import { isUsageLimitReached } from "../auth/usage-report";
-import { claudeRankingStrategy } from "./claude";
+import { claudeRankingStrategy, parseClaudeUsagePayload } from "./claude";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 import {
@@ -30,12 +31,20 @@ const CLAUDE_RESET_WINDOW_IDS: Readonly<Record<string, string>> = {
 export function claudeResetClearedBlockScopes(cleared: readonly string[], report: UsageReport): (string | undefined)[] {
 	const shared = report.limits.filter(limit => limit.scope.shared);
 	if (!["anthropic:5h", "anthropic:7d"].every(id => shared.some(limit => limit.id === id))) return [];
-	const unscoped = report.limits.filter(
-		limit => limit.scope.shared || limit.scope.tier === "opus" || limit.scope.tier === "sonnet",
-	);
+	const unscoped = report.limits.filter(limit => {
+		if (limit.scope.shared) return true;
+		if (!limit.scope.tier) return false;
+		// Fable/Mythos have independent block scopes. A live deadline lets
+		// redemption retain their uncovered exhaustion in that exact scope.
+		if (limit.scope.tier === "fable" || limit.scope.tier === "mythos") {
+			const reset = limit.window?.resetsAt;
+			return typeof reset !== "number" || !Number.isFinite(reset) || reset <= Date.now();
+		}
+		return true;
+	});
 	const scopes = [
 		{ blockScope: undefined, limits: unscoped },
-		...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []),
+		...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []).filter(scope => scope.blockScope.length > 0),
 	];
 	return scopes
 		.filter(scope => scope.limits.some(limit => cleared.includes(limit.id)))
@@ -46,6 +55,10 @@ export function claudeResetClearedBlockScopes(cleared: readonly string[], report
 /** OAuth credential and transport used for an account's Claude reset operations. */
 export interface ClaudeResetAuth {
 	accessToken: string;
+	/** Observe a safe discovery read's throttle without retrying any mutation. */
+	onRateLimited?: (retryAfterMs: number | undefined) => void;
+	accountId?: string;
+	email?: string;
 	orgId?: string;
 	baseUrl?: string;
 	fetch: FetchImpl;
@@ -55,6 +68,8 @@ export interface ClaudeResetAuth {
 /** Live reset eligibility plus the exact organization and host used for redemption. */
 export interface ClaudeResetCreditList extends UsageResetCredits {
 	credits: UsageResetCredit[];
+	/** Quota evidence parsed from the same successful discovery response. */
+	report?: UsageReport;
 	orgId?: string;
 	/** OAuth API base that answered discovery; pass back as consume `baseUrl`. */
 	baseUrl?: string;
@@ -102,7 +117,7 @@ interface JuniperStatus {
 }
 
 type ParsedStatus<T> = { ok: true; status: T | null } | { ok: false };
-type Discovery<T> = { kind: "answered"; status: T | null; baseUrl: string } | { kind: "failed" };
+type Discovery<T> = { kind: "answered"; status: T | null; baseUrl: string; report?: UsageReport } | { kind: "failed" };
 
 function optionalString(value: unknown): string | undefined | null {
 	if (value === undefined || value === null) return undefined;
@@ -290,6 +305,7 @@ async function discoverStatus<T>(
 			return { kind: "failed" };
 		}
 		if (!response.ok) {
+			if (response.status === 429) auth.onRateLimited?.(extractRetryHint(response));
 			const canFallback =
 				ENDPOINT_ABSENT_STATUSES[response.status] === true && baseUrl !== DEFAULT_CLAUDE_OAUTH_BASE_URL;
 			if (canFallback) continue;
@@ -302,11 +318,12 @@ async function discoverStatus<T>(
 			return { kind: "failed" };
 		}
 		if (!isRecord(payload)) return { kind: "failed" };
+		const report = parseClaudeUsagePayload(payload, auth, `${baseUrl}/usage?${query}`) ?? undefined;
 		if (field in payload) {
 			const parsed = parse(payload[field]);
-			return parsed.ok ? { kind: "answered", status: parsed.status, baseUrl } : { kind: "failed" };
+			return parsed.ok ? { kind: "answered", status: parsed.status, baseUrl, report } : { kind: "failed" };
 		}
-		if (isUsageEnvelope(payload)) return { kind: "answered", status: null, baseUrl };
+		if (isUsageEnvelope(payload)) return { kind: "answered", status: null, baseUrl, report };
 		const canFallback = baseUrl !== DEFAULT_CLAUDE_OAUTH_BASE_URL;
 		if (!canFallback) return { kind: "failed" };
 	}
@@ -463,7 +480,14 @@ async function withResolvedOrganization(
 ): Promise<ClaudeResetCreditList> {
 	if (list.orgId || list.credits.length === 0) return list;
 	const resolution = await resolveOrganization({ ...auth, baseUrl: list.baseUrl ?? auth.baseUrl });
-	return resolution.orgId ? { ...list, orgId: resolution.orgId } : list;
+	if (!resolution.orgId) return list;
+	return {
+		...list,
+		orgId: resolution.orgId,
+		...(list.report
+			? { report: { ...list.report, metadata: { ...list.report.metadata, orgId: resolution.orgId } } }
+			: {}),
+	};
 }
 
 /**
@@ -514,7 +538,10 @@ export async function listClaudeResetCredits(auth: ClaudeResetAuth): Promise<Cla
 	if (cedar.kind === "failed") return null;
 	let cedarList: ClaudeResetCreditList | undefined;
 	if (cedar.status) {
-		cedarList = normalizeCedarList(cedar.status, orgId, cedar.baseUrl);
+		cedarList = {
+			...normalizeCedarList(cedar.status, orgId, cedar.baseUrl),
+			...(cedar.report ? { report: cedar.report } : {}),
+		};
 		if (cedarList.availableCount > 0 || cedarList.nextCreditId) {
 			return withResolvedOrganization(cedarList, auth);
 		}
@@ -522,7 +549,13 @@ export async function listClaudeResetCredits(auth: ClaudeResetAuth): Promise<Cla
 
 	const juniper = await discoverStatus(auth, "at_wall=1&skip_spend=1", JUNIPER_PROGRAM, parseJuniperStatus);
 	if (juniper.kind === "answered" && juniper.status) {
-		return withResolvedOrganization(normalizeJuniperList(juniper.status, orgId, juniper.baseUrl), auth);
+		return withResolvedOrganization(
+			{
+				...normalizeJuniperList(juniper.status, orgId, juniper.baseUrl),
+				...(juniper.report ? { report: juniper.report } : {}),
+			},
+			auth,
+		);
 	}
 	if (cedarList && juniper.kind === "answered") return cedarList;
 	if (juniper.kind === "answered") {
@@ -533,6 +566,7 @@ export async function listClaudeResetCredits(auth: ClaudeResetAuth): Promise<Cla
 			credits: [],
 			...(orgId ? { orgId } : {}),
 			baseUrl: juniper.baseUrl,
+			...(juniper.report ? { report: juniper.report } : {}),
 		};
 	}
 	return null;

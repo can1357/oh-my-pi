@@ -127,8 +127,8 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
  * its own refusal/repair (e.g. `todo` inferring an omitted `op`) is never
  * pre-empted by the host's generic wording plus the full docs. Lenience covers
  * schema mismatch only: malformed JSON and non-object content still throw. The
- * `__parseError`/`__rawJson` strip mirrors the agent loop so a payload cannot
- * forge the loop's parse-failure sentinels.
+ * `__parseError`/`__rawJson` strip keeps a payload from forging the agent
+ * loop's parse-failure sentinels.
  */
 function parseDeviceArgs(
 	device: Tool,

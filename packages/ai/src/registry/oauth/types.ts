@@ -12,13 +12,23 @@ export type OAuthCredentials = {
 	apiEndpoint?: string;
 	/**
 	 * Organization/workspace the token is scoped to (e.g. an Anthropic org
-	 * UUID or a ChatGPT workspace id). Captured once at login; token refreshes
-	 * never rewrite it. Lets one account email hold credentials for multiple
-	 * subscriptions.
+	 * UUID or canonical Factory org ID). Lets one account email hold
+	 * credentials for multiple subscriptions.
 	 */
 	orgId?: string;
 	/** Human-readable organization name for display (may embed the email). */
 	orgName?: string;
+	/**
+	 * Account residency region (e.g. `"eu"`), when the provider is
+	 * region-partitioned. Captured at login; refreshed identity may update it
+	 * when the account migrates, while failed lookups preserve the stored value.
+	 * Residency selects the API host, not inference eligibility.
+	 */
+	region?: string;
+	/** Factory organization inference scope, independent of account residency. */
+	inferenceRegion?: "global" | "eu" | "us";
+	/** WorkOS selected organization; never used as a Factory API organization header. */
+	activeOrganizationId?: string;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an

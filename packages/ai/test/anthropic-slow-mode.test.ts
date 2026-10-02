@@ -136,6 +136,27 @@ describe("parseAnthropicSlowModeHeaders", () => {
 		expect(signal?.status).toBe("unrecognized");
 	});
 
+	it("reads wrap-up utilization only from unified-status responses, keeping zero readings", () => {
+		const inWindow = parseAnthropicSlowModeHeaders({
+			"anthropic-ratelimit-unified-status": "allowed",
+			"anthropic-ratelimit-unified-grace-5h-utilization": "0.4",
+			"anthropic-ratelimit-unified-grace-7d-utilization": "garbage",
+			"anthropic-ratelimit-unified-overage-status": "allowed_warning",
+		});
+		expect(inWindow?.graceUtilization).toEqual({ fiveHour: 0.4, sevenDay: 0 });
+		expect(inWindow?.overageAllowed).toBe(true);
+		// The closing response carries no other slow facts but must still reach the controller.
+		expect(
+			parseAnthropicSlowModeHeaders({ "anthropic-ratelimit-unified-status": "allowed" })?.graceUtilization,
+		).toEqual({ fiveHour: 0, sevenDay: 0 });
+		expect(
+			parseAnthropicSlowModeHeaders({
+				"anthropic-ratelimit-unified-grace-5h-utilization": "0.4",
+				"anthropic-ratelimit-unified-5h-reset": "1780405800",
+			})?.graceUtilization,
+		).toBeUndefined();
+	});
+
 	it("returns undefined when a response carries no slow-lane or unified-limit facts", () => {
 		expect(parseAnthropicSlowModeHeaders({ "content-type": "text/event-stream" })).toBeUndefined();
 		expect(parseAnthropicSlowModeHeaders(undefined)).toBeUndefined();

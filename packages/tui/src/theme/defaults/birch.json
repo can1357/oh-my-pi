@@ -91,5 +91,15 @@
 		"pageBg": "#f9f7f1",
 		"cardBg": "#fefdfb",
 		"infoBg": "#f5f8f3"
+	},
+	"terminal": {
+		"background": "barkCream",
+		"foreground": "deepBark",
+		"chrome": "userMsgBg",
+		"widget": "#fefdfb",
+		"ansi": [
+			"forestFloor", "#b05248", "mossSage", "#8f7226", "#466888", "#865878", "#3a7678", "warmGray",
+			"barkCharcoal", "#c0645a", "#6a8a60", "#a08436", "#5a7ea0", "#9a6a8c", "#4a8a8c", "barkStriation"
+		]
 	}
 }

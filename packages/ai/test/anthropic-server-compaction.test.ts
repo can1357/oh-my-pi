@@ -214,7 +214,7 @@ describe("Anthropic on-demand compaction requests", () => {
 		});
 	});
 
-	it("uses model and deployment policy, including Foundry and Claude Platform on AWS but not Bedrock", async () => {
+	it("uses model and deployment policy, including Foundry and Claude Platform on AWS but not Bedrock's other routes", async () => {
 		const oldModel = buildModel({ ...spec, id: "claude-sonnet-4-5" });
 		const bedrock = buildModel({
 			...spec,
@@ -222,7 +222,6 @@ describe("Anthropic on-demand compaction requests", () => {
 			baseUrl: "https://bedrock-mantle.us-west-2.api.aws",
 		});
 		expect(oldModel.compat.supportsServerCompaction).toBe(false);
-		expect(bedrock.compat.supportsServerCompaction).toBe(false);
 		for (const blocked of [oldModel, bedrock]) {
 			const response = await captureRequest(blocked, { anthropicCompaction: {} });
 			expect(response.payload.compaction).toBeUndefined();
@@ -237,6 +236,46 @@ describe("Anthropic on-demand compaction requests", () => {
 			const response = await captureRequest(model, { anthropicCompaction: {} });
 			expect(response.payload.compaction).toBeUndefined();
 		});
+	});
+
+	it.each([
+		["amazon-bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic", "us.anthropic.claude-opus-5-5"],
+		["bedrock-mantle", "https://bedrock-mantle.us-east-1.api.aws/anthropic", "anthropic.claude-opus-5-5"],
+		["bedrock-mantle", "https://bedrock-mantle.{region}.api.aws/anthropic", "anthropic.claude-opus-5-5"],
+		[
+			"amazon-bedrock",
+			"https://bedrock-runtime-fips.us-east-1.amazonaws.com/anthropic",
+			"us.anthropic.claude-opus-5-5",
+		],
+		[
+			"bedrock-mantle",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234.bedrock-mantle.us-east-1.vpce.amazonaws.com/anthropic",
+			"anthropic.claude-opus-5-5",
+		],
+	])("sends on-demand compaction for %s at %s", async (provider, baseUrl, id) => {
+		const bedrock = buildModel({ ...spec, id, provider, baseUrl });
+		const response = await captureRequest(bedrock, { anthropicCompaction: {} });
+		expect(response.payload.compaction).toEqual({ type: "summarize" });
+		expect(response.beta).toContain("compact-2026-09-04");
+		const origin = new URL(baseUrl).origin;
+		expect(supportsAnthropicCompaction(bedrock, origin)).toBe(false);
+		expect(supportsAnthropicCompaction(bedrock, `${origin}/openai/v1`)).toBe(false);
+	});
+
+	it("gates a first-party reroute and an opt-out on compat.bedrockMessagesApi", () => {
+		const runtimeRoute = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic";
+		// Rerouted without the flag: excluded, as before Bedrock support.
+		expect(supportsAnthropicCompaction(model, runtimeRoute)).toBe(false);
+		const optedIn = buildModel({ ...spec, compat: { bedrockMessagesApi: true } });
+		expect(supportsAnthropicCompaction(optedIn, runtimeRoute)).toBe(true);
+		const optedOut = buildModel({
+			...spec,
+			id: "us.anthropic.claude-fable-5",
+			provider: "amazon-bedrock",
+			baseUrl: runtimeRoute,
+			compat: { bedrockMessagesApi: false },
+		});
+		expect(supportsAnthropicCompaction(optedOut)).toBe(false);
 	});
 });
 
@@ -534,5 +573,41 @@ describe("Anthropic compaction replay", () => {
 		expect(control?.index).toBeGreaterThan(nextIndex);
 		const keptIndex = wire.findIndex(message => JSON.stringify(message).includes("sig_kept"));
 		expect(wire.slice(0, keptIndex).some(message => message.role === "system")).toBe(false);
+	});
+
+	it("keeps an effort change of the turn the block opened behind the compaction block", async () => {
+		const opened: AssistantMessage = {
+			...keptFrom({ message: {} as AssistantMessage }),
+			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "low" } },
+		};
+		const request = await captureRequest(preserved, { ...options, thinkingEnabled: true, effort: "low" }, [
+			summaryMessage({ signature: SIGNATURE }),
+			opened,
+			{ role: "user", content: "next", timestamp: 3 },
+		]);
+		const wire = request.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		expect(wire[0]?.content?.[0]).toEqual({ type: "compaction", content: SUMMARY, signature: SIGNATURE });
+		const effortIndex = wire.findIndex(message => message.output_config?.effort === "low");
+		const nextIndex = wire.findIndex(message => JSON.stringify(message).includes('"next"'));
+		expect(effortIndex).toBe(1);
+		expect(nextIndex).toBe(2);
+	});
+
+	it("applies an effort change before a summary replayed as text", async () => {
+		const opened: AssistantMessage = {
+			...keptFrom({ message: {} as AssistantMessage }),
+			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "low" } },
+		};
+		const request = await captureRequest(preserved, { ...options, thinkingEnabled: true, effort: "low" }, [
+			summaryMessage({ signature: SIGNATURE }, "different-provider"),
+			opened,
+			{ role: "user", content: "next", timestamp: 3 },
+		]);
+		const wire = request.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		expect(JSON.stringify(wire)).not.toContain('"type":"compaction"');
+		expect(wire.findIndex(message => message.output_config?.effort === "low")).toBe(0);
+		expect(JSON.stringify(wire[1])).toContain("<summary>");
 	});
 });

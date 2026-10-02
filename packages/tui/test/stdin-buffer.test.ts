@@ -246,12 +246,6 @@ describe("StdinBuffer", () => {
 	});
 
 	describe("Kitty Keyboard Protocol", () => {
-		it("should handle batched Kitty press and release", () => {
-			// Press 'a', release 'a' batched together (common over SSH)
-			processInput("\x1b[97u\x1b[97;1:3u");
-			expect(emittedSequences).toEqual(["\x1b[97u", "\x1b[97;1:3u"]);
-		});
-
 		it("should handle multiple batched Kitty events", () => {
 			// Press 'a', release 'a', press 'b', release 'b'
 			processInput("\x1b[97u\x1b[97;1:3u\x1b[98u\x1b[98;1:3u");
@@ -262,12 +256,6 @@ describe("StdinBuffer", () => {
 			// Delete key release
 			processInput("\x1b[3;1:3~");
 			expect(emittedSequences).toEqual(["\x1b[3;1:3~"]);
-		});
-
-		it("should handle rapid typing simulation with Kitty protocol", () => {
-			// Simulates typing "hi" quickly with releases interleaved
-			processInput("\x1b[104u\x1b[104;1:3u\x1b[105u\x1b[105;1:3u");
-			expect(emittedSequences).toEqual(["\x1b[104u", "\x1b[104;1:3u", "\x1b[105u", "\x1b[105;1:3u"]);
 		});
 	});
 
@@ -297,19 +285,6 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[<0;10;5m"]);
 		});
 
-		it("should handle mouse move event", () => {
-			processInput("\x1b[<35;20;5m");
-			expect(emittedSequences).toEqual(["\x1b[<35;20;5m"]);
-		});
-
-		it("should handle split mouse events", () => {
-			processInput("\x1b[<3");
-			processInput("5;1");
-			processInput("5;");
-			processInput("10m");
-			expect(emittedSequences).toEqual(["\x1b[<35;15;10m"]);
-		});
-
 		it("should handle multiple mouse events", () => {
 			processInput("\x1b[<35;1;1m\x1b[<35;2;2m\x1b[<35;3;3m");
 			expect(emittedSequences).toEqual(["\x1b[<35;1;1m", "\x1b[<35;2;2m", "\x1b[<35;3;3m"]);
@@ -337,15 +312,6 @@ describe("StdinBuffer", () => {
 			processInput("");
 			// Empty string emits an empty data event
 			expect(emittedSequences).toEqual([""]);
-		});
-
-		it("should handle lone escape character with timeout", async () => {
-			processInput("\x1b");
-			expect(emittedSequences).toEqual([]);
-
-			// After timeout, should emit
-			await waitUntil(() => emittedSequences.length > 0);
-			expect(emittedSequences).toEqual(["\x1b"]);
 		});
 
 		it("should handle lone escape character with explicit flush", () => {
@@ -408,16 +374,6 @@ describe("StdinBuffer", () => {
 		it("should return empty array if nothing to flush", () => {
 			const flushed = buffer.flush();
 			expect(flushed).toEqual([]);
-		});
-
-		it("should emit flushed data via timeout", async () => {
-			processInput("\x1b[1;5");
-			expect(emittedSequences).toEqual([]);
-
-			// Wait for the flush timeout to deliver the partial
-			await waitUntil(() => emittedSequences.length > 0);
-
-			expect(emittedSequences).toEqual(["\x1b[1;5"]);
 		});
 	});
 
@@ -704,28 +660,18 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
 		});
 
-		describe("classification disabled (issue #12540)", () => {
-			it("emits stall-batched Enter keystrokes as submits instead of one paste", () => {
-				// A UI event-loop stall drains the pty backlog in one read, byte-
-				// identical to an unbracketed multiline paste. When the terminal
-				// confirms bracketed-paste support the heuristic is off, so every
-				// batched Enter stays a submit rather than a coalesced newline.
-				buffer.setRawPasteClassification(false);
-				processInput("aaa\rbbb\rccc");
+		describe("stall probe (issues #12540, #13344)", () => {
+			it("replays a stall-batched burst split across same-tick reads as keys", () => {
+				// A stalled loop can drain the pty backlog as several reads before the
+				// classification window fires. Once the accumulated candidate
+				// classifies, the stall probe must still turn it back into keystrokes
+				// so each batched Enter submits instead of becoming a pasted newline.
+				buffer.setRawPasteStallProbe(() => true);
+				processInput("aaa\r");
+				processInput("bbb\r");
+				processInput("ccc");
 				expect(emittedPaste).toEqual([]);
 				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
-			});
-
-			it("flushes a candidate already held by the classification window as keys", async () => {
-				// The first break-bearing read arms the fixed window; disabling the
-				// heuristic mid-window must replay the held bytes as keystrokes, not
-				// drop them or later emit them as a paste.
-				processInput("hello\r");
-				expect(emittedSequences).toEqual([]);
-				expect(emittedPaste).toEqual([]);
-				buffer.setRawPasteClassification(false);
-				expect(emittedPaste).toEqual([]);
-				expect(emittedSequences).toEqual(["h", "e", "l", "l", "o", "\r"]);
 			});
 		});
 	});

@@ -46,7 +46,7 @@ const capabilities: DesktopCapabilities = {
 	input: true,
 	ax: true,
 	backgroundWindowInput: true,
-	deliveryModes: ["background", "foreground"],
+	takeover: true,
 	capturePermission: "granted",
 	inputPermission: "granted",
 	axPermission: "granted",
@@ -646,7 +646,7 @@ describe("computer prelude", () => {
 				"print(repr(el))",
 				"await el.press()",
 				"await win.raise_()",
-				"await win.click(10, 20, button='right', delivery=None)",
+				"await win.click(10, 20, button='right', takeover=None)",
 			].join("\n"),
 			{
 				cwd: process.cwd(),
@@ -901,6 +901,36 @@ describe("computer worker round trips", () => {
 		);
 		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.payload.returnValue).toEqual({ role: "button", count: 1 });
+	});
+
+	describe("numeric window ids", () => {
+		class TwoWindowSession extends FakeNativeSession {
+			override async listWindows(): Promise<DesktopWindow[]> {
+				return [windowFixture, { ...windowFixture, id: "7", app: "Numbers", title: "99", focused: false }];
+			}
+		}
+
+		it.each([
+			["a number", "desktop.window(42)"],
+			["an { id } number", "desktop.window({ id: 42 })"],
+		])("resolves %s as that window id", async (_label, selector) => {
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => new TwoWindowSession());
+			const result = await runWorker(transport, "numeric-id", `(await ${selector}).id`);
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.payload.returnValue).toBe("42");
+		});
+
+		it.each([
+			["a missing id", 404],
+			["a number that is another window's title", 99],
+		])("throws a miss for %s", async (_label, id) => {
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => new TwoWindowSession());
+			const result = await runWorker(transport, "numeric-miss", `await desktop.window(${id})`);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.message).toBe(`no window matches ${id}`);
+		});
 	});
 
 	it("returns plain identity snapshots for rendered handle calls and enforces the derived read-only tier", async () => {

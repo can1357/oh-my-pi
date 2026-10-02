@@ -70,5 +70,3 @@ export function adoptRequiredClaudeCodeVersion(error: unknown): boolean {
 export const claudeToolPrefix: string = "_";
 /** Identity block prepended by Claude Code's CLI runtime. */
 export const claudeCodeSystemInstruction = "You are Claude Code, Anthropic's official CLI for Claude.";
-/** Claude Code's per-request output-token ceiling. */
-export const CLAUDE_CODE_MAX_OUTPUT_TOKENS = 64000;

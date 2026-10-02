@@ -427,15 +427,6 @@ export class TtsrManager {
 			if (scope.allowThinking) this.#canMatchThinking = true;
 		}
 
-		logger.debug("TTSR rule registered", {
-			ruleName: rule.name,
-			conditions: rule.condition,
-			astConditions: rule.astCondition,
-			question,
-			scope: rule.scope,
-			globs: rule.globs,
-		});
-
 		return true;
 	}
 
@@ -710,6 +701,17 @@ export class TtsrManager {
 	resetBuffer(): void {
 		this.#buffers.clear();
 		this.#lastAstSnapshots.clear();
+	}
+
+	/** Clear only one tool stream's transient matcher state. */
+	clearStream(streamKey: string): void {
+		const prefix = `${streamKey}#`;
+		for (const key of this.#buffers.keys()) {
+			if (key === streamKey || key.startsWith(prefix)) this.#buffers.delete(key);
+		}
+		for (const key of this.#lastAstSnapshots.keys()) {
+			if (key === streamKey || key.startsWith(prefix)) this.#lastAstSnapshots.delete(key);
+		}
 	}
 
 	/** Check if any TTSR rules are registered. */

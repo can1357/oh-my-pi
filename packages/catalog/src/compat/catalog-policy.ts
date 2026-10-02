@@ -1,6 +1,6 @@
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model } from "../types";
-import { resolveModelPolicy } from "./resolve";
+import { resolveCatalogAxes } from "./resolve";
 
 /**
  * Rule-owned catalog-axis policy by model. Resolve once per process rather
@@ -21,7 +21,7 @@ export function resolveCatalogPolicy(model: Model): Readonly<Record<string, unkn
 	const key = `${model.provider}\u0000${model.providerType ?? ""}\u0000${model.api}\u0000${model.id}\u0000${model.reasoning ? 1 : 0}`;
 	const cached = catalogPolicyCache.get(key);
 	if (cached !== undefined) return cached;
-	const policy = Object.freeze({ ...resolveModelPolicy(toModelSpec(model)).catalog });
+	const policy = Object.freeze({ ...resolveCatalogAxes(toModelSpec(model)) });
 	if (catalogPolicyCache.size >= CATALOG_POLICY_CACHE_MAX) catalogPolicyCache.clear();
 	catalogPolicyCache.set(key, policy);
 	return policy;

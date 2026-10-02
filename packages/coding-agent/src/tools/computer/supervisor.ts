@@ -4,7 +4,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import type { ToolSession } from "../index";
-import { ToolAbortError } from "../tool-errors";
+import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	COMPUTER_WORKER_ARG,
@@ -126,19 +126,6 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
 	return error;
-}
-
-function toErrorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
-		};
-	}
-	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
 }
 
 /** Supervises one lazy, crash-isolated computer worker per agent session. */
@@ -308,7 +295,11 @@ export class ComputerSupervisor implements ComputerController {
 			});
 			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value } });
 		} catch (error) {
-			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: false, error: toErrorPayload(error) } });
+			this.#safeSend({
+				type: "tool-reply",
+				id: message.id,
+				reply: { ok: false, error: toWorkerErrorPayload(error) },
+			});
 		} finally {
 			pending.toolCalls.delete(message.id);
 			pending.signal?.removeEventListener("abort", onParentAbort);
