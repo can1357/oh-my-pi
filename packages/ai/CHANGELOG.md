@@ -6,6 +6,7 @@
 
 - Added routing-session cleanup for OpenAI Responses and Codex while preserving shared provider fallbacks ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 - Added a reset-aware usage reserve: `AuthStorageOptions.defaultReserveTaperHours` and per-account `AuthAccountPolicy.taperHours` release the reserve as `reserve × min(1, timeToReset / taper)` per usage window (taper capped at the window length; unknown or rolling resets keep the static reserve), in both model usage health and credential ranking. Default `0` keeps reserves static ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added an explicit credits rung for credential selection: `AuthApiKeyOptions.usageFunding` / `ModelUsageHealthOptions.usageFunding` (`"credits"`) serve only credit-backed accounts — plan allowance spent while a paid balance funds overage (Codex flexible credits, flagged as `creditOverage` in Codex usage report metadata) — ordered by account policy priority, so negative-priority accounts pay last. Model usage health reports such accounts with the new `credits` state instead of `reserve`; default selection is unchanged ([#14134](https://github.com/can1357/oh-my-pi/pull/14134) by [@schickling-assistant](https://github.com/schickling-assistant)).
 
 ## [18.8.6] - 2026-10-08
 

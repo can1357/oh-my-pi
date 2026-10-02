@@ -40,6 +40,7 @@ import type { UsageService } from "./usage";
 import { usageLimitsInReserve } from "./reserve";
 import {
 	currentReserveUsageLimits,
+	isCreditBackedUsage,
 	isUsageLimitReached,
 	normalizeUsageFraction,
 	remainingUsageFraction,
@@ -279,6 +280,8 @@ export class CredentialSelector {
 				inReserve: false,
 				accountPriority: 0,
 				allowanceSpent: remainingUsageFraction(strategy, usage, args.rankingContext, nowMs) === 0,
+				// The credits rung selects OAuth subscription accounts only.
+				creditBacked: false,
 				usageMeasured,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
@@ -490,6 +493,7 @@ export class CredentialSelector {
 				reserveMeasured: reserve !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
+				creditBacked: !blocked && isCreditBackedUsage(usage, remainingFraction),
 				usageMeasured,
 				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: planPriority(args.planGate, usage),
@@ -502,7 +506,7 @@ export class CredentialSelector {
 				orderPos,
 			});
 		}
-		return orderUsageRankedCandidates(ranked, args.planGate !== undefined);
+		return orderUsageRankedCandidates(ranked, args.planGate !== undefined, args.options?.usageFunding === "credits");
 	}
 
 	/**
@@ -518,6 +522,11 @@ export class CredentialSelector {
 	 * 3. unfiltered last resort: the plan filter matched nothing usable —
 	 *    skip it and try every account once; the server is the final arbiter
 	 *    of model access.
+	 *
+	 * `options.usageFunding === "credits"` (a fallback chain's credits rung)
+	 * narrows every pass to credit-backed accounts — plan allowance spent,
+	 * overage funded by a paid balance — plus blocked accounts for the
+	 * last-resort passes; account policy priority orders them.
 	 *
 	 * Returns both the API key bytes for outbound requests AND the refreshed
 	 * {@link OAuthCredential} so callers needing identity metadata (account id,
@@ -570,8 +579,12 @@ export class CredentialSelector {
 		);
 		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
 		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
+		// The credits rung must see every account's usage to tell paid overage
+		// from renewable allowance, even with a single account.
+		const creditsRung = options?.usageFunding === "credits";
 		const checkUsage =
-			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
+			(strategy !== undefined || policyReserveEnabled || (creditsRung && canFetchPolicyUsage)) &&
+			(credentials.length > 1 || hasPlanRequirement || creditsRung);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
@@ -599,6 +612,7 @@ export class CredentialSelector {
 			!this.#deps.blocks.isBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
 		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
 		const rankDespitePin =
+			creditsRung ||
 			!sessionPreferredIsAvailable ||
 			!sessionPreferredIsWarm ||
 			hasPlanRequirement ||
@@ -644,7 +658,7 @@ export class CredentialSelector {
 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
 			];
 		}
-		const candidates: OAuthCandidate[] = shouldRank
+		const rankedCandidates: OAuthCandidate[] = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
 					provider,
@@ -666,6 +680,17 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		// The credits rung never serves from renewable allowance: only credit-backed
+		// accounts qualify. Blocked ones stay for the last-resort passes so a spent
+		// pool still answers with the wire's usage-limit error, which drives the
+		// next fallback rung, instead of a missing key.
+		const candidates = creditsRung
+			? rankedCandidates.filter(
+					candidate =>
+						candidate.creditBacked === true ||
+						this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+				)
+			: rankedCandidates;
 		const preflightFailures = new Set<OAuthCandidate>();
 		// The last retryable refresh error (network, timeout, 5xx) that removed a candidate.
 		// When no candidate resolves, it is rethrown so callers retry instead of reporting
@@ -682,9 +707,10 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		// A warm automatic pin normally wins. Two policies may evict it, each only
+		// A warm automatic pin normally wins. Three policies may evict it, each only
 		// while a sibling is confirmed better: reserve (sibling measured outside
-		// reserve) and spent allowance (unblocked sibling with allowance left).
+		// reserve), spent allowance (unblocked sibling with allowance left), and on
+		// the credits rung a negative-priority pin (credit-backed sibling at >= 0).
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean =>
 			!sessionPinIsExplicit &&
 			preferredCandidate !== undefined &&
@@ -697,6 +723,13 @@ export class CredentialSelector {
 					candidate.inReserve === false
 				) {
 					return true;
+				}
+				if (creditsRung && candidate.creditBacked === true) {
+					const pinPriority =
+						this.#deps.policies.forCredential(provider, preferredCandidate.selection.credential)?.priority ?? 0;
+					const siblingPriority =
+						this.#deps.policies.forCredential(provider, candidate.selection.credential)?.priority ?? 0;
+					if (pinPriority < 0 && siblingPriority >= 0) return true;
 				}
 				return (
 					preferredCandidate.allowanceSpent === true &&

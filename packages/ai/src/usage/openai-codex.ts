@@ -665,6 +665,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			metadata: {
 				planType,
 				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
+				// The plan allowance is spent and a paid credit balance funds the
+				// overage: credential selection treats this account as credit-backed.
+				...(creditOverage ? { creditOverage: true } : {}),
 				email,
 				accountId,
 				meterStates,

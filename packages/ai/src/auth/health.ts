@@ -32,7 +32,12 @@ import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
 import { usageLimitsInReserve } from "./reserve";
-import { currentReserveUsageLimits, isUsageLimitExhausted, usageReportMetadataValue } from "./usage-report";
+import {
+	currentReserveUsageLimits,
+	isCreditBackedUsage,
+	isUsageLimitExhausted,
+	usageReportMetadataValue,
+} from "./usage-report";
 
 /** Dependencies for model pool health and stored credential probes. */
 export interface CredentialHealthDeps {
@@ -90,7 +95,9 @@ export class CredentialHealth implements HealthApi {
 	 * Pool aggregation is deliberately conservative: one healthy sibling makes
 	 * the model healthy, while any unknown sibling prevents a depleted/reserve
 	 * conclusion. Static runtime/config/env credentials return unknown because
-	 * they bypass the managed account pool.
+	 * they bypass the managed account pool. An account serving past its spent
+	 * allowance on paid credits reports `credits`; with `usageFunding: "credits"`
+	 * (the credits rung) the pool is healthy only while such an account exists.
 	 */
 	async model(provider: Provider, options: ModelUsageHealthOptions): Promise<ModelUsageHealth> {
 		options.signal?.throwIfAborted();
@@ -208,6 +215,10 @@ export class CredentialHealth implements HealthApi {
 					return { credentialId: entry.id, credentialType, state: "unknown" };
 				}
 				const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+				// Paid overage is its own rung: neither allowance nor reserve.
+				if (isCreditBackedUsage(report, remainingFraction)) {
+					return { credentialId: entry.id, credentialType, state: "credits", remainingFraction };
+				}
 				const reserve = this.#deps.policies.reserveFor(provider, entry.credential, reserveFraction);
 				const inReserve = reserve !== undefined && usageLimitsInReserve(currentLimits, reserve, nowMs) === true;
 				return {
@@ -226,8 +237,17 @@ export class CredentialHealth implements HealthApi {
 			if (selectedAccount) selectedAccount.selected = true;
 		}
 
+		if (options.usageFunding === "credits") {
+			// The credits rung serves only credit-backed accounts, so only they make
+			// it usable; an unknown account cannot be selected on this rung either.
+			return {
+				state: accounts.some(account => account.state === "credits") ? "healthy" : "depleted",
+				accounts,
+			};
+		}
 		if (accounts.some(account => account.state === "healthy")) return { state: "healthy", accounts };
 		if (accounts.some(account => account.state === "unknown")) return { state: "unknown", accounts };
+		if (accounts.some(account => account.state === "credits")) return { state: "credits", accounts };
 		if (accounts.some(account => account.state === "reserve")) return { state: "reserve", accounts };
 		return { state: "depleted", accounts };
 	}

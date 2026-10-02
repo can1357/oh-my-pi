@@ -1101,6 +1101,48 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	// The allowance rung must not spend paid credits while a later rung can
+	// serve; the explicit `@credits` rung spends them once those are gone.
+	test.each([
+		["a later rung is healthy", "healthy", "runtime-fallback-model", undefined],
+		["every later rung is depleted", "depleted", "runtime-model", "credits"],
+	] as const)(
+		"skips a credits-only allowance rung when %s",
+		async (_case, laterState, expectedId, expectedFunding) => {
+			const settings = Settings.isolated({
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": "confirm",
+				"retry.fallbackChains": {
+					task: ["runtime-provider/runtime-fallback-model", "runtime-provider/runtime-model@credits"],
+				},
+			});
+			settings.setModelRole("task", "runtime-provider/runtime-model");
+			const options = buildSessionOptions("task");
+			vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) => {
+				const state =
+					healthOptions.usageFunding === "credits"
+						? "healthy"
+						: healthOptions.modelId === "runtime-model"
+							? "credits"
+							: laterState;
+				return { state, accounts: [{ credentialId: 1, credentialType: "oauth", state }] };
+			});
+			const { session } = await createAgentSession({
+				...options,
+				modelPatternFallbackRole: "subagent:credits-rung",
+				settings,
+				hasUI: false,
+			});
+			try {
+				expect(session.model?.provider).toBe("runtime-provider");
+				expect(session.model?.id).toBe(expectedId);
+				expect(session.model?.usageFunding).toBe(expectedFunding);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
 	test("rejects a depleted terminal fallback after startup skips the primary", async () => {
 		const settings = Settings.isolated({
 			"retry.usageAwareFallback": true,
