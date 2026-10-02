@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.4.11] - 2026-10-02
+
+### Fixed
+
+- Fixed lenient argument validation for tools such as `yield`: malformed tool-call JSON is now reported to the model instead of causing the tool to run with empty arguments.
+
 ## [18.4.10] - 2026-10-02
 
 ### Fixed
