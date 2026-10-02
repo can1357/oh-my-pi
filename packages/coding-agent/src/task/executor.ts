@@ -3210,6 +3210,7 @@ export function buildWakeRelayBody(args: {
 	yielded: boolean;
 	result: SingleResult | undefined;
 	turnText: string;
+	registry: AgentRegistry;
 	error: string | undefined;
 	aborted: boolean;
 	abortReason: string | undefined;
@@ -3221,7 +3222,7 @@ export function buildWakeRelayBody(args: {
 	// artifact before failing must be reported, never contradicted.
 	const summary =
 		args.yielded && args.result?.outputPath
-			? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
+			? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs, registry: args.registry })
 			: undefined;
 
 	const headline = args.error
@@ -3509,7 +3510,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				const messageResult =
 					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
-					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs, registry });
 					try {
 						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
 					} catch (error) {
@@ -3528,7 +3529,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// output there, which `agent://<id>` must not be offered for.
 				const outputPublished = result?.outputPath !== undefined;
 				if (wakeJob && (yielded || messageResult) && result) {
-					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs, registry });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
 						wakeJob.outcome.reject(new AsyncJobError(text, structured));
@@ -3550,6 +3551,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						yielded,
 						result,
 						turnText,
+						registry,
 						abortReason,
 						alreadyMessaged: IrcBus.forRegistry(registry).sentSince(id, wakeJob.ownerId, turnStartTime),
 					});
