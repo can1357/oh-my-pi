@@ -68,6 +68,30 @@ describe("model presets", () => {
 		sessions.push(session);
 		return session;
 	}
+	/**
+	 * Drop every credential-shaped env var for the duration of `run`.
+	 *
+	 * `ModelRegistry.hasConfiguredAuth` resolves through `KeyCascade.source`,
+	 * which reads live process env on top of the (empty) `AuthStorage` under test.
+	 * An exported provider key on the developer's machine — including the ones
+	 * `~/.omp/agent/.env` hydrates into the environment at startup — would flip
+	 * the "nothing is authed" contract this suite pins.
+	 */
+	async function withoutAmbientCredentials<T>(run: () => Promise<T>): Promise<T> {
+		const saved: Record<string, string> = {};
+		for (const key of Object.keys(process.env)) {
+			if (!/(?:API_?KEY|_TOKEN|_SECRET|_BEARER_TOKEN|APPLICATION_CREDENTIALS)$/.test(key)) continue;
+			const value = process.env[key];
+			if (value === undefined) continue;
+			saved[key] = value;
+			delete process.env[key];
+		}
+		try {
+			return await run();
+		} finally {
+			for (const [key, value] of Object.entries(saved)) process.env[key] = value;
+		}
+	}
 
 	/** Settings with a real project layer and an optional `--config` overlay. */
 	async function projectSettings(options: { project?: string; overlay?: string; storage?: "global" | "project" }) {
@@ -319,38 +343,40 @@ describe("model presets", () => {
 	});
 
 	it("refuses a preset with no default and no authed model before writing", async () => {
-		const dir = TempDir.createSync("@pi-model-presets-noauth-");
-		tempDirs.push(dir);
-		const noAuth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
-		const registry = new ModelRegistry(noAuth, path.join(dir.path(), "models.yml"));
-		try {
-			const settings = Settings.isolated();
-			settings.setModelRole("default", SONNET);
-			cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
-			const agent = new Agent({
-				initialState: {
-					model: bundled(SONNET),
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-					thinkingLevel: Effort.High,
-				},
-			});
-			const session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry: registry,
-			});
-			sessions.push(session);
+		await withoutAmbientCredentials(async () => {
+			const dir = TempDir.createSync("@pi-model-presets-noauth-");
+			tempDirs.push(dir);
+			const noAuth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+			const registry = new ModelRegistry(noAuth, path.join(dir.path(), "models.yml"));
+			try {
+				const settings = Settings.isolated();
+				settings.setModelRole("default", SONNET);
+				cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
+				const agent = new Agent({
+					initialState: {
+						model: bundled(SONNET),
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+						thinkingLevel: Effort.High,
+					},
+				});
+				const session = new AgentSession({
+					agent,
+					sessionManager: SessionManager.inMemory(),
+					settings,
+					modelRegistry: registry,
+				});
+				sessions.push(session);
 
-			const result = await applyModelPreset(settings, session, "auto");
+				const result = await applyModelPreset(settings, session, "auto");
 
-			expect(result.kind).toBe("unavailable");
-			expect(settings.getModelRole("default")).toBe(SONNET);
-		} finally {
-			noAuth.close();
-		}
+				expect(result.kind).toBe("unavailable");
+				expect(settings.getModelRole("default")).toBe(SONNET);
+			} finally {
+				noAuth.close();
+			}
+		});
 	});
 
 	it("reports when a higher layer still defines a just-saved preset name", async () => {
