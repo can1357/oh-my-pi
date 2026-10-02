@@ -4,15 +4,12 @@ import {
 	detectKittyUnicodePlaceholdersSupport,
 	encodeKittyPlaceholderGrid,
 	encodeKittyVirtualPlacement,
-	getKittyGraphics,
 	KITTY_PLACEHOLDER,
 	KITTY_PLACEHOLDER_MAX_CELLS,
 	kittyPlaceholdersFit,
 	renderKittyPlaceholderLines,
-	setKittyGraphics,
 } from "@oh-my-pi/pi-tui/kitty-graphics";
 
-const ORIGINAL = { ...getKittyGraphics() };
 const ORIGINAL_TMUX = Bun.env.TMUX;
 
 beforeEach(() => {
@@ -20,7 +17,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	setKittyGraphics(ORIGINAL);
 	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 });
@@ -76,15 +72,6 @@ describe("kitty Unicode placeholder encoding", () => {
 		expect(kittyPlaceholdersFit(5, 0)).toBe(false);
 		expect(kittyPlaceholdersFit(KITTY_PLACEHOLDER_MAX_CELLS + 1, 1)).toBe(false);
 		expect(kittyPlaceholdersFit(1, KITTY_PLACEHOLDER_MAX_CELLS + 1)).toBe(false);
-	});
-});
-
-describe("kitty graphics feature state", () => {
-	it("getKittyGraphics/setKittyGraphics round-trips overrides", () => {
-		setKittyGraphics({ unicodePlaceholders: false });
-		expect(getKittyGraphics()).toEqual({ unicodePlaceholders: false });
-		setKittyGraphics({ unicodePlaceholders: true });
-		expect(getKittyGraphics().unicodePlaceholders).toBe(true);
 	});
 });
 

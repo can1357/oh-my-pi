@@ -88,14 +88,8 @@ const BACKOFF_MAX_MS = 5_000;
 interface SystemOneResponse {
 	model: string;
 	answers: Record<string, Answer>;
-	/** OpenRouter adds the billed `cost` in USD; TypeSafe reports tokens only. */
-	usage: { input_tokens: number; output_tokens: number; cost?: number } & Record<string, unknown>;
-}
-
-/** Wire usage field; non-finite values fall back (counts read as 0, cost stays unset for catalog repricing). */
-function readUsage<T>(usage: Record<string, unknown> | undefined | null, key: string, fallback: T): number | T {
-	const value = usage?.[key];
-	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+	/** OpenRouter adds the billed `cost` in USD; some routes omit token counts. */
+	usage: { input_tokens?: number; output_tokens?: number; cost?: number } & Record<string, unknown>;
 }
 
 /** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
@@ -182,9 +176,9 @@ export class TypeSafeJudge implements Judge {
 			model: response.model,
 			answers: answers as JudgmentResult<Q>["answers"],
 			usage: tokenUsage(
-				readUsage(usage, judgment?.usageMap?.input ?? "input_tokens", 0),
-				readUsage(usage, judgment?.usageMap?.output ?? "output_tokens", 0),
-				readUsage(usage, judgment?.usageMap?.cost ?? "cost", undefined),
+				usage[judgment?.usageMap?.input ?? "input_tokens"] as number | undefined,
+				usage[judgment?.usageMap?.output ?? "output_tokens"] as number | undefined,
+				(usage[judgment?.usageMap?.cost ?? "cost"] as number | undefined) ?? 0,
 			),
 		};
 	}

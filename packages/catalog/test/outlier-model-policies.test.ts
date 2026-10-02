@@ -31,7 +31,7 @@ describe("outlier catalog policies", () => {
 
 	test("hosted seeds retain the kinds required by their dedicated runners", () => {
 		const cases = [
-			["openai-codex", "gpt-image-1", "image"],
+			["openai-codex", "gpt-image-2", "image"],
 			["google-antigravity", "gemini-3-pro-image", "image"],
 			["deepinfra", "black-forest-labs/FLUX-2-pro", "image"],
 			["deepinfra", "hexgrad/Kokoro-82M", "tts"],

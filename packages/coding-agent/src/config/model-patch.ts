@@ -324,7 +324,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
-	if (patch.promptCache !== undefined) result.promptCache = patch.promptCache;
+	if (patch.promptCache !== undefined) {
+		result.promptCache = patch.promptCache;
+		result.promptCacheConfig = patch.promptCache;
+	}
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
@@ -362,6 +365,12 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.headers = patch.headers;
 		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
+		// A same-id definition that omits a lifetime must not carry the previous
+		// route's catalog policy; buildModel reapplies policy for the new route.
+		if (patch.promptCache === undefined) {
+			delete result.promptCache;
+			delete result.promptCacheConfig;
+		}
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);
 	if (patch.thinking !== undefined && built.thinking !== undefined) {

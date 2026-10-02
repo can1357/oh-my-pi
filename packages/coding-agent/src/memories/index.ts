@@ -162,11 +162,18 @@ export function startMemoryStartupTask(options: {
 
 interface MemoryInstructionSession {
 	sessionManager: Pick<AgentSession["sessionManager"], "getSessionFile">;
+	agent?: { state: { messages: readonly unknown[] } };
 }
 
 interface MemoryToolDeveloperInstructionsSnapshot {
 	summary: string;
 	learned: string;
+}
+
+// The first user message means a request was built from the current prompt,
+// and any signed thinking it returns is bound to that prompt.
+function memoryConversationStarted(session: MemoryInstructionSession): boolean {
+	return (session.agent?.state.messages.length ?? 0) > 0;
 }
 
 interface CachedMemoryToolDeveloperInstructions {
@@ -260,19 +267,23 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
 /**
  * Refresh the active session's consolidated-memory snapshot after startup maintenance.
  *
- * Startup may finish after the first prompt build and write `memory_summary.md`;
- * the active session should see that summary. It must not reread `learned.md`,
- * because a `learn` call racing with startup belongs to the next session's
- * memory prompt, not the active prompt-cache prefix.
+ * Startup may finish after the first prompt build and write `memory_summary.md`.
+ * The session adopts that summary only while it holds no messages: once a
+ * request went out, signed thinking is bound to the prompt it carried, so the
+ * new summary waits for the next session, whose cache key (session file) differs.
+ * It must not reread `learned.md`, because a `learn` call racing with startup
+ * belongs to the next session's memory prompt, not the active prompt-cache prefix.
  */
 export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
 	agentDir: string,
 	settings: Settings,
 ): Promise<void> {
+	if (memoryConversationStarted(session)) return;
 	const sessionFile = getMemoryInstructionSessionFile(session);
 	const cached = memoryToolDeveloperInstructionsBySession.get(session);
 	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	if (memoryConversationStarted(session)) return;
 	const root = getMemoryInstructionRoot(agentDir, settings);
 	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
 	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
@@ -349,6 +360,7 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
 	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
 	if (!isMemoryStartupActive(options)) return;
+	if (memoryConversationStarted(options.session)) return;
 	await options.session.refreshBaseSystemPrompt?.();
 }
 

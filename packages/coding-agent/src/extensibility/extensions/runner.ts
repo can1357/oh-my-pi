@@ -2,14 +2,23 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import type {
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
+import {
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	isNonBlankContext,
+	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CredentialDisabledEvent,
+	ImageContent,
+	Model,
+	ProviderResponseMetadata,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -35,6 +44,8 @@ import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
+	AssistantMessageRewriteEvent,
+	AssistantMessageRewriteResult,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -99,6 +110,21 @@ interface BeforeAgentStartCombinedResult {
 }
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+
+export interface ToolCallPreflight {
+	before?: (
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+		context?: AgentToolContext,
+	) => Promise<{ block?: boolean; reason?: string } | undefined> | { block?: boolean; reason?: string } | undefined;
+	after?: (
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
+	cancel?: (toolCallId: string) => void;
+}
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
@@ -551,6 +577,7 @@ export class ExtensionRunner {
 	 * accumulate for the session's lifetime.
 	 */
 	#emittedToolCalls = new Set<string>();
+	#loopToolCalls = new Set<string>();
 
 	/** Records that the loop already emitted `tool_call` for this dispatch. */
 	markToolCallEmitted(toolCallId: string, toolName: string): void {
@@ -566,6 +593,25 @@ export class ExtensionRunner {
 		return this.#emittedToolCalls.delete(`${toolCallId}:${toolName}`);
 	}
 
+	/** Marks every dispatch prepared by the agent loop, independent of extension handlers. */
+	markLoopToolCall(toolCallId: string, toolName: string): void {
+		if (this.#loopToolCalls.size >= 512) {
+			const oldest = this.#loopToolCalls.values().next().value;
+			if (oldest !== undefined) this.#loopToolCalls.delete(oldest);
+		}
+		this.#loopToolCalls.add(`${toolCallId}:${toolName}`);
+	}
+
+	/** Clears a loop marker when pre-dispatch blocked execution before the wrapper ran. */
+	clearLoopToolCall(toolCallId: string, toolName: string): void {
+		this.#loopToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
+	/** Consumes the marker for a loop dispatch; false means non-loop execution. */
+	consumeLoopToolCall(toolCallId: string, toolName: string): boolean {
+		return this.#loopToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
 	/**
 	 * Resolves a tool NAME to its native built-in implementation (the pre-extension-override,
 	 * unwrapped tool) plus a factory for the `AgentToolContext` that native tool expects, or
@@ -574,12 +620,38 @@ export class ExtensionRunner {
 	 * delegated native call sees the ordinary session tool context (ui, cwd, snapshot state, etc.).
 	 */
 	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
+	#toolCallPreflight?: ToolCallPreflight;
 
 	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
 	setNativeToolResolver(
 		resolve: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined,
 	): void {
 		this.#nativeToolResolver = resolve;
+	}
+
+	setToolCallPreflight(preflight: ToolCallPreflight | undefined): void {
+		this.#toolCallPreflight = preflight;
+	}
+
+	async runToolCallPreflightBefore(
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+		context?: AgentToolContext,
+	): Promise<{ block?: boolean; reason?: string } | undefined> {
+		return this.#toolCallPreflight?.before?.(toolCallId, tool, args, context);
+	}
+
+	async runToolCallPreflightAfter(
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult | undefined> {
+		return this.#toolCallPreflight?.after?.(toolCallId, result, context);
+	}
+
+	cancelToolCallPreflight(toolCallId: string): void {
+		this.#toolCallPreflight?.cancel?.(toolCallId);
 	}
 
 	/** Whether a native built-in of `name` is available to delegate to. */
@@ -1554,10 +1626,102 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
+	/**
+	 * Run extension rewrites on a detached finalized assistant message. Text may
+	 * change only in its original block position; all other metadata and blocks
+	 * remain unchanged. Text replay signatures are tied to their original text.
+	 *
+	 * Handlers see a structured clone, but the result is rebuilt from the
+	 * original blocks: unchanged blocks keep their identity and symbol-keyed
+	 * provider markers (e.g. `kCursorExecResolved`, which `structuredClone`
+	 * drops and without which agent-loop re-runs Cursor-settled tool calls).
+	 */
+	async emitAssistantMessage(
+		message: AssistantMessage,
+		signal?: AbortSignal,
+	): Promise<AssistantMessage["content"] | undefined> {
+		if (!this.hasHandlers("assistant_message")) return undefined;
+		const ctx = this.createContext();
+		const original = message.content;
+		// Accepted text per block position; every other field comes from `original`.
+		const texts = original.map(block => (block.type === "text" ? block.text : undefined));
+		const isRewritten = (index: number) => {
+			const block = original[index];
+			return block?.type === "text" && texts[index] !== block.text;
+		};
+		const currentContent = (): AssistantMessage["content"] =>
+			original.map((block, index) => {
+				if (block.type !== "text" || !isRewritten(index)) return block;
+				const { textSignature: _stale, ...rest } = block;
+				return { ...rest, text: texts[index] as string };
+			});
+		const textMetadata = (block: TextContent) => {
+			const { text: _text, textSignature: _textSignature, ...metadata } = block;
+			return metadata;
+		};
+
+		extensions: for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("assistant_message");
+			if (!handlers?.length) continue;
+			for (const handler of handlers) {
+				if (signal?.aborted) break extensions;
+				// Detach the whole message, not just `content`: in-place edits to `usage`
+				// or other fields must not leak into the finalized message.
+				const presented = structuredClone({ ...message, content: currentContent() });
+				const event: AssistantMessageRewriteEvent = { type: "assistant_message", message: presented };
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
+				)) as AssistantMessageRewriteResult | undefined;
+				if (signal?.aborted) break extensions;
+				if (result?.content === undefined) continue;
+				const replacement = result.content;
+				// Compare against a fresh clone: the handler may have mutated `presented`.
+				const expected = structuredClone(currentContent());
+				if (
+					!Array.isArray(replacement) ||
+					replacement.length !== expected.length ||
+					replacement.some((block, index) => {
+						const previous = expected[index];
+						if (!block || typeof block !== "object" || block.type !== previous?.type) return true;
+						if (block.type !== "text") return !Bun.deepEquals(block, previous);
+						return (
+							typeof block.text !== "string" ||
+							previous?.type !== "text" ||
+							!Bun.deepEquals(textMetadata(block), textMetadata(previous))
+						);
+					})
+				) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "assistant_message",
+						error: "content replacement may only change text in existing blocks; block positions, non-text blocks, and other metadata must remain unchanged",
+					});
+					continue;
+				}
+				for (const [index, block] of replacement.entries()) {
+					if (block.type === "text") texts[index] = block.text;
+				}
+			}
+		}
+		return original.some((_block, index) => isRewritten(index)) ? currentContent() : undefined;
+	}
+
+	/**
+	 * Emit `tool_result` to every subscribed extension. Returns the full
+	 * `content`/`details`/`isError` triple only when a handler modified the
+	 * result; joined `additionalContext` rides along whenever any handler set it.
+	 */
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
+		const contexts: string[] = [];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
@@ -1585,15 +1749,20 @@ export class ExtensionRunner {
 					currentEvent.isError = handlerResult.isError;
 					modified = true;
 				}
+				if (isNonBlankContext(handlerResult.additionalContext)) {
+					contexts.push(handlerResult.additionalContext);
+				}
 			}
 		}
 
-		if (!modified) return undefined;
+		const additionalContext = joinAdditionalContext(contexts);
+		if (!modified) return additionalContext === undefined ? undefined : { additionalContext };
 
 		return {
 			content: currentEvent.content,
 			details: currentEvent.details,
 			isError: currentEvent.isError,
+			...(additionalContext !== undefined ? { additionalContext } : {}),
 		};
 	}
 

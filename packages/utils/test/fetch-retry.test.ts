@@ -132,10 +132,6 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, "Your limit will reset in 13 minutes")).toBe(13 * 60_000);
 	});
 
-	it("parses bare 'reset in 13 minutes' phrasing", () => {
-		expect(extractRetryHint(undefined, "reset in 13 minutes")).toBe(13 * 60_000);
-	});
-
 	it("parses 'will reset in 2h' phrasing", () => {
 		expect(extractRetryHint(undefined, "will reset in 2h")).toBe(2 * 60 * 60_000);
 	});

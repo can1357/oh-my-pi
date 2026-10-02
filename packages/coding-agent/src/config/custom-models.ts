@@ -138,6 +138,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
 		promptCache: resolvedModel.promptCache,
+		promptCacheConfig: resolvedModel.promptCache,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
 		headers: resolvedModel.headers,

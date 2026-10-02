@@ -17,6 +17,7 @@ members = [
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
+   "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
    "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
@@ -24,7 +25,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.3.5"
+version = "18.4.12"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -33,6 +34,9 @@ repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
 brush-core = { path = "crates/vendor/brush-core" }
+# brush-parser 0.4.0 (latest release) re-parses `$(...)` bodies without
+# here-document awareness; the vendored copy fixes it (see its README.md).
+brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
@@ -399,7 +403,7 @@ tiktoken-rs = "0.12"
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
-brush-parser = "0.4"
+brush-parser = { path = "crates/vendor/brush-parser" }
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────

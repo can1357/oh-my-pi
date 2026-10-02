@@ -2,7 +2,6 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
 	Container,
-	extractPrintableText,
 	fuzzyMatch,
 	Input,
 	matchesKey,
@@ -56,7 +55,16 @@ import { resolveAssistantErrorPresentation } from "../chat/transcript-render-hel
 import { OverlayPanel, PanelDivider } from "../chrome/overlay-box";
 import { TreeView, type TreeRow } from "../components/tree-view";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
-import { editorKeys, interruptKey } from "../chrome/keybinding-hints";
+import { boundKeys, editorKeys, interruptKey } from "../chrome/keybinding-hints";
+import type { TspPickerItem, TspPickerProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { ThemeColor } from "../theme/schema";
+import { col, keyed, node, span, text } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import { plainText } from "../native/spans";
+import type { OutlineTarget } from "../chat/transcript-outline";
+import { collectBlocks, targetCopy, turnPreview } from "./copy-selector";
 
 /** Filter mode for tree display */
 type FilterMode = TreeFilterMode;
@@ -155,13 +163,49 @@ function stripSystemWrapperTags(content: string): string {
 /** Per-message cap on text folded into the tree search index. */
 const SEARCH_TEXT_LIMIT = 200;
 
+/** One theme-colored piece of an entry's display text. */
+interface EntryPart {
+	t: string;
+	s?: ThemeColor;
+}
+
+/** A cached native tree item and the inputs it was built from. */
+interface TreeItemMemo {
+	label: string | undefined;
+	branch: boolean;
+	node: NativeNode;
+}
+
+/** The session tree's `picker` data (see {@link TreeList.pickerView}). */
+interface TreePickerView {
+	items: readonly TspPickerItem[];
+	order: readonly string[];
+	selected: string | null;
+	current: readonly string[];
+	query: string;
+	/** UTF-16 caret into `query`. */
+	cursor: number;
+	filterMode: FilterMode;
+	total: number;
+	empty: TspText;
+}
+
+const FILTER_TABS: readonly { id: TreeFilterMode; label: string }[] = [
+	{ id: "default", label: "Default" },
+	{ id: "no-tools", label: "No tools" },
+	{ id: "user-only", label: "User only" },
+	{ id: "labeled-only", label: "Labeled" },
+	{ id: "all", label: "All" },
+];
+
 class TreeList implements Component {
 	#tree: TreeView<TreeSelectorNode, string>;
 	#roots: TreeSelectorNode[] = [];
 	#rootIds: Set<string> = new Set();
 	#nodeById: Map<string, TreeSelectorNode> = new Map();
 	#filterMode: FilterMode;
-	#searchQuery = "";
+	/** The search field; its value is the fuzzy query. */
+	readonly searchInput = new Input();
 	#toolCallMap: Map<string, ToolCallInfo> = new Map();
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
@@ -171,6 +215,26 @@ class TreeList implements Component {
 	onCancel?: () => void;
 	onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
 
+	/** Native item nodes by entry id, reused across filter/search changes. */
+	#itemCache = new Map<string, TreeItemMemo>();
+	#itemsNative: { rows: readonly TreeRow<TreeSelectorNode, string>[]; items: NativeNode[] } | undefined;
+	#listNative:
+		| {
+				items: readonly NativeNode[];
+				selected: string | undefined;
+				query: string;
+				filterMode: FilterMode;
+				node: NativeNode;
+		  }
+		| undefined;
+	/** Bumped on every label edit: labels are item badges. */
+	#labelVersion = 0;
+	#pickerItems:
+		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
+		| undefined;
+	#pickerOrder: { rows: readonly TreeRow<TreeSelectorNode, string>[]; order: string[] } | undefined;
+	#previewMemo: { node: TreeSelectorNode | undefined; labels: number; preview: NativeChild[] } | undefined;
+
 	constructor(
 		tree: TreeSelectorNode[],
 		private readonly currentLeafId: string | null,
@@ -179,6 +243,8 @@ class TreeList implements Component {
 		initialSelectedId?: string,
 	) {
 		this.#filterMode = initialFilterMode;
+		this.searchInput.prompt = `${theme.fg("muted", "Search:")} `;
+		this.searchInput.placeholder = "Type to search";
 		this.#multipleRoots = tree.length > 1;
 		this.#indexSession(tree);
 		this.#tree = new TreeView<TreeSelectorNode, string>({
@@ -307,7 +373,7 @@ class TreeList implements Component {
 	#buildFilter(): (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean {
 		const filterMode = this.#filterMode;
 		const leafId = this.currentLeafId;
-		const searchTokens = this.#searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
+		const searchTokens = this.getSearchQuery().toLowerCase().split(/\s+/).filter(Boolean);
 		return node => {
 			const entry = node.entry;
 			const isCurrentLeaf = entry.id === leafId;
@@ -473,6 +539,7 @@ class TreeList implements Component {
 
 	invalidate(): void {
 		this.#tree.invalidate();
+		this.#itemCache.clear();
 	}
 
 	dispose(): void {
@@ -480,7 +547,203 @@ class TreeList implements Component {
 	}
 
 	getSearchQuery(): string {
-		return this.#searchQuery;
+		return this.searchInput.getValue();
+	}
+
+	getFilterMode(): FilterMode {
+		return this.#filterMode;
+	}
+
+	/** Native filter tab: switch to that mode, like its alt+key shortcut. */
+	setFilterMode(mode: string): void {
+		const next = TREE_FILTER_MODES.find(m => m === mode);
+		if (next === undefined || next === this.#filterMode) return;
+		this.#filterMode = next;
+		this.#applyFilter();
+	}
+
+	/** Native click on an entry: highlight it, then the same outcome as Enter. */
+	activateEntry(entryId: string): void {
+		if (!this.#tree.rows.some(row => row.key === entryId)) return;
+		this.#tree.setSelectedKey(entryId);
+		const selected = this.#tree.selectedItem;
+		if (selected && this.onSelect) this.onSelect(selected.entry.id, { summarize: false });
+	}
+
+	/** Native row click: highlight the entry without switching. */
+	selectEntry(entryId: string): void {
+		if (this.#tree.rows.some(row => row.key === entryId)) this.#tree.setSelectedKey(entryId);
+	}
+
+	/**
+	 * The `tree` picker's data. `items` is every structural entry, rebuilt
+	 * only when the tree or a label changes; filter modes and typing change
+	 * only `order` (the visible entries) and the selection.
+	 */
+	pickerView(): TreePickerView {
+		const allRows = this.#tree.allRows;
+		if (this.#pickerItems?.rows !== allRows || this.#pickerItems.labels !== this.#labelVersion) {
+			// Real branch points get a disclosure; linear chains stay flat at their head's depth.
+			const branchPoints = new Set<string>();
+			for (const row of allRows) {
+				if (row.parentKey !== undefined && row.siblingCount > 1) branchPoints.add(row.parentKey);
+			}
+			this.#pickerItems = {
+				rows: allRows,
+				labels: this.#labelVersion,
+				items: allRows.map(row => this.#pickerItem(row, branchPoints.has(row.key))),
+			};
+		}
+		const rows = this.#tree.rows;
+		if (this.#pickerOrder?.rows !== rows) this.#pickerOrder = { rows, order: rows.map(row => row.key) };
+		return {
+			items: this.#pickerItems.items,
+			order: this.#pickerOrder.order,
+			selected: this.#tree.selectedKey ?? null,
+			current: this.currentLeafId === null ? [] : [this.currentLeafId],
+			query: this.getSearchQuery(),
+			cursor: this.searchInput.getCursor(),
+			filterMode: this.#filterMode,
+			total: allRows.length,
+			empty: this.#emptyText(),
+		};
+	}
+
+	#pickerItem(row: TreeRow<TreeSelectorNode, string>, open: boolean): TspPickerItem {
+		const item = row.item;
+		const entry = item.entry;
+		const label = this.#entryParts(item).map(part =>
+			span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s),
+		);
+		let kind: TspPickerItem["node"] = "marker";
+		let role: string | undefined;
+		if (isUserRequestEntry(entry)) {
+			kind = "user";
+		} else if (entry.type === "message") {
+			const message = entry.message;
+			if (message.role === "assistant") kind = "assistant";
+			else if (message.role === "toolResult") [kind, role] = ["tool", `omp.tool.${message.toolName}`];
+			else if (message.role === "bashExecution") [kind, role] = ["tool", "omp.tool.bash"];
+			else if (message.role === "pythonExecution") [kind, role] = ["tool", "omp.tool.eval"];
+		}
+		return {
+			id: row.key,
+			label,
+			depth: row.depth,
+			node: kind,
+			...(role ? { role } : {}),
+			...(open ? { open: true } : {}),
+			...(item.label ? { badges: [{ text: plainText(item.label), tone: "warning" as const }] } : {}),
+			...(this.#activePathIds.has(row.key) ? { dot: "accent" as const } : {}),
+		};
+	}
+
+	/**
+	 * Preview of the selected entry: a title, its label, and its content as
+	 * the transcript shows it (markdown prose, commands and output as code).
+	 */
+	pickerPreview(): readonly NativeChild[] {
+		const selected = this.#tree.selectedItem;
+		const memo = this.#previewMemo;
+		if (memo !== undefined && memo.node === selected && memo.labels === this.#labelVersion) return memo.preview;
+		const preview: NativeChild[] = [];
+		if (selected) {
+			const entry = selected.entry;
+			const parts = this.#entryParts(selected)
+				.map(part => (part.t.includes("\x1b") ? plainText(part.t) : part.t))
+				.join("");
+			if (entry.type === "message" || entry.type === "custom_message") {
+				const target: OutlineTarget = {
+					entryId: entry.id,
+					turnId: entry.id,
+					isUserTurn: isUserRequestEntry(entry),
+					start: 0,
+					end: 0,
+					entries: [entry],
+				};
+				const copy = targetCopy(target, collectBlocks(target.entries));
+				preview.push(text(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`, { role: "omp.picker.title" }));
+				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				preview.push(turnPreview(target, copy.content || parts));
+			} else {
+				preview.push(text(parts, { role: "omp.picker.title" }));
+				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+			}
+		}
+		this.#previewMemo = { node: selected, labels: this.#labelVersion, preview };
+		return preview;
+	}
+
+	/**
+	 * The visible entries as a native `list` keyed `"list"`, items keyed by
+	 * entry id. Selection stays omp's; the terminal scrolls and virtualizes.
+	 * Branch heads carry a `branch` icon and the active path an accent bullet
+	 * instead of drawn tree connectors.
+	 */
+	describeList(): NativeNode {
+		const rows = this.#tree.rows;
+		let items = this.#itemsNative;
+		if (items?.rows !== rows) {
+			items = { rows, items: rows.map(row => this.#describeRow(row)) };
+			this.#itemsNative = items;
+		}
+		const selected = this.#tree.selectedKey;
+		const query = this.getSearchQuery();
+		const memo = this.#listNative;
+		if (
+			memo?.items === items.items &&
+			memo.selected === selected &&
+			memo.query === query &&
+			memo.filterMode === this.#filterMode
+		) {
+			return memo.node;
+		}
+		const list = node(
+			"list",
+			{ selected: selected ?? null, filter: query || undefined, empty: this.#emptyText(), virtual: true },
+			items.items,
+			"list",
+		);
+		this.#listNative = { items: items.items, selected, query, filterMode: this.#filterMode, node: list };
+		return list;
+	}
+
+	/** The empty-state explanation from {@link render}, as spans. */
+	#emptyText(): TspText {
+		const total = this.#tree.allRows.length;
+		if (total === 0) return [span("No entries found", "muted")];
+		const query = this.getSearchQuery();
+		if (query.length > 0) {
+			return [
+				span(`No entries match search "${query}". Press `, "muted"),
+				span("backspace", "key"),
+				span(" to clear the search", "muted"),
+			];
+		}
+		const filterLabel = this.#getFilterLabel().trim() || "[default]";
+		return [
+			span(`${total} entries hidden by the current filter ${filterLabel}. Press `, "muted"),
+			span("alt+a", "key"),
+			span(" to show all, ", "muted"),
+			span("alt+d", "key"),
+			span(" for default", "muted"),
+		];
+	}
+
+	#describeRow(row: TreeRow<TreeSelectorNode, string>): NativeNode {
+		const item = row.item;
+		const branch = row.parentKey !== undefined && row.siblingCount > 1;
+		const cached = this.#itemCache.get(row.key);
+		if (cached !== undefined && cached.label === item.label && cached.branch === branch) return cached.node;
+		const label: TspSpan[] = [];
+		if (this.#activePathIds.has(row.key)) label.push(span(`${theme.md.bullet} `, "accent"));
+		if (item.label) label.push(span(`[${plainText(item.label)}] `, "warning"));
+		for (const part of this.#entryParts(item)) {
+			label.push(span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s));
+		}
+		const described = node("item", { label, icon: branch ? "branch" : undefined }, undefined, row.key);
+		this.#itemCache.set(row.key, { label: item.label, branch, node: described });
+		return described;
 	}
 
 	getSelectedNode(): TreeSelectorNode | undefined {
@@ -490,6 +753,7 @@ class TreeList implements Component {
 	updateNodeLabel(entryId: string, label: string | undefined): void {
 		const node = this.#nodeById.get(entryId);
 		if (node) node.label = label;
+		this.#labelVersion++;
 		this.#tree.invalidate();
 	}
 
@@ -523,8 +787,8 @@ class TreeList implements Component {
 			if (totalCount === 0) {
 				lines.push(truncateToWidth(theme.fg("muted", "No entries found"), width));
 				lines.push(truncateToWidth(theme.fg("muted", `(0/0)${this.#getFilterLabel()}`), width));
-			} else if (this.#searchQuery.length > 0) {
-				lines.push(truncateToWidth(theme.fg("muted", `No entries match search "${this.#searchQuery}"`), width));
+			} else if (this.getSearchQuery().length > 0) {
+				lines.push(truncateToWidth(theme.fg("muted", `No entries match search "${this.getSearchQuery()}"`), width));
 				lines.push(
 					truncateToWidth(theme.fg("muted", `Press ${formatKeyHint("backspace")} to clear the search`), width),
 				);
@@ -660,9 +924,14 @@ class TreeList implements Component {
 	}
 
 	#getEntryDisplayText(node: TreeSelectorNode, isSelected: boolean): string {
-		const entry = node.entry;
-		let result: string;
+		let result = "";
+		for (const part of this.#entryParts(node)) result += part.s ? theme.fg(part.s, part.t) : part.t;
+		return isSelected ? theme.bold(result) : result;
+	}
 
+	/** Entry display text as theme-colored parts, shared by the ANSI row and the native item label. */
+	#entryParts(node: TreeSelectorNode): readonly EntryPart[] {
+		const entry = node.entry;
 		const normalize = (s: string) => s.replace(/[\n\t]/g, " ").trim();
 
 		switch (entry.type) {
@@ -672,84 +941,76 @@ class TreeList implements Component {
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
 					const content = normalize(this.#extractContent(msgWithContent.content));
-					result = theme.fg("accent", "user: ") + content;
-				} else if (role === "developer") {
+					return [{ t: "user: ", s: "accent" }, { t: content }];
+				}
+				if (role === "developer") {
 					const msgWithContent = msg as { content?: unknown };
 					const content = normalize(this.#extractContent(msgWithContent.content));
-					result = theme.fg("dim", "developer: ") + theme.fg("muted", content);
-				} else if (role === "assistant") {
+					return [
+						{ t: "developer: ", s: "dim" },
+						{ t: content, s: "muted" },
+					];
+				}
+				if (role === "assistant") {
 					const presentation = resolveAssistantErrorPresentation(msg);
 					if (presentation.kind === "compact-recovered") {
-						result = theme.fg("success", "assistant: ") + theme.fg("dim", presentation.text);
-						break;
+						return [
+							{ t: "assistant: ", s: "success" },
+							{ t: presentation.text, s: "dim" },
+						];
 					}
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(this.#extractContent(msgWithContent.content));
-					if (textContent) {
-						result = theme.fg("success", "assistant: ") + textContent;
-					} else if (presentation.kind === "full") {
-						result =
-							theme.fg("success", "assistant: ") + theme.fg("error", normalize(presentation.text).slice(0, 80));
-					} else if (msgWithContent.stopReason === "aborted") {
-						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(aborted)");
-					} else {
-						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(no content)");
+					const head: EntryPart = { t: "assistant: ", s: "success" };
+					if (textContent) return [head, { t: textContent }];
+					if (presentation.kind === "full") {
+						return [head, { t: normalize(presentation.text).slice(0, 80), s: "error" }];
 					}
-				} else if (role === "toolResult") {
+					if (msgWithContent.stopReason === "aborted") return [head, { t: "(aborted)", s: "muted" }];
+					return [head, { t: "(no content)", s: "muted" }];
+				}
+				if (role === "toolResult") {
 					const toolMsg = msg as { toolCallId?: string; toolName?: string };
 					const toolCall = toolMsg.toolCallId ? this.#toolCallMap.get(toolMsg.toolCallId) : undefined;
-					if (toolCall) {
-						result = theme.fg("muted", this.#formatToolCall(toolCall.name, toolCall.arguments));
-					} else {
-						result = theme.fg("muted", `[${toolMsg.toolName ?? "tool"}]`);
-					}
-				} else if (role === "bashExecution") {
-					const bashMsg = msg as { command?: string };
-					result = theme.fg("dim", `[bash]: ${normalize(bashMsg.command ?? "")}`);
-				} else {
-					result = theme.fg("dim", `[${role}]`);
+					if (toolCall) return [{ t: this.#formatToolCall(toolCall.name, toolCall.arguments), s: "muted" }];
+					return [{ t: `[${toolMsg.toolName ?? "tool"}]`, s: "muted" }];
 				}
-				break;
+				if (role === "bashExecution") {
+					const bashMsg = msg as { command?: string };
+					return [{ t: `[bash]: ${normalize(bashMsg.command ?? "")}`, s: "dim" }];
+				}
+				return [{ t: `[${role}]`, s: "dim" }];
 			}
 			case "custom_message": {
 				if (entry.customType === "advisor") {
 					const { qualifier, text } = advisorTreeDisplay(entry.details);
 					const label = qualifier ? `advisor (${qualifier}): ` : "advisor: ";
-					result = theme.fg("customMessageLabel", label) + normalize(text);
-					break;
+					return [{ t: label, s: "customMessageLabel" }, { t: normalize(text) }];
 				}
 				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
-				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
-				break;
+				return [{ t: `[${entry.customType}]: `, s: "customMessageLabel" }, { t: normalize(content) }];
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
-				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
-				break;
+				return [{ t: `[compaction: ${tokens}k tokens]`, s: "borderAccent" }];
 			}
 			case "branch_summary":
-				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
-				break;
+				return [{ t: `[branch summary]: `, s: "warning" }, { t: normalize(entry.summary) }];
 			case "model_change":
-				result = theme.fg("dim", `[model: ${entry.model}]`);
-				break;
+				return [{ t: `[model: ${entry.model}]`, s: "dim" }];
 			case "model_usage": {
 				const purpose = sanitizeTreeField(entry.purpose);
 				const role = sanitizeTreeField(entry.role ?? "");
 				const provider = sanitizeTreeField(entry.provider);
 				const model = sanitizeTreeField(entry.model);
-				result = theme.fg("dim", `[model usage: ${purpose} ${role ? `${role} ` : ""}${provider}/${model}]`);
-				break;
+				return [{ t: `[model usage: ${purpose} ${role ? `${role} ` : ""}${provider}/${model}]`, s: "dim" }];
 			}
 			case "thinking_level_change":
-				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel ?? ThinkingLevel.Off}]`);
-				break;
+				return [{ t: `[thinking: ${entry.thinkingLevel ?? ThinkingLevel.Off}]`, s: "dim" }];
 			case "custom":
-				result = theme.fg("dim", `[custom: ${entry.customType}]`);
-				break;
+				return [{ t: `[custom: ${entry.customType}]`, s: "dim" }];
 			case "label":
-				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
-				break;
+				return [{ t: `[label: ${entry.label ?? "(cleared)"}]`, s: "dim" }];
 			case "service_tier_change": {
 				// Per-family map, or null when the session went back to the default.
 				const tiers = entry.serviceTier
@@ -757,27 +1018,21 @@ class TreeList implements Component {
 							.map(([family, tier]) => `${family}:${tier}`)
 							.join(" ")
 					: "(default)";
-				result = theme.fg("dim", `[service tier: ${tiers}]`);
-				break;
+				return [{ t: `[service tier: ${tiers}]`, s: "dim" }];
 			}
 			case "title_change":
-				result = theme.fg("dim", `[title: ${normalize(entry.title)}]`);
-				break;
+				return [{ t: `[title: ${normalize(entry.title)}]`, s: "dim" }];
 			case "mode_change":
-				result = theme.fg("dim", `[mode: ${entry.mode}]`);
-				break;
+				return [{ t: `[mode: ${entry.mode}]`, s: "dim" }];
 			case "credential_pin":
-				result = theme.fg("dim", `[credential pin: ${entry.provider}]`);
-				break;
+				return [{ t: `[credential pin: ${entry.provider}]`, s: "dim" }];
 			default:
 				// Bookkeeping entries with nothing worth spelling out still get their
 				// type. A row that renders to the empty string is worse than a
 				// useless one: it draws as a bare bullet with no way to tell what it
 				// is or why the tree has a gap in it.
-				result = theme.fg("dim", `[${entry.type.replaceAll("_", " ")}]`);
+				return [{ t: `[${entry.type.replaceAll("_", " ")}]`, s: "dim" }];
 		}
-
-		return isSelected ? theme.bold(result) : result;
 	}
 
 	#extractContent(content: unknown): string {
@@ -884,6 +1139,37 @@ class TreeList implements Component {
 		}
 	}
 
+	/** Enter (`summarize` false) / Shift+Enter: switch to the selected entry. */
+	confirm(summarize: boolean): void {
+		const selected = this.#tree.selectedItem;
+		if (selected && this.onSelect) this.onSelect(selected.entry.id, { summarize });
+	}
+
+	/** Esc: clear the search first, then close. */
+	escape(): void {
+		if (this.getSearchQuery()) this.clearSearch();
+		else this.onCancel?.();
+	}
+
+	clearSearch(): void {
+		this.searchInput.setValue("");
+		this.#applyFilter();
+	}
+
+	/** Ctrl+O / Shift+Ctrl+O: default → no-tools → user-only → labeled-only → all → default. */
+	cycleFilter(delta: 1 | -1): void {
+		const modes = TREE_FILTER_MODES;
+		const currentIndex = modes.indexOf(this.#filterMode);
+		this.#filterMode = modes[(currentIndex + delta + modes.length) % modes.length];
+		this.#applyFilter();
+	}
+
+	/** Shift+L: edit the selected entry's label. */
+	editLabel(): void {
+		const selected = this.#tree.selectedItem;
+		if (selected && this.onLabelEdit) this.onLabelEdit(selected.entry.id, selected.label);
+	}
+
 	handleInput(keyData: string): void {
 		if (matchesSelectUp(keyData)) {
 			this.#tree.moveSelection(-1, true);
@@ -918,36 +1204,17 @@ class TreeList implements Component {
 			keyData === "\x1b[13;2~" // Shift+Enter legacy CSI ~ form — also accepted by the composer (editor.ts:1466)
 		) {
 			// Summarize-and-switch: fork with a branch summary without the extra prompt.
-			const selected = this.#tree.selectedItem;
-			if (selected && this.onSelect) {
-				this.onSelect(selected.entry.id, { summarize: true });
-			}
+			this.confirm(true);
 		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return")) {
-			const selected = this.#tree.selectedItem;
-			if (selected && this.onSelect) {
-				this.onSelect(selected.entry.id, { summarize: false });
-			}
+			this.confirm(false);
 		} else if (matchesAppInterrupt(keyData)) {
-			if (this.#searchQuery) {
-				this.#searchQuery = "";
-				this.#applyFilter();
-			} else {
-				this.onCancel?.();
-			}
+			this.escape();
 		} else if (matchesKey(keyData, "ctrl+c")) {
 			this.onCancel?.();
 		} else if (matchesKey(keyData, "shift+ctrl+o") || matchesKey(keyData, "ctrl+shift+o")) {
-			// Cycle filter backwards
-			const modes = TREE_FILTER_MODES;
-			const currentIndex = modes.indexOf(this.#filterMode);
-			this.#filterMode = modes[(currentIndex - 1 + modes.length) % modes.length];
-			this.#applyFilter();
+			this.cycleFilter(-1);
 		} else if (matchesKey(keyData, "ctrl+o")) {
-			// Cycle filter forwards: default → no-tools → user-only → labeled-only → all → default
-			const modes = TREE_FILTER_MODES;
-			const currentIndex = modes.indexOf(this.#filterMode);
-			this.#filterMode = modes[(currentIndex + 1) % modes.length];
-			this.#applyFilter();
+			this.cycleFilter(1);
 		} else if (matchesKey(keyData, "alt+d")) {
 			this.#filterMode = "default";
 			this.#applyFilter();
@@ -963,22 +1230,11 @@ class TreeList implements Component {
 		} else if (matchesKey(keyData, "alt+a")) {
 			this.#filterMode = "all";
 			this.#applyFilter();
-		} else if (matchesKey(keyData, "backspace")) {
-			if (this.#searchQuery.length > 0) {
-				this.#searchQuery = this.#searchQuery.slice(0, -1);
-				this.#applyFilter();
-			}
-		} else if (matchesKey(keyData, "shift+l") && !this.#searchQuery) {
-			const selected = this.#tree.selectedItem;
-			if (selected && this.onLabelEdit) {
-				this.onLabelEdit(selected.entry.id, selected.label);
-			}
+		} else if (matchesKey(keyData, "shift+l") && !this.getSearchQuery()) {
+			this.editLabel();
 		} else {
-			const printableText = extractPrintableText(keyData);
-			if (printableText) {
-				this.#searchQuery += printableText;
-				this.#applyFilter();
-			}
+			const before = this.getSearchQuery();
+			if (this.searchInput.handleInput(keyData) && this.getSearchQuery() !== before) this.#applyFilter();
 		}
 	}
 }
@@ -990,11 +1246,7 @@ class SearchLine implements Component {
 	invalidate(): void {}
 
 	render(width: number): readonly string[] {
-		const query = this.treeList.getSearchQuery();
-		if (query) {
-			return [truncateToWidth(`${theme.fg("muted", "Search:")} ${theme.fg("accent", query)}`, width)];
-		}
-		return [truncateToWidth(theme.fg("muted", "Search:"), width)];
+		return this.treeList.searchInput.render(width);
 	}
 
 	handleInput(_keyData: string): void {}
@@ -1005,6 +1257,9 @@ class LabelInput implements Component {
 	#input: Input;
 	onSubmit?: (entryId: string, label: string | undefined) => void;
 	onCancel?: () => void;
+
+	#native: NativeNode | undefined;
+	#preview: readonly NativeChild[] | undefined;
 
 	constructor(
 		private readonly entryId: string,
@@ -1018,6 +1273,35 @@ class LabelInput implements Component {
 
 	invalidate(): void {}
 
+	/** Prompt, the label `Input`, and save/cancel hints; the Input describes its own edits. */
+	describe(_cx: DescribeContext): NativeNode {
+		this.#native ??= node("col", { gap: "xs" }, [
+			text([span("Label (empty to remove):", "muted")]),
+			this.#input,
+			hintsRow([
+				{ keys: ["enter"], label: "save" },
+				{ keys: [boundKeys("app.interrupt", ["escape"])[0] ?? "escape"], label: "cancel" },
+			]),
+		]);
+		return this.#native;
+	}
+
+	/** The picker preview while editing: the prompt and the label `Input` (save/cancel sit in the action bar). */
+	get preview(): readonly NativeChild[] {
+		this.#preview ??= [
+			text("Label", { role: "omp.picker.title" }),
+			text([span("Empty to remove", "muted")]),
+			this.#input,
+		];
+		return this.#preview;
+	}
+
+	/** Enter: save the label (empty removes it). */
+	submit(): void {
+		const value = this.#input.getValue().trim();
+		this.onSubmit?.(this.entryId, value || undefined);
+	}
+
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
 		lines.push(truncateToWidth(theme.fg("muted", "Label (empty to remove):"), width));
@@ -1029,8 +1313,7 @@ class LabelInput implements Component {
 
 	handleInput(keyData: string): void {
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
-			const value = this.#input.getValue().trim();
-			this.onSubmit?.(this.entryId, value || undefined);
+			this.submit();
 		} else if (matchesAppInterrupt(keyData)) {
 			this.onCancel?.();
 		} else {
@@ -1047,6 +1330,23 @@ export class TreeSelectorComponent extends OverlayPanel {
 	#labelInput: LabelInput | null = null;
 	#labelInputContainer: Container;
 	#treeContainer: Container;
+	#nativeMemo:
+		| {
+				content: NativeChild;
+				query: string;
+				cursor: number;
+				filterMode: FilterMode;
+				node: NativeNode;
+		  }
+		| undefined;
+	#pickerMemo:
+		| {
+				view: TreePickerView;
+				preview: readonly NativeChild[];
+				label: LabelInput | null;
+				node: NativeNode;
+		  }
+		| undefined;
 
 	constructor(
 		tree: TreeSelectorNode[],
@@ -1056,6 +1356,8 @@ export class TreeSelectorComponent extends OverlayPanel {
 		onCancel: () => void,
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
+		/** The picker's subtitle. */
+		private readonly sessionName?: string,
 	) {
 		super("Session Tree");
 		// The outer panel has eight fixed rows around the tree list: top/bottom
@@ -1107,6 +1409,164 @@ export class TreeSelectorComponent extends OverlayPanel {
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);
 		}
+	}
+
+	override describe(cx: DescribeContext): NativeNode {
+		return cx.supports("picker") ? this.#describePicker() : this.#describeCard();
+	}
+
+	/**
+	 * The `tree` picker, keyed `picker` inside a column: mounted in the dock,
+	 * the reconciler hoists it into `layer` as a sheet. The label editor
+	 * takes the preview pane while open.
+	 */
+	#describePicker(): NativeNode {
+		const view = this.#treeList.pickerView();
+		const label = this.#labelInput;
+		const preview = label ? label.preview : this.#treeList.pickerPreview();
+		const memo = this.#pickerMemo;
+		if (
+			memo?.label === label &&
+			memo.preview === preview &&
+			memo.view.items === view.items &&
+			memo.view.order === view.order &&
+			memo.view.selected === view.selected &&
+			memo.view.query === view.query &&
+			memo.view.cursor === view.cursor &&
+			memo.view.filterMode === view.filterMode
+		) {
+			return memo.node;
+		}
+		const props: TspPickerProps = {
+			title: "Session tree",
+			...(this.sessionName ? { subtitle: this.sessionName } : {}),
+			icon: "git-branch",
+			noun: "entries",
+			size: "lg",
+			layout: "tree",
+			preview: "side",
+			...pickerQuery(this.#treeList.searchInput),
+			placeholder: "Search entries…",
+			tabs: FILTER_TABS,
+			tab: view.filterMode,
+			items: view.items,
+			order: view.order,
+			selected: view.selected,
+			current: view.current,
+			total: view.total,
+			empty: view.empty,
+			focus: label ? "preview" : "list",
+			actions: label
+				? [
+						pickerAction("label-save", "Save label", "enter", { primary: true }),
+						{ ...CLOSE_ACTION, label: "Cancel" },
+					]
+				: [
+						pickerAction("switch", "Switch", "enter", { primary: true }),
+						pickerAction("summarize", "Summarize & switch", "shift+enter"),
+						pickerAction("label", "Label", "shift+l"),
+						pickerAction("filter", "Filter", "ctrl+o"),
+						CLOSE_ACTION,
+					],
+		};
+		const result = col([keyed(picker(props, preview), "picker")]);
+		this.#pickerMemo = { view, preview, label, node: result };
+		return result;
+	}
+
+	/** Picker pointer events run the same paths as their keys; the label editor owns them while open. */
+	#handlePickerEvent(event: PickerEvent): void {
+		const label = this.#labelInput;
+		if (label) {
+			if (event.kind !== "action") return;
+			if (event.act === "label-save") label.submit();
+			else if (event.act === "close") label.onCancel?.();
+			return;
+		}
+		const list = this.#treeList;
+		if (event.kind !== "action") {
+			if (event.kind === "select") list.selectEntry(event.item);
+			else list.activateEntry(event.item);
+			return;
+		}
+		switch (event.act) {
+			case "tab":
+				if (event.value !== undefined) list.setFilterMode(event.value);
+				return;
+			case "switch":
+				list.confirm(false);
+				return;
+			case "summarize":
+				list.confirm(true);
+				return;
+			case "label":
+				if (!list.getSearchQuery()) list.editLabel();
+				return;
+			case "filter":
+				list.cycleFilter(1);
+				return;
+			case "close":
+				list.escape();
+				return;
+			case "clear":
+				list.clearSearch();
+				return;
+			default:
+				return;
+		}
+	}
+
+	/**
+	 * Native tree: filter-mode `tabs`, the search query as an `input`, then
+	 * the entry `list` (or the label editor in its place) and the key hints.
+	 */
+	#describeCard(): NativeNode {
+		const content: NativeChild = this.#labelInput ?? this.#treeList.describeList();
+		const search = this.#treeList.searchInput;
+		const query = search.getValue();
+		const cursor = search.getCursor();
+		const filterMode = this.#treeList.getFilterMode();
+		const memo = this.#nativeMemo;
+		if (
+			memo?.content === content &&
+			memo.query === query &&
+			memo.cursor === cursor &&
+			memo.filterMode === filterMode
+		) {
+			return memo.node;
+		}
+		const children: NativeChild[] = [
+			node("tabs", { items: FILTER_TABS, active: filterMode }, undefined, "filter"),
+			search,
+			content,
+			hintsRow([
+				{ keys: ["enter"], label: "switch" },
+				{ keys: ["alt+up", "alt+down"], label: "previous/next turn" },
+				actionHint(["tui.select.pageUp", "tui.select.pageDown"], "page"),
+				{ keys: ["home", "end"], label: "first/last" },
+				{ keys: ["shift+enter"], label: "summarize & switch" },
+				{ keys: ["shift+l"], label: "label" },
+				{ keys: ["ctrl+o"], label: "filter" },
+			]),
+		];
+		const result = overlayCard("omp.overlay.tree", "Session Tree", children);
+		this.#nativeMemo = { content, query, cursor, filterMode, node: result };
+		return result;
+	}
+
+	/** Filter tab → switch mode; entry click → highlight it and switch, exactly like Enter. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const picked = pickerEvent(event, "picker");
+		if (picked) {
+			this.#handlePickerEvent(picked);
+			return;
+		}
+		if (event.type !== "select" && event.type !== "activate") return;
+		if (event.key === "filter") {
+			if (event.type === "select") this.#treeList.setFilterMode(event.item);
+			return;
+		}
+		if (event.key === "list" && !this.#labelInput) this.#treeList.activateEntry(event.item);
 	}
 
 	#showLabelInput(entryId: string, currentLabel: string | undefined): void {

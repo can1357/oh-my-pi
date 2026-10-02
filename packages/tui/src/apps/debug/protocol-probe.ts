@@ -13,6 +13,7 @@
  * so the graphics test needs no asset on disk and works across all three image
  * protocols, each of which decodes a standard PNG.
  */
+import { hsvToRgb } from "@oh-my-pi/pi-utils/color";
 import * as zlib from "node:zlib";
 import { type Component, Container } from "../../tui";
 import { encodeTextSized, type TextSizingScale } from "../../utils";
@@ -22,6 +23,8 @@ import { Text } from "../../components/text";
 import { ImageProtocol, NotifyProtocol, TERMINAL } from "../../terminal-capabilities";
 import { DynamicBorder } from "../../chrome/dynamic-border";
 import { theme } from "../../theme/theme";
+import { ansi } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 
@@ -110,30 +113,11 @@ export function buildLargeTextLines(scales: readonly TextSizingScale[] = [2, 3])
 	return lines;
 }
 
-/** HSV (h in degrees, s/v in 0..1) to 8-bit RGB, for the truecolor demo bar. */
-function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
-	const c = v * s;
-	const hp = (((h % 360) + 360) % 360) / 60;
-	const x = c * (1 - Math.abs((hp % 2) - 1));
-	let r = 0;
-	let g = 0;
-	let b = 0;
-	if (hp < 1) [r, g, b] = [c, x, 0];
-	else if (hp < 2) [r, g, b] = [x, c, 0];
-	else if (hp < 3) [r, g, b] = [0, c, x];
-	else if (hp < 4) [r, g, b] = [0, x, c];
-	else if (hp < 5) [r, g, b] = [x, 0, c];
-	else [r, g, b] = [c, 0, x];
-	const m = v - c;
-	const to8 = (n: number) => Math.round((n + m) * 255);
-	return [to8(r), to8(g), to8(b)];
-}
-
 /** A 24-bit-color hue sweep rendered as background-painted cells (one space each). */
 function truecolorBar(cells: number): string {
 	let out = "";
 	for (let i = 0; i < cells; i++) {
-		const [r, g, b] = hsvToRgb((i / cells) * 360, 0.85, 1);
+		const { r, g, b } = hsvToRgb({ h: (i / cells) * 360, s: 0.85, v: 1 });
 		out += `\x1b[48;2;${r};${g};${b}m `;
 	}
 	return `${out}\x1b[0m`;
@@ -166,13 +150,20 @@ function imageProtocolLabel(): string {
 /**
  * Deliberate exception to the normal text/data components: OSC 66 probes must
  * reach the terminal byte-for-byte, without sanitization, wrapping, clipping,
- * or padding that could invalidate the protocol sample.
+ * or padding that could invalidate the protocol sample. A native terminal
+ * gets the same bytes as one `ansi` block.
  */
 class RawLines implements Component {
 	readonly #lines: readonly string[];
+	readonly #native: NativeNode;
 
 	constructor(lines: readonly string[]) {
 		this.#lines = lines.slice();
+		this.#native = ansi(this.#lines.join("\n"));
+	}
+
+	describe(): NativeNode {
+		return this.#native;
 	}
 
 	render(): readonly string[] {

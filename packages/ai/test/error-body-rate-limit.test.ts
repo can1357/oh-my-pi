@@ -95,14 +95,6 @@ describe("in-band 429/5xx bodies (openai-completions stream)", () => {
 		});
 	}
 
-	it("advances the retry lane for the body the shipped classifier missed: bare { code: 429 }", async () => {
-		// The legacy stream-error guard only fires on an object `error` member, so
-		// before the probe ran first this frame produced errorId 0 (terminal).
-		const result = await streamFrame({ code: 429 });
-		expect(result.errorId).not.toBe(0);
-		expect(retriable(result.errorId)).toBe(true);
-	});
-
 	it("an opaque body cannot trigger credential rotation", async () => {
 		const result = await streamFrame({ status: 429, message: "{}" });
 

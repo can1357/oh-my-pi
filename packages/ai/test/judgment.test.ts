@@ -1,3 +1,4 @@
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { describe, expect, it } from "bun:test";
 import {
 	type ApiKeyResolveContext,
@@ -224,6 +225,29 @@ describe("TypeSafeJudge", () => {
 		expect(result.model).toBe("jev-latest");
 		expect(result.usage.input).toBe(5);
 		expect(result.usage.totalTokens).toBe(6);
+	});
+
+	it("keeps estimated judge cost finite when a successful response omits token counts", async () => {
+		const responses = [{}, { input_tokens: 5 }];
+		const judge = new TypeSafeJudge({
+			apiKey: "test-key",
+			fetch: async () =>
+				Response.json({
+					model: "jev-latest",
+					answers: { urgent: { type: "noul", noul: 0.9 } },
+					usage: responses.shift(),
+				}),
+		});
+
+		const missing = (await judge.judge(request)).usage;
+		const partial = (await judge.judge(request)).usage;
+		expect(missing).toMatchObject({ input: 0, output: 0, totalTokens: 0, cost: { total: 0 } });
+		expect(partial).toMatchObject({ input: 5, output: 0, totalTokens: 5, cost: { total: 0 } });
+		const rates = { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 };
+		calculateUsageCost(rates, missing);
+		calculateUsageCost(rates, partial);
+		expect(missing.cost.total).toBe(0);
+		expect(partial.cost.total).toBeCloseTo((5 * rates.input) / 1_000_000);
 	});
 
 	it("posts OpenRouter decisions to the alpha route and carries the billed cost", async () => {

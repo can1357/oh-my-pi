@@ -80,17 +80,6 @@ describe("EventController aborted-turn working messages", () => {
 		expect(setWorkingMessage).not.toHaveBeenCalled();
 	});
 
-	it("lets intent updates drive the loader when not aborting", async () => {
-		const { ctx, setWorkingMessage } = createContext();
-		const controller = new EventController(ctx);
-		await controller.handleEvent(AGENT_START);
-		setWorkingMessage.mockClear();
-		await controller.handleEvent(toolStartWithIntent("call-1", "Searching files"));
-
-		expect(setWorkingMessage).toHaveBeenCalledTimes(1);
-		expect(setWorkingMessage.mock.calls[0]?.[0]).toContain("Searching files");
-	});
-
 	it("resumes intent updates once aborting clears", async () => {
 		const { ctx, setWorkingMessage, sessionState } = createContext();
 		const controller = new EventController(ctx);

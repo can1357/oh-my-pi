@@ -27,7 +27,12 @@ import {
 import type { Theme, ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
 import type { OutputMeta } from "./output-meta";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import type { TspTone } from "@oh-my-pi/pi-wire";
+import { code, col, compact, keyed, node, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { getLanguageFromPath } from "../lang-from-path";
+import { fileHref, fileRow, inlineErrorView } from "./native-view";
 import { splitUrlScheme } from "./url-scheme-host";
 
 /** A verified line range with its yes-probability and a one-line preview. */
@@ -148,6 +153,49 @@ function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, th
 	return lines;
 }
 
+function scoreTone(p: number): TspTone {
+	return p >= STRONG ? "success" : p >= PLAUSIBLE ? "warning" : "muted";
+}
+
+/**
+ * One hit (§7.3 find): a 22px row of the score bar, the path and `12 lines
+ * judged`, then its strongest ranges as numbered `code` (no path header).
+ */
+function describeHit(hit: FindHit, rangeLimit: number, cwd: string | undefined): NativeNode {
+	const ranges = [...hit.ranges].sort((a, b) => b.p - a.p || a.start - b.start).slice(0, rangeLimit);
+	const tone = scoreTone(hit.contentScore);
+	const score = hit.contentScore.toFixed(2);
+	const isUrlHit = splitUrlScheme(hit.rel) !== undefined;
+	const head = fileRow(hit.rel, {
+		lead: node("progress", { value: hit.contentScore, tone, title: `score ${score}`, max: { w: 40 } }),
+		detail: [
+			span(score, tone),
+			span(
+				hit.truncated ? ` · ${hit.linesSeen} lines judged, partial` : ` · ${hit.linesSeen} lines judged`,
+				"muted",
+			),
+		],
+		href: isUrlHit || cwd === undefined ? undefined : fileHref(path.join(cwd, hit.rel)),
+		key: "hit",
+	});
+	const lang = getLanguageFromPath(hit.rel);
+	const snippets = ranges.map(range =>
+		keyed(
+			code(range.snippet.trimEnd(), { lang, start: range.start, numbers: true, title: range.p.toFixed(2) }),
+			`${range.start}-${range.end}`,
+		),
+	);
+	return keyed(col([head, ...snippets], { gap: "xs", role: "omp.tool.find.hit" }), hit.rel);
+}
+
+/** Native find head: the query, then `meta` (result counts), or the call's keywords and scope. */
+function findNativeHead(
+	query: string | undefined,
+	meta: readonly NonNullable<NativeToolHead["meta"]>[number][],
+): NativeToolHead {
+	return { title: "Find", target: query ?? "", targetKind: "query", meta };
+}
+
 function quoteQuery(query: string | undefined): string | undefined {
 	return query === undefined ? undefined : `"${query}"`;
 }
@@ -262,6 +310,84 @@ export const findToolRenderer = {
 			},
 			{ paddingX: 1 },
 		);
+	},
+	describeCall(args: FindRenderArgs): NativeToolView {
+		const keywords = args.grep_keywords ?? [];
+		return {
+			tool: findNativeHead(
+				args.query,
+				compact([keywords.length > 0 && keywords.join(" "), args.path && `in ${args.path}`]),
+			),
+			inline: true,
+		};
+	},
+
+	/**
+	 * Inline (§7.3 find): `Find “query”  2 hits · 8 files`, then per hit its
+	 * score bar, path and coverage over the strongest snippets. The search
+	 * accounting (τ, tokens, cost, time) is the footnote's tooltip.
+	 */
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: FindToolDetails; isError?: boolean },
+		options: RenderResultOptions,
+		args?: FindRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		const progress = result.content?.find(c => c.type === "text")?.text ?? "";
+		const query = args?.query ?? details?.query;
+		if (result.isError) return inlineErrorView(findNativeHead(query, []), progress || "Unknown error");
+		if (options.isPartial || details === undefined) {
+			return {
+				tool: findNativeHead(query, progress ? [[span(progress, "muted", { fx: "shimmer" })]] : []),
+				inline: true,
+			};
+		}
+		const { hits, stats, threshold } = details;
+		const scope = details.scopePath === undefined ? undefined : `in ${details.scopePath}`;
+		const failed = stats.errors > 0 ? [span(`${stats.errors} failed`, "warning")] : undefined;
+		const accounting = [
+			`${stats.filesRead} files read`,
+			`τ ${threshold.toFixed(2)}`,
+			`${formatNumber(stats.inputTokens)} tokens`,
+			`$${stats.cost.toFixed(4)}`,
+			formatDuration(details.elapsedMs),
+		].join(" · ");
+		const failures = stats.failures.map((failure, i) =>
+			keyed(text([span(failure, "warning")], { wrap: "word", role: "omp.tool.notice" }), `fail${i}`),
+		);
+		if (hits.length === 0) {
+			return {
+				tool: findNativeHead(query, compact(["0 hits", scope, failed])),
+				tone: "warning",
+				inline: true,
+				body: failures.length > 0 ? failures : undefined,
+			};
+		}
+		const shown = options.expanded ? hits : hits.slice(0, COLLAPSED_HITS);
+		const rangeLimit = options.expanded ? RANGES_EXPANDED : RANGES_COLLAPSED;
+		const hidden = hits.length - shown.length;
+		const footParts = compact([
+			hidden > 0 && formatCount("more hit", hidden),
+			`keywords: ${details.keywords.join(", ")}`,
+		]);
+		// One quiet last line; the accounting ANSI prints in the head rides its tooltip.
+		const foot = keyed(
+			text([span(footParts.join(" · "), "muted")], { wrap: "word", role: "omp.tool.stats", title: accounting }),
+			"foot",
+		);
+		return {
+			tool: findNativeHead(
+				query,
+				compact([`${formatCount("hit", hits.length)} · ${formatCount("file", stats.filesRead)}`, scope, failed]),
+			),
+			inline: true,
+			body: compact<NativeChild>([
+				...shown.map(hit => describeHit(hit, rangeLimit, details.cwd)),
+				...failures,
+				foot,
+			]),
+			preview: { lines: PREVIEW_LIMITS.EXPANDED_LINES },
+		};
 	},
 	mergeCallAndResult: true,
 	animatedPendingPreview: true,

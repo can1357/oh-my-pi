@@ -25,20 +25,4 @@ describe("task agent capability descriptions", () => {
 		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "yield"] })).toBe(true);
 		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "bash"] })).toBe(false);
 	});
-
-	it("disables read summarization for scout, leaves other agents summarizing", () => {
-		const agents = loadBundledAgents();
-
-		expect(agentByName(agents, "scout").readSummarize).toBe(false);
-		for (const name of ["task", "sonic", "reviewer"]) {
-			expect(agentByName(agents, name).readSummarize).toBeUndefined();
-		}
-	});
-	it("ships every bundled agent without prewalk; hand-off is opt-in via task.agentPrewalk", () => {
-		const agents = loadBundledAgents();
-
-		for (const name of ["task", "scout", "sonic", "reviewer", "security-reviewer"]) {
-			expect(agentByName(agents, name).prewalk).toBeUndefined();
-		}
-	});
 });

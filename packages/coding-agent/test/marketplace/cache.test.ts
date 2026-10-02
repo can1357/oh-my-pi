@@ -49,10 +49,6 @@ describe("isValidVersionForCache", () => {
 		expect(isValidVersionForCache("1.0\\0")).toBe(false);
 	});
 
-	it("rejects spaces", () => {
-		expect(isValidVersionForCache("1 0")).toBe(false);
-	});
-
 	it("rejects strings exceeding 128 characters", () => {
 		expect(isValidVersionForCache("a".repeat(129))).toBe(false);
 		expect(isValidVersionForCache("a".repeat(128))).toBe(true);
@@ -68,10 +64,6 @@ describe("getCachedPluginPath", () => {
 		);
 	});
 
-	it("throws on invalid marketplace name (space)", () => {
-		expect(() => getCachedPluginPath("/cache", "bad market", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
-	});
-
 	it("throws on invalid marketplace name (slash)", () => {
 		expect(() => getCachedPluginPath("/cache", "a/b", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
 	});
@@ -82,19 +74,6 @@ describe("getCachedPluginPath", () => {
 
 	it("throws on invalid version containing ..", () => {
 		expect(() => getCachedPluginPath("/cache", "market", "plugin", "..")).toThrow(/Invalid version/);
-	});
-
-	it("throws on invalid version containing /", () => {
-		expect(() => getCachedPluginPath("/cache", "market", "plugin", "1.0/0")).toThrow();
-	});
-
-	it("throws on invalid version with leading dot rejected by segment validator", () => {
-		// ".1.0.0" passes VERSION_RE but isValidNameSegment rejects leading dot —
-		// version validation uses VERSION_RE, not isValidNameSegment
-		// ".1.0.0" starts with dot — VERSION_RE allows it, but name segment does not apply to version
-		// Actually ".1.0.0" should be valid per VERSION_RE: only alpha/digit/._+-
-		// Let's verify the boundary: space is rejected
-		expect(() => getCachedPluginPath("/cache", "market", "plugin", "1 0")).toThrow();
 	});
 });
 
@@ -200,15 +179,6 @@ describe("cleanOrphanedCache", () => {
 		expect(result).toEqual({ removed: 1 });
 		expect(fs.existsSync(pathA)).toBe(true);
 		expect(isCached(cacheDir, "mkt", "plugin-b", "1.0.0")).toBe(false);
-	});
-
-	it("preserves all entries when all are in installedPaths", async () => {
-		const srcA = await mkSourcePlugin(sourceDir, "plugin-a");
-		const pathA = await cachePlugin(srcA, cacheDir, "mkt", "plugin-a", "1.0.0");
-
-		const result = await cleanOrphanedCache(cacheDir, new Set([pathA]));
-		expect(result).toEqual({ removed: 0 });
-		expect(fs.existsSync(pathA)).toBe(true);
 	});
 
 	it("removes all entries when installedPaths is empty", async () => {

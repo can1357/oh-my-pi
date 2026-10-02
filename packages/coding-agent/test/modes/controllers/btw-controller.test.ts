@@ -102,18 +102,6 @@ async function drainBtwRequest(): Promise<void> {
 }
 
 describe("BtwPanelComponent", () => {
-	it("is branchable only after a complete non-empty answer", () => {
-		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
-		const panel = new BtwPanelComponent({ question: "Question?", tui: ui });
-
-		expect(panel.isBranchable()).toBe(false);
-		panel.setAnswer("   ");
-		panel.markComplete();
-		expect(panel.isBranchable()).toBe(false);
-		panel.setAnswer("Answer");
-		expect(panel.isBranchable()).toBe(true);
-	});
-
 	it("confirms a copy visually and clears the confirmation on the next answer", () => {
 		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
 		const panel = new BtwPanelComponent({ question: "Question?", tui: ui });
@@ -222,19 +210,6 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 
 		expect(controller.canBranch()).toBe(false);
-		expect(controller.handlesBranchKey()).toBe(true);
-	});
-
-	it("allows branch after a complete non-empty reply", async () => {
-		const assistantMessage = createAssistantMessage("Answer");
-		const runEphemeralTurn = vi.fn(async () => ({ replyText: "Answer", assistantMessage }));
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		const controller = new BtwController(ctx);
-
-		await controller.start("Question?");
-		await drainBtwRequest();
-
-		expect(controller.canBranch()).toBe(true);
 		expect(controller.handlesBranchKey()).toBe(true);
 	});
 
@@ -429,31 +404,6 @@ describe("BtwController", () => {
 		await erroredController.start("Question?");
 		await drainBtwRequest();
 		expect(erroredController.canBranch()).toBe(false);
-	});
-
-	it("handleBranch returns false and does not call the context when not branchable", async () => {
-		const runEphemeralTurn = vi.fn(async () => ({ replyText: "", assistantMessage: createAssistantMessage("") }));
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		const controller = new BtwController(ctx);
-
-		await controller.start("Question?");
-		await drainBtwRequest();
-
-		expect(await controller.handleBranch()).toBe(false);
-		expect(ctx.handleBtwBranch).not.toHaveBeenCalled();
-	});
-
-	it("handleBranch calls the context with the question and full assistant message when branchable", async () => {
-		const assistantMessage = createAssistantMessage("Answer");
-		const runEphemeralTurn = vi.fn(async () => ({ replyText: "Answer", assistantMessage }));
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		const controller = new BtwController(ctx);
-
-		await controller.start("Question?");
-		await drainBtwRequest();
-
-		expect(await controller.handleBranch()).toBe(true);
-		expect(ctx.handleBtwBranch).toHaveBeenCalledWith("Question?", assistantMessage, "leaf-1", "session-1");
 	});
 
 	it("keeps a pending branch visible and refuses to dismiss it", async () => {

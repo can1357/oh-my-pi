@@ -1,3 +1,7 @@
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { node } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { isNativeRendering } from "../native/state";
 import type { Theme, ThemeColor } from "./theme";
 import { FG_RESET } from "./color";
 
@@ -27,7 +31,7 @@ const BOLD_OPEN = "\x1b[1m";
 const BOLD_CLOSE = "\x1b[22m";
 
 type ShimmerTheme = Pick<Theme, "bold" | "fg" | "getFgAnsi">;
-/** Sweep style for animated shimmer text; `disabled` renders every tier as the low color. */
+/** Sweep style for animated shimmer text; `disabled` renders every tier as the mid color. */
 export type ShimmerMode = "classic" | "kitt" | "disabled";
 
 let activeMode: ShimmerMode = "classic";
@@ -114,13 +118,8 @@ function compile(theme: ShimmerTheme, palette: ShimmerPalette): CompiledPalette 
 
 // ─── Intensity profiles ──────────────────────────────────────────────────────
 /** Smooth cosine bump sweeping left → right with edge padding. */
-function classicIntensity(time: number, index: number, length: number): number {
-	const period = length + CLASSIC_PADDING * 2;
-	// Fixed-velocity, un-floored band position: advancing at a constant
-	// cells/second (not period / fixed-sweep) keeps the per-frame step ≤1 cell at
-	// the default cadence for any length, so long messages are no steppier.
-	const pos = ((time / 1000) * SHIMMER_SPEED_CELLS_PER_S) % period;
-	const dist = Math.abs(index + CLASSIC_PADDING - pos);
+function classicIntensity(index: number, position: number): number {
+	const dist = Math.abs(index + CLASSIC_PADDING - position);
 	if (dist >= CLASSIC_BAND_HALF_WIDTH) return 0;
 	return 0.5 * (1 + Math.cos((Math.PI * dist) / CLASSIC_BAND_HALF_WIDTH));
 }
@@ -130,16 +129,7 @@ function classicIntensity(time: number, index: number, length: number): number {
  * bar with a quadratic-decay trail behind it. No leading glow — LEDs don't
  * predict the future.
  */
-function kittIntensity(time: number, index: number, length: number): number {
-	const range = length - 1;
-	if (range <= 0) return 1;
-	// Fixed head velocity: a triangle ping-pong over a 2*range round trip at a
-	// constant cells/second, so the bright head advances ≤1 cell per frame at the
-	// default cadence regardless of bar length. Round-trip duration scales with length.
-	const cycleCells = 2 * range;
-	const sweep = ((time / 1000) * SHIMMER_SPEED_CELLS_PER_S) % cycleCells;
-	const goingRight = sweep < range;
-	const head = goingRight ? sweep : cycleCells - sweep;
+function kittIntensity(index: number, head: number, goingRight: boolean): number {
 	const delta = index - head;
 	const abs = delta < 0 ? -delta : delta;
 	if (abs <= KITT_HEAD_HALF) return 1;
@@ -166,6 +156,28 @@ export function shimmerEnabled(): boolean {
 }
 
 /**
+ * Describe shimmering segments for a TSP terminal, which clocks the sweep
+ * itself: a `shimmer` node in the active mode, or plain spans in the mid tier
+ * color when shimmer is disabled. Palette tiers given as theme colors travel as
+ * token names; raw-ANSI tiers are dropped (the terminal's theme decides).
+ */
+export function describeShimmer(segments: readonly ShimmerSegment[], key?: string): NativeNode {
+	const spans: TspSpan[] = [];
+	for (const { text: value, palette } of segments) {
+		if (value.length === 0) continue;
+		const mid = (palette ?? DEFAULT_SHIMMER_PALETTE).mid;
+		spans.push(typeof mid === "string" ? { t: value, s: mid } : { t: value });
+	}
+	if (activeMode === "disabled") return node("text", { spans }, undefined, key);
+	const palette = segments[0]?.palette ?? DEFAULT_SHIMMER_PALETTE;
+	const tokens: { low?: string; mid?: string; high?: string } = {};
+	if (typeof palette.low === "string") tokens.low = palette.low;
+	if (typeof palette.mid === "string") tokens.mid = palette.mid;
+	if (typeof palette.high === "string") tokens.high = palette.high;
+	return node("shimmer", { spans, mode: activeMode, palette: tokens }, undefined, key);
+}
+
+/**
  * Apply a shimmer sweep across one or more segments, treating them as a
  * single continuous string for band positioning. Each segment can supply
  * its own palette so the gradient stays in lockstep while the colors
@@ -179,48 +191,75 @@ export function shimmerEnabled(): boolean {
  *   - No per-char allocations beyond the run buffer.
  */
 export function shimmerSegments(segments: readonly ShimmerSegment[], theme: ShimmerTheme): string {
+	// A TSP terminal animates shimmer from described nodes; a frame painted
+	// here would freeze mid-sweep, so the text goes out unstyled.
+	if (isNativeRendering()) {
+		let out = "";
+		for (const { text: value } of segments) out += value;
+		return out;
+	}
 	const mode = activeMode;
 
-	// Pre-scan: total code-point count (positions the band) and resolved palette.
-	// The per-segment string is kept verbatim — iterating UTF-16 units with a
-	// surrogate-pair guard produces the same code points as `Array.from(text)`
-	// at zero per-frame allocation (previously the #1 hotspot at ~10% of profiled
-	// CPU during streaming — the working message is shimmered every animation
-	// frame at 30fps and `Array.from` reallocated the code-point array each tick).
-	let total = 0;
-	const perSeg: { text: string; palette: ShimmerPalette }[] = [];
-	for (const seg of segments) {
-		total += countCodePoints(seg.text);
-		perSeg.push({ text: seg.text, palette: seg.palette ?? DEFAULT_SHIMMER_PALETTE });
-	}
-	if (total === 0) return "";
-
-	// Disabled: no animation, no per-char work. Paint each segment in its mid
-	// tier so the working line stays legible without movement.
+	// Disabled: no animation or code-point scan. Preserve the all-empty result,
+	// but include empty segments' ANSI pairs when any segment has text.
 	if (mode === "disabled") {
+		let hasText = false;
+		for (const { text } of segments) {
+			if (text.length > 0) {
+				hasText = true;
+				break;
+			}
+		}
+		if (!hasText) return "";
 		let out = "";
-		for (const { text, palette } of perSeg) {
-			const seq = compile(theme, palette).mid;
+		for (const { text, palette } of segments) {
+			const seq = compile(theme, palette ?? DEFAULT_SHIMMER_PALETTE).mid;
 			out += `${seq.open}${text}${seq.close}`;
 		}
 		return out;
 	}
 
-	const time = Date.now();
-	const intensityFn = mode === "kitt" ? kittIntensity : classicIntensity;
+	// Position the band in code points without copying the segments or splitting
+	// their strings. Surrogate pairs are counted independently in each segment.
+	let total = 0;
+	for (const { text } of segments) total += countCodePoints(text);
+	if (total === 0) return "";
 
-	// Fast-path window: outside `[bandLo, bandHi]` the intensity is guaranteed
-	// zero (tier "low"), so we can skip `intensityFn` + `tierFor` entirely for
-	// the prefix/suffix of every segment. On the typical ~60-char working
-	// message the classic band spans ~12 cells, so ~80% of the per-char loop
-	// disappears — the intensity call and the tier compare were the residual
-	// per-frame cost after #4353 removed the allocation hotspot (issue #4377).
-	const { lo: bandLo, hi: bandHi } = activeBand(mode, time, total);
+	// Fixed velocity keeps the per-frame step independent of message length.
+	// Share the frame's phase/head between the window and every active character.
+	const travel = (Date.now() / 1000) * SHIMMER_SPEED_CELLS_PER_S;
+	const isKitt = mode === "kitt";
+	let position: number;
+	let goingRight = true;
+	let bandLo: number;
+	let bandHi: number;
+	if (isKitt) {
+		const range = total - 1;
+		if (range <= 0) {
+			position = 0;
+		} else {
+			const cycleCells = 2 * range;
+			const sweep = travel % cycleCells;
+			goingRight = sweep < range;
+			position = goingRight ? sweep : cycleCells - sweep;
+		}
+		// Only the head and its direction-dependent trailing cells can light up.
+		bandLo = goingRight ? position - KITT_HEAD_HALF - KITT_TRAIL_LEN : position - KITT_HEAD_HALF;
+		bandHi = goingRight ? position + KITT_HEAD_HALF : position + KITT_HEAD_HALF + KITT_TRAIL_LEN;
+	} else {
+		position = travel % (total + CLASSIC_PADDING * 2);
+		bandLo = position - CLASSIC_PADDING - CLASSIC_BAND_HALF_WIDTH;
+		bandHi = position - CLASSIC_PADDING + CLASSIC_BAND_HALF_WIDTH;
+	}
+
+	// Outside this window intensity is zero, so skip the intensity and tier
+	// calculations for the low-tier prefix/suffix of every segment.
+	const intensityFn = isKitt ? kittIntensity : classicIntensity;
 
 	let out = "";
 	let index = 0;
-	for (const { text, palette } of perSeg) {
-		const compiled = compile(theme, palette);
+	for (const { text, palette } of segments) {
+		const compiled = compile(theme, palette ?? DEFAULT_SHIMMER_PALETTE);
 		let runTier: Tier | null = null;
 		let runStart = 0;
 		let runEnd = 0;
@@ -234,7 +273,8 @@ export function shimmerSegments(segments: readonly ShimmerSegment[], theme: Shim
 				const c2 = text.charCodeAt(i + 1);
 				if (c2 >= 0xdc00 && c2 <= 0xdfff) step = 2;
 			}
-			const tier: Tier = index < bandLo || index > bandHi ? "low" : tierFor(intensityFn(time, index, total));
+			const tier: Tier =
+				index < bandLo || index > bandHi ? "low" : tierFor(intensityFn(index, position, goingRight));
 			if (tier !== runTier) {
 				if (runTier !== null && runEnd > runStart) {
 					const seq = compiled[runTier];
@@ -253,34 +293,6 @@ export function shimmerSegments(segments: readonly ShimmerSegment[], theme: Shim
 		}
 	}
 	return out;
-}
-
-/**
- * Sweep window (code-point indices) outside which the intensity is guaranteed
- * zero for `mode` at `time` over `total` cells. Widening the window is safe —
- * the per-char intensity call still runs inside the window and reports 0 for
- * off-band code points — but narrower windows skip more of the per-char loop.
- */
-function activeBand(mode: "classic" | "kitt", time: number, total: number): { lo: number; hi: number } {
-	if (mode === "classic") {
-		const period = total + CLASSIC_PADDING * 2;
-		const pos = ((time / 1000) * SHIMMER_SPEED_CELLS_PER_S) % period;
-		return {
-			lo: pos - CLASSIC_PADDING - CLASSIC_BAND_HALF_WIDTH,
-			hi: pos - CLASSIC_PADDING + CLASSIC_BAND_HALF_WIDTH,
-		};
-	}
-	const range = total - 1;
-	if (range <= 0) return { lo: 0, hi: total };
-	const cycleCells = 2 * range;
-	const sweep = ((time / 1000) * SHIMMER_SPEED_CELLS_PER_S) % cycleCells;
-	const goingRight = sweep < range;
-	const head = goingRight ? sweep : cycleCells - sweep;
-	// The trail always lies behind the head for the current direction — chars
-	// ahead of the head are dark. See {@link kittIntensity} for the exact rule.
-	return goingRight
-		? { lo: head - KITT_HEAD_HALF - KITT_TRAIL_LEN, hi: head + KITT_HEAD_HALF }
-		: { lo: head - KITT_HEAD_HALF, hi: head + KITT_HEAD_HALF + KITT_TRAIL_LEN };
 }
 
 function countCodePoints(text: string): number {

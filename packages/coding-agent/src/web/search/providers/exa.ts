@@ -7,9 +7,8 @@
  * them into a combined `answer` string on the SearchResponse.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { $env, asRecord } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
-import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
 import { readMcpJsonRpcResponse } from "../../../mcp/json-rpc";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -148,8 +147,13 @@ interface ExaSearchResponse {
 	costDollars?: { total: number };
 	searchTime?: number;
 }
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return isRecord(value) ? value : null;
+
+function isSearchResponse(data: unknown): data is ExaSearchResponse {
+	return (
+		typeof data === "object" &&
+		data !== null &&
+		("results" in data || "statuses" in data || "costDollars" in data || "searchTime" in data)
+	);
 }
 
 function parseJsonContent(text: string): unknown | null {
@@ -354,7 +358,7 @@ function buildExaMcpArgs(params: ExaSearchParams): Record<string, unknown> {
 
 async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchResponse> {
 	const query = new URLSearchParams();
-	const apiKey = findApiKey();
+	const apiKey = $env.EXA_API_KEY;
 	if (apiKey) query.set("exaApiKey", apiKey);
 	query.set("tools", "web_search_exa");
 	const fetchImpl = params.fetch ?? fetch;
@@ -482,23 +486,11 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
-	isAvailable(authStorage: AuthStorage): boolean {
-		if (!this.#settingsAllowSearch()) return false;
-		return !!getEnvApiKey("exa") || authStorage.keys.source("exa") !== undefined;
-	}
-
 	/**
-	 * Exa ships an unauthenticated public MCP fallback, so an explicit
-	 * selection (programmatic or via `providers.webSearch: exa`) routes
-	 * through MCP even when no credential is configured. The auto chain
-	 * still uses {@link isAvailable} so an unrelated configured provider
-	 * keeps priority over the public fallback.
+	 * Available unless disabled in settings: without a credential, search runs
+	 * through Exa's unauthenticated public MCP.
 	 */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
-		return this.#settingsAllowSearch();
-	}
-
-	#settingsAllowSearch(): boolean {
+	isAvailable(_authStorage: AuthStorage): boolean {
 		try {
 			if (cfgExaEnabled.get(settings) === false) {
 				return false;

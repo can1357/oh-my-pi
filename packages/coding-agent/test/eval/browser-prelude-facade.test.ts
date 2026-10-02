@@ -68,6 +68,7 @@ function makeSession(getPreludes?: () => readonly EvalPreludeDefinition[]): Tool
 			"browser.headless": true,
 			"browser.relay": false,
 			"browser.cmux": false,
+			"browser.tern": false,
 		}),
 		...(getPreludes === undefined ? {} : { getEvalPreludes: getPreludes }),
 	};
