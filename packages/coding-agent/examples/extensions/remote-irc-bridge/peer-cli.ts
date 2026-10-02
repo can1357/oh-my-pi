@@ -130,7 +130,7 @@ Bun.listen({
 console.log(`roster written to ${values.roster}`);
 console.log(`listening on ${roster.socket} as @${roster.namespace}/{${roster.peers.join(",")}}`);
 console.log("start omp with:");
-console.log(`  OMP_REMOTE_IRC_ROSTER=${values.roster} omp -e examples/extensions/remote-irc-bridge/extension.ts`);
+console.log(`  OMP_REMOTE_IRC_ROSTER=${values.roster} omp -e ${path.join(import.meta.dir, "extension.ts")}`);
 console.log("type `<peer>: message` to send, `<peer>?: message` to send and await a reply, /peers, /quit");
 
 const INPUT_RE = /^([A-Za-z0-9._-]+)(\?)?:\s*(.*)$/;
