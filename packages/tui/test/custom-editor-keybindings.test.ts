@@ -82,25 +82,57 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("b");
 	});
 
-	it("exits with the draft intact on ctrl+d when the cursor is at the end of the buffer", () => {
+	it("exits with the draft intact on ctrl+d at the end of the buffer when the host persists drafts", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onExit = vi.fn();
 		editor.onExit = onExit;
+		editor.exitPersistsDraft = true;
 		editor.setText("ab\ncd");
 		editor.handleInput("\x04"); // Ctrl+D
 		expect(onExit).toHaveBeenCalledTimes(1);
 		expect(editor.getText()).toBe("ab\ncd");
 	});
 
+	it("keeps a draft on ctrl+d at the end of the buffer when the host cannot persist it", () => {
+		// Startup composer: no session exists yet, so quitting would drop the draft.
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.setText("ab");
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(onExit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("ab");
+	});
+
 	it("forward-deletes on ctrl+d at the end of a line when later lines follow", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onExit = vi.fn();
 		editor.onExit = onExit;
+		editor.exitPersistsDraft = true;
 		editor.setText("ab\ncd");
 		editor.handleInput("\x1b[A"); // Up, cursor now at end of "ab"
 		editor.handleInput("\x04"); // Ctrl+D joins the lines
 		expect(onExit).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("abcd");
+	});
+
+	it("deletes a vim visual selection ending on an empty final line instead of exiting", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.exitPersistsDraft = true;
+		editor.setVimMode(true);
+		editor.setText("ab\n");
+		editor.handleInput("\x1b"); // Escape -> Normal, cursor on the empty final line
+		editor.handleInput("k");
+		editor.handleInput("0");
+		editor.handleInput("v"); // Visual from "a"
+		editor.handleInput("j"); // extend onto the empty final line
+		expect(editor.hasTextAfterCursor()).toBe(false);
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(onExit).not.toHaveBeenCalled();
+		expect(editor.vimMode).toBe("normal");
+		expect(editor.getText()).toBe("");
 	});
 
 	it("exits on ctrl+d after the last attachment chip is deleted", () => {

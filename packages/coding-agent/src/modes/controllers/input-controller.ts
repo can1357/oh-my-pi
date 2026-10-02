@@ -613,6 +613,8 @@ export class InputController {
 			this.ctx.resetDisplayAfterAppearanceRefresh();
 		};
 		this.ctx.editor.onExit = () => this.handleCtrlD();
+		// handleCtrlD's shutdown snapshots the editor text as a resume draft.
+		this.ctx.editor.exitPersistsDraft = true;
 		this.ctx.editor.setActionKeys("app.suspend", this.ctx.keybindings.getKeys("app.suspend"));
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));

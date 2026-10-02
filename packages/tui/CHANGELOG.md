@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `CustomEditor`: a forward-delete exit key (Ctrl+D) now exits with the cursor at the end of a nonempty draft when the host sets `exitPersistsDraft`; it still forward-deletes text after the cursor or an active Vim Visual selection, and the startup composer keeps the empty-draft-only exit ([#14130](https://github.com/can1357/oh-my-pi/pull/14130) by [@kevcube](https://github.com/kevcube))
+
 ## [18.4.12] - 2026-10-02
 
 ### Changed
