@@ -534,13 +534,14 @@ describe("auto thinking classifier helpers", () => {
 			registry: createRegistry([]),
 			model,
 		});
-		const vendorModel = (spec: { id: string; provider: string; api: ai.Api }, thinking?: ai.ThinkingConfig) =>
+		const vendorModel = (spec: { id: string; provider: string; api: ai.Api }, efforts?: Effort[], vde?: Effort) =>
 			buildModel({
 				...spec,
 				name: spec.id,
 				baseUrl: "https://example.com",
 				reasoning: true,
-				thinking,
+				thinking: efforts ? { mode: "effort", efforts } : undefined,
+				vendorDefaultEffort: vde,
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: 128_000,
@@ -557,20 +558,20 @@ describe("auto thinking classifier helpers", () => {
 			);
 		});
 
-		it("prefers the vendor default over the model default level and snaps it onto the ladder", async () => {
-			const both = buildModel({
-				...buildLadderModel("mock-both", [Effort.Low, Effort.Medium]),
-				thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium], defaultLevel: Effort.Medium },
-				vendorDefaultEffort: Effort.Minimal,
-			});
-			// `minimal` beats `defaultLevel`, then snaps up to the ladder floor.
-			expect(await classifyDifficulty({ request: "x" }, vendorDeps(both))).toBe(Effort.Low);
+		it("snaps the vendor default onto the ladder", async () => {
+			const model = vendorModel(
+				{ id: "mock-snap", provider: "mock", api: "openai-completions" },
+				[Effort.Low, Effort.Medium],
+				Effort.Minimal,
+			);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(model))).toBe(Effort.Low);
 		});
 
-		it("falls back to the model default level and respects the auto ceiling", async () => {
+		it("respects the auto ceiling", async () => {
 			const maxDefault = vendorModel(
 				{ id: "mock-max-default", provider: "mock", api: "openai-completions" },
-				{ mode: "effort", efforts: MAX_LADDER, defaultLevel: Effort.Max },
+				MAX_LADDER,
+				Effort.Max,
 			);
 			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxDefault))).toBe(Effort.XHigh);
 			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxDefault, "max"))).toBe(Effort.Max);
@@ -578,15 +579,35 @@ describe("auto thinking classifier helpers", () => {
 			// Nothing at or below the default ceiling: no level, never `max`.
 			const maxOnly = vendorModel(
 				{ id: "mock-max-only", provider: "mock", api: "openai-completions" },
-				{ mode: "effort", efforts: [Effort.Max], defaultLevel: Effort.Max },
+				[Effort.Max],
+				Effort.Max,
 			);
 			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxOnly))).toBeUndefined();
 		});
 
-		it("throws when no vendor default is known so the caller keeps its fallback", async () => {
-			await expect(
-				classifyDifficulty({ request: "x" }, vendorDeps(buildLadderModel("mock-plain", XHIGH_LADDER))),
-			).rejects.toThrow();
+		it("falls back to omp's model default under the ceiling when no concrete publisher default exists", async () => {
+			const ompDefault = buildModel({
+				...buildLadderModel("mock-omp-default", MAX_LADDER),
+				thinking: { mode: "effort", efforts: MAX_LADDER, defaultLevel: Effort.Max },
+			});
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(ompDefault, "max"))).toBe(Effort.Max);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(ompDefault))).toBe(Effort.XHigh);
+			const offDefault = buildModel({ ...ompDefault, vendorDefaultEffort: "none" });
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(offDefault, "max"))).toBe(Effort.Max);
+		});
+
+		it("prefers publisher metadata over omp's model default", async () => {
+			const model = buildModel({
+				...buildLadderModel("mock-precedence", MAX_LADDER),
+				thinking: { mode: "effort", efforts: MAX_LADDER, defaultLevel: Effort.Max },
+				vendorDefaultEffort: Effort.Medium,
+			});
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(model, "max"))).toBe(Effort.Medium);
+		});
+
+		it("throws for the normal Auto fallback when neither default is concrete", async () => {
+			const model = buildModel({ ...buildLadderModel("mock-none", XHIGH_LADDER), vendorDefaultEffort: "none" });
+			await expect(classifyDifficulty({ request: "x" }, vendorDeps(model))).rejects.toThrow();
 		});
 	});
 });
