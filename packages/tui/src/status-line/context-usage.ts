@@ -859,16 +859,32 @@ export function describeContextUsage(breakdown: ContextBreakdown): NativeNode {
  * has them and as the glyph grid otherwise.
  */
 export class ContextUsageView extends Container {
-	readonly #breakdown: ContextBreakdown;
+	#breakdown: ContextBreakdown;
 	#native: { meter: boolean; node: NativeNode } | undefined;
+	readonly #theme: Theme;
 
 	constructor(breakdown: ContextBreakdown, theme: Theme) {
 		super();
 		this.#breakdown = breakdown;
+		this.#theme = theme;
+		this.#build();
+	}
+
+	/** Replace the shown breakdown in place, refreshing both the ANSI and native views. */
+	setBreakdown(breakdown: ContextBreakdown): void {
+		this.#breakdown = breakdown;
+		this.#native = undefined;
+		this.clear();
+		this.#build();
+		this.invalidate();
+	}
+
+	#build(): void {
+		const theme = this.#theme;
 		this.addChild(new DynamicBorder());
 		this.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(renderContextUsage(breakdown, theme), 1, 0));
+		this.addChild(new Text(renderContextUsage(this.#breakdown, theme), 1, 0));
 		this.addChild(new DynamicBorder());
 	}
 

@@ -62,7 +62,6 @@ import {
 	postmortem,
 	prompt,
 	sanitizeText,
-	stableStringifyJson,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -89,7 +88,6 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
@@ -377,6 +375,7 @@ import { cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
+import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
@@ -1345,7 +1344,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	/** Message the working row shows; mirrors what the loader was last given. */
 	#workingMessage = DEFAULT_WORKING_MESSAGE;
-	/** When the current working loader was created (the native row's `elapsed` origin). */
+	/**
+	 * The native row's `elapsed` origin: the viewed session's run start, so a
+	 * loader recreated by a focus switch keeps the real elapsed time.
+	 */
 	#workingStartedAt = 0;
 	#idleStatusNative: { rate: number | undefined; node: NativeNode } | undefined;
 	#statusHudNative: { children: readonly Component[]; slot: NativeNode | undefined; node: NativeNode } | undefined;
@@ -4550,58 +4552,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#previousGoalContinuationActivity = undefined;
 	}
 
-	/** Model-visible tool activity, excluding call IDs and timestamps that differ on every turn. */
-	#goalContinuationActivity(messages: AgentMessage[]): string {
-		const digests: string[] = [];
-		const record = (value: unknown): void => {
-			const serialized = stableStringifyJson(value);
-			digests.push(`${serialized.length}:${Bun.hash(serialized).toString(16)}`);
-		};
-		for (const message of messages) {
-			if (message.role === "assistant") {
-				for (const block of message.content) {
-					if (block.type === "toolCall") record(["call", block.name, block.arguments]);
-				}
-			} else if (message.role === "toolResult") {
-				record(["result", message.toolName, message.content, message.isError === true]);
-			}
-		}
-		return digests.join(":");
-	}
-
 	#getPausedGoalState(): GoalModeState | undefined {
 		const state = this.session.getGoalModeState();
 		if (!state?.goal || state.enabled || state.goal.status !== "paused") {
 			return undefined;
 		}
 		return state;
-	}
-
-	#goalFromModeData(modeData: SessionContext["modeData"]): Goal | undefined {
-		const goal = modeData?.goal;
-		if (!goal || typeof goal !== "object") return undefined;
-		const value = goal as Record<string, unknown>;
-		if (
-			typeof value.id !== "string" ||
-			typeof value.objective !== "string" ||
-			typeof value.status !== "string" ||
-			typeof value.tokensUsed !== "number" ||
-			typeof value.timeUsedSeconds !== "number" ||
-			typeof value.createdAt !== "number" ||
-			typeof value.updatedAt !== "number"
-		) {
-			return undefined;
-		}
-		return {
-			id: value.id,
-			objective: value.objective,
-			status: value.status as Goal["status"],
-			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
-			tokensUsed: value.tokensUsed,
-			timeUsedSeconds: value.timeUsedSeconds,
-			createdAt: value.createdAt,
-			updatedAt: value.updatedAt,
-		};
 	}
 
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
@@ -4637,7 +4593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.#pendingGoalContinuationTurns > 0) {
 			this.#pendingGoalContinuationTurns--;
-			const activity = this.#goalContinuationActivity(event.messages);
+			const activity = goalContinuationActivity(event.messages);
 			this.#goalSuppressNextContinuation =
 				activity.length === 0 || activity === this.#previousGoalContinuationActivity;
 			this.#previousGoalContinuationActivity = activity;
@@ -4842,7 +4798,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
-			const goal = this.#goalFromModeData(sessionContext.modeData);
+			const goal = goalFromModeData(sessionContext.modeData);
 			if (!goal) {
 				this.sessionManager.appendModeChange("none");
 				return;
@@ -6329,6 +6285,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#exitGoalMode({ reason: "dropped" });
 	}
 
+	/** Enter through the same goal activation path as `/goal set`, then start its first turn. */
+	async startGoalAtStartup(objective: string): Promise<void> {
+		await this.#enterGoalMode({ objective, silent: true });
+		if (!this.goalModeEnabled) return;
+		this.#resetGoalContinuationSuppression();
+		using _keepalive = new EventLoopKeepalive();
+		await this.session.prompt(objective, { streamingBehavior: "steer" });
+	}
+
 	async #startGoalFromObjective(
 		objective: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
@@ -7229,6 +7194,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
+		this.#commandController.resetContextView();
 	}
 
 	showStatus(message: string, options?: { dim?: boolean }): void {
@@ -7414,7 +7380,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				() => this.interruptFromPointer(),
 			);
 			this.#workingMessage = DEFAULT_WORKING_MESSAGE;
-			this.#workingStartedAt = Date.now();
+			this.#workingStartedAt = this.viewSession.runStartedAt ?? Date.now();
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
 			this.statusContainer.disposeChildren();
