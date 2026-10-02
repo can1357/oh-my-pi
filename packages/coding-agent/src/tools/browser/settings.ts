@@ -42,6 +42,20 @@ export const cfgBrowserRelay = register({
 	},
 });
 
+export const cfgBrowserRelayBrowser = register({
+	id: "browser.relayBrowser",
+	type: "enum",
+	values: ["chromium", "firefox"] as const,
+	default: "chromium",
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "Browser Relay Browser",
+		description:
+			"Browser controlled by relay mode. Chromium uses the extension relay; Firefox connects to an existing local WebDriver BiDi endpoint.",
+	},
+});
+
 export const cfgBrowserRelayUrl = register({
 	id: "browser.relayUrl",
 	type: "string",
@@ -49,8 +63,9 @@ export const cfgBrowserRelayUrl = register({
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
-		label: "Browser Relay URL",
-		description: "omp browser relay endpoint (default http://127.0.0.1:9224).",
+		label: "Browser Relay Endpoint",
+		description:
+			"Relay endpoint: Chromium HTTP discovery URL (default http://127.0.0.1:9224) or Firefox WebDriver BiDi WebSocket URL (default ws://127.0.0.1:9222/session).",
 	},
 });
 

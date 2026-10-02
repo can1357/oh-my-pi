@@ -33,24 +33,32 @@ export interface AriaSnapshotPayload {
  * page CSP never applies. They run the generated Playwright ARIA-snapshot bundle
  * (CJS, see scripts/generate-aria-snapshot.ts) in a throwaway module scope.
  *
- * Our Puppeteer patch intentionally routes these unmarked functions through its
- * isolated world. Capture and ref resolution therefore share the same stealthier
- * `_ariaRef` expando namespace without exposing markers to page scripts. Nothing
- * is installed on `window`; the only footprint is the isolated-world `_ariaRef`
- * markers needed for actionable `[ref=eN]` ids. The cmux backend evaluates its
- * standalone script in the page world, so refs are backend-local.
+ * Capture, href collection and ref resolution share the same evaluator world
+ * and `_ariaRef` namespace. An owner marker ensures another alias's snapshot
+ * cannot silently redirect a previously returned ref to a different element.
+ * Chromium's Puppeteer patch routes unmarked evaluators through its isolated
+ * world; Firefox BiDi and standalone cmux evaluation use their backend world.
  */
-function buildEvaluator(params: string, call: string): (...args: unknown[]) => unknown {
+function buildEvaluator(params: string, call: string, setup = ""): (...args: unknown[]) => unknown {
 	return new Function(
 		...params.split(",").map(p => p.trim()),
-		`var module = { exports: {} };\n${ariaBundle}\nreturn module.exports.${call};`,
+		`var module = { exports: {} };\n${ariaBundle}\n${setup}\nreturn module.exports.${call};`,
 	) as unknown as (...args: unknown[]) => unknown;
 }
 
 // Handles (root) must stay top-level args: Puppeteer only unwraps JSHandles
 // passed positionally to page.evaluate, never ones nested inside an object.
-const evaluateAriaSnapshot = buildEvaluator("root, request", "ariaSnapshot(root, request)");
-const evaluateResolveRef = buildEvaluator("ref", "resolveAriaRef(ref)");
+const SNAPSHOT_OWNER = 'Symbol.for("omp.browser.ariaSnapshotOwner")';
+const evaluateAriaSnapshot = buildEvaluator(
+	"root, request, owner",
+	"ariaSnapshot(root, request)",
+	`globalThis[${SNAPSHOT_OWNER}] = owner;`,
+);
+const evaluateResolveRef = buildEvaluator(
+	"ref, owner",
+	"resolveAriaRef(ref)",
+	`if (globalThis[${SNAPSHOT_OWNER}] !== owner) throw new Error("ARIA refs were invalidated by another alias; run tab.ariaSnapshot() or tab.observe() again");`,
+);
 const evaluateAriaHrefs = new Function(
 	"refs",
 	`var module = { exports: {} };\n${ariaBundle}\nvar hrefs = {}; for (var ref of refs) { var el = module.exports.resolveAriaRef(ref); if (el && el.tagName === "A" && el.href) hrefs[ref] = el.href; } return hrefs;`,
@@ -66,9 +74,15 @@ export async function captureAriaSnapshot(
 	page: Page,
 	root: ElementHandle | null,
 	options: AriaSnapshotOptions = {},
+	owner?: string,
 ): Promise<string> {
 	const request = { depth: options.depth, boxes: options.boxes };
-	const snapshot = (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	const snapshot = (await page.evaluate(
+		evaluateAriaSnapshot as never,
+		root as never,
+		request as never,
+		owner as never,
+	)) as string;
 	let hrefs: AriaHrefMap = {};
 	if (options.urls) {
 		const refs = collectAriaSnapshotRefs(snapshot);
@@ -82,8 +96,8 @@ export async function captureAriaSnapshot(
  * null when the ref no longer matches any element. It uses the same isolated
  * world as capture, where that snapshot wrote its `_ariaRef` expandos.
  */
-export async function resolveAriaRefHandle(page: Page, ref: string): Promise<ElementHandle | null> {
-	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never)) as JSHandle;
+export async function resolveAriaRefHandle(page: Page, ref: string, owner?: string): Promise<ElementHandle | null> {
+	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never, owner as never)) as JSHandle;
 	const element = handle.asElement();
 	if (!element) {
 		await handle.dispose().catch(() => undefined);
@@ -163,7 +177,7 @@ export function parseAriaRefSelector(selector: string): string | null {
 export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
 	const request = { depth: options.depth, boxes: options.boxes };
 	const sel = selector ? JSON.stringify(selector) : "null";
-	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
+	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");globalThis[${SNAPSHOT_OWNER}]=undefined;return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
 }
 
 /** Build the cmux page-world expression returning snapshot text plus link destinations. */

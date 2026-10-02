@@ -49,6 +49,7 @@ import {
 	cfgBrowserHeadless,
 	cfgBrowserIdleCloseSec,
 	cfgBrowserRelay,
+	cfgBrowserRelayBrowser,
 	cfgBrowserRelayUrl,
 	cfgBrowserTern,
 } from "./browser/settings";
@@ -85,7 +86,13 @@ export {
 	type AriaSnapshotDiffResult,
 	type SnapshotPostProcessOptions,
 } from "./browser/snapshot-plus";
-export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
+export {
+	DEFAULT_RELAY_URL,
+	type FirefoxRelayKind,
+	type RelayBrowser,
+	type RelayKind,
+	resolveRelayKind,
+} from "./browser/relay/kind";
 export { type TernKind, resolveTernKind } from "./browser/tern/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
@@ -177,10 +184,11 @@ export function resolveBrowserKind(
 		return { kind: "spawned", path: exe, args };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
+	const relayBrowser = cfgBrowserRelayBrowser.get(session.settings);
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
 	if (app?.relay) {
-		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl }, env);
+		const relayKind = resolveRelayKind({ settingEnabled: true, browser: relayBrowser, url: relayUrl }, env);
 		if (relayKind) return relayKind;
 	}
 	if (app?.tern === true) {
@@ -200,6 +208,7 @@ export function resolveBrowserKind(
 		const relayKind = resolveRelayKind(
 			{
 				settingEnabled: cfgBrowserRelay.get(session.settings),
+				browser: relayBrowser,
 				url: relayUrl,
 			},
 			env,
@@ -528,11 +537,11 @@ async function closeBrowser(
 ): Promise<AgentToolResult<unknown>> {
 	const kill = !!params.kill;
 	if (params.all) {
-		const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs }));
+		const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs, signal }));
 		const text = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 		return toolResult(details).text(text).done();
 	}
-	const closed = await untilAborted(signal, () => releaseTab(name, { kill, timeoutMs }));
+	const closed = await untilAborted(signal, () => releaseTab(name, { kill, timeoutMs, signal }));
 	const text = closed ? `Released managed tab ${JSON.stringify(name)}` : `No tab named ${JSON.stringify(name)}`;
 	return toolResult(details).text(text).done();
 }
@@ -558,18 +567,19 @@ async function runBrowser(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
+	const deadlineStartMs = performance.now();
 	const code = resolveBrowserRunCode(params);
 	const tab = getTab(name);
 	if (tab) {
 		details.browser = tab.browser.kind.kind;
 		details.url = tab.info.url;
 	}
-
 	const { displays, returnValue, screenshots } = await runInTab(name, {
 		code,
 		timeoutMs,
 		signal,
 		session,
+		deadlineStartMs,
 	});
 
 	if (screenshots.length) details.screenshots = screenshots;
@@ -607,11 +617,10 @@ async function saveBrowserOutputArtifact(session: ToolSession, fullText: string)
 }
 
 function describeBrowser(handle: BrowserHandle): string {
+	if ("client" in handle) return `cmux browser (${handle.kind.surface ?? "split"})`;
+	if ("webSocketUrl" in handle) return "Firefox relay";
 	if ("tern" in handle) {
 		return `Tern browser picture-in-picture (pane ${handle.kind.pane})`;
-	}
-	if (!("browser" in handle)) {
-		return `cmux browser (${handle.kind.surface ?? "split"})`;
 	}
 	switch (handle.kind.kind) {
 		case "headless":
@@ -635,6 +644,8 @@ function describeKind(kind: BrowserKind): string {
 			return `connected:${kind.cdpUrl}`;
 		case "relay":
 			return `relay:${kind.cdpUrl}`;
+		case "firefox-relay":
+			return "firefox-relay";
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 		case "tern":
