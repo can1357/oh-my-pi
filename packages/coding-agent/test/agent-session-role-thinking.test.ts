@@ -14,7 +14,7 @@ import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } f
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
-import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDefaultThinkingLevel, cfgProvidersAutoThinkingMaxEffort } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
@@ -612,11 +612,12 @@ describe("AgentSession role model thinking behavior", () => {
 			initialThinkingLevel: Effort.High,
 			modelRoles: { default: `${model.provider}/${model.id}` },
 		});
+		cfgProvidersAutoThinkingMaxEffort.set(sessionSettings, Effort.High);
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockRejectedValue(new Error("classifier down"));
 
 		session.setThinkingLevel(AUTO_THINKING);
-		const fallback = resolveProvisionalAutoLevel(model);
+		const fallback = Effort.High;
 		await session.prompt("Investigate a regression");
 
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);

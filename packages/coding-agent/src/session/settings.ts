@@ -992,7 +992,7 @@ export const cfgProvidersTinyModelDtype = register({
 export const cfgProvidersAutoThinkingMaxEffort = register({
 	id: "providers.autoThinkingMaxEffort",
 	type: "enum",
-	values: ["xhigh", "max"] as const,
+	values: ["high", "xhigh", "max"] as const,
 	default: "xhigh",
 	ui: {
 		tab: "model",
@@ -1002,6 +1002,7 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 			"Highest effort the `auto` classifier may resolve. `xhigh` keeps the classifier one tier below the top, so only an explicit `ultrathink` reaches `max`; `max` lets a turn the classifier judges exceptional bill the top tier on models that expose it.",
 		condition: "autoThinkingActive",
 		options: [
+			{ value: "high", label: "high", description: "Classifier stops at high" },
 			{ value: "xhigh", label: "xhigh", description: "Classifier stops at xhigh (default)" },
 			{ value: "max", label: "max", description: "Classifier may resolve max where the model supports it" },
 		],

@@ -121,6 +121,7 @@ export interface ClassifyDifficultyDeps {
  * `ultrathink` reaches {@link Effort.Max}.
  */
 function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
+	if (cfgProvidersAutoThinkingMaxEffort.get(deps.settings) === Effort.High) return Effort.High;
 	if (cfgProvidersAutoThinkingMaxEffort.get(deps.settings) !== Effort.Max) return Effort.XHigh;
 	return getSupportedEfforts(deps.model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
 }
@@ -158,7 +159,9 @@ export async function classifyDifficulty(
 		// `hard` bucket up to a tier it never chose.
 		if (kind === "local") {
 			const { answers } = await candidate.judge({ state, questions: { bucket: questions.bucket } }, options);
-			return { effort: BUCKET_EFFORT[answers.bucket.choice], ceiling: Effort.XHigh };
+			const ceiling =
+				cfgProvidersAutoThinkingMaxEffort.get(deps.settings) === Effort.High ? Effort.High : Effort.XHigh;
+			return { effort: BUCKET_EFFORT[answers.bucket.choice], ceiling };
 		}
 		const ceiling = autoEffortCeiling(deps);
 		const level = ceiling === Effort.Max ? questions.levelWithMax : questions.level;

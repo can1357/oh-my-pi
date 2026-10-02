@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `high` as an option for `providers.autoThinkingMaxEffort`, so `defaultThinkingLevel: auto` can classify per turn without resolving above `high`.
+
 ## [18.4.11] - 2026-10-02
 
 ### Added
