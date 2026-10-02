@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Restored Ctrl+D exit-and-save-draft when the cursor is at the end of the prompt; it still forward-deletes when text follows the cursor ([#14130](https://github.com/can1357/oh-my-pi/pull/14130) by [@kevcube](https://github.com/kevcube))
 - Fixed HTML export hanging when a session's subagent directory held a transcript named `..jsonl`; discovery now only descends into real child directories ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ## [18.4.12] - 2026-10-02

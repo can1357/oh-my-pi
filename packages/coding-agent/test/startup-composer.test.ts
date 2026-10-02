@@ -607,6 +607,19 @@ describe("Composer prepaint", () => {
 		expect(terminal.stops).toBe(1);
 	});
 
+	it("keeps a startup draft on ctrl+d with the cursor at the end, since no session can persist it yet", () => {
+		const terminal = new CountingTerminal();
+		const exit = vi.fn();
+		const composer = new Composer({ preferences: config, terminal, exit });
+		composer.start();
+
+		terminal.sendInput("unsent draft");
+		terminal.sendInput("\x04");
+
+		expect(exit).not.toHaveBeenCalled();
+		expect(composer.editor.getExpandedText()).toBe("unsent draft");
+	});
+
 	it("keeps emergency exit live after adoption until interactive handlers replace it", () => {
 		const terminal = new CountingTerminal();
 		const exit = vi.fn();

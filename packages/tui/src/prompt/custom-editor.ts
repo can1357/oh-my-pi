@@ -1272,6 +1272,10 @@ export class CustomEditor extends Editor {
 	onEscape?: () => void;
 	onClear?: () => void;
 	onExit?: () => void;
+	/** Set by hosts whose `onExit` snapshots the draft for the next resume. When true, a
+	 *  forward-delete exit key quits with the cursor at the end of a nonempty draft; when
+	 *  false (startup composer, before a session exists), it only quits an empty buffer. */
+	exitPersistsDraft = false;
 	onDisplayReset?: () => void;
 	onCycleThinkingLevel?: () => void;
 	onCycleModelForward?: () => void;
@@ -1579,25 +1583,35 @@ export class CustomEditor extends Editor {
 
 			// Intercept configured exit shortcut. When the key doubles as
 			// forward-delete (readline ^D: the default app.exit binding overlaps
-			// tui.editor.deleteCharForward) and the buffer is non-empty, perform
-			// the delete here instead of quitting. Invoking the operation directly
-			// — not falling through, not redispatching the raw key — keeps the
-			// exit chord's precedence slot on both sides: a later app action or
+			// tui.editor.deleteCharForward) and text sits at or after the cursor,
+			// perform the delete here instead of quitting. Invoking the operation
+			// directly — not falling through, not redispatching the raw key — keeps
+			// the exit chord's precedence slot on both sides: a later app action or
 			// extension handler bound to the same chord cannot steal it, and
 			// neither can an earlier base-editor action (e.g. a user-bound
 			// tui.input.submit, which Editor.handleInput checks before
-			// deleteCharForward). Only an empty buffer exits; firing onExit is
-			// the controller's chance to snapshot the current text as a draft
-			// before shutting down. Exit keys with no forward-delete role always
-			// exit. Draft presence is read off the buffer alone: attachments live
-			// as inline chip tokens, while `pendingImages` / `pendingTexts`
+			// deleteCharForward). An active Vim Visual selection also deletes, even
+			// with the cursor on an empty final line. Otherwise, with the cursor at
+			// the end of the buffer there is nothing to delete, so the key exits —
+			// but only when the host persists the draft (exitPersistsDraft); a host
+			// that cannot keeps the empty-buffer-only rule so the draft is never
+			// lost. Firing onExit is the controller's chance to snapshot the current
+			// text as a draft before shutting down. Exit keys with no forward-delete
+			// role always exit. Draft presence is read off the buffer alone: attachments
+			// live as inline chip tokens, while `pendingImages` / `pendingTexts`
 			// intentionally retain deleted records so numbering isn't recycled
 			// (see composerChips) — trusting them would make Ctrl+D a permanent
 			// no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
 				const doublesAsForwardDelete =
 					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
-				if (doublesAsForwardDelete && !this.textEquals("")) {
+				const deletes =
+					this.hasTextAfterCursor() ||
+					// Vim `x` deletes an active Visual selection even when the cursor rests on an
+					// empty final line with nothing after it.
+					this.vimSelectedLines > 0 ||
+					(!this.exitPersistsDraft && !this.textEquals(""));
+				if (doublesAsForwardDelete && deletes) {
 					this.deleteCharForward();
 					// Same post-edit normalization the parent dispatch runs below: an edit that
 					// leaves a bare "->"/"=>" turns it into a reserved queue header, or later
