@@ -17,6 +17,17 @@ import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type JudgeDeps, kindOf } from "../judgment";
 
+/**
+ * `JudgeDeps` as routing consumes it.
+ *
+ * Routing builds the native judge itself (see below) and never enters
+ * `resolveJudge`, so `purpose` has no consumer on this path — but upstream
+ * requires it on `JudgeDeps`, and a routing judgment is still a judgment.
+ * Requiring it here would force every caller to pass a label the code drops,
+ * so accept it, ignore it, and let the single callsite supply `"routing"`.
+ */
+export type RoutingJudgeDeps = Omit<JudgeDeps, "purpose"> & { purpose?: string };
+
 /** Re-state a validated judgment api as its literal union (generic `Model<Api>` defeats narrowing). */
 function judgmentApiOf(api: string): "typesafe" | "openrouter-decisions" | undefined {
 	return api === "typesafe" ? "typesafe" : api === "openrouter-decisions" ? "openrouter-decisions" : undefined;
@@ -31,7 +42,7 @@ function judgmentApiOf(api: string): "typesafe" | "openrouter-decisions" | undef
  * Construction is wrapped because resolver/registry lookups can throw before
  * any judgment call is made; a construction failure is also "no router".
  */
-export function resolveRoutingJudge(deps: JudgeDeps): TypeSafeJudge | undefined {
+export function resolveRoutingJudge(deps: RoutingJudgeDeps): TypeSafeJudge | undefined {
 	try {
 		const chain = resolveRoleChain("judge", deps.settings, roleCandidatePool("judge", deps.settings, deps.registry));
 		const [primary] = chain;
