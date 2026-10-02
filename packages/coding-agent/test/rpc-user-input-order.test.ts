@@ -163,6 +163,17 @@ test("a session change invalidates earlier input only once it commits, never inp
 	expect(gate.isCurrent(after)).toBe(true);
 });
 
+test("a committed fork invalidates input accepted before it", () => {
+	const gate = new RpcUserInputGate();
+	const before = { id: "before", type: "prompt", message: "before" } as const;
+	const fork = { id: "fork", type: "fork", entryId: "entry-1" } as const;
+	gate.accept(before);
+	gate.accept(fork);
+
+	gate.commitSessionChange(fork);
+	expect(gate.isCurrent(before)).toBe(false);
+});
+
 test("an abort accepted after a session change keeps its own boundary when the change commits", () => {
 	const gate = new RpcUserInputGate();
 	const change = { id: "change", type: "switch_session", sessionPath: "/tmp/other.jsonl" } as const;

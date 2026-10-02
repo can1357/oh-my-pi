@@ -45,7 +45,7 @@ import {
 	wordCompletionQuery,
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
-import type { AgentSession } from "../../session/agent-session";
+import { type AgentSession, SessionBusyError } from "../../session/agent-session";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession } from "../../session/session-listing";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -219,7 +219,7 @@ type RpcOutput = (
 
 export type RpcSessionChangeCommand = Extract<
 	RpcCommand,
-	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" }
+	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" } | { type: "fork" }
 >;
 
 export type RpcQueueModeCommand = Extract<
@@ -230,9 +230,10 @@ export type RpcQueueModeCommand = Extract<
 export type RpcSessionChangeResult =
 	| { type: "new_session"; data: { cancelled: boolean } }
 	| { type: "switch_session"; data: { cancelled: boolean } }
-	| { type: "branch"; data: { text: string; cancelled: boolean } };
+	| { type: "branch"; data: { text: string; cancelled: boolean } }
+	| { type: "fork"; data: { cancelled: boolean } };
 
-export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
+export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch" | "fork">;
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
@@ -486,6 +487,7 @@ const SESSION_CHANGE_TYPES: Record<string, true> = {
 	new_session: true,
 	switch_session: true,
 	branch: true,
+	fork: true,
 	open_session: true,
 };
 
@@ -791,6 +793,14 @@ export async function handleRpcSessionChange(
 			const result = await session.branch(command.entryId);
 			if (!result.cancelled) subagentRegistry?.clear();
 			return { type: "branch", data: { text: result.selectedText, cancelled: result.cancelled } };
+		}
+
+		case "fork": {
+			// RPC forks are snapshots: refuse while work could still write into the transcript.
+			// fork() rechecks after its awaits; interactive /fork keeps carrying running bash across.
+			const cancelled = !(await session.fork(command.entryId, { requireIdle: true }));
+			if (!cancelled) subagentRegistry?.clear();
+			return { type: "fork", data: { cancelled } };
 		}
 	}
 	throw new Error("Unsupported RPC session change command");
@@ -1778,14 +1788,25 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "new_session":
 			case "switch_session":
-			case "branch": {
+			case "branch":
+			case "fork": {
+				// Fast refusal before the goal controller voids a waiting continuation;
+				// fork() repeats the check after each of its own awaits.
+				if (command.type === "fork" && session.isBusyForSnapshot) {
+					return error(id, "fork", new SessionBusyError("fork the session").message, "session_busy");
+				}
 				await goalController.beginSessionChange();
 				let result: RpcSessionChangeResult | undefined;
 				try {
 					result = await handleRpcSessionChange(session, command, subagentRegistry);
+				} catch (err) {
+					// fork() refuses when work started while its transition awaited.
+					if (err instanceof SessionBusyError) return error(id, command.type, err.message, "session_busy");
+					throw err;
 				} finally {
+					// Branch and fork switch files in-process without detaching a run (fork requires idle).
 					await goalController.endSessionChange({
-						detachedRun: command.type !== "branch" && result?.data.cancelled !== true,
+						detachedRun: command.type !== "branch" && command.type !== "fork" && result?.data.cancelled !== true,
 					});
 					// Respond only once this change's reattach (and any queued ahead of it) has run.
 					await goalController.settled();
@@ -1793,7 +1814,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (!result.data.cancelled) {
 					inputGate.commitSessionChange(command);
 					// `branch` leaves a live run streaming to its normal yield; new/switch detach it.
-					if (command.type !== "branch") promptResults.abortOpen();
+					if (command.type !== "branch" && command.type !== "fork") promptResults.abortOpen();
 					// The detached run publishes no terminal agent_end to settle on.
 					void settleWatcher.check();
 					await emitAvailableCommandsUpdate();
