@@ -197,6 +197,7 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
+- `retry.usageReserveTaperHours` (default `0` = static reserve; releases the reserve linearly to 0 over this many hours before each window's reset)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
 
 Programmatic toggles in session:

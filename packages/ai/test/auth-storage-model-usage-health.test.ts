@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	type ApiKeyCredential,
+	type AuthAccountPolicies,
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
-import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type {
+	CredentialRankingStrategy,
+	UsageLimit,
+	UsageProvider,
+	UsageReport,
+	UsageWindow,
+} from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -715,5 +722,86 @@ describe("AuthStorage Claude tier reserve health", () => {
 		});
 		expect(health.state).toBe("depleted");
 		expect(health.accounts[0]?.resetsAt).toBeGreaterThan(Date.now());
+	});
+});
+
+describe("AuthStorage reset-aware usage reserve", () => {
+	const HOUR_MS = 60 * 60 * 1000;
+	const storages: AuthStorage[] = [];
+	afterEach(() => {
+		for (const storage of storages) storage.close();
+		storages.length = 0;
+	});
+
+	/** One window at 95% used: 5% left, inside a static 10% reserve. */
+	function nearlySpentReport(window: Omit<UsageWindow, "id" | "label">): UsageReport {
+		const usageReport = report("account-1", [limit("7-day", 0.95)]);
+		usageReport.limits[0]!.window = { id: "7-day", label: "7-day", ...window };
+		return usageReport;
+	}
+
+	async function reserveState(
+		usageReport: UsageReport,
+		taper: { defaultReserveTaperHours?: number; accountPolicies?: AuthAccountPolicies } = {},
+	): Promise<string> {
+		const storage = new AuthStorage(makeStore([oauthRow(1)]), {
+			usageProviderResolver: provider =>
+				provider === "anthropic" ? makeUsageProvider({ "account-1": usageReport }) : undefined,
+			rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
+			configValueResolver: async value => value,
+			...taper,
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		const health = await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0.1 });
+		return health.state;
+	}
+
+	it.each([
+		// Taper 0 keeps today's static reserve however close the reset is.
+		["static when the taper is 0", 0, 6, "reserve"],
+		// 24 h taper, 18 h to reset: reserve 10% × 18/24 = 7.5% ≥ 5% left.
+		["still protected early in the taper", 24, 18, "reserve"],
+		// 24 h taper, 6 h to reset: reserve 10% × 6/24 = 2.5% < 5% left.
+		["released linearly as the reset nears", 24, 6, "healthy"],
+	])("%s", async (_name, taperHours, hoursToReset, expected) => {
+		const usageReport = nearlySpentReport({
+			durationMs: 7 * 24 * HOUR_MS,
+			resetsAt: Date.now() + hoursToReset * HOUR_MS,
+		});
+		expect(await reserveState(usageReport, { defaultReserveTaperHours: taperHours })).toBe(expected);
+	});
+
+	it("caps the taper at the window length so a short window keeps its reserve when it opens", async () => {
+		// 5 h window, 24 h taper, 4 h to reset: tapers over 5 h → 10% × 4/5 = 8% ≥ 5% left.
+		const usageReport = nearlySpentReport({ durationMs: 5 * HOUR_MS, resetsAt: Date.now() + 4 * HOUR_MS });
+		expect(await reserveState(usageReport, { defaultReserveTaperHours: 24 })).toBe("reserve");
+	});
+
+	it("releases the whole reserve once the window's reset has passed", async () => {
+		// Fetched after the reported reset, so the sample still counts, but nothing is protected anymore.
+		const usageReport = nearlySpentReport({ durationMs: 7 * 24 * HOUR_MS, resetsAt: Date.now() - 1_000 });
+		expect(await reserveState(usageReport, { defaultReserveTaperHours: 24 })).toBe("healthy");
+		expect(await reserveState(usageReport, { defaultReserveTaperHours: 0 })).toBe("reserve");
+	});
+
+	it.each([
+		["no reset timestamp", { durationMs: 7 * 24 * HOUR_MS }],
+		["a rolling regeneration tick", { resetsAt: Date.now() + HOUR_MS, resetLabel: "regen" }],
+	])("keeps the static reserve for a window with %s", async (_name, window) => {
+		expect(await reserveState(nearlySpentReport(window), { defaultReserveTaperHours: 24 })).toBe("reserve");
+	});
+
+	it("lets a per-account taperHours override the global taper in both directions", async () => {
+		const usageReport = nearlySpentReport({ durationMs: 7 * 24 * HOUR_MS, resetsAt: Date.now() + 6 * HOUR_MS });
+		const policy = (taperHours: number): AuthAccountPolicies => [
+			{ provider: "anthropic", account: { accountId: "account-1" }, taperHours },
+		];
+		expect(await reserveState(usageReport, { defaultReserveTaperHours: 0, accountPolicies: policy(24) })).toBe(
+			"healthy",
+		);
+		expect(await reserveState(usageReport, { defaultReserveTaperHours: 24, accountPolicies: policy(0) })).toBe(
+			"reserve",
+		);
 	});
 });

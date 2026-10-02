@@ -480,6 +480,52 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(health.state).toBe("healthy");
 	});
 
+	test("a reset-aware taper releases a preferred account's reserve before its weekly reset", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { email: "protected@example.com" },
+					priority: 100,
+					reservePct: 50,
+					taperHours: 24,
+				},
+				{
+					provider: "openai-codex",
+					account: { email: "drain@example.com" },
+					priority: 10,
+					reservePct: 10,
+				},
+			],
+		});
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-drain", "drain@example.com") },
+		]);
+		// 40% weekly quota left, 6 h to reset: the 50% reserve has tapered to 50% × 6/24 = 12.5%.
+		for (const accountId of ["acct-protected", "acct-drain"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.6, resetInMs: 6 * HOUR_MS },
+				}),
+			);
+		}
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "tapered-reserve");
+		const health = await authStorage.health.model("openai-codex", {
+			reserveFraction: 0.1,
+		});
+
+		expectExclusivePreference(counts, "api-acct-protected", "api-acct-drain");
+		expect(health.accounts.map(account => account.state)).toEqual(["healthy", "healthy"]);
+	});
+
 	test("applies the global reserve fallback to unconfigured siblings", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {

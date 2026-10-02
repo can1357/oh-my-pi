@@ -22,7 +22,7 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
-import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import { DEFAULT_USAGE_RESERVE_PCT, DEFAULT_USAGE_RESERVE_TAPER_HOURS } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -759,6 +759,27 @@ export const cfgRetryUsageReservePct = register({
 	},
 });
 
+export const cfgRetryUsageReserveTaperHours = register({
+	id: "retry.usageReserveTaperHours",
+	type: "number",
+	default: DEFAULT_USAGE_RESERVE_TAPER_HOURS,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Reserve Taper",
+		description:
+			"Release the reserve margin linearly over this many hours before each quota window resets (capped at the window length), so reserved quota is spent instead of expiring. 0 keeps the reserve until the reset.",
+		condition: "usageAwareFallbackEnabled",
+		options: [
+			{ value: "0", label: "Off", description: "Static reserve until the window resets" },
+			{ value: "1", label: "1 hour", description: "Release only in the final hour" },
+			{ value: "6", label: "6 hours", description: "Release over the final 6 hours" },
+			{ value: "24", label: "24 hours", description: "Release over the final day" },
+			{ value: "48", label: "48 hours", description: "Release over the final two days" },
+		],
+	},
+});
+
 export const cfgRetryUsageReservePolicy = register({
 	id: "retry.usageReservePolicy",
 	type: "enum",
@@ -834,6 +855,7 @@ export const cfgRetry = combine({
 	modelFallback: cfgRetryModelFallback,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
+	usageReserveTaperHours: cfgRetryUsageReserveTaperHours,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
 });
 
