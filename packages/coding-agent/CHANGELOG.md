@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auto-learn captures rewriting earlier OpenAI Responses history after a learning tool call, disrupting prompt-cache reuse ([#14099](https://github.com/can1357/oh-my-pi/pull/14099) by [@nanbloom001](https://github.com/nanbloom001)).
+
 ## [18.4.11] - 2026-10-02
 
 ### Added
