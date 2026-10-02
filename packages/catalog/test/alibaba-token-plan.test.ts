@@ -144,6 +144,18 @@ describe("QwenCloud Token Plan provider", () => {
 				},
 			},
 		});
+		const plus = models?.find(model => model.id === "qwen3.8-plus");
+		if (!plus) throw new Error("qwen3.8-plus missing from discovery");
+		expect(plus).toMatchObject({
+			id: "qwen3.8-plus",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+		});
+		expect(buildModel(plus).compat).toMatchObject({
+			supportsReasoningEffort: true,
+			replayReasoningContent: true,
+			whenThinking: { thinkingFormat: "openai", extraBody: { enable_thinking: true } },
+		});
 		const flash = models?.find(model => model.id === "qwen3.8-flash");
 		if (!flash) throw new Error("qwen3.8-flash missing from discovery");
 		expect(buildModel(flash)).toMatchObject({
