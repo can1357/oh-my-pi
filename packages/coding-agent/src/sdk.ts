@@ -3858,6 +3858,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
+				subagent: agentKind === "sub",
 				renderMermaid: cfgTuiRenderMermaid.get(settings),
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
 				activeRepoContext,

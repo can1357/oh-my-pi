@@ -1,7 +1,7 @@
 export { type Type, type } from "@oh-my-pi/omptype";
 export * from "./api-registry";
 export type * from "./auth-broker";
-export type { AuthGatewayBootOptions, ModelResolver } from "./auth-gateway/dispatch";
+export type { AuthGatewayBootOptions, AuthGatewayRouteOptions, ModelResolver } from "./auth-gateway/dispatch";
 export * from "./auth-gateway/types";
 export * from "./auth-retry";
 export * from "./auth-storage";

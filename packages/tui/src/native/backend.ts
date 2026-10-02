@@ -671,6 +671,7 @@ export class NativeBackend {
 			case "action":
 			case "change":
 			case "edit":
+			case "undo":
 				this.#routeUiEvent(event);
 				return;
 			case "focus": {
@@ -687,7 +688,7 @@ export class NativeBackend {
 	}
 
 	#routeUiEvent(
-		event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" }>,
+		event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" | "undo" }>,
 	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
 		const target = reconciler?.target(event.id);
@@ -721,6 +722,9 @@ export class NativeBackend {
 				ui = { type: "edit", key: target.keypath, from, to, text, cursor, len };
 				break;
 			}
+			case "undo":
+				ui = { type: "undo", key: target.keypath };
+				break;
 		}
 		target.component.handleNativeEvent(ui);
 		this.#host.requestRender();
