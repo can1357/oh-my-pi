@@ -1086,6 +1086,29 @@ export const cfgProvidersTinyModelDtype = register({
 	},
 });
 
+export const cfgProvidersAutoThinkingSource = register({
+	id: "providers.autoThinkingSource",
+	type: "enum",
+	values: ["classifier", "vendor"] as const,
+	default: "classifier",
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Auto Thinking Source",
+		description:
+			"How `auto` picks each turn's effort: classify the prompt with the judge model, or use the model vendor's documented default effort with no model call. Vendor mode falls back to the provisional auto level when no vendor default is known.",
+		condition: "autoThinkingActive",
+		options: [
+			{ value: "classifier", label: "Classifier", description: "Classify each prompt's difficulty (default)" },
+			{
+				value: "vendor",
+				label: "Vendor default",
+				description: "Use the effort the vendor applies when a request omits it; no classifier call",
+			},
+		],
+	},
+});
+
 export const cfgProvidersAutoThinkingMaxEffort = register({
 	id: "providers.autoThinkingMaxEffort",
 	type: "enum",
@@ -1096,11 +1119,11 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 		group: "Thinking",
 		label: "Auto Thinking Ceiling",
 		description:
-			"Highest effort the `auto` classifier may resolve. `xhigh` keeps the classifier one tier below the top, so only an explicit `ultrathink` reaches `max`; `max` lets a turn the classifier judges exceptional bill the top tier on models that expose it.",
+			"Highest effort `auto` may resolve, from the classifier or the vendor default. `xhigh` keeps `auto` one tier below the top, so only an explicit `ultrathink` reaches `max`; `max` lets a turn the classifier judges exceptional, or a vendor default of `max`, bill the top tier on models that expose it.",
 		condition: "autoThinkingActive",
 		options: [
-			{ value: "xhigh", label: "xhigh", description: "Classifier stops at xhigh (default)" },
-			{ value: "max", label: "max", description: "Classifier may resolve max where the model supports it" },
+			{ value: "xhigh", label: "xhigh", description: "Auto stops at xhigh (default)" },
+			{ value: "max", label: "max", description: "Auto may resolve max where the model supports it" },
 		],
 	},
 });
