@@ -4,7 +4,7 @@ import * as rerankWire from "../../providers/rerank-server";
 import { rerank } from "../../rerank";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -13,7 +13,7 @@ import {
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 
 /** OpenRouter-compatible `POST /v1/rerank` gateway handler. */
-export async function handleRerank(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+export async function handleRerank(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
