@@ -2327,6 +2327,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
+			relaysWakeTurnOutput: () => this.#ircWakeTurnObserver !== undefined,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
 		};

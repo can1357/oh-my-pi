@@ -609,6 +609,7 @@ describe("IRC", () => {
 				isDisposed: () => false,
 				isStreaming: () => false,
 				planModeEnabled: () => false,
+				relaysWakeTurnOutput: () => observer !== undefined,
 				emitSessionEvent: async () => {},
 				wakeForIrc: wake,
 			} as unknown as IrcBridgeHost);
