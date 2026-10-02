@@ -114,7 +114,7 @@ Important edge behavior from runtime:
 
 - Unknown command responses echo the request `id` when one was provided.
 - Malformed JSON and synchronous dispatch failures emit `command: "parse"` without an `id`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
-- Ordinary `prompt` handling acknowledges without awaiting the agent run; `abort_and_prompt` first awaits the abort. Both may emit a later error response with the **same** id if asynchronous prompt dispatch fails. Skill-file loading and builtin slash-command handlers run before the acknowledgement, so not every prompt response is immediate.
+- Ordinary `prompt` handling acknowledges after the message is admitted (queued, given an idle turn slot, or routed to an extension command), not before native `input` handlers or image preparation finish, and without waiting for the agent run. `abort_and_prompt` first awaits the abort, then acknowledges. A failure before admission is the command's error response. A failure after admission can still emit a later error response with the same `id`.
 - An accepted `prompt` or `abort_and_prompt` completes exactly once: either its success response carries `data.agentInvoked: false` (finished locally), or a later `prompt_result` frame with the same `id` reports how its work ended. `prompt_result` is always written after the response for that `id`.
 
 ## Command Schema (canonical)
@@ -931,6 +931,7 @@ That means:
 - command acceptance != run completion
 - a prompt completes via `data.agentInvoked: false` on its response or via its own `prompt_result`
 - a run completes on an `agent_end` frame where `isTerminal !== false`; that frame carries no prompt identity, so correlate prompts through `prompt_result`
+- native `input` handlers run once, in submission order, before command, skill, or queue dispatch. Later input waits until the earlier submission is admitted, including an idle skill's vision description, and does not wait for its model turn. An `abort` cancels input received before it that is not yet admitted, even if that input is still in a hook. A successful `new_session`, `switch_session`, `branch` or `open_session` does the same for input received before it; a vetoed one cancels nothing, and input sent after the session change runs in the new session.
 - the session is done only at `session_settled`: background jobs can wake the agent after it yields
 
 ### While streaming

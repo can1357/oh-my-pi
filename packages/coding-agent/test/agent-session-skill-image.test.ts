@@ -10,8 +10,8 @@ import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { ONE_PIXEL_PNG as PNG, VISION_DESCRIPTION_SSE } from "./helpers/skill-image-vision";
 
-const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 const skill: Pick<CustomMessage, "customType" | "content" | "display" | "attribution" | "details"> = {
 	customType: "skill-prompt",
 	content: [
@@ -56,24 +56,6 @@ function setup(options: { responses?: MockResponseSource; beforeVisionReply?: ()
 		modelRegistry: registry,
 		toolRegistry: new Map(),
 	});
-	const chunk = (data: unknown) => `data: ${JSON.stringify(data)}\n\n`;
-	const body =
-		chunk({
-			id: "x",
-			object: "chat.completion.chunk",
-			created: 1,
-			model: "glm-5.3-flash",
-			choices: [{ index: 0, delta: { role: "assistant", content: "A red square." }, finish_reason: null }],
-		}) +
-		chunk({
-			id: "x",
-			object: "chat.completion.chunk",
-			created: 1,
-			model: "glm-5.3-flash",
-			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-			usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-		}) +
-		"data: [DONE]\n\n";
 	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
 		Object.assign(
 			async (input: string | URL | Request) => {
@@ -81,7 +63,10 @@ function setup(options: { responses?: MockResponseSource; beforeVisionReply?: ()
 				// such as auto-title generation on the anthropic endpoint pass straight through.
 				const url = input instanceof Request ? input.url : String(input);
 				if (url.endsWith("/chat/completions")) await options.beforeVisionReply?.();
-				return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+				return new Response(VISION_DESCRIPTION_SSE, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
 			},
 			{ preconnect: fetch.preconnect },
 		),
@@ -165,4 +150,24 @@ it("queues an image-bearing skill when another turn starts during vision preproc
 	);
 	expect(JSON.stringify(skillRequest?.context.messages)).toContain("other turn");
 	expectDescriptionBeforeSkill(skillRequest?.context.messages ?? []);
+});
+
+it("drops an image-bearing skill when aborted during vision preprocessing", async () => {
+	const visionStarted = Promise.withResolvers<void>();
+	const releaseVision = Promise.withResolvers<void>();
+	const { session, mock, visionCalls } = setup({
+		beforeVisionReply: async () => {
+			visionStarted.resolve();
+			await releaseVision.promise;
+		},
+	});
+	const skillDispatch = session.promptCustomMessage(skill);
+	await visionStarted.promise;
+	await session.abort();
+	releaseVision.resolve();
+	await skillDispatch;
+	await session.waitForIdle();
+	expect(visionCalls()).toBe(1);
+	expect(mock.calls.length).toBe(0);
+	expect(session.messages.length).toBe(0);
 });

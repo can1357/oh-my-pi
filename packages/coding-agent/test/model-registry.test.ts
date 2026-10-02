@@ -1657,6 +1657,60 @@ describe("ModelRegistry", () => {
 			expect(headers?.["X-Model"]).toBeUndefined();
 		});
 
+		test.each([
+			["provider headers", "provider", true, { "X-Shared": "provider" }],
+			["model override headers", "modelOverride", true, { "X-Shared": "model", "X-Model": "model" }],
+			["runtime provider headers", "runtimeProvider", true, { "X-Shared": "runtime", "X-Runtime": "runtime" }],
+			["provider headers (lazy catalog)", "provider", false, { "X-Shared": "provider" }],
+			["model override headers (lazy catalog)", "modelOverride", false, { "X-Shared": "model", "X-Model": "model" }],
+			[
+				"runtime provider headers (lazy catalog)",
+				"runtimeProvider",
+				false,
+				{ "X-Shared": "runtime", "X-Runtime": "runtime" },
+			],
+		] as const)("refreshes keep discovered %s one resolver deep", async (_name, scenario, materialized, expected) => {
+			writeRawModelsJson({
+				proxy: {
+					baseUrl: "https://proxy.example/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					headers: { "X-Shared": "provider", "X-Provider": "provider" },
+					discovery: { type: "openai-models-list" },
+					models: [],
+					...(scenario === "modelOverride"
+						? { modelOverrides: { "gpt-5": { headers: { "X-Shared": "model", "X-Model": "model" } } } }
+						: {}),
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("https://proxy.example/v1/models", ["gpt-5"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			if (materialized) registry.getAll();
+			if (scenario === "runtimeProvider") {
+				registry.registerProvider("proxy", { headers: { "X-Shared": "runtime", "X-Runtime": "runtime" } });
+			}
+			// Every nested resolver layer re-resolves its sources, each behind one
+			// abort listener; the count is the resolver's depth.
+			const resolveCountingListeners = async () => {
+				const model = registry.find("proxy", "gpt-5");
+				const controller = new AbortController();
+				const addEventListener = spyOn(controller.signal, "addEventListener");
+				const headers = await model?.resolveHeaders?.(controller.signal);
+				return { headers, listeners: addEventListener.mock.calls.length };
+			};
+
+			await registry.refreshProvider("proxy", "online");
+			const first = await resolveCountingListeners();
+			for (let refresh = 0; refresh < 5; refresh++) {
+				await registry.refreshProvider("proxy", "online");
+			}
+			const sixth = await resolveCountingListeners();
+
+			expect(first.headers).toMatchObject({ ...expected, "X-Provider": "provider" });
+			expect(sixth.headers).toEqual(first.headers);
+			expect(sixth.listeners).toBe(first.listeners);
+		});
+
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
 			const model = minimaxReplace.find("minimax-code", "MiniMax-M2.5");
 			const compat = getOpenAICompat(model);

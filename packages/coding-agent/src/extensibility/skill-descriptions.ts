@@ -1,7 +1,8 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type Api, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getAgentDir, isBunTestRuntime, logger, postmortem, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, parseModelPattern, resolveRoleSelection } from "../config/model-resolver";
@@ -19,11 +20,15 @@ const compressionSlots = new Semaphore(4);
 
 export type SkillDescriptionCompressor = (name: string, description: string, request: string) => Promise<string>;
 
-/** Resolve the configured fast role for each background request, without using the foreground model. */
+/**
+ * Resolve the configured fast role for each background request, without using the foreground model.
+ * `getTelemetry` supplies the telemetry handle for each request's chat span.
+ */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	getTelemetry?: () => AgentTelemetry | undefined,
 ): SkillDescriptionCompressor {
 	return async (_name, _description, request) => {
 		const available = registry.getAvailable();
@@ -44,7 +49,7 @@ export function createSkillDescriptionCompressor(
 		const { model } = selected;
 		const apiKey = await registry.getApiKey(model, sessionId);
 		if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
-		const response = await completeSimple(
+		const response = await instrumentedCompleteSimple(
 			model,
 			{
 				messages: [{ role: "user", content: request, timestamp: Date.now() }],
@@ -57,6 +62,7 @@ export function createSkillDescriptionCompressor(
 				temperature: 0,
 				signal: AbortSignal.timeout(30_000),
 			},
+			{ telemetry: getTelemetry?.(), oneshotKind: "skill_description" },
 		);
 		if (response.stopReason !== "stop") {
 			throw new Error(`Model stopped: ${response.stopReason} ${response.errorMessage ?? ""}`);

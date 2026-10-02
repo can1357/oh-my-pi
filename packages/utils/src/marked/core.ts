@@ -1,3 +1,13 @@
+import {
+	CloserIndexes,
+	canCloseDelimiter,
+	canOpenDelimiter,
+	escapedAt,
+	InlineClosers,
+	PUNCTUATION,
+} from "./inline-closers";
+import { TextRun, TextStops } from "./inline-text";
+
 /** Token shapes emitted by the Markdown lexer. */
 export namespace Tokens {
 	/** A block quote. */
@@ -237,6 +247,16 @@ export type TokensList = Token[] & { links: Links };
 /** Context supplied to extension tokenizers. */
 export interface TokenizerThis {
 	lexer: Lexer;
+	/**
+	 * For an inline tokenizer, the whole inline source, such as a paragraph's text. The `src` it receives is the part
+	 * of it before `end` that starts at `end - src.length`: inside a link label or the text of emphasis, `end` is where
+	 * that text ends, right before its closer, and a token there must not reach past it. Inline tokenizers get one
+	 * context object per inline source, the same for every call while the lexer works through it and the labels and
+	 * emphasis inside it, so a tokenizer can keep state for it in a `WeakMap`.
+	 */
+	source?: string;
+	/** For an inline tokenizer, where the text the lexer works through ends in `source` (see `source`). */
+	end?: number;
 }
 /** A tokenizer extension callback. */
 export type TokenizerExtensionFunction = (
@@ -246,11 +266,25 @@ export type TokenizerExtensionFunction = (
 ) => Tokens.Generic | undefined;
 /** A tokenizer extension start hint. */
 export type TokenizerStartFunction = (this: TokenizerThis, src: string) => number | void;
+/**
+ * An offset form of a start hint: the first index at or after `from` in `src` where the extension's tokenizer could
+ * match, or `undefined` (not -1) when there is none; anything else below `from` throws. The test at each index must
+ * read `src` only from that index on, so the answer for `from` is also the answer for every later offset up to it,
+ * and must still pass where `src` goes on past its end: for a link label or the text of emphasis, the lexer asks on
+ * the inline source it lies in, then asks again on the label or text at the index it got, if that lies inside.
+ */
+export type TokenizerStartFromFunction = (this: TokenizerThis, src: string, from: number) => number | undefined;
 /** An inline or block tokenizer extension. */
 export interface TokenizerExtension {
 	name: string;
 	level: "block" | "inline";
 	start?: TokenizerStartFunction;
+	/**
+	 * Replaces `start` for inline text when present. Inline lexing calls it on the whole inline source and reuses
+	 * the answer until lexing passes it, inside link labels and emphasis too, instead of calling `start` on the rest
+	 * of the source at every text step, so a hint that stops at its answer keeps a long paragraph linear.
+	 */
+	startFrom?: TokenizerStartFromFunction;
 	tokenizer: TokenizerExtensionFunction;
 	childTokens?: string[];
 }
@@ -341,7 +375,6 @@ const DEFAULTS: MarkedOptions = {
 	walkTokens: null,
 	extensions: null,
 };
-const PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/;
 
 function tokenList(links: Links = Object.create(null)): TokensList {
 	const list = [] as unknown as TokensList;
@@ -379,80 +412,33 @@ function escapeHtml(value: string, encode = true): string {
 	return out;
 }
 
-function findClosingBracket(src: string, start: number, open: string, close: string): number {
-	let depth = 0;
-	for (let i = start; i < src.length; i++) {
-		if (src[i] === "\\") {
-			i++;
-			continue;
-		}
-		if (src[i] === open) depth++;
-		else if (src[i] === close) {
-			if (depth === 0) return i;
-			depth--;
-		}
-	}
-	return -1;
-}
-
 function findDelimiter(src: string, delimiter: string, from: number): number {
 	let at = src.indexOf(delimiter, from);
-	while (at !== -1) {
-		let escapes = 0;
-		for (let i = at - 1; i >= 0 && src[i] === "\\"; i--) escapes++;
-		if (escapes % 2 === 0) return at;
-		at = src.indexOf(delimiter, at + delimiter.length);
-	}
-	return -1;
+	while (at !== -1 && escapedAt(src, at)) at = src.indexOf(delimiter, at + delimiter.length);
+	return at;
 }
 
-function canOpenDelimiter(src: string, index: number, width: number, marker: string, previous = "\n"): boolean {
-	const before = index === 0 ? previous : src[index - 1]!;
-	if (index === 0 && before === marker) return false;
-	const after = src[index + width];
-	if (after === undefined || /\s/.test(after)) return false;
-	if (marker === "_" && /[\p{L}\p{N}]/u.test(before) && /[\p{L}\p{N}]/u.test(after)) return false;
-	return true;
+/**
+ * The autolink at the start of `src`, a suffix of `closers`' source: "<", a URL or an address, ">". A URL runs from its
+ * scheme to the first " " or ">", which must be a ">"; an address holds no " ", "<", ">" or second "@". An address
+ * that matches after a scheme ends where the URL does, so only the URL is tried there.
+ */
+function autolinkPrefix(src: string, closers: InlineClosers): string | undefined {
+	const scheme = /^<(?:https?:\/\/|ftp:\/\/)/i.exec(src);
+	if (!scheme) return /^<[^ <>@]+@[^ <>@]+>/.exec(src)?.[0];
+	const close = closers.closeUrlAutolink(src, scheme[0].length);
+	return close === -1 ? undefined : src.slice(0, close + 1);
 }
 
-function canCloseDelimiter(src: string, index: number, marker: string): boolean {
-	const before = src[index - 1];
-	const after = src[index + 1] ?? "\n";
-	if (before === undefined || /\s/.test(before)) return false;
-	if (marker === "_" && /[\p{L}\p{N}]/u.test(before) && /[\p{L}\p{N}]/u.test(after)) return false;
-	return !PUNCTUATION.test(before) || /\s/.test(after) || PUNCTUATION.test(after);
-}
-function inlineHtmlPrefix(src: string): string | undefined {
+/** The inline HTML (a tag or a comment) at the start of `src`, a suffix of `closers`' source, or `undefined`. */
+function inlineHtmlPrefix(src: string, closers: InlineClosers): string | undefined {
 	if (src.startsWith("<!--")) {
-		const end = src.indexOf("-->", 4);
+		const end = closers.closeComment(src);
 		return end === -1 ? undefined : src.slice(0, end + 3);
 	}
 	if (!/^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>)/.test(src)) return undefined;
-	let quote = "";
-	for (let i = 1; i < src.length; i++) {
-		const char = src[i]!;
-		if (quote !== "") {
-			if (char === quote) quote = "";
-			continue;
-		}
-		if (char === '"' || char === "'") {
-			quote = char;
-			continue;
-		}
-		if (char === ">") return src.slice(0, i + 1);
-	}
-	return undefined;
-}
-
-function appendText(tokens: Token[], raw: string, text = raw, escaped = false): void {
-	if (raw === "") return;
-	const previous = tokens.at(-1);
-	if (previous?.type === "text" && previous.tokens === undefined && previous.escaped === escaped) {
-		previous.raw += raw;
-		previous.text += text;
-		return;
-	}
-	tokens.push({ type: "text", raw, text, escaped });
+	const end = closers.closeTag(src);
+	return end === -1 ? undefined : src.slice(0, end + 1);
 }
 
 /** Tokenizes the built-in inline Markdown surface. */
@@ -473,15 +459,60 @@ export class Tokenizer {
 	}
 }
 
-function matchLink(src: string, lexer: Lexer): Tokens.Link | Tokens.Image | undefined {
+// A nested inline source (a link label, the text of emphasis) shares the closers, text stops and tokenizer context of
+// the source it lies in, which are offered to the next inline lex on that lexer. They are offered for the call that
+// lexes the nested source through `lexer.inlineTokens`, which a subclass may override; the first lex that call
+// reaches takes them if it lexes exactly that string, or else starts a root source.
+let offered: { lexer: Lexer; nested: NestedMatch; outer: InlineLex } | undefined;
+
+/** Starts the lex of `src` on `lexer`: of the nested source offered for it, else of a root source. Clears the offer. */
+function openInlineSource(src: string, lexer: Lexer, output: Token[]): InlineLex {
+	const offer = offered;
+	offered = undefined;
+	const shared = offer?.lexer === lexer && offer.nested.src === src ? offer : undefined;
+	const closers = shared ? shared.nested.closers : new InlineClosers(new CloserIndexes(src), src.length);
+	return {
+		src,
+		lexer,
+		output,
+		closers,
+		stops: shared ? shared.outer.stops.nested(src, closers.end) : new TextStops(src, lexer),
+		textRun: new TextRun(src),
+		context: shared ? shared.outer.context : { lexer, source: src, end: src.length },
+		rest: src,
+	};
+}
+
+/**
+ * Whether any label can resolve in `links`. The map every lexer starts with has no prototype, so it resolves none
+ * until a definition is added.
+ */
+function hasDefinitions(links: Links): boolean {
+	if (Object.getPrototypeOf(links) !== null) return true;
+	for (const _label in links) return true;
+	return false;
+}
+
+/**
+ * A link, image, emphasis or strong emphasis token whose `tokens` are still to be lexed from `src`, a part of the
+ * source that shares `closers`. `inlineTokens` lexes it once the rule that matched it has returned.
+ */
+interface NestedMatch {
+	token: Tokens.Link | Tokens.Image | Tokens.Em | Tokens.Strong;
+	src: string;
+	closers: InlineClosers;
+}
+
+/** Matches a link or image at the start of `src`, a suffix of `closers`' source. */
+function matchLink(src: string, lexer: Lexer, closers: InlineClosers): NestedMatch | undefined {
 	const image = src.startsWith("![");
 	if (!(image || src.startsWith("["))) return undefined;
 	const labelStart = image ? 2 : 1;
-	const labelEnd = findClosingBracket(src, labelStart, "[", "]");
+	const labelEnd = closers.closeSquare(src, labelStart);
 	if (labelEnd === -1) return undefined;
 	const label = src.slice(labelStart, labelEnd);
 	if (src[labelEnd + 1] === "(") {
-		const destinationEnd = findClosingBracket(src, labelEnd + 2, "(", ")");
+		const destinationEnd = closers.closeRound(src, labelEnd + 2);
 		if (destinationEnd === -1) return undefined;
 		const inside = src.slice(labelEnd + 2, destinationEnd).trim();
 		let href = inside;
@@ -491,31 +522,92 @@ function matchLink(src: string, lexer: Lexer): Tokens.Link | Tokens.Image | unde
 		href = cleanUrl(titleMatch[1]!);
 		title = titleMatch[2] ?? titleMatch[3] ?? titleMatch[4] ?? null;
 		const raw = src.slice(0, destinationEnd + 1);
-		const tokens = lexer.inlineTokens(label);
-		return image
-			? { type: "image", raw, href, title, text: unescapeMarkdown(label), tokens }
-			: { type: "link", raw, href, title, text: label, tokens };
+		// An image's text is its label unescaped. Nested images each unescape their label, so a label without an escape
+		// is taken as it is instead of read again.
+		return {
+			token: image
+				? {
+						type: "image",
+						raw,
+						href,
+						title,
+						text: closers.escapeWithin(src, labelStart, labelEnd) ? unescapeMarkdown(label) : label,
+						tokens: [],
+					}
+				: { type: "link", raw, href, title, text: label, tokens: [] },
+			src: label,
+			closers: closers.nested(src, labelEnd),
+		};
 	}
 	let rawEnd = labelEnd + 1;
-	let ref = label;
+	let refStart = labelStart;
+	let refEnd = labelEnd;
 	if (src[rawEnd] === "[") {
-		const refEnd = findClosingBracket(src, rawEnd + 1, "[", "]");
-		if (refEnd === -1) return undefined;
-		ref = src.slice(rawEnd + 1, refEnd) || label;
-		rawEnd = refEnd + 1;
+		const end = closers.closeSquare(src, rawEnd + 1);
+		if (end === -1) return undefined;
+		if (end > rawEnd + 1) {
+			refStart = rawEnd + 1;
+			refEnd = end;
+		}
+		rawEnd = end + 1;
 	}
-	const def = lexer.tokens.links[ref.replace(/\s+/g, " ").toLowerCase()];
+	// Definition labels come from `[^\]]+`, so a reference holding an unescaped "]" names none. Skip normalizing it,
+	// and every reference while there are no definitions.
+	const links = lexer.tokens.links;
+	if (!hasDefinitions(links) || closers.squareCloserWithin(src, refStart, refEnd)) return undefined;
+	const def = links[src.slice(refStart, refEnd).replace(/\s+/g, " ").toLowerCase()];
 	if (!def) return undefined;
 	const raw = src.slice(0, rawEnd);
-	const tokens = lexer.inlineTokens(label);
-	return image
-		? { type: "image", raw, href: def.href, title: def.title ?? null, text: unescapeMarkdown(label), tokens }
-		: { type: "link", raw, href: def.href, title: def.title ?? null, text: label, tokens };
+	return {
+		token: image
+			? {
+					type: "image",
+					raw,
+					href: def.href,
+					title: def.title ?? null,
+					text: closers.escapeWithin(src, labelStart, labelEnd) ? unescapeMarkdown(label) : label,
+					tokens: [],
+				}
+			: { type: "link", raw, href: def.href, title: def.title ?? null, text: label, tokens: [] },
+		src: label,
+		closers: closers.nested(src, labelEnd),
+	};
+}
+
+/** Matches emphasis or strong emphasis at the start of `rest`, a suffix of `closers`' source, lexed after `output`. */
+function matchEmphasis(rest: string, output: Token[], closers: InlineClosers): NestedMatch | undefined {
+	const marker = rest[0];
+	const previous = output.at(-1)?.raw.at(-1) ?? "\n";
+	if (marker !== "*" && marker !== "_") return undefined;
+	if (rest.startsWith(marker.repeat(3)) && canOpenDelimiter(rest, 0, 3, marker, previous)) {
+		const end = findDelimiter(rest, marker.repeat(3), 3);
+		if (end !== -1 && canCloseDelimiter(rest, end, marker)) {
+			// The text between the delimiters inside the outer two markers of each: `**inner**`.
+			const text = rest.slice(1, end + 2);
+			return {
+				token: { type: "em", raw: rest.slice(0, end + 3), text, tokens: [] },
+				src: text,
+				closers: closers.nested(rest, end + 2),
+			};
+		}
+	}
+	const width = rest[1] === marker ? 2 : 1;
+	if (!canOpenDelimiter(rest, 0, width, marker, previous)) return undefined;
+	const end = closers.closeEmphasis(rest, marker, width);
+	if (end === -1) return undefined;
+	const raw = rest.slice(0, end + width);
+	const text = rest.slice(width, end);
+	return {
+		token: width === 2 ? { type: "strong", raw, text, tokens: [] } : { type: "em", raw, text, tokens: [] },
+		src: text,
+		closers: closers.nested(rest, end),
+	};
 }
 
 function trimBareUrl(candidate: string): string {
-	let out = candidate;
-	while (/[.,:;!?]$/.test(out)) out = out.slice(0, -1);
+	let end = candidate.length;
+	while (end > 0 && ".,:;!?".includes(candidate[end - 1]!)) end--;
+	let out = candidate.slice(0, end);
 	let opens = 0;
 	let closes = 0;
 	for (const char of out) {
@@ -529,12 +621,43 @@ function trimBareUrl(candidate: string): string {
 	return out;
 }
 
-function inlineTokens(src: string, lexer: Lexer, output: Token[] = []): Token[] {
-	let rest = src;
+/** The lex of one inline source, carried across the nested sources lexed inside it. */
+interface InlineLex {
+	readonly src: string;
+	readonly lexer: Lexer;
+	readonly output: Token[];
+	readonly closers: InlineClosers;
+	readonly stops: TextStops;
+	readonly textRun: TextRun;
+	readonly context: TokenizerThis;
+	/** The part of `src` not lexed yet, always a suffix of it. */
+	rest: string;
+}
+
+// Each level of nested links or emphasis keeps only this loop's small frame on the stack while the level inside it
+// is lexed: the rules run in `lexToNested`, which returns each link, image or emphasis before its content is lexed.
+function inlineTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
+	const lex = openInlineSource(src, lexer, output);
+	for (let nested = lexToNested(lex); nested; nested = lexToNested(lex)) {
+		offered = { lexer, nested, outer: lex };
+		nested.token.tokens = lexer.inlineTokens(nested.src);
+		// An override that returned without lexing the text leaves its offer to no later lex of an equal string.
+		offered = undefined;
+		output.push(nested.token);
+	}
+	return output;
+}
+
+/** Lexes `lex.rest` up to the next link, image or emphasis, which it returns with `lex.rest` past it, or to its end. */
+function lexToNested(lex: InlineLex): NestedMatch | undefined {
+	const { src, lexer, output, closers, stops, textRun, context } = lex;
+	// The context is shared with the sources nested in this one, which move its end while they are lexed.
+	context.end = closers.end;
+	let rest = lex.rest;
 	while (rest !== "") {
 		let custom: Tokens.Generic | undefined;
 		for (const extension of lexer.extensions.inline) {
-			custom = extension.tokenizer.call({ lexer }, rest, output);
+			custom = extension.tokenizer.call(context, rest, output);
 			if (custom?.raw) break;
 		}
 		if (custom?.raw) {
@@ -556,81 +679,35 @@ function inlineTokens(src: string, lexer: Lexer, output: Token[] = []): Token[] 
 			continue;
 		}
 		if (rest[0] === "`") {
-			const opener = /^`+/.exec(rest)![0];
-			const end = findDelimiter(rest, opener, opener.length);
+			const width = closers.codeOpenerWidth(rest);
+			const end = closers.closeCode(rest, width);
 			if (end !== -1) {
-				const raw = rest.slice(0, end + opener.length);
-				let text = rest.slice(opener.length, end).replace(/\n/g, " ");
+				const raw = rest.slice(0, end + width);
+				let text = rest.slice(width, end).replace(/\n/g, " ");
 				if (/^ .* $/.test(text) && text.trim() !== "") text = text.slice(1, -1);
 				output.push({ type: "codespan", raw, text });
 				rest = rest.slice(raw.length);
 				continue;
 			}
 		}
-		const auto = /^<((?:https?:\/\/|ftp:\/\/)[^ >]+|[^ <>@]+@[^ <>@]+)>/i.exec(rest);
+		const auto = autolinkPrefix(rest, closers);
 		if (auto) {
-			const text = auto[1]!;
+			const text = auto.slice(1, -1);
 			const href = text.includes("@") && !/^[a-z][a-z+.-]*:\/\//i.test(text) ? `mailto:${text}` : text;
-			output.push({ type: "link", raw: auto[0], text, href, tokens: [{ type: "text", raw: text, text }] });
-			rest = rest.slice(auto[0].length);
+			output.push({ type: "link", raw: auto, text, href, tokens: [{ type: "text", raw: text, text }] });
+			rest = rest.slice(auto.length);
 			continue;
 		}
-		const html = inlineHtmlPrefix(rest);
+		const html = inlineHtmlPrefix(rest, closers);
 		if (html) {
 			output.push({ type: "html", raw: html, inLink: false, inRawBlock: false, block: false, text: html });
 			rest = rest.slice(html.length);
 			continue;
 		}
-		const link = matchLink(rest, lexer);
-		if (link) {
-			output.push(link);
-			rest = rest.slice(link.raw.length);
-			continue;
-		}
-
-		const marker = rest[0];
-		const previous = output.at(-1)?.raw.at(-1) ?? "\n";
-		if (
-			(marker === "*" || marker === "_") &&
-			rest.startsWith(marker.repeat(3)) &&
-			canOpenDelimiter(rest, 0, 3, marker, previous)
-		) {
-			const end = findDelimiter(rest, marker.repeat(3), 3);
-			if (end !== -1 && canCloseDelimiter(rest, end, marker)) {
-				const raw = rest.slice(0, end + 3);
-				const inner = rest.slice(3, end);
-				const text = `${marker.repeat(2)}${inner}${marker.repeat(2)}`;
-				output.push({ type: "em", raw, text, tokens: lexer.inlineTokens(text) });
-				rest = rest.slice(raw.length);
-				continue;
-			}
-		}
-		if (
-			(marker === "*" || marker === "_") &&
-			canOpenDelimiter(rest, 0, rest[1] === marker ? 2 : 1, marker, previous)
-		) {
-			const width = rest[1] === marker ? 2 : 1;
-			const delimiter = marker.repeat(width);
-			let end = findDelimiter(rest, delimiter, width);
-			let nested = 0;
-			while (end !== -1) {
-				if (!canCloseDelimiter(rest, end, marker) && canOpenDelimiter(rest, end, width, marker)) {
-					nested++;
-				} else if (canCloseDelimiter(rest, end, marker) && nested > 0) {
-					nested--;
-				} else if (canCloseDelimiter(rest, end, marker)) {
-					break;
-				}
-				end = findDelimiter(rest, delimiter, end + width);
-			}
-			if (end !== -1) {
-				const raw = rest.slice(0, end + width);
-				const text = rest.slice(width, end);
-				const tokens = lexer.inlineTokens(text);
-				output.push(width === 2 ? { type: "strong", raw, text, tokens } : { type: "em", raw, text, tokens });
-				rest = rest.slice(raw.length);
-				continue;
-			}
+		const nested = matchLink(rest, lexer, closers) ?? matchEmphasis(rest, output, closers);
+		if (nested) {
+			lex.rest = rest.slice(nested.token.raw.length);
+			return nested;
 		}
 		if (rest.startsWith("~~")) {
 			let del: Tokens.Del | undefined | false;
@@ -643,14 +720,17 @@ function inlineTokens(src: string, lexer: Lexer, output: Token[] = []): Token[] 
 				continue;
 			}
 		}
+		// `rest` is always a suffix of `src`, so its offset follows from the lengths.
+		const pos = src.length - rest.length;
 		let url: Tokens.Link | undefined | false;
 		const urlOverride = lexer.tokenizerOverrides.url;
 		if (urlOverride) url = urlOverride.call(lexer.tokenizer, rest);
 		if (!urlOverride || url === false) {
-			const match =
-				/^(?:(?:https?:\/\/|ftp:\/\/|www\.)[^\s<]+|[A-Za-z0-9._+-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)/i.exec(
-					rest,
-				);
+			const match = stops.bareUrlCanStart(pos)
+				? /^(?:(?:https?:\/\/|ftp:\/\/|www\.)[^\s<]+|[A-Za-z0-9._+-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)/i.exec(
+						rest,
+					)
+				: null;
 			if (match) {
 				const text = trimBareUrl(match[0]);
 				const href =
@@ -668,24 +748,12 @@ function inlineTokens(src: string, lexer: Lexer, output: Token[] = []): Token[] 
 			continue;
 		}
 
-		let next = rest.length;
-		for (const char of ["\\", "`", "<", "[", "!", "*", "_", "~", "\n"]) {
-			const at = rest.indexOf(char, 1);
-			if (at !== -1 && at < next) next = at;
-		}
-		const urlAt = /(?:https?:\/\/|ftp:\/\/|www\.|[A-Za-z0-9._+-]+@)/i.exec(rest.slice(1));
-		if (urlAt && urlAt.index + 1 < next) next = urlAt.index + 1;
-		const hardBreak = /(?: {2,}|\\)\n/.exec(rest.slice(1));
-		if (hardBreak && hardBreak.index + 1 < next) next = hardBreak.index + 1;
-		for (const extension of lexer.extensions.inline) {
-			const at = extension.start?.call({ lexer }, rest);
-			if (typeof at === "number" && at > 0 && at < next) next = at;
-		}
-		if (next === 0) next = 1;
-		appendText(output, rest.slice(0, next));
+		const next = stops.textLength(rest);
+		textRun.append(output, pos, pos + next);
 		rest = rest.slice(next);
 	}
-	return output;
+	lex.rest = rest;
+	return undefined;
 }
 
 function splitTableRow(line: string): string[] {

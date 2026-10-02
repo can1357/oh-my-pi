@@ -357,6 +357,16 @@ behavior {
 	pricing-peer provider="xai-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
 	}
+	// Token Plan rows report zero cost upstream; like the Antigravity and
+	// SuperGrok rules above, they show the pay-as-you-go equivalent (Credits
+	// overflow is billed at the PAYG list price). MiniMax-M3.1-Flash-Preview has
+	// no published price and borrows the MiniMax-M3 rate as an estimate.
+	pricing-peer provider="minimax-code" peers="minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
+	}
+	pricing-peer provider="minimax-code-cn" peers="minimax-cn" "minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
+	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"
 }
