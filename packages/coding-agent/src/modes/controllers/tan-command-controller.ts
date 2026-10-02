@@ -168,6 +168,12 @@ export class TanCommandController {
 							parentAgentId: ownerId,
 							agentRegistry,
 							disableExtensionDiscovery: true,
+							// The clone runs in the parent's cwd (which is the parent's
+							// isolation worktree when the parent is isolated) and carries the
+							// parent's full tool set — including `task`. Inherit the gate
+							// marker so the clone's own spawns stay gated by
+							// `task.isolation.allowNested`.
+							isIsolated: session.isIsolated === true,
 							// `[]` is truthy and would make the child pick bindPreparedExtensions([])
 							// over a populated path fallback, so collapse an empty list to undefined.
 							preloadedPreparedExtensions: parentPreparedExtensions?.length
@@ -182,6 +188,10 @@ export class TanCommandController {
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
 							tools: clone.getEnabledToolNames(),
+							// Keep the nested-isolation gate marker with the clone: a
+							// parked tan clone cold-revives from this entry, and without
+							// isIsolated the revived clone would offer nested isolation.
+							isIsolated: session.isIsolated === true,
 						});
 						const abortClone = () => {
 							void clone?.abort();

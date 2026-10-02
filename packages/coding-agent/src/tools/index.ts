@@ -322,6 +322,8 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Whether this session runs inside an isolation worktree (nested isolation gate). */
+	isIsolated?: boolean;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
