@@ -107,11 +107,7 @@ export class SimulatedBrowserFixture {
 		return tab;
 	}
 
-	emitCdpEvent(
-		source: { tabId?: number; sessionId?: string },
-		method: string,
-		params: Record<string, unknown>,
-	): void {
+	emitCdpEvent(source: { tabId?: number; sessionId?: string }, method: string, params: Record<string, unknown>): void {
 		for (const listener of this.cdpEventListeners) {
 			listener(source, method, params);
 		}
@@ -191,22 +187,14 @@ export class SimulatedBrowserFixture {
 				tab.url = targetUrl;
 			}
 
-			this.emitCdpEvent(
-				target,
-				"Page.frameNavigated",
-				{
-					frame: {
-						id: tab.rootFrameId,
-						loaderId: newLoaderId,
-						url: targetUrl,
-					},
+			this.emitCdpEvent(target, "Page.frameNavigated", {
+				frame: {
+					id: tab.rootFrameId,
+					loaderId: newLoaderId,
+					url: targetUrl,
 				},
-			);
-			this.emitCdpEvent(
-				target,
-				"Page.loadEventFired",
-				{ timestamp: Date.now() / 1000 },
-			);
+			});
+			this.emitCdpEvent(target, "Page.loadEventFired", { timestamp: Date.now() / 1000 });
 
 			return Promise.resolve({
 				frameId: tab.rootFrameId,
@@ -243,22 +231,18 @@ export class SimulatedBrowserFixture {
 				// Target specific frame from contextId or explicit frameId
 				const contextId = typeof params?.contextId === "number" ? params.contextId : undefined;
 				const contextMapping = contextId ? this.contextToFrame.get(contextId) : undefined;
-				const targetFrameId = contextMapping?.frameId ??
-					(typeof params?.frameId === "string" ? params.frameId : tab.rootFrameId);
+				const targetFrameId =
+					contextMapping?.frameId ?? (typeof params?.frameId === "string" ? params.frameId : tab.rootFrameId);
 
 				const targetChild = tab.childFrames.find(cf => cf.id === targetFrameId);
 
 				if (targetChild) {
 					const childBase = targetChild.url.split("#")[0];
 					targetChild.url = childBase + targetHash;
-					this.emitCdpEvent(
-						target,
-						"Page.navigatedWithinDocument",
-						{
-							frameId: targetChild.id,
-							url: targetChild.url,
-						},
-					);
+					this.emitCdpEvent(target, "Page.navigatedWithinDocument", {
+						frameId: targetChild.id,
+						url: targetChild.url,
+					});
 					return Promise.resolve({
 						result: {
 							type: "string",
@@ -271,14 +255,10 @@ export class SimulatedBrowserFixture {
 				tab.url = base + targetHash;
 
 				// Emulate Chrome's native Page.navigatedWithinDocument
-				this.emitCdpEvent(
-					target,
-					"Page.navigatedWithinDocument",
-					{
-						frameId: tab.rootFrameId,
-						url: tab.url,
-					},
-				);
+				this.emitCdpEvent(target, "Page.navigatedWithinDocument", {
+					frameId: tab.rootFrameId,
+					url: tab.url,
+				});
 
 				return Promise.resolve({
 					result: {
@@ -617,10 +597,7 @@ export class WorkerTestHarness {
 		}
 	}
 
-	async sendRpc(
-		rpc: { op: string; [key: string]: unknown },
-		timeoutMs = 2500,
-	): Promise<WorkerRpcResult> {
+	async sendRpc(rpc: { op: string; [key: string]: unknown }, timeoutMs = 2500): Promise<WorkerRpcResult> {
 		const id = ++this.#rpcSeq;
 		const { promise, resolve, reject } = Promise.withResolvers<WorkerRpcResult>();
 		this.#rpcDeferreds.set(id, { resolve, reject });
@@ -651,10 +628,7 @@ function getBundledWorkerSource(): string {
 	if (process.env.TEST_WORKER_SOURCE_FILE && fs.existsSync(process.env.TEST_WORKER_SOURCE_FILE)) {
 		return fs.readFileSync(process.env.TEST_WORKER_SOURCE_FILE, "utf-8");
 	}
-	const assetPath = path.resolve(
-		import.meta.dir,
-		"../../src/tools/browser/relay/extension-assets/background.js.txt",
-	);
+	const assetPath = path.resolve(import.meta.dir, "../../src/tools/browser/relay/extension-assets/background.js.txt");
 	if (!fs.existsSync(assetPath)) {
 		throw new Error(`Extension asset background.js.txt not found at ${assetPath}`);
 	}
@@ -795,9 +769,7 @@ describe("Browser relay worker navigation behavioral regression", () => {
 		const navCommandIndex = fixture.cdpCommands.findIndex(
 			c => c.method === "Page.navigate" && c.params.url === "about:blank",
 		);
-		const evalCommandIndex = fixture.cdpCommands.findIndex(
-			c => c.method === "Runtime.evaluate",
-		);
+		const evalCommandIndex = fixture.cdpCommands.findIndex(c => c.method === "Runtime.evaluate");
 		expect(navCommandIndex).toBeGreaterThanOrEqual(0);
 		expect(evalCommandIndex).toBeGreaterThan(navCommandIndex);
 	});
