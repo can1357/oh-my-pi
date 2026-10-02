@@ -417,6 +417,12 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/**
+	 * The model patterns are the parent's live selector without a requested
+	 * level, so a `:level` on them is inherited effort that {@link thinkingLevel}
+	 * outranks rather than a level the caller asked for.
+	 */
+	modelInheritsLiveThinkingLevel?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -4028,8 +4034,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			// The parent's live effort rides inherited selectors (and the auth
+			// fallback) as a `:level` suffix; it ranks below the agent definition's
+			// own level so inheriting the parent's model does not override it.
+			const inheritedThinkingLevel =
+				explicitThinkingLevel && (authFallbackUsed || options.modelInheritsLiveThinkingLevel === true);
+			const requestedThinkingLevel =
+				explicitThinkingLevel && !inheritedThinkingLevel ? resolvedThinkingLevel : undefined;
+			// Precedence: caller `effort` > requested `:level` suffix on the resolved
+			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// inherited parent effort / pattern-derived level.
+			const effectiveThinkingLevel = effortLevel ?? requestedThinkingLevel ?? thinkingLevel ?? resolvedThinkingLevel;
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				const displayLevel =
+					effortLevel ?? requestedThinkingLevel ?? (inheritedThinkingLevel ? effectiveThinkingLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
@@ -4037,11 +4055,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManagerPromise = sessionFile
