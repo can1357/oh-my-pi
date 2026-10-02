@@ -224,6 +224,28 @@ describe("learned-lesson read-back", () => {
 		expect(nextOut).toContain("Active-session lesson");
 	});
 
+	it("keeps the active session snapshot when startup writes a new summary after the first prompt went out", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const session = {
+			sessionManager: { getSessionFile: () => "session-active-startup.jsonl" },
+			agent: { state: { messages: [{ role: "user" }] } },
+		};
+		const root = getMemoryRoot(agentDir, settings.getCwd());
+		await Bun.write(path.join(root, "memory_summary.md"), "Original guidance");
+		const initial = await buildMemoryToolDeveloperInstructions(agentDir, settings, session);
+		expect(initial ?? "").toContain("Original guidance");
+
+		await Bun.write(path.join(root, "memory_summary.md"), "Updated guidance");
+		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(session, agentDir, settings);
+
+		const active = await buildMemoryToolDeveloperInstructions(agentDir, settings, session);
+		expect(active ?? "").toContain("Original guidance");
+		expect(active ?? "").not.toContain("Updated guidance");
+		const nextSession = sessionWithFile("session-next-startup.jsonl");
+		const next = await buildMemoryToolDeveloperInstructions(agentDir, settings, nextSession);
+		expect(next ?? "").toContain("Updated guidance");
+	});
+
 	it("injects both the summary and lessons when both exist", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const root = getMemoryRoot(agentDir, settings.getCwd());
@@ -344,10 +366,6 @@ describe("learn tool (local backend)", () => {
 		};
 	}
 
-	it("createIf returns a tool for the local backend", () => {
-		expect(LearnTool.createIf(localSession())).toBeInstanceOf(LearnTool);
-	});
-
 	it("tiers the local save as a write approval even without a skill payload", () => {
 		expect(new LearnTool(localSession()).approval({ memory: "x" })).toBe("write");
 	});
@@ -355,6 +373,16 @@ describe("learn tool (local backend)", () => {
 	it("execute writes the lesson to learned.md", async () => {
 		await new LearnTool(localSession()).execute("1", { memory: "A local tool lesson" });
 		expect(await Bun.file(learnedFile).text()).toContain("- A local tool lesson");
+	});
+
+	it("rejects a global lesson without creating learned.md", async () => {
+		await expect(
+			new LearnTool(localSession()).execute("local-global", {
+				memory: "A cross-project lesson must not become project-local.",
+				scope: "global",
+			}),
+		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		expect(await Bun.file(learnedFile).exists()).toBe(false);
 	});
 
 	it("execute throws when the lesson is empty after sanitization", async () => {

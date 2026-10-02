@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
+	git::git_builtin,
 	minimizer,
 	output_decode::{OutputDecoder, decode_bytes},
 	process,
@@ -170,10 +171,35 @@ pub struct ShellExecuteOptions {
 
 pub type ShellExecuteResult = ShellRunResult;
 
+/// Spawn registry of the run currently executing on a [`Shell`], if any.
+///
+/// Kept apart from the session mutex (held for the whole command) so
+/// [`Shell::pids`] can read it while the run is in flight.
+type ActiveSpawns = Arc<parking_lot::Mutex<Option<Arc<process::SpawnRegistry>>>>;
+
+/// Publishes a run's registry in [`ActiveSpawns`] for as long as it lives;
+/// dropping it (normal return, error, cancellation, or task abort) clears the
+/// slot.
+struct ActiveSpawnsGuard(ActiveSpawns);
+
+impl ActiveSpawnsGuard {
+	fn publish(slot: &ActiveSpawns, registry: Arc<process::SpawnRegistry>) -> Self {
+		*slot.lock() = Some(registry);
+		Self(slot.clone())
+	}
+}
+
+impl Drop for ActiveSpawnsGuard {
+	fn drop(&mut self) {
+		*self.0.lock() = None;
+	}
+}
+
 pub struct Shell {
-	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
-	abort_state: ShellAbortState,
-	config:      ShellConfig,
+	session:       Arc<TokioMutex<Option<ShellSessionCore>>>,
+	abort_state:   ShellAbortState,
+	config:        ShellConfig,
+	active_spawns: ActiveSpawns,
 }
 
 impl Shell {
@@ -203,6 +229,7 @@ impl Shell {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
 			config,
+			active_spawns: ActiveSpawns::default(),
 		}
 	}
 
@@ -222,6 +249,7 @@ impl Shell {
 		run_shell_session(
 			self.session.clone(),
 			self.abort_state.clone(),
+			self.active_spawns.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -232,6 +260,19 @@ impl Shell {
 
 	pub async fn abort(&self) {
 		self.abort_state.abort().await;
+	}
+
+	/// Pids of the processes spawned by the in-flight [`Shell::run`] that are
+	/// still alive, in spawn order. Covers every external child the run
+	/// started — foreground commands, pipeline stages, and `&` background
+	/// jobs — but not builtins, which run in-process. Empty when no run is
+	/// executing (including one still waiting for a previous run to release
+	/// the session). Never blocks on the session lock held by a running
+	/// command.
+	#[must_use]
+	pub fn pids(&self) -> Vec<i32> {
+		let registry = self.active_spawns.lock().clone();
+		registry.map_or_else(Vec::new, |registry| registry.live_pids())
 	}
 
 	/// Number of live background jobs (running `&`/`nohup` children) tracked by
@@ -327,9 +368,25 @@ pub async fn execute_shell_streams(
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
 
+/// How long a cancelled run waits for its task to wind down before aborting
+/// it (discarding any output still queued in the pipe readers).
+///
+/// On Windows the wait covers more hops: in-process pipeline producers stop on
+/// a poll between writes and consumers cannot observe cancellation out of a
+/// blocked pipe read (readiness polling is unix-only in the builtin stdin
+/// layer), so producer exit, pipe EOF, the consumer's final flush and the
+/// reader's last read each need a separate thread wakeup. Under heavy load
+/// that chain exceeded 2s, the abort then discarded the consumer's final
+/// output mid-flight (`yes x | tail -5` lost its 5 lines).
+#[cfg(windows)]
+const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
+#[cfg(not(windows))]
+const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
+	active_spawns: ActiveSpawns,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
@@ -354,6 +411,10 @@ async fn run_shell_session(
 		let spawn_registry = spawn_registry.clone();
 		async move {
 			let mut session_guard = session.lock().await;
+			// Published only once this run owns the session, so a run queued
+			// behind another never shadows the executing run's pids. Declared
+			// after `session_guard`, so it clears before the lock is released.
+			let _active_spawns = ActiveSpawnsGuard::publish(&active_spawns, spawn_registry.clone());
 
 			let session = match &mut *session_guard {
 				Some(session) => session,
@@ -375,7 +436,7 @@ async fn run_shell_session(
 		res = &mut run_task => res,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut run_task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
 			if graceful.is_err() {
 				run_task.abort();
 				let _ = run_task.await;
@@ -452,7 +513,7 @@ async fn run_shell_oneshot(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
@@ -518,7 +579,7 @@ async fn run_shell_oneshot_streams(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
@@ -578,6 +639,56 @@ const fn normalize_env_key(key: &str) -> &str {
 #[cfg(not(windows))]
 const fn normalize_env_key(key: &str) -> &str {
 	key
+}
+
+/// Canonical spelling for a key inherited from the host environment (the
+/// process env or the caller-forwarded session env). Windows env names are
+/// case-insensitive, so a host `Temp` must still surface as `$TEMP` in the
+/// case-sensitive shell. Per-command env keeps the narrower
+/// [`normalize_env_key`]: a lowercase `tmp` there is an ordinary variable.
+#[cfg(windows)]
+const fn normalize_inherited_env_key(key: &str) -> &str {
+	if key.eq_ignore_ascii_case("TEMP") {
+		"TEMP"
+	} else if key.eq_ignore_ascii_case("TMP") {
+		"TMP"
+	} else if key.eq_ignore_ascii_case("TMPDIR") {
+		"TMPDIR"
+	} else {
+		normalize_env_key(key)
+	}
+}
+
+#[cfg(not(windows))]
+const fn normalize_inherited_env_key(key: &str) -> &str {
+	key
+}
+
+/// Value exported for an inherited (already normalized) env key.
+///
+/// A host `TEMP`/`TMP`/`TMPDIR` may carry an 8.3 profile alias
+/// (`C:\Users\ADMINI~1\...`) while `cd` stores the long form in `PWD`, so
+/// `cd "$TEMP"` would leave the two spellings disagreeing. Absolute temp paths
+/// are expanded with the same `GetLongPathNameW` routine `cd` uses (symlinks
+/// and junctions kept); anything else, or a failed expansion, passes through.
+#[cfg(windows)]
+fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	let path = std::path::Path::new(value);
+	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
+		return std::borrow::Cow::Borrowed(value);
+	}
+	match brush_core::sys::fs::expand_to_long_path(path)
+		.into_os_string()
+		.into_string()
+	{
+		Ok(expanded) => std::borrow::Cow::Owned(expanded),
+		Err(_) => std::borrow::Cow::Borrowed(value),
+	}
+}
+
+#[cfg(not(windows))]
+const fn inherited_env_value<'a>(_key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	std::borrow::Cow::Borrowed(value)
 }
 
 #[cfg(windows)]
@@ -649,7 +760,7 @@ fn copy_env_into_shell(
 		let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
 			continue;
 		};
-		let normalized_key = normalize_env_key(key);
+		let normalized_key = normalize_inherited_env_key(key);
 		if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 			continue;
 		}
@@ -660,7 +771,8 @@ fn copy_env_into_shell(
 			});
 			continue;
 		}
-		let mut var = ShellVariable::new(ShellValue::String(value.to_string()));
+		let value = inherited_env_value(normalized_key, value);
+		let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
 		var.export();
 		shell
 			.env_mut()
@@ -731,12 +843,10 @@ async fn create_session_for_run(
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
 	// destructive set (`rm`, `mv`, `cp`, `ln`) additionally honors
 	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
-	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
-		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
-		let rm_disabled =
-			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN");
-		let mv_disabled =
-			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN");
+	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
+		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
+		let rm_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_RM_BUILTIN");
+		let mv_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_MV_BUILTIN");
 		for (name, registration) in pi_builtins::utility_builtins() {
 			let disabled = match name {
 				"rm" => rm_disabled,
@@ -752,15 +862,25 @@ async fn create_session_for_run(
 		}
 	}
 
+	// Opt-in via PI_SMART_GIT: `git worktree add` becomes a copy-on-write clone
+	// through pi-vcs; every other git invocation reaches the binary unchanged
+	// (see `crate::git`).
+	if env_flag(config, "PI_SMART_GIT") {
+		shell.register_builtin("git", git_builtin());
+	}
+
 	copy_env_into_shell(&mut shell, std::env::vars_os())?;
 
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
-			let normalized_key = normalize_env_key(key);
+			let normalized_key = normalize_inherited_env_key(key);
 			if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 				continue;
 			}
-			let mut var = ShellVariable::new(ShellValue::String(value.clone()));
+			// The agent forwards its whole host env here, so temp paths need the
+			// same long-form expansion as the direct host copy above.
+			let value = inherited_env_value(normalized_key, value);
+			let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
 			var.export();
 			shell
 				.env_mut()
@@ -1244,7 +1364,13 @@ async fn run_shell_command_once(
 	});
 	// Let pipeline consumers flush output after cancellation kills their
 	// producers. The outer run cancellation remains bounded, and this delayed
-	// fallback still releases readers whose writers never close.
+	// fallback still releases readers whose writers never close. Windows needs
+	// a wider budget for the same reason as `CANCEL_RUN_GRACE`: the consumer's
+	// flush depends on the producer's exit becoming visible through several
+	// thread wakeups.
+	#[cfg(windows)]
+	const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
+	#[cfg(not(windows))]
 	const CANCEL_READER_GRACE: Duration = Duration::from_millis(500);
 	let cancel_bridge = tokio::spawn({
 		let cancel_token = cancel_token.clone();
@@ -1701,14 +1827,14 @@ pub const GIT_REPO_LOCATION_ENV_VARS: [&str; 6] = [
 /// Windows environment lookups are case-insensitive, so `git_dir` binds there
 /// exactly like `GIT_DIR`; POSIX names are case-sensitive.
 #[cfg(windows)]
-fn is_git_repo_location_var(key: &str) -> bool {
+pub(crate) fn is_git_repo_location_var(key: &str) -> bool {
 	GIT_REPO_LOCATION_ENV_VARS
 		.iter()
 		.any(|name| key.eq_ignore_ascii_case(name))
 }
 
 #[cfg(not(windows))]
-fn is_git_repo_location_var(key: &str) -> bool {
+pub(crate) fn is_git_repo_location_var(key: &str) -> bool {
 	GIT_REPO_LOCATION_ENV_VARS.contains(&key)
 }
 
@@ -2037,13 +2163,13 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 /// does not do. It therefore shadows the real one unless
 /// `PI_DISABLE_NOHUP_BUILTIN` (session env or process env) asks otherwise.
 fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
-	uutils_env_disabled(config, "PI_DISABLE_NOHUP_BUILTIN")
+	env_flag(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
-/// Reads a boolean "disable" flag for the uutils builtins from the session
-/// environment (preferred) then the process environment, mirroring the nohup
-/// builtin gate. Truthy = present and not "", "0", or "false".
-fn uutils_env_disabled(config: &ShellConfig, key: &str) -> bool {
+/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`) from the
+/// session environment (preferred) then the process environment. Truthy =
+/// present and not "", "0", or "false".
+fn env_flag(config: &ShellConfig, key: &str) -> bool {
 	let raw = config
 		.session_env
 		.as_ref()
@@ -2148,6 +2274,124 @@ mod tests {
 		);
 	}
 
+	/// A temp directory reachable through an 8.3 alias, as
+	/// `(short, long, guard)`. Existing profile aliases survive after new 8.3
+	/// creation is disabled, so the host TEMP is preferred; otherwise a fresh
+	/// alias is made when the volume still creates them.
+	#[cfg(windows)]
+	fn short_temp_fixture()
+	-> Option<(std::path::PathBuf, std::path::PathBuf, Option<tempfile::TempDir>)> {
+		let host_temp = std::env::temp_dir();
+		let expanded_host_temp = brush_core::sys::fs::expand_to_long_path(&host_temp);
+		if host_temp != expanded_host_temp {
+			return Some((host_temp, expanded_host_temp, None));
+		}
+		let (root, long, short) = short_alias_fixture()?;
+		Some((short, brush_core::sys::fs::expand_to_long_path(&long), Some(root)))
+	}
+
+	/// Runs `cd "$TEMP"` and asserts the shell cwd, `PWD`, and every temp var
+	/// share the long spelling `expected`.
+	#[cfg(windows)]
+	async fn assert_cd_temp_matches_pwd(shell: &mut BrushShell, expected: &std::path::Path) {
+		let expected_str = expected.to_string_lossy().into_owned();
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let result = shell
+			.run_string("cd \"$TEMP\"", &SourceInfo::from("pi-shell:test"), &params)
+			.await
+			.expect("cd inherited TEMP");
+		assert_eq!(exit_code(&result), 0);
+		assert_eq!(shell.working_dir(), expected);
+		for key in ["TEMP", "TMP", "TMPDIR", "PWD"] {
+			assert_eq!(shell.env_str(key).as_deref(), Some(expected_str.as_str()), "{key}");
+		}
+	}
+
+	/// Host TEMP/TMP paths must not export the short profile spelling after
+	/// entering the directory.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn inherited_short_temp_matches_pwd_after_cd() {
+		let Some((short, expected, _guard)) = short_temp_fixture() else {
+			return;
+		};
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.working_dir(short.parent().expect("parent").to_path_buf())
+			.build()
+			.await
+			.expect("build shell");
+
+		copy_env_into_shell(
+			&mut shell,
+			["TEMP", "TMP", "TMPDIR"]
+				.into_iter()
+				.map(|key| (std::ffi::OsString::from(key), short.as_os_str().to_os_string())),
+		)
+		.expect("inherit temp vars");
+
+		assert_cd_temp_matches_pwd(&mut shell, &expected).await;
+	}
+
+	/// The agent forwards its host env as `session_env`, applied after the
+	/// direct host copy; a short TEMP arriving that way must be expanded too,
+	/// or it overwrites the expanded host value.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn session_env_short_temp_matches_pwd_after_cd() {
+		let Some((short, expected, _guard)) = short_temp_fixture() else {
+			return;
+		};
+		let short_str = short.to_str().expect("utf8 short temp").to_string();
+		let env = ["TEMP", "TMP", "TMPDIR"]
+			.into_iter()
+			.map(|key| (key.to_string(), short_str.clone()))
+			.collect();
+		let config = ShellConfig {
+			session_env:   Some(env),
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let mut session = create_session(&config).await.expect("create_session");
+
+		assert_cd_temp_matches_pwd(&mut session.shell, &expected).await;
+	}
+
+	/// Windows env names are case-insensitive: a host `Temp`/`Tmp`/`TmpDir`
+	/// must surface as the uppercase names shell scripts read. Relative values
+	/// are not paths to expand and pass through verbatim.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn inherited_temp_keys_fold_to_uppercase() {
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.build()
+			.await
+			.expect("build shell");
+
+		copy_env_into_shell(
+			&mut shell,
+			[("Temp", "rel\\temp"), ("Tmp", "rel\\tmp"), ("TmpDir", "rel\\tmpdir")]
+				.into_iter()
+				.map(|(key, value)| (key.into(), value.into())),
+		)
+		.expect("inherit temp vars");
+
+		assert_eq!(shell.env_str("TEMP").as_deref(), Some("rel\\temp"));
+		assert_eq!(shell.env_str("TMP").as_deref(), Some("rel\\tmp"));
+		assert_eq!(shell.env_str("TMPDIR").as_deref(), Some("rel\\tmpdir"));
+		assert_eq!(shell.env_str("Temp"), None);
+	}
+
 	/// A host cwd spelled with 8.3 short names matches the stored long form of
 	/// the same directory, so no redundant `set_working_dir` runs.
 	#[cfg(windows)]
@@ -2185,6 +2429,71 @@ mod tests {
 		let session = create_session(&config).await.expect("create_session");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		(session, params)
+	}
+
+	#[cfg(unix)]
+	fn pseudo_terminal_session() -> (std::os::fd::OwnedFd, fs::File) {
+		use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+
+		let mut master = -1;
+		let mut slave = -1;
+		// SAFETY: openpty initializes two new owned file descriptors on success;
+		// the null name, termios, and winsize pointers request defaults.
+		let opened = unsafe {
+			libc::openpty(
+				&mut master,
+				&mut slave,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+			)
+		};
+		assert_eq!(opened, 0, "openpty");
+		// SAFETY: openpty returned unique descriptors on success.
+		let master = unsafe { OwnedFd::from_raw_fd(master) };
+		// SAFETY: openpty returned unique descriptors on success.
+		let slave = unsafe { fs::File::from_raw_fd(slave) };
+		// SAFETY: this re-exec test process inherited its parent's process
+		// group, so it is not a process-group leader and may create a session.
+		assert_ne!(unsafe { libc::setsid() }, -1, "setsid");
+		// SAFETY: slave is a live pseudo-terminal descriptor owned by this
+		// process; fd 0 is deliberately replaced only in this isolated test.
+		assert_eq!(unsafe { libc::dup2(slave.as_raw_fd(), libc::STDIN_FILENO) }, 0, "dup2 stdin");
+		// The ioctl request parameter's integer type differs between platforms.
+		let tiocsctty = libc::TIOCSCTTY as _;
+		// SAFETY: this session has no controlling terminal and fd 0 is the
+		// pseudo-terminal slave, so TIOCSCTTY establishes it as controlling.
+		assert_eq!(unsafe { libc::ioctl(libc::STDIN_FILENO, tiocsctty, 0) }, 0, "TIOCSCTTY");
+		for signal in [libc::SIGTTOU, libc::SIGHUP] {
+			// SAFETY: this isolated test process deliberately ignores terminal
+			// background-write stops and hangups while fg hands the
+			// pseudo-terminal to a job. The dispositions cannot escape the
+			// re-exec test process.
+			let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
+			assert_ne!(previous, libc::SIG_ERR, "ignore terminal job-control signal {signal}");
+		}
+		(master, slave)
+	}
+
+	async fn interactive_kill_test_context(
+		terminal_stdin: &fs::File,
+	) -> (ShellSessionCore, ExecutionParameters) {
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.options_mut().enable_job_control = true;
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(
+			OpenFiles::STDIN_FD,
+			OpenFile::from(terminal_stdin.try_clone().expect("clone terminal stdin")),
+		);
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
 		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
 		(session, params)
@@ -2408,9 +2717,12 @@ mod tests {
 		assert_eq!(fs::read_to_string(&out).expect("probe output"), "unset|kept");
 	}
 
+	/// Waits until `pid` runs as `expected`. Each poll walks the whole process
+	/// table, which takes seconds on a loaded host, so the bound is generous;
+	/// it stays below the 30 s lifetime of the process-test children.
 	#[cfg(unix)]
 	async fn wait_for_process_name(pid: i32, expected: &str) {
-		time::timeout(Duration::from_secs(2), async {
+		time::timeout(Duration::from_secs(20), async {
 			loop {
 				if pi_builtins::ProcInfo::all().into_iter().any(|process| {
 					process.pid() == pid
@@ -2721,20 +3033,72 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pidwait_returns_after_the_matching_process_exits() {
 		let (_dir, command, name) = process_test_command("opw");
-		let mut child = process_test_child(&command, Duration::from_millis(250))
-			.spawn()
-			.expect("waited process");
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
+		let mut child = command.spawn().expect("waited process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
 		wait_for_process_name(pid, &name).await;
 
-		let (result, output) = execute_captured(format!("pidwait -x -p {pid} {name}")).await;
-		let status = child.try_wait().expect("waited child status");
+		// `-e` reports selection before pidwait starts its exit wait. Seeing this
+		// line proves it selected the still-live child, so the test can release
+		// the child without a wall-clock race.
+		// `-e` prints the kernel command name, which on macOS is the resolved
+		// executable rather than the symlink name `-x` matches.
+		let command_name = pi_builtins::ProcInfo::all()
+			.into_iter()
+			.find(|process| process.pid() == pid)
+			.expect("waited process info")
+			.command_name();
+		let (tx, rx) = flume::unbounded();
+		let waiting_for = format!("waiting for {command_name} (pid {pid})\n");
+		let pidwait_command = format!("pidwait -e -x -p {pid} {name}");
+		let mut pidwait = tokio::spawn(async move {
+			execute_shell(
+				ShellExecuteOptions { command: pidwait_command, ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("pidwait execution")
+		});
+		let mut output = String::new();
+		time::timeout(Duration::from_secs(30), async {
+			while !output.contains(&waiting_for) {
+				output.push_str(
+					&rx.recv_async()
+						.await
+						.expect("pidwait output closed before it selected the child"),
+				);
+			}
+		})
+		.await
+		.expect("pidwait did not select the child");
+		tokio::task::yield_now().await;
+		assert!(
+			!pidwait.is_finished(),
+			"pidwait returned while its matching process was still running"
+		);
+		assert!(
+			child.try_wait().expect("waited child status").is_none(),
+			"pidwait selected a child that already exited"
+		);
+
+		let _ = child.start_kill();
+		let result = time::timeout(Duration::from_secs(30), &mut pidwait)
+			.await
+			.expect("pidwait did not return after its matching process exited")
+			.expect("pidwait task");
+		while let Ok(chunk) = rx.recv_async().await {
+			output.push_str(&chunk);
+		}
+		let mut status = child.try_wait().expect("waited child status");
 		if status.is_none() {
 			let _ = child.start_kill();
 			let _ = child.wait().await;
+			status = child.try_wait().expect("reaped child status");
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "");
+		assert_eq!(output, waiting_for);
 		assert!(status.is_some(), "pidwait returned while its matching process was still running");
 	}
 
@@ -2895,7 +3259,10 @@ mod tests {
 		let command = "top -s 0 | head -n 1";
 		#[cfg(not(target_os = "macos"))]
 		let command = "top -d 0 | head -n 1";
-		let execution = time::timeout(Duration::from_secs(2), execute_captured(command.to_string()))
+		// top observes head's closed pipe on its next write, after completing a
+		// full synchronous process snapshot. Under host load that scan takes
+		// seconds; this is only a bound against a broken pipe-close loop.
+		let execution = time::timeout(Duration::from_secs(30), execute_captured(command.to_string()))
 			.await
 			.expect("top kept sampling after its output pipe closed");
 		assert_eq!(execution.0.exit_code, Some(0));
@@ -3278,6 +3645,317 @@ mod tests {
 		for pid in pids {
 			assert!(process::Process::from_pid(pid).is_none(), "pipeline process {pid} survived");
 		}
+	}
+
+	/// Detached non-interactive external pipeline stages do not share a process
+	/// group. A stopped later stage must still stop the whole pipeline instead
+	/// of leaving its earlier producer blocked on a full pipe.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stopped_later_detached_pipeline_stage_stops_pipeline() {
+		const MARKER: &str = "PI_SHELL_TEST_STOPPED_LATER_DETACHED_STAGE";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::stopped_later_detached_pipeline_stage_stops_pipeline",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		let result = time::timeout(
+			Duration::from_secs(20),
+			session
+				.shell
+				.run_string("/usr/bin/yes | sh -c 'kill -STOP $$'", &source_info, &params),
+		)
+		.await
+		.expect("pipeline did not report its stopped later stage")
+		.expect("stopped pipeline");
+		assert_eq!(exit_code(&result), 148);
+		assert_eq!(
+			session
+				.shell
+				.jobs()
+				.current_job()
+				.expect("stopped pipeline job")
+				.process_ids()
+				.count(),
+			2,
+			"stopped pipeline must retain every external stage"
+		);
+	}
+
+	/// Interactive job control can give the first stage a process group while
+	/// a pipe-input later stage still detaches into its own session. The later
+	/// stop must cover the pipeline despite that partial group membership.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stopped_later_interactive_detached_stage_stops_pipeline() {
+		const MARKER: &str = "PI_SHELL_TEST_STOPPED_LATER_INTERACTIVE_STAGE";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::stopped_later_interactive_detached_stage_stops_pipeline",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let (_pty_master, pty_slave) = pseudo_terminal_session();
+		let (mut session, params) = interactive_kill_test_context(&pty_slave).await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		let result = time::timeout(
+			Duration::from_secs(20),
+			session
+				.shell
+				.run_string("/usr/bin/yes | sh -c 'kill -STOP $$'", &source_info, &params),
+		)
+		.await
+		.expect("interactive pipeline did not report its stopped later stage")
+		.expect("stopped pipeline");
+		assert_eq!(exit_code(&result), 148);
+		assert_eq!(
+			session
+				.shell
+				.jobs()
+				.current_job()
+				.expect("stopped pipeline job")
+				.process_ids()
+				.count(),
+			2,
+			"stopped pipeline must retain every external stage"
+		);
+	}
+
+	/// Every selected stopped stage reports one pipeline stop episode. After
+	/// every stage is continued, fg must consume no stale stop report and wait
+	/// for the pipeline to complete.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn resumed_pipeline_drains_every_selected_stop_report() {
+		const MARKER: &str = "PI_SHELL_TEST_DRAINED_STOP_REPORTS";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::resumed_pipeline_drains_every_selected_stop_report",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let script = "echo $$ > \"$1\"; : > \"$2\"; if test \"$3\" -eq 1; then kill -STOP $$; fi; \
+		              while ! test -e \"$4\"; do sleep 0.01; done";
+		let (_pty_master, pty_slave) = pseudo_terminal_session();
+		for stage_count in [2_usize, 3] {
+			for stopped_subset in 1..(1_usize << stage_count) {
+				let files = tempfile::tempdir().expect("pipeline files");
+				let release = files.path().join("release");
+				let pidfiles: Vec<_> = (0..stage_count)
+					.map(|stage| files.path().join(format!("{stage}.pid")))
+					.collect();
+				let readyfiles: Vec<_> = (0..stage_count)
+					.map(|stage| files.path().join(format!("{stage}.ready")))
+					.collect();
+				let command = (0..stage_count)
+					.map(|stage| {
+						let stopped = usize::from(stopped_subset & (1 << stage) != 0);
+						format!(
+							"sh -c {} sh {} {} {stopped} {}",
+							quote_arg(script),
+							quote_arg(pidfiles[stage].to_str().expect("utf8 pidfile")),
+							quote_arg(readyfiles[stage].to_str().expect("utf8 readyfile")),
+							quote_arg(release.to_str().expect("utf8 release")),
+						)
+					})
+					.collect::<Vec<_>>()
+					.join(" | ");
+				let (mut session, params) = interactive_kill_test_context(&pty_slave).await;
+				let source_info = SourceInfo::from("pi-natives:test");
+				let initial = time::timeout(
+					Duration::from_secs(20),
+					session.shell.run_string(command, &source_info, &params),
+				)
+				.await
+				.expect("pipeline did not report its initial stop")
+				.expect("stopped pipeline");
+				assert_eq!(exit_code(&initial), 148, "subset {stopped_subset:#b}");
+				time::timeout(Duration::from_secs(20), async {
+					while !readyfiles.iter().all(|file| file.exists()) {
+						time::sleep(Duration::from_millis(10)).await;
+					}
+				})
+				.await
+				.expect("pipeline stages did not become ready");
+				let pids: Vec<i32> = pidfiles
+					.iter()
+					.map(|file| {
+						fs::read_to_string(file)
+							.expect("stage pidfile")
+							.trim()
+							.parse()
+							.expect("stage pid")
+					})
+					.collect();
+				time::timeout(Duration::from_secs(20), async {
+					while pids.iter().enumerate().any(|(stage, pid)| {
+						stopped_subset & (1 << stage) != 0
+							&& !pi_builtins::ProcInfo::all()
+								.into_iter()
+								.any(|process| process.pid() == *pid && process.state() == 'T')
+					}) {
+						time::sleep(Duration::from_millis(10)).await;
+					}
+				})
+				.await
+				.expect("selected stages did not stop");
+				fs::write(&release, "").expect("release stages");
+				let continued = session
+					.shell
+					.run_string(
+						format!(
+							"kill -CONT {}",
+							pids
+								.iter()
+								.map(ToString::to_string)
+								.collect::<Vec<_>>()
+								.join(" ")
+						),
+						&source_info,
+						&params,
+					)
+					.await
+					.expect("continue stages");
+				assert_eq!(exit_code(&continued), 0, "subset {stopped_subset:#b}");
+				let resumed = time::timeout(
+					Duration::from_secs(20),
+					session.shell.run_string("fg %1", &source_info, &params),
+				)
+				.await
+				.expect("resumed pipeline did not complete")
+				.expect("foreground resumed pipeline");
+				assert_eq!(
+					exit_code(&resumed),
+					0,
+					"subset {stopped_subset:#b} reported a stale stop after fg"
+				);
+			}
+		}
+	}
+
+	/// A child that stops before `ChildProcess::wait` begins is still reported
+	/// as stopped. Every pipeline stage is spawned before the first one is
+	/// waited on, so a stage that stops itself at once (the jobspec test above)
+	/// can stop before the wait subscribes to SIGCHLD; that signal is never
+	/// observed, and without a check for already-stopped children the wait
+	/// hangs.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn child_wait_reports_a_stop_that_precedes_the_wait() {
+		const MARKER: &str = "PI_SHELL_TEST_CHILD_STOP_BEFORE_WAIT";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::child_wait_reports_a_stop_that_precedes_the_wait",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let mut command = Command::new("sh");
+		command.args(["-c", "kill -STOP $$"]).kill_on_drop(true);
+		let child = command.spawn().expect("self-stopping child");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		time::timeout(Duration::from_secs(20), async {
+			while !pi_builtins::ProcInfo::all()
+				.into_iter()
+				.any(|process| process.pid() == pid && process.state() == 'T')
+			{
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("child did not stop itself");
+
+		let mut child = brush_core::processes::ChildProcess::new(child, Some(pid), None);
+		let result = time::timeout(Duration::from_secs(20), child.wait(None))
+			.await
+			.expect("wait missed a stop that happened before it began")
+			.expect("child wait");
+		assert!(matches!(result, brush_core::processes::ProcessWaitResult::Stopped));
+	}
+
+	/// A stopped background process must not make the next foreground process
+	/// look stopped. The inner run is isolated: after the background child
+	/// stops, the foreground command is the only new child that could report
+	/// status to the shell.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stopped_background_job_does_not_stop_foreground_process() {
+		const MARKER: &str = "PI_SHELL_TEST_STOPPED_BACKGROUND_JOB";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::stopped_background_job_does_not_stop_foreground_process",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		let background = session
+			.shell
+			.run_string("sh -c 'kill -STOP $$' &", &source_info, &params)
+			.await
+			.expect("start stopped background process");
+		assert_eq!(exit_code(&background), 0);
+		let background_pid = session
+			.shell
+			.jobs()
+			.current_job()
+			.expect("background job")
+			.process_ids()
+			.next()
+			.expect("background process");
+		time::timeout(Duration::from_secs(20), async {
+			while !pi_builtins::ProcInfo::all()
+				.into_iter()
+				.any(|process| process.pid() == background_pid && process.state() == 'T')
+			{
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("background process did not stop");
+
+		let foreground = session
+			.shell
+			.run_string("/bin/sleep 1", &source_info, &params)
+			.await
+			.expect("foreground sleep");
+		assert_eq!(
+			exit_code(&foreground),
+			0,
+			"a stopped background process must not stop the foreground sleep"
+		);
+		assert_eq!(
+			session.shell.jobs().jobs.len(),
+			1,
+			"foreground sleep must not become a stopped job"
+		);
+
+		let _ = session
+			.shell
+			.run_string("kill -CONT %1; kill %1; wait %1", &source_info, &params)
+			.await;
 	}
 
 	/// A failed target makes `kill` return non-zero without preventing later
@@ -5363,6 +6041,59 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;
+	}
+
+	/// `Shell::pids` reports the in-flight run's live external children without
+	/// waiting on the session lock that the running command holds, and goes
+	/// empty once the run returns — including through cancellation.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pids_reports_in_flight_children_until_run_returns() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Arc::new(Shell::new(None));
+		assert!(shell.pids().is_empty(), "no run in flight");
+
+		// The bare `sleep` builtin runs in-process; use the external binary.
+		let sleep = test_executable("sleep");
+		let run = tokio::spawn({
+			let shell = shell.clone();
+			async move {
+				shell
+					.run(
+						ShellRunOptions {
+							command: format!("'{}' 30", sleep.display()),
+							..Default::default()
+						},
+						None,
+						CancelToken::default(),
+					)
+					.await
+			}
+		});
+
+		let pids = time::timeout(Duration::from_secs(5), async {
+			loop {
+				let pids = shell.pids();
+				if !pids.is_empty() {
+					break pids;
+				}
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("in-flight run never reported a pid");
+		assert_eq!(pids.len(), 1, "exactly the sleep child: {pids:?}");
+		let child = process::Process::from_pid(pids[0]).expect("reported pid is alive");
+		assert_eq!(child.status(), process::ProcessStatus::Running);
+
+		shell.abort().await;
+		let result = time::timeout(Duration::from_secs(5), run)
+			.await
+			.expect("aborted run returns")
+			.expect("run task")
+			.expect("run result");
+		assert!(result.cancelled, "run was aborted");
+		assert!(shell.pids().is_empty(), "pids cleared once the run returns");
 	}
 
 	#[cfg(unix)]

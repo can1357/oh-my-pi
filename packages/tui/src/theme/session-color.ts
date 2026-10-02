@@ -145,11 +145,11 @@ const LIGHT_HUE_INTERVALS: readonly HueInterval[] = [[195, 330]];
 /** Theme-derived inputs for {@link getSessionAccentHex}; see `Theme.sessionAccentInputs`. */
 export interface SessionAccentTheme {
 	/** Theme accent hex; the session accent adopts its OKLCH lightness and chroma. */
-	accentHex: string;
+	readonly accentHex: string;
 	/** Major theme color hexes checked for hue collision. */
-	colorHexes: string[];
+	readonly colorHexes: readonly string[];
 	/** WCAG luminance of the status-line surface on light themes; undefined on dark themes. */
-	surfaceLuminance?: number;
+	readonly surfaceLuminance?: number;
 }
 
 /**
@@ -180,6 +180,22 @@ export interface SessionAccentTheme {
  * @param theme — accent hex, collision colors, and surface luminance of the active theme.
  */
 export function getSessionAccentHex(name: string, theme: SessionAccentTheme): string {
+	// Pure function of its inputs; keyed by value so structurally equal inputs
+	// share an entry. Bounded: sessions × themes stays tiny in practice.
+	const key = `${name}\0${theme.accentHex}\0${theme.surfaceLuminance}\0${theme.colorHexes.join(",")}`;
+	const cached = accentHexCache.get(key);
+	if (cached !== undefined) return cached;
+	const hex = computeSessionAccentHex(name, theme);
+	if (accentHexCache.size >= ACCENT_CACHE_LIMIT) accentHexCache.clear();
+	accentHexCache.set(key, hex);
+	return hex;
+}
+
+const ACCENT_CACHE_LIMIT = 256;
+const accentHexCache = new Map<string, string>();
+const accentAnsiCache = new Map<string, string | undefined>();
+
+function computeSessionAccentHex(name: string, theme: SessionAccentTheme): string {
 	// 1. Pick hue range based on theme mode
 	const isDark = theme.surfaceLuminance === undefined;
 	const intervals = isDark ? DARK_HUE_INTERVALS : LIGHT_HUE_INTERVALS;
@@ -249,5 +265,11 @@ export function getSessionAccentHex(name: string, theme: SessionAccentTheme): st
  */
 export function getSessionAccentAnsi(hex: string | undefined): string | undefined {
 	if (!hex) return undefined;
-	return Bun.color(hex, TERMINAL.trueColor ? "ansi-16m" : "ansi-256") ?? undefined;
+	const trueColor = TERMINAL.trueColor;
+	const key = trueColor ? hex : `256:${hex}`;
+	if (accentAnsiCache.has(key)) return accentAnsiCache.get(key);
+	const ansi = Bun.color(hex, trueColor ? "ansi-16m" : "ansi-256") ?? undefined;
+	if (accentAnsiCache.size >= ACCENT_CACHE_LIMIT) accentAnsiCache.clear();
+	accentAnsiCache.set(key, ansi);
+	return ansi;
 }

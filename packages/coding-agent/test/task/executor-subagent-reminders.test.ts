@@ -79,8 +79,10 @@ function createMockSession(
 		prompt: async (text: string, options?: PromptOptions) => {
 			promptIndex += 1;
 			await onPrompt({ text, options, promptIndex, emit, state });
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
+		hasPendingAsyncWork: () => false,
 	};
 
 	return session as unknown as AgentSession;
@@ -204,7 +206,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("splices the subagent role prompt before the trailing system section", async () => {
+	it("appends the per-spawn subagent prompt after the default blocks so the static prefix stays shared", async () => {
 		let userPrompt = "";
 		const session = createMockSession(({ text, emit }) => {
 			userPrompt = text;
@@ -230,16 +232,15 @@ describe("runSubprocess yield reminders", () => {
 		const systemPromptBuilder = createAgentSessionSpy.mock.calls[0]?.[0]?.systemPrompt;
 		expect(systemPromptBuilder).toBeFunction();
 		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
-		const systemPrompt = systemPromptBuilder(["system", "project", "now"]);
+		const systemPrompt = systemPromptBuilder(["system", "<project-context>\ncwd\n</project-context>"]);
 
-		expect(systemPrompt).toHaveLength(4);
+		expect(systemPrompt).toHaveLength(3);
 		expect(systemPrompt?.[0]).toBe("system");
-		expect(systemPrompt?.[1]).toBe("project");
+		expect(systemPrompt?.[1]).toBe("<project-context>\ncwd\n</project-context>");
 		expect(systemPrompt?.[2]).toContain(baseAgent.systemPrompt);
 		// The parent-conversation CONTEXT section is gone: subagents get their
 		// background inside the assignment (or a local:// file), never a dump.
 		expect(systemPrompt?.[2]).not.toMatch(/CONTEXT\n=+/);
-		expect(systemPrompt?.[3]).toBe("now");
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
 	it("resets yield state after an intervening wake wins the follow-up prompt race", async () => {

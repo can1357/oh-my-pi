@@ -21,6 +21,8 @@ import {
 export interface HistorySearchEntry {
 	prompt: string;
 	created_at: number;
+	/** Project folder the prompt was typed in. */
+	cwd?: string;
 }
 
 /** Searchable prompt history supplied by the host. */
@@ -28,11 +30,37 @@ export interface HistorySource {
 	search(query: string, limit: number): HistorySearchEntry[];
 	getRecent(limit: number): HistorySearchEntry[];
 }
-import { rawKeyHint } from "../chrome/keybinding-hints";
+import { boundKeys, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { contentRowWidth, renderScrollableList } from "../chrome/selector-helpers";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
+import type { KeyName } from "../key-hint-format";
+import type { TspPickerItem } from "@oh-my-pi/pi-wire";
+import { col, keyed, node, span } from "../native/describe";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+import { picker, pickerAction, pickerAge, pickerDate, pickerEvent, pickerHits, pickerQuery } from "../native/picker";
+import { shortenPath } from "../render/render-utils";
+
+const ENTER_KEYS: readonly KeyName[] = ["enter"];
+
+/** Native item key of a history entry: key-path safe (prompts may hold `/` and newlines), stable across queries. */
+function nativeEntryKey(entry: HistorySearchEntry): string {
+	return `${entry.created_at}-${Bun.hash(entry.prompt).toString(36)}`;
+}
+
+interface HistoryNativeMemo {
+	picker: boolean;
+	items: readonly HistorySearchEntry[];
+	selected: HistorySearchEntry | undefined;
+	query: string;
+	cursor: number;
+	node: NativeNode;
+}
+
+/** Key of the `picker` child a dock-mounted history search describes (hoisted into `layer`). */
+const PICKER_KEY = "picker";
 
 /** Visible result rows; also the jump distance for PageUp/PageDown. */
 const MAX_VISIBLE = 10;
@@ -47,46 +75,31 @@ function queryTokens(query: string): string[] {
 
 /** Wrap every case-insensitive occurrence of any token in `text` with the accent color. */
 function highlightTokens(text: string, tokens: string[]): string {
-	if (tokens.length === 0) return text;
-
-	const lower = text.toLowerCase();
-	const ranges: Array<[number, number]> = [];
-	for (const tok of tokens) {
-		let from = lower.indexOf(tok);
-		while (from !== -1) {
-			ranges.push([from, from + tok.length]);
-			from = lower.indexOf(tok, from + tok.length);
-		}
-	}
+	const ranges = pickerHits(text, tokens);
 	if (ranges.length === 0) return text;
-
-	ranges.sort((a, b) => a[0] - b[0]);
 	let out = "";
 	let pos = 0;
 	for (const [start, end] of ranges) {
-		if (end <= pos) continue; // fully covered by a previous (merged) range
-		const from = Math.max(start, pos);
-		if (from > pos) out += text.slice(pos, from);
-		out += theme.fg("accent", text.slice(from, end));
+		if (start > pos) out += text.slice(pos, start);
+		out += theme.fg("accent", text.slice(start, end));
 		pos = end;
 	}
 	if (pos < text.length) out += text.slice(pos);
 	return out;
 }
 
-/** Compact "time since" label (e.g. `now`, `5m`, `2h`, `3d`, `2w`, `6mo`, `1y`) from epoch seconds. */
-function relativeTime(epochSeconds: number): string {
-	const seconds = Math.max(0, Math.floor(Date.now() / 1000) - epochSeconds);
-	if (seconds < 60) return "now";
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.floor(minutes / 60);
-	if (hours < 24) return `${hours}h`;
-	const days = Math.floor(hours / 24);
-	if (days < 7) return `${days}d`;
-	if (days < 30) return `${Math.floor(days / 7)}w`;
-	if (days < 365) return `${Math.floor(days / 30)}mo`;
-	return `${Math.floor(days / 365)}y`;
+/** A past prompt as a picker row: its first line (with query hits), age and project folder. */
+function historyPickerItem(entry: HistorySearchEntry, tokens: readonly string[]): TspPickerItem {
+	const label = entry.prompt.trim().split("\n", 1)[0]!.replace(/\s+/g, " ").trim();
+	const hits = pickerHits(label, tokens);
+	return {
+		id: nativeEntryKey(entry),
+		label,
+		...(entry.cwd ? { detail: shortenPath(entry.cwd) } : {}),
+		facts: { when: pickerAge(entry.created_at * 1000) },
+		...(hits.length > 0 ? { hits } : {}),
+		title: pickerDate(entry.created_at * 1000),
+	};
 }
 
 class HistoryResultsList implements Component {
@@ -133,7 +146,7 @@ class HistoryResultsList implements Component {
 			if (!entry) continue;
 			const isSelected = i === this.#menu.selectedIndex;
 
-			const timeStr = relativeTime(entry.created_at);
+			const timeStr = pickerAge(entry.created_at * 1000);
 			const timeWidth = visibleWidth(timeStr);
 			const showTime = rowWidth >= gutterWidth + 12 + timeWidth;
 
@@ -170,9 +183,12 @@ export class HistorySearchComponent extends OverlayPanel {
 	#onSelect: (prompt: string) => void;
 	#onCancel: () => void;
 	#resultLimit = 100;
+	#nativeHints: NativeNode | undefined;
+	#nativeMemo: HistoryNativeMemo | undefined;
+	#pickerItems: { items: readonly HistorySearchEntry[]; rows: readonly TspPickerItem[] } | undefined;
 
 	constructor(historyStorage: HistorySource, onSelect: (prompt: string) => void, onCancel: () => void) {
-		super("History");
+		super("History", "omp.overlay.history");
 		this.#historyStorage = historyStorage;
 		this.#onSelect = onSelect;
 		this.#onCancel = onCancel;
@@ -195,7 +211,8 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#resultsList = new HistoryResultsList(this.#menu);
 
 		const dot = theme.fg("dim", theme.sep.dot);
-		const hint = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select"), rawKeyHint("esc", "cancel")].join(dot);
+		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
+		const hint = [navigate, rawKeyHint("enter", "select"), keyHint("tui.select.cancel", "cancel")].join(dot);
 
 		this.addChild(new Spacer(1));
 		this.addChild(this.#searchInput);
@@ -254,6 +271,132 @@ export class HistorySearchComponent extends OverlayPanel {
 
 		this.#searchInput.handleInput(keyData);
 		this.#updateResults();
+	}
+
+	/**
+	 * With the `picker` kind: a `size:"md"` sheet of past prompts (first line
+	 * with hits, age, folder) as a keyed child the reconciler hoists into
+	 * `layer`, since the selector replaces the editor in the dock. Otherwise
+	 * the query field (the `Input`, which describes itself as `input`), the
+	 * results as a `list` keyed by entry (filter = query, age as the item
+	 * value), and the key hints.
+	 */
+	override describe(cx: DescribeContext): NativeNode {
+		const items = this.#menu.visibleItems;
+		const selected = this.#menu.selectedItem;
+		const usePicker = cx.supports("picker");
+		const query = usePicker ? this.#searchInput.getValue() : this.#searchInput.getValue().trim();
+		const cursor = this.#searchInput.getCursor();
+		const memo = this.#nativeMemo;
+		if (
+			memo &&
+			memo.picker === usePicker &&
+			memo.items === items &&
+			memo.selected === selected &&
+			memo.query === query &&
+			memo.cursor === cursor
+		) {
+			return memo.node;
+		}
+		if (usePicker) {
+			const root = col([keyed(this.#describePicker(items, selected, query), PICKER_KEY)]);
+			this.#nativeMemo = { picker: true, items, selected, query, cursor, node: root };
+			return root;
+		}
+
+		const rows = items.map(entry =>
+			node(
+				"item",
+				{
+					label: entry.prompt.replace(/\s+/g, " ").trim(),
+					value: [span(pickerAge(entry.created_at * 1000), "dim")],
+				},
+				undefined,
+				nativeEntryKey(entry),
+			),
+		);
+		const list = node(
+			"list",
+			{
+				selected: selected ? nativeEntryKey(selected) : null,
+				filter: query || undefined,
+				empty: query ? "No matching history" : "No history yet",
+				max: { lines: MAX_VISIBLE },
+				virtual: true,
+			},
+			rows,
+			"list",
+		);
+		this.#nativeHints ??= hintsRow([
+			actionHint(["tui.select.up", "tui.select.down"], "navigate"),
+			{ keys: ENTER_KEYS, label: "select" },
+			actionHint("tui.select.cancel", "cancel"),
+		]);
+		const root = overlayCard(this.nativeRole, this.title, [this.#searchInput, list, this.#nativeHints]);
+		this.#nativeMemo = { picker: false, items, selected, query, cursor, node: root };
+		return root;
+	}
+
+	#describePicker(
+		items: readonly HistorySearchEntry[],
+		selected: HistorySearchEntry | undefined,
+		query: string,
+	): NativeNode {
+		let rows = this.#pickerItems;
+		if (rows?.items !== items) {
+			const tokens = queryTokens(query.trim());
+			rows = { items, rows: items.map(entry => historyPickerItem(entry, tokens)) };
+			this.#pickerItems = rows;
+		}
+		return picker({
+			title: this.title,
+			icon: "history",
+			noun: "prompts",
+			size: "md",
+			layout: "rows",
+			preview: "none",
+			...pickerQuery(this.#searchInput),
+			placeholder: "Search prompts…",
+			columns: [{ id: "when", format: "time" }],
+			items: rows.rows,
+			selected: selected ? nativeEntryKey(selected) : null,
+			empty: "No history yet",
+			actions: [
+				pickerAction("insert", "Insert", "enter", { primary: true }),
+				pickerAction("close", "Close", boundKeys("app.interrupt", ["escape"])[0] ?? "escape", { end: true }),
+			],
+		});
+	}
+
+	/**
+	 * Picker: a row click highlights, a second click or `Insert` inserts it
+	 * (Enter), `Close` cancels (Esc), `Clear search` empties the query.
+	 * List: picking a result does what highlighting it and pressing Enter does.
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const ev = pickerEvent(event, PICKER_KEY);
+		if (ev) {
+			if (ev.kind === "action") {
+				if (ev.act === "close") this.#onCancel();
+				else if (ev.act === "insert") this.handleInput("\r");
+				else if (ev.act === "clear") {
+					this.#searchInput.setValue("");
+					this.#updateResults();
+				}
+				return;
+			}
+			const index = this.#menu.visibleItems.findIndex(entry => nativeEntryKey(entry) === ev.item);
+			if (index < 0) return;
+			this.#menu.setSelectedIndex(index);
+			if (ev.kind === "activate") this.#onSelect(this.#menu.visibleItems[index]!.prompt);
+			return;
+		}
+		if ((event.type !== "select" && event.type !== "activate") || event.key !== "list") return;
+		const index = this.#menu.visibleItems.findIndex(entry => nativeEntryKey(entry) === event.item);
+		const target = this.#menu.visibleItems[index];
+		if (!target) return;
+		this.#menu.setSelectedIndex(index);
+		this.#onSelect(target.prompt);
 	}
 
 	#updateResults(): void {

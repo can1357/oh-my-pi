@@ -17,7 +17,93 @@ describe("Editor text assistance", () => {
 		expect(editor.getText()).toBe("The weather ");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 12 });
 	});
-	it("accepts word completion with right arrow at end of line", () => {
+	it("reports Tab acceptance with the state the ghost was shown for", () => {
+		const feedback: Array<[string, number, string, boolean]> = [];
+		const assist: EditorTextAssistProvider = {
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+			wordCompletionFeedback: (lines, line, col, suggestion, accepted) => {
+				feedback.push([lines[line] ?? "", col, suggestion, accepted]);
+			},
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("The weath");
+
+		editor.handleInput("\t");
+
+		expect(feedback).toEqual([["The weath", 9, "er", true]]);
+	});
+
+	it("reports a ghost as typed past only when a typed character diverges from it", () => {
+		const feedback: Array<[string, string, boolean]> = [];
+		const assist: EditorTextAssistProvider = {
+			getWordCompletion: (lines, line, col) => {
+				const typed = (lines[line] ?? "").slice(0, col);
+				if (typed.endsWith("weath")) return "er";
+				if (typed.endsWith("weathe")) return "r";
+				return null;
+			},
+			wordCompletionFeedback: (lines, line, col, suggestion, accepted) => {
+				feedback.push([(lines[line] ?? "").slice(0, col), suggestion, accepted]);
+			},
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("The weath");
+
+		editor.handleInput("e");
+		expect(feedback).toEqual([]);
+		editor.handleInput("d");
+
+		expect(editor.getText()).toBe("The weathed");
+		expect(feedback).toEqual([["The weathe", "r", false]]);
+	});
+
+	it("resolves the provisional space from Tab accept against the next keystroke", () => {
+		const cases: Array<[keys: string[], text: string]> = [
+			[["."], "The weather."],
+			[[")"], "The weather)"],
+			[["-", "l"], "The weather-l"],
+			[[" ", "-"], "The weather -"],
+			[["\n", "i"], "The weather\ni"],
+			[[" ", "i"], "The weather i"],
+			[[" ", " "], "The weather  "],
+			[["i"], "The weather i"],
+			[['"'], 'The weather "'],
+			[["\x1b[D", "\x1b[C", "."], "The weather ."],
+		];
+		for (const [keys, text] of cases) {
+			const assist: EditorTextAssistProvider = {
+				getWordCompletion: (lines, line, col) =>
+					(lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null,
+			};
+			const editor = new Editor(defaultEditorTheme);
+			editor.setTextAssistProvider(assist);
+			editor.setText("The weath");
+
+			editor.handleInput("\t");
+			for (const key of keys) editor.handleInput(key);
+
+			expect(editor.getText()).toBe(text);
+		}
+	});
+
+	it("undoes punctuation typed over the provisional space back to the accepted word and space", () => {
+		const assist: EditorTextAssistProvider = {
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("The weath");
+
+		editor.handleInput("\t");
+		editor.handleInput(".");
+		editor.handleInput("\x1f"); // Ctrl+_ (undo)
+
+		expect(editor.getText()).toBe("The weather ");
+	});
+
+	it("accepts word completion with right arrow at end of line without a trailing space", () => {
 		const assist: EditorTextAssistProvider = {
 			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
 		};
@@ -26,9 +112,9 @@ describe("Editor text assistance", () => {
 		editor.setText("The weath");
 
 		editor.handleInput("\x1b[C");
+		editor.handleInput("s");
 
-		expect(editor.getText()).toBe("The weather ");
-		expect(editor.getCursor()).toEqual({ line: 0, col: 12 });
+		expect(editor.getText()).toBe("The weathers");
 	});
 
 	it("keeps right arrow as movement mid-line even when a word completion exists", () => {
@@ -47,22 +133,24 @@ describe("Editor text assistance", () => {
 		expect(editor.getCursor()).toEqual({ line: 0, col: 10 });
 	});
 
-	it("accepts word completion before whitespace or closing punctuation without adding a space", () => {
-		for (const suffix of [" rest", ", later"]) {
-			const assist: EditorTextAssistProvider = {
-				getWordCompletion: (lines, line, col) =>
-					(lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null,
-			};
-			const editor = new Editor(defaultEditorTheme);
-			editor.setTextAssistProvider(assist);
-			editor.setText(`The weath${suffix}`);
-			for (let i = 0; i < suffix.length; i++) editor.handleInput("\x1b[D");
+	it("neither accepts nor reports a mid-line word completion, which is never rendered", () => {
+		const feedback: string[] = [];
+		const assist: EditorTextAssistProvider = {
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+			wordCompletionFeedback: (_lines, _line, _col, suggestion) => {
+				feedback.push(suggestion);
+			},
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("The weath)");
+		editor.handleInput("\x1b[D");
 
-			editor.handleInput("\t");
+		editor.handleInput("\t");
+		editor.handleInput("x");
 
-			expect(editor.getText()).toBe(`The weather${suffix}`);
-			expect(editor.getCursor()).toEqual({ line: 0, col: 11 });
-		}
+		expect(editor.getText()).toBe("The weathx)");
+		expect(feedback).toEqual([]);
 	});
 
 	it("applies autocorrection only after the provider returns a boundary replacement", () => {

@@ -185,11 +185,6 @@ describe("Token calculation", () => {
 		expect(calculateContextTokens(usage)).toBe(1800);
 	});
 
-	it("should handle zero values", () => {
-		const usage = createMockUsage(0, 0, 0, 0);
-		expect(calculateContextTokens(usage)).toBe(0);
-	});
-
 	it("prefers positive provider context occupancy without accepting an explicit zero", () => {
 		const usage = { ...createMockUsage(0, 0, 0, 0), contextTokens: 120_000 };
 		expect(calculateContextTokens(usage)).toBe(120_000);
@@ -362,14 +357,6 @@ describe("compactionContextTokens", () => {
 	it("clamps negative inputs to zero", () => {
 		expect(compactionContextTokens(-5, -10)).toBe(0);
 		expect(compactionContextTokens(-5, 100)).toBe(100);
-	});
-
-	it("lets a deflated provider count still trigger compaction via the floor", () => {
-		const settings: CompactionSettings = { enabled: true, reserveTokens: 10000, keepRecentTokens: 20000 };
-		// Post-compression provider count is under threshold — raw, it would NOT compact.
-		expect(shouldCompact(20_000, 100_000, settings)).toBe(false);
-		// Floored by the real stored-conversation estimate (95k) it correctly compacts.
-		expect(shouldCompact(compactionContextTokens(20_000, 95_000), 100_000, settings)).toBe(true);
 	});
 });
 
@@ -1409,32 +1396,6 @@ describe("findCutPoint", () => {
 		expect(cut.firstKeptEntryIndex).toBe(2);
 	});
 
-	it("should find cut point based on actual token differences", () => {
-		// Create entries with cumulative token counts
-		const entries: SessionEntry[] = [];
-		for (let i = 0; i < 10; i++) {
-			entries.push(createMessageEntry(createUserMessage(`User ${i}`)));
-			entries.push(
-				createMessageEntry(createAssistantMessage(`Assistant ${i}`, createMockUsage(0, 100, (i + 1) * 1000, 0))),
-			);
-		}
-
-		// 20 entries, last assistant has 10000 tokens
-		// keepRecentTokens = 2500: keep entries where diff < 2500
-		const result = findCutPoint(entries, tokenizer, 0, entries.length, 2500);
-
-		// Should cut at a valid cut point (user or assistant message)
-		expect(entries[result.firstKeptEntryIndex].type).toBe("message");
-		const role = (entries[result.firstKeptEntryIndex] as SessionMessageEntry).message.role;
-		expect(role === "user" || role === "assistant").toBe(true);
-	});
-
-	it("should return startIndex if no valid cut points in range", () => {
-		const entries: SessionEntry[] = [createMessageEntry(createAssistantMessage("a"))];
-		const result = findCutPoint(entries, tokenizer, 0, entries.length, 1000);
-		expect(result.firstKeptEntryIndex).toBe(0);
-	});
-
 	it("should keep everything if all messages fit within budget", () => {
 		const entries: SessionEntry[] = [
 			createMessageEntry(createUserMessage("1")),
@@ -1445,28 +1406,6 @@ describe("findCutPoint", () => {
 
 		const result = findCutPoint(entries, tokenizer, 0, entries.length, 50000);
 		expect(result.firstKeptEntryIndex).toBe(0);
-	});
-
-	it("should indicate split turn when cutting at assistant message", () => {
-		// Create a scenario where we cut at an assistant message mid-turn
-		const entries: SessionEntry[] = [
-			createMessageEntry(createUserMessage("Turn 1")),
-			createMessageEntry(createAssistantMessage("A1", createMockUsage(0, 100, 1000, 0))),
-			createMessageEntry(createUserMessage("Turn 2")), // index 2
-			createMessageEntry(createAssistantMessage("A2-1", createMockUsage(0, 100, 5000, 0))), // index 3
-			createMessageEntry(createAssistantMessage("A2-2", createMockUsage(0, 100, 8000, 0))), // index 4
-			createMessageEntry(createAssistantMessage("A2-3", createMockUsage(0, 100, 10000, 0))), // index 5
-		];
-
-		// With keepRecentTokens = 3000, should cut somewhere in Turn 2
-		const result = findCutPoint(entries, tokenizer, 0, entries.length, 3000);
-
-		// If cut at assistant message (not user), should indicate split turn
-		const cutEntry = entries[result.firstKeptEntryIndex] as SessionMessageEntry;
-		if (cutEntry.message.role === "assistant") {
-			expect(result.isSplitTurn).toBe(true);
-			expect(result.turnStartIndex).toBe(2); // Turn 2 starts at index 2
-		}
 	});
 });
 

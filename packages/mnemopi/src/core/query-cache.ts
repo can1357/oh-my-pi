@@ -28,9 +28,11 @@ export interface QueryCacheStats {
 	readonly version: number;
 }
 
-interface Tier23Entry {
-	readonly embedding: QueryEmbedding;
-	readonly results: readonly QueryCacheResult[];
+interface CacheEntry<T> {
+	readonly scope: string;
+	readonly normalized: string;
+	readonly results: readonly T[];
+	readonly embedding: QueryEmbedding | null;
 }
 
 interface CacheRow {
@@ -39,22 +41,40 @@ interface CacheRow {
 	readonly results_json: string;
 }
 
-export function isEnhancedRecallEnabled(env: Env = process.env): boolean {
-	return enhancedRecallEnabled(env);
+/** Separates the option scope from the normalized query inside an entry key. */
+const SCOPE_SEPARATOR = "\u0000";
+
+function splitEntryKey(key: string): { scope: string; normalized: string } {
+	const index = key.lastIndexOf(SCOPE_SEPARATOR);
+	if (index < 0) return { scope: "", normalized: key };
+	return { scope: key.slice(0, index), normalized: key.slice(index + 1) };
 }
 
-export function isQueryCacheEnabled(useCache = true, env: Env = process.env): boolean {
-	return useCache && isEnhancedRecallEnabled(env);
+export function isEnhancedRecallEnabled(env: Env = process.env, configured?: boolean): boolean {
+	return enhancedRecallEnabled(env, configured);
 }
 
-export class QueryCache {
+export function isQueryCacheEnabled(useCache = true, env: Env = process.env, configured?: boolean): boolean {
+	return useCache && isEnhancedRecallEnabled(env, configured);
+}
+
+/**
+ * Tiered query result cache. Every entry lives in a `scope`: an opaque string the
+ * caller derives from all non-query inputs (result limit, filters, visibility,
+ * ranking mode, ...). Lookups only ever consider entries of the same scope, so the
+ * fuzzy tiers can match a *similar query* but never a different set of options.
+ *
+ * - Tier 1: exact normalized query match.
+ * - Tiers 2/3: query embedding cosine >= 0.88, or >= 0.78 plus word overlap.
+ * - Tier 4: normalized word overlap.
+ */
+export class QueryCache<T = QueryCacheResult> {
 	readonly maxSize: number;
 	readonly ttlSeconds: number;
 
 	#cacheVersion = 0;
-	#tier1 = new Map<string, readonly QueryCacheResult[]>();
-	#tier23 = new Map<string, Tier23Entry>();
-	#tier4 = new Map<string, readonly QueryCacheResult[]>();
+	/** Entry key -> entry; Map order is least- to most-recently used. */
+	#entries = new Map<string, CacheEntry<T>>();
 	#insertTimes = new Map<string, number>();
 	#conn: Database | null = null;
 
@@ -99,14 +119,11 @@ export class QueryCache {
 			const now = Date.now() / 1000;
 			for (const row of rows) {
 				try {
-					const results = JSON.parse(row.results_json) as QueryCacheResult[];
+					const results = JSON.parse(row.results_json) as T[];
+					const embedding = row.embedding_json === null ? null : (JSON.parse(row.embedding_json) as number[]);
+					const { scope, normalized } = splitEntryKey(row.normalized);
+					this.#entries.set(row.normalized, { scope, normalized, results, embedding });
 					this.#rememberKey(row.normalized, now);
-					this.#tier1.set(row.normalized, results);
-					this.#tier4.set(row.normalized, results);
-					if (row.embedding_json !== null) {
-						const embedding = JSON.parse(row.embedding_json) as number[];
-						this.#tier23.set(row.normalized, { embedding, results });
-					}
 				} catch {
 					// Match Python's best-effort persistence loading: corrupt rows are ignored.
 				}
@@ -118,36 +135,36 @@ export class QueryCache {
 
 	invalidate(): void {
 		this.#cacheVersion += 1;
-		this.#tier1.clear();
-		this.#tier23.clear();
-		this.#tier4.clear();
+		this.#entries.clear();
 		this.#insertTimes.clear();
 		if (this.#conn !== null) {
 			this.#conn.run("DELETE FROM query_cache");
 		}
 	}
 
-	get(query: string, embedding?: QueryEmbedding | null): readonly QueryCacheResult[] | null {
+	get(query: string, embedding?: QueryEmbedding | null, scope = ""): readonly T[] | null {
 		const normalized = this.normalize(query);
+		const exactKey = `${scope}${SCOPE_SEPARATOR}${normalized}`;
 		const now = Date.now() / 1000;
-		if (this.#expireIfNeeded(normalized, now)) {
+		if (this.#expireIfNeeded(exactKey, now)) {
 			this.misses += 1;
 			return null;
 		}
 
-		const tier1 = this.#tier1.get(normalized);
-		if (tier1 !== undefined) {
-			this.#touchKey(normalized);
+		const exact = this.#entries.get(exactKey);
+		if (exact !== undefined) {
+			this.#touchKey(exactKey);
 			this.hits += 1;
 			this.tier1Hits += 1;
-			this.#recordPersistentHit(normalized);
-			return tier1;
+			this.#recordPersistentHit(exactKey);
+			return exact.results;
 		}
 
 		if (embedding !== undefined && embedding !== null && embedding.length !== 0) {
 			let bestScore = 0;
 			let bestKey: string | null = null;
-			for (const [cachedKey, cached] of this.#tier23) {
+			for (const [cachedKey, cached] of this.#entries) {
+				if (cached.scope !== scope || cached.embedding === null) continue;
 				if (this.#isExpired(cachedKey, now)) continue;
 				const cosine = cosineSimilarity(embedding, cached.embedding);
 				if (cosine >= 0.88) {
@@ -156,7 +173,7 @@ export class QueryCache {
 					break;
 				}
 				if (cosine >= 0.78) {
-					const jaccard = this.jaccardWords(query, cachedKey);
+					const jaccard = this.jaccardWords(query, cached.normalized);
 					if (jaccard >= 0.15 && cosine > bestScore) {
 						bestScore = cosine;
 						bestKey = cachedKey;
@@ -164,7 +181,7 @@ export class QueryCache {
 				}
 			}
 			if (bestKey !== null) {
-				const entry = this.#tier23.get(bestKey);
+				const entry = this.#entries.get(bestKey);
 				if (entry !== undefined) {
 					this.#touchKey(bestKey);
 					this.hits += 1;
@@ -177,18 +194,19 @@ export class QueryCache {
 		}
 
 		let queryWords: Set<string> | null = null;
-		for (const [cachedKey, results] of this.#tier4) {
+		for (const [cachedKey, cached] of this.#entries) {
+			if (cached.scope !== scope) continue;
 			if (this.#isExpired(cachedKey, now)) continue;
 			queryWords ??= new Set(normalized.split(/\s+/));
 			if (queryWords.size === 0) continue;
 			let overlap = 0;
-			for (const cachedWord of cachedKey.split(/\s+/)) if (queryWords.has(cachedWord)) overlap += 1;
+			for (const cachedWord of cached.normalized.split(/\s+/)) if (queryWords.has(cachedWord)) overlap += 1;
 			if (overlap >= queryWords.size * 0.7 && overlap >= 2) {
 				this.#touchKey(cachedKey);
 				this.hits += 1;
 				this.tier4Hits += 1;
 				this.#recordPersistentHit(cachedKey);
-				return results;
+				return cached.results;
 			}
 		}
 
@@ -196,19 +214,17 @@ export class QueryCache {
 		return null;
 	}
 
-	put(query: string, results: readonly QueryCacheResult[], embedding?: QueryEmbedding | null): void {
+	put(query: string, results: readonly T[], embedding?: QueryEmbedding | null, scope = ""): void {
 		if (this.maxSize === 0) return;
 		const normalized = this.normalize(query);
+		const key = `${scope}${SCOPE_SEPARATOR}${normalized}`;
 		const now = Date.now() / 1000;
-		this.#rememberKey(normalized, now);
-		this.#tier1.set(normalized, results);
-		this.#tier4.set(normalized, results);
-		if (embedding !== undefined && embedding !== null && embedding.length !== 0) {
-			this.#tier23.set(normalized, { embedding, results });
-		} else {
-			this.#tier23.delete(normalized);
-		}
-		this.#putPersistent(normalized, results, embedding);
+		const storedEmbedding =
+			embedding !== undefined && embedding !== null && embedding.length !== 0 ? embedding : null;
+		this.#entries.delete(key);
+		this.#entries.set(key, { scope, normalized, results, embedding: storedEmbedding });
+		this.#rememberKey(key, now);
+		this.#putPersistent(key, results, storedEmbedding);
 		this.#evictIfNeeded();
 	}
 
@@ -232,7 +248,7 @@ export class QueryCache {
 			tier2_hits: this.tier2Hits,
 			tier3_hits: this.tier3Hits,
 			tier4_hits: this.tier4Hits,
-			size: this.#tier1.size,
+			size: this.#entries.size,
 			max_size: this.maxSize,
 			version: this.#cacheVersion,
 		};
@@ -274,16 +290,11 @@ export class QueryCache {
 			this.#insertTimes.delete(key);
 			this.#insertTimes.set(key, insertTime);
 		}
-		this.#touchMap(this.#tier1, key);
-		this.#touchMap(this.#tier23, key);
-		this.#touchMap(this.#tier4, key);
-	}
-
-	#touchMap<V>(map: Map<string, V>, key: string): void {
-		const value = map.get(key);
-		if (value === undefined && !map.has(key)) return;
-		map.delete(key);
-		map.set(key, value as V);
+		const entry = this.#entries.get(key);
+		if (entry !== undefined) {
+			this.#entries.delete(key);
+			this.#entries.set(key, entry);
+		}
 	}
 
 	#isExpired(key: string, now: number): boolean {
@@ -298,9 +309,7 @@ export class QueryCache {
 	}
 
 	#deleteKey(key: string, persistent: boolean): void {
-		this.#tier1.delete(key);
-		this.#tier23.delete(key);
-		this.#tier4.delete(key);
+		this.#entries.delete(key);
 		this.#insertTimes.delete(key);
 		if (persistent && this.#conn !== null) this.#conn.run("DELETE FROM query_cache WHERE normalized = ?", [key]);
 	}
@@ -310,39 +319,31 @@ export class QueryCache {
 		for (const [key, insertedAt] of this.#insertTimes) {
 			if (now - insertedAt > this.ttlSeconds) this.#deleteKey(key, true);
 		}
-		while (this.#tier1.size > this.maxSize) {
-			const oldest = this.#tier1.keys().next();
+		while (this.#entries.size > this.maxSize) {
+			const oldest = this.#entries.keys().next();
 			if (oldest.done) break;
 			this.#deleteKey(oldest.value, true);
 		}
 	}
 
-	#putPersistent(
-		normalized: string,
-		results: readonly QueryCacheResult[],
-		embedding: QueryEmbedding | null | undefined,
-	): void {
+	#putPersistent(key: string, results: readonly T[], embedding: QueryEmbedding | null): void {
 		if (this.#conn === null) return;
 		try {
 			this.#conn.run(
 				"INSERT OR REPLACE INTO query_cache (normalized, embedding_json, results_json) VALUES (?, ?, ?)",
-				[
-					normalized,
-					embedding !== undefined && embedding !== null ? JSON.stringify(embedding) : null,
-					JSON.stringify(results),
-				],
+				[key, embedding !== null ? JSON.stringify(embedding) : null, JSON.stringify(results)],
 			);
 		} catch {
 			// Persistence is best-effort; in-memory tiers remain authoritative for this process.
 		}
 	}
 
-	#recordPersistentHit(normalized: string): void {
+	#recordPersistentHit(key: string): void {
 		if (this.#conn === null) return;
 		try {
 			this.#conn.run(
 				"UPDATE query_cache SET hit_count = hit_count + 1, last_hit = CURRENT_TIMESTAMP WHERE normalized = ?",
-				[normalized],
+				[key],
 			);
 		} catch {
 			// Match Python's best-effort persistence behavior.

@@ -204,3 +204,65 @@ test("opt-in recovery never rotates a non-corruption SQLite failure", async () =
 	expect(failure.message).toContain(dbPath);
 	expect(await backupNames(dir.path())).toEqual([]);
 });
+
+/** Point the freelist trunk at a page past EOF: reads still work, but the next page allocation fails. */
+async function corruptFreelist(dbPath: string) {
+	const seed = new Database(dbPath);
+	seed.run("CREATE TABLE existing (value TEXT)");
+	seed.close();
+	const damaged = await fs.promises.readFile(dbPath);
+	damaged.writeUInt32BE(0x0d000000, 32);
+	damaged.writeUInt32BE(1, 36);
+	await fs.promises.writeFile(dbPath, damaged);
+	return damaged;
+}
+
+test("recovery still fires when a multi-statement script hides the corruption behind a later error", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-hidden-corrupt-");
+	const dbPath = dir.join("store.db");
+	const damaged = await corruptFreelist(dbPath);
+
+	const initialize = (db: Database) => {
+		// Bun reports only the final statement's step error, so the failed CREATE is dropped here...
+		db.run("CREATE TABLE IF NOT EXISTS added (value TEXT); CREATE TABLE IF NOT EXISTS existing (value TEXT);");
+		// ...and resurfaces as SQLITE_ERROR, which on its own would not trigger recovery.
+		db.prepare("SELECT value FROM added").finalize();
+		return db;
+	};
+
+	const db = await openSqliteDatabase(dbPath, initialize, { recoverCorruption: true });
+	try {
+		expect(db.query("SELECT value FROM added").all()).toEqual([]);
+	} finally {
+		db.close();
+	}
+	const backups = (await backupNames(dir.path())).filter(name => !/-wal$|-shm$|-journal$/.test(name));
+	expect(backups).toHaveLength(1);
+	expect(await fs.promises.readFile(path.join(dir.path(), backups[0]!))).toEqual(damaged);
+});
+
+test("a non-corruption init failure on a store that fails quick_check is preserved as corruption", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-init-fails-on-corrupt-");
+	const dbPath = dir.join("store.db");
+	const damaged = await corruptFreelist(dbPath);
+	const initFailure = new Error("init failed");
+	let attempts = 0;
+	let preserved: unknown;
+
+	const db = await openSqliteDatabase(
+		dbPath,
+		handle => {
+			if (attempts++ === 0) throw initFailure;
+			return handle;
+		},
+		{ recoverCorruption: true, onCorruptionPreserved: (_backupPath, error) => (preserved = error) },
+	);
+	db.close();
+
+	expect(attempts).toBe(2);
+	expect(isSqliteCorruptionError(preserved)).toBe(true);
+	expect((preserved as Error | undefined)?.cause).toBe(initFailure);
+	const backups = (await backupNames(dir.path())).filter(name => !/-wal$|-shm$|-journal$/.test(name));
+	expect(backups).toHaveLength(1);
+	expect(await fs.promises.readFile(path.join(dir.path(), backups[0]!))).toEqual(damaged);
+});

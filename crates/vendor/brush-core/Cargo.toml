@@ -181,6 +181,9 @@ features = [
     "user",
 ]
 
+[target."cfg(unix)".dependencies.rlimit]
+version = "0.11.0"
+
 [target."cfg(unix)".dependencies.terminfo]
 version = "0.9.0"
 

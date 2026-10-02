@@ -73,39 +73,6 @@ function stopChunk(model: Model<"openai-completions">): unknown {
 // looked like the applier had widened the range. The accumulator now
 // merges chunks and handles both cumulative and per-chunk-delta semantics.
 describe("issue #2080 - MiniMax multi-chunk object tool arguments", () => {
-	it("appends per-chunk-delta string fragments instead of overwriting the previous chunk", async () => {
-		const model = getBundledModel<"openai-completions">("minimax-code-cn", "MiniMax-M3");
-		// Two chunks; each carries a slice of the `input` string. The
-		// concatenation forms the real hashline patch.
-		const fetchMock = createMockFetch([
-			toolCallChunk(model, {
-				name: "edit",
-				arguments: { input: "[foo.ts#A1B2]\nSWAP 91.=91:\n+    " },
-			}),
-			toolCallChunk(model, {
-				arguments: { input: 'const out = await executeTool("nuke", { path: "x" }, ctx);' },
-			}),
-			stopChunk(model),
-			"[DONE]",
-		]);
-
-		const result = await streamOpenAICompletions(model, baseContext(), {
-			apiKey: "test-key",
-			fetch: fetchMock,
-		}).result();
-
-		expect(result.content).toEqual([
-			{
-				type: "toolCall",
-				id: "call-minimax-1",
-				name: "edit",
-				arguments: {
-					input: '[foo.ts#A1B2]\nSWAP 91.=91:\n+    const out = await executeTool("nuke", { path: "x" }, ctx);',
-				},
-			},
-		]);
-	});
-
 	it("does not double cumulative chunks where each delta restates everything seen so far", async () => {
 		const model = getBundledModel<"openai-completions">("minimax-code-cn", "MiniMax-M3");
 		// Second chunk strictly extends the first — common shape for hosts

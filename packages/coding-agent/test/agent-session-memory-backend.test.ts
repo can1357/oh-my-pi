@@ -48,7 +48,6 @@ describe("AgentSession memory backend lifecycle", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.keys.setRuntime("anthropic", "test-key");
 		settings = Settings.isolated({
 			"compaction.enabled": false,
 			"memory.backend": "off",
@@ -80,6 +79,9 @@ describe("AgentSession memory backend lifecycle", () => {
 			contextWindow: 8192,
 			maxTokens: 2048,
 		});
+		// AgentSession validates the prompt key through the registry for the session model's provider;
+		// without a runtime key it falls back to ambient env/~/.env credentials.
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const read = createTool("read");
 		const agent = new Agent({
 			getApiKey: () => "test-key",

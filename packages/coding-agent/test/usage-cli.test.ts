@@ -5,13 +5,15 @@ import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
-	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
-	type UsageAccountIdentity,
 	type UsagePolicyDiagnosticsOptions,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import {
+	collectUnreportedAccounts,
+	type UsageAccountIdentity,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;

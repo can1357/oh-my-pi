@@ -5,7 +5,7 @@
  * pi-ai both consume these; URL matching is the one detection surface that
  * stays in code.
  */
-import { hostMatchesUrl } from "../hosts";
+import { hostMatchesUrl, isBedrockRouteUrl } from "../hosts";
 
 const OFFICIAL_ANTHROPIC_URL = "https://api.anthropic.com";
 
@@ -26,6 +26,15 @@ const CLOUDFLARE_ANTHROPIC_GATEWAY_URL_MARKER = /gateway\.ai\.cloudflare\.com\/.
 const VERTEX_ANTHROPIC_URL_MARKER = /aiplatform\.googleapis\.com\/.+\/publishers\/anthropic\//i;
 const BEDROCK_ANTHROPIC_URL_MARKER = /(?:^|\/\/|\.)bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com/i;
 const AZURE_ANTHROPIC_URL_MARKER = /(?:^|\/\/|\.)[a-z0-9-]+\.(?:inference|services)\.ai\.azure\.com/i;
+
+/**
+ * Amazon Bedrock's Anthropic Messages API: the `/anthropic` path on the
+ * bedrock-runtime or bedrock-mantle endpoint. It rejects the tool `strict`
+ * field and enforces Anthropic signatures on replay.
+ */
+export function isBedrockAnthropicRoute(baseUrl?: string): boolean {
+	return isBedrockRouteUrl(baseUrl, "anthropic");
+}
 
 /**
  * Azure AI Inference / Foundry Anthropic route
@@ -53,6 +62,7 @@ export function isAnthropicSigningProxyUrl(baseUrl?: string): boolean {
 			(CLOUDFLARE_ANTHROPIC_GATEWAY_URL_MARKER.test(baseUrl) ||
 				VERTEX_ANTHROPIC_URL_MARKER.test(baseUrl) ||
 				BEDROCK_ANTHROPIC_URL_MARKER.test(baseUrl))) ||
+		isBedrockAnthropicRoute(baseUrl) ||
 		isAzureAnthropicRoute(baseUrl)
 	);
 }

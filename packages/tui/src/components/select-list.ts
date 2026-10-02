@@ -1,8 +1,14 @@
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
+import { Input } from "./input";
 import { getMenuWindow, MenuSelection } from "./menu-selection";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText, matchesKey } from "../keys";
 import { type MouseRoutable, routeSelectListMouse, type SgrMouseEvent } from "../mouse";
+import { col, node, span } from "../native/describe";
+import { sameItems, sameProps } from "../native/memo";
+import { plainLine } from "../native/spans";
+import type { TspProps } from "@oh-my-pi/pi-wire";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import type { SymbolTheme } from "../symbols";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
@@ -23,12 +29,25 @@ function sanitizeSingleLine(text: string): string {
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
 
+/** Described `item` node cached on the item, rebuilt only when its visible fields change. */
+const kNativeItem = Symbol("selectList.nativeItem");
+
+interface NativeDescribedItem extends SelectItem {
+	[kNativeItem]?: { signature: string; node: NativeNode };
+}
+
 export interface SelectItem {
 	value: string;
 	label: string;
 	description?: string;
 	/** Optional type-indicator glyph rendered in an aligned column before the label */
 	icon?: string;
+	/** Named icon a TSP terminal draws from its own set (replaces the {@link icon} glyph natively). */
+	iconName?: string;
+	/** Native detail text when it differs from the ANSI {@link description} (which may embed {@link state}). */
+	nativeDetail?: string;
+	/** Live state drawn right-aligned natively ("demo/demo", "off"). */
+	state?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
 	/** Disabled rows stay visible but are skipped by navigation and cannot activate. */
@@ -153,6 +172,12 @@ export class SelectList implements Component, MouseRoutable {
 	#hoveredIndex: number | null = null;
 	/** Per-render map of 0-based output line → filtered-item index. */
 	#hitRows: (number | undefined)[] = [];
+	#nativeList?: { props: TspProps<"list">; items: readonly NativeNode[]; node: NativeNode };
+	#nativeRoot?: { list: NativeNode; status: string; node: NativeNode };
+	/** Typed text marked at the start of native item labels (an autocomplete popup's query). */
+	#nativeMark: string | undefined;
+	/** The type-to-filter field; its value is pushed into the selection's query. */
+	readonly #search = new Input();
 
 	onSelect?: (item: SelectItem) => void;
 	onCancel?: () => void;
@@ -172,6 +197,7 @@ export class SelectList implements Component, MouseRoutable {
 			requiresConfirmation: item => item.confirmation !== undefined,
 			filter: layout.filterItems,
 		});
+		this.#search.prompt = "";
 	}
 	/** Return item, selection, and filter state for debug inspection. */
 	debugState(): Record<string, unknown> {
@@ -193,8 +219,10 @@ export class SelectList implements Component, MouseRoutable {
 		this.#maxVisible = Math.max(1, Math.trunc(rows));
 	}
 
+	/** Replace the filter text (caret to end) and refilter. */
 	setFilter(filter: string): void {
-		this.#setFilter(filter, true);
+		this.#search.setValue(filter);
+		this.#setFilter(this.#search.getValue(), true);
 	}
 
 	/** Replace controlled items while retaining the selected value when possible. */
@@ -213,6 +241,26 @@ export class SelectList implements Component, MouseRoutable {
 
 	getFilter(): string {
 		return this.#selection.query;
+	}
+
+	/**
+	 * What a native `picker` shows: the filtered items in order, the selected
+	 * and pending values, the query and its caret (UTF-16 offset).
+	 */
+	pickerView(): {
+		readonly items: readonly SelectItem[];
+		readonly selected: string | null;
+		readonly pending: string | null;
+		readonly query: string;
+		readonly cursor: number;
+	} {
+		return {
+			items: this.#selection.visibleItems,
+			selected: this.#selection.selectedKey ?? null,
+			pending: this.#selection.pendingKey ?? null,
+			query: this.#selection.query,
+			cursor: this.#search.getCursor(),
+		};
 	}
 
 	/** Resolve a 0-based rendered-line index to a filtered-item index. */
@@ -240,6 +288,95 @@ export class SelectList implements Component, MouseRoutable {
 
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
 		routeSelectListMouse(this, event, line);
+	}
+
+	/**
+	 * A `list` of `item`s keyed by item value, with the selection, the search
+	 * query and the empty/no-match text, plus a status line (search query,
+	 * pending confirmation, host status) under it when one applies.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const items: NativeNode[] = [];
+		for (const item of this.#selection.visibleItems) items.push(this.#describeItem(item));
+		const query = this.#selection.query;
+		const cachedMax = this.#nativeList?.props.max;
+		const props: TspProps<"list"> = {
+			selected: this.#selection.selectedKey ?? null,
+			filter: this.#nativeMark === undefined ? query.trim() || undefined : undefined,
+			empty:
+				query.trim().length > 0
+					? (this.layout.noMatchText ?? "No matching items")
+					: (this.layout.emptyText ?? "No items"),
+			max:
+				typeof cachedMax === "object" && cachedMax.lines === this.#maxVisible
+					? cachedMax
+					: { lines: this.#maxVisible },
+		};
+		const cachedList = this.#nativeList;
+		const list =
+			cachedList && sameProps(cachedList.props, props) && sameItems(cachedList.items, items)
+				? cachedList.node
+				: node("list", props, items, "list");
+		if (list !== cachedList?.node) this.#nativeList = { props, items, node: list };
+
+		const status = this.#shouldRenderSearchStatus() ? plainLine(this.#statusText()) : "";
+		const cachedRoot = this.#nativeRoot;
+		if (cachedRoot && cachedRoot.list === list && cachedRoot.status === status) return cachedRoot.node;
+		const children: NativeChild[] = [list];
+		if (status) children.push(node("text", { spans: [span(status, "muted")], wrap: "none" }, undefined, "status"));
+		const root = col(children, { role: "omp.select" });
+		this.#nativeRoot = { list, status, node: root };
+		return root;
+	}
+
+	/**
+	 * Mark `typed` where it leads a native item label (`{s:"mark"}`), for lists
+	 * whose items were matched against text outside the list (autocomplete).
+	 * The list then sends no `filter`: the marks already say what matched.
+	 */
+	setNativeMark(typed: string): void {
+		this.#nativeMark = typed;
+	}
+
+	/** Pointer select/activate on an item does what a click does today: select it and request activation. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "select" && event.type !== "activate") return;
+		const index = this.#selection.visibleItems.findIndex(item => item.value === event.item);
+		if (index >= 0) this.clickItem(index);
+	}
+
+	#describeItem(item: NativeDescribedItem): NativeNode {
+		const pending = this.#selection.isPending(item);
+		const label = plainLine(this.#sanitizedLabel(item));
+		const description = plainLine((pending ? item.confirmation : this.#sanitizedDescription(item)) ?? "");
+		const detail = pending || item.nativeDetail === undefined ? description : plainLine(item.nativeDetail);
+		const icon = item.icon && item.iconName === undefined ? plainLine(item.icon) : "";
+		const state = item.state ? plainLine(item.state) : "";
+		const mark = this.#nativeMark ?? "";
+		const marked = mark.length > 0 && label.toLowerCase().startsWith(mark.toLowerCase()) ? mark.length : 0;
+		const signature =
+			`${label}\0${detail}\0${icon}\0${item.iconName}\0${state}\0${marked}\0` +
+			`${item.disabled === true}\0${pending}`;
+		const cached = item[kNativeItem];
+		if (cached?.signature === signature) return cached.node;
+		const name = marked === 0 ? [span(label)] : [span(label.slice(0, marked), "mark")];
+		if (marked > 0 && marked < label.length) name.push(span(label.slice(marked)));
+		const described = node(
+			"item",
+			{
+				// A named icon comes from the terminal's set; a bare glyph leads the label.
+				icon: item.iconName,
+				label: icon ? [span(`${icon} `, "muted"), ...name] : name,
+				detail: detail ? [span(detail, pending ? "warning" : "muted")] : undefined,
+				value: state ? [span(state, "muted")] : undefined,
+				disabled: item.disabled === true ? true : undefined,
+				tone: pending ? "warning" : undefined,
+			},
+			undefined,
+			item.value,
+		);
+		item[kNativeItem] = { signature, node: described };
+		return described;
 	}
 
 	invalidate(): void {
@@ -356,14 +493,15 @@ export class SelectList implements Component, MouseRoutable {
 			return;
 		}
 
-		if (this.#handleSearchInput(keyData)) return;
-		if (this.#selection.visibleItems.length === 0) return;
-
+		// Typed text filters even when it collides with a navigation binding; then
+		// host navigation; every other key is the search field's.
+		if (extractPrintableText(keyData) !== undefined && this.#handleSearchInput(keyData)) return;
+		const wrap = this.layout.wrapNavigation !== false;
 		let selectionChanged = false;
 		if (kb.matches(keyData, "tui.select.up")) {
-			selectionChanged = this.#selection.move(-1, this.layout.wrapNavigation !== false);
+			selectionChanged = this.#selection.move(-1, wrap);
 		} else if (kb.matches(keyData, "tui.select.down")) {
-			selectionChanged = this.#selection.move(1, this.layout.wrapNavigation !== false);
+			selectionChanged = this.#selection.move(1, wrap);
 		} else if (kb.matches(keyData, "tui.select.pageUp")) {
 			selectionChanged = this.#selection.move(-this.#maxVisible);
 		} else if (kb.matches(keyData, "tui.select.pageDown")) {
@@ -373,7 +511,9 @@ export class SelectList implements Component, MouseRoutable {
 		} else if (matchesKey(keyData, "end")) {
 			selectionChanged = this.#selection.moveToBoundary("last");
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
-			this.#activateSelected();
+			if (this.#selection.visibleItems.length > 0) this.#activateSelected();
+		} else {
+			this.#handleSearchInput(keyData);
 		}
 		if (selectionChanged) this.#notifySelectionChange();
 	}
@@ -570,6 +710,21 @@ export class SelectList implements Component, MouseRoutable {
 	}
 
 	#renderStatusLine(width: number): string {
+		const avail = Math.max(1, width - 2);
+		if (
+			this.layout.statusText === undefined &&
+			this.#selection.pendingKey === undefined &&
+			this.#selection.query.length > 0
+		) {
+			const label = truncateToWidth("  Search: ", avail, Ellipsis.Omit);
+			const fieldWidth = avail - visibleWidth(label);
+			const styled = this.theme.scrollInfo(label);
+			return fieldWidth > 0 ? styled + this.#search.render(fieldWidth)[0].trimEnd() : styled;
+		}
+		return this.theme.scrollInfo(truncateToWidth(this.#statusText(), avail, Ellipsis.Omit));
+	}
+
+	#statusText(): string {
 		const pendingItem =
 			this.#selection.pendingKey === undefined
 				? undefined
@@ -582,12 +737,10 @@ export class SelectList implements Component, MouseRoutable {
 			totalCount: this.#selection.items.length,
 			pendingItem,
 		});
-		const statusText =
-			this.layout.statusText !== undefined
-				? (custom ?? "")
-				: (pendingItem?.confirmation ??
+		return this.layout.statusText !== undefined
+			? (custom ?? "")
+			: (pendingItem?.confirmation ??
 					(query ? `  Search: ${query}` : this.#canEditSearch() ? "  Type to search" : ""));
-		return this.theme.scrollInfo(truncateToWidth(statusText, Math.max(1, width - 2), Ellipsis.Omit));
 	}
 
 	#shouldRenderSearchStatus(): boolean {
@@ -608,21 +761,17 @@ export class SelectList implements Component, MouseRoutable {
 	#handleSearchInput(keyData: string): boolean {
 		if (!this.#canEditSearch()) return false;
 
-		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.editor.deleteCharBackward")) {
-			if (this.#selection.query.length === 0) return false;
-			const chars = [...this.#selection.query];
-			chars.pop();
-			this.#setFilter(chars.join(""), true);
-			return true;
+		const before = this.#search.getValue();
+		if (before.length === 0) {
+			if (getKeybindings().matches(keyData, "tui.editor.deleteCharBackward")) return false;
+			const printableText = extractPrintableText(keyData);
+			if (printableText !== undefined && printableText.trim().length === 0) return false;
 		}
 
-		const printableText = extractPrintableText(keyData);
-		if (printableText === undefined) return false;
-		if (this.#selection.query.length === 0 && printableText.trim().length === 0) return false;
-
-		this.#setFilter(this.#selection.query + printableText, true);
-		return true;
+		const consumed = this.#search.handleInput(keyData);
+		const after = this.#search.getValue();
+		if (after !== before) this.#setFilter(after, true);
+		return consumed;
 	}
 
 	#setFilter(filter: string, notify: boolean): void {

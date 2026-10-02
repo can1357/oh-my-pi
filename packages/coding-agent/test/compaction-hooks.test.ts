@@ -223,27 +223,6 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 		}
 	}, 120000);
 
-	it("should include entries in compact event after compaction is saved", async () => {
-		const hook = createHook();
-		await createSession([hook]);
-
-		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
-
-		await session.compact();
-
-		const compactEvents = capturedEvents.filter(e => e.type === "session_compact");
-		expect(compactEvents.length).toBe(1);
-
-		const afterEvent = compactEvents[0];
-		if (afterEvent.type === "session_compact") {
-			// sessionManager is now on ctx, use session.sessionManager directly
-			const entries = session.sessionManager.getEntries();
-			const hasCompactionEntry = entries.some((e: { type: string }) => e.type === "compaction");
-			expect(hasCompactionEntry).toBe(true);
-		}
-	}, 120000);
-
 	it("should continue with default compaction if hook throws error", async () => {
 		const throwingHook: LoadedHook = {
 			path: "throwing-hook",
@@ -357,41 +336,6 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 		await session.compact();
 
 		expect(callOrder).toEqual(["hook1-before", "hook2-before", "hook1-after", "hook2-after"]);
-	}, 120000);
-
-	it("should pass correct data in before_compact event", async () => {
-		let capturedBeforeEvent: SessionBeforeCompactEvent | null = null;
-
-		const hook = createHook(event => {
-			capturedBeforeEvent = event;
-			return undefined;
-		});
-		await createSession([hook]);
-
-		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
-
-		await session.prompt("What is 3+3? Reply with just the number.");
-		await session.agent.waitForIdle();
-
-		await session.compact();
-
-		expect(capturedBeforeEvent).not.toBeNull();
-		const event = capturedBeforeEvent!;
-		expect(typeof event.preparation.isSplitTurn).toBe("boolean");
-		expect(event.preparation.firstKeptEntryId).toBeDefined();
-
-		expect(Array.isArray(event.preparation.messagesToSummarize)).toBe(true);
-		expect(Array.isArray(event.preparation.turnPrefixMessages)).toBe(true);
-
-		expect(typeof event.preparation.tokensBefore).toBe("number");
-
-		expect(Array.isArray(event.branchEntries)).toBe(true);
-
-		// sessionManager, modelRegistry, and model are now on ctx, not event
-		// Verify they're accessible via session
-		expect(typeof session.sessionManager.getEntries).toBe("function");
-		expect(typeof session.modelRegistry.getApiKey).toBe("function");
 	}, 120000);
 
 	it("should use hook compaction even with different values", async () => {

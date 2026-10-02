@@ -287,7 +287,8 @@ export function formatVideoDetails(
 	return lines.join("\n");
 }
 
-function formatByteSize(bytes: number): string {
+/** Binary-unit size (`512 B`, `1.5 KiB`, `3.2 MiB`) for resource details. */
+export function formatByteSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	const kib = bytes / 1024;
 	if (kib < 1024) return `${kib.toFixed(1)} KiB`;

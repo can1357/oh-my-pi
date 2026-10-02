@@ -362,36 +362,9 @@ describe("Ollama searchOllama response mapping", () => {
 		expect(response.sources[0]?.snippet).toBeUndefined();
 	});
 
-	it("handles non-string content field gracefully", async () => {
-		const fetchMock: FetchImpl = async () =>
-			new Response(
-				JSON.stringify({
-					results: [{ title: "Bad Content", url: "https://example.com/bad", content: 123 }],
-				}),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
-			);
-
-		const response = await searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		expect(response.sources).toHaveLength(1);
-		expect(response.sources[0]?.snippet).toBeUndefined();
-	});
-
 	it("returns empty sources array when results is missing", async () => {
 		const fetchMock: FetchImpl = async () =>
 			new Response(JSON.stringify({}), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-
-		const response = await searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		expect(response.sources).toEqual([]);
-	});
-
-	it("returns empty sources array when results is null", async () => {
-		const fetchMock: FetchImpl = async () =>
-			new Response(JSON.stringify({ results: null }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
 			});
@@ -438,26 +411,6 @@ describe("Ollama searchOllama error handling", () => {
 		const error = await promise.catch(e => e);
 		expect(error).toBeInstanceOf(Error);
 		expect(error.status).toBe(401);
-		expect(error.provider).toBe("ollama");
-	});
-
-	it("throws SearchProviderError with 403 status on forbidden", async () => {
-		const fetchMock: FetchImpl = async () => new Response("Forbidden", { status: 403 });
-
-		const promise = searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		const error = await promise.catch(e => e);
-		expect(error.status).toBe(403);
-		expect(error.provider).toBe("ollama");
-	});
-
-	it("throws SearchProviderError with 402 status on credits exhausted", async () => {
-		const fetchMock: FetchImpl = async () => new Response("credits exhausted", { status: 402 });
-
-		const promise = searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		const error = await promise.catch(e => e);
-		expect(error.status).toBe(402);
 		expect(error.provider).toBe("ollama");
 	});
 

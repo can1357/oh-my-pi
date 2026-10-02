@@ -1,6 +1,6 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page } from "puppeteer-core";
-import { requireReactHookResult } from "./devtools-hook";
+import { type ReactPageEnvelope, requireReactHookResult } from "./devtools-hook";
 
 /** Options controlling React Suspense boundary filtering. */
 export interface ReactSuspenseOptions {
@@ -14,11 +14,6 @@ export interface ReactSuspenseBoundary {
 	state: "pending" | "resolved";
 	fallback?: unknown;
 	classification: "static" | "dynamic";
-}
-
-interface ReactSuspenseEnvelope {
-	missingHook?: boolean;
-	value?: ReactSuspenseBoundary[];
 }
 
 const SUSPENSE_SOURCE_PREFIX = `(() => {
@@ -74,15 +69,20 @@ const SUSPENSE_SOURCE_SUFFIX = `;
 	return { value };
 })()`;
 
+/** Page expression listing Suspense boundaries; evaluates to a `ReactPageEnvelope<ReactSuspenseBoundary[]>`. */
+export function reactSuspenseSource(options: ReactSuspenseOptions): string {
+	return `${SUSPENSE_SOURCE_PREFIX}${JSON.stringify(options.onlyDynamic === true)}${SUSPENSE_SOURCE_SUFFIX}`;
+}
+
 /** List mounted React Suspense boundaries and whether each has ever suspended. */
 export async function readReactSuspense(
 	page: Page,
 	options: ReactSuspenseOptions = {},
 	signal?: AbortSignal,
 ): Promise<ReactSuspenseBoundary[]> {
-	const source = `${SUSPENSE_SOURCE_PREFIX}${JSON.stringify(options.onlyDynamic === true)}${SUSPENSE_SOURCE_SUFFIX}`;
+	const source = reactSuspenseSource(options);
 	const result = (await untilAborted(signal, () =>
 		page.mainFrame().mainRealm().evaluate(source),
-	)) as ReactSuspenseEnvelope;
+	)) as ReactPageEnvelope<ReactSuspenseBoundary[]>;
 	return requireReactHookResult(result);
 }

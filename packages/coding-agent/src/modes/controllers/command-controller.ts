@@ -10,7 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Loader, Markdown, padding, Spacer, Text, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -30,6 +30,7 @@ import {
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
@@ -38,9 +39,11 @@ import { moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
-import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
+import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
@@ -73,7 +76,9 @@ import {
 	selectChangelogEntries,
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
+import { formatDumpArchiveReport } from "../../session/session-dump-format";
 import { openPath } from "../../utils/open";
+import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
 	collapseSharedUsageReports,
@@ -81,8 +86,9 @@ import {
 	summarizeUsageResetCredits,
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
+import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 
-import { cfgDisplayCollapseCompacted, cfgTerminalShowImages } from "../settings";
+import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 
@@ -101,6 +107,9 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 }
 
 export class CommandController {
+	/** The last `/context` card mounted, reused so repeated runs never stack cards. */
+	#contextView: ContextUsageView | undefined;
+
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	async #restoreAfterMoveFailure(
@@ -219,6 +228,22 @@ export class CommandController {
 			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+
+	async handleDumpAllCommand(): Promise<void> {
+		try {
+			const archive = await this.ctx.session.dumpSessionArchiveToTmpDir();
+			if (!archive) {
+				this.ctx.showError("No messages to dump yet.");
+				return;
+			}
+			await copyToClipboard(archive.path);
+			this.ctx.showStatus([...formatDumpArchiveReport(archive), "Archive path copied to clipboard"].join("\n"));
+		} catch (error: unknown) {
+			this.ctx.showError(
+				`Failed to write session dump: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
 		}
 	}
 
@@ -457,7 +482,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showSessionInfo(info);
+		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage());
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
@@ -593,7 +618,8 @@ export class CommandController {
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 	}
 
-	async handleJobsCommand(): Promise<void> {
+	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
+		const full = options?.full === true;
 		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 		if (!snapshot) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
@@ -607,15 +633,26 @@ export class CommandController {
 
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
 			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+			this.ctx.presentCommandOutput(new JobsPanel(snapshot, now, [new Spacer(1), new Text(info, 1, 0)]));
 			return;
 		}
+
+		// Full mode wraps here so every line, including heredoc lines and wrap
+		// continuations, keeps the two-column indent under its job row.
+		const commandWidth = Math.max(1, (this.ctx.ui.terminal.columns ?? 100) - 4);
+		const describe = (job: AsyncJobSnapshotItem): string => {
+			if (!full) return `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}`;
+			const command = replaceTabs(sanitizeText(job.command ?? job.label));
+			return wrapTextWithAnsi(command, commandWidth)
+				.map(line => `  ${theme.fg("dim", line)}`)
+				.join("\n");
+		};
 
 		if (snapshot.running.length > 0) {
 			info += `\n${theme.bold("Running Jobs")}\n`;
 			for (const job of snapshot.running) {
 				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+				info += `${describe(job)}\n`;
 			}
 		}
 
@@ -623,11 +660,13 @@ export class CommandController {
 			info += `\n${theme.bold("Recent Jobs")}\n`;
 			for (const job of snapshot.recent) {
 				info += `${renderJobLine(job, now)}\n`;
-				info += `  ${theme.fg("dim", truncateJobLabel(job.label, lineWidth))}\n`;
+				info += `${describe(job)}\n`;
 			}
 		}
 
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
+		// The native jobs panel truncates labels, so full mode renders plain text only
+		const body = [new Spacer(1), new Text(info.trimEnd(), 1, 0)];
+		this.ctx.presentCommandOutput(full ? body : new JobsPanel(snapshot, now, body));
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -642,16 +681,10 @@ export class CommandController {
 				usageReports = await provider.fetchUsageReports();
 			} catch (error) {
 				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
-				return;
 			}
 		}
 
-		if (!usageReports || usageReports.length === 0) {
-			this.ctx.showWarning("No usage data available.");
-			return;
-		}
-
-		this.ctx.showUsageDashboard(usageReports);
+		this.ctx.showUsageDashboard(usageReports ?? []);
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {
@@ -690,8 +723,20 @@ export class CommandController {
 	}
 
 	handleHotkeysCommand(): void {
-		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
-		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
+		const bindings = { keybindings: this.ctx.keybindings };
+		if (isNativeRendering()) {
+			// A native terminal gets a dismissable sheet with keycaps instead of a transcript table.
+			const sheet = new HotkeysSheetComponent(bindings, () => {
+				handle.hide();
+				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+				this.ctx.ui.requestRender();
+			});
+			const handle = this.ctx.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.ctx.ui.setFocus(sheet);
+			this.ctx.ui.requestRender();
+			return;
+		}
+		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
 	}
 
 	handleToolsCommand(): void {
@@ -708,14 +753,25 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		const output = renderContextUsage(breakdown, theme);
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Text(output, 1, 0));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		const chat = this.ctx.chatContainer;
+		const prev = this.#contextView;
+		// Identity check: a handle left over from a cleared/switched transcript is ignored.
+		if (prev && chat.children.includes(prev) && chat.canRemoveBlock(prev)) {
+			if (chat.children.at(-1) === prev) {
+				prev.setBreakdown(breakdown);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			chat.removeChild(prev);
+		}
+		const view = new ContextUsageView(breakdown, theme);
+		this.ctx.presentCommandOutput(view);
+		this.#contextView = view;
+	}
+
+	/** Forget the tracked `/context` card (the transcript it lived in was reset). */
+	resetContextView(): void {
+		this.#contextView = undefined;
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -1152,6 +1208,12 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
+		// After a `/fork`, the current session ID is changed to the forked one,
+		// so the session ID before the fork is the one we want to show in the hint.
+		const previousSessionId = this.ctx.sessionManager.isSessionOnDisk()
+			? this.ctx.sessionManager.getSessionId()
+			: undefined;
+
 		const success = await this.ctx.session.fork();
 		if (!success) {
 			this.ctx.showError("Fork failed (session not persisted or cancelled)");
@@ -1161,11 +1223,18 @@ export class CommandController {
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 
-		const sessionFile = this.ctx.session.sessionFile;
-		const shortPath = sessionFile ? sessionFile.split("/").pop() : "new session";
 		this.ctx.present([
 			new Spacer(1),
-			new Text(`${theme.fg("accent", `${theme.status.success} Session forked to ${shortPath}`)}`, 1, 1),
+			new Text(
+				theme.fg(
+					"accent",
+					previousSessionId
+						? `${theme.status.success} Session forked · return to original: ${resumeCommand(previousSessionId)} or /resume ${previousSessionId}`
+						: `${theme.status.success} Session forked`,
+				),
+				1,
+				1,
+			),
 		]);
 	}
 
@@ -1593,13 +1662,24 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
-		const label = isAuto ? "Auto-compacting context... (esc to cancel)" : "Compacting context... (esc to cancel)";
+		const cancelHint = `(${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
+		const label = isAuto ? `Auto-compacting context... ${cancelHint}` : `Compacting context... ${cancelHint}`;
 		const compactingLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
 			label,
 			getSymbolTheme().spinnerFrames,
+		);
+		const compactionStartMs = Date.now();
+		compactingLoader.setWorkingRow(
+			() => ({
+				label: isAuto ? "Auto-compacting context…" : "Compacting context…",
+				startedAt: compactionStartMs,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(compactingLoader);
 		this.ctx.ui.requestRender();
@@ -1625,15 +1705,12 @@ export class CommandController {
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 
 			this.ctx.statusLine.invalidate();
-			// Same as the auto-compaction rebuild: a collapsed transcript is an
-			// intentional replacement, so drop the stale pre-compaction scrollback
-			// instead of repainting the shrunken frame below it. With collapse
-			// disabled the full history stays inline and scrollback is kept.
-			if (cfgDisplayCollapseCompacted.get(this.ctx.settings)) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
+			// Same pairing as the auto-compaction arm in event-controller: the
+			// rebuild clears the container's emission ledger, so every block
+			// re-emits on this frame while the previous copy is still in native
+			// scrollback — without a clear the collapse-disabled path appends a
+			// duplicate transcript, exactly as `/compact` reproduced (#12140).
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
@@ -1684,7 +1761,7 @@ export class CommandController {
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
-			"Generating handoff… (esc to cancel)",
+			`Generating handoff… (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(handoffLoader);
@@ -2088,10 +2165,11 @@ export function renderUsageReports(
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
+	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
 	const lines: string[] = [];
-	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
+	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
 	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
 	const grouped = new Map<string, UsageReport[]>();
@@ -2099,6 +2177,9 @@ export function renderUsageReports(
 		const list = grouped.get(report.provider) ?? [];
 		list.push(report);
 		grouped.set(report.provider, list);
+	}
+	for (const account of unavailableAccounts) {
+		if (!grouped.has(account.provider)) grouped.set(account.provider, []);
 	}
 	const providerEntries = Array.from(grouped.entries())
 		.map(([provider, providerReports]) => ({
@@ -2174,6 +2255,13 @@ export function renderUsageReports(
 			for (const selector of reportingModels) {
 				lines.push(`    ${replaceTabs(truncateToWidth(sanitizeText(selector), availableWidth - 4))}`);
 			}
+		}
+		for (const account of unavailableAccounts) {
+			if (account.provider !== provider) continue;
+			const label = replaceTabs(sanitizeText(account.label.replace(/[\r\n]+/g, " ")));
+			const status = " — usage unavailable";
+			const boundedLabel = truncateToWidth(label, Math.max(0, availableWidth - 2 - visibleWidth(status)));
+			lines.push(`  ${uiTheme.fg("dim", truncateToWidth(`${boundedLabel}${status}`, availableWidth - 2))}`);
 		}
 
 		// Provider-wide disclaimers (e.g. "OMP-observed spend only") render once

@@ -3,7 +3,7 @@ import type { SetupHost } from "./scenes/types";
 import { composerSetupScene } from "./scenes/composer";
 import { glyphSetupScene } from "./scenes/glyph";
 import { modelSetupScene } from "./scenes/model";
-import { providersSetupScene } from "./scenes/providers";
+import { providersSetupScene } from "./scenes/sign-in";
 import { themeSetupScene } from "./scenes/theme";
 import type { SetupScene } from "./scenes/types";
 import { SetupWizardComponent } from "./wizard-overlay";

@@ -6,6 +6,7 @@ import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
@@ -145,6 +146,7 @@ export function createComputerPrelude(
 		python: computerPreludeAssets.python,
 		exports: ["computer"],
 		codeModeDeclarations: computerPreludeAssets.codeModeDeclarations,
+		guidance: computerUsePrompt,
 		approval: computerApproval,
 		enabled: () => cfgComputerEnabled.get(session.settings) === true,
 		invoke: async (parameters, context) => {

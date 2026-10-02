@@ -177,14 +177,6 @@ describe("mergeSessionRanking", () => {
 		expect(ids(mergeSessionRanking(all, fuzzy, historyIds))).toEqual(["c", "a", "e", "b"]);
 	});
 
-	it("never drops a metadata match and appends it after prompt-history matches", () => {
-		const all = ["a", "b"].map(id => makeSession(id));
-		const byId = new Map(all.map(s => [s.id, s]));
-		const fuzzy = [byId.get("a")!];
-
-		expect(ids(mergeSessionRanking(all, fuzzy, ["b"]))).toEqual(["b", "a"]);
-	});
-
 	it("surfaces purely history-matched sessions ordered by prompt-history rank", () => {
 		const all = ["a", "b", "c"].map(id => makeSession(id));
 

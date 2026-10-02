@@ -1,3 +1,4 @@
+import type { TspProps, TspSpace } from "@oh-my-pi/pi-wire";
 import type { MouseRoutable } from "../../mouse";
 import type { Component } from "../../tui";
 import { padding, truncateToWidth, visibleWidth } from "../../utils";
@@ -49,6 +50,49 @@ export interface LayoutAllocation {
 	grow?: number;
 	min?: number;
 	max?: number;
+}
+
+const kNativeAdapter = Symbol("layout.nativeAdapter");
+type AdaptedRenderer = LayoutRenderer & { [kNativeAdapter]?: Component };
+
+/**
+ * Describe child for layout content: components describe themselves; a lazy
+ * row renderer becomes a stable adapter component the native engine renders
+ * as a `rows` fallback (it can only produce width-bound rows).
+ */
+export function nativeLayoutChild(content: LayoutContent): Component {
+	if (typeof content !== "function") return content;
+	const adapted = content as AdaptedRenderer;
+	adapted[kNativeAdapter] ??= { render: width => content(width, undefined) };
+	return adapted[kNativeAdapter];
+}
+
+/** Spacing step standing in for a textual gap decoration (the terminal draws no divider glyphs). */
+export function nativeLayoutGap(decoration: LayoutDecoration | undefined): TspSpace | undefined {
+	const length = layoutDecorationText(decoration).length;
+	if (length === 0) return undefined;
+	if (length === 1) return "xs";
+	if (length === 2) return "sm";
+	return "md";
+}
+
+/** Flex props for one layout slot along `axis` (`w` for rows, `h` for stacks). */
+export function nativeSlotProps(
+	axis: "w" | "h",
+	slot: { fixed?: number; grow?: number; min?: number; max?: number },
+): TspProps<"col"> {
+	const bound = (cells: number): { w: `${number}ch` } | { h: `${number}lines` } =>
+		axis === "w" ? { w: `${cells}ch` } : { h: `${cells}lines` };
+	const fixed = optionalLayoutSize(slot.fixed);
+	if (fixed !== undefined) return { grow: 0, shrink: 0, min: bound(fixed), max: bound(fixed) };
+	const min = optionalLayoutSize(slot.min);
+	const max = optionalLayoutSize(slot.max);
+	return {
+		grow: slot.grow === undefined ? undefined : layoutSize(slot.grow),
+		basis: "content",
+		min: min === undefined || min === 0 ? undefined : bound(min),
+		max: max === undefined ? undefined : bound(max),
+	};
 }
 
 /** Clamp an external size to a finite, non-negative integer cell count. */

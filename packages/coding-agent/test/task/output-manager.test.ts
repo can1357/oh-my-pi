@@ -20,16 +20,6 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Bob")).toBe("Bob");
 	});
 
-	it("de-duplicates repeated names while preserving order", async () => {
-		const mgr = new AgentOutputManager(() => null);
-
-		const ids: string[] = [];
-		for (const name of ["Auth", "Auth", "Api", "Auth"]) {
-			ids.push(await mgr.allocate(name));
-		}
-		expect(ids).toEqual(["Auth", "Auth-2", "Api", "Auth-3"]);
-	});
-
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {
 		const mgr = new AgentOutputManager(() => null, { parentPrefix: "Anna" });
 

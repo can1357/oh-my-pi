@@ -1,14 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import {
-	getActiveProfile,
-	getAgentDir,
-	getProfileRootDir,
-	isEnoent,
-	logger,
-	stringifyYamlConfig,
-} from "@oh-my-pi/pi-utils";
+// Subpaths, not the `@oh-my-pi/pi-utils` barrel: the barrel loads the native
+// addon (file-lock), and key-hint formatting runs on addon-free CLI paths
+// (`omp --version`, help) through cli/command-help.ts.
+import { getActiveProfile, getAgentDir, getProfileRootDir } from "@oh-my-pi/pi-utils/dirs";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import { JSONC, YAML } from "bun";
+import { formatKeyHints } from "./key-hint-format";
 import {
 	type Keybinding,
 	type KeybindingDefinitions,
@@ -645,12 +645,9 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 		return this.getResolvedBindings();
 	}
 
-	/**
-	 * Get display string for a keybinding (e.g., "ctrl+c/escape").
-	 */
+	/** Display string for a keybinding's keys (see {@link formatKeyHints}); empty when unbound. */
 	getDisplayString(keybinding: Keybinding): string {
-		const keys = this.getKeys(keybinding);
-		return formatKeyHints(keys.length === 0 ? [] : keys);
+		return formatKeyHints(this.getKeys(keybinding));
 	}
 
 	/**
@@ -664,97 +661,7 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	}
 }
 
-/**
- * Key hint formatting utilities for UI labels.
- *
- * Modifier labels are platform-aware: macOS names the physical keys `Option`
- * (`alt`) and `Cmd` (`super`), so rendering `Alt`/`Super` there would name keys
- * absent from a Mac keyboard. Every other platform keeps `Alt`/`Super`.
- */
-
-/**
- * Platform override for key-hint rendering; `undefined` resolves to the host
- * `process.platform`. Mirrors `setKittyProtocolActive` in the TUI keys module:
- * a single seam that keeps hint output deterministic in tests without mutating
- * the global `process.platform`.
- */
-let keyHintPlatformOverride: NodeJS.Platform | undefined;
-
-/** Pin the platform used to render modifier labels (test seam). */
-export function setKeyHintPlatform(platform: NodeJS.Platform | undefined): void {
-	keyHintPlatformOverride = platform;
-}
-
-/** Platform currently used for key-hint rendering. */
-export function keyHintPlatform(): NodeJS.Platform {
-	return keyHintPlatformOverride ?? process.platform;
-}
-
-type Modifier = "ctrl" | "shift" | "alt" | "super";
-
-function isModifier(part: string): part is Modifier {
-	return part === "ctrl" || part === "shift" || part === "alt" || part === "super";
-}
-
-/**
- * Human label for a modifier, using each platform's own key names. `ctrl` and
- * `shift` are the same everywhere; `alt`/`super` become `Option`/`Cmd` on macOS.
- */
-export function modifierLabel(mod: Modifier, platform: NodeJS.Platform = keyHintPlatform()): string {
-	switch (mod) {
-		case "ctrl":
-			return "Ctrl";
-		case "shift":
-			return "Shift";
-		case "alt":
-			return platform === "darwin" ? "Option" : "Alt";
-		case "super":
-			return platform === "darwin" ? "Cmd" : "Super";
-	}
-}
-
-const KEY_LABELS: Record<string, string> = {
-	esc: "Esc",
-	escape: "Esc",
-	enter: "Enter",
-	return: "Enter",
-	space: "Space",
-	tab: "Tab",
-	backspace: "Backspace",
-	delete: "Delete",
-	home: "Home",
-	end: "End",
-	pageup: "PgUp",
-	pagedown: "PgDn",
-	up: "Up",
-	down: "Down",
-	left: "Left",
-	right: "Right",
-};
-
-function formatKeyPart(part: string, platform: NodeJS.Platform): string {
-	const lower = part.toLowerCase();
-	if (isModifier(lower)) return modifierLabel(lower, platform);
-	const label = KEY_LABELS[lower];
-	if (label) return label;
-	if (part.length === 1) return part.toUpperCase();
-	return `${part.charAt(0).toUpperCase()}${part.slice(1)}`;
-}
-
-/** Format a key chord with human-readable, platform-aware modifier labels. */
-export function formatKeyHint(key: KeyId): string {
-	const platform = keyHintPlatform();
-	return key
-		.split("+")
-		.map(part => formatKeyPart(part, platform))
-		.join("+");
-}
-
-/** Format alternative key chords as slash-separated human-readable hints. */
-export function formatKeyHints(keys: KeyId | KeyId[]): string {
-	const list = Array.isArray(keys) ? keys : [keys];
-	return list.map(formatKeyHint).join("/");
-}
+export * from "./key-hint-format";
 
 export type { Keybinding, KeybindingsConfig, KeyId };
 export { migrateKeybindingsConfigFile };

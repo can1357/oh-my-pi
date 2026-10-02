@@ -38,7 +38,7 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
 
-import { isReadTruncationNotice, splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
@@ -199,11 +199,30 @@ const writeSchema = type({
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
 export type WriteToolInput = typeof writeSchema.infer;
 
+/**
+ * Offset of the last non-blank line of LF-only `text` when that line is a `read`
+ * truncation notice, else -1. Walks lines backward from the end instead of splitting.
+ */
+function readTruncationNoticeStart(text: string): number {
+	let end = text.length;
+	while (end > 0) {
+		const start = text.lastIndexOf("\n", end - 1) + 1;
+		const line = text.slice(start, end);
+		if (line.trim().length > 0) return isReadTruncationNotice(line) ? start : -1;
+		end = start - 1;
+	}
+	return -1;
+}
+
+/** `normalizeToLF(text).length` without the copy: each CRLF collapses to one LF; a lone CR stays one char. */
+function lfNormalizedLength(text: string): number {
+	let length = text.length;
+	for (let at = text.indexOf("\r\n"); at !== -1; at = text.indexOf("\r\n", at + 2)) length--;
+	return length;
+}
+
 function endsWithReadTruncationNotice(content: string): boolean {
-	const lines = splitAddressableFileLines(normalizeToLF(content));
-	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
-	if (noticeIndex === -1) return false;
-	return isReadTruncationNotice(lines[noticeIndex]!);
+	return readTruncationNoticeStart(normalizeToLF(content)) !== -1;
 }
 
 async function readCurrentWriteSource(
@@ -242,12 +261,18 @@ async function readCurrentWriteSource(
  * the truncation marker, not character count, establishes as incomplete.
  */
 function readProjectionPayloadLength(content: string): number | undefined {
-	const lines = splitAddressableFileLines(normalizeToLF(content));
-	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
-	if (noticeIndex === -1 || !isReadTruncationNotice(lines[noticeIndex]!)) return undefined;
-	let end = noticeIndex;
-	while (end > 0 && lines[end - 1]!.trim().length === 0) end--;
-	return lines.slice(0, end).join("\n").length;
+	const text = normalizeToLF(content);
+	let payloadEnd = readTruncationNoticeStart(text);
+	if (payloadEnd === -1) return undefined;
+	// Back over the blank lines separating the payload from the notice. `lastIndexOf` clamps a
+	// negative start to 0, so the first line (ending at the LF at 0) needs the explicit guard.
+	while (payloadEnd > 0) {
+		const previousStart = payloadEnd > 1 ? text.lastIndexOf("\n", payloadEnd - 2) + 1 : 0;
+		if (text.slice(previousStart, payloadEnd - 1).trim().length > 0) break;
+		payloadEnd = previousStart;
+	}
+	// `payloadEnd` starts the first dropped line; the payload excludes the LF before it.
+	return Math.max(0, payloadEnd - 1);
 }
 
 function assertNotShorterReadProjection(
@@ -258,8 +283,8 @@ function assertNotShorterReadProjection(
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
 	if (rawPayloadLength === undefined || currentContent === undefined) return;
-	const payloadLength = writeContent === rawContent ? rawPayloadLength : normalizeToLF(writeContent).length;
-	if (payloadLength >= normalizeToLF(currentContent).length) return;
+	const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
+	if (payloadLength >= lfNormalizedLength(currentContent)) return;
 	throw new ToolError(
 		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
 	);

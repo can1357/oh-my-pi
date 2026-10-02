@@ -1,11 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, Container, EditorTheme, Loader, TUI } from "@oh-my-pi/pi-tui";
+import type { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -47,6 +49,7 @@ import type { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-con
 import type { RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
+import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -258,8 +261,7 @@ export interface InteractiveModeContext {
 	hookSelector: HookSelectorComponent | undefined;
 	hookInput: HookInputComponent | undefined;
 	hookEditor: HookEditorComponent | undefined;
-	lastStatusSpacer: Spacer | undefined;
-	lastStatusText: Text | undefined;
+	lastStatus: StatusNotice | undefined;
 	fileSlashCommands: Set<string>;
 	skillCommands: Map<string, Skill>;
 	oauthManualInput: OAuthManualInputManager;
@@ -294,13 +296,13 @@ export interface InteractiveModeContext {
 	 */
 	present(content: Component | readonly Component[]): void;
 	/**
-	 * Mount command output immediately while idle, or defer it until the active
-	 * agent turn ends so a growing live block cannot push duplicate rows into
-	 * native scrollback.
+	 * Mount command output immediately while idle or on a Tern surface, or defer
+	 * it until the active agent turn ends so a growing live block cannot push
+	 * duplicate rows into terminal scrollback.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void;
-	/** Show session information in a focused transient overlay. */
-	showSessionInfo(info: string): void;
+	/** Show session information in a focused transient overlay; `context` adds a context-window meter natively. */
+	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
 	/**
@@ -310,7 +312,8 @@ export interface InteractiveModeContext {
 	 */
 	resetTranscript(): void;
 	showStatus(message: string, options?: { dim?: boolean }): void;
-	showModelCycleTrack(track: string): void;
+	/** Show the ctrl+p role chip track above the editor, `activeIndex` filled. */
+	showModelCycleTrack(segments: readonly TrackSegment[], activeIndex: number): void;
 	showError(message: string): void;
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
@@ -318,23 +321,35 @@ export interface InteractiveModeContext {
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		options?: { preserveDraft?: boolean },
+	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	setWorkingMessage(message?: string): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
+	/** Interrupt key id for a maintenance working row's stop control; undefined while Esc would not cancel it. */
+	maintenanceInterruptKey(): string | undefined;
+	/** A click on a working row's stop control: the interrupt key's handler. */
+	interruptFromPointer(): void;
 	/** Reconcile the idle "F5 to Retry" status row with the transcript tail. */
 	syncRetryHintRow(): void;
-	startPendingSubmission(input: {
-		text: string;
-		images?: ImageContent[];
-		imageLinks?: (string | undefined)[];
-		customType?: string;
-		display?: boolean;
-		streamingBehavior?: "steer" | "followUp";
-	}): SubmittedUserInput;
+	startPendingSubmission(
+		input: {
+			text: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			customType?: string;
+			display?: boolean;
+			streamingBehavior?: "steer" | "followUp";
+		},
+		options?: { preserveDraft?: boolean; clearEditor?: boolean },
+	): SubmittedUserInput;
 	cancelPendingSubmission(): boolean;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;
 	finishPendingSubmission(input: SubmittedUserInput): void;
@@ -409,13 +424,14 @@ export interface InteractiveModeContext {
 	handleTodoCommand(args: string): Promise<void>;
 	handleSessionCommand(): Promise<void>;
 	handleAdvisorStatusCommand(): Promise<void>;
-	handleJobsCommand(): Promise<void>;
+	handleJobsCommand(options?: { full?: boolean }): Promise<void>;
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
 	handleChangelogCommand(args?: string): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
 	handleContextCommand(): void;
 	handleDumpCommand(): Promise<void>;
+	handleDumpAllCommand(): Promise<void>;
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;
 	handleClearCommand(): Promise<void>;
@@ -497,8 +513,17 @@ export interface InteractiveModeContext {
 	resetDisplayAfterAppearanceRefresh(): void;
 	handleDequeue(): void;
 	handleImagePaste(): Promise<boolean>;
-	/** Queue a message for delivery only after the active agent turn would stop. */
-	handleQueueCommand(message: string): Promise<void>;
+	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
+	handleImagePathPaste(path: string): Promise<void>;
+	/**
+	 * Queue a message for delivery only after the active agent turn would stop.
+	 * `detached` is a submission whose draft already left the editor: its attachments
+	 * are queued and its text is restored if queueing fails.
+	 */
+	handleQueueCommand(
+		message: string,
+		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+	): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
@@ -537,6 +562,8 @@ export interface InteractiveModeContext {
 	): Promise<boolean>;
 	handleGoalModeCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
 	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
+	/** True while `/guided-goal` is interviewing the user and no goal record exists yet. */
+	isGuidedGoalInterviewActive(): boolean;
 	handleLoopCommand(args?: string): Promise<string | undefined>;
 	setLoopPrompt(prompt: string): void;
 	armLoopAutoSubmit(): void;

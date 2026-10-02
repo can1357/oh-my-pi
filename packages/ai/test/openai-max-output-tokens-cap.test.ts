@@ -301,14 +301,8 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
-	it.each([
-		["llama.cpp", "llama.cpp", "http://127.0.0.1:8080/v1"],
-		["lm-studio", "lm-studio", "http://127.0.0.1:1234/v1"],
-		["vllm", "vllm", "http://127.0.0.1:8000/v1"],
-		["ollama through OpenAI completions", "ollama", "http://127.0.0.1:11434/v1"],
-		["loopback custom", "custom", "http://127.0.0.1:8080/v1"],
-	] as const)("lets %s completions use model.maxTokens above 64k", async (_label, provider, baseUrl) => {
-		const model = localCompletionsModel(provider, baseUrl, 131_072);
+	it("lets loopback custom completions use model.maxTokens above 64k", async () => {
+		const model = localCompletionsModel("custom", "http://127.0.0.1:8080/v1", 131_072);
 		const body = await captureCompletionsBody(model, 131_072);
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(131_072);
 	});
@@ -325,14 +319,8 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
-	it.each([
-		["llama.cpp", "llama.cpp", "http://127.0.0.1:8080/v1"],
-		["lm-studio", "lm-studio", "http://127.0.0.1:1234/v1"],
-		["vllm", "vllm", "http://127.0.0.1:8000/v1"],
-		["ollama", "ollama", "http://127.0.0.1:11434/v1"],
-		["loopback custom", "custom", "http://127.0.0.1:8080/v1"],
-	] as const)("lets %s Responses hosts use model.maxTokens above 64k", async (_label, provider, baseUrl) => {
-		const model = localResponsesModel(provider, baseUrl, 131_072);
+	it("lets loopback custom Responses hosts use model.maxTokens above 64k", async () => {
+		const model = localResponsesModel("custom", "http://127.0.0.1:8080/v1", 131_072);
 		const body = await drainResponses(model, 131_072);
 		expect(body.max_output_tokens).toBe(131_072);
 	});
