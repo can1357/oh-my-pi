@@ -32,6 +32,7 @@ import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1761,6 +1762,22 @@ export async function resolveModelScope(
 			explicitThinkingLevel: explicit,
 		});
 	};
+	// The scope is chat-only (it feeds Ctrl+P cycling and the initial model). A
+	// pattern naming an available non-chat runner (judge, search, image, …) is
+	// not a typo: the model hub and role resolution use runners outside the scope.
+	let runnerModels: Model<Api>[] | undefined;
+	const reportUnmatched = (pattern: string, glob: boolean) => {
+		runnerModels ??= modelRegistry.getAvailable("all").filter(model => modelKind(model) !== "chat");
+		const namesRunner = glob
+			? resolveGlobScopePattern(pattern, runnerModels).models.length > 0
+			: parseModelPatternWithContext(pattern, runnerModels, buildPreferenceContext(runnerModels, preferences))
+					.model !== undefined;
+		if (namesRunner) {
+			logger.debug(`Scope pattern "${pattern}" names a non-chat model; it stays out of the chat scope`);
+			return;
+		}
+		logger.warn(`No models match pattern "${pattern}"`);
+	};
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
@@ -1774,7 +1791,7 @@ export async function resolveModelScope(
 			} = resolveGlobScopePattern(pattern, availableModels);
 
 			if (matchingModels.length === 0) {
-				logger.warn(`No models match pattern "${pattern}"`);
+				reportUnmatched(pattern, true);
 				continue;
 			}
 
@@ -1814,7 +1831,7 @@ export async function resolveModelScope(
 		}
 
 		if (!model) {
-			logger.warn(`No models match pattern "${pattern}"`);
+			reportUnmatched(pattern, false);
 			continue;
 		}
 

@@ -266,6 +266,24 @@ function quarantineShellSession(
 		.catch(() => undefined);
 }
 
+/**
+ * Drops every persistent Shell owned by an agent session (keys built with
+ * `agentSessionKey` as the {@link BashExecutorOptions.sessionKey}). The map is
+ * process-global, so without this each disposed session keeps its native shell
+ * for the life of the process. A Shell with live background jobs is retained
+ * until they exit, matching the `:async:` teardown; an in-flight run keeps its
+ * own reference and drops the Shell when it settles.
+ */
+export function releaseShellSessions(agentSessionKey: string | undefined): void {
+	if (!agentSessionKey) return;
+	const prefix = `${agentSessionKey}\n`;
+	for (const [key, shell] of shellSessions) {
+		if (!key.startsWith(prefix)) continue;
+		shellSessions.delete(key);
+		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
+	}
+}
+
 function resolveShellCwd(cwd: string | undefined): string | undefined {
 	// Preserve the caller's logical cwd string. Brush uses this value to update `PWD` and its
 	// internal working directory, so realpathing here collapses symlinks before the shell sees them.

@@ -91,7 +91,14 @@ export class SpawnRun {
 	attach(owner: SpawnRunOwner): void {
 		const signal = owner.signal;
 		if (signal?.aborted) this.#controller.abort(signal.reason);
-		else signal?.addEventListener("abort", () => this.#controller.abort(signal.reason), { once: true });
+		else if (signal) {
+			const onAbort = () => this.#controller.abort(signal.reason);
+			signal.addEventListener("abort", onAbort, { once: true });
+			// The owner signal can outlive the run (a session- or job-scoped signal that never
+			// aborts); drop the listener once the run settles so the signal does not pin it.
+			const detach = () => signal.removeEventListener("abort", onAbort);
+			void this.result.then(detach, detach);
+		}
 		this.#onUpdate = owner.onUpdate;
 		if (this.#lastUpdate) void owner.onUpdate?.(this.#lastUpdate);
 		this.#onArtifactsRetained = owner.onArtifactsRetained;

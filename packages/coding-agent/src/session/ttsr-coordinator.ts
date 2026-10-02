@@ -694,11 +694,12 @@ export class TtsrCoordinator {
 					);
 					this.#markInjected(details.rules);
 				}
-				try {
-					await this.#host.agent.continue();
-				} catch {
-					this.resolveResume();
-				}
+				this.#host.scheduleAgentContinue({
+					source: "ttsr-interrupt",
+					generation,
+					onSkip: () => this.resolveResume(),
+					onError: () => this.resolveResume(),
+				});
 			},
 			{ delayMs: 50 },
 		);

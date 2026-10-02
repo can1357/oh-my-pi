@@ -2,9 +2,18 @@
 
 ## [Unreleased]
 
+## [18.4.11] - 2026-10-02
+
+### Fixed
+
+- Fixed lenient argument validation for tools such as `yield`: malformed tool-call JSON is now reported to the model instead of causing the tool to run with empty arguments.
+
+## [18.4.10] - 2026-10-02
+
 ### Fixed
 
 - `streamProxy` no longer finalizes a cut-off tool-call argument buffer into an executable auto-closed preview; such a call gets the parse-error arguments, so the tool is not run and the model receives the parse error ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
+- OpenAI remote compaction no longer sends stored native tool calls whose names are blank, longer than 128 characters, or contain whitespace or control characters. The outputs that answer those calls are dropped as well ([#13985](https://github.com/can1357/oh-my-pi/pull/13985) by [@Xytronix](https://github.com/Xytronix)).
 
 ## [18.4.6] - 2026-10-01
 

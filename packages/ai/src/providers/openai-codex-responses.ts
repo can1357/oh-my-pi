@@ -47,6 +47,7 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -4907,10 +4908,11 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
 				const replayItems =
 					model.supportsComputerUse === true
-						? redactedHistoryItems
-						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
+						? sanitizedHistoryItems
+						: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);

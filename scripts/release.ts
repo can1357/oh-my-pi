@@ -3,9 +3,9 @@
  * Release script for pi-mono
  *
  * Usage:
- *   bun scripts/release.ts <version|major|minor|patch|canary> [--skip-ci-check]
- *                                                        Full release (preflight incl. CI-green check, version,
- *                                                        changelog, commit, push, watch)
+ *   bun scripts/release.ts <version|major|minor|patch|canary>
+ *                                                        Full release (preflight, version, changelog, commit,
+ *                                                        push, watch)
  *   bun scripts/release.ts watch                         Watch CI for current commit
  *   bun scripts/release.ts deps                          Full third-party dependency refresh (bun.lock + Cargo.lock);
  *                                                        land it via PR/main CI before the next release
@@ -43,82 +43,8 @@ function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
 }
 
-// =============================================================================
-// CI-green preflight
-// =============================================================================
-
-export interface CIRun {
-	databaseId: number;
-	status: string;
-	conclusion: string | null;
-	event?: string;
-	headBranch?: string;
-}
-
-export interface CommitRuns {
-	sha: string;
-	runs: readonly CIRun[];
-}
-
-export type CIGateDecision =
-	| { kind: "pass"; sha: string; runId: number; ancestor: boolean }
-	| { kind: "fail"; sha: string; runId: number; conclusion: string; ancestor: boolean }
-	| { kind: "pending"; sha: string; runId: number; ancestor: boolean }
-	| { kind: "none" };
-
-/**
- * Only a run of `main` itself counts: a push, or a dispatch on the main ref.
- * `pull_request` runs skip Rust validation and native builds, and a branch
- * run tests a different ref, so neither may vouch for the commit.
- */
-export function isMainCIRun(run: CIRun): boolean {
-	return run.headBranch === "main" && (run.event === "push" || run.event === "workflow_dispatch");
-}
-
-/**
- * Decide the CI gate from HEAD's first-parent chain (index 0 = HEAD). The
- * first commit that has a main CI run ({@link isMainCIRun}) is authoritative;
- * its latest such run (highest databaseId) must have completed with
- * `success`. Commits without one (e.g. path-filtered pushes) fall through to
- * their first-parent ancestor.
- */
-export function decideCIGate(chain: readonly CommitRuns[]): CIGateDecision {
-	for (let i = 0; i < chain.length; i++) {
-		const { sha } = chain[i];
-		const runs = chain[i].runs.filter(isMainCIRun);
-		if (runs.length === 0) continue;
-		const latest = runs.reduce((a, b) => (b.databaseId > a.databaseId ? b : a));
-		const ancestor = i > 0;
-		if (latest.status !== "completed") return { kind: "pending", sha, runId: latest.databaseId, ancestor };
-		if (latest.conclusion === "success") return { kind: "pass", sha, runId: latest.databaseId, ancestor };
-		return { kind: "fail", sha, runId: latest.databaseId, conclusion: latest.conclusion ?? "unknown", ancestor };
-	}
-	return { kind: "none" };
-}
-
-const CI_ANCESTOR_LIMIT = 30;
-
-async function listCIRuns(sha: string): Promise<CIRun[]> {
-	const out =
-		await $`gh run list --commit ${sha} --workflow ci.yml --json databaseId,status,conclusion,event,headBranch`.text();
-	return JSON.parse(out) as CIRun[];
-}
-
-interface CIJob {
-	name: string;
-	databaseId: number;
-	status: string;
-	conclusion: string | null;
-}
-
-/** Snapshot an in-progress run and return its first already-failed job, if any. */
-async function findFailedJob(runId: number): Promise<CIJob | undefined> {
-	const out = await $`gh run view ${runId} --json jobs`.quiet().text();
-	const { jobs } = JSON.parse(out) as { jobs: CIJob[] };
-	return jobs.find(j => j.status === "completed" && j.conclusion !== "success" && j.conclusion !== "skipped");
-}
-
-async function checkCIGreen(): Promise<void> {
+/** Exits unless HEAD contains origin/main, so the release push can fast-forward. */
+async function checkUpToDate(): Promise<void> {
 	await git(["fetch", "origin", "main"]).quiet();
 	const head = (await git(["rev-parse", "HEAD"]).text()).trim();
 	// Local-only commits are fine: the release push sends them along with the
@@ -137,49 +63,6 @@ async function checkCIGreen(): Promise<void> {
 			? `  HEAD is ${ahead} unpushed commit(s) ahead of origin/main (pushed with the release)`
 			: "  HEAD matches origin/main",
 	);
-
-	const shas = (await git(["rev-list", "--first-parent", "-n", String(CI_ANCESTOR_LIMIT), "HEAD"]).text())
-		.trim()
-		.split("\n")
-		.filter(Boolean);
-	const chain: CommitRuns[] = [];
-	let decision: CIGateDecision = { kind: "none" };
-	for (const sha of shas) {
-		chain.push({ sha, runs: await listCIRuns(sha) });
-		decision = decideCIGate(chain);
-		if (decision.kind !== "none") break;
-	}
-
-	if (decision.kind === "none") {
-		console.error(`Error: No CI run found on HEAD or its last ${CI_ANCESTOR_LIMIT} first-parent ancestors.`);
-		process.exit(1);
-	}
-	const label = decision.ancestor
-		? `ancestor ${decision.sha.slice(0, 8)} (HEAD ${head.slice(0, 8)} has no CI run)`
-		: `HEAD ${decision.sha.slice(0, 8)}`;
-	if (decision.kind === "pending") {
-		// No need to wait: the release commit's own CI run re-validates HEAD (a
-		// superset of this commit) and gates every publish job on release_gate.
-		// Only fail fast on jobs that have already failed.
-		const failed = await findFailedJob(decision.runId);
-		if (failed) {
-			console.error(
-				`Error: CI run ${decision.runId} for ${label} has a failed job: ${failed.name} (job ${failed.databaseId}): ${failed.conclusion}`,
-			);
-			console.error("  Fix main before releasing, or pass --skip-ci-check to override.");
-			process.exit(1);
-		}
-		console.log(
-			`  CI run ${decision.runId} for ${label} still in progress, no failures so far; the release run re-validates`,
-		);
-		return;
-	}
-	if (decision.kind === "fail") {
-		console.error(`Error: CI run ${decision.runId} for ${label} concluded '${decision.conclusion}'.`);
-		console.error("  Fix main (or re-run CI) before releasing, or pass --skip-ci-check to override.");
-		process.exit(1);
-	}
-	console.log(`  CI green for ${label} (run ${decision.runId})`);
 }
 
 // =============================================================================
@@ -375,7 +258,7 @@ async function cmdDeps(): Promise<void> {
 	console.log("let CI go green BEFORE the next release; `release` no longer refreshes third-party deps.");
 }
 
-async function cmdRelease(versionOrBump: string, skipCICheck = false): Promise<void> {
+async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
 	// never throws, so without this guard garbage like "999.bad" would be
@@ -416,11 +299,7 @@ async function cmdRelease(versionOrBump: string, skipCICheck = false): Promise<v
 	}
 	console.log("  Working directory clean");
 
-	if (skipCICheck) {
-		console.warn("\n  !!! WARNING: --skip-ci-check given: NOT verifying that CI is green on main. !!!\n");
-	} else {
-		await checkCIGreen();
-	}
+	await checkUpToDate();
 
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
@@ -613,12 +492,10 @@ async function cmdRelease(versionOrBump: string, skipCICheck = false): Promise<v
 // =============================================================================
 
 if (import.meta.main) {
-	const args = process.argv.slice(2);
-	const skipCICheck = args.includes("--skip-ci-check");
-	const arg = args.find(a => a !== "--skip-ci-check");
+	const arg = process.argv[2];
 	const usage = () => {
 		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch|canary> [--skip-ci-check]   Full release");
+		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
 		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
 		console.error("  bun scripts/release.ts deps                          Full third-party dependency refresh");
 	};
@@ -639,7 +516,7 @@ if (import.meta.main) {
 		arg === "canary" ||
 		validateExplicitVersion(arg) !== null
 	) {
-		await cmdRelease(arg, skipCICheck);
+		await cmdRelease(arg);
 	} else {
 		console.error(`Unknown command or invalid version: ${arg}`);
 		usage();

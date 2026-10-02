@@ -17,6 +17,8 @@ import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
+import type { GoalModeState } from "../../goals/state";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -43,6 +45,13 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| {
+			id?: string;
+			type: "goal";
+			op: RpcGoalOp;
+			objective?: string;
+			token_budget?: number;
+	  }
 	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
@@ -151,6 +160,8 @@ export interface RpcSessionState {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Current goal-mode state; `null` when the session has no goal. */
+	goal: GoalModeState | null;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -302,6 +313,7 @@ export type RpcResponse =
 			success: true;
 			data: { enabled: boolean; active: boolean };
 	  }
+	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
 	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
 	| {
 			id?: string;

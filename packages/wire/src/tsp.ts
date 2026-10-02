@@ -701,6 +701,8 @@ export interface TspAgentProps {
 		tokens?: number;
 		context?: number;
 		contextLabel?: string;
+		/** The agent's own completion estimate, 0–1; drawn while running. */
+		done?: number;
 		cost?: number;
 		age?: number;
 		took?: number;
