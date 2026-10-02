@@ -10,6 +10,8 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { evaluateLocationHash, handleSafePageNavigate, parseFragmentedAboutBlank } from "./safe-navigation";
+import type { FrameTreeResponse, SendCommandFn } from "./safe-navigation";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -184,15 +186,49 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
-		case "send":
-			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
-				msg.method,
-				msg.params,
-			);
+		case "send": {
+			const target = msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId };
+			if (msg.method === "Page.navigate") {
+				const sendCmd = (method: string, params?: Record<string, unknown>) =>
+					chrome.debugger.sendCommand(target, method, params);
+				return await handleSafePageNavigate(sendCmd, msg.params ?? {});
+			}
+			return await chrome.debugger.sendCommand(target, msg.method, msg.params);
+		}
 		case "createTab": {
-			const tab = await chrome.tabs.create({ url: msg.url });
-			const snap = snapshot(tab);
+			const { isFragmented, hash } = parseFragmentedAboutBlank(msg.url);
+			if (!isFragmented) {
+				const tab = await chrome.tabs.create({ url: msg.url });
+				const snap = snapshot(tab);
+				if (!snap) throw new Error("created tab has no id");
+				return { tab: snap };
+			}
+			const tab = await chrome.tabs.create({ url: "about:blank" });
+			if (tab.id === undefined) throw new Error("created tab has no id");
+			const tabId = tab.id;
+			try {
+				await chrome.debugger.attach({ tabId }, "1.3");
+				try {
+					const target = { tabId };
+					const sendCmd: SendCommandFn = (method, params) => chrome.debugger.sendCommand(target, method, params);
+					const treeRes = (await sendCmd("Page.getFrameTree", {})) as FrameTreeResponse | undefined;
+					const rootFrame = treeRes?.frameTree?.frame;
+					if (!rootFrame?.id) throw new Error("Created tab has no root frame");
+					await evaluateLocationHash(sendCmd, rootFrame.id, hash, msg.url);
+				} finally {
+					relayInitiatedDetachTabs.add(tabId);
+					try {
+						await chrome.debugger.detach({ tabId });
+					} catch {
+						relayInitiatedDetachTabs.delete(tabId);
+					}
+				}
+			} catch (err) {
+				await chrome.tabs.remove(tabId).catch(() => {});
+				throw err;
+			}
+			const updated = await chrome.tabs.get(tabId);
+			const snap = snapshot(updated);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };
 		}

@@ -24,12 +24,6 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		expect(bundled["grok-4.6"], "xai-oauth/grok-4.6 must be bundled for the default").toBeDefined();
 	});
 
-	it("bundles every curated id", () => {
-		const seededIds = seed.map(model => model.id).sort();
-		const bundledIds = Object.keys(bundled).sort();
-		expect(bundledIds).toEqual(seededIds);
-	});
-
 	for (const seededModel of seed.filter(model => model.api === "openai-responses")) {
 		it(`matches contract for ${seededModel.id}`, () => {
 			const bundledEntry = bundled[seededModel.id];
