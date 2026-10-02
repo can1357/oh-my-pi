@@ -74,6 +74,7 @@ function nestedSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => [],
+		advertisedSessionAgents: () => [],
 		getPlanModeState: () => undefined,
 	} as unknown as ToolSession;
 }
