@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added `ChildProcess.killAndWait()` to await process-tree termination and report termination failures.
+- Added the public `getSessionOwnersDir()` utility, which returns the profile-independent `~/.omp/run/session-owners` directory that names session ownership leases ([#14095](https://github.com/can1357/oh-my-pi/pull/14095) by [@andrebrait](https://github.com/andrebrait))
+- Added `ChildProcess.killAndWait()` to await process-tree termination and report termination failures. ([#11226](https://github.com/can1357/oh-my-pi/pull/11226) by [@iliaal](https://github.com/iliaal)).
 
 ### Changed
 
@@ -25,6 +26,23 @@
 ### Known gaps
 
 **A command deadline that fires after a detached root, or a Windows root with a retained handle, has already exited records a `TimeoutError` even when nothing was left behind.** The deadline sweeps the group or the retained-handle tree in that state, which it must — a detached group outlives its leader, and an earlier round on this branch fixed the opposite defect of skipping that sweep. What it cannot do is tell "swept a survivor" from "swept nothing": the native sweep reports only whether it completed, so an empty tree and one whose survivor it killed both come back `true` (it does reject when it cannot account for a live member, but that is a different question from whether one was there). Reporting no timeout in both cases is worse, because a real survivor past the deadline is exactly what the timeout is for — `ptree-timeout.test.ts` pins that case with a root that exits immediately while its `sleep 30` holds the group. Closing this needs the sweep to report what it found, which is a native API change and is deferred with the platform work.
+
+## [18.4.12] - 2026-10-02
+
+### Fixed
+
+- Fixed multi-second temp directory removal stalls on Windows by forcing a major GC before the first deletion retry ([#13044](https://github.com/can1357/oh-my-pi/pull/13044) by [@jchanghong023](https://github.com/jchanghong023)).
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added XDG-aware utility paths for skill descriptions and prediction state, with automatic adoption of legacy data when XDG locations are first resolved.
+
+### Fixed
+
+- Fixed machine-global daemon runtime paths so brokers such as text prediction use the shared XDG state location across profiles and custom agent directories.
+
 ## [18.4.10] - 2026-10-02
 
 ### Added

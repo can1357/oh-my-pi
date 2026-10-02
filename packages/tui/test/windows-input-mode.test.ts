@@ -85,6 +85,15 @@ describe("Win32InputModeDecoder", () => {
 	it("repeats auto-repeated keys", () => {
 		expect(new Win32InputModeDecoder().decode("\x1b[65;30;97;1;0;3_")).toEqual(["a", "a", "a"]);
 	});
+
+	it("decodes key records inside a paste as typed text", () => {
+		const decoder = new Win32InputModeDecoder();
+		// Blank line: two Enter down/up pairs; emoji: surrogate halves as VK_PACKET records.
+		const pasted = `a${ENTER}${ENTER_UP}${ENTER}${ENTER_UP}b\x1b[231;0;55357;1;0;1_\x1b[231;0;56832;1;0;1_`;
+		expect(decoder.decodePaste(pasted)).toBe("a\r\rb😀");
+		// Record-shaped text without ESC is ordinary pasted content.
+		expect(decoder.decodePaste("see [13;28;13;1;0;1_ here")).toBe("see [13;28;13;1;0;1_ here");
+	});
 });
 
 class InputRecorder implements Component {
@@ -151,6 +160,20 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
 		expect(out.indexOf("\x1b[?9001l")).toBeGreaterThan(out.indexOf("\x1b[?9001h"));
 		expect(out).toContain("\x1b[>1u");
+	});
+
+	it("pastes line breaks the console host sent as key records, then submits on a later Enter (#14065)", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c");
+
+		// Split mid-record across stdin reads.
+		await harness.feed(`\x1b[200~first${ENTER.slice(0, 6)}`, `${ENTER.slice(6)}${ENTER_UP}second\x1b[201~`);
+		await harness.feed(ENTER, ENTER_UP);
+		expect(recorder.received).toEqual(["\x1b[200~first\rsecond\x1b[201~", "\r"]);
 	});
 
 	it("does not request win32-input-mode when the console is served by sshd (#14034)", async () => {

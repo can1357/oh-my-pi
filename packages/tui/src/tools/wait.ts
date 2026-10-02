@@ -61,6 +61,8 @@ export interface JobSnapshot {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when the task progress reports an attached live advisor. */
 	advisor?: boolean;
+	/** The task agent's latest self-estimated completion (0–100); see `AgentProgress.completionPercent`. */
+	completionPercent?: number;
 	resultText?: string;
 	errorText?: string;
 	/** Source-output metadata retained for per-job warnings and persisted row rendering. */
@@ -309,7 +311,11 @@ function jobsRenderResult(
 							job.status === "running" ? options.spinnerFrame : undefined,
 						)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
-						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+						const completion =
+							job.status === "running" && job.completionPercent !== undefined
+								? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
+								: "";
+						const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
 						const displayId = truncateToWidth(
 							replaceTabs(job.id).replace(/\s+/g, " "),
 							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
@@ -601,11 +607,19 @@ function describeJob(job: JobSnapshot, isPartial: boolean): NativeNode {
 		{ role: "omp.wait.job", tone },
 		compact([
 			row(
-				[
+				compact([
 					node("badge", { text: job.type, tone }),
 					text(spans, { truncate: "end", grow: 1 }),
+					job.status === "running" && job.completionPercent !== undefined
+						? node("progress", {
+								value: job.completionPercent / 100,
+								label: `${job.completionPercent}%`,
+								tone: "accent",
+								title: "Agent's own completion estimate",
+							})
+						: undefined,
 					elapsed(job.durationMs, !running),
-				],
+				]),
 				{ gap: "sm" },
 			),
 			artifactError && text([span(formatArtifactErrorNotice(artifactError), "warning")], { wrap: "word" }),
