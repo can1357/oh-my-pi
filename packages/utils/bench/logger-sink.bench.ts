@@ -25,7 +25,6 @@ const sink = new RotatingFileSink({
 	filenameSuffix: "test",
 	maxBytes: 100 * 1024 * 1024,
 	maxFiles: 2,
-	auditFile: path.join(dir, "audit.json"),
 });
 const start = Bun.nanoseconds();
 for (let i = 0; i < N; i++) sink.write(`${line} ${i}`);

@@ -103,6 +103,12 @@ switch (scenario) {
 		writeResult({ events });
 		break;
 	}
+	case "debug-only":
+		logger.setTransports({ console: false, file: primaryDir });
+		logger.debug("debug-only-first", { ordinal: 1 });
+		logger.debug("debug-only-second", { ordinal: 2 });
+		disableTransports();
+		break;
 	case "default-file":
 		logger.info("mode-default", { mode: "default" });
 		disableTransports();

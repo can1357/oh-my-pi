@@ -157,20 +157,7 @@ describe("runEvalAgent", () => {
 		const session = createBudgetSession(sessionManager);
 		cfgTaskIsolationEnabled.set(session.settings, true);
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-			repoRoot: "/tmp",
-			baseline: {
-				root: {
-					repoRoot: "/tmp",
-					headCommit: "base",
-					staged: "",
-					unstaged: "",
-					untracked: [],
-					untrackedPatch: "",
-				},
-				nested: [],
-			},
-		});
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" });
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async options => {
 			options.onSubprocessResult?.(createResult({ usage: createUsage(4_567) }));
 			throw new Error("cleanup failed");

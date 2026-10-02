@@ -526,6 +526,42 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Recent Jobs");
 	});
 
+	it("jobs full: shows the untruncated command instead of the label", async () => {
+		const { output, runtime } = createRuntime();
+		const command = `pytest ${"tests/a ".repeat(40)}-q`;
+		runtime.session.getAsyncJobSnapshot = () => ({
+			running: [
+				{ id: "j1", type: "bash", status: "running", label: "pytest tests/a...", command, startTime: Date.now() },
+			],
+			recent: [{ id: "j2", type: "task", status: "completed", label: "build done", startTime: Date.now() - 60_000 }],
+			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+		});
+
+		await executeAcpBuiltinSlashCommand("/jobs", runtime);
+		await executeAcpBuiltinSlashCommand("/jobs full", runtime);
+		await executeAcpBuiltinSlashCommand("/jobs bogus", runtime);
+
+		expect(output[0]).not.toContain(command);
+		expect(output[1]).toContain(command);
+		expect(output[1]).toContain("build done");
+		expect(output[2]).toContain("Usage: /jobs [full]");
+	});
+
+	it("jobs full: strips control sequences and fences the command", async () => {
+		const { output, runtime } = createRuntime();
+		const command = `printf ${"x".repeat(150)} \x1b[2J\`\`\`\n# heading TAIL`;
+		runtime.session.getAsyncJobSnapshot = () => ({
+			running: [{ id: "j1", type: "bash", status: "running", label: "printf x...", command, startTime: Date.now() }],
+			recent: [],
+			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+		});
+
+		await executeAcpBuiltinSlashCommand("/jobs full", runtime);
+
+		expect(output[0]).not.toContain("\x1b");
+		expect(output[0]).toContain(`\`\`\`\`\nprintf ${"x".repeat(150)} \`\`\`\n# heading TAIL\n\`\`\`\``);
+	});
+
 	// /dump
 	it("dump: outputs transcript with LLM request JSON path when sidecar succeeds", async () => {
 		const { output, runtime } = createRuntime();

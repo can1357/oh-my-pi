@@ -52,6 +52,11 @@ const ENSURE_ATTEMPTS = 3;
 const EXIT_WAIT_MS = 10_000;
 /** How long release waits for a host's save; the host finishes it regardless. */
 const FLUSH_WAIT_MS = 8_000;
+/**
+ * How long one caller waits for a database to open. IDA's initial auto-analysis of a large binary
+ * can run for hours; it keeps going in the host past this, and a later call picks up the result.
+ */
+const OPEN_WAIT_MS = 120_000;
 
 /** The host connection dropped (host exited or is exiting). */
 class IdaHostGoneError extends ToolError {}
@@ -412,7 +417,10 @@ export interface AcquireIdaDatabaseOptions extends LocateIdbOptions {
 /**
  * Return the open database for a binary (or one slice of a universal binary) or `.i64`/`.idb`,
  * starting its host and opening (or creating) it on first use. Concurrent callers share one open;
- * aborting `signal` stops only this caller's wait, the open itself always runs to completion.
+ * aborting `signal` or exceeding {@link OPEN_WAIT_MS} stops only this caller's wait, the open itself
+ * always runs to completion.
+ *
+ * Throws a ToolError when the database is still opening after {@link OPEN_WAIT_MS}.
  */
 export async function acquireIdaDatabase(
 	session: ToolSession,
@@ -430,7 +438,32 @@ export async function acquireIdaDatabase(
 		opening.catch(error => logger.debug("IDA database open failed", { id: loc.id, error: errorMessage(error) }));
 		pending.set(loc.id, opening);
 	}
-	return untilAborted(signal, opening);
+	const deadline = AbortSignal.timeout(OPEN_WAIT_MS);
+	try {
+		return await untilAborted(signal ? AbortSignal.any([signal, deadline]) : deadline, opening);
+	} catch (error) {
+		if (signal?.aborted || !deadline.aborted) throw error;
+		const name = idaDaemonName(loc.id);
+		const since = await openingSince(session, name);
+		const age = since === undefined ? "" : ` for ${Math.round((Date.now() - since) / 60_000)}m`;
+		throw new ToolError(
+			`IDA is still analyzing ${idbRef(loc)} (opening${age}); the analysis continues in \`${name}\`. Retry later, or stop it with \`omp ps stop ${name}\``,
+		);
+	}
+}
+
+/** When the host `name` started opening its database; undefined when it is unreachable or already open. */
+async function openingSince(session: ToolSession, name: string): Promise<number | undefined> {
+	try {
+		const broker = await daemonClientForProject(session.cwd);
+		// A separate connection: caching an `opening` status in `handles` would hand stale status to the pending open.
+		const db = await IdaDatabase.attach(name, hostEndpoint(broker, name), "status");
+		if (!db) return undefined;
+		db.disconnect();
+		return db.status.state === "opening" ? db.status.lastUsed : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The open database with `locateIdb` id (or daemon name) `ref` in this project, if any. */

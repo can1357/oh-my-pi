@@ -216,7 +216,7 @@ The bash executor builds the sink with `headBytes` and `maxColumns` from setting
 - when `headBytes > 0` (`tools.artifactHeadBytes`, default 20 KiB) it reserves a **head** window within that same budget and uses the remainder for a rolling **tail**; head retention is capped at half the total budget, and `dump()` splices in a middle-elision marker when necessary,
 - per-line column cap: when `maxColumns > 0` (`tools.outputMaxColumns`, default 768 bytes) over-wide lines are ellipsis-truncated at write time and the rest of the line is dropped,
 - tracks total bytes/lines seen,
-- mirrors the sanitized, uncapped text stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active; artifact size is unbounded by default,
+- mirrors the sanitized, uncapped text stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active; the artifact file is capped at `tools.artifactMaxBytes` (default 16 MB: the first 3 MB plus a rolling tail, joined by an `[ARTIFACT TRUNCATED: …]` notice; `0` = unbounded),
 - marks `truncated` on tail overflow, middle elision, column-cap drops, or file spill.
 
 `dump()` returns:

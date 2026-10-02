@@ -701,6 +701,8 @@ export interface TspAgentProps {
 		tokens?: number;
 		context?: number;
 		contextLabel?: string;
+		/** The agent's own completion estimate, 0–1; drawn while running. */
+		done?: number;
 		cost?: number;
 		age?: number;
 		took?: number;
@@ -847,8 +849,16 @@ export type TspOp =
 	| readonly [op: "settle", id: string]
 	| readonly [op: "focus", id: string | null]
 	| readonly [op: "reveal", id: string, where: "start" | "end" | "nearest"]
+	| readonly [op: "scroll", id: string, by: TspScrollBy]
 	| readonly [op: "suspend"]
 	| readonly [op: "resume"];
+
+/**
+ * How far a `scroll` op moves the scroller holding a node: a line, a
+ * viewport less a line, or to an end (`end` makes a following `ansi` block
+ * follow again). Sent only when `hello.features` lists `scroll`.
+ */
+export type TspScrollBy = "line-up" | "line-down" | "page-up" | "page-down" | "start" | "end";
 
 /** Verb `f`: an atomic batch of ops for one surface. */
 export interface TspFrame {
@@ -938,5 +948,11 @@ export type TspEvent =
 	 * text length the terminal saw, a mismatch makes the edit stale).
 	 */
 	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
+	/**
+	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
+	 * a `prefs` sheet while the focus is outside it): the program moves its
+	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).
+	 */
+	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database, Statement } from "bun:sqlite";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -89,6 +89,52 @@ describe("composer startup cache", () => {
 		cache.close();
 	});
 
+	it("skips write transactions for identical payloads", () => {
+		const project = path.join(root, "project");
+		const sessions = [{ name: "a", timeAgo: "1m ago" }];
+		const cache = ComposerCache.open(dbPath);
+		const observer = new Database(dbPath, { readonly: true });
+		// data_version moves only when another connection commits a change.
+		const dataVersion = () => observer.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
+		const statementRuns = vi.spyOn(Statement.prototype, "run");
+		const transactions = vi.spyOn(Database.prototype, "transaction");
+		try {
+			cache.writeStatus(project, statusFor(ThinkingLevel.High));
+			cache.writeRecentSessions(project, sessions);
+			const written = dataVersion();
+			statementRuns.mockClear();
+			transactions.mockClear();
+
+			// Same connection: nothing reaches SQLite.
+			cache.writeStatus(project, statusFor(ThinkingLevel.High));
+			cache.writeRecentSessions(project, sessions);
+			// Next launch: values learned by read() are not written back either.
+			const next = ComposerCache.open(dbPath);
+			next.read(project);
+			next.writeStatus(project, statusFor(ThinkingLevel.High));
+			next.writeRecentSessions(project, sessions);
+			expect(statementRuns).not.toHaveBeenCalled();
+			expect(transactions).not.toHaveBeenCalled();
+
+			// Without a prior read, the upsert guard still leaves identical rows untouched.
+			const blind = ComposerCache.open(dbPath);
+			blind.writeStatus(project, statusFor(ThinkingLevel.High));
+			blind.writeRecentSessions(project, sessions);
+			expect(dataVersion()).toBe(written);
+
+			next.writeStatus(project, statusFor(ThinkingLevel.Low));
+			expect(dataVersion()).not.toBe(written);
+			expect(cache.read(path.join(root, "fresh")).status?.statusLine.thinkingLevel).toBe(ThinkingLevel.Low);
+			next.close();
+			blind.close();
+		} finally {
+			statementRuns.mockRestore();
+			transactions.mockRestore();
+			observer.close();
+			cache.close();
+		}
+	});
+
 	it("drops a store written in an older payload format", async () => {
 		const project = path.join(root, "project");
 		await fs.mkdir(path.dirname(dbPath), { recursive: true });
@@ -96,9 +142,11 @@ describe("composer startup cache", () => {
 		legacy.run(
 			"CREATE TABLE entries (project TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (project, kind)) WITHOUT ROWID",
 		);
-		legacy
-			.prepare("INSERT INTO entries VALUES (?, ?, ?)")
-			.run(project, "welcome", JSON.stringify({ modelName: "Stale", providerName: "stale" }));
+		legacy.run("INSERT INTO entries VALUES (?, ?, ?)", [
+			project,
+			"welcome",
+			JSON.stringify({ modelName: "Stale", providerName: "stale" }),
+		]);
 		legacy.close();
 
 		const cache = ComposerCache.open(dbPath);

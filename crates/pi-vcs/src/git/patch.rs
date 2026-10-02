@@ -3,7 +3,9 @@
 //!
 //! Patch joins deliberately preserve binary-patch terminators (issue #8899).
 //! Cherry-picks are fail-clean: unlike `git cherry-pick`, conflicts do not put
-//! markers or unmerged entries in the checkout. Stash pop is likewise
+//! markers or unmerged entries in the checkout, and only the picked paths are
+//! rewritten — the pick is refused when one of them carries local changes,
+//! while unrelated dirty paths stay as they are. Stash pop is likewise
 //! preflighted so a rejected restore leaves no trace (issue #4175).
 
 use std::{
@@ -20,7 +22,11 @@ use gix::{
 	refs::transaction::PreviousValue,
 };
 
-use super::{GitRepo, mutate::update_reference, open::load_index_or_head};
+use super::{
+	GitRepo,
+	mutate::update_reference,
+	open::{load_index_or_head, status_with_index},
+};
 use crate::{
 	error::{Error, Result},
 	types::{ApplyOptions, DiffOptions, HunkSelection, HunkSelectionError, HunkSpec},
@@ -264,6 +270,71 @@ impl GitRepo {
 		if merged_tree == head_tree.detach() {
 			return Err(Error::EmptyCherryPick { sha: picked_id.to_string() });
 		}
+		let head_map = tree_map(&repo, head_tree.detach())?;
+		let merged = tree_map(&repo, merged_tree)?;
+		let changed: BTreeSet<String> = head_map
+			.keys()
+			.chain(merged.keys())
+			.filter(|path| head_map.get(*path) != merged.get(*path))
+			.cloned()
+			.collect();
+		let unstaged = unstaged_changed_paths(&repo, &head_map, &changed)?;
+		// Picked paths with unstaged edits get `HEAD + edits + pick` in the
+		// worktree, merged the same fail-clean way as the pick itself.
+		let local_map;
+		let worktree = if unstaged.is_empty() {
+			&merged
+		} else {
+			let mut editor = repo
+				.find_tree(head_tree)
+				.map_err(|err| Error::backend("git cherry-pick HEAD tree", err))?
+				.edit()
+				.map_err(|err| Error::backend("git cherry-pick edit tree", err))?;
+			for path in &unstaged {
+				let mode = head_map.get(path).map_or(Mode::FILE, |entry| entry.mode);
+				match read_worktree_entry(&self.root().join(path), mode)? {
+					Some((bytes, mode)) => {
+						let id = repo
+							.write_blob(bytes)
+							.map_err(|err| Error::backend("git hash worktree blob", err))?
+							.detach();
+						editor
+							.upsert(path.as_str(), entry_kind(mode), id)
+							.map_err(|err| Error::backend("git cherry-pick edit tree", err))?;
+					},
+					None => {
+						editor
+							.remove(path.as_str())
+							.map_err(|err| Error::backend("git cherry-pick edit tree", err))?;
+					},
+				}
+			}
+			let local_tree = editor
+				.write()
+				.map_err(|err| Error::backend("git cherry-pick write tree", err))?
+				.detach();
+			let labels = gix::merge::blob::builtin_driver::text::Labels {
+				ancestor: Some("HEAD".into()),
+				current:  Some("local changes".into()),
+				other:    Some(rev.into()),
+			};
+			let options = repo
+				.tree_merge_options()
+				.map_err(|err| Error::backend("git cherry-pick options", err))?;
+			let mut local = repo
+				.merge_trees(head_tree, local_tree, merged_tree, labels, options)
+				.map_err(|err| Error::backend("git cherry-pick merge", err))?;
+			if local.has_unresolved_conflicts(TreatAsUnresolved::default()) {
+				return Err(overwrite_error(&unstaged));
+			}
+			let tree = local
+				.tree
+				.write()
+				.map_err(|err| Error::backend("git cherry-pick write tree", err))?
+				.detach();
+			local_map = tree_map(&repo, tree)?;
+			&local_map
+		};
 		let author = picked
 			.author()
 			.map_err(|err| Error::backend("git cherry-pick author", err))?;
@@ -278,10 +349,7 @@ impl GitRepo {
 		repo
 			.commit_as(committer, author, "HEAD", message.as_ref(), merged_tree, [head_id])
 			.map_err(|err| Error::backend("git cherry-pick commit", err))?;
-		let merged = tree_map(&repo, merged_tree)?;
-		let previous = index_map(&repo)?;
-		write_worktree_map(self, &previous, &merged)?;
-		write_index_map(&repo, &merged)
+		checkout_changed_paths(self, &repo, &merged, worktree, &changed, &unstaged)
 	}
 
 	/// Clear cherry-pick state; fail-clean single-commit picks create none.
@@ -1495,6 +1563,143 @@ fn write_worktree_map(
 		}
 	}
 	Ok(())
+}
+
+fn overwrite_error(paths: &BTreeSet<String>) -> Error {
+	let list = paths
+		.iter()
+		.map(String::as_str)
+		.collect::<Vec<_>>()
+		.join("\n\t");
+	Error::backend(
+		"git cherry-pick",
+		format!(
+			"your local changes to the following files would be overwritten by the \
+			 cherry-pick:\n\t{list}\nCommit or discard them, then retry."
+		),
+	)
+}
+
+/// Return the picked (`changed`) paths that carry unstaged edits, which the
+/// caller merges with the pick. Refuses the pick when a picked path has staged
+/// content differing from HEAD, is an untracked file the pick would create, or
+/// the index has unmerged entries. Unrelated dirty paths are never inspected,
+/// so the rest of the checkout stays as it is. Worktree checks go through gix
+/// status, which honors the index stat cache and clean filters (LFS).
+fn unstaged_changed_paths(
+	repo: &gix::Repository,
+	head: &BTreeMap<String, FileEntry>,
+	changed: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+	let index = load_index_or_head(repo, "git cherry-pick index")?;
+	if index
+		.entries()
+		.iter()
+		.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+	{
+		return Err(Error::backend("git cherry-pick", "the index has unmerged entries"));
+	}
+	let staged = index_state_map(&index);
+	let mut blocked: BTreeSet<String> = changed
+		.iter()
+		.filter(|path| staged.get(*path) != head.get(*path))
+		.cloned()
+		.collect();
+	let mut unstaged = BTreeSet::new();
+	let patterns: Vec<gix::bstr::BString> = changed
+		.iter()
+		.filter(|path| !blocked.contains(*path))
+		.map(|path| format!(":(literal){path}").into())
+		.collect();
+	if !patterns.is_empty() {
+		let iter = status_with_index(repo, "git cherry-pick status", index)?
+			.untracked_files(gix::status::UntrackedFiles::Files)
+			.into_iter(patterns)
+			.map_err(|err| Error::backend("git cherry-pick status", err))?;
+		for item in iter {
+			let item = item.map_err(|err| Error::backend("git cherry-pick status", err))?;
+			let gix::status::Item::IndexWorktree(change) = item else {
+				continue;
+			};
+			use gix::status::index_worktree;
+			let (path, edited) = match change {
+				index_worktree::Item::Modification { rela_path, status, .. }
+					if !matches!(
+						status,
+						gix::status::plumbing::index_as_worktree::EntryStatus::NeedsUpdate(_)
+					) =>
+				{
+					(rela_path, true)
+				},
+				index_worktree::Item::DirectoryContents { entry, .. }
+					if entry.status == gix::dir::entry::Status::Untracked =>
+				{
+					(entry.rela_path, false)
+				},
+				index_worktree::Item::Rewrite { dirwalk_entry, .. } => (dirwalk_entry.rela_path, false),
+				_ => continue,
+			};
+			let path = path.to_str_lossy().into_owned();
+			if !changed.contains(&path) {
+				continue;
+			}
+			if edited {
+				unstaged.insert(path);
+			} else {
+				blocked.insert(path);
+			}
+		}
+	}
+	if blocked.is_empty() {
+		Ok(unstaged)
+	} else {
+		Err(overwrite_error(&blocked))
+	}
+}
+
+/// Materialize `changed` paths into the worktree (from `worktree`) and index
+/// (from the committed `merged` tree), keeping every other index entry and its
+/// stat cache untouched. `unstaged` paths keep a zeroed stat so their local
+/// edits still read as modified.
+fn checkout_changed_paths(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	merged: &BTreeMap<String, FileEntry>,
+	worktree: &BTreeMap<String, FileEntry>,
+	changed: &BTreeSet<String>,
+	unstaged: &BTreeSet<String>,
+) -> Result<()> {
+	for path in changed {
+		match worktree.get(path) {
+			Some(entry) => write_worktree_entry(repo, path, entry, gix_repo)?,
+			None => remove_worktree_path(repo, path)?,
+		}
+	}
+	let mut index = load_index_or_head(gix_repo, "git cherry-pick index")?;
+	index.remove_entries(|_, path, _| changed.contains(path.to_str_lossy().as_ref()));
+	for path in changed {
+		let Some(entry) = merged.get(path) else {
+			continue;
+		};
+		let stat = if unstaged.contains(path) {
+			Stat::default()
+		} else {
+			let metadata = gix::index::fs::Metadata::from_path_no_follow(&repo.root().join(path))?;
+			Stat::from_fs(&metadata).map_err(|err| Error::backend("git cherry-pick index", err))?
+		};
+		index.dangerously_push_entry(
+			stat,
+			entry.id,
+			Flags::empty(),
+			entry.mode,
+			BStr::new(path.as_bytes()),
+		);
+	}
+	index.sort_entries();
+	index.remove_tree();
+	index
+		.write(gix::index::write::Options::default())
+		.map_err(|err| Error::backend("git write index", err))
 }
 
 fn write_worktree_entry(

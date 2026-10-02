@@ -1,12 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import {
-	autolinkSchemeScanIndex,
 	clearRenderCache,
 	extractMarkdownLinks,
 	Markdown,
 	renderInlineMarkdown,
-	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
@@ -1642,6 +1640,16 @@ bar`,
 			expect(protoOut.includes("\x1b]8;;")).toBe(false);
 			expect(stripTerminalSequences(protoOut)).toContain("proto");
 		});
+
+		it("autolinks urls and emails end-to-end", () => {
+			const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
+				...defaultMarkdownTheme,
+				link: (text: string) => `<L>${text}</L>`,
+			});
+			const plain = stripVTControlCharacters(rendered);
+			expect(plain).toContain("<L>https://example.com</L>");
+			expect(plain).toContain("<L>user@example.com</L>");
+		});
 	});
 
 	describe("HTML-like tags in text", () => {
@@ -2463,15 +2471,71 @@ describe("Math rendering", () => {
 	});
 });
 
-describe("inline start()/url-gate scanners (perf rewrites)", () => {
-	// The hand-rolled scanners replaced regex scans that marked runs on the
-	// remaining source at every inline position. They must return exactly what
-	// the old regexes returned for every input.
-	const OLD_MATH_START = /\$|\\\(|\\\[/;
-	const OLD_AUTOLINK_SCAN = /www\.|https?:\/\/|ftp:\/\//i;
-	// marked's bundled GFM inline url rule (verbatim, no flags).
-	const GFM_URL_REGEX =
-		/^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/;
+describe("Strikethrough", () => {
+	const strike = (text: string): string =>
+		stripVTControlCharacters(
+			renderInlineMarkdown(text, { ...defaultMarkdownTheme, strikethrough: (inner: string) => `<S>${inner}</S>` }),
+		);
+
+	it("strikes through as GFM's `~~` rule reads it", () => {
+		expect(strike("~~a~~ ~~a ~~b~~ c")).toBe("<S>a</S> <S>a ~~b</S> c");
+		expect(strike("~~a~~~ b~~ ~~ c~~ d~~")).toBe("<S>a~~~ b</S> ~~ c~~ d~~");
+		expect(strike("~~a\\~~ b~~ ~~a \\\\~~")).toBe("<S>a~~ b</S> <S>a \\</S>");
+		expect(strike("x~~y~~z ~~~~ ~~a\\")).toBe("x<S>y</S>z ~~~~ ~~a\\");
+	});
+
+	it("still strikes through past an opener whose text a backslash before a line break ends", () => {
+		expect(strike("~~a\\\nb~~ ~~c\nd~~")).toBe("~~ab~~ <S>c\nd</S>");
+	});
+
+	// Inside emphasis or a link label the text ends before its closer: a `~~` past that end closes nothing there.
+	it("strikes through inside emphasis and a link label only up to their end", () => {
+		expect(strike("*a ~~b* c~~ [d ~~e](u) f~~")).toBe("a ~~b c~~ d ~~e f~~");
+		expect(strike("*a ~~b~~* [c ~~d~~](u)")).toBe("a <S>b</S> c <S>d</S>");
+	});
+});
+
+describe("inline rendering stays linear on long paragraphs", () => {
+	// Generous bound: each shape took v18.4.4 several seconds at 40 KB; linear lexing takes well under 300 ms.
+	it.each([
+		["unclosed strikethrough (80 KB)", "~~a ".repeat(20_000)],
+		["unclosed $ before digits (80 KB)", "$1*".repeat(26_667)],
+	])("renders a long paragraph of %s in under two seconds", (_name, text) => {
+		// Compile the rendering paths first, so the bound measures the rendering.
+		renderInlineMarkdown(text.slice(0, 2_000), defaultMarkdownTheme);
+		const start = performance.now();
+		renderInlineMarkdown(text, defaultMarkdownTheme);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+
+	// The same bound on lexing alone: styling nested emphasis costs more than lexing it.
+	it.each([
+		// Every nesting level holds the long word, so a math start hint searched per level reads it once per level.
+		[
+			"nested emphasis around a long word (800 KB)",
+			`${"*a ".repeat(4_000)}${"a".repeat(800_000)}${" b*".repeat(4_000)}`,
+		],
+		// Each level's `~~` scan finds no closer before the end of the paragraph.
+		[
+			"nested emphasis with an unclosed ~~ at every level (80 KB)",
+			`${"*a ~~b ".repeat(8_000)}${" b*".repeat(8_000)}`,
+		],
+		// Each level's `~~` closes only past the last level; the long word makes every scan to that closer long.
+		[
+			"nested emphasis with a ~~ at every level closed past it (70 KB)",
+			`${"*a ~~b ".repeat(2_000)}${"a".repeat(50_000)}${" b*".repeat(2_000)} x~~`,
+		],
+	])("lexes a long paragraph of %s in under two seconds", (_name, text) => {
+		extractMarkdownLinks(text.slice(0, 2_000));
+		const start = performance.now();
+		extractMarkdownLinks(text);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+});
+
+describe("math start hint", () => {
+	// mathStartIndex must find the offsets `/\$|\\\(|\\\[/` finds.
+	const MATH_OPENER = /\$|\\\(|\\\[/;
 
 	const fixtures = [
 		"",
@@ -2485,65 +2549,13 @@ describe("inline start()/url-gate scanners (perf rewrites)", () => {
 		"backslash only \\ then ( apart",
 		"ends with backslash \\",
 		"ends with dollar $",
-		"www.example.com leading",
-		"see www.example.com mid-string",
-		"see WWW.EXAMPLE.COM upper",
-		"mixed WwW.case.com scan",
-		"http://example.com leading",
-		"prose http://example.com mid",
-		"prose HTTPS://EXAMPLE.COM upper",
-		"HtTpS://mixed.example",
-		"ftp://files.example mid ftp",
-		"prose FTP://FILES.EXAMPLE",
-		"ftps:// is not ftp:// until here ftp://x",
-		"wwww.overlap.example",
-		"hhttp://overlap.example",
-		"http:/ missing slash then https://real.example",
-		"www without dot www. with dot",
-		"w h f teaser chars but no scheme",
-		"user@example.com email",
-		"prose user.name+tag@example.co.uk",
-		"trailing at sign only@ ",
-		"@leading-at no local part",
-		"a".repeat(400), // long identifier run, no @
-		`${"a".repeat(400)}@example.com`, // long local part (past gate scan limit)
-		"short@x",
-		"dots...and+plus_under-score@host.tld",
 	];
 
-	it("mathStartIndex matches the old /\\$|\\\\\\(|\\\\\\[/ scan on every fixture", () => {
+	it("mathStartIndex finds the offsets /\\$|\\\\\\(|\\\\\\[/ finds on every fixture", () => {
 		for (const src of fixtures) {
-			const m = OLD_MATH_START.exec(src);
+			const m = MATH_OPENER.exec(src);
 			expect(mathStartIndex(src)).toBe(m ? m.index : undefined);
 		}
-	});
-
-	it("autolinkSchemeScanIndex matches the old /www\\.|https?:\\/\\/|ftp:\\/\\//i scan on every fixture", () => {
-		for (const src of fixtures) {
-			const m = OLD_AUTOLINK_SCAN.exec(src);
-			expect(autolinkSchemeScanIndex(src)).toBe(m ? m.index : undefined);
-		}
-	});
-
-	it("urlTokenPossible is conservative: never false when the GFM url regex matches", () => {
-		for (const src of fixtures) {
-			if (GFM_URL_REGEX.test(src)) {
-				expect(urlTokenPossible(src)).toBeTrue();
-			}
-		}
-		// And it actually gates: plain prose with no scheme/email head is rejected.
-		expect(urlTokenPossible("plain prose, nothing linkable here")).toBeFalse();
-		expect(urlTokenPossible("@leading-at no local part")).toBeFalse();
-	});
-
-	it("gated tokenizer still autolinks urls and emails end-to-end", () => {
-		const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
-			...defaultMarkdownTheme,
-			link: (text: string) => `<L>${text}</L>`,
-		});
-		const plain = stripVTControlCharacters(rendered);
-		expect(plain).toContain("<L>https://example.com</L>");
-		expect(plain).toContain("<L>user@example.com</L>");
 	});
 });
 

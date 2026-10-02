@@ -64,6 +64,18 @@ export interface NativeHost {
 	overlays(): readonly NativeOverlay[];
 	/** Component receiving keyboard input. */
 	focused(): Component | null;
+	/**
+	 * The user clicked into a node described by `owners[0]` (then the
+	 * components containing it, innermost first): move keyboard focus there.
+	 * `field` is the outermost owner that takes keys and whose focus target is
+	 * the clicked `editor`/`input`, if any; `sheet` tells the overlays that
+	 * don't hold the keys while the user works beside them.
+	 */
+	focusFromPointer(
+		owners: readonly Component[],
+		field: Component | null,
+		sheet: (overlay: Component) => boolean,
+	): void;
 	requestRender(): void;
 	/** The terminal switched appearance. */
 	appearanceChanged(dark: boolean): void;
@@ -661,6 +673,16 @@ export class NativeBackend {
 			case "edit":
 				this.#routeUiEvent(event);
 				return;
+			case "focus": {
+				const reconciler = this.#surfaceFor(event.sf)?.reconciler;
+				const owners = reconciler?.owners(event.id) ?? [];
+				if (!reconciler || owners.length === 0) return;
+				const field =
+					owners.findLast(owner => owner.handleInput && reconciler.focusTarget(owner) === event.id) ?? null;
+				this.#host.focusFromPointer(owners, field, overlay => overlay.nativeSheet?.(this.#cx) === true);
+				this.#host.requestRender();
+				return;
+			}
 		}
 	}
 
