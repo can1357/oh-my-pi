@@ -1196,7 +1196,7 @@ export class CommandController {
 		// otherwise flush onto the fresh transcript's first agent_end. Best-effort
 		// flush first (a landed restore is a no-op on a fresh session), then the
 		// commit discards whatever remains.
-		await this.ctx.flushPendingModelSwitch();
+		await this.ctx.flushPendingModelSwitch?.();
 		// The boundary COMMITS inside newSession (transcript + session id switch)
 		// BEFORE its later steps — the prompt rebuild or the session_switch hook —
 		// can throw. A throw after the commit still leaves the fresh session in
@@ -1206,11 +1206,11 @@ export class CommandController {
 		// old session alive, and that path returns before the discard below.
 		const committed = await this.ctx.session.newSession(options).catch(error => {
 			// The queue belongs to the source session, which is gone either way.
-			this.ctx.clearPendingModelSwitch();
+			this.ctx.clearPendingModelSwitch?.();
 			throw error;
 		});
 		if (!committed) return;
-		this.ctx.clearPendingModelSwitch();
+		this.ctx.clearPendingModelSwitch?.();
 		// A focused subagent view keeps its own history: return to the main session
 		// first so the transcript below cannot rebuild from the subagent's surviving
 		// conversation, then drop any turn-scoped anchors (coalescing timers,
