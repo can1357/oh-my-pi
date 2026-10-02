@@ -2006,7 +2006,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
-		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
+		const summary = formatTaskResultSummary(result, {
+			totalDurationMs,
+			mergeSummary,
+			registry: this.session.agentRegistry ?? AgentRegistry.global(),
+		});
 		return {
 			content: [{ type: "text", text: summary }],
 			details: {
