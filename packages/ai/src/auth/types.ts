@@ -447,8 +447,22 @@ export interface UsageLimitMarkResult {
 	reportResetAtMs?: number;
 }
 
-/** Combined model availability state across stored accounts. */
-export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
+/**
+ * Combined model availability state across stored accounts.
+ *
+ * `credits` marks an account whose renewable plan allowance is spent while the
+ * provider still serves it from a paid credit balance (Codex flexible
+ * credits). It is neither allowance (`healthy`) nor `reserve`.
+ */
+export type ModelUsageHealthState = "healthy" | "credits" | "reserve" | "depleted" | "unknown";
+
+/**
+ * Which funding a request may draw on. Absent: the default allowance-first
+ * ranking. `credits`: the explicit credits rung of a fallback chain, which
+ * serves only from accounts whose allowance is spent and whose paid credit
+ * balance still funds overage.
+ */
+export type UsageFunding = "credits";
 
 /** Usage health of one stored credential for a model. */
 export interface ModelUsageAccountHealth {
@@ -473,6 +487,8 @@ export interface ModelUsageHealthOptions {
 	sessionId?: string;
 	baseUrl?: string;
 	reserveFraction: number;
+	/** `credits`: report the pool as the credits rung sees it — healthy only while a credit-backed account exists. */
+	usageFunding?: UsageFunding;
 	signal?: AbortSignal;
 }
 
@@ -482,6 +498,8 @@ export type AuthApiKeyOptions = {
 	modelId?: string;
 	/** Provider account ids known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
 	accountIds?: readonly string[];
+	/** `credits`: serve only from credit-backed accounts (allowance spent, overage funded by credits). */
+	usageFunding?: UsageFunding;
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of

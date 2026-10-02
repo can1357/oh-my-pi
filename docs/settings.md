@@ -584,6 +584,8 @@ When the active chat model keeps failing (429s, quota walls, provider outages) a
 
 A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. Bare fallback entries inherit the failing turn's thinking level; an explicit suffix can replace it. When a chain is exhausted, recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
 
+A selector's `@credits` modifier names the same model's paid-credits rung: `openai-codex/gpt-6.1-sol@credits:auto` is served only from accounts whose plan allowance is spent while a paid credit balance still funds overage (Codex flexible credits), ordered by `auth.accountPolicies[].priority`, so a negative-priority account still pays last. Usage health reports such accounts as `credits`; without the modifier, usage-aware fallback handles that state exactly like `reserve`, so later rungs run before credits are spent. A chain such as `[xai-oauth/grok-4.7:high, zai/glm-5.3:auto, openai-codex/gpt-6.1-sol@credits:auto, anthropic/claude-opus-5-5:auto]` behind a Sol primary spends plan allowance, then Grok and GLM, then Codex credits, then Opus. On OpenRouter and Vercel AI Gateway, `@<slug>` keeps its upstream-routing meaning.
+
 ### Tools and approvals
 
 ```yaml

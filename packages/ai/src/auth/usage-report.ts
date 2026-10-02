@@ -255,6 +255,17 @@ export function remainingUsageFraction(
 }
 
 /**
+ * Whether an account serves past its spent plan allowance on a paid credit
+ * balance (Codex flexible credits): the provider reported credit-funded
+ * overage and the current allowance windows have nothing left. Callers rule
+ * out exhausted/blocked accounts first; this only separates paid overage from
+ * renewable allowance.
+ */
+export function isCreditBackedUsage(report: UsageReport | null, remainingFraction: number | undefined): boolean {
+	return report?.metadata?.creditOverage === true && remainingFraction === 0;
+}
+
+/**
  * Computes the required drain rate: `headroomFraction / remainingHours` —
  * how fast the window's remaining quota must be consumed to fully use it
  * before it resets and expires. Higher = more headroom at risk of expiring

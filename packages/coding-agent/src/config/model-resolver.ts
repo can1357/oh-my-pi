@@ -15,7 +15,8 @@ import {
  *   with alias-vs-dated pick.
  * - `parseModelPatternWithContext`/`parseModelPattern` layer the selector
  *   grammar on top: trailing `:level` thinking suffixes (`splitThinkingSuffix`)
- *   and `@upstream` provider routing (`splitUpstreamRouting`).
+ *   and `@upstream` provider routing (`splitUpstreamRouting`), whose reserved
+ *   `@credits` slug marks a non-aggregator model's credits rung.
  * - Everything else (`resolveModelFromString`, `resolveModelOverride*`,
  *   `resolveRoleSelection`, `resolveModelScope`, `resolveCliModel`,
  *   `findSmolModel`/`findSlowModel`) adapts inputs — roles, settings patterns,
@@ -199,8 +200,17 @@ function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
 	return undefined;
 }
 
+/**
+ * Selector modifier naming a route's credits rung: `openai-codex/gpt-6.1-sol@credits:auto`
+ * serves the same model from accounts whose plan allowance is spent and whose
+ * paid credit balance funds the overage. Reserved on non-aggregator providers,
+ * where `@<slug>` has no upstream-routing meaning.
+ */
+export const CREDITS_FUNDING_ROUTE = "credits";
+
 export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
+	if (model.usageFunding === "credits") return `${selector}@${CREDITS_FUNDING_ROUTE}`;
 	const upstream = getSingleUpstreamRoute(model);
 	return upstream ? `${selector}@${upstream}` : selector;
 }
@@ -799,8 +809,10 @@ function matchModel(
 			// Let the routing fallback apply `@upstream` before fuzzy matching can consume the
 			// slug — but only for aggregator providers (OpenRouter / Vercel Gateway). Other
 			// providers have ids that legitimately end in `@` (Vertex `claude-opus-4-8@default`),
-			// and the fallback never routes them, so they must keep fuzzy matching.
-			if (splitUpstreamRouting(modelId) && providerModels.some(supportsUpstreamRouting)) {
+			// and the fallback never routes them, so they must keep fuzzy matching. The reserved
+			// `@credits` funding modifier is left to the routing fallback on every provider.
+			const routing = splitUpstreamRouting(modelId);
+			if (routing && (routing.upstream === CREDITS_FUNDING_ROUTE || providerModels.some(supportsUpstreamRouting))) {
 				return undefined;
 			}
 			const scored = providerModels
@@ -1000,11 +1012,15 @@ function matchPatternWithContext(
 	// No direct match: a trailing `@upstream` may be a provider-routing selector.
 	// Only honor it when the base resolves to an aggregator model (OpenRouter /
 	// Vercel Gateway); otherwise `@` stays part of the id and `direct` stands.
+	// On any other model, the reserved `@credits` slug selects the credits rung.
 	const routing = splitUpstreamRouting(pattern);
 	if (routing) {
 		const routed = parseModelPatternWithContext(routing.base, availableModels, context, options);
 		if (routed.model && supportsUpstreamRouting(routed.model)) {
 			return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream), upstream: routing.upstream };
+		}
+		if (routed.model && routing.upstream === CREDITS_FUNDING_ROUTE) {
+			return { ...routed, model: { ...routed.model, usageFunding: "credits" } };
 		}
 	}
 	return direct;

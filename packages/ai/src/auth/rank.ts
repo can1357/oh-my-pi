@@ -25,6 +25,11 @@ export type UsageCandidate<T extends AuthCredential> = {
 	 * spent, so if it still serves it draws on paid overage such as Codex credits.
 	 */
 	allowanceSpent?: boolean;
+	/**
+	 * Present after ranking: unblocked, allowance spent, and the provider reports
+	 * a paid credit balance funding the overage (Codex flexible credits).
+	 */
+	creditBacked?: boolean;
 };
 
 /** OAuth credential eligible for usage ranking. */
@@ -45,6 +50,7 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	accountPriority: number;
 	hasPriorityBoost: boolean;
 	allowanceSpent: boolean;
+	creditBacked: boolean;
 	usageMeasured: boolean;
 	planPriority: number;
 	secondaryUsed: number;
@@ -85,6 +91,7 @@ function compareUsageRankedCandidatePriority(
 	left: UsageRankedCandidate<AuthCredential>,
 	right: UsageRankedCandidate<AuthCredential>,
 	planGated: boolean,
+	creditsRung: boolean,
 ): number {
 	if (left.blocked !== right.blocked) return left.blocked ? 1 : -1;
 	if (left.blocked && right.blocked) {
@@ -95,6 +102,12 @@ function compareUsageRankedCandidatePriority(
 	}
 	if (planGated && left.planPriority !== right.planPriority) {
 		return left.planPriority - right.planPriority;
+	}
+	// The credits rung spends paid balances only; account policy decides whose
+	// first, so a negative-priority account still pays last.
+	if (creditsRung) {
+		if (left.creditBacked !== right.creditBacked) return left.creditBacked ? -1 : 1;
+		if (left.accountPriority !== right.accountPriority) return right.accountPriority - left.accountPriority;
 	}
 	// Paid overage (Codex credits) never renews, so an account serving past its
 	// allowance yields to any sibling whose renewable allowance is left (#13889).
@@ -134,17 +147,22 @@ function compareUsageRankedCandidates(
 	left: UsageRankedCandidate<AuthCredential>,
 	right: UsageRankedCandidate<AuthCredential>,
 	planGated: boolean,
+	creditsRung: boolean,
 ): number {
-	const priority = compareUsageRankedCandidatePriority(left, right, planGated);
+	const priority = compareUsageRankedCandidatePriority(left, right, planGated, creditsRung);
 	return priority !== 0 ? priority : left.orderPos - right.orderPos;
 }
 
-/** Sort ranked candidates by blocks, plan, spent allowance, reserve, boost, hot window, usage and drain. */
+/**
+ * Sort ranked candidates by blocks, plan, spent allowance, reserve, boost, hot window, usage and drain.
+ * `creditsRung` puts credit-backed accounts first, ordered by account priority.
+ */
 export function orderUsageRankedCandidates<T extends AuthCredential>(
 	candidates: UsageRankedCandidate<T>[],
 	planGated: boolean,
+	creditsRung = false,
 ): UsageCandidate<T>[] {
-	candidates.sort((left, right) => compareUsageRankedCandidates(left, right, planGated));
+	candidates.sort((left, right) => compareUsageRankedCandidates(left, right, planGated, creditsRung));
 	return candidates.map(candidate => ({
 		selection: candidate.selection,
 		usage: candidate.usage,
@@ -152,5 +170,6 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		inReserve: candidate.inReserve,
 		reserveMeasured: candidate.reserveMeasured,
 		allowanceSpent: candidate.allowanceSpent,
+		creditBacked: candidate.creditBacked,
 	}));
 }
