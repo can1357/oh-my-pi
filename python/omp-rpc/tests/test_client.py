@@ -475,6 +475,9 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "branch":
             branch_messages = [{"entryId": command["entryId"], "text": "branch message"}]
             respond(request_id, "branch", {"text": "branch created", "cancelled": False})
+        elif command_type == "fork":
+            # Report whether entryId reached the wire; a whole-session fork must omit it.
+            respond(request_id, "fork", {"cancelled": "entryId" not in command})
         elif command_type == "get_branch_messages":
             respond(request_id, "get_branch_messages", {"messages": branch_messages})
         elif command_type == "get_last_assistant_text":
@@ -1541,6 +1544,10 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(branch.text, "branch created")
             branch_messages = client.get_branch_messages()
             self.assertEqual(branch_messages[0].entry_id, "entry-9")
+
+            # The fake reports cancelled exactly when no entryId was sent.
+            self.assertFalse(client.fork("entry-9").cancelled)
+            self.assertTrue(client.fork().cancelled)
 
     def test_message_and_control_commands(self) -> None:
         with self.make_client() as client:

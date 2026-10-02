@@ -72,6 +72,7 @@ type SessionChangeStubOptions = {
 	newSession?: boolean;
 	switchSession?: boolean;
 	branch?: { selectedText: string; selectedImages: ImageContent[]; cancelled: boolean };
+	fork?: boolean;
 };
 
 function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessionChangeSession {
@@ -80,6 +81,7 @@ function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessi
 		switchSession: async (_sessionPath: string) => options.switchSession ?? true,
 		branch: async (_entryId: string) =>
 			options.branch ?? { selectedText: "branched text", selectedImages: [], cancelled: false },
+		fork: async (_entryId?: string) => options.fork ?? true,
 	};
 }
 
@@ -196,6 +198,11 @@ describe("RPC subagent registry", () => {
 				}),
 				expected: { type: "branch", data: { text: "Branch text", cancelled: false } },
 			},
+			{
+				command: { type: "fork", entryId: "entry-1" },
+				session: createSessionChangeSession({ fork: true }),
+				expected: { type: "fork", data: { cancelled: false } },
+			},
 		];
 
 		for (const testCase of cases) {
@@ -234,6 +241,11 @@ describe("RPC subagent registry", () => {
 				command: { type: "branch", entryId: "entry-1" },
 				session: createSessionChangeSession({ branch: { selectedText: "", selectedImages: [], cancelled: true } }),
 				expected: { type: "branch", data: { text: "", cancelled: true } },
+			},
+			{
+				command: { type: "fork" },
+				session: createSessionChangeSession({ fork: false }),
+				expected: { type: "fork", data: { cancelled: true } },
 			},
 		];
 
