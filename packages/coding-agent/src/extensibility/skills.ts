@@ -162,6 +162,8 @@ interface CollisionResolution {
 interface RedundantCopy {
 	/** Registered name of the identical copy that stands for the candidate. */
 	duplicateOf: string;
+	/** Alias the candidate would receive if its instructions differed, used for exclusion rules. */
+	name: string;
 }
 
 /** A distinct file left unloaded because `retained` carries identical content. */
@@ -175,6 +177,18 @@ const isInstalledSkill = (skill: Pick<Skill, "_source"> | undefined): boolean =>
 const isCustomSkill = (skill: Pick<Skill, "_source"> | undefined): boolean =>
 	skill?._source?.provider === CUSTOM_DIR_PROVIDER_ID;
 
+function availableSkillAlias(
+	skills: ReadonlyMap<string, Skill>,
+	namespace: string,
+	rawName: string,
+	replacedNames?: readonly string[],
+): string {
+	let alias = `${namespace}/${rawName}`;
+	for (let n = 2; skills.has(alias) && !replacedNames?.includes(alias); n++) {
+		alias = `${namespace}/${rawName}~${n}`;
+	}
+	return alias;
+}
 /**
  * Resolve a same-name skill against what is already loaded.
  * - Precedence, when raw names collide:
@@ -221,9 +235,7 @@ function resolveCollision(
 	if (bareSkill && ((bareInstalled && !candidateInstalled) || (candidateCustom && !bareCustom))) {
 		if (identical.includes(candidate.name)) return { name: candidate.name, dropped: identical };
 		const bareEntry = admitted.get(candidate.name)!;
-		let namespacedBare = `${bareEntry.namespace}/${bareEntry.rawName}`;
-		for (let n = 2; skillMap.has(namespacedBare) && !identical.includes(namespacedBare); n++)
-			namespacedBare = `${bareEntry.namespace}/${bareEntry.rawName}~${n}`;
+		const namespacedBare = availableSkillAlias(skillMap, bareEntry.namespace, bareEntry.rawName, identical);
 		return {
 			name: candidate.name,
 			dropped: identical,
@@ -233,15 +245,12 @@ function resolveCollision(
 			},
 		};
 	}
-	if (identical.length > 0) return { duplicateOf: identical[0] };
 
 	// Otherwise the already-admitted skill keeps the bare name (first-admitted
 	// wins, or the authored skill over an installed package); only the new
 	// candidate is namespaced.
-	let namespaced = `${namespace}/${candidate.name}`;
-	for (let n = 2; skillMap.has(namespaced); n++) {
-		namespaced = `${namespace}/${candidate.name}~${n}`;
-	}
+	const namespaced = availableSkillAlias(skillMap, namespace, candidate.name);
+	if (identical.length > 0) return { duplicateOf: identical[0], name: namespaced };
 	if (bareSkill && !bareInstalled && candidateInstalled) {
 		return {
 			name: namespaced,
@@ -519,6 +528,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		const rawName = skill.name;
 		const resolved = resolveCollision(skillMap, admitted, skill, body, frontmatter, namespace);
 		if ("duplicateOf" in resolved) {
+			if (disabledSkillNames.has(resolved.name) || matchesIgnorePatterns(resolved.name)) return undefined;
 			// Keyed by realpath: a symlink to a redundant file is that file again, not another copy.
 			if (!redundant.has(realPath)) {
 				redundant.set(realPath, { skill, retained: skillMap.get(resolved.duplicateOf)! });
@@ -530,13 +540,20 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 
 		for (const droppedName of dropped) {
 			const droppedSkill = skillMap.get(droppedName)!;
-			const droppedPath = admitted.get(droppedName)!.realPath;
+			const droppedEntry = admitted.get(droppedName)!;
+			const droppedPath = droppedEntry.realPath;
+			const excludedName =
+				droppedName === rawName
+					? availableSkillAlias(skillMap, droppedEntry.namespace, rawName, dropped)
+					: droppedName;
 			skillMap.delete(droppedName);
 			admitted.delete(droppedName);
 			// The candidate now stands for the dropped file, and for every copy it stood for.
 			for (const entry of redundant.values()) if (entry.retained === droppedSkill) entry.retained = skill;
 			droppedSkill.name = rawName;
-			redundant.set(droppedPath, { skill: droppedSkill, retained: skill });
+			if (!disabledSkillNames.has(excludedName) && !matchesIgnorePatterns(excludedName)) {
+				redundant.set(droppedPath, { skill: droppedSkill, retained: skill });
+			}
 			// The alias no longer exists: retract the warning that advertised it.
 			const stale = collisionWarnings.findIndex(w => w.message.endsWith(`available as "${droppedName}"`));
 			if (stale !== -1) collisionWarnings.splice(stale, 1);

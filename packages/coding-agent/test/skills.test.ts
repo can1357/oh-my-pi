@@ -920,6 +920,59 @@ describe("collision handling", () => {
 			expect(diagnostic.duplicates[0].retained.filePath).toBe(firstFile);
 		});
 
+		it.each([
+			["ignored", { ignoredSkills: ["mirror/*"] }],
+			["disabled", { disabledExtensions: ["skill:mirror/calendar"] }],
+		])("does not notify about an identical copy whose namespace is %s", async (_label, filter) => {
+			const { skills, diagnostics, warnings } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [first, mirror],
+				...filter,
+			});
+			expect(skills.map(skill => skill.filePath)).toEqual([firstFile]);
+			expect(diagnostics).toEqual([]);
+			expect(warnings).toEqual([]);
+		});
+
+		it("honors an excluded suffixed alias without hiding the preceding active variant", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-duplicate-slot-"));
+			try {
+				const variantRoot = path.join(root, "one", "mirror");
+				const duplicateRoot = path.join(root, "two", "mirror");
+				await Bun.write(path.join(variantRoot, "calendar", "SKILL.md"), await Bun.file(secondFile).text());
+				await Bun.write(path.join(duplicateRoot, "calendar", "SKILL.md"), await Bun.file(firstFile).text());
+				const { skills, diagnostics } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [first, variantRoot, duplicateRoot],
+					disabledExtensions: ["skill:mirror/calendar~2"],
+				});
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "mirror/calendar"]);
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates).toEqual([]);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.each([
+			["ignored", { ignoredSkills: ["claude/*"] }],
+			["disabled", { disabledExtensions: ["skill:claude/calendar"] }],
+		])("does not notify about a provider copy whose displaced namespace is %s", async (_label, filter) => {
+			const { project } = await projectWithProviderCopies(firstFile, undefined);
+			try {
+				const { skills, diagnostics } = await loadSkills({
+					...providerOptions,
+					cwd: project,
+					customDirectories: [mirror],
+					...filter,
+				});
+				expect(skills.map(skill => skill.filePath)).toEqual([mirrorFile]);
+				expect(diagnostics).toEqual([]);
+			} finally {
+				await removeWithRetries(project);
+			}
+		});
+
 		it("never counts a symlink to a loaded file and lists a redundant file once", async () => {
 			if (process.platform === "win32") return;
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-aliases-"));
