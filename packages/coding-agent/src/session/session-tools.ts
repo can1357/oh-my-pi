@@ -21,6 +21,7 @@ import {
 	type LoadSkillsResult,
 	loadSkills,
 	type Skill,
+	type SkillDiagnostic,
 	type SkillWarning,
 	setActiveSkills,
 } from "../extensibility/skills";
@@ -207,6 +208,7 @@ interface SessionToolsOptions {
 	systemPromptSources?: SystemPromptSources;
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
+	skillDiagnostics?: SkillDiagnostic[];
 	skillsSettings?: SkillsSettings;
 	skillsReloadable?: boolean;
 }
@@ -546,6 +548,7 @@ export class SessionTools {
 	#skills: Skill[];
 	#promptSkills: Skill[];
 	#skillWarnings: SkillWarning[];
+	#skillDiagnostics: SkillDiagnostic[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
 	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
@@ -609,6 +612,7 @@ export class SessionTools {
 		this.#skills = options.skills ?? [];
 		this.#promptSkills = this.#skills;
 		this.#skillWarnings = options.skillWarnings ?? [];
+		this.#skillDiagnostics = options.skillDiagnostics ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
@@ -754,6 +758,7 @@ export class SessionTools {
 			const published = getActiveSkills() === this.#skills;
 			this.#skills = discovered.skills;
 			this.#skillWarnings = discovered.warnings;
+			this.#skillDiagnostics = discovered.diagnostics;
 			this.#skillsSettings = skillsSettings;
 			if (published) setActiveSkills(this.#skills);
 			await this.refreshBaseSystemPrompt();
@@ -777,6 +782,11 @@ export class SessionTools {
 	/** Diagnostics produced while loading the current skills. */
 	get skillWarnings(): SkillWarning[] {
 		return this.#skillWarnings;
+	}
+
+	/** Skill resolution diagnostics for the current skills. */
+	get skillDiagnostics(): SkillDiagnostic[] {
+		return this.#skillDiagnostics;
 	}
 
 	/** Settings snapshot used for the current skill discovery. */
@@ -2327,6 +2337,7 @@ export class SessionTools {
 		const { discovered, skillsSettings } = await this.#discoverSkills();
 		this.#skills = discovered.skills;
 		this.#skillWarnings = discovered.warnings;
+		this.#skillDiagnostics = discovered.diagnostics;
 		this.#skillsSettings = skillsSettings;
 		if (this.#host.agentKind() === "main") {
 			setActiveSkills(this.#skills);
