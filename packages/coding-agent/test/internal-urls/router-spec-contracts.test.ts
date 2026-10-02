@@ -104,6 +104,24 @@ describe("InternalUrlRouter URL shape", () => {
 		expect(router.normalize("artifact:/3")).toBe("artifact:/3");
 	});
 
+	it("strips a filesystem path prefixed onto an aliasing scheme's URL", () => {
+		const router = InternalUrlRouter.instance();
+		expect(router.normalize("/home/me/repo/local://notes.md")).toBe("local://notes.md");
+		expect(router.normalize("notes/local://a/b.md:10-20")).toBe("local://a/b.md:10-20");
+		// The first prefixed scheme wins; a later `local://` is part of the URL's path.
+		expect(router.normalize("/repo/local://a/b/local://notes.md")).toBe("local://a/b/local://notes.md");
+		// Windows cwd spellings, and the bare session-local root.
+		expect(router.normalize("C:\\repo\\local://rules.md")).toBe("local://rules.md");
+		expect(router.normalize("C:/repo/local://rules.md")).toBe("local://rules.md");
+		expect(router.normalize("/repo/local://")).toBe("local://");
+		expect(router.canHandle("/repo/local://")).toBe(true);
+		// A single slash after the scheme can be a real `local:` directory; leave it.
+		expect(router.normalize("/home/me/repo/local:/notes.md")).toBe("/home/me/repo/local:/notes.md");
+		// A prefix that is itself a URL, or a scheme without the alias, is not repaired.
+		expect(router.normalize("https://host/local://x")).toBe("https://host/local://x");
+		expect(router.normalize("/repo/artifact://3")).toBe("/repo/artifact://3");
+	});
+
 	it("never treats a URL query as a glob, but keeps path globs", () => {
 		const router = InternalUrlRouter.instance();
 		for (const url of [

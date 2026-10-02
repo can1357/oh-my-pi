@@ -110,8 +110,14 @@ class StreamingJsonStringExtractor {
 		this.#changed = false;
 	}
 
-	update(prefix: string): StreamingJsonStringExtractorResult {
-		if (!prefix.startsWith(this.#source)) {
+	/**
+	 * Advance the decode to `prefix`. A `prefix` that does not extend the
+	 * previous one restarts from scratch; `knownAppend` lets a caller that
+	 * already guarantees the extension skip the O(prefix) re-verification
+	 * (only the length is checked).
+	 */
+	update(prefix: string, knownAppend = false): StreamingJsonStringExtractorResult {
+		if (knownAppend ? prefix.length < this.#source.length : !prefix.startsWith(this.#source)) {
 			this.reset();
 		}
 		this.#source = prefix;
@@ -415,7 +421,11 @@ function displayArgsForPrefix(entry: RevealEntry, prefix: string, forceParse = f
 			parsedChanged = true;
 		}
 	}
-	const extracted = entry.stringExtractor?.update(prefix);
+	// Every prefix handed here extends the extractor's previous one: the entry
+	// only ever reveals forward within `target`, and setTarget resets the
+	// display state (extractor included) whenever a new target is not an
+	// append of the old one.
+	const extracted = entry.stringExtractor?.update(prefix, true);
 	if (extracted?.changed) {
 		entry.parsedArgs = { ...entry.parsedArgs, ...extracted.values };
 		parsedChanged = true;

@@ -148,6 +148,7 @@ function createAsyncSession(
 		prompt: async (text: string) => {
 			prompts.push(text);
 			onPrompt({ text, promptIndex: prompts.length, harness });
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => pendingAsync,
@@ -217,6 +218,30 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("FRESH: build failed");
 		expect(result.output).not.toContain("STALE");
+	});
+
+	it("waits for a pending owner job before spending a yield reminder", async () => {
+		const harness = createAsyncSession(({ harness: h }) => {
+			if (h.settleCalls() === 0) {
+				h.emitAssistant("Waiting for job-1.");
+				return;
+			}
+			h.emitTerminalYield({ report: "Build failed; job-1 delivered its result." });
+		});
+		mockCreateAgentSession(harness.session);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "verify the build",
+			index: 0,
+			id: "quiescence-wait-before-yield",
+		});
+
+		expect(harness.settleCalls()).toBe(1);
+		expect(harness.prompts).toHaveLength(2);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("Build failed; job-1 delivered its result.");
 	});
 
 	it("fails the run when the model never refreshes the superseded yield", async () => {

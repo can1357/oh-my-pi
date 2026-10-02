@@ -211,6 +211,9 @@ pub(crate) fn file_id(path: &Path, follow: bool) -> io::Result<FileId> {
 
 pub(crate) fn file_id_of(file: &fs::File) -> io::Result<FileId> {
 	let info = handle_info(file)?;
+	if info.file_index == 0 {
+		return Err(unsupported("file identity"));
+	}
 	Ok(FileId::native(info.volume_serial, info.file_index))
 }
 
@@ -238,6 +241,29 @@ pub(crate) fn file_metadata(file: &fs::File) -> io::Result<Metadata> {
 		Ok(info) => Metadata::native_with_handle(meta, info),
 		Err(_) => Metadata::from(meta),
 	})
+}
+
+/// Path metadata with handle identity.
+///
+/// A Windows path stat cannot carry the volume serial and file index that
+/// identity comparisons need. Read both metadata and identity from one
+/// attribute-query handle so a rename between separate path lookups cannot
+/// combine two different objects. Objects that cannot be opened for identity
+/// queries keep path metadata with unknown identity.
+pub(crate) fn path_metadata(path: &Path, follow: bool) -> io::Result<Metadata> {
+	if let Ok(file) = open_for_info(path, follow, 0)
+		&& let Ok(meta) = file.metadata()
+	{
+		return Ok(match handle_info(&file) {
+			Ok(info) => Metadata::native_with_handle(meta, info),
+			Err(_) => Metadata::from(meta),
+		});
+	}
+	if follow {
+		fs::metadata(path).map(Metadata::from)
+	} else {
+		fs::symlink_metadata(path).map(Metadata::from)
+	}
 }
 
 pub(crate) fn file_is_locked(_file: &fs::File) -> io::Result<bool> {

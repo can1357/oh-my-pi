@@ -173,6 +173,12 @@ stdenv.mkDerivation {
     cargo build --release -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}
     install -Dm755 "target/release/${platform.nativeLibrary}" \
       "packages/natives/native/${platform.addon}"
+    # The loader and embed-native.ts require the release version, which is
+    # written into the addon after linking (build-bindings.ts does this for
+    # local builds; this raw cargo build must do it itself). Darwin re-signs
+    # through signIfRequired below; the sandbox has no system codesign.
+    bun scripts/stamp-native-version.ts --no-sign \
+      "packages/natives/native/${platform.addon}"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # The loader extracts this archived addon at runtime, so fix its
       # interpreter-independent Nix RPATH before Bun embeds it.
@@ -190,8 +196,16 @@ stdenv.mkDerivation {
         "packages/natives/native/${platform.addon}"
     ''}
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # The darwin stdenv links C code against darwin.libiconv, whose install
+      # name is an absolute /nix/store path. The addon is gzip-embedded in the
+      # bun binary, so that reference is invisible to the output scanner and the
+      # library is absent from the runtime closure on target machines. Repoint
+      # it at the system libiconv (dyld shared cache, same ABI).
+      install_name_tool -change "${darwin.libiconv}/lib/libiconv.2.dylib" \
+        /usr/lib/libiconv.2.dylib "packages/natives/native/${platform.addon}"
       # arm64 Darwin requires even locally-built Mach-O addons to carry an
-      # ad-hoc signature. Sign before Bun archives the file.
+      # ad-hoc signature. The install-name rewrite invalidates it, so sign
+      # after the change and before Bun archives the file.
       signIfRequired "packages/natives/native/${platform.addon}"
     ''}
 
@@ -297,6 +311,19 @@ stdenv.mkDerivation {
           'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libcublasLt.so.13":{cublasLtGetVersion:{args:[],returns:"ptr"}},"libcublas.so.13":{cublasGetVersion:{args:[],returns:"ptr"}},"libcurand.so.10":{curandGetVersion:{args:["ptr"],returns:"i32"}},"libcudart.so.13":{cudaRuntimeGetVersion:{args:["ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
       ''
     }
+    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # The smoke test above can pass in the build sandbox because
+      # darwin.libiconv is present there, while a Mac after GC is not. Fail
+      # the build if the embedded addon references any /nix/store path.
+      # Capture, don't pipe: under `set -o pipefail` a failing otool would
+      # take the false branch and the check would silently pass.
+      addonDeps="$(otool -L "packages/natives/native/${platform.addon}")"
+      if grep -q "/nix/store/" <<<"$addonDeps"; then
+        echo "embedded addon references /nix/store paths:" >&2
+        echo "$addonDeps" >&2
+        exit 1
+      fi
+    ''}
     runHook postInstallCheck
   '';
 

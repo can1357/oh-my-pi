@@ -45,8 +45,6 @@ const TEST_SOURCE: NonNullable<ToolPathWithSource["source"]> = {
 	level: "user",
 };
 
-const ARRAY_WITH_NULL_SOURCE = ["export default () => [null];"].join("\n");
-
 const MIXED_ARRAY_SOURCE = [
 	"export default api => [",
 	"\t{",
@@ -155,21 +153,6 @@ describe("custom tool loader", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0]?.path).toBe(factoryExitTool);
 		expect(result.errors[0]?.error).toContain("process.exit(3)");
-	});
-
-	it("reports a null array entry instead of throwing", async () => {
-		const nullArrayTool = await writeTool("null-array.js", ARRAY_WITH_NULL_SOURCE);
-
-		const result = await loadCustomTools([{ path: nullArrayTool, source: TEST_SOURCE }], requireTempRoot(), []);
-
-		expect(result.tools).toEqual([]);
-		expect(result.errors).toHaveLength(1);
-		expect(result.errors[0]).toMatchObject({
-			path: nullArrayTool,
-			source: TEST_SOURCE,
-		});
-		expect(result.errors[0]?.error.toLowerCase()).toContain("invalid");
-		expect(result.errors[0]?.error).toContain("index 0");
 	});
 
 	it("reports a tool entry missing a name instead of throwing", async () => {

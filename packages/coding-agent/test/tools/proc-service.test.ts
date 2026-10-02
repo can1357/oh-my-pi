@@ -11,6 +11,7 @@ import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient } from "../../src/launch/client";
 import * as daemonClient from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
+import * as bashExecutor from "../../src/exec/bash-executor";
 import { BashTool } from "../../src/tools/bash";
 import { WriteTool } from "../../src/tools/write";
 import type { ToolSession } from "../../src/tools";
@@ -340,21 +341,22 @@ describe("bash services via proc://", () => {
 			const persisted = await proc.write(parseInternalUrl("proc://echo-service/mode"), "persist", { session });
 			expect(persisted.content[0]?.type === "text" ? persisted.content[0].text : "").toContain("persistent");
 			expect(persisted.details?.proc).toMatchObject({ action: "mode", mode: "persist", daemon: { persist: true } });
-			const metadata: { spec: { persist: boolean } } = await Bun.file(
-				path.join(runtimeDir, "daemons", "echo-service", "meta.json"),
+			const spec: { persist: boolean } = await Bun.file(
+				path.join(runtimeDir, "daemons", "echo-service", "spec.json"),
 			).json();
-			expect(metadata.spec.persist).toBeTrue();
+			expect(spec.persist).toBeTrue();
 			const sessionMode = await proc.write(parseInternalUrl("proc://echo-service/mode"), "session", { session });
 			expect(sessionMode.content[0]?.type === "text" ? sessionMode.content[0].text : "").toContain("mode=session");
-			const sessionMetadata: { spec: { persist: boolean } } = await Bun.file(
-				path.join(runtimeDir, "daemons", "echo-service", "meta.json"),
+			const sessionSpec: { persist: boolean } = await Bun.file(
+				path.join(runtimeDir, "daemons", "echo-service", "spec.json"),
 			).json();
-			expect(sessionMetadata.spec.persist).toBeFalse();
+			expect(sessionSpec.persist).toBeFalse();
 			const restarted = await bash.execute("restart", {
 				command: "printf 'REPLACED\\n'; read line",
 				name: "echo-service",
-				ready: { log: "REPLACED", timeout: 5 },
+				ready: { log: "REPLACED", host: "", timeout: 5 },
 				pty: false,
+				async: false,
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
 			const write = new WriteTool(session);
@@ -371,18 +373,15 @@ describe("bash services via proc://", () => {
 			expect(detached.content[0]?.type === "text" ? detached.content[0].text : "").toContain("detached");
 			const detachedRead = await proc.resolve(parseInternalUrl("proc://detach-candidate"), { session });
 			expect(detachedRead.content).toContain("detached=true");
-			const detachedMetadata: { spec: { persist: boolean; detached: boolean; pty: boolean } } = await Bun.file(
-				path.join(runtimeDir, "daemons", "detach-candidate", "meta.json"),
+			const detachedSpec: { persist: boolean; detached: boolean; pty: boolean } = await Bun.file(
+				path.join(runtimeDir, "daemons", "detach-candidate", "spec.json"),
 			).json();
-			expect(detachedMetadata.spec).toMatchObject({ detached: true, persist: true, pty: false });
+			expect(detachedSpec).toMatchObject({ detached: true, persist: true, pty: false });
 			await expect(
 				proc.write(parseInternalUrl("proc://detach-candidate/mode"), "session", { session }),
 			).rejects.toThrow("must remain persistent");
 			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
 			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
-				"does not accept async or timeout",
-			);
-			await expect(bash.execute("invalid", { command: "true", name: "bad", async: false })).rejects.toThrow(
 				"does not accept async or timeout",
 			);
 			await expect(bash.execute("invalid", { command: "true", name: "bad", timeout: 1 })).rejects.toThrow(
@@ -399,4 +398,53 @@ describe("bash services via proc://", () => {
 			spy.mockRestore();
 		}
 	}, 25_000);
+
+	it("keeps empty or default optional fields out of service-mode selection", async () => {
+		const bash = new BashTool(toolSession(process.cwd()));
+		const textOf = (result: { content: Array<{ type: string; text?: string }> }): string =>
+			result.content.map(part => (part.type === "text" ? (part.text ?? "") : "")).join("");
+		const commands: string[] = [];
+		const spy = vi.spyOn(bashExecutor, "executeBash").mockImplementation(async command => {
+			commands.push(command);
+			return {
+				output: "PLAIN",
+				exitCode: 0,
+				cancelled: false,
+				timedOut: false,
+				truncated: false,
+				totalBytes: 5,
+				totalLines: 1,
+				outputBytes: 5,
+				outputLines: 1,
+			};
+		});
+		try {
+			// Argument shape produced by tool-call layers that materialize every
+			// optional field: a plain command, not a service start.
+			const materialized = await bash.execute("materialized", {
+				command: "printf 'PLAIN\\n'",
+				timeout: 120,
+				cwd: process.cwd(),
+				pty: false,
+				async: false,
+				name: "",
+				ready: { log: "", port: 1, host: "", timeout: 1 },
+			});
+			expect(materialized.details?.service).toBeUndefined();
+			expect(textOf(materialized)).toContain("PLAIN");
+			expect(textOf(materialized)).toContain("Ignored ready");
+
+			const blank = await bash.execute("blank", {
+				command: "printf 'BLANK\\n'",
+				name: "   ",
+				ready: { log: "", host: "" },
+			});
+			expect(blank.details?.service).toBeUndefined();
+			expect(textOf(blank)).not.toContain("Ignored");
+
+			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'"]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
 });

@@ -1,24 +1,27 @@
-import { logger } from "@oh-my-pi/pi-utils";
 import {
-	createUnavailableWorker,
-	createWorkerHandle,
+	type ModelWorkerMessage,
+	ModelWorkerHost,
+	spawnRefCountedWorker,
+	wrapRefCountedSubprocess,
+} from "../subprocess/model-worker-host";
+import {
 	createWorkerSubprocess,
-	logWorkerMessage,
 	type RefCountedWorkerHandle,
 	resolveWorkerSpawnCmd,
 	SMOKE_TEST_TIMEOUT_MS,
 	type SpawnedSubprocess,
 	smokeTestWorker,
-	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
-import { tinyModelEnvKey, tinyWorkerEnv } from "../tiny/title-client";
-import { safeSend } from "../utils/ipc";
+import { tinyWorkerEnv } from "../tiny/title-client";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
-import type { SttModelKey } from "./models";
+import { getSttModelSpec, type SttModelKey } from "./models";
 
-type PendingRequest =
-	| { kind: "transcribe"; modelKey: SttModelKey; resolve: (text: string) => void; reject: (error: Error) => void }
-	| { kind: "download"; modelKey: SttModelKey; resolve: (result: SttDownloadResult) => void };
+type TranscribeRequest = {
+	kind: "transcribe";
+	modelKey: SttModelKey;
+	resolve: (text: string) => void;
+	reject: (error: Error) => void;
+};
 
 export interface SttTranscribeOptions {
 	language?: string;
@@ -82,65 +85,28 @@ export function createSttSubprocess(): SpawnedSubprocess<SttWorkerOutbound> {
 	});
 }
 
-function wrapSubprocess(
-	spawned: SpawnedSubprocess<SttWorkerOutbound>,
-): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-	const { proc } = spawned;
-	return {
-		...createWorkerHandle<SttWorkerInbound, SttWorkerOutbound>(spawned, message => safeSend(proc, message, "stt")),
-		ref() {
-			try {
-				proc.ref();
-			} catch {
-				// Already gone.
-			}
-		},
-		unref() {
-			try {
-				proc.unref();
-			} catch {
-				// Already gone.
-			}
-		},
-	};
-}
-
-function spawnInlineUnavailableWorker(error: unknown): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-	return {
-		...createUnavailableWorker<SttWorkerInbound, SttWorkerOutbound>(error),
-		ref() {},
-		unref() {},
-	};
-}
-
 function spawnSttWorker(): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-	return spawnWorkerOrUnavailable(
-		() => wrapSubprocess(createSttSubprocess()),
-		spawnInlineUnavailableWorker,
-		"stt worker spawn failed; speech-to-text disabled",
-	);
+	return spawnRefCountedWorker(createSttSubprocess, "stt", "stt worker spawn failed; speech-to-text disabled");
 }
 
 export class SttClient {
-	#worker: RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> | null = null;
-	#unsubscribeMessage: (() => void) | null = null;
-	#unsubscribeError: (() => void) | null = null;
-	#pending = new Map<string, PendingRequest>();
 	#streams = new Map<string, StreamState>();
-	#progressListeners = new Set<(event: SttProgressEvent) => void>();
-	#nextRequestId = 0;
-	#refed = false;
-	/** {@link tinyModelEnvKey} the current worker was spawned under. */
-	#workerEnvKey: string | undefined;
-	#spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>;
+	#host: ModelWorkerHost<SttModelKey, SttWorkerInbound, SttWorkerOutbound, TranscribeRequest, SttProgressEvent>;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> = spawnSttWorker) {
-		this.#spawnWorker = spawnWorker;
+		this.#host = new ModelWorkerHost({
+			name: "stt",
+			spawnWorker,
+			modelLabel: modelKey => getSttModelSpec(modelKey)?.label ?? modelKey,
+			handleMessage: message => this.#handleMessage(message),
+			failRequest: (request, error) => request.reject(error),
+			hasStreams: () => this.#streams.size > 0,
+			failStreams: error => this.#failStreams(error),
+		});
 	}
 
 	onProgress(listener: (event: SttProgressEvent) => void): () => void {
-		this.#progressListeners.add(listener);
-		return () => this.#progressListeners.delete(listener);
+		return this.#host.onProgress(listener);
 	}
 
 	/**
@@ -150,24 +116,12 @@ export class SttClient {
 	 */
 	async transcribe(modelKey: SttModelKey, audio: Float32Array, options: SttTranscribeOptions = {}): Promise<string> {
 		options.signal?.throwIfAborted();
-		const worker = this.#ensureWorker();
-		const id = String(++this.#nextRequestId);
-		const { promise, resolve, reject } = Promise.withResolvers<string>();
-		this.#addPending(id, { kind: "transcribe", modelKey, resolve, reject });
-		const abort = (): void => {
-			const pending = this.#pending.get(id);
-			if (pending?.kind !== "transcribe") return;
-			this.#deletePending(id);
-			pending.reject(new DOMException("The operation was aborted.", "AbortError"));
-		};
-		options.signal?.addEventListener("abort", abort, { once: true });
-		try {
-			worker.send({ type: "transcribe", id, modelKey, audio, language: options.language });
-			return await promise;
-		} finally {
-			options.signal?.removeEventListener("abort", abort);
-			this.#deletePending(id);
-		}
+		return this.#host.request<string>(
+			options.signal,
+			id => ({ type: "transcribe", id, modelKey, audio, language: options.language }),
+			(resolve, reject) => ({ kind: "transcribe", modelKey, resolve, reject }),
+			(_resolve, reject) => reject(new DOMException("The operation was aborted.", "AbortError")),
+		);
 	}
 
 	/**
@@ -178,8 +132,8 @@ export class SttClient {
 	 * an aborted signal) tears the session down and resolves `stop()` with "".
 	 */
 	startStream(modelKey: SttModelKey, options: SttStreamOptions = {}): SttStreamHandle {
-		const worker = this.#ensureWorker();
-		const id = String(++this.#nextRequestId);
+		const worker = this.#host.ensureWorker();
+		const id = this.#host.nextId();
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		// `stop()` is normally the only awaiter of `promise`, but with model loading
 		// now deferred to the stream, a load failure (or early worker error) can
@@ -195,7 +149,7 @@ export class SttClient {
 			settled = true;
 			this.#streams.delete(id);
 			signal?.removeEventListener("abort", onAbort);
-			this.#syncWorkerRef();
+			this.#host.syncWorkerRef();
 			apply();
 		};
 		this.#streams.set(id, {
@@ -206,7 +160,7 @@ export class SttClient {
 			reject,
 			finish,
 		});
-		this.#syncWorkerRef();
+		this.#host.syncWorkerRef();
 		worker.send({ type: "stream_start", id, modelKey, language: options.language });
 		const handle: SttStreamHandle = {
 			pushAudio: audio => {
@@ -227,114 +181,15 @@ export class SttClient {
 		return handle;
 	}
 
-	async downloadModel(modelKey: SttModelKey, options: SttDownloadOptions = {}): Promise<SttDownloadResult> {
-		if (options.signal?.aborted) return { ok: false };
-		const unsubscribe = options.onProgress ? this.onProgress(options.onProgress) : undefined;
-		try {
-			const worker = this.#ensureWorker();
-			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<SttDownloadResult>();
-			this.#addPending(id, { kind: "download", modelKey, resolve });
-			const abort = (): void => {
-				const pending = this.#pending.get(id);
-				if (pending?.kind !== "download") return;
-				this.#deletePending(id);
-				pending.resolve({ ok: false });
-			};
-			options.signal?.addEventListener("abort", abort, { once: true });
-			try {
-				worker.send({ type: "download", id, modelKey });
-				return await promise;
-			} finally {
-				options.signal?.removeEventListener("abort", abort);
-				this.#deletePending(id);
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			logger.debug("stt: local model download failed", {
-				modelKey,
-				error: message,
-			});
-			return { ok: false, error: message };
-		} finally {
-			unsubscribe?.();
-		}
+	downloadModel(modelKey: SttModelKey, options: SttDownloadOptions = {}): Promise<SttDownloadResult> {
+		return this.#host.downloadModel(modelKey, options);
 	}
 
-	async terminate(): Promise<void> {
-		const worker = this.#worker;
-		this.#worker = null;
-		this.#unsubscribeMessage?.();
-		this.#unsubscribeMessage = null;
-		this.#unsubscribeError?.();
-		this.#unsubscribeError = null;
-		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-			if (pending.kind === "transcribe") pending.reject(new Error("stt worker terminated"));
-			else pending.resolve({ ok: false });
-		}
-		this.#pending.clear();
-		this.#refed = false;
-		this.#failStreams(new Error("stt worker terminated"));
-		try {
-			await worker?.terminate();
-		} catch {
-			// Already gone.
-		}
+	terminate(): Promise<void> {
+		return this.#host.terminate();
 	}
 
-	#ensureWorker(): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-		const envKey = tinyModelEnvKey();
-		if (this.#worker) {
-			if (this.#workerEnvKey === envKey || this.#pending.size > 0 || this.#streams.size > 0) return this.#worker;
-			// Device/dtype changed while idle: retire the worker so the respawn uses the new env.
-			void this.terminate();
-		}
-		const worker = this.#spawnWorker();
-		this.#worker = worker;
-		this.#workerEnvKey = envKey;
-		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
-		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
-		return worker;
-	}
-
-	/** Register a pending request and keep the worker referenced while work is in flight. */
-	#addPending(id: string, request: PendingRequest): void {
-		this.#pending.set(id, request);
-		this.#syncWorkerRef();
-	}
-
-	/** Drop a pending request and unref the worker once no request or stream is active. */
-	#deletePending(id: string): void {
-		if (this.#pending.delete(id)) this.#syncWorkerRef();
-	}
-
-	/**
-	 * STT workers start unreferenced so an idle warm model never blocks exit.
-	 * Setup/download commands must keep the worker alive while awaiting IPC, or
-	 * Bun can drain the event loop immediately after `Preparing Speech-to-Text`.
-	 */
-	#syncWorkerRef(): void {
-		const worker = this.#worker;
-		if (!worker) return;
-		const shouldRef = this.#pending.size > 0 || this.#streams.size > 0;
-		if (shouldRef === this.#refed) return;
-		this.#refed = shouldRef;
-		if (shouldRef) worker.ref();
-		else worker.unref();
-	}
-
-	#handleMessage(message: SttWorkerOutbound): void {
-		if (message.type === "log") {
-			logWorkerMessage(message);
-			return;
-		}
-		if (message.type === "progress") {
-			this.#emitProgress(message.event);
-			return;
-		}
-		if (message.type === "pong") return;
-
+	#handleMessage(message: ModelWorkerMessage<SttWorkerOutbound>): void {
 		if (message.type === "partial" || message.type === "segment" || message.type === "stream_done") {
 			const stream = this.#streams.get(message.id);
 			if (!stream) return;
@@ -344,53 +199,33 @@ export class SttClient {
 			return;
 		}
 
-		const pending = this.#pending.get(message.id);
+		const pending = this.#host.pending.get(message.id);
 		if (!pending) {
 			if (message.type === "error") {
 				const stream = this.#streams.get(message.id);
 				if (stream) {
-					this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
+					this.#host.emitProgress({ modelKey: stream.modelKey, status: "error" }, message.error);
 					stream.finish(() => stream.reject(new Error(message.error)));
 				}
 			}
 			return;
 		}
-		this.#deletePending(message.id);
+		this.#host.deletePending(message.id);
 		if (message.type === "transcription") {
 			if (pending.kind === "transcribe") pending.resolve(message.text);
 			return;
 		}
-		if (message.type === "downloaded") {
-			if (pending.kind === "download") pending.resolve({ ok: true });
-			return;
-		}
 		// message.type === "error"
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+		this.#host.emitProgress({ modelKey: pending.modelKey, status: "error" }, message.error);
 		if (pending.kind === "transcribe") pending.reject(new Error(message.error));
 		else pending.resolve({ ok: false, error: message.error });
 	}
 
-	#emitProgress(event: SttProgressEvent): void {
-		for (const listener of this.#progressListeners) listener(event);
-	}
-
 	#failStreams(error: Error): void {
 		for (const stream of Array.from(this.#streams.values())) {
-			this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
+			this.#host.emitProgress({ modelKey: stream.modelKey, status: "error" }, error.message);
 			stream.finish(() => stream.reject(error));
 		}
-	}
-
-	#handleWorkerError(error: Error): void {
-		logger.warn("stt: worker error", { error: error.message });
-		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-			if (pending.kind === "transcribe") pending.reject(error);
-			else pending.resolve({ ok: false, error: error.message });
-		}
-		this.#pending.clear();
-		this.#failStreams(error);
-		void this.terminate();
 	}
 }
 
@@ -405,5 +240,9 @@ export async function smokeTestSttWorker({
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	await smokeTestWorker(wrapSubprocess(createSttSubprocess()), "stt worker", timeoutMs);
+	await smokeTestWorker(
+		wrapRefCountedSubprocess<SttWorkerInbound, SttWorkerOutbound>(createSttSubprocess(), "stt"),
+		"stt worker",
+		timeoutMs,
+	);
 }

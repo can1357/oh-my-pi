@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 const CHAT_PAYLOAD = {
@@ -219,5 +220,38 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		const models = await options.fetchDynamicModels?.();
 		expect(models?.some(model => model.id === "openrouter/auto" && model.api === "openrouter")).toBe(true);
 		expect(models?.some(model => model.api === "openrouter-images")).toBe(false);
+	});
+
+	it("keeps decision models that advertise zero limits, as unknown limits", async () => {
+		// Live respan/span-01* rows report `context_length: 0` and `max_completion_tokens: 0`.
+		const spanLite = {
+			id: "respan/span-01-lite",
+			name: "Respan: Span 01 Lite",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 0,
+			pricing: { prompt: "0", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 0, max_completion_tokens: 0 },
+		};
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					fetch: async input =>
+						String(input).endsWith("/models?output_modalities=decisions")
+							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
+							: new Response(null, { status: 404 }),
+				}),
+				staticModels: [],
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.find(model => model.id === "respan/span-01-lite")).toMatchObject({
+			api: "openrouter-decisions",
+			kind: "judge",
+			contextWindow: null,
+			maxTokens: null,
+		});
 	});
 });

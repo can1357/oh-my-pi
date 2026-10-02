@@ -390,7 +390,6 @@ export class WorkPool {
 							workPoolYieldItems,
 							keepAlive: true,
 							retainArtifacts: true,
-							shareEvalSession: false,
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							signal,
 							onProgress,

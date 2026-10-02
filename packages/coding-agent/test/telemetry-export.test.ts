@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-export";
+import { cfgTelemetryOtlpExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-settings";
 
 /**
  * Gating contract for the OTLP export bootstrap. These cases all short-circuit
@@ -40,46 +42,53 @@ afterEach(() => {
 
 describe("initTelemetryExport gating", () => {
 	it("stays disabled when no OTLP endpoint is configured", async () => {
-		await initTelemetryExport();
+		await initTelemetryExport(true);
+		expect(isTelemetryExportEnabled()).toBe(false);
+	});
+
+	it("keeps OTLP export disabled when the user opts out despite configured endpoints", async () => {
+		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318/v1/traces";
+		const settings = Settings.isolated({ "telemetry.otlpExportEnabled": false });
+		await initTelemetryExport(cfgTelemetryOtlpExportEnabled.get(settings));
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("stays disabled when OTEL_SDK_DISABLED=true even with an endpoint", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "true";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("stays disabled when OTEL_TRACES_EXPORTER=none and only the traces endpoint is set", async () => {
 		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_TRACES_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("declines unsupported OTLP protocols instead of misrouting spans", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4317";
 		process.env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
 		process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/json";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("honors the kill-switches case-insensitively per the OTEL env contract", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "TRUE";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
 		delete process.env.OTEL_SDK_DISABLED;
 		process.env.OTEL_TRACES_EXPORTER = "otlp,None";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
@@ -88,7 +97,7 @@ describe("initTelemetryExport gating", () => {
 		process.env.OTEL_TRACES_EXPORTER = "none";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 });

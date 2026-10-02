@@ -121,6 +121,17 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		}
 	});
 
+	test("link dry-run leaves filesystem state untouched", async () => {
+		const localPlugin = await createLocalPlugin(tmpRoot);
+		const linkTarget = path.join(tmpRoot, "plugins", "node_modules", "kimi-datasource");
+		const lockfile = path.join(tmpRoot, "omp-plugins.lock.json");
+
+		await runPluginCommand({ action: "link", args: [localPlugin], flags: { dryRun: true, json: true } });
+
+		await expect(fs.lstat(linkTarget)).rejects.toHaveProperty("code", "ENOENT");
+		expect(await Bun.file(lockfile).exists()).toBe(false);
+	});
+
 	test("real local plugin directory: install symlinks it like link would", async () => {
 		// End-to-end: stage a real plugin folder, route through plugin-cli
 		// (no spies on PluginManager.link), and verify the resulting symlink

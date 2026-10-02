@@ -13,10 +13,11 @@ fn main() {
 	}
 }
 
-/// Builds and links the Apple Foundation Models bridge through
-/// `src/applefm/build-bridge.sh` (shared with Bazel): `bridge.swift` when a
-/// Swift 6.4+ / macOS 27 SDK toolchain exists and the target is Apple silicon,
-/// otherwise `stub.c`.
+/// Builds the Apple Foundation Models bridge dylib through
+/// `src/applefm/build-bridge.sh` (shared with Bazel) and exposes it to the
+/// crate as `OMP_APPLEFM_BRIDGE` for embedding: `bridge.swift` when a Swift
+/// 6.4+ / macOS 27 SDK toolchain exists and the target is Apple silicon,
+/// otherwise an empty file (bridge not built).
 ///
 /// Cargo reruns this only when the sources, the toolchain selection inputs, or
 /// the selected compiler/SDK change; Swift module caches persist across builds
@@ -27,7 +28,7 @@ fn build_applefm_bridge() {
 	let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set"));
 	let sources = manifest_dir.join("src/applefm");
 	let script = sources.join("build-bridge.sh");
-	for file in ["build-bridge.sh", "bridge.swift", "stub.c"] {
+	for file in ["build-bridge.sh", "bridge.swift"] {
 		println!("cargo:rerun-if-changed={}", sources.join(file).display());
 	}
 	for variable in ["OMP_APPLEFM_SWIFTC", "OMP_APPLEFM_MODULE_CACHE", "SDKROOT", "DEVELOPER_DIR"] {
@@ -61,7 +62,7 @@ fn build_applefm_bridge() {
 	} else {
 		None
 	};
-	let library = out_dir.join("libomp_applefm.a");
+	let library = out_dir.join("libomp_applefm.dylib");
 	let mut command = Command::new("/bin/sh");
 	command
 		.arg(&script)
@@ -89,13 +90,7 @@ fn build_applefm_bridge() {
 		String::from_utf8_lossy(&result.stderr)
 	);
 
-	println!("cargo:rustc-link-search=native={}", out_dir.display());
-	println!("cargo:rustc-link-lib=static=omp_applefm");
-	if let Some((swiftc, sdk)) = &toolchain {
-		for argument in applefm_link_args(swiftc, sdk) {
-			println!("cargo:rustc-link-arg={argument}");
-		}
-	}
+	println!("cargo:rustc-env=OMP_APPLEFM_BRIDGE={}", library.display());
 }
 
 /// Returns `(swiftc, sdk)` for the first toolchain `build-bridge.sh detect`
@@ -111,30 +106,6 @@ fn detect_swift_toolchain(script: &Path) -> Option<(PathBuf, PathBuf)> {
 	let swiftc = PathBuf::from(fields.next().filter(|field| !field.is_empty())?);
 	let sdk = PathBuf::from(fields.next()?);
 	Some((swiftc, sdk))
-}
-
-/// Linker arguments for the Swift bridge: the Swift runtime and overlays from
-/// the SDK it was compiled against, the toolchain's back-compat archives, an
-/// rpath for `libswift_Concurrency` (linked as `@rpath/…` because the addon's
-/// minimum macOS predates its OS copy), and a weak `FoundationModels` link so
-/// the addon loads on macOS without it. Mirrored by
-/// `bazel/toolchains/swift/applefm.bzl`.
-fn applefm_link_args(swiftc: &Path, sdk: &Path) -> Vec<String> {
-	let toolchain_lib = swiftc
-		.parent()
-		.and_then(Path::parent)
-		.expect("swiftc lives in <toolchain>/usr/bin")
-		.join("lib/swift/macosx");
-	vec![
-		format!("-L{}", sdk.join("usr/lib/swift").display()),
-		format!("-L{}", toolchain_lib.display()),
-		"-Wl,-rpath,/usr/lib/swift".to_owned(),
-		format!(
-			"-Wl,-weak_library,{}",
-			sdk.join("System/Library/Frameworks/FoundationModels.framework/FoundationModels.tbd")
-				.display()
-		),
-	]
 }
 
 fn build_oauth_callback_helper() {

@@ -14,6 +14,9 @@ import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../session/sett
 /** Supply live model-overlay preferences and runtime resolution from the host. */
 export function createModelBrowserSource(settings: Settings): ModelHubSource {
 	return {
+		get revision() {
+			return settings.revision;
+		},
 		get defaultThinkingLevel() {
 			return cfgDefaultThinkingLevel.get(settings);
 		},

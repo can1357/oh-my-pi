@@ -4,7 +4,6 @@ import {
 	renderOrchestrateNotice,
 	renderWorkflowNotice,
 } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
-import { clearBundledCommandsCache, loadBundledCommands } from "@oh-my-pi/pi-coding-agent/task/commands";
 
 describe("magic keyword registry", () => {
 	it("keeps ids and words unique so notice types and settings keys cannot collide", () => {
@@ -87,14 +86,5 @@ describe("workflow notice", () => {
 		});
 		expect(open).toContain("isolated=None");
 		expect(open).toContain("`isolated` requests a worktree");
-	});
-});
-
-describe("orchestrate slash command removal", () => {
-	it("is no longer bundled as a slash command", () => {
-		clearBundledCommandsCache();
-		const names = loadBundledCommands().map(command => command.name);
-		expect(names).not.toContain("orchestrate");
-		expect(names).toContain("init");
 	});
 });

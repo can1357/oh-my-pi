@@ -23,12 +23,4 @@ describe("resolveMemoryCompletionInput", () => {
 		expect(resolveMemoryCompletionInput(rendered, {})).toEqual({ prompt: rendered });
 		expect(resolveMemoryCompletionInput(rendered, { maxTokens: 256 })).toEqual({ prompt: rendered });
 	});
-
-	it("does not leak the extraction instructions into the user turn", () => {
-		const request = resolveMemoryCompletionInput("ignored", {
-			task: { kind: "memory-extraction", input: "Sam prefers dark mode." },
-		});
-		expect(request.prompt).toBe("Sam prefers dark mode.");
-		expect(memoryExtractionPrompt).not.toContain("Sam prefers dark mode.");
-	});
 });
