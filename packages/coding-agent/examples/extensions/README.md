@@ -34,21 +34,23 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ### Commands & UI
 
-| Extension                      | Description                                                                                 |
-| ------------------------------ | ------------------------------------------------------------------------------------------- |
-| `plan-mode.ts`                 | Claude Code-style plan mode for read-only exploration with `/plan` command                  |
-| `tools.ts`                     | Interactive `/tools` command to enable/disable tools with session persistence               |
-| `handoff.ts`                   | Transfer context to a new focused session via `/handoff <goal>`                             |
-| `qna.ts`                       | Extracts questions from last response into editor via `ctx.ui.setEditorText()`              |
-| `status-line.ts`               | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors                   |
-| `thinking-note.ts`             | Adds display-only supplemental UI below assistant thinking blocks                           |
-| `translator-output-preview.ts` | Opt-in Chinese assistant display in the original message; English context remains unchanged |
-| `snake.ts`                     | Snake game with custom UI, keyboard handling, and session persistence                       |
+| Extension                      | Description                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| `plan-mode.ts`                 | Claude Code-style plan mode for read-only exploration with `/plan` command     |
+| `tools.ts`                     | Interactive `/tools` command to enable/disable tools with session persistence  |
+| `handoff.ts`                   | Transfer context to a new focused session via `/handoff <goal>`                |
+| `qna.ts`                       | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
+| `status-line.ts`               | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
+| `thinking-note.ts`             | Adds display-only supplemental UI below assistant thinking blocks              |
+| `translator-output-preview.ts` | Chinese editor prose → English main-model context → Chinese response display   |
+| `snake.ts`                     | Snake game with custom UI, keyboard handling, and session persistence          |
 
-### Output-only translator preview
+### Bidirectional translator
 
-This example requires a custom OMP build with `registerAssistantTextDisplay`.
-It does not translate user input. Install the extension independently under
+This example requires a custom OMP build with `registerAssistantTextDisplay`,
+fail-closed input rejection, and input draft restoration. It translates ordinary
+Chinese editor prose before submission and translates English response prose
+only for display. Install the extension independently under
 `~/.omp/agent/extensions/translator/index.ts` alongside that matching build;
 new OMP sessions then discover `/translator` automatically. Do not load the
 example explicitly as well as installing it. For an isolated source checkout
@@ -62,19 +64,40 @@ bun --cwd="$HOME/oh-my-pi" packages/coding-agent/src/cli.ts \
 ```
 
 Choose a main model with working authentication, then run `/translator`.
-Chinese input stays in the original editor and is sent unchanged; the main
-model replies in English and Gemini translates the display. `/translator off`
-disables translation; `/translator original` opens the latest English original
-in a read-only OMP view; `/translator model provider/id` changes only the
-translator. Defaults to `google-antigravity/gemini-3.7-flash`. Translation sends
-English source prose to the selected provider. Published terminal scrollback
-cannot be repainted; the in-memory display cache does not survive a restart.
-The `--no-session` invocation never saves the test conversation.
+Type Chinese in the original editor: the translator submits English to the
+actual main model, which replies in English; the original response area displays
+a Chinese translation. The user message and model history contain the submitted
+English, not a hidden Chinese copy. Code fences, inline code, link destinations,
+path tokens, and `[Image #N]` markers remain unchanged; image attachments are
+passed through untouched. English-only prose bypasses input translation, even
+when protected code or URLs contain Chinese. Slash/skill commands, `!` shell,
+`$` Python, yield-queue shorthand, continuation shortcuts, and empty/image-only
+submissions bypass translation, including command arguments. Extension/internal
+input is not retranslated.
+
+Both directions use the same independently selected translator, defaulting to
+`google-antigravity/gemini-3.7-flash`. `/translator model provider/id` changes
+that translator without changing the main model. Chinese input and English
+response prose are sent to the selected translation provider. `/translator off`
+disables both directions and cancels pending translations. `/translator original`
+opens the latest completed English response in a read-only OMP view; interrupted
+responses do not replace it. The English response source is never rewritten.
+
+Input translation has a 20-second deadline. Esc during input translation cancels
+only that translation, not an active main-model or response-translation request.
+Failure, timeout, cancellation, changed session/mode/model, malformed protected
+tokens, residual Chinese prose, or a translation introducing command syntax
+rejects submission; the core restores the original draft and attachments without
+overwriting newer drafts. There is no fallback submission of untranslated Chinese.
+Output failure shows a notice with `/translator original` instead of replacing
+the English source. Published terminal scrollback cannot be repainted; the
+in-memory display cache does not survive a restart. The `--no-session` invocation
+never saves the test conversation.
 
 With the matching binary and extension already installed, `omp --no-session`
 is sufficient for manual testing. Existing running OMP processes are not
-upgraded in place. Preserve the display-interface commits when merging upstream;
-an official binary without that interface is not compatible with this extension.
+upgraded in place. Preserve the display and fail-closed input interfaces when
+merging upstream; an official binary without them is not compatible with this extension.
 
 ### Git Integration
 

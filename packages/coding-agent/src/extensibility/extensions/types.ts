@@ -1273,6 +1273,12 @@ export type { ToolCallEventResult } from "../shared-events";
 
 /** Result from input event handler */
 export interface InputEventResult {
+	/**
+	 * Reject this submission with a visible reason and restore its original draft
+	 * and attachments. Takes precedence over handled, text and images; no commands,
+	 * queueing or model dispatch may proceed. Handler failures also reject input.
+	 */
+	reject?: string;
 	/** If true, the input was handled and should not continue through normal flow */
 	handled?: boolean;
 	/** Replace the input text */
