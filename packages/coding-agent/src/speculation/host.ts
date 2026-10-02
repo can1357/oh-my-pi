@@ -8,8 +8,10 @@ import type {
 	SpeculativeCommitDecision,
 	SpeculativeDiscardContext,
 	SpeculativeExecutionHost,
+	SpeculativeLaunchContext,
 	SpeculativeOperationContext,
 	SpeculativeToolExecutionConfig,
+	SpeculativeToolReference,
 } from "@oh-my-pi/pi-agent-core";
 import { BINARY_SNIFF_BYTES, isProbablyBinaryHeader, readImageMetadata } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -21,6 +23,7 @@ import { type LocalReadSpeculationEvidence, resolveSpeculativeReadTarget, SNAPSH
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { cfgTaskSpeculativeLaunch } from "../task/settings";
 
 import {
 	cfgToolsApproval,
@@ -129,16 +132,8 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		if (context.effect.kind !== "local_read") {
 			return { allowed: false, reason: "tool and effect pair is not supported for speculative execution" };
 		}
-		if (hasLifecycleHandlers(this.extensionRunner)) {
-			return { allowed: false, reason: "active extension lifecycle handler" };
-		}
-		const approval = resolveApproval(
-			context.tool,
-			context.args,
-			cfgToolsApprovalMode.get(this.settings),
-			cfgToolsApproval.get(this.settings),
-		);
-		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
+		const gate = this.#policyGate(context.tool, context.args);
+		if (!gate.allowed) return gate;
 		const resource = context.effect.resources[0];
 		if (!resource || context.effect.resources.length !== 1 || resource.access !== "read") {
 			return { allowed: false, reason: "local read must have one read resource" };
@@ -191,6 +186,30 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		// immediately before execution — after the hook gate for deferred
 		// candidates — and nothing commits without passing validation below.
 		return { allowed: true, deferBeforeToolCall: true };
+	}
+
+	/**
+	 * Stream-session launches (e.g. `task` subagents started from streamed
+	 * items) pass the same lifecycle and approval gate as reads: work that a
+	 * handler could block or a user must approve never starts early.
+	 */
+	authorizeLaunch(context: SpeculativeLaunchContext): SpeculativeAuthorization {
+		return this.#policyGate(context.tool, context.args);
+	}
+
+	/** Extension lifecycle handlers and non-auto-allow approval both veto early execution. */
+	#policyGate(tool: SpeculativeToolReference, args: unknown): SpeculativeAuthorization {
+		if (hasLifecycleHandlers(this.extensionRunner)) {
+			return { allowed: false, reason: "active extension lifecycle handler" };
+		}
+		const approval = resolveApproval(
+			tool,
+			args,
+			cfgToolsApprovalMode.get(this.settings),
+			cfgToolsApproval.get(this.settings),
+		);
+		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
+		return { allowed: true };
 	}
 
 	/**
@@ -294,6 +313,9 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
  * while the single shared host preserves accumulated evidence across toggles.
  * The host's own `authorize` re-checks the enabled flag per operation, so a
  * lingering coordinator from before a disable still vetoes new candidates.
+ * `task.speculativeLaunch` also keeps the coordinator alive: reads and eval
+ * stay gated by `tools.speculativeExecution.enabled`, while the task tool's
+ * stream session gates itself on its own flag.
  */
 export function createSpeculativeToolExecutionConfig(
 	settings: Settings,
@@ -303,7 +325,7 @@ export function createSpeculativeToolExecutionConfig(
 	const host = new CodingAgentSpeculativeExecutionHost(settings, toolSession, extensionRunner);
 	return {
 		get enabled() {
-			return cfgToolsSpeculativeExecutionEnabled.get(settings);
+			return cfgToolsSpeculativeExecutionEnabled.get(settings) || cfgTaskSpeculativeLaunch.get(settings);
 		},
 		get maxInFlight() {
 			return cfgToolsSpeculativeExecutionMaxInFlight.get(settings);

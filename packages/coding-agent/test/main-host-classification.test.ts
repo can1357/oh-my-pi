@@ -11,6 +11,9 @@ it("classifies an interactive host before opening auth storage", async () => {
 	let observedTimeout: number | undefined;
 	const parsed = parseArgs([]);
 	parsed.noExtensions = true;
+	// An interactive launch needs a terminal on stdin; without one it exits 2.
+	const originalIsTTY = process.stdin.isTTY;
+	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 	try {
 		await expect(
@@ -22,6 +25,7 @@ it("classifies an interactive host before opening auth storage", async () => {
 			}),
 		).rejects.toBe(stop);
 	} finally {
+		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		setInteractiveHost(previous);
 	}
 

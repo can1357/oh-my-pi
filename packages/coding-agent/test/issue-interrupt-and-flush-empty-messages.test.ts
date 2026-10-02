@@ -5,7 +5,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 function createContext(options?: {
-	queuedMessageCount?: number;
+	hasInterruptibleInput?: boolean;
 	pendingImages?: ImageContent[];
 	pendingImageLinks?: (string | undefined)[];
 }) {
@@ -41,7 +41,7 @@ function createContext(options?: {
 			isCompacting: false,
 			isBashRunning: false,
 			isEvalRunning: false,
-			queuedMessageCount: options?.queuedMessageCount ?? 1,
+			hasInterruptibleInput: options?.hasInterruptibleInput ?? true,
 			extensionRunner: undefined,
 			abort,
 			prompt,
@@ -83,7 +83,7 @@ describe("empty submit with queued messages", () => {
 		// chip token, which expands to `[Image #1]` at submit time.
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
 		const { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender } = createContext({
-			queuedMessageCount: 0,
+			hasInterruptibleInput: false,
 			pendingImages: [image],
 		});
 		const controller = new InputController(ctx);
@@ -102,7 +102,7 @@ describe("empty submit with queued messages", () => {
 	it("restores an image-only steer when streaming dispatch rejects", async () => {
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
 		const { ctx, abort, prompt, showError, updatePendingMessagesDisplay, requestRender } = createContext({
-			queuedMessageCount: 0,
+			hasInterruptibleInput: false,
 			pendingImages: [image],
 			pendingImageLinks: ["local://draft.png"],
 		});
@@ -126,7 +126,7 @@ describe("empty submit with queued messages", () => {
 
 	it("queues an image-only steer instead of aborting when messages are already queued", async () => {
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
-		const { ctx, abort, prompt } = createContext({ queuedMessageCount: 1, pendingImages: [image] });
+		const { ctx, abort, prompt } = createContext({ hasInterruptibleInput: true, pendingImages: [image] });
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
@@ -140,7 +140,7 @@ describe("empty submit with queued messages", () => {
 		// Deleting the chip token removes the attachment: an empty submit with a
 		// token-less pending image behaves like a plain empty submit (abort path).
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
-		const { ctx, abort, prompt } = createContext({ queuedMessageCount: 1, pendingImages: [image] });
+		const { ctx, abort, prompt } = createContext({ hasInterruptibleInput: true, pendingImages: [image] });
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 

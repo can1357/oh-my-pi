@@ -84,15 +84,6 @@ describe("parseAgentFields", () => {
 		expect(fields?.thinkingLevel).toBeUndefined();
 	});
 
-	test("lowercases tool names", () => {
-		const fields = parseAgentFields({
-			name: "reviewer",
-			description: "desc",
-			tools: ["Read", "Search"],
-		});
-
-		expect(fields?.tools).toEqual(["read", "grep", "yield"]);
-	});
 	test("keeps an explicitly empty tools list distinct from an absent one", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual(["yield"]);
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();

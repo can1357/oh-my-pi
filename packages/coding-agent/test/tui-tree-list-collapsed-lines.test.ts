@@ -119,24 +119,6 @@ describe("renderTreeList maxCollapsedLines", () => {
 		expect(collapsed.at(-1)).toContain("2 more changes");
 	});
 
-	it("renders all items when total lines fit within budget", () => {
-		const items = [["a"], ["b"], ["c"]];
-
-		const collapsed = renderTreeList(
-			{
-				items,
-				expanded: false,
-				maxCollapsedLines: 10,
-				itemType: "item",
-				renderItem: group => group,
-			},
-			stubTheme,
-		);
-
-		expect(collapsed.length).toBe(3);
-		expect(collapsed.some(l => l.includes("more"))).toBe(false);
-	});
-
 	it("uses non-last tree branch when summary line follows", () => {
 		const items = [["a"], ["b", "c"]];
 

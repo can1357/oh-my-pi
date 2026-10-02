@@ -8,6 +8,13 @@ use super::{
 	types::{CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, Target},
 };
 
+/// How window-targeted input reaches its target.
+///
+/// `Background` avoids deliberate activation and physical pointer movement;
+/// unsupported routes refuse, and detected focus side effects surface as
+/// potentially delivered input. `Foreground` is the explicit `takeover: true`
+/// escalation: it activates the target and restores state where the OS allows,
+/// without overwriting a newer user focus choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
 	#[default]
@@ -16,8 +23,8 @@ pub enum DeliveryMode {
 }
 
 impl DeliveryMode {
-	pub(crate) fn parse(value: Option<&str>) -> Self {
-		if value.is_some_and(|value| value.trim().eq_ignore_ascii_case("foreground")) {
+	pub(crate) const fn from_takeover(takeover: Option<bool>) -> Self {
+		if matches!(takeover, Some(true)) {
 			Self::Foreground
 		} else {
 			Self::Background
@@ -104,6 +111,10 @@ pub trait Backend: Send {
 
 pub trait AxBackend {
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle>;
+	/// Resolves an element's owning top-level window for coordinate input.
+	/// Refuses missing or ambiguous ownership instead of hit-testing unrelated
+	/// windows.
+	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String>;
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>>;
@@ -113,16 +124,4 @@ pub trait AxBackend {
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;
 	fn focused_element(&mut self) -> CoreResult<Option<AxHandle>>;
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>>;
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn delivery_only_escalates_explicit_foreground() {
-		assert_eq!(DeliveryMode::parse(None), DeliveryMode::Background);
-		assert_eq!(DeliveryMode::parse(Some("garbage")), DeliveryMode::Background);
-		assert_eq!(DeliveryMode::parse(Some(" FoReGrOuNd ")), DeliveryMode::Foreground);
-	}
 }

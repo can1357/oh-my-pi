@@ -22,7 +22,7 @@ export default class Skill extends Command {
 	static flags = {
 		global: Flags.boolean({ char: "g", description: "Use the user-global skills.json (install/update/uninstall)" }),
 		yes: Flags.boolean({ char: "y", description: "Install or update skills that ship scripts without asking" }),
-		json: Flags.boolean({ description: "Output JSON (search, info, token)" }),
+		json: Flags.boolean({ description: "Output JSON (search, info, token, list)" }),
 		sort: Flags.string({ description: "Search order", options: ["relevance", "downloads", "recent"] }),
 		scope: Flags.string({ description: "Publishing scope (default: your Stencil username)" }),
 		tag: Flags.string({ description: "Dist-tag for the published version" }),

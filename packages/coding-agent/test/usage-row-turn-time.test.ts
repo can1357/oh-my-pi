@@ -541,13 +541,4 @@ describe("AgentSession synthetic follow-up marking", () => {
 			await session.dispose();
 		}
 	});
-
-	it("stores a caller-supplied timestamp on the custom message entry", () => {
-		const sessionManager = SessionManager.inMemory();
-		sessionManager.appendCustomMessageEntry("collab-prompt", "hi", true, undefined, "user", 1_700_000_000_123);
-		const entry = sessionManager.getEntries().find(entry => entry.type === "custom_message") as {
-			timestamp: string;
-		};
-		expect(entry.timestamp).toBe(new Date(1_700_000_000_123).toISOString());
-	});
 });

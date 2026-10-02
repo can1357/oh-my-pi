@@ -45,6 +45,7 @@ import {
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
 	MAX_EMPTY_STREAM_RETRIES,
+	mapGoogleUsage,
 	mapStopReasonString,
 	mapToolChoice,
 	nextToolCallId,
@@ -750,9 +751,16 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const responseSignal = options?.signal
 					? AbortSignal.any([options.signal, responseAbortController.signal])
 					: responseAbortController.signal;
+				const onSseEvent = options?.onSseEvent;
 				const chunks = iterateWithIdleTimeout(
-					readSseJson<CloudCodeAssistResponseChunk>(activeResponse.body, responseSignal, event =>
-						options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
+					// Attach the observer only when a diagnostic listener exists: any
+					// observer turns on per-line raw capture in `readSseJson`.
+					readSseJson<CloudCodeAssistResponseChunk>(
+						activeResponse.body,
+						responseSignal,
+						onSseEvent
+							? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+							: undefined,
 					),
 					{
 						firstItemTimeoutMs: firstEventTimeoutMs,
@@ -873,25 +881,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 
 					if (responseData.usageMetadata) {
-						// promptTokenCount includes cachedContentTokenCount, so subtract to get fresh input
-						const promptTokens = responseData.usageMetadata.promptTokenCount || 0;
-						const cacheReadTokens = responseData.usageMetadata.cachedContentTokenCount || 0;
-						const thinkingTokens = responseData.usageMetadata.thoughtsTokenCount || 0;
-						output.usage = {
-							input: promptTokens - cacheReadTokens,
-							output: (responseData.usageMetadata.candidatesTokenCount || 0) + thinkingTokens,
-							cacheRead: cacheReadTokens,
-							cacheWrite: 0,
-							totalTokens: responseData.usageMetadata.totalTokenCount || 0,
-							...(thinkingTokens > 0 ? { reasoningTokens: thinkingTokens } : {}),
-							cost: {
-								input: 0,
-								output: 0,
-								cacheRead: 0,
-								cacheWrite: 0,
-								total: 0,
-							},
-						};
+						output.usage = mapGoogleUsage(responseData.usageMetadata);
 						calculateCost(model, output.usage, output.timestamp);
 					}
 				}

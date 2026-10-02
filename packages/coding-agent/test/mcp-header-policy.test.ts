@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mergeMCPHeaders, setGeneratedHeader } from "@oh-my-pi/pi-coding-agent/mcp/transports/header-policy";
+import { setGeneratedHeader } from "@oh-my-pi/pi-coding-agent/mcp/transports/header-policy";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 
 const REQUEST_TIMEOUT_MS = 1_000;
@@ -27,19 +27,7 @@ async function rpcResult(req: Request): Promise<Response> {
 	});
 }
 
-describe("mergeMCPHeaders", () => {
-	it("gives generated headers case-insensitive precedence over configured ones", () => {
-		const merged = mergeMCPHeaders({
-			generated: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-			configured: { "content-type": "text/plain", accept: "text/html", "X-Tenant": "t" },
-		});
-		expect(merged).toEqual({
-			"Content-Type": "application/json",
-			Accept: "application/json, text/event-stream",
-			"X-Tenant": "t",
-		});
-	});
-
+describe("setGeneratedHeader", () => {
 	it("setGeneratedHeader replaces case-variant entries", () => {
 		const headers: Record<string, string> = { authorization: "Bearer configured", "X-A": "1" };
 		setGeneratedHeader(headers, "Authorization", "Bearer generated");

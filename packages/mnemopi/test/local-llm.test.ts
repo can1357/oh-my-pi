@@ -8,13 +8,11 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/llm-backends";
 import {
 	buildHostPrompt,
-	callLocalLlm,
 	callRemoteLlm,
 	chunkMemoriesByBudget,
 	cleanOutput,
 	complete,
 	llmAvailable,
-	localGgufAvailable,
 	summarizeMemories,
 } from "@oh-my-pi/pi-mnemopi/core/local-llm";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
@@ -101,11 +99,6 @@ describe("local LLM TypeScript port", () => {
 
 	it("preserves a literal think tag that follows real content", () => {
 		expect(cleanOutput("The XML tag is <think>keep</think>")).toBe("The XML tag is <think>keep</think>");
-	});
-
-	it("keeps local GGUF unavailable and returns null for local completion", async () => {
-		expect(localGgufAvailable()).toBe(false);
-		expect(await callLocalLlm("prompt")).toBeNull();
 	});
 
 	it("uses host backend before remote and skips remote on host miss", async () => {

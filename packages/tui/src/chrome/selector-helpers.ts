@@ -6,7 +6,7 @@
  * replace.
  */
 import { centeredViewportRange, scrollOffsetForRow, viewportOverflows } from "../components/scroll-viewport";
-import { extractPrintableText, matchesKey } from "../keys";
+import { matchesKey } from "../keys";
 import { ScrollView } from "../components/scroll-view";
 import { theme } from "../theme/index";
 /**
@@ -70,22 +70,6 @@ export function clampSelection(
 	const scroll = scrollOffsetForRow(scrollOffset, selected, total, maxVisible, "nearest");
 
 	return { selectedIndex: selected, scrollOffset: scroll };
-}
-
-/**
- * Classify a key event for search-query text entry. Returns the single
- * printable character to append to the query, or `null` when the key is not a
- * searchable character: non-printable or multi-byte.
- */
-export function searchableChar(data: string): string | null {
-	const printableText = extractPrintableText(data);
-	if (printableText && printableText.length === 1) {
-		const printableCharCode = printableText.charCodeAt(0);
-		if (printableCharCode > 32 && printableCharCode < 127) {
-			return printableText;
-		}
-	}
-	return null;
 }
 
 /**

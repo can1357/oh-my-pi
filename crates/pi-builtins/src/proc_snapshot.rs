@@ -336,9 +336,11 @@ mod proc_snapshot {
 			.filter_map(|entry| parse_stat(&fs::read_to_string(entry.path().join("stat")).ok()?))
 			.map(|stat| {
 				let seconds = |value: u64| ticks.map(|ticks| Duration::from_secs_f64(value as f64 / ticks));
-				let cpu_percent = uptime.zip(ticks).and_then(|(uptime, ticks)| {
+				// A thread started within the current clock tick has no elapsed time
+				// yet; procps reports 0% rather than an unknown share.
+				let cpu_percent = uptime.zip(ticks).map(|(uptime, ticks)| {
 					let age = uptime - stat.start_time as f64 / ticks;
-					(age > 0.0).then(|| 100.0 * (stat.utime + stat.stime) as f64 / ticks / age)
+					if age > 0.0 { 100.0 * (stat.utime + stat.stime) as f64 / ticks / age } else { 0.0 }
 				});
 				ThreadInfo {
 					state: stat.state,
@@ -557,10 +559,20 @@ mod proc_snapshot {
 			None
 		}
 
-		pub const fn state(&self) -> char {
+		/// Apple `ps` state letter.
+		///
+		/// XNU leaves almost every live process in `SRUN`, so such a process
+		/// takes the letter of its most active thread, as Apple `ps` does; `?`
+		/// when its threads are unreadable (another user's process, without
+		/// root).
+		pub fn state(&self) -> char {
 			match self.info.pbi_status {
 				1 => 'I',
-				2 => 'R',
+				2 => process_threads(self)
+					.iter()
+					.map(|thread| thread.state)
+					.min_by_key(|&state| MACH_STATE_ORDER.find(state).unwrap_or(usize::MAX))
+					.unwrap_or('?'),
 				3 => 'S',
 				4 => 'T',
 				5 => 'Z',
@@ -718,6 +730,10 @@ mod proc_snapshot {
 		};
 		(actual >= size_of::<libc::proc_threadinfo>() as i32).then_some(info)
 	}
+
+	/// Thread state letters from most to least active: Apple `ps`'s
+	/// `mach_state_order`, which picks a process's letter from its threads.
+	const MACH_STATE_ORDER: &str = "RUSITH";
 
 	/// Mirrors Apple `ps`: `mach_state_order` for the state letter, and the
 	/// current priority for timesharing threads but the base priority for
@@ -1207,9 +1223,9 @@ mod proc_snapshot {
 					policy:      None,
 					user_time:   times.map(|(_, _, user)| ticks_duration(user)),
 					system_time: times.map(|(_, kernel, _)| ticks_duration(kernel)),
-					cpu_percent: times.and_then(|(creation, kernel, user)| {
+					cpu_percent: times.map(|(creation, kernel, user)| {
 						let age = now.saturating_sub(creation);
-						(age > 0).then(|| 100.0 * kernel.saturating_add(user) as f64 / age as f64)
+						if age > 0 { 100.0 * kernel.saturating_add(user) as f64 / age as f64 } else { 0.0 }
 					}),
 				});
 			}

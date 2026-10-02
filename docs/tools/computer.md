@@ -10,9 +10,10 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 - Direct-helper call renderer and approval policy: `packages/coding-agent/src/tools/computer/call.ts`
 - Eval facades: `packages/coding-agent/src/tools/computer/{prelude.js,prelude.py,declarations.d.ts}`
 - Model-facing prelude documentation: `packages/coding-agent/src/prompts/tools/computer.md`
-- Safety prompt: `packages/coding-agent/src/prompts/system/computer-safety.md`
-- Prelude registration/gate: `packages/coding-agent/src/tools/index.ts`
-- Exposure policy: `packages/coding-agent/src/tools/computer/exposure.ts`
+- Computer-use prompt: `packages/coding-agent/src/prompts/system/computer-use.md`
+- Prelude registration/gate: `packages/coding-agent/src/sdk.ts`
+- Live prelude reconciliation: `packages/coding-agent/src/session/agent-session.ts`
+- `/computer` toggle: `packages/coding-agent/src/slash-commands/builtin-modes.ts`
 - Persistent worker: `packages/coding-agent/src/tools/computer/{supervisor,protocol,worker,worker-entry}.ts`
 - Native implementation: `crates/pi-natives/src/desktop/`
 - Native public types: `packages/natives/native/index.d.ts`
@@ -21,7 +22,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 
 - `computer.enabled` gates the Eval prelude and defaults to `false`. `/computer` toggles it for the current session without persisting settings.
 - The prelude is available only through enabled Eval runtimes; it is not an AgentTool.
-- Calls are serialized by the host service. The active Eval documentation and globals update with the current enabled state.
+- The worker permits one active run; concurrent direct helpers/runs fail with `Computer worker is busy`. Capability inspection remains available during a run. The active Eval documentation and globals update with the current enabled state.
 - Unlike `browser`, this prelude can operate IDEs, terminals, native applications, browser windows, and system dialogs. It has no browser DOM or web ARIA surface; its accessibility methods use the host OS.
 
 ## Settings
@@ -62,9 +63,9 @@ await win.click(120, 48, button="right")
 
 Handles are frozen snapshots plus proxy methods. `computer.window(...)` and `computer.focusedWindow()` resolve to a `ComputerWindow` carrying `id`, `app`, `title`, `pid`, `bounds`, and `focused`; `computer.ref(...)`, `win.ref(...)`, `win.find(...)`, `computer.elementAt(...)`, `computer.focusedElement()`, `el.parent()`, and `el.children()` resolve to `ComputerElement` values carrying `ref`, `role`, `nativeRole`, `title`, `description`, `enabled`, `focused`, and `childCount`. Window methods re-resolve through `desktop.window(id)` and element methods through `desktop.ref(ref)` on every call, so a closed window or expired ref fails at the call. Methods are non-enumerable, so displaying or serializing a handle shows its identity fields only.
 
-`computer.run(fnOrCode, { args?, read_only?, timeout? })` runs a multi-step function or JavaScript string in the same session and returns the real structured value. JavaScript functions receive `{ desktop, wait, assert }` — `desktop` has the same helpers as `computer` plus synchronous `capabilities()` — and cannot capture Eval-cell closures; `{ args: [...] }` passes plain data, functions, and regular expressions after the scope object. Python `computer.run(code, read_only=..., timeout=...)` accepts a JavaScript string only. Nonempty inner `display` text prints in the outer Eval cell; screenshots surface as Eval images. `read_only` defaults to `false`; `timeout` defaults to 120 seconds and is clamped to 1–300 seconds. Unknown options are rejected. `computer.capabilities()` reports the native backend and permission state (`action: "capabilities"`); `computer.close()` ends the persistent desktop session.
+`computer.run(fnOrCode, { args?, read_only?, timeout? })` runs a multi-step function or JavaScript string in the same session and returns the real structured value. JavaScript functions receive `{ desktop, wait, assert }` — `desktop` has the desktop helpers plus synchronous `capabilities()`, but not `run()` or `close()` — and cannot capture Eval-cell closures; `{ args: [...] }` passes plain data, functions, and regular expressions after the scope object. Python `computer.run(code, read_only=..., timeout=...)` accepts a JavaScript string only. Nonempty inner `display` text prints in the outer Eval cell; screenshots surface as Eval images. `read_only` defaults to `false`; `timeout` defaults to 120 seconds, is capped by a positive `tools.maxTimeout`, then clamped to 1–300 seconds. The host invocation schema rejects unknown fields; the JavaScript facade forwards only recognized run options. `computer.capabilities()` reports the native backend and permission state (`action: "capabilities"`); `computer.close()` ends the persistent desktop session.
 
-Approval: a direct call is `read` when its terminal method is inspection-only (`displays`, `windows`, `window`, `focusedWindow`, `screenshot`, `elementAt`, `focusedElement`, `ref`, `clipboard.read`, `ax`, `find`, `value`, `bounds`, `attributes`, `actions`, `parent`, `children`) and `exec` for input, `raise`, `setValue`, `perform`, `press`, `click`, `focus`, and `clipboard.write`; read calls also run with the worker's read-only guard. `computer.run` is `read` only when `read_only === true`; malformed input, an omitted flag, or `false` is `exec`. Approval details contain `read-only` when applicable plus at most 2,000 characters of resolved JavaScript.
+Approval: a direct call is `read` when its terminal method is inspection-only (`displays`, `windows`, `window`, `focusedWindow`, `screenshot`, `elementAt`, `focusedElement`, `ref`, `clipboard.read`, `ax`, `find`, `value`, `bounds`, `attributes`, `actions`, `parent`, `children`) and `exec` for input, `raise`, `setValue`, `perform`, `press`, `click`, `focus`, and `clipboard.write`; read calls also run with the worker's read-only guard. `computer.run` is `read` only when `read_only === true`; malformed input, an omitted flag, or `false` is `exec`.
 
 Runs have full host access and are not sandboxed. The persistent `JsRuntime` supplies `desktop`, `wait`, and `assert`, plus ordinary helpers such as `display`, `print`, `read`, `write`, `env`, and `tool`. Full Bun/Node files, processes, modules, and network APIs remain available. `wait(ms)` sleeps; `wait(predicate, { timeout?, interval? })` polls until truthy.
 
@@ -75,10 +76,10 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 ### Discovery
 
 - `desktop.windows({ app?, title? })` returns matching `DesktopWindow[]`; app/title matching is case-insensitive substring matching.
-- `desktop.window(id | { app?, title? })` returns one persistent window facade. Zero matches throw; multiple matches throw with the candidates.
+- `desktop.window(id | { id?, app?, title? })` returns one persistent window facade. An id may be a string or a number (`74` is the id `"74"`, never matched against app or title). Zero matches throw; multiple matches throw with the candidates.
 - `desktop.focusedWindow()` returns a window facade or `null`.
 - `desktop.displays()` returns `DesktopDisplay[]`.
-- `desktop.capabilities()` returns capture/input/AX availability, permission states, delivery modes, display server, backend, and display count.
+- `desktop.capabilities()` returns capture/input/AX availability, `backgroundWindowInput` and `takeover` support, permission states, display server, backend, and display count.
 
 A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`, and `focused` fields.
 
@@ -87,17 +88,17 @@ A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`
 Both a selected window and `desktop` expose:
 
 - `screenshot({ silent? }) -> { path, width, height }`
-- `click(x, y, { button?, count?, modifiers?, delivery? })`
-- `doubleClick(x, y, { button?, modifiers?, delivery? })`
+- `click(x, y, { button?, count?, modifiers?, takeover? })`
+- `doubleClick(x, y, { button?, modifiers?, takeover? })`
 - `move(x, y)`
-- `drag([[x, y], ...], { modifiers?, delivery? })`
-- `scroll(x, y, { dx?, dy?, delivery? })`
-- `type(text, { delivery? })`
-- `press(chord | string[], { delivery? })`
+- `drag([[x, y], ...], { modifiers?, takeover? })`
+- `scroll(x, y, { dx?, dy?, takeover? })`
+- `type(text, { takeover? })`
+- `press(chord | string[], { takeover? })`
 
-A window also exposes `raise()`, `ax(...)`, `find(...)`, and `ref(...)`. Input defaults to `delivery: "background"`; `delivery: "foreground"` is the explicit focus-changing fallback. Pixel coordinates belong to the most recent screenshot of the same target. Coordinate input before capture, after target/layout changes, or with another target's frame throws.
+A window also exposes `raise()`, `ax(...)`, `find(...)`, and `ref(...)`. Window input defaults to background delivery without deliberate activation or pointer movement. `takeover: true` briefly activates the target and posts real input; use it only after that call reports `BackgroundUnavailable` or a screenshot proves a no-op, and AX cannot perform the action. Never replay uncertain input blindly. Desktop-root pointer helpers drive the user's real pointer, so prefer window handles. Pixel coordinates belong to the most recent screenshot of the same target. Coordinate input before capture, after target/layout changes, or with another target's frame throws.
 
-Screenshots are PNGs written under the OS temp directory. Unless `silent: true`, each capture emits a status text block and an image block. The returned path always names the full PNG written by the worker; details record displayed dimensions, source dimensions, and target.
+Screenshots are PNGs written under the OS temp directory. Native capture is resized to the effective capture caps before both saving and displaying; the saved PNG and model-visible image share the same pixel frame. Unless `silent: true`, each capture emits a status text block and an image block. Details record captured dimensions, original source dimensions, and target.
 
 ### Accessibility
 
@@ -109,9 +110,9 @@ Screenshots are PNGs written under the OS temp directory. Unless `silent: true`,
 `El` exposes snapshot fields `ref`, `role`, `nativeRole`, optional `title`/`description`, `enabled`, `focused`, and `childCount`, plus:
 
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
-- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ delivery? })`, and `focus()`.
+- mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ takeover? })`, and `focus()`.
 
-AX actions need no screenshot. AX bounds and `desktop.elementAt()` use global logical desktop coordinates, not screenshot pixels. A window AX snapshot advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
+AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. A window AX snapshot advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
 
 ### Clipboard
 
@@ -128,7 +129,7 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 
 1. `createComputerPrelude(session)` defines the enabled-only global and its host-side invoker.
 2. A direct helper renders its allowlisted call chain, and `computer.run(fnOrCode, options)` serializes a function when needed; the host resolves the JavaScript, clamps the timeout, computes effective image caps, creates the per-run snapshot (read-only for inspection chains), and asks the supervisor to execute it.
-3. The supervisor lazily starts one crash-isolated Bun worker (10-second startup deadline), serializes calls, and forwards aborts.
+3. The supervisor lazily starts one crash-isolated Bun worker (10-second startup deadline) and forwards aborts. The worker rejects overlapping runs instead of queueing them.
 4. The worker lazily creates one native `DesktopSession` and one persistent `JsRuntime`. Handles, screenshot coordinate frames, runtime variables, and recent AX refs survive successful calls.
 5. Each run installs a run-scoped `desktop` facade plus `wait`/`assert`. AsyncLocalStorage prevents leaked asynchronous work from borrowing a later run's signal or read-only policy.
 6. Native operations execute in the worker. Runtime `tool.*` calls cross back through the supervisor into the owning session tool bridge and inherit cancellation.
@@ -139,7 +140,7 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 ## Side effects
 
 - Captures real windows or the selected desktop composite into provider context and writes PNGs to the OS temp directory.
-- Sends real keyboard/pointer input. Background delivery is intended to preserve focus, pointer, and window order; foreground delivery may temporarily activate the target.
+- Sends real keyboard/pointer input. Window background delivery is intended to preserve focus, pointer, and window order; `takeover: true` may temporarily activate the target. Desktop-root pointer calls affect the user's real pointer.
 - Reads or writes the system clipboard.
 - Executes full-access JavaScript and may invoke other session tools through `tool.*`.
 - Keeps a native desktop session and Bun worker alive across calls.
@@ -155,7 +156,7 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
 
-Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, using AX or a delivery mode listed by `desktop.capabilities()` after `BackgroundUnavailable`, and inspecting those capabilities for platform/permission failures.
+Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. After `BackgroundUnavailable`, prefer AX; use `takeover: true` only for the refused call when supported. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
 
 ## Platform constraints
 

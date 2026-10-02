@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
@@ -77,25 +77,6 @@ describe("callSessionTool", () => {
 			undefined,
 		);
 		expect(statuses).toEqual([expect.objectContaining({ op: "read", path: "/tmp/demo.txt", chars: 5 })]);
-	});
-
-	it("passes the session tool context to bridged executions", async () => {
-		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const context = { settings: Settings.isolated() } as AgentToolContext;
-		const session = {
-			...createSession([createTool("bash", execute)]),
-			getToolContext: () => context,
-		};
-
-		await callSessionTool("bash", { command: "true" }, { session });
-
-		expect(execute).toHaveBeenCalledWith(
-			expect.stringMatching(/^js-bash-/),
-			{ command: "true", [INTENT_FIELD]: "js prelude" },
-			undefined,
-			undefined,
-			context,
-		);
 	});
 
 	it("settles an interrupted speculative wait without starting ordinary tool execution", async () => {

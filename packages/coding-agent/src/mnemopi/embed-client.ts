@@ -1,4 +1,7 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { getFastembedCacheDir, logger } from "@oh-my-pi/pi-utils";
+import { trackDownload } from "../downloads/activity";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -25,7 +28,7 @@ import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorker
 export type MnemopiEmbedWorkerHandle = RefCountedWorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>;
 
 type PendingRequest =
-	| { kind: "init"; model: MnemopiEmbedModelId; resolve: (ok: boolean) => void }
+	| { kind: "init"; model: MnemopiEmbedModelId; resolve: (error: string | undefined) => void }
 	| { kind: "embed"; model: MnemopiEmbedModelId; resolve: (vectors: number[][] | Error) => void };
 
 /**
@@ -154,19 +157,31 @@ export class MnemopiEmbedClient {
 		model: MnemopiEmbedModelId,
 		cacheDir: string | undefined,
 	): Promise<MnemopiSubprocessEmbeddingModel | null> {
+		// fastembed unpacks each model into `<cacheDir>/<model>` and exposes no byte
+		// progress; a missing directory means this init downloads the archive.
+		const cached = await fs.access(path.join(cacheDir ?? getFastembedCacheDir(), model)).then(
+			() => true,
+			() => false,
+		);
+		const tracker = cached ? undefined : trackDownload(model.replace(/^fast-/, ""), { detail: "downloading" });
 		try {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<boolean>();
+			const { promise, resolve } = Promise.withResolvers<string | undefined>();
 			this.#addPending(id, { kind: "init", model, resolve });
 			try {
 				worker.send({ type: "init", id, model, cacheDir });
-				const ok = await promise;
-				if (!ok) return null;
+				const error = await promise;
+				if (error !== undefined) {
+					tracker?.fail(error);
+					return null;
+				}
+				tracker?.done();
 			} finally {
 				this.#deletePending(id);
 			}
 		} catch (error) {
+			tracker?.fail(error);
 			logger.debug("mnemopi-embed: init failed", {
 				model,
 				error: error instanceof Error ? error.message : String(error),
@@ -184,7 +199,7 @@ export class MnemopiEmbedClient {
 		this.#unsubscribeError?.();
 		this.#unsubscribeError = null;
 		for (const pending of this.#pending.values()) {
-			if (pending.kind === "init") pending.resolve(false);
+			if (pending.kind === "init") pending.resolve("mnemopi embed worker terminated");
 			else pending.resolve(new Error("mnemopi embed worker terminated"));
 		}
 		this.#pending.clear();
@@ -308,7 +323,7 @@ export class MnemopiEmbedClient {
 		if (!pending) return;
 		this.#deletePending(message.id);
 		if (message.type === "ready") {
-			if (pending.kind === "init") pending.resolve(true);
+			if (pending.kind === "init") pending.resolve(undefined);
 			return;
 		}
 		if (message.type === "vectors") {
@@ -316,14 +331,14 @@ export class MnemopiEmbedClient {
 			return;
 		}
 		logger.debug("mnemopi-embed: worker returned error", { error: message.error });
-		if (pending.kind === "init") pending.resolve(false);
+		if (pending.kind === "init") pending.resolve(message.error);
 		else pending.resolve(new Error(message.error));
 	}
 
 	#handleWorkerError(error: Error): void {
 		logger.warn("mnemopi-embed: worker error", { error: error.message });
 		for (const pending of this.#pending.values()) {
-			if (pending.kind === "init") pending.resolve(false);
+			if (pending.kind === "init") pending.resolve(error.message);
 			else pending.resolve(error);
 		}
 		this.#pending.clear();

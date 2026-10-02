@@ -119,7 +119,7 @@ describe("model cache migrations", () => {
 		expect(cached?.unrestorableHeaderModelIds).toEqual(["gated-model"]);
 	});
 
-	it("fails closed and securely deletes corrupt header provenance", () => {
+	it("fails closed and deletes corrupt header provenance", () => {
 		const model = createModel("corrupt-provenance", "Corrupt Provenance");
 		writeModelCache("runtime-ext", Date.now(), [model], true, "static-v1", dbPath);
 

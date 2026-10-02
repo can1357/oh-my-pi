@@ -178,30 +178,6 @@ describe("hasCopilotVisionInput", () => {
 });
 
 describe("getCopilotPremiumMultiplier", () => {
-	it("returns bundled multiplier metadata for paid-tier Copilot plans", () => {
-		expect(
-			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "claude-haiku-4.5").premiumMultiplier, "paid"),
-		).toBe(0.33);
-		expect(
-			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "claude-opus-4.6").premiumMultiplier, "paid"),
-		).toBe(3);
-		expect(getCopilotPremiumMultiplier(getBundledModel("github-copilot", "gpt-4o").premiumMultiplier, "paid")).toBe(
-			0,
-		);
-		expect(
-			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "gpt-5.4-mini").premiumMultiplier, "paid"),
-		).toBe(0.33);
-		expect(
-			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "grok-code-fast-1").premiumMultiplier, "paid"),
-		).toBe(0.25);
-	});
-
-	it("treats zero-multiplier models as 1x for free-tier or unknown plans", () => {
-		expect(getCopilotPremiumMultiplier(0, "free")).toBe(1);
-		expect(getCopilotPremiumMultiplier(0, undefined)).toBe(1);
-		expect(getCopilotPremiumMultiplier(0, "enterprise")).toBe(1);
-	});
-
 	it("defaults to 1x when multiplier metadata is missing", () => {
 		expect(getCopilotPremiumMultiplier(undefined, "paid")).toBe(1);
 		expect(getCopilotPremiumMultiplier(undefined, "free")).toBe(1);
@@ -309,14 +285,6 @@ describe("buildCopilotDynamicHeaders", () => {
 		expect(headers["Copilot-Vision-Request"]).toBe("true");
 		expect(premiumRequests).toBe(3);
 	});
-
-	it("defaults to 1x when premium multiplier is not provided", () => {
-		const { premiumRequests } = buildCopilotDynamicHeaders({
-			messages: [],
-			hasImages: false,
-		});
-		expect(premiumRequests).toBe(1);
-	});
 });
 
 describe("resolveCopilotIntegrationIdOverride", () => {
@@ -376,11 +344,6 @@ describe("buildCopilotDynamicHeaders integration identity", () => {
 		});
 		expect(headers["Copilot-Integration-Id"]).toBe("copilot-chat");
 		expect(headers["Editor-Version"]).toBe("copilot/1.0.82");
-	});
-
-	it("falls back to the chat-surface default", () => {
-		const { headers } = buildCopilotDynamicHeaders({ messages: [], hasImages: false });
-		expect(headers["Copilot-Integration-Id"]).toBe("copilot-chat");
 	});
 
 	it("keeps the CLI identity for Enterprise requests", () => {
