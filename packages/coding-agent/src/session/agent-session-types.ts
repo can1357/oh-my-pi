@@ -42,7 +42,7 @@ import type { MCPLoadResult } from "../mcp";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
-import type { Skill, SkillWarning } from "../extensibility/skills";
+import type { Skill, SkillDiagnostic, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -268,6 +268,8 @@ export interface AgentSessionConfig {
 	skillDescriptions?: SkillDescriptionCatalog;
 	/** Skill loading warnings already captured by the SDK. */
 	skillWarnings?: SkillWarning[];
+	/** Skill resolution diagnostics already captured by the SDK. */
+	skillDiagnostics?: SkillDiagnostic[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
 	skillsReloadable?: boolean;
 	/** Custom TypeScript slash commands. */
