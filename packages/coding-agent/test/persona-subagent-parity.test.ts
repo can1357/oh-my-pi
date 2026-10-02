@@ -548,3 +548,23 @@ describe("subagent spawn inheritance parity", () => {
 		).rejects.toThrow(/spawns disabled/);
 	});
 });
+
+describe("derivation hardening (review)", () => {
+	it("restricted host without a grant denies rather than widens", () => {
+		const child = deriveChildToolNames(CHILD_AGENT, {
+			parentEffectiveGrant: null,
+			restrictToolNames: true,
+			atMaxDepth: false,
+		});
+		expect(child).toEqual([]);
+	});
+
+	it("unrestricted host without a grant keeps the declared list", () => {
+		const child = deriveChildToolNames(CHILD_AGENT, {
+			parentEffectiveGrant: null,
+			restrictToolNames: false,
+			atMaxDepth: false,
+		});
+		expect(child).toEqual(["read", "write", "bash"]);
+	});
+});

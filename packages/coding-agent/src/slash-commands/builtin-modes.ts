@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -16,6 +18,7 @@ import {
 	type ModelPresetSession,
 	saveModelPreset,
 } from "../config/model-presets";
+import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
@@ -24,7 +27,7 @@ import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
 import { appendPersonaJournalEntry, clearPersonaJournalEntry } from "../session/persisted-persona";
 import { discoverAgents, getAgent } from "../task";
 import type { PersonaExplicitOverrides } from "../session/tool-policy";
-import { clearSubmittedText } from "./helpers/draft";
+import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type {
@@ -35,7 +38,13 @@ import type {
 	TuiSlashCommandRuntime,
 } from "./types";
 
-import { cfgComputerDisplay, cfgComputerEnabled, cfgComputerMaxHeight, cfgComputerMaxWidth } from "../tools/settings";
+import {
+	cfgComputerDisplay,
+	cfgComputerEnabled,
+	cfgComputerMaxHeight,
+	cfgComputerMaxWidth,
+	cfgRatchetEnabled,
+} from "../tools/settings";
 import { cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
@@ -77,7 +86,14 @@ async function runWithDetachedModeDraft(
 	if (!runtime.draftDetached) editor.clearDraft();
 	try {
 		const submitted = await run();
-		if (!submitted && ((runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0)) {
+		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
+		if (!submitted && hasAttachments) {
+			if (runtime.draftDetached) {
+				// Newer typing may already sit in the editor: merge the submission
+				// back beside it so each draft's image markers keep their images.
+				restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				return;
+			}
 			editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];
 			editor.pendingImageLinks = [
 				...(runtime.input?.imageLinks ?? runtime.input?.images?.map(() => undefined) ?? []),
@@ -86,6 +102,14 @@ async function runWithDetachedModeDraft(
 			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
 		}
 	} catch (error) {
+		if (runtime.draftDetached) {
+			// The caller already took this draft out of the editor before
+			// dispatch (Ctrl+Enter's `handleFollowUp`, or `onSubmit` for these
+			// mode commands); it owns restoring the submission and reporting
+			// the error so a submission that failed after newer text was typed
+			// merges with it once, instead of being silently dropped here.
+			throw error;
+		}
 		if (!editor.getText() && editor.pendingImages.length === 0) {
 			editor.setText(command.text);
 			editor.pendingImages = runtime.input?.images ? [...runtime.input.images] : [];
@@ -96,10 +120,42 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
+	if (session.isUltrafastModeEnabled()) return "ultra";
 	return session.isFastModeEnabled() ? "on" : "off";
 }
+
+const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
+
+/**
+ * `/fast [on|ultra|off|status]` for the active model: `on` selects the
+ * family's `priority` tier, `ultra` the OpenAI `ultrafast` tier, `off` clears
+ * either. Bare invocation toggles between off and priority. Returns the
+ * user-facing reply, or `undefined` for an unknown argument.
+ */
+function runFastCommand(arg: string, session: AgentSession): string | undefined {
+	switch (arg) {
+		case "":
+		case "toggle":
+			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "on":
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		case "ultra":
+		case "ultrafast":
+			return session.setUltrafastMode(true)
+				? "Ultrafast mode enabled."
+				: "Ultrafast is unavailable for the current model.";
+		case "off":
+			session.setFastMode(false);
+			return "Fast mode disabled.";
+		case "status":
+			return `Fast mode is ${formatFastModeStatus(session)}.`;
+		default:
+			return undefined;
+	}
+}
+
 
 const SLOW_UNSUPPORTED =
 	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and subscription slow mode on Anthropic.";
@@ -475,71 +531,29 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+		description:
+			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
 		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|off|status]",
+		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode" },
+			{ name: "on", description: "Enable fast mode (priority tier)" },
+			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
 			{ name: "off", description: "Disable fast mode" },
 			{ name: "status", description: "Show fast mode status" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.session.toggleFastMode();
-				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				return commandConsumed();
-			}
-			if (arg === "on") {
-				const supported = runtime.session.setFastMode(true);
-				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
-				return commandConsumed();
-			}
-			if (arg === "off") {
-				runtime.session.setFastMode(false);
-				await runtime.output("Fast mode disabled.");
-				return commandConsumed();
-			}
-			if (arg === "status") {
-				await runtime.output(`Fast mode is ${formatFastModeStatus(runtime.session)}.`);
-				return commandConsumed();
-			}
-			return usage("Usage: /fast [on|off|status]", runtime);
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage(FAST_USAGE, runtime);
+			await runtime.output(message);
+			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.ctx.session.toggleFastMode();
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "on") {
-				const supported = runtime.ctx.session.setFastMode(true);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(
-					supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.",
-				);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "off") {
-				runtime.ctx.session.setFastMode(false);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus("Fast mode disabled.");
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "status") {
-				runtime.ctx.showStatus(`Fast mode is ${formatFastModeStatus(runtime.ctx.session)}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
-			runtime.ctx.editor.setText("");
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? FAST_USAGE);
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -826,7 +840,162 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			ctx.ui.requestRender();
 		},
 	},
+	{
+		name: "ratchet",
+		icon: "loop",
+		description: "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended",
+		inlineHint: "[flow and goal]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			const armed = prepareRatchet(runtime.session, command.args);
+			if ("error" in armed) return usage(armed.error, runtime);
+			return { prompt: armed.kickoff };
+		},
+		handleTui: async (command, runtime) => {
+			const { session } = runtime.ctx;
+			const armed = prepareRatchet(session, command.args);
+			clearSubmittedText(runtime);
+			if ("error" in armed) {
+				runtime.ctx.showWarning(armed.error);
+				return;
+			}
+			// Same delivery as /guided-goal: the kickoff is a hidden developer message queued behind
+			// any in-flight run; the agent's batched `ask` is the first thing the user sees.
+			const images = runtime.input?.images?.length ? runtime.input.images : undefined;
+			if (session.isStreaming) {
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+				return;
+			}
+			try {
+				await session.prompt(armed.kickoff, images ? { synthetic: true, images } : { synthetic: true });
+			} catch (error) {
+				if (!(error instanceof AgentBusyError)) throw error;
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+			}
+		},
+	},
+	{
+		name: "prewalk",
+		icon: "prewalk",
+		description: "Arm or restart a one-shot model handoff",
+		allowArgs: true,
+		acpDescription: "Arm or restart prewalk",
+		acpInputHint: "[restart]",
+		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
+			if (target.error || !target.model) {
+				return usage(target.error ?? 'Model "@smol" not found', runtime);
+			}
+			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
+				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
+			}
+			if (arg === "restart") {
+				const source = resolveSessionModelSelector("@default", runtime.session, runtime.settings);
+				if (source.error || !source.model) {
+					return usage(source.error ?? 'Model "@default" not found', runtime);
+				}
+				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
+					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
+				}
+				const result = await runtime.session.restartPrewalk(
+					source.model,
+					source.thinkingLevel,
+					target.model,
+					target.thinkingLevel,
+				);
+				if (result === "rejected") return commandConsumed();
+				const restartSource = `${source.model.provider}/${source.model.id}`;
+				await runtime.output(
+					result === "armed"
+						? `Prewalk restarted: using @default (${restartSource}) for planning, then switching to @smol (${target.model.provider}/${target.model.id}) at the next edit/write (todo-gated).`
+						: `Prewalk reset: using @default (${restartSource}); @smol resolves to the same model and thinking level, so no handoff was armed.`,
+				);
+				return commandConsumed();
+			}
+			const armed = runtime.session.armPrewalk(target.model, target.thinkingLevel);
+			if (armed) {
+				await runtime.output(
+					`Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
+				);
+			}
+			return commandConsumed();
+		},
+	},
+	{
+		name: "modelpreset",
+		icon: "model",
+		description: "Save and switch model presets (role models + thinking level)",
+		acpDescription: "Manage model presets",
+		acpInputHint: "[list|save|switch|delete] [name]",
+		inlineHint: "[save|switch|delete|list] [name]",
+		subcommands: [
+			{ name: "list", description: "List saved presets" },
+			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
+			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
+			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const count = getModelPresetNames(runtime.ctx.settings).length;
+			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
+		},
+		handle: async (command, runtime) => {
+			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
+			if (outcome.usage) return usage(outcome.message, runtime);
+			await runtime.output(outcome.message);
+			if (outcome.switched) await runtime.notifyTitleChanged?.();
+			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			let args = command.args;
+			if (!args.trim()) {
+				const names = getModelPresetNames(ctx.settings);
+				if (names.length === 0) {
+					ctx.showStatus(NO_PRESETS_MESSAGE);
+					return;
+				}
+				const picked = await ctx.showHookSelector("Switch to model preset", names);
+				if (picked === undefined) return;
+				args = `switch ${picked}`;
+			}
+			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
+			if (outcome.switched) {
+				ctx.statusLine.invalidate();
+				ctx.updateEditorBorderColor();
+			}
+			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
+			else ctx.showStatus(outcome.message);
+			ctx.ui.requestRender();
+		},
+	},
 ];
+
+/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
+const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
+
+/**
+ * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
+ * render the kickoff prompt carrying the user's request as data.
+ */
+function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
+	const tools = session.getEnabledToolNames();
+	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
+	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
+	const previous = cfgRatchetEnabled.get(session.settings);
+	if (!previous) cfgRatchetEnabled.override(session.settings, true);
+	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
+		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
+		return { error: "The ratchet eval prelude is unavailable in this session." };
+	}
+	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
+	return { kickoff };
+}
 
 const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
 const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
@@ -894,6 +1063,21 @@ async function runPresetsCommand(
 
 
 
+/**
+ * Refuse persona enter/exit under an active plan/goal/vibe mode (TUI parity:
+ * switchAgentPersona/exitAgentPersona). The mode owns the tool partition and
+ * the pre-mode presentation snapshot; a persona restore would clobber it.
+ */
+function personaModeBlocker(session: AgentSession): string | undefined {
+	const plan = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
+	if (plan?.enabled) return "Exit plan mode before switching or clearing the agent persona.";
+	const goal = typeof session.getGoalModeState === "function" ? session.getGoalModeState() : undefined;
+	if (goal?.enabled) return "Exit goal mode before switching or clearing the agent persona.";
+	const vibe = typeof session.getVibeModeState === "function" ? session.getVibeModeState() : undefined;
+	if (vibe?.enabled) return "Exit vibe mode before switching or clearing the agent persona.";
+	return undefined;
+}
+
 /** Bare `/agent` with no persona active: usage message in ACP/text mode (TUI opens the picker). */
 async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const session = runtime.session;
@@ -903,10 +1087,8 @@ async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<S
 		// clobber an ACTIVE plan partition. The user can never strand: exiting
 		// the mode first is the recovery path (handleAgentCommandSwitch already
 		// refuses entry under plan mode, so the two cannot co-activate here).
-		const modeState = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
-		if (modeState?.enabled) {
-			return usage("Exit plan mode before switching or clearing the agent persona.", runtime);
-		}
+		const blocker = personaModeBlocker(session);
+		if (blocker) return usage(blocker, runtime);
 		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
 		clearPersonaJournalEntry(session);
 		// Exit reverts the model/thinking/toolset to the pre-persona baseline;
@@ -922,10 +1104,8 @@ async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<S
 /** `/agent <name>`: discover the agent and enter its persona through the session runtime. */
 async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const session = runtime.session;
-	const modeState = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
-	if (modeState?.enabled) {
-		return usage("Plan mode is active. Exit plan mode before switching agent personas.", runtime);
-	}
+	const blocker = personaModeBlocker(session);
+	if (blocker) return usage(blocker, runtime);
 	const personaRuntime = session.getPersonaRuntime();
 	if (!personaRuntime) {
 		return usage("Persona switching is unavailable: this session has no persona runtime.", runtime);

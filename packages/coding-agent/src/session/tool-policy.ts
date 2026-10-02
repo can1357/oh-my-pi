@@ -323,7 +323,7 @@ export class SessionToolPolicy {
 		const declaredOrInherited =
 			declared !== undefined
 				? withPairedCheckpointRewind(normalizeToolNames(expandExecToolShorthand(declared)))
-				: normalizeToolNames(this.cliGrant ?? explicit.tools ?? []);
+				: withPairedCheckpointRewind(normalizeToolNames(this.cliGrant ?? explicit.tools ?? []));
 		const grant = new Set(declaredOrInherited);
 
 		// fo80e: a persona that declares a usable spawns list needs `task` to

@@ -3514,7 +3514,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 }
 
 interface ChildToolNameDerivation {
-	/** Parent's effective grant when the parent session is restricted; `null`/`undefined` when unrestricted. */
+	/**
+	 * Parent's effective grant when the parent session is restricted;
+	 * `null`/`undefined` when unrestricted. A restricted host (restrictToolNames)
+	 * MUST supply this — without it the child's declared list cannot be bounded.
+	 */
 	parentEffectiveGrant?: ReadonlySet<string> | null;
 	/** Child runs with `restrictToolNames` (plan mode or restricted host). */
 	restrictToolNames?: boolean;
@@ -3533,6 +3537,10 @@ interface ChildToolNameDerivation {
  */
 export function deriveChildToolNames(agent: AgentDefinition, options: ChildToolNameDerivation): string[] | undefined {
 	const parentGrant = options.parentEffectiveGrant ?? null;
+	if (options.restrictToolNames === true && parentGrant === null) {
+		// Restricted host with no grant to bound against: deny rather than widen.
+		return [];
+	}
 	let toolNames: string[] | undefined;
 	if (agent.tools) {
 		// fr-vW: expand the `exec` shorthand on the CHILD side BEFORE the parent

@@ -98,8 +98,9 @@ describe("SessionToolPolicy baseline restriction and persona grants", () => {
 	});
 
 	it("the pairing does not widen an inherited (CLI-bounded) grant", () => {
-		// Frontmatter omits tools: the grant inherits the CLI list; effective()
-		// still intersects cliGrant, so the paired sister stays denied there.
+		// Frontmatter omits tools: the stored grant inherits the CLI list plus
+		// the paired sister, but effective() still intersects cliGrant, so the
+		// sister stays denied at decision time.
 		const policy = new SessionToolPolicy({
 			toolNames: ["checkpoint"],
 			restrictToolNames: false,
