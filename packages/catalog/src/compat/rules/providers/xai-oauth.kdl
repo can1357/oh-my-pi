@@ -7,6 +7,7 @@ provider "xai-oauth" {
 	kind-apis {
 		image "openai-images"
 		tts "xai-tts"
+		video "openai-images"
 	}
 	web-search "xai"
 
@@ -108,10 +109,24 @@ provider "xai-oauth" {
 			limits
 			supports-tools #false
 		}
+		// Curated video runner: Grok Imagine video serves through the xAI video
+		// endpoint, not the chat surface. Tracked here so the bundled roster keeps
+		// its /v1/models snapshot counterpart (`exclude-models` filters it from
+		// the chat picker; `grok-imagine-video-1.5-lite` is the current live id).
+		model "grok-imagine-video-1.5-lite" name="Grok Imagine Video 1.5 Lite" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	models "grok-imagine-image" {
 		kind "image"
+	}
+	models "grok-imagine-video-1.5-lite" {
+		kind "video"
 	}
 	models "grok-tts" {
 		kind "tts"
