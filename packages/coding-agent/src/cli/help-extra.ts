@@ -36,6 +36,7 @@ export function getExtraHelpText(): string {
   CLINE_API_KEY              - ClinePass subscription models
   COMMAND_CODE_API_KEY       - Command Code Provider API models
   CHARM_HYPER_API_KEY        - Charm Hyper inference gateway models
+  CHEAPER_INFERENCE_API_KEY  - Cheaper Inference gateway models
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
   STEPFUN_API_KEY            - StepFun Step models
   HELMCODE_API_KEY           - Helmcode private EU inference

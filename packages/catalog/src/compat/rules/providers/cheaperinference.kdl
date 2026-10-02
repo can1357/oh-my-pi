@@ -1,0 +1,23 @@
+// Cheaper Inference gateway deployment contract (api.cheaperinference.com).
+//
+// Capability data is NOT restated here: `GET /v1/models` publishes each row's
+// type, context window, output cap, vision and reasoning flags, and
+// per-million tariff, and `cheaperInferenceModelManagerOptions` maps them.
+// Only facts the gateway does not publish belong in this file.
+provider "cheaperinference" {
+	default-model "gpt-5.4-mini"
+	env "CHEAPER_INFERENCE_API_KEY"
+	dynamic-models-authoritative #true
+	// Deliberately NO `discovery` node: that node enrolls a provider in
+	// generate-models.ts, and `/v1/models` requires a key, so an
+	// unauthenticated regen could not snapshot this roster anyway. Every row
+	// comes from the live `/v1/models` snapshot at runtime.
+
+	// OpenAI Chat Completions gateway in front of models from several labs.
+	// System prompts ride the `system` role and `store` stays off, matching
+	// the sibling gateways. The gateway honors `max_tokens` on Claude and GPT
+	// rows alike, so the output budget uses that spelling.
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_tokens"
+}
