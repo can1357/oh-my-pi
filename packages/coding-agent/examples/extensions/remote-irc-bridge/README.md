@@ -1,8 +1,9 @@
 # Remote IRC bridge (reference)
 
 A minimal, open implementation of the cross-process IRC seams: an extension that connects an omp
-session to agents in other processes, and a terminal client that plays those agents. It exists so
-the feature has an observable use case without the production bridge (murmur, not open source).
+session to agents in other processes, and a terminal client that plays those agents. The production
+consumer of these seams is the murmur bridge, which is closed source; this example exists so the feature
+can be run, reviewed and demonstrated entirely from this repository.
 
 ```
  omp session ──(-e extension.ts)──┐                         ┌── peer-cli.ts (one terminal)
@@ -18,45 +19,65 @@ the feature has an observable use case without the production bridge (murmur, no
 | `peer-cli.ts`  | Outside omp. Writes the roster, listens on the socket, prints omp's messages and acks them, reads stdin to send messages as any rostered peer.                      |
 | `protocol.ts`  | The wire types and line codec shared by both.                                                                                                                      |
 
-## Run it
+## Demo: two terminals, five minutes
 
-Terminal A — the mesh:
+Everything below runs from `packages/coding-agent` in a checkout of this repo and stays isolated from
+any other omp sessions on the machine: unique socket/roster paths, `--no-extensions` (no auto-discovered
+extensions; the explicit `-e` still loads), `--no-session` (nothing written to your session store), and a
+scratch `--cwd` (no project `AGENTS.md` or `.mcp.json`). Your normal model auth is used as is.
+
+Setup, once:
 
 ```bash
-bun examples/extensions/remote-irc-bridge/peer-cli.ts --namespace demo --peers leia,han
+cd packages/coding-agent
+mkdir -p /tmp/omp-remote-irc/project
+```
+
+Terminal A — the mesh (plays `leia` and `han`):
+
+```bash
+cd packages/coding-agent
+bun examples/extensions/remote-irc-bridge/peer-cli.ts \
+  --namespace demo --peers leia,han \
+  --socket /tmp/omp-remote-irc/bridge.sock --roster /tmp/omp-remote-irc/roster.json
 # roster written to /tmp/omp-remote-irc/roster.json
 # listening on /tmp/omp-remote-irc/bridge.sock as @demo/{leia,han}
+# start omp with: …   (prints the exact terminal-B command with an absolute path)
 ```
 
-Terminal B — omp, with the roster the CLI wrote:
+Terminal B — omp, from source or an installed binary (swap `bun src/cli.ts` for `omp`):
 
 ```bash
-OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json omp -e "$PWD/examples/extensions/remote-irc-bridge/extension.ts"
+cd packages/coding-agent
+OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json \
+  bun src/cli.ts --no-extensions --no-session --cwd /tmp/omp-remote-irc/project \
+  -e "$PWD/examples/extensions/remote-irc-bridge/extension.ts"
 ```
 
-Use an absolute `-e` path (the CLI prints one): `-e` resolves against omp's working directory, so a relative
-path breaks as soon as you add `--cwd`. To keep the run away from your other sessions add
-`--no-extensions --no-session --cwd /tmp/omp-remote-irc/project`; `--no-extensions` only disables discovery,
-explicit `-e` paths still load.
+Use an absolute `-e` path: it resolves against omp's working directory, so a relative path breaks as soon
+as `--cwd` is set. If omp reports `Failed to load extension …`, that is the cause. Warnings about MCP
+servers from your global `mcp.json` are expected and harmless.
 
-Terminal A prints `omp session "Main" connected`. Now:
+Terminal A prints `omp session "Main" connected; it addresses us as @demo/<peer>`. Then:
 
-- In omp, ask the model to `read history://`. The index lists `@demo/leia` and `@demo/han` as `remote`,
-  with a footer explaining the form.
-- Ask it to `write agent://@demo/leia` a message. Terminal A prints `[Main → @demo/leia] …` and acks;
-  the model gets `Delivered to @demo/leia.`
-- In terminal A type `leia: hello from the mesh`. omp receives it as a peer message from `@demo/leia`
-  (an idle session wakes, a streaming one is steered). Terminal A prints the receipt
-  (`↳ peer-1: woken`).
-- Type `leia?: what is 2+2` to send with `expectsReply`. The CLI remembers the question; omp's next
-  message to leia is printed as `(reply to peer-1) …`.
+1. In omp: `read history://` — the index lists `@demo/leia` and `@demo/han` as `remote`, with a footer
+   explaining the form. Only these two peers appear, which also confirms the run is isolated.
+2. In omp: `send "hello from omp" to @demo/leia via write agent://@demo/leia` — terminal A prints
+   `[Main → @demo/leia] hello from omp` and acks; the model gets `Delivered to @demo/leia.`
+3. In omp: `read agent://@demo/leia` — "remote peer, no local output to read; message it with …".
+4. In terminal A: `leia: are you there?` — omp receives it as a peer message from `@demo/leia` (an idle
+   session wakes, a streaming one is steered); A prints the receipt (`↳ peer-1: woken`).
+5. In terminal A: `leia?: what is 2+2` — sent with `expectsReply`; the CLI remembers the question and
+   prints omp's next message to leia as `[Main → @demo/leia] (reply to peer-2) …`.
+6. `/peers` lists the roster; `/quit` exits terminal A and removes the socket. Cleanup:
+   `rm -rf /tmp/omp-remote-irc`.
 
-Headless works too. This is the exchange the test suite reproduces end to end
-(`test/examples/remote-irc-bridge.test.ts`), and what a print-mode run looks like:
+Headless works too, and is the exchange `test/examples/remote-irc-bridge.test.ts` reproduces:
 
 ```bash
-OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json omp -p \
-  -e examples/extensions/remote-irc-bridge/extension.ts \
+OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json \
+  bun src/cli.ts -p --no-extensions --no-session --cwd /tmp/omp-remote-irc/project \
+  -e "$PWD/examples/extensions/remote-irc-bridge/extension.ts" \
   "Call wait to receive the first peer message, reply to its sender with 'pong: <body>' via write agent://<sender>, then summarise."
 # terminal A:  leia?: ping
 #              ↳ peer-1: injected (omp id …)
