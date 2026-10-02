@@ -221,6 +221,15 @@ struct PsSort {
 	descending: bool,
 }
 
+/// How a short-flag group was written; `r` means different things in each.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlagForm {
+	/// `-axr`: Unix/Apple syntax (`-r` sorts by CPU).
+	Dashed,
+	/// `axr`: BSD syntax as procps reads it (`r` selects running processes).
+	Bare,
+}
+
 enum ParsePsResult {
 	Options(Box<PsOptions>),
 	Help,
@@ -331,7 +340,7 @@ impl PsProcessRow {
 	fn cpu_percent(&self) -> Option<f64> {
 		let age = self.age?.as_secs_f64();
 		let cpu_time = self.cpu_time?.as_secs_f64();
-		(age > 0.0).then_some(100.0 * cpu_time / age)
+		Some(if age > 0.0 { 100.0 * cpu_time / age } else { 0.0 })
 	}
 
 	fn memory_percent(&self, total_memory: Option<u64>) -> Option<f64> {
@@ -403,6 +412,11 @@ impl builtins::Command for PsCommand {
 					PsProcessRow::from_process(process, threads, now, options.command_only)
 				})
 				.collect();
+			// Filtered on the row's own read: a second read of a live state can
+			// disagree with the STAT column it prints.
+			if options.running_only {
+				rows.retain(|row| row.state == 'R');
+			}
 			sort_ps_rows(&mut rows, &options.sort);
 			let columns = ps_columns(&options);
 			let output = render_ps_table(&rows, &columns, options.no_headers);
@@ -609,8 +623,7 @@ fn parse_ps_args(argv: &[String]) -> std::result::Result<ParsePsResult, (u8, Str
 				if group.is_empty() {
 					return Err((1, "invalid option '-'".to_string()));
 				}
-				let bsd = group.contains('x');
-				parse_ps_flag_group(group, bsd, argv, &mut index, &mut options)?;
+				parse_ps_flag_group(group, FlagForm::Dashed, argv, &mut index, &mut options)?;
 			},
 			_ if arg
 				.chars()
@@ -619,7 +632,7 @@ fn parse_ps_args(argv: &[String]) -> std::result::Result<ParsePsResult, (u8, Str
 				parse_i32_list(arg, &mut options.pids)?;
 			},
 			_ if arg.chars().all(|character| character.is_ascii_alphabetic()) => {
-				parse_ps_flag_group(arg, true, argv, &mut index, &mut options)?;
+				parse_ps_flag_group(arg, FlagForm::Bare, argv, &mut index, &mut options)?;
 			},
 			_ => return Err((1, format!("unsupported operand '{arg}'"))),
 		}
@@ -650,11 +663,12 @@ fn take_ps_value(
 
 fn parse_ps_flag_group(
 	group: &str,
-	bsd: bool,
+	form: FlagForm,
 	argv: &[String],
 	index: &mut usize,
 	options: &mut PsOptions,
 ) -> std::result::Result<(), (u8, String)> {
+	let bsd = form == FlagForm::Bare || group.contains('x');
 	if bsd {
 		options.bsd_syntax = true;
 	}
@@ -679,7 +693,13 @@ fn parse_ps_flag_group(
 			'u' if bsd => options.user_format = true,
 			'w' => {},
 			'c' => options.command_only = true,
+			'r' if form == FlagForm::Dashed => {
+				options.sort.push(PsSort { field: PsSortField::Cpu, descending: true });
+			},
 			'r' => options.running_only = true,
+			'm' if form == FlagForm::Dashed => {
+				options.sort.push(PsSort { field: PsSortField::Mem, descending: true });
+			},
 			'h' => options.no_headers = true,
 			'M' => {
 				options.threads = true;
@@ -854,9 +874,6 @@ fn ps_process_selected(
 	current_terminal: Option<u64>,
 	current_session: Option<i32>,
 ) -> bool {
-	if options.running_only && process.state() != 'R' {
-		return false;
-	}
 	let has_selectors = !options.pids.is_empty()
 		|| !options.parents.is_empty()
 		|| !options.groups.is_empty()
@@ -1290,6 +1307,8 @@ fn format_ps_state(row: &PsProcessRow) -> String {
 	if row.sid == Some(row.pid) {
 		state.push('s');
 	}
+	// procps marks multithreaded processes; Apple `ps` has no such flag.
+	#[cfg(not(target_os = "macos"))]
 	if row.thread_count.is_some_and(|threads| threads > 1) {
 		state.push('l');
 	}
@@ -1500,7 +1519,8 @@ fn write_ps_help(mut output: impl Write) -> io::Result<()> {
 		 LIST     select effective users\n-U, --User LIST     select real users\n-t, --tty LIST      \
 		 select terminals\n\nOutput:\n-f                  full format\n-l                  long \
 		 format\n-o, --format LIST   custom columns\n--sort LIST     sort by columns; prefix \
-		 descending keys with '-'\n--no-headers    omit column headings\n-M                  one \
+		 descending keys with '-'\n-r                  sort by CPU usage, highest first\n-m                  \
+		 sort by memory usage, highest first\n--no-headers    omit column headings\n-M                  one \
 		 line per thread (USER PID TT %CPU STAT PRI STIME UTIME COMMAND)\n\nBSD forms such as 'ps \
 		 ax', 'ps aux', and 'ps axo pid,command' are supported."
 	)
@@ -1533,6 +1553,26 @@ mod tests {
 		let error = parse_ps_format("pid,definitely_not_a_field", &mut Vec::new())
 			.expect_err("unknown fields must fail");
 		assert_eq!(error, (1, "unknown output format specifier 'definitely_not_a_field'".to_string()));
+	}
+
+	#[test]
+	fn dashed_r_sorts_by_cpu_while_bare_r_selects_running() {
+		for argv in [&["-Ao", "pid,comm", "-r"][..], &["-axr"][..]] {
+			let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+			let ParsePsResult::Options(options) = parse_ps_args(&argv).expect("valid -r") else {
+				panic!("expected parsed options");
+			};
+			assert!(!options.running_only, "{argv:?}");
+			assert!(matches!(options.sort[..], [PsSort { field: PsSortField::Cpu, descending: true }]));
+		}
+
+		let ParsePsResult::Options(options) =
+			parse_ps_args(&["axr".to_string()]).expect("valid bare r")
+		else {
+			panic!("expected parsed options");
+		};
+		assert!(options.running_only);
+		assert!(options.sort.is_empty());
 	}
 
 	#[test]

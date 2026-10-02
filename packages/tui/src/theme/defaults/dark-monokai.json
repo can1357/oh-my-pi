@@ -94,5 +94,15 @@
 		"pageBg": "#1a1b17",
 		"cardBg": "#1e1f1c",
 		"infoBg": "#3e3d32"
+	},
+	"terminal": {
+		"background": "monokaiBg",
+		"foreground": "monokaiText",
+		"chrome": "userMsgBg",
+		"widget": "userMsgBg",
+		"ansi": [
+			"#333333", "#d32965", "#86b42b", "#b3b42b", "#6a7ec8", "#8c6bc8", "#56adbc", "#e3e3dd",
+			"#717171", "monokaiPink", "monokaiGreen", "#e2e22e", "#819aff", "monokaiPurple", "monokaiCyan", "monokaiText"
+		]
 	}
 }

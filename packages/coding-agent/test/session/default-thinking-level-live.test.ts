@@ -7,13 +7,13 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 
 // `defaultThinkingLevel` seeds new sessions. A later write that is not the user's
 // in-process choice (config reload, another omp process, a parent session) must not
@@ -69,6 +69,7 @@ describe("defaultThinkingLevel on running sessions", () => {
 
 	it("keeps a subagent at its spawn-time level when the parent's default changes", async () => {
 		const parent = Settings.isolated();
+		cfgDefaultThinkingLevel.set(parent, Effort.High);
 		const subagent = await start(createSubagentSettings(parent), {
 			thinkingLevel: Effort.Low,
 			taskDepth: 1,
@@ -82,6 +83,11 @@ describe("defaultThinkingLevel on running sessions", () => {
 		await Promise.resolve();
 
 		expect(subagent.thinkingLevel).toBe(Effort.Low);
+		// The subagent's own default stays the spawn-time snapshot, so what it later seeds from
+		// that default (a reload without a thinking entry, the children it spawns) is not
+		// re-steered by the parent's edit either.
+		expect(cfgDefaultThinkingLevel.get(subagent.settings)).toBe(Effort.High);
+		expect(cfgDefaultThinkingLevel.get(createSubagentSettings(subagent.settings))).toBe(Effort.High);
 	});
 
 	it("switches the main session only for a settings-panel change, not a plain settings write", async () => {
@@ -94,7 +100,7 @@ describe("defaultThinkingLevel on running sessions", () => {
 		expect(session.thinkingLevel).toBe(Effort.Low);
 
 		// The settings panel (and approved `cfg://` writes) apply the user's choice live.
-		const controller = new SelectorController({ session, settings } as unknown as InteractiveModeContext);
+		const controller = new SelectorController(createInteractiveModeContext({ session, settings }));
 		cfgDefaultThinkingLevel.set(settings, Effort.Medium);
 		controller.handleSettingChange(cfgDefaultThinkingLevel.id, Effort.Medium);
 		expect(session.thinkingLevel).toBe(Effort.Medium);

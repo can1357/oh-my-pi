@@ -102,6 +102,21 @@ export const TIER_RANK: Readonly<Record<ToolTier, number>> = {
 	exec: 2,
 };
 
+/**
+ * Fold the per-target decisions of a multi-target write tool (`edit`, `ast_edit`): the first
+ * `policy: "deny"` decision wins with its reason (a read-only URL target); otherwise the highest
+ * tier, starting from "read".
+ */
+export function strictestApproval(decisions: Iterable<ToolApprovalDecision>): ToolApprovalDecision {
+	let tier: ToolTier = "read";
+	for (const decision of decisions) {
+		if (typeof decision !== "string" && decision.policy === "deny") return decision;
+		const decisionTier = typeof decision === "string" ? decision : decision.tier;
+		if (TIER_RANK[decisionTier] > TIER_RANK[tier]) tier = decisionTier;
+	}
+	return tier;
+}
+
 const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 	"always-ask": "read",
 	write: "write",

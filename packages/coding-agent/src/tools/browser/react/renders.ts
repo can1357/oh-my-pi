@@ -1,6 +1,6 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page } from "puppeteer-core";
-import { requireReactHookResult } from "./devtools-hook";
+import { type ReactPageEnvelope, requireReactHookResult } from "./devtools-hook";
 
 /** Render-recording lifecycle action. */
 export type ReactRendersAction = "start" | "stop" | "status";
@@ -17,11 +17,6 @@ export interface ReactRendersResult {
 	active?: boolean;
 	commits: number;
 	components: ReactRenderComponent[];
-}
-
-interface ReactRendersEnvelope {
-	missingHook?: boolean;
-	value?: ReactRendersResult;
 }
 
 const RENDERS_SOURCE_PREFIX = `(() => {
@@ -49,15 +44,20 @@ const RENDERS_SOURCE_SUFFIX = `;
 	return { value };
 })()`;
 
+/** Page expression applying `action` to commit recording; evaluates to a `ReactPageEnvelope<ReactRendersResult>`. */
+export function reactRendersSource(action: ReactRendersAction): string {
+	return `${RENDERS_SOURCE_PREFIX}${JSON.stringify(action)}${RENDERS_SOURCE_SUFFIX}`;
+}
+
 /** Start, stop, or inspect React commit recording for the current document. */
 export async function collectReactRenders(
 	page: Page,
 	options: { action: ReactRendersAction },
 	signal?: AbortSignal,
 ): Promise<ReactRendersResult> {
-	const source = `${RENDERS_SOURCE_PREFIX}${JSON.stringify(options.action)}${RENDERS_SOURCE_SUFFIX}`;
+	const source = reactRendersSource(options.action);
 	const result = (await untilAborted(signal, () =>
 		page.mainFrame().mainRealm().evaluate(source),
-	)) as ReactRendersEnvelope;
+	)) as ReactPageEnvelope<ReactRendersResult>;
 	return requireReactHookResult(result);
 }

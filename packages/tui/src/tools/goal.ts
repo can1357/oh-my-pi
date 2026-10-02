@@ -4,7 +4,11 @@ import type { Theme, ThemeColor } from "../theme/theme";
 import { formatDuration, formatErrorDetail, formatNumber, TRUNCATE_LENGTHS } from "../render/render-utils";
 import { renderStatusLine, truncateToWidth } from "../render/index";
 import { framedToolCard } from "../render/tool-card";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { compact, node, span, text } from "../native/describe";
+import { OwnerMemo } from "../native/memo";
+import { errorView, noteText, resultText, toolHead } from "./native-view";
+import type { NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
 /** Lifecycle state of a tracked goal. */
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
 
@@ -63,6 +67,39 @@ interface GoalRenderArgs {
 	objective?: string;
 	token_budget?: number;
 }
+
+function describeGoalResult(result: ToolRenderResult<GoalToolDetails>, args?: GoalRenderArgs): NativeToolView {
+	const details = result.details;
+	const description = describeOp(details?.op ?? args?.op);
+	if (result.isError) return errorView("Goal", resultText(result) || "Goal tool failed", description);
+	const goal = details?.goal ?? null;
+	if (!goal) return { head: toolHead("Goal", description, "no active goal"), tone: "warning" };
+
+	const head = [
+		...toolHead("Goal", description),
+		span(" "),
+		span(goal.status, `${goalBadgeColor(goal.status)} strong`),
+	];
+	const used = formatNumber(goal.tokensUsed);
+	const left = goal.tokenBudget !== undefined ? Math.max(0, goal.tokenBudget - goal.tokensUsed) : 0;
+	const tokens =
+		goal.tokenBudget !== undefined
+			? `${used} / ${formatNumber(goal.tokenBudget)} tokens (${formatNumber(left)} left)`
+			: `${used} tokens`;
+	const meta = [tokens];
+	if (goal.timeUsedSeconds > 0) meta.push(`${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`);
+	const report = details?.completionBudgetReport;
+	return {
+		head,
+		body: compact([
+			text([span(`"${goal.objective.trim()}"`, "muted")], { wrap: "word" }),
+			text([span(meta.join(" · "), "dim")], { wrap: "word" }),
+			report ? node("section", { head: [span("Report", "toolTitle")] }, [noteText(report)], "report") : undefined,
+		]),
+	};
+}
+
+const goalResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /** Renders goal creation, status, and lifecycle results. */
 export const goalToolRenderer = {
@@ -147,6 +184,24 @@ export const goalToolRenderer = {
 			phase: "success",
 			borderColor: "borderMuted",
 		}));
+	},
+
+	describeCall(args: GoalRenderArgs): NativeToolView {
+		const head: TspSpan[] = toolHead("Goal", describeOp(args.op));
+		const objective = args.objective?.trim();
+		if (args.op === "create" && objective) head.push(span(" "), span(`"${objective}"`, "muted"));
+		if (args.op === "create" && args.token_budget !== undefined) {
+			head.push(span(" "), span(`budget ${formatNumber(args.token_budget)}`, "muted"));
+		}
+		return { head };
+	},
+
+	describeResult(
+		result: ToolRenderResult<GoalToolDetails>,
+		_options: RenderResultOptions,
+		args?: GoalRenderArgs,
+	): NativeToolView | undefined {
+		return goalResultMemo.get(result, [args?.op], () => describeGoalResult(result, args));
 	},
 
 	mergeCallAndResult: true,

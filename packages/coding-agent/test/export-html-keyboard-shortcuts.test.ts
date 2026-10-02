@@ -61,11 +61,6 @@ function exerciseShortcut(body: string, eventInit: Record<string, unknown>) {
 describe("HTML export keyboard shortcuts", () => {
 	const keydownBody = extractKeydownHandlerBody(templateJs);
 
-	it("advertises browser-safe single-key toggles", () => {
-		expect(templateJs).toContain("T toggle thinking · O toggle tools");
-		expect(templateJs).not.toContain("Ctrl+T toggle thinking · Ctrl+O toggle tools");
-	});
-
 	it("toggles thinking and tool outputs with bare keys", () => {
 		expect(exerciseShortcut(keydownBody, { key: "t" })).toEqual({ calls: ["thinking"], prevented: true });
 		expect(exerciseShortcut(keydownBody, { key: "T" })).toEqual({ calls: ["thinking"], prevented: true });

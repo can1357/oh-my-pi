@@ -1,7 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { orderedSettings } from "@oh-my-pi/pi-coding-agent/config/all-settings";
 import { all, bindEffects, combine, effect, lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 import {
 	cfgProvidersMaxInFlightRequests,
@@ -10,7 +14,8 @@ import {
 	cfgTopP,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgEditFuzzyMatch, cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
@@ -178,6 +183,13 @@ describe("settings registry", () => {
 			seen.push(`topP=${value}`);
 		});
 
+		cfgTopP.listen(grandchild, value => {
+			seen.push(`grandchild topP=${value}`);
+		});
+		cfgSteeringMode.listen(grandchild, value => {
+			seen.push(`grandchild steeringMode=${value}`);
+		});
+
 		cfgTemperature.override(parent, 0.7);
 		cfgTopP.override(parent, 0.33);
 		cfgSteeringMode.override(parent, "all");
@@ -185,7 +197,89 @@ describe("settings registry", () => {
 		expect(cfgSteeringMode.get(child)).toBe("all");
 		expect(cfgSteeringMode.get(grandchild)).toBe("all");
 		await tick();
-		expect(seen.sort()).toEqual(["temperature=0.7", "topP=0.33"]);
+		expect(seen.sort()).toEqual([
+			"grandchild steeringMode=all",
+			"grandchild topP=0.33",
+			"temperature=0.7",
+			"topP=0.33",
+		]);
+	});
+
+	it("treats a reordered record as a change, since record order carries precedence", async () => {
+		const settings = Settings.isolated({ "edit.modelVariants": { claude: "patch", sonnet: "replace" } });
+		const seen: string[][] = [];
+		cfgEditModelVariants.listen(settings, value => {
+			seen.push(Object.keys(value));
+		});
+
+		cfgEditModelVariants.override(settings, { sonnet: "replace", claude: "patch" });
+		expect(Object.keys(cfgEditModelVariants.get(settings))).toEqual(["sonnet", "claude"]);
+		await tick();
+		expect(seen).toEqual([["sonnet", "claude"]]);
+	});
+
+	it("releases a soft-pinned default on a global write or unset of that setting", () => {
+		const written = Settings.isolated();
+		cfgTaskMaxConcurrency.pinDefault(written);
+		expect(cfgTaskMaxConcurrency.provenance(written)).toBe("runtime");
+		cfgTaskMaxConcurrency.set(written, 9);
+		expect(cfgTaskMaxConcurrency.get(written)).toBe(9);
+		expect(cfgTaskMaxConcurrency.provenance(written)).toBe("global");
+
+		const unset = Settings.isolated();
+		cfgTaskMaxConcurrency.pinDefault(unset);
+		cfgTaskMaxConcurrency.unset(unset);
+		expect(cfgTaskMaxConcurrency.provenance(unset)).toBe("default");
+
+		// An explicit runtime override is not a soft pin: a global write stays beneath it.
+		const overridden = Settings.isolated();
+		cfgTaskMaxConcurrency.override(overridden, 4);
+		cfgTaskMaxConcurrency.set(overridden, 9);
+		expect(cfgTaskMaxConcurrency.get(overridden)).toBe(4);
+	});
+
+	it("warns once per instance about an invalid configured value, unaffected by other instances", async () => {
+		const tempDir = TempDir.createSync("@pi-settings-warn-");
+		try {
+			const agentDir = tempDir.join("agent");
+			const cwd = tempDir.join("project");
+			fs.mkdirSync(agentDir, { recursive: true });
+			fs.mkdirSync(cwd, { recursive: true });
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({ temperature: "hot", statusLine: { leftSegments: ["modle"] } }),
+			);
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const warnings = (prefix: string) => warn.mock.calls.filter(([message]) => String(message).startsWith(prefix));
+			const invalid = () => warnings("Settings: ignoring invalid value");
+			const unknownItems = () => warnings("Settings: unknown status line segment");
+
+			const settings = await Settings.loadReadOnly({ cwd, agentDir });
+			expect(unknownItems()).toHaveLength(1);
+			expect(cfgTemperature.get(settings)).toBe(cfgTemperature.default);
+			expect(invalid()).toHaveLength(1);
+
+			// Instances holding valid values never re-arm another instance's warnings.
+			const unrelated = Settings.isolated();
+			cfgTemperature.get(unrelated);
+			await unrelated.cloneForCwd(cwd);
+			cfgTopK.override(settings, 3);
+			cfgTemperature.get(settings);
+			cfgTemperature.get(settings.overlay());
+			await settings.cloneForCwd(cwd);
+			expect(invalid()).toHaveLength(1);
+			expect(unknownItems()).toHaveLength(1);
+
+			// Fixing the value in the same instance re-arms it.
+			cfgTemperature.override(settings, 0.5);
+			cfgTemperature.get(settings);
+			cfgTemperature.clearOverride(settings);
+			cfgTemperature.get(settings);
+			expect(invalid()).toHaveLength(2);
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
 	});
 
 	it("keeps an overlay's inherited values in its cwd clone and in layer accessors", async () => {

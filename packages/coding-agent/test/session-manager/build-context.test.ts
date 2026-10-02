@@ -72,13 +72,6 @@ describe("buildSessionContext", () => {
 			expect(ctx.models).toEqual({});
 		});
 
-		it("single user message", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello")];
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages).toHaveLength(1);
-			expect(ctx.messages[0].role).toBe("user");
-		});
-
 		it("rehydrates custom_message attribution from entries", () => {
 			const entries: SessionEntry[] = [
 				{
@@ -358,12 +351,87 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant"]);
 			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary");
 			expect(ctx.messages[0].providerPayload).toMatchObject({ signature: "sig" });
-			expect(ctx.messages[0].timestamp).toBeLessThan(new Date(newTurn.timestamp).getTime());
+			expect(ctx.messages[0].historyRewriteAt).toBeLessThan(new Date(newTurn.timestamp).getTime());
 		});
 
-		it("predates native summaries before the retained tail but keeps local commit timestamps", () => {
+		it("keeps context notes behind a native Anthropic summary so its block opens the request", () => {
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "Keep the rollback plan." },
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const nativeCompaction: CompactionEntry = {
+				...compaction("3", "2", "Native summary", ""),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([
+				msg("1", null, "user", "first"),
+				notes,
+				nativeCompaction,
+				msg("4", "3", "user", "after compact"),
+			]);
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "custom", "user"]);
+		});
+
+		it("keeps context notes out of the fold between a native summary and its retained assistant turn", () => {
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "Keep the rollback plan." },
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const retained = msg("3", "2", "assistant", "checking");
+			if (retained.message.role !== "assistant") throw new Error("Expected assistant");
+			retained.message.content.push({ type: "toolCall", id: "t1", name: "read", arguments: {} });
+			retained.message.stopReason = "toolUse";
+			const result: SessionMessageEntry = {
+				type: "message",
+				id: "4",
+				parentId: "3",
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "read",
+					content: [{ type: "text", text: "file" }],
+					isError: false,
+					timestamp: 1,
+				},
+			};
+			const nativeCompaction: CompactionEntry = {
+				...compaction("5", "4", "Native summary", "3"),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([
+				msg("1", null, "user", "first"),
+				notes,
+				retained,
+				result,
+				nativeCompaction,
+				msg("6", "5", "user", "after compact"),
+			]);
+			expect(ctx.messages.map(message => message.role)).toEqual([
+				"compactionSummary",
+				"assistant",
+				"toolResult",
+				"custom",
+				"user",
+			]);
+		});
+
+		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
-			// thinking on the next request; native replay must not do that.
+			// thinking on the next request; native replay must not do that. The
+			// commit timestamp still retires the tail's pre-compaction usage.
 			const mayDay = new Date("2025-05-01T00:00:00Z").getTime();
 			const retainedAssistant: SessionMessageEntry = {
 				type: "message",
@@ -414,10 +482,11 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant", "user"]);
 			const summary = ctx.messages[0];
 			if (summary?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
-			expect(new Date(summary.timestamp).getTime()).toBe(mayDay - 1);
+			expect(summary.timestamp).toBe(new Date("2025-06-01T00:00:00Z").getTime());
 			const [llmSummary] = defaultConvertToLlm([summary]);
 			if (llmSummary?.role !== "user") throw new Error("Expected user LLM message");
 			expect(llmSummary.historyRewriteAt).toBe(mayDay - 1);
+			expect(llmSummary.timestamp).toBe(summary.timestamp);
 
 			// A local compaction keeps the entry commit timestamp.
 			const localCtx = buildSessionContext(
@@ -640,26 +709,6 @@ describe("buildSessionContext", () => {
 			expect(transcript.messages[1]?.role).toBe("assistant");
 			expect(transcript.messages[2]?.role).toBe("compactionSummary");
 			expect(transcript.messages[3]?.role).toBe("user");
-		});
-
-		it("agent context: summary stays at top", () => {
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "old question"),
-				msg("2", "1", "assistant", "old response"),
-				msg("3", "2", "user", "kept question"),
-				msg("4", "3", "assistant", "kept response"),
-				compaction("5", "4", "Summary of compacted turns", "3"),
-				msg("6", "5", "user", "after compact"),
-			];
-
-			// Agent context (no transcript): summary first
-			const agentCtx = buildSessionContext(entries);
-
-			expect(agentCtx.messages).toHaveLength(4);
-			expect(agentCtx.messages[0]?.role).toBe("compactionSummary");
-			expect(agentCtx.messages[1]?.role).toBe("user");
-			expect(agentCtx.messages[2]?.role).toBe("assistant");
-			expect(agentCtx.messages[3]?.role).toBe("user");
 		});
 
 		it("display transcript with no post-compaction messages: summary at bottom", () => {

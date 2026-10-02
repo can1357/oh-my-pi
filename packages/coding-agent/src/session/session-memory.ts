@@ -68,6 +68,10 @@ export class SessionMemory {
 	#runtimeCwd: string | undefined;
 	/** Apply waiting behind the current transition; later requests join it. */
 	#queuedApply: { retainMnemopi: boolean; done: Promise<void> } | undefined;
+	/** Memory settings as last dispatched to `#applySettingsChange`; unset when live changes are disabled. */
+	#observedSettings: Record<string, unknown> | undefined;
+	/** Dispatched setting changes still running, including backend hooks that run outside the transition queue. */
+	readonly #settingsChanges = new Set<Promise<void>>();
 
 	constructor(
 		host: SessionMemoryHost,
@@ -86,11 +90,44 @@ export class SessionMemory {
 		if (this.#memoryAgentDir) this.#runtimeCwd = host.cwd();
 		// Subagents alias the parent's backend state and never replace it live.
 		if (options.memoryEnabled !== false && this.#memoryAgentDir && this.#memoryTaskDepth === 0) {
-			memorySettingsValue().listen(host, (next, previous) => {
-				const changed: string[] = [];
-				for (const id in next) if (!Bun.deepEquals(next[id], previous[id])) changed.push(id);
-				return this.#applySettingsChange(changed);
-			});
+			const value = memorySettingsValue();
+			this.#observedSettings = value.get(host.settings);
+			value.listen(host, () => this.#observeSettings());
+		}
+	}
+
+	/**
+	 * Dispatches memory-setting edits not handled yet. The settings listener and
+	 * {@link settle} both land here, so an edit starts exactly once, whichever
+	 * observes it first.
+	 */
+	#observeSettings(): void {
+		const previous = this.#observedSettings;
+		if (!previous || this.#host.isDisposed()) return;
+		const next = memorySettingsValue().get(this.#host.settings);
+		const changed: string[] = [];
+		for (const id in next) if (!Bun.deepEquals(next[id], previous[id])) changed.push(id);
+		if (changed.length === 0) return;
+		this.#observedSettings = next;
+		const handling = this.#applySettingsChange(changed);
+		this.#settingsChanges.add(handling);
+		void handling.then(() => this.#settingsChanges.delete(handling));
+	}
+
+	/**
+	 * Resolves once the runtime reflects every memory-setting edit made so far:
+	 * starts edits the listener has not delivered yet, then waits out backend
+	 * transitions and settings hooks until no new work arrives. Failed edits are
+	 * reported by their handler; callers inspect the settled runtime themselves.
+	 */
+	async settle(): Promise<void> {
+		let drained: Promise<void> | undefined;
+		for (;;) {
+			this.#observeSettings();
+			const transition = this.#memoryBackendTransition;
+			if (transition === drained && this.#settingsChanges.size === 0) return;
+			drained = transition;
+			await Promise.all([transition, ...this.#settingsChanges]);
 		}
 	}
 
@@ -106,7 +143,7 @@ export class SessionMemory {
 				return;
 			}
 			// Queue synchronously, like a backend switch, so the next prompt's
-			// transition drain and a later cwd rebind both order after this edit.
+			// transition drain orders after this edit.
 			const hook = await this.#enqueueTransition(async () => {
 				if (this.#host.isDisposed()) return undefined;
 				const backend = await resolveMemoryBackend(this.#host.settings);

@@ -6,6 +6,7 @@
  * URL forms:
  * - skill://<name> - Reads SKILL.md
  * - skill://<name>/<path> - Reads relative path within skill's baseDir
+ * - skill://<namespace>/<name>[/<path>] - Same, for a collision-namespaced skill
  */
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
@@ -49,14 +50,25 @@ async function skillTargetPath(
 		throw new Error("skill:// URL requires a skill name: skill://<name>");
 	}
 
-	const skill = skills.find(s => s.name === skillName);
+	let urlPath = url.pathname;
+	let skill: Skill | undefined;
+	if (urlPath.length > 1) {
+		// A namespaced skill (`<plugin>/<name>`) spans the host and the first
+		// path segment. Skill names never contain `/`, so an exact match here
+		// is unambiguous and wins over reading `<name>` as a path relative to
+		// a bare skill that happens to share the namespace's name.
+		const slash = urlPath.indexOf("/", 1);
+		const namespaced = `${skillName}/${decodeURIComponent(slash === -1 ? urlPath.slice(1) : urlPath.slice(1, slash))}`;
+		skill = skills.find(s => s.name === namespaced);
+		if (skill) urlPath = slash === -1 ? "" : urlPath.slice(slash);
+	}
+	skill ??= skills.find(s => s.name === skillName);
 	if (!skill) {
 		const available = skills.map(s => s.name);
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
 		throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
 	}
 
-	const urlPath = url.pathname;
 	let resolvedPath: string;
 	if (!urlPath || urlPath === "/") {
 		resolvedPath = path.resolve(directory ? skill.baseDir : skill.filePath);
@@ -73,12 +85,18 @@ async function skillTargetPath(
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
 	if (!skill.containRoot) return resolvedPath;
+	const escape = `skill:// path resolves outside the plugin root: ${url.href}`;
 	const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
-	if (contained.status === "outside") {
-		throw new UrlContainmentError(`skill:// path resolves outside the plugin root: ${url.href}`);
-	}
+	if (contained.status === "outside") throw new UrlContainmentError(escape);
 	if (contained.status === "ok") return contained.realPath;
-	if (create) await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill");
+	if (create) {
+		try {
+			await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill", url.href);
+		} catch (error) {
+			// Same wording as the read path: the plugin root, not a per-skill root, bounds the package.
+			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
+		}
+	}
 	return resolvedPath;
 }
 
@@ -93,7 +111,6 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		immutable: true,
 		unbounded: true,
 		linkable: true,
-		shellOperand: true,
 	};
 
 	/** Advertised only when loaded skills are readable through an active tool. */
@@ -134,8 +151,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 
 	/**
 	 * Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir.
-	 * A missing plugin-skill target (or dangling symlink) cannot be proven inside the plugin root, so
-	 * it throws {@link UrlContainmentError} instead of locating to null.
+	 * Null for a missing entry (or dangling symlink) without `create`, plugin skill or not.
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		const skills = context?.skills ?? getActiveSkills();
@@ -145,12 +161,8 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			await fs.stat(targetPath);
 			return targetPath;
 		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			const skillName = url.rawHost || url.hostname;
-			if (skills.find(skill => skill.name === skillName)?.containRoot) {
-				throw new UrlContainmentError(`skill:// path does not exist: ${url.href}`);
-			}
-			return null;
+			if (isEnoent(error)) return null;
+			throw error;
 		}
 	}
 

@@ -1,7 +1,7 @@
 IDA Pro (idalib) databases: lifecycle, structured edits, and Python `exec` inside the database.
 
 <instruction>
-- Open DBs are shared by every agent and subagent in this omp process and survive compaction; `list` shows them. `db` accepts a binary or `.i64`/`.idb` path (`<bin>:@<arch>` for a universal Mach-O slice) or an open db id, and MAY be omitted when exactly one DB is open.
+- Each open DB runs as an `omp.ida.<id>` daemon in the project's `omp ps`, shared by every agent, subagent, and omp process in the project; DBs survive compaction; at most `ida.maxOpen` (default 4) stay open: opening another saves and closes the least recently used idle DB, and DBs idle for `ida.idleCloseSec` (default 15 min) are saved and closed. Reopening is fast but resets the `exec` namespace. `list` shows them. `db` accepts a binary or `.i64`/`.idb` path (`<bin>:@<arch>` for a universal Mach-O slice), an open db id, or its daemon name, and MAY be omitted when exactly one DB is open.
 - `read <binary>` opens or creates the DB and shows the overview; `open` does the same without a view. Executables get a store IDB under `~/.omp/agent/idbs/<sha16>-<name>/` (the binary itself is never modified); `.i64`/`.idb` files open in place.
 - Look with `read` views (`<bin>:<func|0xaddr>` pseudocode, `:<func>:asm`, `:imports`, `:exports`, `:strings`, `:xrefs:<func|0xaddr>`); change with `ida` (`rename`, `comment`, `set_type`, `make_function`) or `exec`.
 - `target` is a symbol name or `0x` address; `_`-prefixed Mach-O names resolve without the underscore.
@@ -25,5 +25,5 @@ ida(action: "exec", code: "[(hex(ea), n) for ea, n in functions('crypt|aes')]")
 </examples>
 
 <critical>
-- Changes persist only after `save`, `close` (saves by default), or omp exit. A killed worker (timeout that ignores SIGINT, crash) loses every change since the last save — `save` after important edits.
+- Dirty DBs autosave ~10 s after the worker goes idle; `save` forces it. A killed worker (timeout that ignores SIGINT, crash, `omp ps kill`) loses only changes made since the last save.
 </critical>

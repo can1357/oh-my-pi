@@ -4,19 +4,14 @@
 
 use std::{
 	ffi::OsString,
-	fs,
-	io::Write,
+	io::{self, Write},
 	path::{Path, PathBuf},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use uucore::{
-	display::Quotable,
-	fs::{MissingHandling, ResolveMode, canonicalize},
-	libc::EINVAL,
-	line_ending::LineEnding,
-};
+use pi_vfs::{BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode};
+use uucore::{display::Quotable, libc::EINVAL, line_ending::LineEnding};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
 
@@ -90,11 +85,12 @@ impl Utility for Readlink {
 			Some(LineEnding::from_zero_flag(use_zero))
 		};
 
+		let canonicalize = CanonicalizeOptions::new(missing_handling, resolve_mode);
 		for operand in &files {
 			let path_result = if resolve_mode == ResolveMode::None {
-				fs::read_link(host.paths().resolve_link(operand))
+				read_link(host.fs(), &host.paths().resolve_link(operand))
 			} else {
-				canonicalize(&host.resolve(operand), missing_handling, resolve_mode)
+				canonicalize_path(host.fs(), &host.resolve(operand), &canonicalize)
 			};
 
 			match path_result {
@@ -105,7 +101,12 @@ impl Utility for Readlink {
 				},
 				Err(err) => {
 					if verbose {
-						let message = if err.raw_os_error() == Some(EINVAL) {
+						// Reading a non-symlink is EINVAL natively; providers report
+						// it as an invalid-input error.
+						let not_a_link = err.raw_os_error() == Some(EINVAL)
+							|| (resolve_mode == ResolveMode::None
+								&& err.kind() == io::ErrorKind::InvalidInput);
+						let message = if not_a_link {
 							format!("{}: Invalid argument", operand.maybe_quote())
 						} else {
 							format!("{}: {err}", operand.maybe_quote())
@@ -201,6 +202,32 @@ fn app() -> Command {
 				.value_parser(clap::value_parser!(OsString))
 				.value_hint(clap::ValueHint::AnyPath),
 		)
+}
+
+/// The value plain `readlink` prints for `link`.
+///
+/// A provider path that aliases a host file (`skill://name/SKILL.md`) prints
+/// that file's canonical host path; everything else reads one symlink hop.
+fn read_link(filesystem: &BlockingFs, link: &Path) -> io::Result<PathBuf> {
+	match filesystem.backing_path(link)? {
+		Some(backing) => BlockingFs::native().canonicalize(backing),
+		None => filesystem.read_link(link),
+	}
+}
+
+/// Canonicalizes `path` for `-f`/`-e`/`-m`.
+///
+/// A provider path that aliases a host file is canonicalized on the host, so
+/// the physical location is printed rather than the alias.
+fn canonicalize_path(
+	filesystem: &BlockingFs,
+	path: &Path,
+	options: &CanonicalizeOptions,
+) -> io::Result<PathBuf> {
+	match filesystem.backing_path(path)? {
+		Some(backing) => BlockingFs::native().canonicalize_with(backing, options),
+		None => filesystem.canonicalize_with(path, options),
+	}
 }
 
 /// Writes a resolved path verbatim, followed by the selected delimiter.

@@ -12,7 +12,7 @@
  * `enableMCP: false`, regardless of what `baseOptions` carries.
  */
 
-import { afterAll, afterEach, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
@@ -28,22 +28,12 @@ afterAll(() => {
 	authStorage.close();
 });
 
-// The factory registers each session's process-effect binding release here; run them so
-// no binding outlives its test.
-const sessionDisposers: Array<() => void> = [];
-const addDisposer = (dispose: () => void): void => {
-	sessionDisposers.push(dispose);
-};
-afterEach(() => {
-	for (const dispose of sessionDisposers.splice(0)) dispose();
-});
-
 describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 	it("forces enableMCP=false even when baseOptions opts in", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-mcp-isolation-");
 		try {
 			const settings = Settings.isolated({});
-			const fakeSession = { addDisposer } as AgentSession;
+			const fakeSession = {} as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);
@@ -70,7 +60,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: {},
+				parsedArgs: { invalidFlagValues: [] },
 				rawArgs: [],
 				createSession,
 			});
@@ -92,7 +82,6 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			const fakeSession = {
 				extensionRunner: undefined,
 				getAllToolNames: () => ["read"],
-				addDisposer,
 				dispose: async () => {
 					disposed = true;
 				},
@@ -103,7 +92,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { tools: ["read", "missing"] },
+				parsedArgs: { tools: ["read", "missing"], invalidFlagValues: [] },
 				rawArgs: ["--tools", "read,missing"],
 				createSession: async () => ({ session: fakeSession }) as CreateAgentSessionResult,
 			});
@@ -131,7 +120,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				`import { writeFileSync } from "node:fs"; export default function (pi) { pi.events.on("acp-session-live", () => writeFileSync(${JSON.stringify(firedPath)}, "fired")); }`,
 			);
 			let captured: CreateAgentSessionOptions | undefined;
-			const fakeSession = { addDisposer } as AgentSession;
+			const fakeSession = {} as AgentSession;
 			const factory = createAcpSessionFactory({
 				baseOptions: {
 					disableExtensionDiscovery: true,
@@ -141,7 +130,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { trustedExtensions: [trustedPath] },
+				parsedArgs: { trustedExtensions: [trustedPath], invalidFlagValues: [] },
 				rawArgs: [],
 				createSession: async options => {
 					captured = options;
@@ -182,7 +171,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { trustedExtensions: [trustedPath] },
+				parsedArgs: { trustedExtensions: [trustedPath], invalidFlagValues: [] },
 				rawArgs: [],
 				createSession: async () => {
 					createCalls++;
@@ -207,7 +196,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 			const projectDir = tempDir.join("project");
 			await Bun.write(`${projectDir}/.omp/TITLE_SYSTEM.md`, "Project-specific title policy.");
 
-			const fakeSession = { addDisposer } as AgentSession;
+			const fakeSession = {} as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);
@@ -237,7 +226,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: {},
+				parsedArgs: { invalidFlagValues: [] },
 				rawArgs: [],
 				createSession,
 			});

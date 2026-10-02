@@ -10,6 +10,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, TextContent, ThinkingContent, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { getStreamMarkupHealingPattern, StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -75,6 +76,26 @@ function chunk(model: string, delta: SseChoiceDelta, finish: SseChunk["choices"]
 		choices: [{ index: 0, delta, finish_reason: finish }],
 	};
 }
+
+it("preserves a parse-error sentinel through Kimi markup healing", async () => {
+	const model = kimiModel();
+	const raw = '{"path":"repaired.txt","content":"hello';
+	const text =
+		"<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" +
+		raw +
+		"<|tool_call_end|><|tool_calls_section_end|>";
+	const result = await streamOpenAICompletions(model, baseContext(), {
+		apiKey: "test-key",
+		fetch: mockFetch([chunk(model.id, { content: text }), chunk(model.id, {}, "stop"), "[DONE]"]),
+	}).result();
+	expect(result.stopReason).toBe("toolUse");
+	const call = result.content.find(block => block.type === "toolCall");
+	if (!call) throw new Error("Expected tool call");
+	expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+	expect(() =>
+		validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, call),
+	).toThrow("Tool call arguments are not valid JSON");
+});
 
 const REPORTED_DSML_LEAK =
 	"<｜DSML｜tool_calls>\n" +

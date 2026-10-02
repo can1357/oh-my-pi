@@ -1,1 +1,1 @@
-`cfg://`: omp settings; ONLY when the user asks about/to change them. `cfg://<ns>` namespace; `cfg://<ns>/<key>` value/type/default/source; write sets session-only, `…/save` persists; user approves each write; after session-only write, ask whether to save.
+`cfg://`: omp settings; ONLY when the user asks about/to change them. `cfg://<ns>` namespace; `cfg://<ns>/<key>` value/type/default/source; write sets session-only, `…/save` persists; writes need user approval (unanswered → error, move on); after session-only write, ask whether to save.

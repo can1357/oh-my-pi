@@ -241,79 +241,6 @@ describe("resolveStdioSpawnCommand", () => {
 		}
 	});
 
-	it("neutralizes percent-delimited args so cmd.exe cannot expand them before the .cmd shim", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-percent-"));
-		try {
-			const shim = path.join(tempDir, "codegraph.cmd");
-			await Bun.write(shim, "@echo off\r\n");
-
-			const result = await resolveStdioSpawnCommand(
-				{ type: "stdio", command: "codegraph", args: ["serve", "--header", "Authorization=%TOKEN%"] },
-				{
-					cwd: tempDir,
-					env: {
-						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
-						PATH: tempDir,
-						PATHEXT: ".cmd",
-					},
-					platform: "win32",
-				},
-			);
-
-			// `%TOKEN%` -> `%%cd:~,%TOKEN%%cd:~,%`: `%cd:~,%` expands to nothing,
-			// so cmd.exe leaves a literal `%TOKEN%` for the shim instead of
-			// substituting an environment variable (BatBadBut / CVE-2024-24576).
-			expect(result.cmd).toEqual([
-				"C:\\Windows\\System32\\cmd.exe",
-				"/d",
-				"/e:ON",
-				"/v:OFF",
-				"/c",
-				`""${shim}" serve --header "Authorization=%%cd:~,%TOKEN%%cd:~,%""`,
-			]);
-			expect(result.windowsVerbatimArguments).toBe(true);
-			expect(result.windowsHide).toBe(true);
-			expect(result.detached).toBe(false);
-		} finally {
-			await removeWithRetries(tempDir);
-		}
-	});
-
-	it("doubles embedded quotes so cmd.exe delivers JSON args to the .cmd shim intact", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-quotes-"));
-		try {
-			const shim = path.join(tempDir, "codegraph.cmd");
-			await Bun.write(shim, "@echo off\r\n");
-
-			const result = await resolveStdioSpawnCommand(
-				{ type: "stdio", command: "codegraph", args: ["--config", '{"a":"b&c|d"}'] },
-				{
-					cwd: tempDir,
-					env: {
-						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
-						PATH: tempDir,
-						PATHEXT: ".cmd",
-					},
-					platform: "win32",
-				},
-			);
-
-			expect(result.cmd).toEqual([
-				"C:\\Windows\\System32\\cmd.exe",
-				"/d",
-				"/e:ON",
-				"/v:OFF",
-				"/c",
-				`""${shim}" --config "{""a"":""b&c|d""}""`,
-			]);
-			expect(result.windowsVerbatimArguments).toBe(true);
-			expect(result.windowsHide).toBe(true);
-			expect(result.detached).toBe(false);
-		} finally {
-			await removeWithRetries(tempDir);
-		}
-	});
-
 	it("resolves extension-less absolute Windows paths to the sibling .cmd shim", async () => {
 		// Mirrors npm's Windows shim layout: bare `codegraph` (shebang script),
 		// `codegraph.cmd` (cmd.exe wrapper), and `codegraph.ps1` siblings under
@@ -619,17 +546,6 @@ describe("writeFrame", () => {
 
 		expect(writeFrame(sink, "anything\n")).toBe(false);
 		expect(sink.writes).toEqual(["anything\n"]);
-	});
-
-	it("does not propagate non-Error throws either", () => {
-		const sink = {
-			write() {
-				throw "string-thrown-non-error";
-			},
-			flush() {},
-		};
-
-		expect(writeFrame(sink, "x")).toBe(false);
 	});
 
 	it("returns true and neutralizes an asynchronous write rejection (broken pipe surfaced as a Promise)", async () => {

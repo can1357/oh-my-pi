@@ -21,4 +21,6 @@ export const cfgSecretsEnabled = register({
 		description: "Obfuscate configured secrets and redact credential-shaped tokens before sending to AI providers",
 	},
 });
+// Process-wide fallback for requests outside a session; a session's own requests redact per its
+// settings (`withCredentialRedaction` in `sdk.ts`), whichever instance holds the effects.
 effect(cfgSecretsEnabled, configureCredentialRedaction);

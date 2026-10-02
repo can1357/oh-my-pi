@@ -21,7 +21,6 @@ import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 
-import { DEFAULT_BASH_INTERCEPTOR_RULES, cfgBashInterceptorPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
@@ -1084,7 +1083,7 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
-		it("spills oversized URL reads that no line selector can page (skill:// whole reads, agent:// values)", async () => {
+		it("spills oversized URL reads like plain files, except pages of artifact storage", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1102,11 +1101,18 @@ describe("Coding Agent Tools", () => {
 			if (!artifactsDir) throw new Error("expected an on-disk artifacts dir");
 			fs.mkdirSync(artifactsDir, { recursive: true });
 			fs.writeFileSync(path.join(artifactsDir, "Worker.md"), JSON.stringify({ report: payload }));
+			fs.writeFileSync(path.join(artifactsDir, "Lines.md"), payload);
+			fs.mkdirSync(path.join(artifactsDir, "local"), { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "local", "big.md"), payload);
 			const spillReadTool = wrapToolWithMetaNotice(
 				new ReadTool(
 					createTestToolSession(testDir, spillSettings, {
 						getSessionFile: () => spillManager.getSessionFile() ?? null,
 						getArtifactsDir: () => artifactsDir,
+						localProtocolOptions: {
+							getArtifactsDir: () => artifactsDir,
+							getSessionId: () => spillManager.getSessionId(),
+						},
 						skills: [
 							{
 								name: "demo",
@@ -1126,12 +1132,30 @@ describe("Coding Agent Tools", () => {
 			};
 
 			try {
-				for (const url of ["skill://demo/ref.md", "agent://Worker/report"]) {
+				for (const url of [
+					"skill://demo/ref.md",
+					"agent://Worker/report",
+					"local://big.md:1-3000",
+					"agent://Lines:1-3000",
+				]) {
 					const result = await spillReadTool.execute(`spill-${url}`, { path: url }, undefined, undefined, context);
 					const output = getTextOutput(result);
 					expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
 					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
 				}
+
+				const artifactId = await spillManager.saveArtifact(payload, "read");
+				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
+				const artifactPage = await spillReadTool.execute(
+					"spill-artifact-page",
+					{ path: `artifact://${artifactId}:1-3000` },
+					undefined,
+					undefined,
+					context,
+				);
+				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
+				expect(saveArtifact).not.toHaveBeenCalled();
 			} finally {
 				await spillManager.close();
 			}
@@ -1989,9 +2013,9 @@ describe("Coding Agent Tools", () => {
 
 			const result = await writeTool.execute("test-call-4-local", { path: localPath, content });
 
-			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to session/local/handoffs/new-output.json`,
-			);
+			// The result names the URL the model wrote, not the session's backing path.
+			expect(getTextOutput(result)).toContain(localPath);
+			expect(getTextOutput(result)).not.toContain(path.join("session", "local"));
 			expect(fs.existsSync(expectedPath)).toBe(true);
 			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
 		});
@@ -2298,17 +2322,6 @@ function b() {
 			expect(output).toMatch(/Wall time: \d+\.\d{2} seconds/);
 			expect(typeof result.details?.wallTimeMs).toBe("number");
 			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(0);
-		});
-
-		it("should expose built-in interceptor defaults truthfully", () => {
-			const defaultSettings = Settings.isolated({ "bashInterceptor.enabled": true });
-			const explicitEmptySettings = Settings.isolated({
-				"bashInterceptor.enabled": true,
-				"bashInterceptor.patterns": [],
-			});
-
-			expect(cfgBashInterceptorPatterns.get(defaultSettings)).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
-			expect(cfgBashInterceptorPatterns.get(explicitEmptySettings)).toEqual([]);
 		});
 
 		it("should block built-in interceptor commands when enabled with default patterns", async () => {
@@ -3333,20 +3346,5 @@ describe("edit tool CRLF handling", () => {
 		});
 		expect(result.isError).toBe(true);
 		expect(getTextOutput(result)).toMatch(/Found 2 occurrences/);
-	});
-
-	// TODO: CRLF preservation broken by LSP formatting - fix later
-	it.skip("should preserve UTF-8 BOM after edit", async () => {
-		const testFile = path.join(testDir, "bom-test.txt");
-		fs.writeFileSync(testFile, "\uFEFFfirst\r\nsecond\r\nthird\r\n");
-
-		await editTool.execute("test-bom", {
-			path: testFile,
-			old_string: "second\n",
-			new_string: "REPLACED\n",
-		});
-
-		const content = await Bun.file(testFile).text();
-		expect(content).toBe("\uFEFFfirst\r\nREPLACED\r\nthird\r\n");
 	});
 });

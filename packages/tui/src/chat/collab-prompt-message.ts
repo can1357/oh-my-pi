@@ -5,12 +5,16 @@ import { Text } from "../components/text";
 import type { CollabPromptDetails } from "./messages";
 import type { CustomMessage } from "./messages";
 import { getMarkdownTheme, theme } from "../theme";
+import { card, md, span } from "../native/describe";
+import type { NativeNode } from "../native/node";
 
 /**
  * Renders a collab guest prompt on every participant's transcript: a
  * user-message-styled bubble prefixed with the author's name.
  */
 export class CollabPromptMessageComponent extends Container {
+	readonly #native: NativeNode;
+
 	constructor(message: CustomMessage<CollabPromptDetails>) {
 		super();
 		const from = message.details?.from?.trim() || "guest";
@@ -24,11 +28,19 @@ export class CollabPromptMessageComponent extends Container {
 						.filter((content): content is TextContent => content.type === "text")
 						.map(content => content.text)
 						.join("");
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor: (value: string) => theme.bg("userMessageBg", value),
 			color: (value: string) => theme.fgOnBg("userMessageText", "userMessageBg", value),
 		});
-		md.setIgnoreTight(true);
-		this.addChild(md);
+		markdown.setIgnoreTight(true);
+		this.addChild(markdown);
+		this.#native = card({ role: "omp.user.collab", tone: "user", head: [span(`«${from}» ›`, "accent strong")] }, [
+			md(text),
+		]);
+	}
+
+	/** A user-toned card headed by the guest's name, with the prompt as markdown. */
+	override describe(): NativeNode {
+		return this.#native;
 	}
 }

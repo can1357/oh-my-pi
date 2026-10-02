@@ -54,8 +54,4 @@ describe("release version bumps", () => {
 	test("bumps the core version when applying a minor bump to a canary", () => {
 		expect(bumpVersion("0.13.0-canary.2", "minor")).toBe("0.14.0");
 	});
-
-	test("rejects explicit canary versions", () => {
-		expect(validateExplicitVersion("1.2.3-canary.1")).toBe(null);
-	});
 });

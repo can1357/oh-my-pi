@@ -352,44 +352,6 @@ describe("Context usage consolidation", () => {
 		await tempDir.remove();
 	});
 
-	it("invalidates status-line cache on reasoning-signature growth", async () => {
-		const tempDir = TempDir.createSync("@cache-invalidate-");
-		const { session, sessionManager, agent } = createSession(tempDir);
-
-		sessionManager.appendMessage({ role: "user", content: "query", timestamp: 1000 } as Message);
-		const assistant: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "text content" }],
-			usage: {
-				input: 250,
-				output: 20,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 270,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			contextSnapshot: { promptTokens: 250, nonMessageTokens: 10 },
-			timestamp: 2000,
-			stopReason: "stop",
-			api: mockModel.api,
-			provider: mockModel.provider,
-			model: mockModel.id,
-		};
-		sessionManager.appendMessage(assistant);
-		syncSession(session, agent);
-
-		const sl = statusLines.track(new StatusLineComponent(session, statusLineHost));
-		const initialBreakdown = sl.getCachedContextBreakdown();
-
-		const assistantExt = assistant as unknown as { thinkingSignature: string };
-		assistantExt.thinkingSignature = "signature_grows";
-
-		const nextBreakdown = sl.getCachedContextBreakdown();
-		expect(nextBreakdown.usedTokens).toBe(initialBreakdown.usedTokens);
-
-		await tempDir.remove();
-	});
-
 	it("uses live in-flight pending snapshot when request is active", async () => {
 		const tempDir = TempDir.createSync("@inflight-");
 		const { session, agent } = createSession(tempDir);

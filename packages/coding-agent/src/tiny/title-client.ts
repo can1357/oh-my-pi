@@ -18,6 +18,7 @@ import type { Setting } from "../config/registry";
 import { isSettingsInitialized, settings } from "../config/settings";
 
 import { stageRunnerScript } from "../eval/runner-cache";
+import { ModelDownloadActivity } from "../downloads/model-downloads";
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import {
 	inferenceWorkerEnv,
@@ -544,6 +545,7 @@ export class TinyTitleClient {
 	/** Models whose load/generation failed, keyed to the device/dtype they failed under. */
 	#failedModels = new Map<TinyLocalModelKey, string>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
+	#downloads = new ModelDownloadActivity(modelKey => getTinyLocalModelSpec(modelKey)?.label ?? modelKey);
 	#nextRequestId = 0;
 	#connect: (modelKey: TinyLocalModelKey) => Promise<WorkerHandle>;
 
@@ -560,10 +562,10 @@ export class TinyTitleClient {
 				);
 			} catch (error) {
 				mlxUnavailable = true;
-				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", {
-					modelKey,
-					error: error instanceof Error ? error.message : String(error),
-				});
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn("tiny-title: MLX worker unavailable; falling back to ONNX CPU", { modelKey, error: message });
+				// Ends a visible `mlx-lm` install row; the ONNX fallback tracks its own load.
+				this.#downloads.observe({ modelKey, status: "error" }, `MLX unavailable: ${message}`);
 			}
 		}
 		return connectTinyWorker(onnxLaunch(modelKey, tinyModelEnv()), modelKey);
@@ -759,6 +761,10 @@ export class TinyTitleClient {
 			this.#emitProgress(message.event);
 			return;
 		}
+		// Any answer settles the model's load, even for an abandoned request;
+		// MLX `chat` loads send no `ready` of their own.
+		if (message.type === "error") this.#downloads.observe({ modelKey, status: "error" }, message.error);
+		else this.#downloads.observe({ modelKey, status: "ready" });
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
 		this.#pending.delete(message.id);
@@ -792,7 +798,7 @@ export class TinyTitleClient {
 	}
 
 	#fail(pending: PendingRequest, error: string | undefined): void {
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+		this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, error);
 		if (pending.kind === "load") pending.resolve(error === undefined ? { ok: false } : { ok: false, error });
 		else pending.resolve(null);
 	}
@@ -801,7 +807,8 @@ export class TinyTitleClient {
 		if (pending.kind !== "load") this.#failedModels.set(pending.modelKey, tinyModelEnvKey());
 	}
 
-	#emitProgress(event: TinyTitleProgressEvent): void {
+	#emitProgress(event: TinyTitleProgressEvent, error?: string): void {
+		this.#downloads.observe(event, error);
 		for (const listener of this.#progressListeners) listener(event);
 	}
 
@@ -813,6 +820,7 @@ export class TinyTitleClient {
 			worker.unsubscribe();
 			void worker.handle.terminate();
 		}
+		this.#downloads.observe({ modelKey, status: "error" }, error);
 		let failed = 0;
 		for (const [id, pending] of this.#pending) {
 			if (pending.modelKey !== modelKey) continue;

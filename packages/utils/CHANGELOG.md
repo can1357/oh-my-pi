@@ -2,9 +2,92 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the public `getSessionOwnersDir()` utility, which returns the profile-independent `~/.omp/run/session-owners` directory that names session ownership leases ([#14095](https://github.com/can1357/oh-my-pi/pull/14095) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.4.12] - 2026-10-02
+
 ### Fixed
 
-- Fixed rotating log files being assigned to the wrong date near local-day boundaries by ensuring dated log paths match the local day used to name the files.
+- Fixed multi-second temp directory removal stalls on Windows by forcing a major GC before the first deletion retry ([#13044](https://github.com/can1357/oh-my-pi/pull/13044) by [@jchanghong023](https://github.com/jchanghong023)).
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added XDG-aware utility paths for skill descriptions and prediction state, with automatic adoption of legacy data when XDG locations are first resolved.
+
+### Fixed
+
+- Fixed machine-global daemon runtime paths so brokers such as text prediction use the shared XDG state location across profiles and custom agent directories.
+
+## [18.4.10] - 2026-10-02
+
+### Added
+
+- Added `startFrom(src, from)` to inline Markdown tokenizer extensions: a start hint that returns the first match at or after `from` (or `undefined`), so long paragraphs stay linear ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Added `this.source` and `this.end` for inline Markdown tokenizer extensions: the whole inline source and where the text being lexed ends in it, with one `this` per source that the link labels and emphasis inside it share, so a tokenizer can remember what it already scanned ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Added `mathSpanInContext` and `MathSpans` to `math-delimiters`, which find math spans without rescanning a run of unclosed openers ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+
+### Fixed
+
+- Fixed long Markdown paragraphs lexing slowly: a 44 KB paragraph with no blank line now parses in about 3 ms instead of 100 ms ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with many unclosed `[`, `*` or `_`, or with a long address-like word and no dotted domain, lexing slowly: a 40 KB paragraph of each now lexes in 4-24 ms instead of 2-12 s ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs of deeply nested emphasis, links or images lexing slowly: 32 KB now lexes in about 50 ms instead of 7 s, and a long word inside every level no longer costs its length once per level, except in nested image labels that hold a backslash escape ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with long or many unclosed runs of backticks, or `<http://` autolinks with no space or `>` after them, lexing slowly: 80 KB of each now lexes in about 50-60 ms instead of seconds (40 KB of one unclosed run took 10 s) ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs of nested brackets, URLs with long trailing punctuation, or unclosed HTML tags or comments lexing slowly: 80 KB of each now lexes in under 40 ms instead of 4-30 s ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed deeply nested Markdown links and emphasis overflowing the stack early: in a fresh process links now nest about three times as deep before a stack overflow, and emphasis twice as deep ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `tryAcquireFileLock`, a non-blocking file-lock helper that returns `null` when the lock is already held.
+- Added an `unref` option to `AsyncDrain`, allowing applications to use long batch windows without keeping the process alive.
+
+### Changed
+
+- Improved logging efficiency and configurability by batching routine file writes, flushing urgent records promptly, adding on-demand `logger.flush()` support, and allowing file log levels to be limited with `OMP_LOG_LEVEL`. Log files are created only when needed, and obsolete log and audit files are cleaned up automatically.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added `normalizePremiumRequests` (also still exported from `@oh-my-pi/pi-tui`).
+
+## [18.4.3] - 2026-09-28
+
+### Added
+
+- Added an optional `onDone` callback to `readSseJsonOrText` that reports the `[DONE]` sentinel without attaching a raw-event observer ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Changed
+
+- SSE events read without raw capture now share one frozen empty `raw` array instead of allocating one per event ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Fixed the unsettled-command report overriding an explicit non-zero exit code with 1 and printing a spurious "ended before completing" line ([#13623](https://github.com/can1357/oh-my-pi/pull/13623) by [@H4vC](https://github.com/H4vC))
+
+## [18.4.2] - 2026-09-28
+
+### Added
+
+- Added cloneJsonTree to provide a high-performance deep copy utility for JSON-shaped object trees
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed SQLite stores opened with `recoverCorruption` crashing on a corrupt file instead of being preserved and recreated when the corruption surfaced as a different initialization error such as `no such table` ([#13530](https://github.com/can1357/oh-my-pi/pull/13530) by [@Hunter-124](https://github.com/Hunter-124))
+- Fixed raw stderr output staying on the previous day's log file after the log sink rotates at local midnight ([#13003](https://github.com/can1357/oh-my-pi/issues/13003)).
+
+## [18.3.1] - 2026-09-25
+
+### Fixed
+
+- Fixed log rotation near local-day boundaries so dated log files are consistently assigned to the correct local date.
 
 ## [18.2.7] - 2026-09-21
 

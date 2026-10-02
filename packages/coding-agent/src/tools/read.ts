@@ -1,4 +1,5 @@
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -85,6 +86,7 @@ import {
 	probeLiteralPathExists,
 	resolveReadPathAsync,
 	splitDelimitedPathEntry,
+	splitMixedUrlPathList,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
@@ -650,6 +652,19 @@ function formatLocatedFileNotice(url: string, backingPath: string, size: number,
 }
 
 /**
+ * Kind of a non-regular, non-directory file, or undefined. Reading one in-process can block
+ * forever (a FIFO, `/dev/stdin` on the TUI's terminal) or never end (`/dev/zero`).
+ */
+function specialFileKind(stat: Stats): string | undefined {
+	if (stat.isFile() || stat.isDirectory()) return undefined;
+	if (stat.isCharacterDevice()) return "character device";
+	if (stat.isBlockDevice()) return "block device";
+	if (stat.isFIFO()) return "FIFO";
+	if (stat.isSocket()) return "socket";
+	return "special file";
+}
+
+/**
  * Peel `?q=<question>` (ask a vision model about an image) from a plain path or a URL whose
  * scheme declares {@link SchemeSpec.imageQuestion}; every other URL owns its query string.
  */
@@ -1030,8 +1045,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
-		if (!parts) return null;
+		return parts ? this.#readDelimitedParts(parts, signal) : null;
+	}
 
+	async #readDelimitedParts(parts: string[], signal?: AbortSignal): Promise<AgentToolResult<ReadToolDetails>> {
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
@@ -1541,6 +1558,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			readPath = expandPath(readPath);
 		}
 		readPath = recoverConflictUriPrefix(readPath).path;
+		// A `;` list mixing URLs with local paths must split before URL detection
+		// claims the whole string as one fetch or one internal/MCP resource.
+		const mixedParts = await splitMixedUrlPathList(
+			readPath,
+			this.session.cwd,
+			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
+		);
+		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal);
 		const imageQuestion = splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
 		const question = imageQuestion.question;
@@ -1713,10 +1738,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		let isDirectory = false;
 		let fileSize = 0;
+		let specialKind: string | undefined;
 		try {
 			const stat = await Bun.file(absolutePath).stat();
 			fileSize = stat.size;
 			isDirectory = stat.isDirectory();
+			specialKind = specialFileKind(stat);
 		} catch (error) {
 			// A located file vanished after routing: the handler owns the canonical not-found error.
 			if (located && isNotFoundError(error)) {
@@ -1741,6 +1768,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							absolutePath = suffixMatch.absolutePath;
 							fileSize = retryStat.size;
 							isDirectory = retryStat.isDirectory();
+							specialKind = specialFileKind(retryStat);
 							suffixResolution = { from: localReadPath, to: suffixMatch.displayPath };
 						} catch {
 							// Suffix match candidate no longer stats — continue through
@@ -1758,6 +1786,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							absolutePath = approvedPlanPath;
 							fileSize = approvedPlanStat.size;
 							isDirectory = approvedPlanStat.isDirectory();
+							specialKind = specialFileKind(approvedPlanStat);
 							recoveredApprovedPlan = true;
 						} catch {
 							// The referenced plan disappeared after resolution; continue through
@@ -1774,6 +1803,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			} else {
 				throw error;
 			}
+		}
+		if (specialKind) {
+			throw new ToolError(
+				`Cannot read '${localReadPath}': it is a ${specialKind}, not a regular file or directory.`,
+			);
 		}
 		// Speculative reads open the authorized resolved target (absolutePath)
 		// but must behave exactly like an ordinary read of the requested
@@ -2460,12 +2494,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					content = [{ type: "text", text: outputText }];
 				}
 			}
-			if (located) {
-				// A located text read is a bounded page its URL re-reads with selectors: spilling it
-				// to an artifact would only duplicate recoverable content.
-				pagedSource = true;
+			// A page of artifact storage is re-readable with selectors: spilling it would only
+			// duplicate it into another artifact. Every other located read spills like a plain file.
+			if (located?.spec.artifactStore) pagedSource = true;
+			// Immutable sources have no write path, so the hint never lands in a written-back file.
+			if (located && immutable && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
 				const firstText = content.find((c): c is TextContent => c.type === "text");
-				if (firstText && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
+				if (firstText) {
 					firstText.text += `\n\n[${formatLocatedFileNotice(located.url, absolutePath, fileSize, false)}]`;
 				}
 			}

@@ -1,6 +1,4 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@applefm_swift//:defs.bzl", "APPLEFM_LINKOPTS")
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -19,8 +17,9 @@ genrule(
     target_compatible_with = ["@platforms//os:macos"],
 )
 
-# Apple Foundation Models bridge (src/applefm/build-bridge.sh): bridge.swift
-# with the toolchain @applefm_swift detected, else stub.c. The toolchain
+# Apple Foundation Models bridge (src/applefm/build-bridge.sh): a bridge.swift
+# dylib built with the toolchain @applefm_swift detected, else an empty file.
+# The addon embeds it as compile data and dlopens it only on macOS 27+. The toolchain
 # fingerprint in toolchain.txt is an input, so cached outputs never cross
 # toolchains. build.rs does the same for cargo builds.
 genrule(
@@ -28,23 +27,12 @@ genrule(
     srcs = [
         "src/applefm/bridge.swift",
         "src/applefm/build-bridge.sh",
-        "src/applefm/stub.c",
         "@applefm_swift//:toolchain.txt",
     ],
-    outs = ["libomp_applefm.a"],
+    outs = ["libomp_applefm.dylib"],
     cmd = select({
         "//bazel/triples:aarch64-apple-darwin": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ arm64 $$(cut -f1,2 $(location @applefm_swift//:toolchain.txt))",
         "//conditions:default": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ x86_64",
-    }),
-    target_compatible_with = ["@platforms//os:macos"],
-)
-
-cc_library(
-    name = "applefm_bridge_lib",
-    srcs = [":applefm_bridge"],
-    linkopts = select({
-        "//bazel/triples:aarch64-apple-darwin": APPLEFM_LINKOPTS,
-        "//conditions:default": [],
     }),
     target_compatible_with = ["@platforms//os:macos"],
 )
@@ -70,6 +58,7 @@ rust_binary(
         "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
 )
@@ -91,7 +80,10 @@ rust_shared_library(
         "src/desktop/linux/wayland/testdata/*.xkb",
         "fixtures/*.json",
     ]) + select({
-        "@platforms//os:macos": [":oauth_callback_darwin_helper"],
+        "@platforms//os:macos": [
+            ":applefm_bridge",
+            ":oauth_callback_darwin_helper",
+        ],
         "//conditions:default": [":oauth_callback_relay"],
     }),
     crate_features = [],
@@ -99,6 +91,7 @@ rust_shared_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = select({
         "@platforms//os:macos": {
+            "OMP_APPLEFM_BRIDGE": "$(execpath :applefm_bridge)",
             "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
         },
         "//conditions:default": {
@@ -130,21 +123,22 @@ rust_shared_library(
         # switched to /MT in lock-step via the static_link_msvcrt cc feature in
         # the native_addon transition (bazel/defs.bzl).
         "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
     version = "17.1.5",
-    deps = all_crate_deps(normal = True) + select({
-        "@platforms//os:macos": [":applefm_bridge_lib"],
-        "//conditions:default": [],
-    }) + [
+    deps = all_crate_deps(normal = True) + [
         "//crates/pi-ast",
         "//crates/pi-diff",
         "//crates/pi-edit",
         "//crates/pi-iso",
+        "//crates/pi-predict",
         "//crates/pi-shell",
         "//crates/pi-vcs",
+        "//crates/pi-vfs",
         "//crates/pi-voice",
         "//crates/pi-walker",
+        "//crates/vendor/napi",
     ],
 )
 

@@ -5,7 +5,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import type { RetryFallbackRole, ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -275,6 +275,36 @@ describe("subagent runtime model resolution", () => {
 		expect(result.modelOverride).toEqual(["primary/bad-runtime-model", "fallback/working-model"]);
 		expect(result.resolvedModel).toBe("fallback/working-model");
 		expect(result.resolvedModelIsFallback).toBe(true);
+	});
+
+	it("persists the installed subagent fallback role for cold revival (#13789)", async () => {
+		const primary = model("primary", "bad-runtime-model");
+		const fallback = model("fallback", "working-model");
+		let persisted: RetryFallbackRole | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			const session = createYieldingSession("none");
+			vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
+				persisted = init.retryFallback;
+				return "session-init";
+			});
+			return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "issue-13789",
+			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+			settings: Settings.isolated({}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+		expect(persisted).toEqual({ primary: "primary/bad-runtime-model", chain: ["fallback/working-model"] });
 	});
 
 	it("does not attribute the run to a fallback that never served a turn", async () => {
@@ -568,39 +598,6 @@ describe("subagent runtime model resolution", () => {
 			enableLsp: false,
 		});
 
-		expect(childModelRole).toBeUndefined();
-	});
-
-	it("treats a null fallback configuration as unset without installing a subagent chain", async () => {
-		const primary = model("lm-studio", "local-reviewer");
-		let childFallbackChains: unknown;
-		let childModelRole: string | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
-			childModelRole = options.settings?.getModelRoles()["subagent:single-model-malformed-fallback"];
-			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
-		});
-
-		const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
-		await runSubprocess({
-			cwd: "/tmp",
-			agent,
-			task: "work",
-			index: 0,
-			id: "single-model-malformed-fallback",
-			modelOverride: "lm-studio/local-reviewer",
-			settings: Settings.isolated({ "retry.fallbackChains": null as never }),
-			modelRegistry: {
-				refresh: async () => {},
-				getAvailable: () => [primary],
-				getApiKey: async () => "test-key",
-			} as never,
-			enableLsp: false,
-		});
-
-		// A configured null is unset (settings contract): the child reads the empty default.
-		expect(childFallbackChains).toEqual({});
 		expect(childModelRole).toBeUndefined();
 	});
 

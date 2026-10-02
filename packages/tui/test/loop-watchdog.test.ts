@@ -224,6 +224,31 @@ describe("LoopWatchdog", () => {
 
 		expect(cancel).toHaveBeenCalledTimes(1);
 	});
+
+	test("isStalled() reports a block while the tick is overdue and for thresholdMs after it runs late", () => {
+		// StdinBuffer asks this when an unmarked multiline burst arrives: during
+		// or right after a block it is batched typing (Enter must submit), on a
+		// responsive loop an input-method commit (one paste). Both orders in which
+		// a resumed loop runs the late tick and the stdin read must see the block.
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness(); // intervalMs=250, thresholdMs=250
+
+		wd.start(); // deadline 250
+		setNow(400); // 150ms overdue: a busy frame, not a stall
+		expect(wd.isStalled()).toBe(false);
+		setNow(560); // 310ms overdue and the tick has not run yet: blocked now
+		expect(wd.isStalled()).toBe(true);
+
+		fireTick(); // the late tick ends the block at 560 and re-arms for 810
+		setNow(800); // 240ms after the block ended
+		expect(wd.isStalled()).toBe(true);
+		setNow(811); // past the grace window, next tick barely due
+		expect(wd.isStalled()).toBe(false);
+
+		wd.stop();
+		setNow(5_000); // a stopped watchdog's stale deadline is not a stall
+		expect(wd.isStalled()).toBe(false);
+	});
 });
 
 /**
@@ -298,5 +323,17 @@ describe("LoopWatchdog long-block classification", () => {
 		h.fireTick();
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	test("isStalled() does not report a suspend/resume gap as a stall", () => {
+		// A laptop waking from sleep is not batched typing: input read before or
+		// after the resumed tick must still classify as a responsive loop.
+		const h = cpuHarness();
+
+		h.wd.start();
+		h.set(82_641, 3); // same gap as a wedge, but no CPU consumed
+		expect(h.wd.isStalled()).toBe(false);
+		h.fireTick();
+		expect(h.wd.isStalled()).toBe(false);
 	});
 });

@@ -13,7 +13,6 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ARTIFACTS_DIR = path.join(os.tmpdir(), "agent-artifacts");
 const REPO_ROOT = path.join(os.tmpdir(), "repo");
-const PLANS_DIR = path.join(os.tmpdir(), "plans");
 
 interface SessionOverrides {
 	artifactsDir?: string | null;
@@ -28,9 +27,7 @@ function makeSession(overrides: SessionOverrides): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: {
-			getPlansDirectory: () => PLANS_DIR,
-		},
+		settings: Settings.isolated(),
 		getArtifactsDir: () => overrides.artifactsDir ?? null,
 		getSessionId: () => overrides.sessionId ?? null,
 		getPlanModeState: () => overrides.planMode,
@@ -60,13 +57,6 @@ describe("resolvePlanPath resolves literally (no plan-mode redirect)", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
 		expect(await resolvePlanPath(session, "PLAN.md")).toBe(path.join(REPO_ROOT, "PLAN.md"));
 		expect(await resolvePlanPath(session, "src/foo.ts")).toBe(path.join(REPO_ROOT, "src", "foo.ts"));
-	});
-
-	it("resolves a local:// plan file to the session local root", async () => {
-		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
-		expect(await resolvePlanPath(session, "local://some-plan.md")).toBe(
-			path.join(ARTIFACTS_DIR, "local", "some-plan.md"),
-		);
 	});
 
 	it("unwraps a `[PATH#TAG]` hashline header to the inner filesystem path", async () => {

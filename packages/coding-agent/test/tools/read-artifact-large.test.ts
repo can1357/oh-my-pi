@@ -74,8 +74,6 @@ describe("read tool large artifact handling", () => {
 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
 		const output = getTextOutput(result);
 
-		expect(output).toContain("Unbounded raw read blocked for artifact://0");
-		expect(output).toContain("artifact://0:raw:1-3000");
 		// The notice must name the artifact file so it can be searched or copied.
 		// Only the directory prefix varies by host (a Windows temp dir sits under
 		// `%USERPROFILE%` and is displayed shortened), so match the path tail.
@@ -90,8 +88,8 @@ describe("read tool large artifact handling", () => {
 		expect(output).toContain("line-001");
 		expect(output).toContain("line-003");
 		expect(output).not.toContain("line-400");
-		expect(output).toContain("artifact://0:raw:1-3000");
-		expect(output).toMatch(/Backing file: .*session[/\\]0\.mcp\.log/);
+		// A large artifact page surfaces its backing file for search/copy workflows.
+		expect(output).toMatch(/session[/\\]0\.mcp\.log/);
 		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "artifact://0" });
 	});
 
@@ -99,11 +97,9 @@ describe("read tool large artifact handling", () => {
 		const result = await tool.execute("call-raw-range", { path: "artifact://0:raw:1-2" });
 		const output = getTextOutput(result);
 
-		expect(output).toStartWith("line-001");
-		expect(output).toContain("line-002");
-		expect(output).not.toContain("line-400");
 		// Raw chunks stay verbatim so copy/paste workflows never absorb the notice.
-		expect(output).not.toContain("Backing file:");
+		expect(output.split("\n")).toEqual(largeArtifactText().split("\n").slice(0, 2));
+		expect(output).not.toMatch(/0\.mcp\.log/);
 	});
 
 	it("returns exactly the requested raw artifact range without context padding", async () => {

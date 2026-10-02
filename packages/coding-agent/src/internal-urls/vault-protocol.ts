@@ -644,18 +644,25 @@ export class VaultProtocolHandler implements ProtocolHandler {
 
 	/**
 	 * Vault file or directory backing a plain filesystem URL; null for listings,
-	 * vault info, `?op=` queries, and missing entries without `create`. Resolving
-	 * an uncached vault root queries the Obsidian CLI once.
+	 * vault info, `?op=` queries, and missing entries without `create`. `create`
+	 * locates write targets, so it refuses directories. Resolving an uncached
+	 * vault root queries the Obsidian CLI once.
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		if (!isVaultEnabled()) throw new VaultDisabledError();
 		const parsed = parseVaultUrl(url);
 		if (parsed.kind !== "fs-file" && parsed.kind !== "fs-dir") return null;
 		const { root, targetPath } = await this.#resolveFsTarget(parsed, context);
-		const realTargetPath = await containedRealPath(targetPath, root, "vault");
+		const realTargetPath = await containedRealPath(targetPath, root, "vault", parsed.url);
+		if (!options?.create) return realTargetPath ?? null;
+		if (
+			parsed.kind === "fs-dir" ||
+			(realTargetPath !== undefined && (await fs.promises.stat(realTargetPath)).isDirectory())
+		) {
+			throw new Error(`vault:// URL must resolve to a file: ${parsed.url}`);
+		}
 		if (realTargetPath !== undefined) return realTargetPath;
-		if (!options?.create) return null;
-		await ensureCreatableWithinRoot(targetPath, root, "vault");
+		await ensureCreatableWithinRoot(targetPath, root, "vault", parsed.url);
 		return targetPath;
 	}
 
@@ -762,7 +769,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		const root = await this.#resolveVaultRoot(parsed.ref, context);
 		const resolvedRoot = await fs.promises.realpath(root);
 		const targetPath = parsed.relativePath ? path.resolve(resolvedRoot, parsed.relativePath) : resolvedRoot;
-		ensureWithinRoot(targetPath, resolvedRoot, "vault");
+		ensureWithinRoot(targetPath, resolvedRoot, "vault", parsed.url);
 		return { root: resolvedRoot, targetPath };
 	}
 
@@ -772,7 +779,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 	): Promise<InternalResource> {
 		const { root, targetPath } = await this.#resolveFsTarget(parsed, context);
 		const realTargetPath = await fs.promises.realpath(targetPath);
-		ensureWithinRoot(realTargetPath, root, "vault");
+		ensureWithinRoot(realTargetPath, root, "vault", parsed.url);
 		const stat = await fs.promises.stat(realTargetPath);
 		if (!stat.isDirectory()) {
 			throw new Error(`vault:// URL must resolve to a directory: ${parsed.url}`);
@@ -804,7 +811,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		context?: ResolveContext,
 	): Promise<InternalResource> {
 		const { root, targetPath } = await this.#resolveFsTarget(parsed, context);
-		const realTargetPath = await containedRealPath(targetPath, root, "vault");
+		const realTargetPath = await containedRealPath(targetPath, root, "vault", parsed.url);
 		if (realTargetPath === undefined) {
 			throw new Error(`Vault file not found: ${parsed.url}`);
 		}

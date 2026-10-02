@@ -112,8 +112,8 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 		backing: "file",
 		selectors: "lines",
 		immutable: true,
+		artifactStore: true,
 		linkable: true,
-		shellOperand: true,
 	};
 
 	promptDoc(): string {
@@ -133,7 +133,7 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const artifact = await resolveArtifactFile(url, context);
 
-		// Path consumers (search, bash URL expansion) use `locate`, which never
+		// Path consumers (search, the shell filesystem) use `locate`, which never
 		// reads the bytes; only content materialization is size-gated.
 		if (artifact.size > MAX_INLINE_ARTIFACT_BYTES) {
 			throw new Error(

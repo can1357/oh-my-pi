@@ -218,6 +218,25 @@ describe("config CLI schema coverage", () => {
 		const parsed: unknown = JSON.parse(output);
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
 	});
+	it("reports the value written to config.yml and the layer that still overrides it", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
+		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
+		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		process.env.PI_CONFIG_FILES = overlayPath;
+		try {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
+			expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+				key: "compaction.enabled",
+				value: true,
+				overriddenBy: "overlay",
+			});
+		} finally {
+			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = previousConfigFiles;
+		}
+	});
 	it("loads PI_CONFIG_FILES overlays in path-list order", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const baseOverlayPath = path.join(testAgentDir.path(), "base-overlay.yml");

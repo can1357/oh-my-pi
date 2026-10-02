@@ -71,6 +71,7 @@ fn path_policy(cwd: &std::path::Path, home: &std::path::Path) -> PathPolicy {
 		cwd:                  cwd.to_owned(),
 		home_dir:             home.to_owned(),
 		url_schemes:          Vec::new(),
+		url_alias_schemes:    Vec::new(),
 		plan_writable_roots:  Vec::new(),
 		plan_active:          false,
 		block_auto_generated: true,

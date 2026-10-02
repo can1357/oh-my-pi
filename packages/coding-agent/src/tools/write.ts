@@ -38,12 +38,12 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
 
-import { isReadTruncationNotice, splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
 import { outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, peelWriteUrlSelector, probeLiteralPathExists } from "./path-utils";
+import { formatPathRelativeToCwd, probeLiteralPathExists } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import {
 	enforcePlanModeWrite,
@@ -199,11 +199,30 @@ const writeSchema = type({
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
 export type WriteToolInput = typeof writeSchema.infer;
 
+/**
+ * Offset of the last non-blank line of LF-only `text` when that line is a `read`
+ * truncation notice, else -1. Walks lines backward from the end instead of splitting.
+ */
+function readTruncationNoticeStart(text: string): number {
+	let end = text.length;
+	while (end > 0) {
+		const start = text.lastIndexOf("\n", end - 1) + 1;
+		const line = text.slice(start, end);
+		if (line.trim().length > 0) return isReadTruncationNotice(line) ? start : -1;
+		end = start - 1;
+	}
+	return -1;
+}
+
+/** `normalizeToLF(text).length` without the copy: each CRLF collapses to one LF; a lone CR stays one char. */
+function lfNormalizedLength(text: string): number {
+	let length = text.length;
+	for (let at = text.indexOf("\r\n"); at !== -1; at = text.indexOf("\r\n", at + 2)) length--;
+	return length;
+}
+
 function endsWithReadTruncationNotice(content: string): boolean {
-	const lines = splitAddressableFileLines(normalizeToLF(content));
-	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
-	if (noticeIndex === -1) return false;
-	return isReadTruncationNotice(lines[noticeIndex]!);
+	return readTruncationNoticeStart(normalizeToLF(content)) !== -1;
 }
 
 async function readCurrentWriteSource(
@@ -242,12 +261,18 @@ async function readCurrentWriteSource(
  * the truncation marker, not character count, establishes as incomplete.
  */
 function readProjectionPayloadLength(content: string): number | undefined {
-	const lines = splitAddressableFileLines(normalizeToLF(content));
-	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
-	if (noticeIndex === -1 || !isReadTruncationNotice(lines[noticeIndex]!)) return undefined;
-	let end = noticeIndex;
-	while (end > 0 && lines[end - 1]!.trim().length === 0) end--;
-	return lines.slice(0, end).join("\n").length;
+	const text = normalizeToLF(content);
+	let payloadEnd = readTruncationNoticeStart(text);
+	if (payloadEnd === -1) return undefined;
+	// Back over the blank lines separating the payload from the notice. `lastIndexOf` clamps a
+	// negative start to 0, so the first line (ending at the LF at 0) needs the explicit guard.
+	while (payloadEnd > 0) {
+		const previousStart = payloadEnd > 1 ? text.lastIndexOf("\n", payloadEnd - 2) + 1 : 0;
+		if (text.slice(previousStart, payloadEnd - 1).trim().length > 0) break;
+		payloadEnd = previousStart;
+	}
+	// `payloadEnd` starts the first dropped line; the payload excludes the LF before it.
+	return Math.max(0, payloadEnd - 1);
 }
 
 function assertNotShorterReadProjection(
@@ -258,8 +283,8 @@ function assertNotShorterReadProjection(
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
 	if (rawPayloadLength === undefined || currentContent === undefined) return;
-	const payloadLength = writeContent === rawContent ? rawPayloadLength : normalizeToLF(writeContent).length;
-	if (payloadLength >= normalizeToLF(currentContent).length) return;
+	const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
+	if (payloadLength >= lfNormalizedLength(currentContent)) return;
 	throw new ToolError(
 		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
 	);
@@ -469,7 +494,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return { writethrough, deferred: enableDiagnostics ? this.#deferredDiagnostics : undefined };
 	}
 
-	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
+	async #resolveArchiveWritePath(writePath: string, signal?: AbortSignal): Promise<ResolvedArchiveWritePath | null> {
 		const candidates = parseArchivePathCandidates(writePath).filter(candidate => candidate.archivePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -477,14 +502,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 		const fallbackCandidate = candidates[candidates.length - 1]!;
 		const fallback: ResolvedArchiveWritePath = {
-			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.archivePath),
+			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.archivePath, signal),
 			archivePath: fallbackCandidate.archivePath,
 			archiveSubPath: normalizeArchiveWriteSubPath(fallbackCandidate.subPath),
 			exists: false,
 		};
 
 		for (const candidate of candidates) {
-			const absolutePath = await resolvePlanPath(this.session, candidate.archivePath);
+			const absolutePath = await resolvePlanPath(this.session, candidate.archivePath, signal);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -579,7 +604,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
-	async #resolveSqliteWritePath(writePath: string): Promise<ResolvedSqliteWritePath | null> {
+	async #resolveSqliteWritePath(writePath: string, signal?: AbortSignal): Promise<ResolvedSqliteWritePath | null> {
 		const candidates = parseSqlitePathCandidates(writePath).filter(candidate => candidate.sqlitePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -588,7 +613,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const fallbackCandidate = candidates[candidates.length - 1]!;
 		const fallbackTarget = parseSqliteWriteTarget(fallbackCandidate.subPath, fallbackCandidate.queryString);
 		const fallback: ResolvedSqliteWritePath = {
-			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.sqlitePath),
+			absolutePath: await resolvePlanPath(this.session, fallbackCandidate.sqlitePath, signal),
 			sqlitePath: fallbackCandidate.sqlitePath,
 			table: fallbackTarget.table,
 			key: fallbackTarget.key,
@@ -598,7 +623,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		let sawExistingNonSqlite = false;
 		for (const candidate of candidates) {
 			const target = parseSqliteWriteTarget(candidate.subPath, candidate.queryString);
-			const absolutePath = await resolvePlanPath(this.session, candidate.sqlitePath);
+			const absolutePath = await resolvePlanPath(this.session, candidate.sqlitePath, signal);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -727,9 +752,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		// A `<file>:conflict://N` target is normalized to its URL; the note tells the model.
 		const router = InternalUrlRouter.instance();
-		const recovered = recoverConflictUriPrefix(
-			peelWriteUrlSelector(router.normalize(unwrapHashlineHeaderPath(rawPath))),
-		);
+		const recovered = recoverConflictUriPrefix(router.peelWriteSelector(unwrapHashlineHeaderPath(rawPath), "write"));
 		const path = recovered.path;
 		const target = router.writeTarget(path);
 		const policy = target?.spec.write;
@@ -746,7 +769,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
 			policy?.scope !== "coordination" &&
-			!(this.session.getPlanModeState?.()?.enabled === true && (await targetsLocalSandbox(this.session, path)))
+			!(
+				this.session.getPlanModeState?.()?.enabled === true &&
+				(await targetsLocalSandbox(this.session, path, signal))
+			)
 		) {
 			throw new ToolError(
 				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
@@ -774,7 +800,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					// dispatched tool's own tier and policy).
 					if (policy?.scope !== "device") {
 						if (policy?.scope !== "coordination") {
-							await enforcePlanModeWrite(this.session, path, { op: "update" });
+							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 						}
 						emitWriteProgress(onUpdate, cleanContent, path);
 					}
@@ -808,10 +834,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// so write and read share one path.
 			}
 
-			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
+			const resolvedArchivePath = await this.#resolveArchiveWritePath(path, signal);
 			if (resolvedArchivePath) {
 				await enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
 					op: resolvedArchivePath.exists ? "update" : "create",
+					signal,
 				});
 
 				emitWriteProgress(
@@ -835,9 +862,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return archiveResult;
 			}
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
 			if (resolvedSqlitePath) {
-				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
+				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update", signal });
 
 				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
 				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
@@ -854,13 +881,18 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
-			await enforcePlanModeWrite(this.session, path, { op: "create" });
-			const absolutePath = await resolvePlanPath(this.session, path);
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+			await enforcePlanModeWrite(this.session, path, { op: "create", signal });
+			const absolutePath = await resolvePlanPath(this.session, path, signal);
+			// A located URL write keeps its URL identity in progress, results, and the hashline header.
+			const displayPath = target ? path : formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
+			const existing = await fs.stat(absolutePath).catch(() => undefined);
+			if (target && existing?.isDirectory()) {
+				throw new ToolError(`${target.url.protocol}// URL must resolve to a file: ${path}`);
+			}
 			// Check if file exists and is auto-generated before overwriting.
-			if (await fs.exists(absolutePath)) {
+			if (existing) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
 			await assertNotTruncatedFileReadProjection(
@@ -884,7 +916,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// use it so a drifted write (e.g. client format-on-save) still
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
 				const writeLine = `Successfully wrote ${Buffer.byteLength(cleanContent, "utf8")} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
@@ -910,7 +942,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const finalContent = diagnostics.finalContent;
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent);
+			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
 			const writeLine = `Successfully wrote ${Buffer.byteLength(finalContent, "utf8")} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {

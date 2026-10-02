@@ -180,8 +180,10 @@ export type DefinitionValue<D> = D extends { type: "boolean"; default: undefined
 	? boolean | undefined
 	: D extends { type: "boolean" }
 		? boolean
-		: D extends { type: "string" }
-			? string | undefined
+		: D extends { type: "string"; default: infer V }
+			? undefined extends V
+				? string | undefined
+				: string
 			: D extends { type: "number"; default: undefined }
 				? number | undefined
 				: D extends { type: "number" }
@@ -268,9 +270,7 @@ export abstract class Derived<T> {
 			const value = this.compute(inputs, settings);
 			// Keep identity stable across equal recomputations so downstream derivations and
 			// listeners comparing by identity don't churn on unrelated layer rebuilds.
-			if (typeof value !== "object" || value === null || !Bun.deepEquals(cached.value, value)) {
-				cached.value = value;
-			}
+			if (!settingValuesEqual(cached.value, value)) cached.value = value;
 			cached.inputs = inputs;
 		}
 		cached.revision = revision;
@@ -310,7 +310,7 @@ export abstract class Derived<T> {
 				queued = false;
 				if (!active) return;
 				const next = this.get(settings);
-				if (Bun.deepEquals(next, current)) return;
+				if (settingValuesEqual(next, current)) return;
 				const previous = current;
 				current = next;
 				run(next, previous);
@@ -323,6 +323,38 @@ export abstract class Derived<T> {
 		if ("settings" in scope) scope.addDisposer?.(unsubscribe);
 		return unsubscribe;
 	}
+}
+
+/**
+ * Deep equality of setting values that, unlike `Bun.deepEquals`, also compares the key order of
+ * plain objects: record order carries precedence (`edit.modelVariants` takes the first match), so a
+ * reorder is a change. Values other than plain objects and arrays compare with `Bun.deepEquals`.
+ */
+export function settingValuesEqual(a: unknown, b: unknown): boolean {
+	if (Object.is(a, b)) return true;
+	if (isArray(a) && isArray(b)) {
+		if (a.length !== b.length) return false;
+		for (let i = 0; i < a.length; i++) if (!settingValuesEqual(a[i], b[i])) return false;
+		return true;
+	}
+	if (!isPlainObject(a) || !isPlainObject(b)) return Bun.deepEquals(a, b);
+	// Positional key comparison needs `b`'s keys materialized; `a` streams.
+	const otherKeys = Object.keys(b);
+	let index = 0;
+	for (const key in a) {
+		if (key !== otherKeys[index++] || !settingValuesEqual(a[key], b[key])) return false;
+	}
+	return index === otherKeys.length;
+}
+
+function isArray(value: unknown): value is readonly unknown[] {
+	return Array.isArray(value);
+}
+
+function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
+	if (typeof value !== "object" || value === null) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
 }
 
 function sameInputs(a: readonly unknown[], b: readonly unknown[]): boolean {
@@ -603,15 +635,16 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return [settings.rawValue(this)];
 	}
 
-	compute(inputs: readonly unknown[]): T {
+	compute(inputs: readonly unknown[], settings: Settings): T {
 		const raw = inputs[0];
 		if (raw === undefined || this.accepts(raw)) {
-			// A fixed value re-arms the warning, so breaking it again is reported again.
-			warnedInvalid.delete(this.id);
+			// A fixed value re-arms this instance's warning, so breaking it again is reported again.
+			settings.warnState.invalid.delete(this.id);
 			return raw === undefined ? this.default : (raw as T);
 		}
-		if (!warnedInvalid.has(this.id) || !Bun.deepEquals(warnedInvalid.get(this.id), raw)) {
-			warnedInvalid.set(this.id, raw);
+		const warned = settings.warnState.invalid;
+		if (!warned.has(this.id) || !Bun.deepEquals(warned.get(this.id), raw)) {
+			warned.set(this.id, raw);
 			logger.warn("Settings: ignoring invalid value, using the default", { setting: this.id, value: raw });
 		}
 		return this.default;
@@ -638,20 +671,22 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
-	 * Registry plumbing run by `Settings` on every load/reload for the configured value.
+	 * Registry plumbing run by `Settings` on every load/reload for the value `settings` configures.
 	 *
-	 * @throws Error when `raw` fails `validate`. Unknown {@link ArrayDefinition.items} entries only warn, once each.
+	 * @throws Error when `raw` fails `validate`. Unknown {@link ArrayDefinition.items} entries only warn,
+	 * once each per instance.
 	 */
-	checkConfigured(raw: unknown): void {
+	checkConfigured(settings: Settings, raw: unknown): void {
 		this.definition.validate?.(raw);
 		const unknown = this.#unknownItems(raw);
-		let warned = warnedItems.get(this.id);
+		const items = settings.warnState.items;
+		let warned = items.get(this.id);
 		// Entries no longer configured re-arm, so adding one back is reported again.
 		for (const entry of warned ?? []) if (!unknown.includes(entry)) warned?.delete(entry);
 		if (unknown.length === 0) return;
 		if (!warned) {
 			warned = new Set();
-			warnedItems.set(this.id, warned);
+			items.set(this.id, warned);
 		}
 		const label = this.definition.type === "array" ? this.definition.items?.label : undefined;
 		for (const entry of unknown) {
@@ -693,15 +728,39 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		else settingsOf(scope).writeValue(this, this.#normalize(value), "override");
 	}
 
-	/** Removes the key from the persisted global config, so lower layers and the default apply again. */
+	/**
+	 * Removes the key from the persisted global config: any other layer or environment variable that
+	 * configures this setting still applies, otherwise the default.
+	 */
 	unset(scope: ScopeLike): void {
 		settingsOf(scope).unsetGlobalValue(this);
 	}
 
 	/**
+	 * Persists one entry of this record setting to the global config; `undefined` removes the entry.
+	 * The record's other entries, persisted or supplied by another layer, stay as they are.
+	 *
+	 * @throws Error when this is not a record setting or the entry does not fit the definition.
+	 */
+	setEntry(scope: ScopeLike, key: string, value: RecordEntryOf<T> | undefined): void {
+		settingsOf(scope).writeEntry(this, key, value === undefined ? undefined : this.#normalizeEntry(key, value));
+	}
+
+	/**
+	 * Adds (`member`) or removes `item` in this list setting's persisted global value, leaving every
+	 * other item as it is.
+	 *
+	 * @throws Error when this is not a list setting or the resulting list does not fit the definition.
+	 */
+	setMember(scope: ScopeLike, item: string, options: { member: boolean }): void {
+		settingsOf(scope).writeMember(this, item, options);
+	}
+
+	/**
 	 * Holds the default as a runtime override only while no persisted layer — global, project,
 	 * `--config` overlay — configures this setting; no-op when the environment or any layer already
-	 * configures it, and dropped when a reload or re-scope configures it (protocol-host defaults).
+	 * configures it, and dropped by a global write ({@link set}, {@link setEntry}, {@link setMember}) or
+	 * {@link unset} of this setting or when a reload or re-scope configures it (protocol-host defaults).
 	 */
 	pinDefault(scope: ScopeLike): void {
 		if (this.envValue() === undefined) settingsOf(scope).pinDefaultValue(this);
@@ -709,6 +768,12 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	#normalize(value: T): unknown {
 		return this.definition.normalize ? this.definition.normalize(value) : value;
+	}
+
+	/** `value` as the `key` entry of this record, normalized like a whole-record write. */
+	#normalizeEntry(key: string, value: unknown): unknown {
+		const normalize = this.definition.normalize;
+		return normalize ? (normalize({ [key]: value }) as Record<string, unknown>)[key] : value;
 	}
 
 	/** Removes a runtime override, restoring the persisted/default value. */
@@ -729,6 +794,8 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 /** Value type of a handle or derivation. */
 export type SettingValueOf<H> = H extends Derived<infer T> ? T : never;
+/** Entry value type of a record setting's value `T` (see {@link Setting.setEntry}). */
+export type RecordEntryOf<T> = T extends Readonly<Record<string, infer V>> ? V : never;
 /** Handle of any registered setting (runtime/string-keyed surfaces: UI, CLI, `cfg://`). */
 export type AnySetting = Setting<unknown>;
 
@@ -766,10 +833,28 @@ export function all(): readonly AnySetting[] {
 // Warn-once diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Invalid configured value each setting (by id) last warned about; re-armed once the value is fixed. */
-const warnedInvalid = new Map<string, unknown>();
-/** Unknown `items` entries each setting (by id) warned about that are still configured. */
-const warnedItems = new Map<string, Set<string>>();
+/**
+ * Warn-once diagnostics of one settings instance, stored at `Settings.warnState`: each is re-armed
+ * only by that instance's own values, so instances reading different values never re-trigger each other.
+ */
+export interface WarnState {
+	/** Invalid configured value each setting (by id) last warned about; re-armed once the value is fixed. */
+	readonly invalid: Map<string, unknown>;
+	/** Unknown `items` entries each setting (by id) warned about that are still configured. */
+	readonly items: Map<string, Set<string>>;
+}
+
+/**
+ * Registry plumbing run by `Settings` when it derives `target` from `source` (overlays, cwd clones):
+ * `target` takes over `source`'s warn-once diagnostics, so the values it inherits are not reported again.
+ */
+export function inheritWarnings(target: Settings, source: Settings): void {
+	const { invalid, items } = target.warnState;
+	invalid.clear();
+	items.clear();
+	for (const [id, value] of source.warnState.invalid) invalid.set(id, value);
+	for (const [id, entries] of source.warnState.items) items.set(id, new Set(entries));
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Process-wide effects
@@ -817,7 +902,7 @@ export function effect<T>(value: Derived<T>, apply: (value: T) => void | Promise
 			let current = value.get(settings);
 			const unsubscribe = settings.onEffectiveChange(value.sources, () => {
 				const next = value.get(settings);
-				if (Bun.deepEquals(next, current)) return;
+				if (settingValuesEqual(next, current)) return;
 				current = next;
 				run(next);
 			});
@@ -827,7 +912,7 @@ export function effect<T>(value: Derived<T>, apply: (value: T) => void | Promise
 		reset: defaults => {
 			if (!applied) return;
 			const next = value.get(defaults);
-			if (!Bun.deepEquals(next, applied.value)) run(next);
+			if (!settingValuesEqual(next, applied.value)) run(next);
 		},
 	};
 	effects.add(entry);
@@ -890,13 +975,10 @@ export function unbindEffects(): void {
 }
 
 /**
- * Test reset: drops every effect hold, re-applies each effect whose last applied value differs from
- * the one `defaults` yields (restoring process state an earlier test changed), and re-arms
- * warn-once diagnostics.
+ * Test reset: drops every effect hold and re-applies each effect whose last applied value differs
+ * from the one `defaults` yields (restoring process state an earlier test changed).
  */
 export function resetRegistryForTest(defaults: Settings): void {
 	unbindEffects();
 	for (const entry of effects) entry.reset(defaults);
-	warnedInvalid.clear();
-	warnedItems.clear();
 }

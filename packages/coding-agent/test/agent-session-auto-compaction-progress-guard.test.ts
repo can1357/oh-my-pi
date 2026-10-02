@@ -70,6 +70,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let compactHookEnabled = true;
+	let compactEvents: { fromExtension?: boolean; compactionEntry?: CompactionEntry }[] = [];
 	const tempDirs: TempDir[] = [];
 
 	const NOTICE_SOURCE = "compaction";
@@ -88,7 +89,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// temporary extension for every test.
 		const extensionRunner = {
 			hasHandlers: (type: string) => compactHookEnabled && type === "session_before_compact",
-			emit: async (event: { type: string; preparation?: CompactionPreparation }) => {
+			emit: async (event: {
+				type: string;
+				preparation?: CompactionPreparation;
+				fromExtension?: boolean;
+				compactionEntry?: CompactionEntry;
+			}) => {
+				if (event.type === "session_compact") compactEvents.push(event);
 				if (event.type !== "session_before_compact" || !event.preparation) return undefined;
 				return {
 					compaction: {
@@ -135,6 +142,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	beforeEach(() => {
 		compactHookEnabled = true;
+		compactEvents = [];
 		sessionManager = SessionManager.inMemory();
 
 		// Seed a minimal branch so prepareCompaction() returns a preparation.
@@ -437,6 +445,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(0);
+		// The hook-provided summary is reported to `session_compact` as extension-owned.
+		expect(compactEvents).toHaveLength(1);
+		expect(compactEvents[0]?.fromExtension).toBe(true);
+		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "compacted", fromExtension: true });
 	});
 
 	it("auto-continues after compaction while an active goal still needs work", async () => {
@@ -886,6 +898,8 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	it("drops a length stop and retries after handoff recovery commits", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		// Over threshold: the window, not the output cap, ran out, so recovery compacts.
+		cfgCompactionThresholdTokens.set(session.settings, 10_000);
 		cfgCompactionEnabled.set(session.settings, true);
 		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		compactHookEnabled = false;
@@ -958,6 +972,89 @@ describe("AgentSession auto-compaction progress guard", () => {
 				}),
 			}),
 		);
+		// Native (handoff) compaction is not extension-owned.
+		expect(compactEvents).toHaveLength(1);
+		expect(compactEvents[0]?.fromExtension).toBe(false);
+		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "handoff document" });
+		expect(compactEvents[0]?.compactionEntry?.fromExtension).toBeFalsy();
+	});
+
+	describe("length stop below the compaction threshold", () => {
+		const lengthStop = (content: AssistantMessage["content"]): AssistantMessage => ({
+			role: "assistant",
+			content,
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "length",
+			usage: {
+				input: 10_000,
+				output: 1_024,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 11_024,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+
+		async function endTurn(message: AssistantMessage): Promise<void> {
+			sessionManager.appendMessage(message);
+			session.agent.emitExternalEvent({ type: "message_end", message });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [message] });
+			await session.waitForIdle();
+		}
+
+		beforeEach(() => {
+			cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+			cfgCompactionEnabled.set(session.settings, true);
+			cfgContextPromotionEnabled.set(session.settings, false);
+			compactHookEnabled = false;
+		});
+
+		it("keeps a truncated deliverable without compacting or retrying", async () => {
+			// The Opus 1024-token `length` stops: output cap, not window, ran out;
+			// compacting a half-empty window only destroyed history.
+			const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+			const warnings: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.level === "warning") warnings.push(event.message);
+			});
+			const truncated = lengthStop([{ type: "text", text: "half an answer" }]);
+
+			await endTurn(truncated);
+
+			expect(handoffSpy).not.toHaveBeenCalled();
+			expect(continueSpy).not.toHaveBeenCalled();
+			expect(warnings.some(message => /output limit/.test(message))).toBe(true);
+			expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "message", message: truncated });
+			expect(session.agent.state.messages).toContain(truncated);
+		});
+
+		it("retries a reasoning-only turn without compacting, telling the model its reasoning was discarded", async () => {
+			// Signed thinking is replay-worthy but delivers nothing: the budget went
+			// to reasoning, so retry rather than keep a truncated non-answer. The retry
+			// must not re-send the identical context: a model that burned the whole cap
+			// planning would re-plan into the same cap forever.
+			const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+			await endTurn(lengthStop([{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" }]));
+
+			expect(handoffSpy).not.toHaveBeenCalled();
+			expect(continueSpy).toHaveBeenCalledTimes(1);
+			expect(sessionManager.getBranch()).not.toContainEqual(
+				expect.objectContaining({
+					type: "message",
+					message: expect.objectContaining({ role: "assistant", stopReason: "length" }),
+				}),
+			);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({
+				role: "developer",
+				content: [{ type: "text", text: expect.stringContaining("1024-token output limit") }],
+			});
+		});
 	});
 
 	it("durably caps repeated empty length-stop recovery across restart", async () => {
@@ -984,10 +1081,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		cfgContextPromotionEnabled.set(session.settings, false);
 		compactHookEnabled = false;
-		// Shake schedules a `shake-retry` continuation each pass (nothing to reclaim,
-		// but the incomplete turn is not over threshold), re-entering Case 3 on the
-		// next empty length turn — the loop the report hit. Without a cap it never
-		// terminates.
+		// Each empty turn is below threshold with nothing actionable, so recovery
+		// schedules a plain retry that re-enters Case 3 on the next empty length
+		// turn — the loop the report hit. Without a cap it never terminates.
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
@@ -1033,6 +1129,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(attempts).toBe(INCOMPLETE_RECOVERY_MAX_RETRIES + 1);
 		expect(continueSpy).toHaveBeenCalledTimes(INCOMPLETE_RECOVERY_MAX_RETRIES);
 		expect(errorNotices.some(message => /length/i.test(message))).toBe(true);
+		// The capped turn is dropped from history; its failure must stay visible to
+		// post-settle readers, or the task executor sees an idle run and re-prompts
+		// it straight back into the loop.
+		expect(session.getLastAssistantMessage()).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("Length-stop recovery gave up"),
+		});
 		expect(sessionManager.getBranch()).not.toContainEqual(
 			expect.objectContaining({
 				type: "message",

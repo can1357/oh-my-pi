@@ -50,6 +50,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		},
 		prompt: async (_text: string, _options?: PromptOptions) => {
 			onPrompt({ emit });
+			return true;
 		},
 	};
 	return session as unknown as AgentSession;
@@ -206,7 +207,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
-	it("never grants subagents wait, and requires write for peers", async () => {
+	it("grants wait only to unrestricted subagents that can start background work, and requires write for peers", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -218,20 +219,28 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const writableResult = await runSubprocess({
 			...baseOptions,
 			id: "writable-child",
-			agent: { ...baseAgent, tools: ["read", "write"] },
+			agent: { ...baseAgent, tools: ["read", "write", "bash"] },
 		});
 		const spawningResult = await runSubprocess({
 			...baseOptions,
 			id: "spawning-child",
 			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
 		});
+		const restrictedResult = await runSubprocess({
+			...baseOptions,
+			id: "restricted-child",
+			agent: { ...baseAgent, tools: ["read", "bash"] },
+			restrictToolNames: true,
+		});
 
 		expect(readOnlyResult.exitCode).toBe(0);
 		expect(writableResult.exitCode).toBe(0);
 		expect(spawningResult.exitCode).toBe(0);
+		expect(restrictedResult.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
-		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write"]);
-		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "bash", "wait"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "wait"]);
+		expect(spy.mock.calls[3]?.[0]?.toolNames).toEqual(["read", "bash"]);
 
 		const promptText = (index: number): string => {
 			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
@@ -628,6 +637,32 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 			sessionOptions?.settings ? cfgTierAnthropic.get(sessionOptions?.settings) : undefined,
 			sessionOptions?.settings ? cfgTierGoogle.get(sessionOptions?.settings) : undefined,
 		]).toEqual(["flex", "none", "flex"]);
+	});
+
+	it("drops inherited live tiers a family can't realize instead of failing the spawn", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		// A resumed parent session file can carry a live tier its family never realizes.
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-inherited-unrealizable-tier",
+			settings: Settings.isolated({ "tier.subagent": "inherit" }),
+			parentServiceTier: { openai: "flex", anthropic: "flex" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected createAgentSession to receive settings");
+		expect([
+			cfgTierOpenai.get(childSettings),
+			cfgTierAnthropic.get(childSettings),
+			cfgTierGoogle.get(childSettings),
+		]).toEqual(["flex", "none", "none"]);
 	});
 
 	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {

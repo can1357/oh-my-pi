@@ -475,11 +475,12 @@ export function buildSessionContext(
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
 
 		// A natively replayed summary must not invalidate the retained tail's
-		// bound thinking: stamping it with the entry commit timestamp would
-		// expose that as historyRewriteAt newer than the tail and strip its
-		// signatures on the next request. Predate the marker before the first
-		// retained entry instead (other lanes keep the commit timestamp).
-		let summaryTimestamp = compaction.timestamp;
+		// bound thinking: the commit timestamp as historyRewriteAt would be newer
+		// than the tail and strip its signatures on the next request. Predate the
+		// marker before the first retained entry instead (other lanes use the
+		// commit timestamp). The summary itself keeps the commit timestamp, which
+		// still retires the tail's pre-compaction usage reports.
+		let historyRewriteAt: number | undefined;
 		if (anthropicPayload !== undefined) {
 			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
 			const snapshotIdx =
@@ -491,9 +492,7 @@ export function buildSessionContext(
 				(snapshotIdx >= 0 && snapshotIdx < compactionIdx - 1 ? path[snapshotIdx + 1] : undefined) ??
 				path[compactionIdx + 1];
 			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
-			if (Number.isFinite(retainedAt)) {
-				summaryTimestamp = new Date(retainedAt - 1).toISOString();
-			}
+			if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
 		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
@@ -502,7 +501,7 @@ export function buildSessionContext(
 		const compactionSummaryMsg = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
-			summaryTimestamp,
+			compaction.timestamp,
 			{
 				shortSummary: compaction.shortSummary,
 				providerPayload,
@@ -510,6 +509,7 @@ export function buildSessionContext(
 				warning: compaction.warning,
 				method: compaction.method,
 				tokensAfter: compaction.tokensAfter,
+				historyRewriteAt,
 			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
@@ -617,7 +617,21 @@ export function buildSessionContext(
 		if (notes && renderedNotes.length > 0) {
 			const sourceEntry = path.find(entry => entry.id === notes.entryId);
 			if (sourceEntry) {
-				messages.unshift(
+				// A native Anthropic compaction block must open the request, and the
+				// provider folds it into a directly following retained assistant turn
+				// (whose signed thinking is bound to that prefix). Nothing may precede
+				// the block or split that fold, so the notes follow the summary and any
+				// retained assistant turn with its tool results.
+				const head = messages[0];
+				let insertAt = 0;
+				if (head?.role === "compactionSummary" && head.providerPayload?.type === "anthropicCompaction") {
+					insertAt = 1;
+					if (messages[insertAt]?.role === "assistant") insertAt++;
+					while (messages[insertAt]?.role === "toolResult") insertAt++;
+				}
+				messages.splice(
+					insertAt,
+					0,
 					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
 				);
 			}

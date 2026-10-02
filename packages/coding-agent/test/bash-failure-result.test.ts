@@ -166,29 +166,30 @@ describe("BashTool skill:// working directory", () => {
 		};
 	}
 
-	it("runs a command with a bare skill URI as cwd", async () => {
-		const { dir, skillDir, skill } = await skillFixture();
+	it("runs a command with a bare skill URI as cwd, resolving relative paths inside it", async () => {
+		const { dir, skill } = await skillFixture();
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cwd", { command: "pwd", cwd: "skill://docs" });
+			const result = await tool.execute("call-skill-cwd", { command: "pwd; cat SKILL.md", cwd: "skill://docs" });
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBeUndefined();
-			expect(text).toContain(skillDir);
+			expect(text).toContain("skill://docs");
+			expect(text).toContain("body");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("runs a leading cd into a bare skill URI", async () => {
-		const { dir, skillDir, skill } = await skillFixture();
+		const { dir, skill } = await skillFixture();
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && pwd" });
+			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && cat SKILL.md" });
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
 			expect(result.isError).toBeUndefined();
-			expect(text).toContain(skillDir);
+			expect(text).toContain("body");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
@@ -218,14 +219,16 @@ describe("BashTool skill:// containment failures", () => {
 		};
 	}
 
-	it("rejects a command reading past the plugin boundary instead of running it", async () => {
-		const { dir, skill } = await containedFixture();
+	it("refuses a read through a symlink past the plugin boundary", async () => {
+		const { dir, outsideFile, skill } = await containedFixture();
+		await fs.symlink(outsideFile, path.join(skill.baseDir, "leak.md"));
 		try {
 			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-leak", { command: "cat skill://docs/leak.md" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
 
-			await expect(tool.execute("call-skill-leak", { command: "cat skill://docs" })).rejects.toThrow(
-				"resolves outside the plugin root",
-			);
+			expect(result.isError).toBe(true);
+			expect(text).not.toContain("outside contents");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

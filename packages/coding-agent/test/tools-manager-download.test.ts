@@ -39,7 +39,7 @@ describe("tool asset downloads", () => {
 		mockDownloadResponse(new Response(body));
 		const controller = new AbortController();
 
-		const download = downloadFile("https://example.test/tool.bin", dest, controller.signal);
+		const download = downloadFile("https://example.test/tool.bin", dest, { signal: controller.signal });
 		await stalled.promise;
 		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
 

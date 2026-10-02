@@ -1,5 +1,7 @@
 import type { Context, Model, Tool } from "@oh-my-pi/pi-ai";
+import { stopsOutputAtContextWindow } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
+import { findRequestUsageAnchor } from "./compaction/transcript-tokens";
 import type { Tokenizer } from "./tokenizer";
 
 /** Smallest output cap {@link fitOutputTokensToContextWindow} will request. */
@@ -9,10 +11,22 @@ export const MIN_FITTED_OUTPUT_TOKENS = 1024;
  * Local counts are padded by 1/this before sizing the output cap: the
  * provider's tokenizer can disagree with ours by a few percent, and
  * undercounting reproduces the overflow this guards against. This is a
- * tokenizer-error margin on the prompt, not a context reserve; compaction's
- * own reserve (`resolveBudgetReserveTokens`) still decides when to compact.
+ * tokenizer-error margin on locally counted text only (provider-reported
+ * usage is exact), not a context reserve; compaction's own reserve
+ * (`resolveBudgetReserveTokens`) still decides when to compact.
  */
 const PROMPT_ESTIMATE_MARGIN_DIVISOR = 10;
+
+/**
+ * Absolute headway subtracted from the remaining room (unconditionally, on anchored and
+ * fully-local counts alike). Proportional padding covers
+ * tokenizer drift that scales with the prompt, but a host can still count a few tokens more
+ * than any local estimate can see (chat-template framing, reasoning wrappers). Measured
+ * against a 262,144-token host: fitted caps landed +11 to +42 tokens over and were rejected
+ * with 400s. 64 tokens covers the observed drift with margin to spare; the
+ * {@link MIN_FITTED_OUTPUT_TOKENS} floor still applies.
+ */
+export const OUTPUT_FIT_HEADWAY_TOKENS = 64;
 
 /**
  * Output cap for a request, so prompt plus output stays inside the model's
@@ -26,12 +40,20 @@ const PROMPT_ESTIMATE_MARGIN_DIVISOR = 10;
  * compaction triggers, and side turns (`/btw`, recaps) have no overflow
  * recovery at all.
  *
+ * The prompt size is the provider's own report from the newest trustworthy
+ * assistant turn (see {@link findRequestUsageAnchor}) plus a local count of
+ * only the messages appended after it; the whole context is counted locally
+ * only when no turn can anchor (fresh or freshly rewritten context).
+ *
  * Returns `maxTokens` unchanged when the requested cap already fits, the
- * model declares no window, or nothing would be requested (including an
+ * model declares no window, the host ends generation at the window itself
+ * instead of rejecting the request (`stops-output-at-context-window`, e.g.
+ * Claude 4.5+ on the Claude API), or nothing would be requested (including an
  * OpenRouter-hosted model with no caller cap: the transport omits the catalog
  * default there so each upstream self-caps, and a fitted value would turn into
  * an explicit cap that filters upstreams). Otherwise returns
- * the remaining room (never below {@link MIN_FITTED_OUTPUT_TOKENS}); a
+ * the remaining room minus {@link OUTPUT_FIT_HEADWAY_TOKENS} (never below
+ * {@link MIN_FITTED_OUTPUT_TOKENS}); a
  * prompt that fills the whole window still overflows and is left to the
  * caller's compaction. Near a full window the floor means a turn can stop on
  * `length` instead of failing with a 400.
@@ -46,7 +68,7 @@ const PROMPT_ESTIMATE_MARGIN_DIVISOR = 10;
  * and the request can still exceed the window as before.
  */
 export function fitOutputTokensToContextWindow(
-	model: Pick<Model, "contextWindow" | "maxTokens"> & { compat?: Model["compat"] },
+	model: Model,
 	context: Context,
 	maxTokens: number | undefined,
 	tokenizer: Tokenizer,
@@ -55,10 +77,9 @@ export function fitOutputTokensToContextWindow(
 	const requested = maxTokens ?? model.maxTokens;
 	const contextWindow = model.contextWindow;
 	if (!requested || !contextWindow || contextWindow <= 0) return maxTokens;
+	if (stopsOutputAtContextWindow(model)) return maxTokens;
 
-	const counted = countContextTokens(context, tokenizer);
-	const promptTokens = counted + Math.ceil(counted / PROMPT_ESTIMATE_MARGIN_DIVISOR);
-	const room = contextWindow - promptTokens;
+	const room = contextWindow - countPromptTokens(context, tokenizer) - OUTPUT_FIT_HEADWAY_TOKENS;
 	if (room >= requested) return maxTokens;
 	return Math.max(MIN_FITTED_OUTPUT_TOKENS, room);
 }
@@ -91,6 +112,22 @@ function toolFragments(tools: readonly Tool[]): string[] {
 	const fragments: string[] = [];
 	for (const tool of tools) fragments.push(tool.name, tool.description, stringifyJson(tool.parameters) ?? "");
 	return fragments;
+}
+
+function withMargin(localTokens: number): number {
+	return localTokens + Math.ceil(localTokens / PROMPT_ESTIMATE_MARGIN_DIVISOR);
+}
+
+/** Provider-anchored prompt size; falls back to a full local count when nothing anchors. */
+function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
+	const { messages } = context;
+	const anchor = findRequestUsageAnchor(messages);
+	if (!anchor) return withMargin(countContextTokens(context, tokenizer));
+	let tail = 0;
+	for (let index = anchor.index + 1; index < messages.length; index++) {
+		tail += tokenizer.countMessage(messages[index]);
+	}
+	return anchor.tokens + withMargin(tail);
 }
 
 function countContextTokens(context: Context, tokenizer: Tokenizer): number {
