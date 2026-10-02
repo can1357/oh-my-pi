@@ -996,6 +996,16 @@ export class RpcClient {
 	}
 
 	/**
+	 * Fork into a new session file and switch to it: history up to and including
+	 * `entryId`, or the whole session when omitted.
+	 * @returns Object with `cancelled: true` if an extension cancelled the fork
+	 */
+	async fork(entryId?: string): Promise<{ cancelled: boolean }> {
+		const response = await this.#send({ type: "fork", entryId });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Get messages available for branching.
 	 */
 	async getBranchMessages(): Promise<Array<{ entryId: string; text: string }>> {
