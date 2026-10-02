@@ -138,7 +138,7 @@ function setupProcessTerminal() {
 	terminal.onGlyphProtocolReport(supported => reports.push(supported));
 	terminal.start(
 		data => received.push(data),
-		() => { },
+		() => {},
 	);
 	return { terminal, writes, received, reports };
 }
