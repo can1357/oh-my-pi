@@ -465,7 +465,7 @@ describe("isolated auto-learn capture", () => {
 				});
 			};
 			Object.assign(fetchMock, { preconnect: fetch.preconnect });
-			await createAutoLearnCaptureRunner({
+			const runCapture = createAutoLearnCaptureRunner({
 				sourceAgent,
 				captureTools: () => [learnTool, captureTool("manage_skill", "Manage skills")],
 				createAgent: options =>
@@ -480,7 +480,20 @@ describe("isolated auto-learn capture", () => {
 								statefulResponses: false,
 							}),
 					}),
-			})("Record the lesson");
+			});
+			const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
+			if (api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
+			try {
+				await runCapture("Record the lesson");
+			} finally {
+				if (api === "openrouter") {
+					if (previousOpenRouterResponses === undefined) {
+						delete Bun.env.PI_OPENROUTER_RESPONSES;
+					} else {
+						Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
+					}
+				}
+			}
 			expect(requests).toHaveLength(2);
 			const [first, second] = requests;
 			expect(second.input.slice(0, first.input.length)).toEqual(first.input);
