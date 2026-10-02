@@ -1579,25 +1579,26 @@ export class CustomEditor extends Editor {
 
 			// Intercept configured exit shortcut. When the key doubles as
 			// forward-delete (readline ^D: the default app.exit binding overlaps
-			// tui.editor.deleteCharForward) and the buffer is non-empty, perform
-			// the delete here instead of quitting. Invoking the operation directly
-			// — not falling through, not redispatching the raw key — keeps the
-			// exit chord's precedence slot on both sides: a later app action or
+			// tui.editor.deleteCharForward) and text sits at or after the cursor,
+			// perform the delete here instead of quitting. Invoking the operation
+			// directly — not falling through, not redispatching the raw key — keeps
+			// the exit chord's precedence slot on both sides: a later app action or
 			// extension handler bound to the same chord cannot steal it, and
 			// neither can an earlier base-editor action (e.g. a user-bound
 			// tui.input.submit, which Editor.handleInput checks before
-			// deleteCharForward). Only an empty buffer exits; firing onExit is
-			// the controller's chance to snapshot the current text as a draft
-			// before shutting down. Exit keys with no forward-delete role always
-			// exit. Draft presence is read off the buffer alone: attachments live
-			// as inline chip tokens, while `pendingImages` / `pendingTexts`
+			// deleteCharForward). With the cursor at the end of the buffer (or an
+			// empty buffer) there is nothing to delete, so the key exits; firing
+			// onExit is the controller's chance to snapshot the current text as a
+			// draft before shutting down. Exit keys with no forward-delete role
+			// always exit. Draft presence is read off the buffer alone: attachments
+			// live as inline chip tokens, while `pendingImages` / `pendingTexts`
 			// intentionally retain deleted records so numbering isn't recycled
 			// (see composerChips) — trusting them would make Ctrl+D a permanent
 			// no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
 				const doublesAsForwardDelete =
 					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
-				if (doublesAsForwardDelete && !this.textEquals("")) {
+				if (doublesAsForwardDelete && this.hasTextAfterCursor()) {
 					this.deleteCharForward();
 					// Same post-edit normalization the parent dispatch runs below: an edit that
 					// leaves a bare "->"/"=>" turns it into a reserved queue header, or later

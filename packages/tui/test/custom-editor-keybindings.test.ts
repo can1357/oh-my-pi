@@ -82,6 +82,27 @@ describe("CustomEditor keybindings", () => {
 		expect(editor.getText()).toBe("b");
 	});
 
+	it("exits with the draft intact on ctrl+d when the cursor is at the end of the buffer", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.setText("ab\ncd");
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(onExit).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("ab\ncd");
+	});
+
+	it("forward-deletes on ctrl+d at the end of a line when later lines follow", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.setText("ab\ncd");
+		editor.handleInput("\x1b[A"); // Up, cursor now at end of "ab"
+		editor.handleInput("\x04"); // Ctrl+D joins the lines
+		expect(onExit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("abcd");
+	});
+
 	it("exits on ctrl+d after the last attachment chip is deleted", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onExit = vi.fn();

@@ -330,9 +330,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
 		// They deliberately mirror the interactive editor's contract so a stalled startup
 		// never behaves differently from a healthy one: Ctrl+C clears the draft and a second
-		// press exits 130 — the unconditional abort, draft or not; Ctrl+D exits 0 on an
-		// empty draft and otherwise forward-deletes (see CustomEditor's app.exit handling),
-		// so typing while the session loads cannot be lost to a mistyped delete.
+		// press exits 130 — the unconditional abort, draft or not; Ctrl+D forward-deletes
+		// while text sits after the cursor and otherwise exits 0 (see CustomEditor's
+		// app.exit handling), so a mid-draft delete never quits during session load.
 		this.editor.setActionKeys("app.clear", ["ctrl+c"]);
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
 		this.editor.onClear = () => this.#handleInterrupt();

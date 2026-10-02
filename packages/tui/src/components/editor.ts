@@ -2747,6 +2747,12 @@ export class Editor implements Component, Focusable {
 		return { line: this.#state.cursorLine, col: this.#state.cursorCol };
 	}
 
+	/** Whether any buffer text sits at or after the cursor (a later line counts). */
+	hasTextAfterCursor(): boolean {
+		const { lines, cursorLine, cursorCol } = this.#state;
+		return cursorLine < lines.length - 1 || cursorCol < (lines[cursorLine]?.length ?? 0);
+	}
+
 	moveToLineStart(): void {
 		this.#moveToLineStart();
 	}

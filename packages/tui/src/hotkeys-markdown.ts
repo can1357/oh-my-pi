@@ -64,9 +64,9 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 	};
 	// CustomEditor tests the chord that was actually pressed, so exit keys split by role: a key
 	// that also carries tui.editor.deleteCharForward (the readline `^D` overlap) forward-deletes
-	// while the prompt holds a draft, any other exit key quits immediately. Mixed bindings such as
-	// `["ctrl+d", "ctrl+q"]` therefore get one row per behavior instead of a single row claiming
-	// both keys delete.
+	// while text sits after the cursor and exits (saving the draft) at the end of the buffer; any
+	// other exit key quits immediately. Mixed bindings such as `["ctrl+d", "ctrl+q"]` therefore
+	// get one row per behavior instead of a single row claiming both keys delete.
 	const exitKeys = bindings.keybindings.getKeys("app.exit");
 	const deletingExitKeys = exitKeys.filter(key =>
 		bindings.keybindings.matchesCanonical(canonicalKeyId(key), "tui.editor.deleteCharForward"),
@@ -78,7 +78,7 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 	if (deletingExitKeys.length > 0) {
 		exitRows.push({
 			keys: [hints(deletingExitKeys)],
-			action: "Delete char forward (with draft) / exit (empty prompt)",
+			action: "Delete char forward / exit and save draft (cursor at end)",
 		});
 	}
 	// An unbound exit action still gets its row, mirroring the `Disabled` hint every other row uses.
