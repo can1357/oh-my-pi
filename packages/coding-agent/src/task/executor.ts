@@ -4349,6 +4349,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// stamp the contract so cold revival leaves them transcript-only
 				// even when the workspace was retained for recovery.
 				isolated: worktree !== undefined || undefined,
+				// Preserve the nested-isolation gate marker across cold revives so a
+				// revived child of an isolated parent still rejects nested isolation.
+				isIsolated: worktree !== undefined || options.isIsolated === true || undefined,
 			});
 
 			abortSignal.addEventListener(
