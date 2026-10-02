@@ -5,6 +5,9 @@
 ### Added
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+### Fixed
+
+- Cursor usage no longer counts cached prompt tokens twice, which had inflated input tokens and cost on every cached turn ([#13723](https://github.com/can1357/oh-my-pi/pull/13723) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.4.10] - 2026-10-02
 
