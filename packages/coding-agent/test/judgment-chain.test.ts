@@ -359,7 +359,7 @@ describe("ChainJudge", () => {
 			}),
 		);
 
-		const result = await new ChainJudge({ settings, registry }).judge({
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
 			state: "mechanical task",
 			questions: { urgent: { type: "noul", instructions: "Does this convey urgency?" } },
 		});
@@ -420,7 +420,7 @@ describe("ChainJudge", () => {
 				}),
 			);
 			const settings = Settings.isolated({ modelRoles: { judge: "judge-proxy/judge-model" } });
-			const result = await new ChainJudge({ settings, registry }).judge({
+			const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
 				state: "mechanical task",
 				questions: { urgent: { type: "noul", instructions: "Does this convey urgency?" } },
 			});
