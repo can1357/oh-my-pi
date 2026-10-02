@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed tab adoption stalling when Chrome discards background tabs.
+### Fixed
+
+- Preserve the user's active tab when creating an automation tab through the relay ([#11688](https://github.com/can1357/oh-my-pi/issues/11688)).
 
 ## [18.3.1] - 2026-09-25
 
