@@ -1,7 +1,5 @@
-import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
@@ -20,14 +18,25 @@ import {
 	type ModelPresetSession,
 	saveModelPreset,
 } from "../config/model-presets";
+import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
-import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
+import { appendPersonaJournalEntry, clearPersonaJournalEntry } from "../session/persisted-persona";
+import { discoverAgents, getAgent } from "../task";
+import type { PersonaExplicitOverrides } from "../session/tool-policy";
+import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+import type {
+	ParsedSlashCommand,
+	SlashCommandResult,
+	SlashCommandRuntime,
+	SlashCommandSpec,
+	TuiSlashCommandRuntime,
+} from "./types";
 
 import {
 	cfgComputerDisplay,
@@ -148,11 +157,11 @@ function runFastCommand(arg: string, session: AgentSession): string | undefined 
 }
 
 const SLOW_UNSUPPORTED =
-	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and low priority on Anthropic subscriptions.";
+	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and subscription slow mode on Anthropic.";
 
 /**
  * `/slow [on|off|status]` for the active model: the `flex` service tier on
- * OpenAI/Google, subscription low priority (`providers.anthropic.slowMode`
+ * OpenAI/Google, subscription slow mode (`providers.anthropic.slowMode`
  * `auto`/`off`) on Anthropic. Bare invocation toggles. Returns the user-facing
  * reply, or `undefined` for an unknown argument.
  */
@@ -160,23 +169,21 @@ function runSlowCommand(arg: string, session: AgentSession): string | undefined 
 	if (arg !== "" && arg !== "toggle" && arg !== "on" && arg !== "off" && arg !== "status") return undefined;
 	const anthropic = session.model?.provider === "anthropic";
 	if (arg === "status") {
-		const label = anthropic ? session.getAnthropicSlowModeLabel() : undefined;
-		if (!session.isSlowModeEnabled()) return label ? `Slow mode is off (${label}).` : "Slow mode is off.";
+		if (!session.isSlowModeEnabled()) return "Slow mode is off.";
 		if (!anthropic) return "Slow mode is on (flex tier).";
-		return label ? `Slow mode is on (${label}).` : "Slow mode is on (low priority at the Claude session limit).";
+		const label = session.getAnthropicSlowModeLabel();
+		return label ? `Slow mode is on (${label}).` : "Slow mode is on (auto at the Claude session limit).";
 	}
 	const enabled = arg === "on" || (arg !== "off" && !session.isSlowModeEnabled());
 	if (!session.setSlowMode(enabled)) return SLOW_UNSUPPORTED;
 	if (!session.isSlowModeEnabled()) {
-		return anthropic
-			? "Slow mode off: at your Claude usage limit, requests may get a short wrap-up allowance, then wait for the limit to reset."
-			: "Slow mode off.";
+		return anthropic ? "Slow mode off: requests wait for your Claude usage limit as usual." : "Slow mode off.";
 	}
 	if (!anthropic) return "Slow mode on: requests use the flex tier (lower cost, higher latency).";
 	const resetsAtSec = session.getAnthropicSlowModeLane()?.activeResetsAtSec();
 	return resetsAtSec !== undefined
 		? `Slow mode on: continuing at low priority until your limit resets at ${formatSlowModeResetClock(resetsAtSec)}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.`
-		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers low priority, requests switch to it after any wrap-up allowance.";
+		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers lower-priority service, requests switch to it automatically.";
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
@@ -236,27 +243,6 @@ function applyComputerUseToggle(session: AgentSession, enable: boolean): string 
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
-}
-
-/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
-const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
-
-/**
- * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
- * render the kickoff prompt carrying the user's request as data.
- */
-function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
-	const tools = session.getEnabledToolNames();
-	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
-	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
-	const previous = cfgRatchetEnabled.get(session.settings);
-	if (!previous) cfgRatchetEnabled.override(session.settings, true);
-	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
-		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
-		return { error: "The ratchet eval prelude is unavailable in this session." };
-	}
-	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
-	return { kickoff };
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -410,9 +396,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "loop",
 		icon: "loop",
-		get description() {
-			return `Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with \`--until '<cmd>'\` / \`--while '<cmd>'\` — the command's exit status decides whether the next iteration runs. ${formatKeyHint("escape")} suspends the ongoing loop; /loop again to disable.`;
-		},
+		description:
+			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with `--until '<cmd>'` / `--while '<cmd>'` — the command's exit status decides whether the next iteration runs. Esc suspends the ongoing loop; /loop again to disable.",
 		inlineHint: "[count|duration] [--while|--until '<cmd>'] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -494,9 +479,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "switch",
 		icon: "swap",
-		get description() {
-			return `Switch model for this session (same as ${formatKeyHint("alt+p")}); accepts fuzzy ids, provider/id, @role, :level`;
-		},
+		description: "Switch model for this session (same as alt+p); accepts fuzzy ids, provider/id, @role, :level",
 		acpDescription: "Switch model for this session only",
 		acpInputHint: "[model]",
 		inlineHint: "[model]",
@@ -574,12 +557,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "slow",
 		icon: "fast",
 		description:
-			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at low priority after the Claude session limit",
+			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at lower priority after the Claude session limit",
 		acpDescription: "Toggle slow mode",
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Flex tier, or Anthropic low priority at the session limit (auto)" },
-			{ name: "off", description: "Standard service; stop Anthropic low priority" },
+			{ name: "on", description: "Flex tier, or Anthropic lower priority at the session limit (auto)" },
+			{ name: "off", description: "Standard service; stop Anthropic lower-priority mode" },
 			{ name: "status", description: "Show slow mode status" },
 		],
 		allowArgs: true,
@@ -727,6 +710,134 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "prewalk",
+		icon: "prewalk",
+		description: "Arm or restart a one-shot model handoff",
+		allowArgs: true,
+		acpDescription: "Arm or restart prewalk",
+		acpInputHint: "[restart]",
+		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
+			if (target.error || !target.model) {
+				return usage(target.error ?? 'Model "@smol" not found', runtime);
+			}
+			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
+				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
+			}
+			if (arg === "restart") {
+				const source = resolveSessionModelSelector("@default", runtime.session, runtime.settings);
+				if (source.error || !source.model) {
+					return usage(source.error ?? 'Model "@default" not found', runtime);
+				}
+				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
+					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
+				}
+				const result = await runtime.session.restartPrewalk(
+					source.model,
+					source.thinkingLevel,
+					target.model,
+					target.thinkingLevel,
+				);
+				if (result === "rejected") return commandConsumed();
+				const restartSource = `${source.model.provider}/${source.model.id}`;
+				await runtime.output(
+					result === "armed"
+						? `Prewalk restarted: using @default (${restartSource}) for planning, then switching to @smol (${target.model.provider}/${target.model.id}) at the next edit/write (todo-gated).`
+						: `Prewalk reset: using @default (${restartSource}); @smol resolves to the same model and thinking level, so no handoff was armed.`,
+				);
+				return commandConsumed();
+			}
+			const armed = runtime.session.armPrewalk(target.model, target.thinkingLevel);
+			if (armed) {
+				await runtime.output(
+					`Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
+				);
+			}
+			return commandConsumed();
+		},
+	},
+	{
+		name: "agent",
+		icon: "agents",
+		description: "Switch agent persona for this session (/agent <name>; bare /agent clears the active persona)",
+		acpDescription: "Switch agent persona for this session",
+		acpInputHint: "<name>",
+		inlineHint: "<name>",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const session = runtime.ctx.session;
+			if (session.getToolPolicy()?.isPersonaActive()) return "Agent persona: active (/agent to exit)";
+			return "Agent persona: none";
+		},
+		handle: handleAgentCommand,
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const name = command.args.trim();
+			if (name) {
+				await runtime.ctx.switchAgentPersona(name);
+				return;
+			}
+			if (runtime.ctx.session.getToolPolicy()?.isPersonaActive()) {
+				await runtime.ctx.exitAgentPersona();
+				return;
+			}
+			await runtime.ctx.showAgentPersonaPicker();
+		},
+	},
+	{
+		name: "modelpreset",
+		icon: "model",
+		description: "Save and switch model presets (role models + thinking level)",
+		acpDescription: "Manage model presets",
+		acpInputHint: "[list|save|switch|delete] [name]",
+		inlineHint: "[save|switch|delete|list] [name]",
+		subcommands: [
+			{ name: "list", description: "List saved presets" },
+			{ name: "save", description: "Save the current role models and thinking level", usage: "<name>" },
+			{ name: "switch", description: "Apply a saved preset", usage: "<name>" },
+			{ name: "delete", description: "Delete a saved preset", usage: "<name>" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const count = getModelPresetNames(runtime.ctx.settings).length;
+			return count > 0 ? `Presets: ${count} saved` : "Presets: none saved";
+		},
+		handle: async (command, runtime) => {
+			const outcome = await runPresetsCommand(command.args, runtime.settings, runtime.session);
+			if (outcome.usage) return usage(outcome.message, runtime);
+			await runtime.output(outcome.message);
+			if (outcome.switched) await runtime.notifyTitleChanged?.();
+			if (outcome.changedConfig) await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			let args = command.args;
+			if (!args.trim()) {
+				const names = getModelPresetNames(ctx.settings);
+				if (names.length === 0) {
+					ctx.showStatus(NO_PRESETS_MESSAGE);
+					return;
+				}
+				const picked = await ctx.showHookSelector("Switch to model preset", names);
+				if (picked === undefined) return;
+				args = `switch ${picked}`;
+			}
+			const outcome = await runPresetsCommand(args, ctx.settings, ctx.session);
+			if (outcome.switched) {
+				ctx.statusLine.invalidate();
+				ctx.updateEditorBorderColor();
+			}
+			if (outcome.failed || outcome.usage) ctx.showWarning(outcome.message);
+			else ctx.showStatus(outcome.message);
+			ctx.ui.requestRender();
+		},
+	},
+	{
 		name: "ratchet",
 		icon: "loop",
 		description: "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended",
@@ -862,6 +973,27 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 ];
 
+/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
+const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
+
+/**
+ * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
+ * render the kickoff prompt carrying the user's request as data.
+ */
+function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
+	const tools = session.getEnabledToolNames();
+	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
+	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
+	const previous = cfgRatchetEnabled.get(session.settings);
+	if (!previous) cfgRatchetEnabled.override(session.settings, true);
+	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
+		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
+		return { error: "The ratchet eval prelude is unavailable in this session." };
+	}
+	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
+	return { kickoff };
+}
+
 const PRESETS_USAGE = "Usage: /modelpreset [list | save <name> | switch <name> | delete <name>]";
 const NO_PRESETS_MESSAGE = "No model presets saved. Use /modelpreset save <name> to create one.";
 
@@ -924,4 +1056,94 @@ async function runPresetsCommand(
 		default:
 			return { message: PRESETS_USAGE, usage: true };
 	}
+}
+
+/**
+ * Refuse persona enter/exit under an active plan/goal/vibe mode (TUI parity:
+ * switchAgentPersona/exitAgentPersona). The mode owns the tool partition and
+ * the pre-mode presentation snapshot; a persona restore would clobber it.
+ */
+function personaModeBlocker(session: AgentSession): string | undefined {
+	const plan = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
+	if (plan?.enabled) return "Exit plan mode before switching or clearing the agent persona.";
+	const goal = typeof session.getGoalModeState === "function" ? session.getGoalModeState() : undefined;
+	if (goal?.enabled) return "Exit goal mode before switching or clearing the agent persona.";
+	const vibe = typeof session.getVibeModeState === "function" ? session.getVibeModeState() : undefined;
+	if (vibe?.enabled) return "Exit vibe mode before switching or clearing the agent persona.";
+	return undefined;
+}
+
+/** Bare `/agent` with no persona active: usage message in ACP/text mode (TUI opens the picker). */
+async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const session = runtime.session;
+	if (session.getToolPolicy()?.isPersonaActive()) {
+		// fw_r- parity with the TUI (exitAgentPersona): persona and plan mode are
+		// mutually exclusive, and the exit's model/presentation restore would
+		// clobber an ACTIVE plan partition. The user can never strand: exiting
+		// the mode first is the recovery path (handleAgentCommandSwitch already
+		// refuses entry under plan mode, so the two cannot co-activate here).
+		const blocker = personaModeBlocker(session);
+		if (blocker) return usage(blocker, runtime);
+		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
+		clearPersonaJournalEntry(session);
+		// Exit reverts the model/thinking/toolset to the pre-persona baseline;
+		// ACP and text-mode clients must see the reverted configuration.
+		await runtime.notifyConfigChanged?.();
+		await runtime.output("Agent persona cleared.");
+		return commandConsumed();
+	}
+	await runtime.output("Usage: /agent <name> to activate an agent persona.");
+	return commandConsumed();
+}
+
+/** `/agent <name>`: discover the agent and enter its persona through the session runtime. */
+async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const session = runtime.session;
+	const blocker = personaModeBlocker(session);
+	if (blocker) return usage(blocker, runtime);
+	const personaRuntime = session.getPersonaRuntime();
+	if (!personaRuntime) {
+		return usage("Persona switching is unavailable: this session has no persona runtime.", runtime);
+	}
+	const discovery = await discoverAgents(runtime.cwd, undefined, session.effectiveExtensionRoots);
+	const agent = getAgent(discovery.agents, name);
+	if (!agent) {
+		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+		return usage(`Unknown agent: ${name}. Available: ${available}`, runtime);
+	}
+	// j2m: the CLI `--tools`/`--no-tools` ceiling is durable policy state the
+	// runtime does not know about — `enter` with empty explicit overrides would
+	// let a wider persona frontmatter widen the session past it. Serialize the
+	// ceiling into `explicit.tools` BEFORE enter so #computePersonaGrant's
+	// intersect path runs (cliGrant null → leave explicit.tools undefined).
+	const cliGrant = session.getToolPolicy()?.cliGrant ?? null;
+	const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
+	try {
+		await personaRuntime.enter(agent, explicitOverrides, createDefaultPersonaModelHooks(session));
+	} catch (error) {
+		return usage(`Persona switch failed: ${errorMessage(error)}`, runtime);
+	}
+	// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
+	// j2g: the pre-persona baseline rides the entry for the resume reconcile.
+	appendPersonaJournalEntry(session, {
+		name: agent.name,
+		explicit: explicitOverrides,
+		baseline: personaRuntime.getActiveBaseline(),
+	});
+	await runtime.output(`Agent persona: ${agent.name}`);
+	await runtime.notifyConfigChanged?.();
+	return commandConsumed();
+}
+
+/**
+ * ACP/text-mode `/agent` handler. Interactive TUI behavior (picker) lives in
+ * `handleTui`; this path answers with text and switches directly by name.
+ */
+async function handleAgentCommand(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	const name = command.args.trim();
+	if (!name) return handleAgentCommandNoName(runtime);
+	return handleAgentCommandSwitch(name, runtime);
 }

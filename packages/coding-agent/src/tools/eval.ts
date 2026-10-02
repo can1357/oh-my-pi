@@ -202,9 +202,10 @@ export interface EvalToolDescriptionOptions {
 	js?: boolean;
 	/**
 	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
-	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
+	 * `false`/`""` hides `agent()`, and a comma list or name array drives the
+	 * advertised default.
 	 */
-	spawns?: boolean | string | null;
+	spawns?: boolean | string | string[] | "*" | null;
 	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
 	autoBackgroundEnabled?: boolean;
 	/** Advertise `@tool` / `tool(fn)` and the `tools` spawn option (`eval.tools.enabled`). */
