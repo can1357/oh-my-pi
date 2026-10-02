@@ -6,10 +6,12 @@
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
 
+## [18.4.11] - 2026-10-02
+
 ### Fixed
 
-- Cursor usage no longer counts cached prompt tokens twice, which had inflated input tokens and cost on every cached turn ([#13723](https://github.com/can1357/oh-my-pi/pull/13723) by [@will-bogusz](https://github.com/will-bogusz)).
-- Auth-broker clients no longer restore a logged-out credential, or overwrite a newer login, when a token refresh reply arrives late ([#13770](https://github.com/can1357/oh-my-pi/pull/13770) by [@atyrode](https://github.com/atyrode)).
+- Fixed Cursor cached prompt token accounting to prevent duplicate input-token and cost reporting on cached turns.
+- Fixed auth-broker credential handling so late token-refresh responses cannot restore logged-out credentials or overwrite a newer login.
 
 ## [18.4.10] - 2026-10-02
 
