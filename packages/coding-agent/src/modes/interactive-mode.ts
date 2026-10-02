@@ -1224,7 +1224,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	hideToolActivity = false;
 	todoExpanded = false;
 	planModeEnabled = false;
-	planModePaused = false;
+	// The session owns the paused flag so session-scoped tools (e.g. `goal`) observe it too.
+	get planModePaused(): boolean {
+		return this.session.isPlanModePaused();
+	}
+	set planModePaused(paused: boolean) {
+		this.session.setPlanModePaused(paused);
+	}
 	goalModeEnabled = false;
 	goalModePaused = false;
 	vibeModeEnabled = false;
@@ -4571,7 +4577,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (event.type === "goal_updated") {
-			if (event.state?.enabled && this.#goalModePreviousTools === undefined && !this.goalModeEnabled) {
+			// A goal starting outside goal mode (agent `goal create`, incl. the guided
+			// interview's) snapshots the live toolset now: an earlier snapshot may be
+			// stale (abandoned interview, tools changed since).
+			if (event.state?.enabled && !this.goalModeEnabled) {
 				this.#goalModePreviousTools = this.#previousGoalTools();
 			}
 			if (event.state) this.#guidedGoalInterviewActive = false;
@@ -4818,7 +4827,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
 			// Restore the current toolset after the goal exits, retaining an opt-in
-			// goal tool if it was active before this goal was resumed.
+			// goal tool if it was active before this goal was resumed. Expose `goal` so
+			// the agent can inspect, complete, or drop the restored goal.
 			if (restored?.goal) {
 				const previousTools = this.#previousGoalTools();
 				this.#goalModePreviousTools = previousTools;
@@ -6121,10 +6131,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Preserve the pre-interview toolset on exit,
-			// including an opt-in goal tool already active before the interview.
+			// calling `goal create`; its `goal_updated` snapshots the toolset to restore.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = this.#previousGoalTools();
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}

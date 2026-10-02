@@ -34,7 +34,7 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 
 	async function makeSession(
 		goalEnabledAtStartup: boolean,
-		options?: { toolNames?: string[]; toolDefault?: boolean; restrictToolNames?: boolean },
+		options?: { toolNames?: string[]; toolDefault?: boolean; restrictToolNames?: boolean; taskDepth?: number },
 	): Promise<AgentSession> {
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -48,6 +48,7 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 		const { session: created } = await createAgentSession({
 			toolNames: options?.toolNames,
 			restrictToolNames: options?.restrictToolNames,
+			taskDepth: options?.taskDepth,
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
 			sessionManager,
@@ -129,6 +130,85 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 
 	it("exposes goal by default only when opted in", async () => {
 		session = await makeSession(true, { toolDefault: true });
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	it("keeps goal.toolDefault from exposing goal to subagents unless they request it", async () => {
+		session = await makeSession(true, { toolDefault: true, taskDepth: 1 });
+		expect(session.getEnabledToolNames()).not.toContain("goal");
+		expect(session.agent.state.tools.some(t => t.name === "goal")).toBe(false);
+		await session.dispose();
+		session = await makeSession(true, { toolDefault: true, taskDepth: 1, toolNames: ["read", "goal"] });
+		expect(session.getEnabledToolNames()).toContain("goal");
+	});
+
+	it.each([
+		["explicit --tools", false],
+		["goal.toolDefault", true],
+	] as const)("refuses agent-created goals while plan mode is paused with %s", async (_label, toolDefault) => {
+		session = await makeSession(true, toolDefault ? { toolDefault: true } : { toolNames: ["read", "goal"] });
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handlePlanModeCommand();
+		await mode.handlePlanModeCommand();
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(true);
+
+		const goalTool = session.agent.state.tools.find(t => t.name === "goal");
+		expect(goalTool).toBeDefined();
+		await expect(goalTool!.execute("create", { op: "create", objective: "tiny goal" })).rejects.toThrow(
+			"Exit plan mode before starting a goal.",
+		);
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(mode.goalModeEnabled).toBe(false);
+	});
+
+	it("does not let the agent resume a goal the user paused", async () => {
+		session = await makeSession(true, { toolDefault: true });
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		const goalTool = () => session!.agent.state.tools.find(t => t.name === "goal")!;
+		await goalTool().execute("create", { op: "create", objective: "pausable goal" });
+		expect(mode.goalModeEnabled).toBe(true);
+
+		await mode.handleGoalModeCommand("pause");
+		expect(mode.goalModePaused).toBe(true);
+		expect(session.getEnabledToolNames()).toContain("goal");
+		const got = await goalTool().execute("get", { op: "get" });
+		expect(got.details?.goal?.status).toBe("paused");
+
+		await expect(goalTool().execute("resume", { op: "resume" })).rejects.toThrow("/goal resume");
+		expect(session.getGoalModeState()?.goal.status).toBe("paused");
+		expect(session.getGoalModeState()?.enabled).toBe(false);
+		expect(mode.goalModeEnabled).toBe(false);
+	});
+
+	it("restores the toolset live at goal start, not one snapshotted by an abandoned guided interview", async () => {
+		session = await makeSession(true, { toolDefault: true });
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		expect(session.getEnabledToolNames()).toContain("bash");
+		vi.spyOn(session, "prompt").mockImplementation(async () => true);
+		expect(await mode.handleGuidedGoalCommand()).toBe(true);
+
+		// The interview goes nowhere; later the user removes bash, then the agent starts a goal.
+		await session.setActiveToolsByName(session.getEnabledToolNames().filter(name => name !== "bash"));
+		const goalTool = () => session!.agent.state.tools.find(t => t.name === "goal")!;
+		await goalTool().execute("create", { op: "create", objective: "later goal" });
+		expect(mode.goalModeEnabled).toBe(true);
+		await goalTool().execute("complete", { op: "complete" });
+
+		const restored = Promise.withResolvers<void>();
+		const setActiveTools = session.setActiveToolsByName.bind(session);
+		vi.spyOn(session, "setActiveToolsByName").mockImplementation(async names => {
+			await setActiveTools(names);
+			restored.resolve();
+		});
+		void mode.getUserInput();
+		await restored.promise;
+		await Promise.resolve();
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).not.toContain("bash");
 		expect(session.getEnabledToolNames()).toContain("goal");
 	});
 

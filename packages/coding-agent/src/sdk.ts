@@ -2268,6 +2268,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
+			isPlanModePaused: () => session?.isPlanModePaused() ?? false,
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
@@ -3936,10 +3937,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return tool?.defaultInactive === true || tool?.hidden === true;
 			}),
 		);
+		// `goal.toolDefault` applies to the top-level agent only; subagents need an explicit request.
 		const exposeGoalInitially =
 			!restrictToolNames &&
 			cfgGoalEnabled.get(settings) &&
-			(cfgGoalToolDefault.get(settings) || explicitlyRequestedToolNames?.includes("goal") === true);
+			((taskDepth === 0 && cfgGoalToolDefault.get(settings)) ||
+				explicitlyRequestedToolNames?.includes("goal") === true);
 		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal" || exposeGoalInitially);
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)

@@ -763,6 +763,7 @@ export class AgentSession implements SettingsScope {
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
+	#planModePaused = false;
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -6360,6 +6361,15 @@ export class AgentSession implements SettingsScope {
 			// does not inherit a stale `required` tool choice.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 		}
+	}
+
+	/** Whether plan mode is paused (`/plan` toggled off once): mode-gated actions stay blocked until fully exited. */
+	isPlanModePaused(): boolean {
+		return this.#planModePaused;
+	}
+
+	setPlanModePaused(paused: boolean): void {
+		this.#planModePaused = paused;
 	}
 
 	getGoalModeState(): GoalModeState | undefined {

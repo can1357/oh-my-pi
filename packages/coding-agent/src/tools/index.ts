@@ -455,6 +455,8 @@ export interface ToolSession {
 	settings: Settings;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
+	/** Whether plan mode is paused (toggled off once, not fully exited) */
+	isPlanModePaused?: () => boolean;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
 	/** Goal mode state (if active or paused) */
@@ -638,6 +640,9 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			: undefined;
 	const goalEnabled = cfgGoalEnabled.get(session.settings);
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
+	// `goal.toolDefault` opts the top-level agent in; subagents only get `goal` when they request it.
+	const goalToolDefault =
+		!restrictToolNames && goalEnabled && (session.taskDepth ?? 0) === 0 && cfgGoalToolDefault.get(session.settings);
 	const externalThinkingActive =
 		cfgExternalThinking.get(session.settings) && supportsExternalThinking(session.getActiveModel?.());
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
@@ -744,7 +749,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		// Explicit requests and the default-on setting keep it available.
 		if (name === "goal") {
 			if (!goalEnabled || restrictToolNames) return false;
-			if (cfgGoalToolDefault.get(session.settings) || session.goalToolRequested === true) return true;
+			if (goalToolDefault || session.goalToolRequested === true) return true;
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
@@ -810,9 +815,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
 		...(externalThinkingActive ? ["think"] : []),
 		...(includeYield ? ["yield"] : []),
-		...(goalModeActive || (!restrictToolNames && goalEnabled && cfgGoalToolDefault.get(session.settings))
-			? ["goal"]
-			: []),
+		...(goalModeActive || goalToolDefault ? ["goal"] : []),
 	];
 	return { requestedTools, names, isAllowed: isToolAllowed };
 }
