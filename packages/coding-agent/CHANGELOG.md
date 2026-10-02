@@ -7,6 +7,7 @@
 - Added `omp.registerAssistantTextDisplay()` for display-only assistant text projections in the existing native and classic transcript component, while preserving source messages and withholding pending prose from immutable history.
 - Exposed `ctx.abortSignal` so extension handlers can cancel external work when their handler times out or the main turn is cancelled.
 - Added an opt-in bidirectional translator extension: Chinese editor prose is translated to English before the main model, English response history stays English, and Chinese is projected only in the original assistant display.
+- Added `/translator input` for input-only Chinese-to-English translation, leaving assistant replies in their original English without output-translation requests; `/translator both` restores bidirectional translation.
 - Added global and per-advisor review cadence, including final-yield reviews and intervals that accumulate skipped transcript updates ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added per-advisor catch-up policy and cancellable `strict` waiting, so asynchronous turn reviewers can run beside synchronous final reviewers ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added `/jobs full` to show each background bash job's full command line; plain `/jobs` still shortens it to fit the terminal ([#13980](https://github.com/can1357/oh-my-pi/pull/13980) by [@rickythefox](https://github.com/rickythefox))
@@ -17,7 +18,8 @@
 
 ### Fixed
 
-- Input hooks can now reject a submission with `reject`, restoring its original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
+- Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
+- Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
 - Fixed test suite failures on non-FHS hosts and under ambient terminal and Git configuration ([#12358](https://github.com/can1357/oh-my-pi/pull/12358) by [@olegpulatov](https://github.com/olegpulatov)).
 
 ## [18.4.9] - 2026-10-01
@@ -1493,7 +1495,8 @@
 
 ### Fixed
 
-	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+    - Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+
 - Subagent `yield` no longer rejects a valid `data` payload because a non-strict OpenAI-compatible backend filled the optional `error` field with `""`; previously the worker retried the identical call until the invalid-yield cap and the parent received nothing.
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
 - `memory://` now resolves against the session that issued it: a caller's own memory backend answers `memory://<id>`, so co-located sessions no longer read each other's memory rows, and a caller whose session is no longer live fails closed instead of being answered by a peer. Prompt completion binds to the same caller, so `memory://<memory-id>` stays on offer while a subagent shares the working directory. Advisors retain their owning session's memory access even without a session file.

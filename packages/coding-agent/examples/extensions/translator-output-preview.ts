@@ -1,13 +1,13 @@
 /**
- * Opt-in Chinese editor -> English main-model context -> Chinese response display.
+ * Opt-in Chinese editor -> English main-model context; optional Chinese response display.
  * bun packages/coding-agent/src/cli.ts --no-extensions --extension packages/coding-agent/examples/extensions/translator-output-preview.ts
- * /translator enables; /translator off disables; /translator original reads the last English original.
+ * /translator or /translator both enables both directions; /translator input translates only input.
+ * /translator off disables; /translator original reads the last English original.
  * /translator model provider/id selects a separate translator without changing the main model.
  * Submitted prose and response history are English; protected code stays byte-for-byte intact.
  * Display translations are memory-only. Printed terminal scrollback cannot be repainted.
  */
 import { complete, type AssistantMessage, type Model } from "@oh-my-pi/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { Container, getMarkdownTheme, Markdown, matchesKey, ScrollView, Text } from "@oh-my-pi/pi-tui";
 
 const DEFAULT_TRANSLATOR = "google-antigravity/gemini-3.7-flash";
@@ -179,10 +179,46 @@ function protectMarkdown(source: string): ProtectedText {
 		},
 	};
 }
+function isAllowedTranslator(model: Model): boolean {
+	const id = model.id.toLowerCase();
+	return id.includes("gemini") || id.includes("muse");
+}
+
+function translatorChoices(ctx: ExtensionContext): Model[] {
+	return ctx.modelRegistry
+		.getAvailable()
+		.filter(isAllowedTranslator)
+		.sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`));
+}
+
+function translatorModelSpec(model: Model): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function matchTranslatorChoices(ctx: ExtensionContext, query: string): Model[] {
+	const normalized = query.trim().toLowerCase();
+	return translatorChoices(ctx)
+		.map(model => {
+			const fields = [model.id.toLowerCase(), model.provider.toLowerCase()];
+			const indexes = fields.map(field => field.indexOf(normalized)).filter(index => index >= 0);
+			return {
+				model,
+				index: indexes.length ? Math.min(...indexes) : -1,
+				exact: fields.some(field => field === normalized),
+			};
+		})
+		.filter(candidate => !normalized || candidate.index >= 0)
+		.sort(
+			(left, right) =>
+				Number(right.exact) - Number(left.exact) ||
+				left.index - right.index ||
+				translatorModelSpec(left.model).localeCompare(translatorModelSpec(right.model)),
+		)
+		.map(candidate => candidate.model);
+}
 
 function resolveTranslator(ctx: ExtensionContext, spec: string): Model | undefined {
-	const slash = spec.indexOf("/");
-	return slash > 0 ? ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1)) : undefined;
+	return translatorChoices(ctx).find(model => translatorModelSpec(model) === spec);
 }
 
 /** Bound even credential/header providers which do not promptly honor cancellation. */
@@ -201,7 +237,7 @@ async function withCancellation<T>(signal: AbortSignal, work: () => Promise<T>):
 }
 
 export default function translator(omp: ExtensionAPI) {
-	let enabled = false;
+	let mode: "off" | "input" | "both" = "off";
 	let translatorSpec = DEFAULT_TRANSLATOR;
 	let sessionId: string | undefined;
 	let generation = 0;
@@ -212,7 +248,10 @@ export default function translator(omp: ExtensionAPI) {
 	let inputController: AbortController | undefined;
 
 	const updateStatus = (ctx: ExtensionContext) =>
-		ctx.ui.setStatus("translator", enabled ? `中→英输入 · 英→中显示 · ${translatorSpec}` : undefined);
+		ctx.ui.setStatus(
+			"translator",
+			mode === "off" ? undefined : `中→英输入 · ${mode === "both" ? "英→中显示" : "回复不翻译"} · ${translatorSpec}`,
+		);
 
 	const cancel = () => {
 		generation++;
@@ -257,13 +296,14 @@ export default function translator(omp: ExtensionAPI) {
 	): Promise<string[]> => {
 		active.add(controller);
 		const epoch = generation;
+		const startedAt = Date.now();
 		const requestSession = ctx.sessionManager.getSessionId();
 		const requestMode = ctx.mode;
 		const requestModel = ctx.models.current();
 		const spec = translatorSpec;
 		const stale = () =>
 			epoch !== generation ||
-			!enabled ||
+			mode === "off" ||
 			requestSession !== ctx.sessionManager.getSessionId() ||
 			requestMode !== ctx.mode ||
 			requestModel?.provider !== ctx.models.current()?.provider ||
@@ -314,18 +354,31 @@ export default function translator(omp: ExtensionAPI) {
 			signal.throwIfAborted();
 			if (stale()) throw new Error("Stale translation");
 			return translations;
-		} catch {
+		} catch (error) {
 			const wasAborted = signal.aborted;
+			const staleRequest = stale();
+			const failure = staleRequest
+				? "翻译已取消：模式、会话或模型已改变。"
+				: timedOut
+					? "翻译失败：已超过 20 秒时限。"
+					: wasAborted
+						? "翻译已取消。"
+						: "翻译失败：模型、认证、网络、译文或保护校验未成功。";
+			omp.logger.warn("translator translation failed", {
+				direction: target === "English" ? "input" : "output",
+				target,
+				model: spec,
+				sessionId: requestSession,
+				sourceBlocks: sources.length,
+				sourceChars: sources.reduce((total, source) => total + source.text.length, 0),
+				elapsedMs: Date.now() - startedAt,
+				timedOut,
+				aborted: wasAborted,
+				stale: staleRequest,
+				error: error instanceof Error ? error.message : String(error),
+			});
 			controller.abort();
-			throw new Error(
-				stale()
-					? "翻译已取消：模式、会话或模型已改变。"
-					: timedOut
-						? "翻译失败：已超过 20 秒时限。"
-						: wasAborted
-							? "翻译已取消。"
-							: "翻译失败：模型、认证、网络、译文或保护校验未成功。",
-			);
+			throw new Error(failure);
 		} finally {
 			ctx.clearTimer(timer);
 			active.delete(controller);
@@ -333,7 +386,13 @@ export default function translator(omp: ExtensionAPI) {
 	};
 
 	omp.on("input", async (event, ctx) => {
-		if (!enabled || !ctx.hasUI || ctx.mode !== "tui" || ctx.agent.kind !== "main" || event.source !== "interactive") {
+		if (
+			mode === "off" ||
+			!ctx.hasUI ||
+			ctx.mode !== "tui" ||
+			ctx.agent.kind !== "main" ||
+			event.source !== "interactive"
+		) {
 			return undefined;
 		}
 		if (!event.text.trim() || isControlInput(event.text)) return undefined;
@@ -366,7 +425,7 @@ export default function translator(omp: ExtensionAPI) {
 	});
 
 	omp.registerAssistantTextDisplay((source, context) => {
-		if (!enabled) return undefined;
+		if (mode !== "both") return undefined;
 		const translated = cache.get(source);
 		if (translated !== undefined) return { text: translated };
 		return context.transient ? { text: PENDING, pending: true } : { text: FAILED };
@@ -377,29 +436,33 @@ export default function translator(omp: ExtensionAPI) {
 	omp.on("session_branch", (_event, ctx) => resetSession(ctx));
 	omp.on("session_tree", (_event, ctx) => resetSession(ctx));
 	omp.on("session_shutdown", (_event, ctx) => {
-		enabled = false;
+		mode = "off";
 		clear();
 		lastOriginal = undefined;
 		updateStatus(ctx);
 	});
 	omp.on("before_agent_start", (event, ctx) => {
-		if (!enabled || ctx.agent.kind !== "main") return undefined;
+		if (mode === "off" || ctx.agent.kind !== "main") return undefined;
 		return {
 			systemPrompt: [
 				...event.systemPrompt,
-				"For this turn, write assistant response prose in English. The user's ordinary Chinese prose has been translated into English before submission; literal code and paths are unchanged. Preserve the task, code, and tool arguments. A separate display layer translates response prose into Chinese without modifying conversation history.",
+				"For this turn, write assistant response prose in English. The user's ordinary Chinese prose has been translated into English before submission; literal code and paths are unchanged. Preserve the task, code, and tool arguments.",
+				mode === "both"
+					? "A separate display layer translates response prose into Chinese without modifying conversation history."
+					: "Your response is displayed in its original English without translation.",
 			],
 		};
 	});
 
 	omp.on("assistant_message", async (event, ctx) => {
-		if (!enabled || ctx.agent.kind !== "main") return undefined;
+		if (mode === "off" || ctx.agent.kind !== "main") return undefined;
 		if (sessionId !== ctx.sessionManager.getSessionId()) resetSession(ctx);
 		const texts = [...new Set(prose(event.message).filter(text => text.trim()))];
 		if (texts.length === 0) return undefined;
 		if (event.message.stopReason !== "aborted" && event.message.stopReason !== "error") {
 			lastOriginal = prose(event.message).join("\n\n");
 		}
+		if (mode !== "both") return undefined;
 		if (event.message.stopReason === "aborted" || event.message.stopReason === "error") {
 			for (const text of texts) remember(text, FAILED);
 			return undefined;
@@ -414,11 +477,11 @@ export default function translator(omp: ExtensionAPI) {
 				"Simplified Chinese",
 				new AbortController(),
 			);
-			if (epoch === generation && enabled) {
+			if (epoch === generation && mode === "both") {
 				missing.forEach((source, index) => remember(source, translations[index]));
 			}
 		} catch (error) {
-			if (epoch === generation && enabled) {
+			if (epoch === generation && mode === "both") {
 				const failure = `中文${error instanceof Error ? error.message : "翻译失败。"} 可用 /translator original 查看英文原文。`;
 				for (const source of missing) remember(source, failure);
 			}
@@ -428,18 +491,19 @@ export default function translator(omp: ExtensionAPI) {
 	});
 
 	omp.registerCommand("translator", {
-		description: "Chinese input → English main model → Chinese display: [off | original | model provider/id]",
+		description:
+			"Chinese input → English main model; optional Chinese display: [input | both | off | original | model]",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI || ctx.mode !== "tui" || ctx.agent.kind !== "main") {
-				ctx.ui.notify("双向翻译仅用于主会话的交互式 OMP 界面。", "warning");
+				ctx.ui.notify("翻译插件仅用于主会话的交互式 OMP 界面。", "warning");
 				return;
 			}
 			const command = args.trim();
 			if (command === "off") {
-				enabled = false;
+				mode = "off";
 				clear();
 				updateStatus(ctx);
-				ctx.ui.notify("已关闭双向翻译并取消待处理翻译；后续输入和回复使用原文。已打印的终端历史无法重绘。", "info");
+				ctx.ui.notify("已关闭翻译并取消待处理翻译；后续输入和回复使用原文。已打印的终端历史无法重绘。", "info");
 				return;
 			}
 			if (command === "original") {
@@ -473,41 +537,54 @@ export default function translator(omp: ExtensionAPI) {
 				});
 				return;
 			}
-			if (command.startsWith("model ")) {
-				const spec = command.slice(6).trim();
+			if (command === "model" || command.startsWith("model ")) {
+				const requested = command === "model" ? "" : command.slice(6).trim();
+				const choices = matchTranslatorChoices(ctx, requested);
+				if (choices.length === 0) {
+					ctx.ui.notify("没有匹配的 Gemini 或 Muse 翻译模型。", "error");
+					return;
+				}
+				let spec = choices.length === 1 ? translatorModelSpec(choices[0]) : undefined;
+				if (!spec) {
+					const selected = await ctx.ui.select(
+						requested ? `匹配 “${requested}” 的 Gemini 或 Muse 模型` : "选择 Gemini 或 Muse 翻译模型",
+						choices.map(model => ({
+							label: translatorModelSpec(model),
+							description: model.name,
+						})),
+					);
+					if (!selected) return;
+					spec = selected;
+				}
 				if (!resolveTranslator(ctx, spec)) {
-					ctx.ui.notify("翻译模型未找到；请使用现有模型注册表中的 provider/id。", "error");
+					ctx.ui.notify("所选 Gemini 或 Muse 翻译模型当前不可用。", "error");
 					return;
 				}
 				cancel();
 				translatorSpec = spec;
 				updateStatus(ctx);
-				ctx.ui.notify(
-					`输入与输出翻译模型已设为 ${translatorSpec}；主模型未改变，已缓存的显示译文保持不变。`,
-					"info",
-				);
+				ctx.ui.notify(`翻译模型已设为 ${translatorSpec}；主模型未改变，已缓存的显示译文保持不变。`, "info");
 				return;
 			}
-			if (command) {
-				ctx.ui.notify(
-					"用法：/translator | /translator off | /translator original | /translator model provider/id",
-					"info",
-				);
+			if (command && command !== "input" && command !== "both") {
+				ctx.ui.notify("用法：/translator [input | both | off | original | model]", "info");
 				return;
 			}
 			if (!resolveTranslator(ctx, translatorSpec)) {
 				ctx.ui.notify(
-					`翻译模型 ${translatorSpec} 不在注册表中。请先用 /translator model provider/id 选择。`,
+					`翻译模型 ${translatorSpec} 不在 Gemini 或 Muse 列表中。请用 /translator model 选择。`,
 					"error",
 				);
 				return;
 			}
 			cancel();
-			enabled = true;
+			mode = command === "input" ? "input" : "both";
 			sessionId = ctx.sessionManager.getSessionId();
 			updateStatus(ctx);
 			ctx.ui.notify(
-				`已启用中→英输入、英→中显示 · ${translatorSpec}。普通中文输入经英译后才提交主模型，主模型用英文回复；历史及用户消息显示使用实际提交的英文，代码保持原样。中英文原文会发送给所选翻译服务；命令不翻译。显示译文仅在内存中缓存，已打印历史不重绘。`,
+				mode === "input"
+					? `已启用仅输入翻译 · ${translatorSpec}。普通中文输入经英译后才提交主模型，主模型用英文回复并直接显示原文，不请求回复翻译。中文输入会发送给所选翻译服务；命令和代码不翻译。已打印历史不重绘。`
+					: `已启用中→英输入、英→中显示 · ${translatorSpec}。普通中文输入经英译后才提交主模型，主模型用英文回复；历史及用户消息显示使用实际提交的英文，代码保持原样。中英文原文会发送给所选翻译服务；命令不翻译。显示译文仅在内存中缓存，已打印历史不重绘。`,
 				"info",
 			);
 		},
