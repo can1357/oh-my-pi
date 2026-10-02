@@ -1,5 +1,20 @@
-import { type } from "@oh-my-pi/omptype";
+import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { once } from "@oh-my-pi/pi-utils";
+
+function validateMaxContextWindow(
+	value: { maxContextWindow?: number; contextWindow?: number },
+	ctx: NarrowContext,
+): boolean {
+	if (
+		value.maxContextWindow !== undefined &&
+		(!Number.isSafeInteger(value.maxContextWindow) ||
+			value.maxContextWindow <= 0 ||
+			(value.contextWindow !== undefined && value.maxContextWindow < value.contextWindow))
+	) {
+		return ctx.mustBe("maxContextWindow a positive integer no smaller than contextWindow");
+	}
+	return true;
+}
 
 export const getModelsConfigSchemaBundle = once(() => {
 	const OpenRouterRoutingSchema = type({
@@ -59,6 +74,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
 		"supportsConfigurationUpdate?": "boolean",
+		"supportsSteering?": "boolean",
 		"stripImageInput?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 		"supportsContextManagement?": "boolean",
@@ -66,6 +82,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
 		"replayUnsignedThinking?": "boolean",
+		"bedrockMessagesApi?": "boolean",
 	} as const;
 
 	const OpenAICompatFieldsSchema = type(OpenAICompatFields);
@@ -189,8 +206,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 			cacheRead: "number",
 			cacheWrite: "number",
 		},
+		"promptCache?": {
+			"short?": "number",
+			"long?": "number",
+		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",
+		"maxContextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
@@ -224,7 +246,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return true;
+		return validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -241,8 +263,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"cacheRead?": "number",
 			"cacheWrite?": "number",
 		},
+		"promptCache?": {
+			"short?": "number",
+			"long?": "number",
+		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",
+		"maxContextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
@@ -269,11 +296,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return true;
+		return validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({
-		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm"',
+		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "apple-foundation-models"',
 		"timeoutMs?": "number",
 		/**
 		 * Defaults to `true`. Set `false` to fetch the model list from

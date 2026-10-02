@@ -17,7 +17,14 @@ import {
 	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { AuthStorage } from "../auth-storage";
+import {
+	type AuthAccountPolicies,
+	type AuthCredentialStore,
+	AuthStorage,
+	type AuthStorageOptions,
+	DEFAULT_USAGE_RESERVE_PCT,
+	SqliteAuthCredentialStore,
+} from "../auth-storage";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError } from "./client";
 import { type AuthBrokerAccountPool, RemoteAuthCredentialStore } from "./remote-store";
@@ -41,6 +48,8 @@ export interface DiscoverAuthStorageOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	accountPolicies?: AuthAccountPolicies;
+	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -74,6 +83,8 @@ async function readTokenFile(): Promise<string | null> {
 interface ConfigSnapshot {
 	url?: string;
 	token?: string;
+	accountPolicies?: unknown;
+	usageReservePct?: unknown;
 }
 
 /**
@@ -82,38 +93,166 @@ interface ConfigSnapshot {
  * legacy flat literal-dot key (`"auth.broker.url": ...`). Nested wins when both
  * are present. Returns the value only when it is a string.
  */
-function readDottedString(record: Record<string, unknown>, dottedKey: string): string | undefined {
+function readDottedValue(record: Record<string, unknown>, dottedKey: string): unknown {
 	let current: unknown = record;
 	for (const segment of dottedKey.split(".")) {
-		if (current === null || typeof current !== "object" || Array.isArray(current)) {
-			current = undefined;
-			break;
-		}
-		current = (current as Record<string, unknown>)[segment];
+		if (current === null || typeof current !== "object" || Array.isArray(current)) return record[dottedKey];
+		const currentRecord = current as Record<string, unknown>;
+		if (!Object.hasOwn(currentRecord, segment)) return record[dottedKey];
+		current = currentRecord[segment];
 	}
-	if (typeof current === "string") return current;
-	const flat = record[dottedKey];
-	return typeof flat === "string" ? flat : undefined;
+	return current;
+}
+
+function readDottedString(record: Record<string, unknown>, dottedKey: string): string | undefined {
+	const value = readDottedValue(record, dottedKey);
+	return typeof value === "string" ? value : undefined;
+}
+
+function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) {
+		throw new AIError.ConfigurationError("auth.accountPolicies must be an array");
+	}
+
+	return value.map((entry, index) => {
+		const path = `auth.accountPolicies[${index}]`;
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+			throw new AIError.ConfigurationError(`${path} must be an object`);
+		}
+		const policy = entry as Record<string, unknown>;
+		const unknownPolicyFields = Object.keys(policy).filter(
+			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct",
+		);
+		if (unknownPolicyFields.length > 0) {
+			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
+		}
+		const provider = policy.provider;
+		if (typeof provider !== "string" || provider.length === 0) {
+			throw new AIError.ConfigurationError(`${path}.provider must be a non-empty string`);
+		}
+		if (provider.trim() !== provider) {
+			throw new AIError.ConfigurationError(`${path}.provider must not contain surrounding whitespace`);
+		}
+		if (policy.account === null || typeof policy.account !== "object" || Array.isArray(policy.account)) {
+			throw new AIError.ConfigurationError(`${path}.account must be an object`);
+		}
+
+		const accountPath = `${path}.account`;
+		const rawAccount = policy.account as Record<string, unknown>;
+		const selectorFields = ["email", "accountId", "projectId", "orgId"] as const;
+		const baseIdentityFields = ["email", "accountId", "projectId"] as const;
+		const unknownAccountFields = Object.keys(rawAccount).filter(
+			key => !selectorFields.includes(key as (typeof selectorFields)[number]),
+		);
+		if (unknownAccountFields.length > 0) {
+			throw new AIError.ConfigurationError(`${accountPath} has unknown fields: ${unknownAccountFields.join(", ")}`);
+		}
+		for (const field of selectorFields) {
+			const fieldValue = rawAccount[field];
+			if (fieldValue !== undefined && (typeof fieldValue !== "string" || fieldValue.length === 0)) {
+				throw new AIError.ConfigurationError(`${accountPath}.${field} must be a non-empty string`);
+			}
+		}
+		if (!baseIdentityFields.some(field => rawAccount[field] !== undefined)) {
+			throw new AIError.ConfigurationError(
+				`${accountPath} must include at least one of email, accountId, or projectId`,
+			);
+		}
+		if (policy.priority !== undefined && (typeof policy.priority !== "number" || !Number.isFinite(policy.priority))) {
+			throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
+		}
+		if (
+			policy.reservePct !== undefined &&
+			(typeof policy.reservePct !== "number" ||
+				!Number.isFinite(policy.reservePct) ||
+				policy.reservePct < 0 ||
+				policy.reservePct > 100)
+		) {
+			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
+		}
+
+		return {
+			provider,
+			account: {
+				...(typeof rawAccount.email === "string" ? { email: rawAccount.email } : {}),
+				...(typeof rawAccount.accountId === "string" ? { accountId: rawAccount.accountId } : {}),
+				...(typeof rawAccount.projectId === "string" ? { projectId: rawAccount.projectId } : {}),
+				...(typeof rawAccount.orgId === "string" ? { orgId: rawAccount.orgId } : {}),
+			},
+			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
+			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+		};
+	});
+}
+
+function parseUsageReservePct(value: unknown): number {
+	const reservePct = value === undefined ? DEFAULT_USAGE_RESERVE_PCT : value;
+	if (typeof reservePct !== "number" || !Number.isFinite(reservePct)) {
+		throw new AIError.ConfigurationError("retry.usageReservePct must be a finite number");
+	}
+	return reservePct;
 }
 
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
+		let raw: string;
 		try {
-			const raw = await fs.readFile(configPath, "utf8");
-			const parsed = YAML.parse(raw);
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-			const record = parsed as Record<string, unknown>;
-			const url = readDottedString(record, "auth.broker.url");
-			const token = readDottedString(record, "auth.broker.token");
-			return { url, token };
-		} catch (err) {
-			if (isEnoent(err)) continue;
-			logger.warn("auth-broker config unreadable", { path: configPath, error: String(err) });
-			return {};
+			raw = await fs.readFile(configPath, "utf8");
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw new AIError.ConfigurationError(`Unable to read ${configPath}: ${String(error)}`);
 		}
+
+		let parsed: unknown;
+		try {
+			parsed = YAML.parse(raw);
+		} catch (error) {
+			throw new AIError.ConfigurationError(`${configPath} contains invalid YAML: ${String(error)}`);
+		}
+		// An empty or comment-only file parses to null: no settings, not a malformed config.
+		if (parsed === null || parsed === undefined) return {};
+		if (typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new AIError.ConfigurationError(`${configPath} must contain a YAML object`);
+		}
+		const record = parsed as Record<string, unknown>;
+		return {
+			url: readDottedString(record, "auth.broker.url"),
+			token: readDottedString(record, "auth.broker.token"),
+			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
+			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
+		};
 	}
 	return {};
+}
+
+export interface AuthAccountPolicyConfig {
+	accountPolicies: AuthAccountPolicies;
+	defaultReservePct: number;
+}
+
+export interface LoadAuthAccountPolicyConfigOptions {
+	agentDir?: string;
+	accountPolicies?: unknown;
+	usageReservePct?: unknown;
+}
+
+/** Load and strictly validate account-selection policy configuration, with main-config fallback. */
+export async function loadAuthAccountPolicyConfig(
+	options: LoadAuthAccountPolicyConfigOptions = {},
+): Promise<AuthAccountPolicyConfig> {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const needsMainConfigFallback = options.accountPolicies === undefined || options.usageReservePct === undefined;
+	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
+	return {
+		accountPolicies: parseAuthAccountPolicies(
+			options.accountPolicies === undefined ? snapshot?.accountPolicies : options.accountPolicies,
+		),
+		defaultReservePct: parseUsageReservePct(
+			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
+		),
+	};
 }
 
 export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool | undefined> {
@@ -226,18 +365,32 @@ export async function resolveAuthBrokerConfig(
 	return { url, token };
 }
 
-/**
- * Create an AuthStorage instance, using the broker when configured and falling
- * back to the local SQLite store otherwise. This is the single source of truth
- * for the TUI and the catalog generator.
- */
-export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
-	const agentDir = options.agentDir ?? getAgentDir();
-	const brokerConfig = await resolveAuthBrokerConfig({
-		agentDir,
-		configValueResolver: options.configValueResolver,
-	});
+export interface OpenAuthCredentialStoreOptions {
+	/** Broker to connect to; `null` opens the local SQLite store under `agentDir`. */
+	brokerConfig: AuthBrokerClientConfig | null;
+	agentDir?: string;
+	cachePath?: string;
+	sourceLabel?: string;
+	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
+	accountPool?: AuthBrokerAccountPool;
+}
 
+/** Credential store opened by {@link openAuthCredentialStore} plus its diagnostics label. */
+export interface OpenedAuthCredentialStore {
+	store: AuthCredentialStore;
+	sourceLabel: string;
+}
+
+/**
+ * Open the credential store {@link discoverAuthStorage} would use for
+ * `brokerConfig`: the remote broker store (fails fast when the broker has no
+ * usable snapshot) or the local SQLite store. Also feeds
+ * {@link AuthStorage.replaceStore} when broker settings change at runtime.
+ */
+export async function openAuthCredentialStore(
+	options: OpenAuthCredentialStoreOptions,
+): Promise<OpenedAuthCredentialStore> {
+	const brokerConfig = options.brokerConfig;
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
@@ -295,19 +448,44 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 			onSnapshot: persist,
 			accountPool,
 		});
-		const storage = new AuthStorage(store, {
-			configValueResolver: options.configValueResolver,
-			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
-		});
-		await storage.reload();
-		return storage;
+		return { store, sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}` };
 	}
 
-	const dbPath = getAgentDbPath(agentDir);
-	const storage = await AuthStorage.create(dbPath, {
+	const dbPath = getAgentDbPath(options.agentDir ?? getAgentDir());
+	const store = await SqliteAuthCredentialStore.open(dbPath);
+	return { store, sourceLabel: options.sourceLabel ?? `local ${dbPath}` };
+}
+
+/**
+ * Create an AuthStorage instance, using the broker when configured and falling
+ * back to the local SQLite store otherwise. This is the single source of truth
+ * for the TUI and the catalog generator.
+ */
+export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const brokerConfig = await resolveAuthBrokerConfig({
+		agentDir,
 		configValueResolver: options.configValueResolver,
-		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
 	});
-	await storage.reload();
+	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
+		agentDir,
+		accountPolicies: options.accountPolicies,
+		usageReservePct: options.authStorageOptions?.defaultReservePct,
+	});
+	const { store, sourceLabel } = await openAuthCredentialStore({
+		brokerConfig,
+		agentDir,
+		cachePath: options.cachePath,
+		sourceLabel: options.sourceLabel,
+		accountPool: options.accountPool,
+	});
+	const storage = new AuthStorage(store, {
+		...options.authStorageOptions,
+		configValueResolver: options.configValueResolver,
+		sourceLabel,
+		accountPolicies,
+		defaultReservePct,
+	});
+	await storage.credentials.reload();
 	return storage;
 }

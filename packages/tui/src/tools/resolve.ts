@@ -3,7 +3,13 @@ import type { ToolRenderer } from "./renderer";
 import type { Component } from "../index";
 import { Text } from "../index";
 
-import type { RenderResultOptions } from "./renderer";
+import type { NativeToolView, RenderResultOptions } from "./renderer";
+
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { span, text } from "../native/describe";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { noteText, toolHead } from "./native-view";
 
 import type { Theme } from "../theme/theme";
 
@@ -46,6 +52,20 @@ export function renderResolutionDeviceCall(device: ResolutionDeviceName, content
 	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
 	return renderDeviceCallPreview(title, content, uiTheme, Ellipsis.Omit);
 }
+
+/** Native form of {@link renderResolutionDeviceCall}: `Resolve/Reject/Propose` head with the first content line. */
+export function describeResolutionDeviceCall(device: ResolutionDeviceName, content: unknown): NativeToolView {
+	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
+	return describeDeviceCallPreview(title, content);
+}
+
+/** Native form of {@link renderDeviceCallPreview}: title head plus the first content line of a pending device write. */
+export function describeDeviceCallPreview(title: string, content: unknown): NativeToolView {
+	const body = typeof content === "string" ? (plainText(content).trim().split("\n")[0] ?? "") : "";
+	return { head: toolHead(title, body || undefined) };
+}
+
+const resolveResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /** Render the first content line of a pending device write. */
 export function renderDeviceCallPreview(
@@ -127,6 +147,48 @@ export const resolveRenderer = {
 			},
 			invalidate() {},
 		};
+	},
+
+	describeCall(args: Partial<ResolveInvocation>): NativeToolView {
+		const head: TspSpan[] = toolHead("Resolve", args.action);
+		if (args.action) {
+			head.push(
+				span(" "),
+				span(
+					args.action === "apply" ? "proposed → resolved" : "proposed → rejected",
+					args.action === "apply" ? "success" : "warning",
+				),
+			);
+		}
+		const reason = args.reason?.trim();
+		return { head, inline: true, body: reason ? [noteText(reason, "muted", 1)] : undefined };
+	},
+
+	describeResult(result: {
+		content: Array<{ type: string; text?: string }>;
+		details?: ResolveDetails;
+		isError?: boolean;
+	}): NativeToolView | undefined {
+		return resolveResultMemo.get(result, [], () => {
+			const details = result.details;
+			const label = plainText(details?.label ?? "pending action");
+			const reason = plainText(details?.reason?.trim() || "No reason provided");
+			const action = details?.action ?? "apply";
+			const isApply = action === "apply" && !result.isError;
+			const verb = isApply ? "Accept" : action === "apply" ? "Failed" : "Discard";
+			const tone = result.isError ? "error" : isApply ? "success" : "warning";
+			const separatorIndex = label.indexOf(": ");
+			const sourceLabel = separatorIndex > 0 ? label.slice(0, separatorIndex).trim() : undefined;
+			const summaryLabel = separatorIndex > 0 ? label.slice(separatorIndex + 2).trim() : label;
+			const head: TspSpan[] = [span(`${verb}:`, `strong ${tone}`), span(" "), span(summaryLabel)];
+			if (sourceLabel) head.push(span(" "), span(`[${sourceLabel}]`, "strong muted"));
+			return {
+				head,
+				tone,
+				inline: true,
+				body: [text([span(reason, "muted")], { wrap: "word" })],
+			};
+		});
 	},
 
 	inline: true,

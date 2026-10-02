@@ -1,11 +1,14 @@
 /**
  * JSON tree rendering utilities shared across tool renderers.
  */
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { INTENT_FIELD, type TspSpan, type TspTreeNode } from "@oh-my-pi/pi-wire";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { TreeView, treeRowPrefix } from "../components/tree-view";
 import { truncateToWidth } from "../render/render-utils";
 import type { Theme, ThemeColor } from "../theme/theme";
+import { node, span } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { plainText } from "../native/spans";
 
 /** Max depth for JSON tree rendering */
 export const JSON_TREE_MAX_DEPTH_COLLAPSED = 2;
@@ -385,4 +388,116 @@ export function renderJsonTreeLines(
 	});
 	const rendered = tree.renderWithState(Number.POSITIVE_INFINITY);
 	return { lines: [...rendered.lines], truncated: rendered.truncated || scalarTruncated };
+}
+
+/** Data caps for {@link describeJsonTree}. */
+export interface JsonTreeDescribeOptions {
+	/** Deepest level expanded into child nodes; deeper containers get a `…` child. */
+	maxDepth?: number;
+	/** Tree nodes emitted before the remaining siblings collapse into `… N more`. */
+	maxNodes?: number;
+	/** Characters kept per string scalar (data cap, not a width). */
+	maxScalarLen?: number;
+	/** Levels open initially; deeper containers start closed. */
+	openDepth?: number;
+	/** Root object keys omitted. Defaults to internal tool argument metadata. */
+	hiddenRootKeys?: readonly string[];
+}
+
+type JsonEntry = readonly [key: string, value: unknown];
+
+function clipScalar(value: string, maxLen: number): string {
+	return value.length > maxLen ? `${value.slice(0, maxLen)}…` : value;
+}
+
+function jsonEntries(value: unknown[] | Record<string, unknown>, hidden?: readonly string[]): JsonEntry[] {
+	const out: JsonEntry[] = [];
+	if (Array.isArray(value)) {
+		for (let index = 0; index < value.length; index++) out.push([`[${index}]`, value[index]]);
+		return out;
+	}
+	for (const key in value) {
+		if (!hidden?.includes(key)) out.push([key, value[key]]);
+	}
+	return out;
+}
+
+function jsonScalarToken(value: unknown): string {
+	if (typeof value === "number" || typeof value === "bigint") return "syntaxNumber";
+	if (typeof value === "boolean" || value === null || value === undefined) return "syntaxKeyword";
+	return "dim";
+}
+
+/**
+ * TSP `tree` of a JSON value: containers become expandable nodes labelled with
+ * their key and size, scalars become `key: value` leaves styled by type.
+ * Bounded by depth, node count and scalar length; no width math.
+ */
+export function describeJsonTree(value: unknown, options: JsonTreeDescribeOptions = {}): NativeNode {
+	const maxDepth = Math.max(0, options.maxDepth ?? JSON_TREE_MAX_DEPTH_EXPANDED);
+	const maxScalarLen = Math.max(1, options.maxScalarLen ?? JSON_TREE_SCALAR_LEN_EXPANDED);
+	const openDepth = options.openDepth ?? JSON_TREE_MAX_DEPTH_COLLAPSED;
+	let budget = Math.max(1, options.maxNodes ?? JSON_TREE_MAX_LINES_EXPANDED);
+	let nextId = 0;
+	const leaf = (label: readonly TspSpan[]): TspTreeNode => ({ id: `${nextId++}`, label });
+
+	const describeEntries = (entries: readonly JsonEntry[], depth: number): TspTreeNode[] => {
+		const out: TspTreeNode[] = [];
+		for (let index = 0; index < entries.length; index++) {
+			if (budget <= 0) {
+				out.push(leaf([span(`… ${entries.length - index} more`, "dim")]));
+				break;
+			}
+			const [key, child] = entries[index];
+			out.push(describeValue(key, child, depth));
+		}
+		return out;
+	};
+
+	const describeValue = (key: string | undefined, entry: unknown, depth: number): TspTreeNode => {
+		budget--;
+		const id = `${nextId++}`;
+		const keySpans: TspSpan[] = key === undefined ? [] : [span(plainText(key), "muted")];
+		if (Array.isArray(entry) || isRecord(entry)) {
+			const entries = jsonEntries(entry);
+			const size = Array.isArray(entry) ? `[${entry.length}]` : `{${entries.length}}`;
+			const label = keySpans.length > 0 ? [...keySpans, span(` ${size}`, "dim")] : [span(size, "dim")];
+			if (entries.length === 0) return { id, label };
+			const children = depth >= maxDepth ? [leaf([span("…", "dim")])] : describeEntries(entries, depth + 1);
+			return { id, label, open: depth < openDepth, children };
+		}
+		const prefix = keySpans.length > 0 ? [...keySpans, span(": ", "muted")] : [];
+		if (typeof entry === "string") {
+			const lines = plainText(entry).split("\n");
+			const first = clipScalar(lines[0], maxScalarLen);
+			if (lines.length === 1) return { id, label: [...prefix, span(`"${first}"`, "syntaxString")] };
+			const children: TspTreeNode[] = [];
+			for (let index = 0; index < lines.length; index++) {
+				if (budget <= 0) {
+					children.push(leaf([span(`… ${lines.length - index} more lines`, "dim")]));
+					break;
+				}
+				budget--;
+				children.push(leaf([span(clipScalar(lines[index], maxScalarLen), "syntaxString")]));
+			}
+			return {
+				id,
+				label: [...prefix, span(`"${first}…"`, "syntaxString"), span(` (${lines.length} lines)`, "dim")],
+				open: false,
+				children,
+			};
+		}
+		return { id, label: [...prefix, span(plainText(formatScalar(entry, maxScalarLen)), jsonScalarToken(entry))] };
+	};
+
+	let nodes: TspTreeNode[];
+	if (Array.isArray(value) || isRecord(value)) {
+		const hidden = Array.isArray(value) ? undefined : (options.hiddenRootKeys ?? DEFAULT_HIDDEN_ROOT_KEYS);
+		const entries = jsonEntries(value, hidden);
+		nodes =
+			entries.length > 0 ? describeEntries(entries, 1) : [leaf([span(Array.isArray(value) ? "[]" : "{}", "dim")])];
+	} else {
+		nodes = [describeValue(undefined, value, 0)];
+	}
+	return node("tree", { nodes });
 }

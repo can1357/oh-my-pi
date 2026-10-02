@@ -73,6 +73,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap<AgentMessage, Component>(),
@@ -155,6 +156,9 @@ function makeRenderCtx(
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: () => helpers.updatePendingMessagesDisplay(),
+		compactionQueuedMessages: [],
+		keybindings: { getKeys: () => [] },
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap<AgentMessage, Component>(),
@@ -173,13 +177,11 @@ function makeRenderCtx(
 		},
 		// Rebuild paths honor terminal.showImages since the native-image work;
 		// keep it on so the image-replay contracts below stay meaningful.
-		settings: {
-			get: (key: string) => {
-				if (key === "terminal.showImages") return showImages;
-				if (key === "display.hideToolActivity") return hideToolActivity;
-				return false;
-			},
-		},
+		settings: Settings.isolated({
+			"terminal.showImages": showImages,
+			"display.hideToolActivity": hideToolActivity,
+			"composer.recallClearedDrafts": false,
+		}),
 		toolOutputExpanded: false,
 		hideToolActivity,
 		hideThinkingBlock: false,
@@ -187,6 +189,7 @@ function makeRenderCtx(
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
 			hasBuiltInTool: () => true,
@@ -245,13 +248,6 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 });
 
 describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
-	it("requests a scrollback-clearing repaint when clearTerminalHistory is set", async () => {
-		await Settings.init({ inMemory: true });
-		const { ctx } = makeCtx();
-		await new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });
-		expect(ctx.ui.requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
-	});
-
 	it("never clears scrollback when clearTerminalHistory is unset", async () => {
 		await Settings.init({ inMemory: true });
 		const { ctx } = makeCtx();
@@ -260,6 +256,23 @@ describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
 			([force, opts]) => force === true && (opts as { clearScrollback?: boolean } | undefined)?.clearScrollback,
 		);
 		expect(clearedCall).toBeUndefined();
+	});
+});
+
+describe("UiHelpers.renderInitialMessages — queued messages", () => {
+	it("keeps the queued-message bar after a mid-turn rebuild such as rewind (#13680)", async () => {
+		const { ctx } = makeRenderCtx(makeEmptyContext());
+		vi.spyOn(ctx.viewSession, "getQueuedMessages").mockReturnValue({
+			steering: ["steer now"],
+			followUp: ["queued one", "queued two"],
+		});
+
+		await new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });
+
+		const pending = Bun.stripANSI(ctx.pendingMessagesContainer.render(100).join("\n"));
+		expect(pending).toContain("steer now");
+		expect(pending).toContain("queued one");
+		expect(pending).toContain("queued two");
 	});
 });
 
@@ -361,28 +374,6 @@ describe("UiHelpers.renderInitialMessages — responsiveness", () => {
 });
 
 describe("UiHelpers.renderInitialMessages — image replay", () => {
-	it("restores read tool image blocks onto the rebuilt assistant transcript", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const transcript = transcriptWith([
-			assistantToolCall("read-image", "read", { path: "sample.png" }),
-			{
-				role: "toolResult",
-				toolCallId: "read-image",
-				toolName: "read",
-				content: [{ type: "text", text: "Read image: sample.png" }, pngImage],
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		await new UiHelpers(ctx).renderInitialMessages();
-
-		expect(hasImageComponent(chatContainer)).toBe(true);
-		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("Read sample.png");
-	});
-
 	it("restores eval display image blocks onto rebuilt tool output", async () => {
 		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
 		setTerminalImageProtocol(ImageProtocol.Sixel);

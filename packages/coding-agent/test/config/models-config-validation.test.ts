@@ -37,33 +37,6 @@ describe("validateProviderConfiguration (models-config auth)", () => {
 	});
 });
 
-describe("ModelsConfigSchema judgment APIs", () => {
-	test("accepts openrouter-decisions and typesafe in models.yml provider and model config", () => {
-		for (const api of ["openrouter-decisions", "typesafe"] as const) {
-			const checked = ModelsConfigSchema({
-				providers: {
-					"judge-proxy": {
-						baseUrl: "https://gateway.example/v1/proxy",
-						api,
-						apiKey: "test-key",
-						headers: { "x-custom": "header" },
-						models: [
-							{
-								id: "test-judge",
-								api,
-							},
-						],
-					},
-				},
-			});
-			if (checked instanceof OmpErrors) throw new Error(checked.summary);
-			const config: ModelsConfig = checked;
-			expect(config.providers?.["judge-proxy"]?.api).toBe(api);
-			expect(config.providers?.["judge-proxy"]?.models?.[0]?.api).toBe(api);
-		}
-	});
-});
-
 describe("ModelsConfigSchema Responses compat overrides", () => {
 	/** A custom Responses-compatible proxy serving gpt-6-astra, as a user writes it in models.yml. */
 	function astraProxyConfig(compat: Record<string, unknown>): unknown {

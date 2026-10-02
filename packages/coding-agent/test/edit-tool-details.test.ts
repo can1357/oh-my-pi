@@ -197,7 +197,7 @@ const inspectionCases: Array<{
 	{
 		mode: "sloppy",
 		args: {
-			input: "*** SM:EDIT sloppy.ts\n*** SM:FIND\nold\n*** SM:PUT\nsloppy",
+			input: "*** Edit File: sloppy.ts\n*** Find\nold\n*** Replace\nsloppy",
 		},
 		path: "sloppy.ts",
 		digest: "«\nold\n»\nsloppy",

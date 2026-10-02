@@ -324,7 +324,7 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 				return (await registryResolver(context)) ?? searchApiKey;
 			}
 		: registryResolver;
-	const accountId = params.authStorage.getOAuthAccountId(params.model.provider, params.sessionId);
+	const accountId = params.authStorage.oauth.identity(params.model.provider, params.sessionId)?.accountId;
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const plan = planQuery(params.query, parsed);
 	const response = await withAuth(
@@ -382,11 +382,11 @@ export class AnthropicProvider extends SearchProvider {
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): Promise<boolean> | boolean {
 		if (model) {
 			return (
-				authStorage.hasAuth(model.provider) ||
+				authStorage.keys.source(model.provider) !== undefined ||
 				(model.provider === "anthropic" && Boolean($env.ANTHROPIC_SEARCH_API_KEY))
 			);
 		}
-		return Boolean($env.ANTHROPIC_SEARCH_API_KEY) || authStorage.hasAuth("anthropic");
+		return Boolean($env.ANTHROPIC_SEARCH_API_KEY) || authStorage.keys.source("anthropic") !== undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

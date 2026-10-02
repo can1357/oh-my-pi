@@ -54,18 +54,16 @@ export interface DryBalanceAuthOptions {
 }
 
 export interface DryBalanceAuthStorage {
-	getOAuthAccess(
-		provider: string,
-		sessionId?: string,
-		options?: DryBalanceAuthOptions,
-	): Promise<OAuthAccess | undefined>;
-	getOAuthAccesses?(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
-	/**
-	 * Force-refresh a single credential by id (step (b) of the auth-retry
-	 * policy). The bench re-mints the failing account's token in place on a
-	 * 401 rather than rotating accounts — it is measuring each account.
-	 */
-	forceRefreshCredentialById?(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	readonly oauth: {
+		access(provider: string, sessionId?: string, options?: DryBalanceAuthOptions): Promise<OAuthAccess | undefined>;
+		accessAll?(provider: string, options?: DryBalanceAuthOptions): Promise<OAuthAccessResolution[]>;
+		/**
+		 * Force-refresh a single credential by id (step (b) of the auth-retry
+		 * policy). The bench re-mints the failing account's token in place on a
+		 * 401 rather than rotating accounts — it is measuring each account.
+		 */
+		refresh?(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	};
 }
 
 export interface DryBalanceModelRegistry {
@@ -410,8 +408,8 @@ async function runBenchRequest(
 	// The bench measures one account, so the switch step intentionally declines.
 	const apiKey: ApiKeyResolver = async ({ lastChance, error }) => {
 		if (error === undefined) return accessToken;
-		if (lastChance || credentialId === undefined || !authStorage.forceRefreshCredentialById) return undefined;
-		const refreshed = await authStorage.forceRefreshCredentialById(credentialId);
+		if (lastChance || credentialId === undefined || !authStorage.oauth.refresh) return undefined;
+		const refreshed = await authStorage.oauth.refresh(credentialId);
 		return refreshed.credential.type === "oauth" ? refreshed.credential.access : undefined;
 	};
 	try {
@@ -472,13 +470,13 @@ async function resolveBenchTargets(
 	model: Model<Api>,
 	authStorage: DryBalanceAuthStorage,
 ): Promise<DryBalanceBenchTarget[]> {
-	const resolved = authStorage.getOAuthAccesses
-		? await authStorage.getOAuthAccesses(model.provider, {
+	const resolved = authStorage.oauth.accessAll
+		? await authStorage.oauth.accessAll(model.provider, {
 				baseUrl: model.baseUrl,
 				modelId: model.id,
 			})
-		: await authStorage
-				.getOAuthAccess(model.provider, undefined, {
+		: await authStorage.oauth
+				.access(model.provider, undefined, {
 					baseUrl: model.baseUrl,
 					modelId: model.id,
 				})
@@ -528,10 +526,10 @@ async function runBenchTargets(
 }
 
 async function createDefaultRuntime(): Promise<DryBalanceRuntime> {
-	const authStorage = await discoverAuthStorage();
+	const cwd = getProjectDir();
+	const settings = await Settings.init({ cwd });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const cwd = getProjectDir();
-		const settings = await Settings.init({ cwd });
 		const modelRegistry = new ModelRegistry(authStorage);
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
@@ -597,10 +595,10 @@ async function runOneAttempt(
 	sessionId: string,
 ): Promise<DryBalanceAttemptResult> {
 	try {
-		// AuthStorage.getOAuthAccess shares the OAuth credential ranking, refresh,
+		// AuthStorage.oauth.access shares the OAuth credential ranking, refresh,
 		// usage-limit, broker, and session-sticky path used by getApiKey(), while
 		// returning the selected account metadata instead of bearer bytes.
-		const access = await modelRegistry.authStorage.getOAuthAccess(model.provider, sessionId, {
+		const access = await modelRegistry.authStorage.oauth.access(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 		});

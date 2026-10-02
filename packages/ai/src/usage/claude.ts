@@ -12,14 +12,12 @@ import {
 	type UsageLimit,
 	type UsageProvider,
 	type UsageReport,
-	type UsageResetCredits,
-	type UsageStatus,
 	type UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
 import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
-import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
+import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
@@ -417,13 +415,6 @@ function buildUsageAmount(utilization: number | undefined): UsageAmount | undefi
 	};
 }
 
-function buildUsageStatus(usedFraction: number | undefined): UsageStatus | undefined {
-	if (usedFraction === undefined) return undefined;
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
-}
-
 function parseDollarAmount(
 	amountMinor: unknown,
 	exponent: unknown,
@@ -501,12 +492,13 @@ function buildClaudeExtraUsageLimit(payload: ClaudeUsageResponse): UsageLimit | 
 
 	const amount = buildExtraUsageAmount(parsed.used, parsed.limit);
 	if (!amount) return null;
+	// A defined limit makes `buildExtraUsageAmount` set `usedFraction`.
 	const status =
 		parsed.limit === undefined
 			? undefined
 			: parsed.used >= parsed.limit
 				? "exhausted"
-				: (buildUsageStatus(amount.usedFraction) ?? "ok");
+				: usageStatus(amount.usedFraction);
 	return {
 		id: "anthropic:extra",
 		label: "Claude Extra Usage",
@@ -550,7 +542,7 @@ function buildUsageLimit(args: {
 		},
 		window,
 		amount,
-		status: buildUsageStatus(amount.usedFraction),
+		status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 	};
 }
 
@@ -667,8 +659,66 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		if (!result.endpointAbsent) break;
 	}
 	if (!payload || baseUrl === undefined) return null;
-	const url = `${baseUrl}/usage`;
+	const report = parseClaudeUsagePayload(payload, credential, `${baseUrl}/usage`);
+	const resetCreditList =
+		parseClaudeResetCreditsFromUsagePayload(payload, credential.orgId, baseUrl) ??
+		(await listClaudeResetCredits({
+			accessToken: credential.accessToken,
+			accountId: credential.accountId,
+			email: credential.email,
+			orgId: credential.orgId,
+			baseUrl: params.baseUrl,
+			fetch: ctx.fetch,
+			signal: params.signal,
+		}));
+	const hasResetInventory =
+		resetCreditList !== null &&
+		(resetCreditList.availableCount > 0 ||
+			resetCreditList.nextCreditId !== undefined ||
+			resetCreditList.credits.length > 0);
+	if (!report && !hasResetInventory) return null;
+	const result: UsageReport = report ?? {
+		provider: "anthropic",
+		fetchedAt: Date.now(),
+		limits: [],
+		metadata: { endpoint: `${baseUrl}/usage`, ...extractUsageIdentity(payload) },
+		raw: payload,
+	};
+	let accountId = result.metadata?.accountId ?? credential.accountId;
+	let email = result.metadata?.email ?? credential.email;
+	if ((!accountId || !email) && !params.signal?.aborted) {
+		const profileIdentity = extractProfileIdentity(await fetchProfile(baseUrl, headers, ctx, params.signal));
+		accountId ??= profileIdentity.accountId;
+		email ??= profileIdentity.email;
+	}
+	if (resetCreditList) {
+		const { orgId, baseUrl: _baseUrl, report: _report, ...resetCredits } = resetCreditList;
+		result.resetCredits = resetCredits;
+		if (orgId) result.metadata = { ...result.metadata, orgId };
+	} else if (ctx.previousReport?.resetCredits) {
+		// `null` means the reset probe failed (timeout, 429, malformed body), not
+		// that the account has no saved resets. Keep the block this credential
+		// last reported instead of dropping banked resets from the report.
+		result.resetCredits = ctx.previousReport.resetCredits;
+	}
+	result.metadata = {
+		...result.metadata,
+		...(accountId ? { accountId } : {}),
+		...(email ? { email } : {}),
+		...(credential.orgId ? { orgId: credential.orgId } : {}),
+	};
+	return result;
+}
 
+/** Parse the quota evidence in one live usage response, without any additional requests. */
+export function parseClaudeUsagePayload(
+	raw: unknown,
+	identity: { accountId?: string; email?: string; orgId?: string } = {},
+	endpoint?: string,
+	fetchedAt = Date.now(),
+): UsageReport | null {
+	if (!isRecord(raw)) return null;
+	const payload: ClaudeUsageResponse = raw;
 	const apiLimitEntries = parseApiLimitEntries(payload.limits);
 	const fiveHour = parseBucket(payload.five_hour) ?? apiLimitEntries.find(entry => entry.kind === "session")?.bucket;
 	const sevenDay =
@@ -721,57 +771,32 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		buildClaudeExtraUsageLimit(payload),
 	].filter((limit): limit is UsageLimit => limit !== null);
 
-	const resetCreditList =
-		parseClaudeResetCreditsFromUsagePayload(payload, credential.orgId, baseUrl) ??
-		(await listClaudeResetCredits({
-			accessToken: credential.accessToken,
-			...(credential.orgId ? { orgId: credential.orgId } : {}),
-			...(params.baseUrl ? { baseUrl: params.baseUrl } : {}),
-			fetch: ctx.fetch,
-			...(params.signal ? { signal: params.signal } : {}),
-		}));
-	const hasResetInventory =
-		resetCreditList !== null &&
-		(resetCreditList.availableCount > 0 ||
-			resetCreditList.nextCreditId !== undefined ||
-			resetCreditList.credits.length > 0);
-	if (limits.length === 0 && !hasResetInventory) return null;
-
-	const identity = extractUsageIdentity(payload);
-	let accountId = identity.accountId ?? credential.accountId;
-	let email = identity.email ?? credential.email;
-	if ((!accountId || !email) && !params.signal?.aborted) {
-		const profileIdentity = extractProfileIdentity(await fetchProfile(baseUrl, headers, ctx, params.signal));
-		accountId = accountId ?? profileIdentity.accountId;
-		email = email ?? profileIdentity.email;
-	}
-	let resetCredits: UsageResetCredits | undefined;
-	let reportOrgId = credential.orgId;
-	if (resetCreditList) {
-		const { orgId, baseUrl: _baseUrl, ...usageResetCredits } = resetCreditList;
-		resetCredits = usageResetCredits;
-		reportOrgId ??= orgId;
-	}
-
-	const report: UsageReport = {
-		provider: params.provider,
-		fetchedAt: Date.now(),
+	if (limits.length === 0) return null;
+	// The response speaks for the token that fetched it; stored metadata may be stale.
+	const payloadIdentity = extractUsageIdentity(payload);
+	const accountId = payloadIdentity.accountId ?? identity.accountId;
+	const email = payloadIdentity.email ?? identity.email;
+	return {
+		provider: "anthropic",
+		fetchedAt,
 		limits,
-		...(resetCredits ? { resetCredits } : {}),
 		metadata: {
-			endpoint: url,
+			...(endpoint ? { endpoint } : {}),
 			...(accountId ? { accountId } : {}),
 			...(email ? { email } : {}),
-			...(reportOrgId ? { orgId: reportOrgId } : {}),
+			...(identity.orgId ? { orgId: identity.orgId } : {}),
 		},
 		raw: payload,
 	};
-
-	return report;
 }
 
 export const claudeUsageProvider: UsageProvider = {
 	id: "anthropic",
+	// v2: cache identity gained an `org:` component so two subscriptions on one
+	// account email stop sharing a slot. v3 retires parsed reports created before
+	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
+	// renewing those incomplete reports throughout the 24h last-good retention.
+	cacheVersion: 3,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
 	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
@@ -881,6 +906,16 @@ function findClaudeSecondaryLimit(
 }
 
 export const claudeRankingStrategy: CredentialRankingStrategy = {
+	healsGlobalBlocks: true,
+	/**
+	 * Anthropic-only idle window after which a session's pinned credential no
+	 * longer suppresses usage-based re-ranking. Anthropic caps OAuth prompt-cache
+	 * retention at `ttl: "1h"` (ephemeral ~5min otherwise), so after this long
+	 * without an Anthropic resolve the conversation-prefix cache is no longer
+	 * guaranteed warm. Other providers retain indefinite stickiness until their
+	 * own cache lifetimes are verified.
+	 */
+	stickyWarmMs: 60 * 60_000,
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
 		const secondary = findClaudeSecondaryLimit(report, context);
@@ -909,8 +944,8 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 * weekly row plus the shared umbrella windows — so a healthy report lifts
 	 * the block while a spent shared 5-hour wall keeps it.
 	 *
-	 * Only Fable/Mythos appear: {@link blockScope} scopes reactive blocks for
-	 * those tiers alone, so no other scope can exist to heal.
+	 * Legacy and shared quota errors also leave account-wide blocks. Only a
+	 * complete report with every reported quota healthy can heal that scope.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
@@ -927,10 +962,17 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			const tier = limit.scope.tier;
 			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 		}
-		return [...tiers].map(tier => ({
-			blockScope: `tier:${tier}`,
-			limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
-		}));
+		return [
+			{
+				blockScope: "",
+				limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
+				healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
+			},
+			...[...tiers].map(tier => ({
+				blockScope: `tier:${tier}`,
+				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
+			})),
+		];
 	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

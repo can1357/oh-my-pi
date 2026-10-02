@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -27,6 +26,7 @@ import {
 	replaceBinaryForUpdate,
 	resolveBunGlobalNodeModulesDirFromLocations,
 	resolveReleaseBinaryAsset,
+	selectFallbackBinaryAsset,
 	resolveReleaseDist,
 	resolveReleaseRename,
 	resolveGitHubTokenForTest,
@@ -430,8 +430,11 @@ describe("update-cli install target detection", () => {
 		"refuses a foreign native target that does not report an OMP version",
 		async () => {
 			const dir = await makeTempDir();
+			const foreignPath = path.join(dir, "foreign");
 			const aliasPath = path.join(dir, "omp");
-			await fs.symlink(process.execPath, aliasPath);
+			await fs.copyFile(process.execPath, foreignPath);
+			await fs.chmod(foreignPath, 0o755);
+			await fs.symlink(foreignPath, aliasPath);
 			const fetchImpl = vi.fn(async () => new Response());
 			const target = resolveUpdateTargetFromPath(aliasPath, undefined, {
 				allowPackageManagers: true,
@@ -697,6 +700,7 @@ describe("migrateRenamedInstall transaction", () => {
 		tag: "v999.1.0",
 		version: "999.1.0",
 		packages: { pkg: "@new/omp", natives: "@new/natives" },
+		registry: "https://registry.npmjs.org/",
 	};
 
 	function scriptedSteps(script: { install: number[]; removeOld?: number; verify: boolean[] }): {
@@ -968,7 +972,7 @@ describe("update-cli release binary integrity", () => {
 	const binaryName = "omp-linux-x64";
 	const url = `https://github.com/can1357/oh-my-pi/releases/download/${tag}/${binaryName}`;
 	const content = "verified binary";
-	const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+	const digest = `sha256:${Bun.SHA256.hash(content, "hex")}`;
 
 	function releaseAsset(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 		return {
@@ -990,6 +994,7 @@ describe("update-cli release binary integrity", () => {
 
 	it("selects an uploaded asset with a valid SHA-256 digest", () => {
 		expect(resolveReleaseBinaryAsset(releaseAsset(), tag, binaryName)).toEqual({
+			version: "17.1.2",
 			url,
 			size: Buffer.byteLength(content),
 			digest,
@@ -1035,7 +1040,7 @@ describe("update-cli release binary integrity", () => {
 		// rejected even then.
 		expect(
 			resolveReleaseBinaryAsset({ ...releaseAsset(), prerelease: true }, tag, binaryName, { allowPrerelease: true }),
-		).toEqual({ url, size: Buffer.byteLength(content), digest });
+		).toEqual({ version: "17.1.2", url, size: Buffer.byteLength(content), digest });
 		expect(() =>
 			resolveReleaseBinaryAsset({ ...releaseAsset(), draft: true }, tag, binaryName, { allowPrerelease: true }),
 		).toThrow("is a draft");
@@ -1131,7 +1136,7 @@ describe("update-cli release binary integrity", () => {
 				url,
 				targetPath,
 				expectedSize: Buffer.byteLength(content),
-				expectedDigest: `sha256:${createHash("sha256").update("different binary").digest("hex")}`,
+				expectedDigest: `sha256:${Bun.SHA256.hash("different binary", "hex")}`,
 				fetchImpl,
 			}),
 		).rejects.toThrow("digest mismatch");
@@ -1143,9 +1148,7 @@ describe("update-cli release binary integrity", () => {
 		const targetPath = path.join(dir, binaryName);
 		const installed = "#!/bin/sh\necho omp/17.0.8\n";
 		const altered = "#!/bin/sh\necho omp/17.1.2\n";
-		const expectedDigest = `sha256:${createHash("sha256")
-			.update("x".repeat(Buffer.byteLength(altered)))
-			.digest("hex")}`;
+		const expectedDigest = `sha256:${Bun.SHA256.hash("x".repeat(Buffer.byteLength(altered)), "hex")}`;
 		await Bun.write(targetPath, installed);
 		await fs.chmod(targetPath, 0o755);
 
@@ -1200,6 +1203,95 @@ describe("update-cli release binary integrity", () => {
 			}),
 		).rejects.toThrow("retry later or set GITHUB_TOKEN or GH_TOKEN");
 		expect(await Bun.file(targetPath).exists()).toBe(false);
+	});
+
+	function publishedRelease(version: string, body: string, overrides: Record<string, unknown> = {}) {
+		return {
+			tag_name: `v${version}`,
+			draft: false,
+			prerelease: false,
+			assets: [
+				{
+					name: binaryName,
+					state: "uploaded",
+					size: Buffer.byteLength(body),
+					digest: `sha256:${Bun.SHA256.hash(body, "hex")}`,
+					browser_download_url: `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`,
+				},
+			],
+			...overrides,
+		};
+	}
+
+	it("installs the newest published release when the advertised tag has none", async () => {
+		// npm `latest` can name a version GitHub never published: 18.2.9 reached
+		// the npm dist-tag while `v18.2.9` 404'd and `v18.2.10` was the newest
+		// published release (#12913). Drafts and stable-channel prereleases are
+		// not installable, so the scan walks past them.
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, binaryName);
+		const published = "published 999.9.8 binary";
+		const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+			const requestUrl = String(input);
+			if (requestUrl.endsWith("/releases/tags/v999.9.9")) {
+				return new Response(null, { status: 404, statusText: "Not Found" });
+			}
+			if (requestUrl.includes("/releases?")) {
+				return new Response(
+					JSON.stringify([
+						publishedRelease("999.9.10", "draft binary", { draft: true }),
+						publishedRelease("999.9.9-canary.1", "canary binary", { prerelease: true }),
+						publishedRelease("999.9.8", published),
+					]),
+				);
+			}
+			if (requestUrl.endsWith(`/download/v999.9.8/${binaryName}`)) return new Response(published);
+			throw new Error(`Unexpected request: ${requestUrl}`);
+		};
+		const verified: string[] = [];
+
+		await updateViaBinaryAt(targetPath, "999.9.9", {
+			binaryName,
+			fetchImpl,
+			githubToken: "test-token",
+			verifyInstalledVersion: async version => {
+				verified.push(version);
+				return { ok: true, path: targetPath };
+			},
+		});
+
+		expect(verified).toEqual(["999.9.8"]);
+		expect(await Bun.file(targetPath).text()).toBe(published);
+	});
+
+	it("names the missing tag and the npm mismatch when no published release can replace it", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, binaryName);
+		const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+			const requestUrl = String(input);
+			if (requestUrl.includes("/releases/tags/")) {
+				return new Response(null, { status: 404, statusText: "Not Found" });
+			}
+			if (requestUrl.includes("/releases?")) {
+				// Older than the running version: installing it would be a downgrade.
+				return new Response(JSON.stringify([publishedRelease("17.1.2", content)]));
+			}
+			throw new Error(`Unexpected request: ${requestUrl}`);
+		};
+
+		await expect(
+			updateViaBinaryAt(targetPath, "999.9.9", { binaryName, fetchImpl, githubToken: "test-token" }),
+		).rejects.toThrow("npm advertises 999.9.9 but GitHub release v999.9.9 is not published");
+		expect(await Bun.file(targetPath).exists()).toBe(false);
+	});
+
+	it("falls back to a prerelease only for canary updates", () => {
+		const releases = [publishedRelease("999.9.9", content, { prerelease: true })];
+
+		expect(selectFallbackBinaryAsset(releases, binaryName, "999.0.0")).toBeUndefined();
+		expect(selectFallbackBinaryAsset(releases, binaryName, "999.0.0", { allowPrerelease: true })?.version).toBe(
+			"999.9.9",
+		);
 	});
 });
 
@@ -1458,7 +1550,7 @@ describe("update-cli script-shim takeover", () => {
 	const url = `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`;
 
 	function makeFetch(content: string, prerelease = false): (input: string | URL | Request) => Promise<Response> {
-		const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+		const digest = `sha256:${Bun.SHA256.hash(content, "hex")}`;
 		return async (input: string | URL | Request): Promise<Response> => {
 			const requestUrl = String(input);
 			if (requestUrl.startsWith("https://api.github.com/")) {
@@ -1672,7 +1764,7 @@ describe("update-cli concurrent binary updates", () => {
 	const binaryName = "omp-linux-x64";
 	const url = `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`;
 	const payload = Buffer.alloc(2048, 0x41);
-	const digest = `sha256:${createHash("sha256").update(payload).digest("hex")}`;
+	const digest = `sha256:${Bun.SHA256.hash(payload, "hex")}`;
 
 	function metadata(): Response {
 		return Response.json({
@@ -1792,6 +1884,7 @@ describe("update-cli manager update recovery", () => {
 		tag: "v18.0.1",
 		version: "18.0.1",
 		packages: { pkg: "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives" },
+		registry: "https://registry.npmjs.org/",
 	};
 	const launcherPath = "C:/Users/test/AppData/Roaming/npm/omp.cmd";
 

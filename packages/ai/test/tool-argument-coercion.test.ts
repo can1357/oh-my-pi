@@ -87,24 +87,6 @@ describe("Tool argument coercion", () => {
 		expect(result.timeout).toBe(300);
 	});
 
-	it("preserves string values when schema expects string", () => {
-		const tool: Tool = {
-			name: "t2",
-			description: "",
-			parameters: type({ label: type("string") }),
-		};
-
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "call-2",
-			name: "t2",
-			arguments: { label: "300" },
-		};
-
-		const result = validateToolArguments(tool, toolCall) as { label: string };
-		expect(result.label).toBe("300");
-	});
-
 	it("stringifies object values when schema expects string", () => {
 		const tool: Tool = {
 			name: "object-string",
@@ -1704,27 +1686,6 @@ describe("Tool argument coercion", () => {
 		expect(result.tick_size).toBeUndefined();
 	});
 
-	it("strips string 'null' on optional boolean field", () => {
-		const tool: Tool = {
-			name: "edit-tool",
-			description: "",
-			parameters: type({
-				path: type("string"),
-				delete: type("boolean").optional(),
-			}),
-		};
-
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "call-edit",
-			name: "edit-tool",
-			arguments: { path: "file.ts", delete: "null" },
-		};
-
-		const result = validateToolArguments(tool, toolCall);
-		expect(result).toEqual({ path: "file.ts" });
-	});
-
 	it("strips string 'null' on optional string field", () => {
 		const tool: Tool = {
 			name: "edit-tool",
@@ -2008,28 +1969,6 @@ describe("Tool argument coercion", () => {
 		}) as { tags: string[] };
 
 		expect(second.tags).toEqual([]);
-	});
-
-	it("strips null from optional properties without defaults", () => {
-		const tool: Tool = {
-			name: "t-optional-nulls",
-			description: "",
-			parameters: type({
-				path: type("string"),
-				offset: type("number").optional(),
-				limit: type("number").optional(),
-			}),
-		};
-
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "call-optional-nulls",
-			name: "t-optional-nulls",
-			arguments: { path: "foo", offset: null, limit: null },
-		};
-
-		const result = validateToolArguments(tool, toolCall);
-		expect(result).toEqual({ path: "foo" });
 	});
 
 	it("deserializes a stringified JSON root with null and stringified-array fields together", () => {

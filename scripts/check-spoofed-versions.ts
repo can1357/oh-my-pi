@@ -3,7 +3,7 @@
 /**
  * Checks spoofed external tool versions against their latest upstream releases.
  *
- * We impersonate several external tools (Gemini CLI, Claude Code) via User-Agent
+ * We impersonate external tools (Gemini CLI, Claude Code, Codex) via client-version
  * strings. When these tools release new versions, the upstream service may start
  * rejecting or deprioritizing older versions. This script detects drift so we
  * can bump the pinned fallbacks before users hit 400s/403s/429s.
@@ -60,6 +60,12 @@ async function fetchLatestNpmVersion(pkg: string): Promise<string | null> {
 }
 
 const checks: VersionCheck[] = [
+	{
+		name: "Codex",
+		file: "packages/catalog/src/wire/codex.ts",
+		sourcePattern: /CODEX_CLIENT_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/,
+		fetchLatest: () => fetchLatestNpmVersion("@openai/codex"),
+	},
 	{
 		name: "Gemini CLI",
 		file: "packages/catalog/src/wire/gemini-headers.ts",

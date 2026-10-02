@@ -4,7 +4,6 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -22,7 +21,7 @@ describe("advisor memory context", () => {
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -47,8 +46,6 @@ describe("advisor memory context", () => {
 	async function createAdvisedSession(
 		backend: string,
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path()),
-		skills: Skill[] = [],
-		toolNames?: string[],
 	): Promise<AgentSession> {
 		const settings = Settings.isolated({
 			"async.enabled": false,
@@ -72,8 +69,7 @@ describe("advisor memory context", () => {
 			settings,
 			model,
 			disableExtensionDiscovery: true,
-			skills,
-			toolNames,
+			skills: [],
 			contextFiles: [],
 			workspaceTree: {
 				rootPath: tempDir.path(),
@@ -127,37 +123,6 @@ describe("advisor memory context", () => {
 		expect(names).not.toContain("edit");
 	});
 
-	it("keeps the advisor read hint tracking the primary snapshot", async () => {
-		tempDir = TempDir.createSync("@pi-advisor-hint-");
-		session = await createAdvisedSession(
-			"sharpshooter",
-			undefined,
-			[
-				{
-					name: "hint-skill",
-					description: "Hint tracking skill",
-					filePath: `${tempDir.path()}/SKILL.md`,
-					baseDir: tempDir.path(),
-					source: "test",
-				},
-			],
-			["read", "bash"],
-		);
-		const advisor = session.getAdvisorAgent();
-		const read = advisor?.state.tools.find(tool => tool.name === "read");
-		if (!read) throw new Error("Expected advisor read tool");
-		const schema = () => JSON.stringify(read.parameters.toJsonSchema());
-		expect(schema()).toContain("skill://");
-		session.settings.set("skillful", false);
-		// A live setting change alone must not mutate the frozen provider prefix.
-		expect(schema()).toContain("skill://");
-		await session.refreshBaseSystemPrompt();
-		expect(schema()).not.toContain("skill://");
-		session.settings.set("skillful", true);
-		await session.refreshBaseSystemPrompt();
-		expect(schema()).toContain("skill://");
-	});
-
 	it.each(["hindsight", "mnemopi"])("keeps in-memory advisor URL tools bound to the %s session", async backend => {
 		tempDir = TempDir.createSync("@pi-advisor-memory-urls-");
 		const previousAgentDir = getAgentDir();
@@ -184,9 +149,10 @@ describe("advisor memory context", () => {
 					pattern: "Advisor project summary marker",
 				}),
 			).rejects.toThrow(unavailableRoot);
-			for (const path of ["memory://root", "memory://root/*.md"]) {
-				await expect(glob.execute("advisor-root-glob", { path })).rejects.toThrow(unavailableRoot);
-			}
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
+				unavailableRoot,
+			);
 
 			if (backend === "mnemopi") {
 				for (let attempt = 0; !session.getMnemopiSessionState() && attempt < 100; attempt++) {

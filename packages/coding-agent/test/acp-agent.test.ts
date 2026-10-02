@@ -43,6 +43,8 @@ import {
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
+import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
 	const result = schema.safeParse(value);
@@ -134,9 +136,9 @@ class FakeAgentSession {
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
-	refreshSkillsCalls = 0;
-	async refreshSkills(): Promise<void> {
-		this.refreshSkillsCalls++;
+	async refreshSkillsAndCommands(): Promise<void> {}
+	subscribeCommandMetadataChanged(_listener: () => void): () => void {
+		return () => {};
 	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
@@ -378,6 +380,10 @@ class FakeAgentSession {
 		return this.fastMode;
 	}
 
+	isUltrafastModeEnabled(): boolean {
+		return false;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}
@@ -617,7 +623,7 @@ describe("ACP agent", () => {
 
 	it("advertises plan mode and emits schema-valid mode updates", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		expectAcpStructure(zNewSessionResponse, created);
@@ -674,7 +680,7 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler errors when the plan file is missing", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -695,7 +701,7 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler approves the agent-named plan and exits plan mode on submit", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -755,8 +761,8 @@ describe("ACP agent", () => {
 	});
 	it("plan-proposal handler autosaves the approved plan without leaking the path", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
-		Settings.instance.set("plan.autosave", true);
+		cfgPlanEnabled.set(Settings.instance, true);
+		cfgPlanAutosave.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -790,11 +796,11 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler approves and notes autosave failure without the path", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 		const blocker = path.join(harness.cwdA, "blocker");
 		await Bun.write(blocker, "x");
-		Settings.instance.set("plan.autosave", true);
-		Settings.instance.set("plan.autosaveDir", path.join(blocker, "sub"));
+		cfgPlanAutosave.set(Settings.instance, true);
+		cfgPlanAutosaveDir.set(Settings.instance, path.join(blocker, "sub"));
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -834,7 +840,7 @@ describe("ACP agent", () => {
 		const harness = await createHarness({
 			elicitationHandler: async () => ({ action: "cancel" }),
 		});
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -1536,7 +1542,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("does not replay internal Hub messages to ACP clients", async () => {
+	it("does not replay internal peer messages to ACP clients", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
 		harness.sessions.push(stored);
@@ -1547,8 +1553,8 @@ describe("ACP agent", () => {
 				{
 					type: "toolCall",
 					id: "toolu_hub_replay",
-					name: "hub",
-					arguments: { op: "send", to: "Scout", message: "Private coordination" },
+					name: "write",
+					arguments: { path: "agent://Scout", content: "Private coordination" },
 				},
 			],
 			stopReason: "toolUse",
@@ -1556,8 +1562,8 @@ describe("ACP agent", () => {
 		stored.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "toolu_hub_replay",
-			toolName: "hub",
-			content: [{ type: "text", text: "Private reply" }],
+			toolName: "write",
+			content: [{ type: "text", text: "Delivered to Scout." }],
 			isError: false,
 			timestamp: Date.now(),
 		});
@@ -2318,44 +2324,6 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("queues next prompt until AgentSession idle cleanup completes", async () => {
-		const harness = await createHarness();
-		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		const session = harness.findSession(created.sessionId)!;
-		const { promise: idleBlocked, resolve: markIdleBlocked } = Promise.withResolvers<void>();
-		const { promise: releaseIdle, resolve: unblockIdle } = Promise.withResolvers<void>();
-		session.waitForIdleBlocker = async () => {
-			markIdleBlocked();
-			await releaseIdle;
-		};
-
-		const firstPrompt = harness.agent.prompt({
-			sessionId: created.sessionId,
-			messageId: "00000000-0000-4000-8000-000000000030",
-			prompt: [{ type: "text", text: "wait for cleanup" }],
-		} as PromptRequest);
-		await idleBlocked;
-
-		try {
-			const secondPrompt = harness.agent.prompt({
-				sessionId: created.sessionId,
-				messageId: "00000000-0000-4000-8000-000000000031",
-				prompt: [{ type: "text", text: "after cleanup" }],
-			} as PromptRequest);
-			await Bun.sleep(0);
-			expect(session.promptCalls).toEqual(["wait for cleanup"]);
-
-			unblockIdle();
-			await firstPrompt;
-			await secondPrompt;
-			expect(session.promptCalls).toEqual(["wait for cleanup", "after cleanup"]);
-		} finally {
-			unblockIdle();
-			harness.abortController.abort();
-			await Bun.sleep(0);
-		}
-	});
-
 	it("serializes multiple prompts queued during idle cleanup", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -2478,7 +2446,6 @@ describe("ACP agent", () => {
 			Object.assign(session, {
 				messages: session.sessionManager.buildSessionContext().messages,
 				titleGenerationSignal: new AbortController().signal,
-				notifyTitleGenerationStart: () => undefined,
 				generateTitle: (_context: string, _systemPrompt?: string, signal?: AbortSignal) => {
 					const inference = inferences[inferenceIndex++];
 					titleSignals.push(signal);

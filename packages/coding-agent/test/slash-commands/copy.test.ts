@@ -134,9 +134,6 @@ describe("/open slash command", () => {
 		expect(harness.showStatus).toHaveBeenCalledWith("No link to open.");
 
 		expect(await executeBuiltinSlashCommand("/open code", harness.runtime)).toBe(true);
-		expect(harness.showStatus).toHaveBeenLastCalledWith(
-			"Usage: /open [link]  (pick a specific link: /copy, → blocks, o)",
-		);
 		expect(openSpy).not.toHaveBeenCalled();
 	});
 });

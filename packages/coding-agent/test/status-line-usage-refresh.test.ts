@@ -7,6 +7,8 @@ import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
+import { cfgTuiCodexResetFireworks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
 	await Promise.resolve();
@@ -123,7 +125,7 @@ function makeCodexSession(
 	session.model = { contextWindow: 200_000, provider: "openai-codex" };
 	session.modelRegistry = {
 		authStorage: {
-			getOAuthAccountIdentity: resolveActiveIdentity,
+			oauth: { identity: resolveActiveIdentity },
 		},
 	};
 	return session as unknown as AgentSession;
@@ -299,11 +301,13 @@ describe("StatusLineComponent usage refresh", () => {
 		};
 		base.modelRegistry = {
 			authStorage: {
-				getOAuthAccountIdentity: () => ({
-					email: "shared@example.com",
-					accountId: "account-shared",
-					orgId,
-				}),
+				oauth: {
+					identity: () => ({
+						email: "shared@example.com",
+						accountId: "account-shared",
+						orgId,
+					}),
+				},
 			},
 		};
 		const component = new StatusLineComponent(base as unknown as AgentSession, statusLineHost);
@@ -341,7 +345,7 @@ describe("StatusLineComponent usage refresh", () => {
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
-		expect(Settings.instance.get("tui.codexResetFireworks")).toBe(false);
+		expect(cfgTuiCodexResetFireworks.get(Settings.instance)).toBe(false);
 		await refreshUsage(component);
 		state = {
 			sevenDayPercent: 0,
@@ -354,7 +358,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("emits distinct enabled events for an unscheduled weekly reset and a newly banked reset", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		const nextSevenDayResetAt = sevenDayResetAt + 7 * 24 * 3_600_000;
 		let state: CodexUsageState = {
@@ -405,7 +409,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("compares weekly reset drops only within the same Codex quota tier", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		let state: CodexUsageState = {
 			sevenDayPercent: 42,
@@ -435,7 +439,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("binds each reset snapshot to the account identity used to normalize it", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		const reports = [
 			...codexUsageReport(
@@ -477,7 +481,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("does not attribute a workspace sibling's saved resets to the active credential", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const workspaceId = "workspace-1";
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		let bobSavedResets = 0;
@@ -517,7 +521,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("keeps an unavailable saved-reset count unknown across refreshes", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		let state: CodexUsageState = {
 			sevenDayPercent: 18,
@@ -545,7 +549,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("suppresses an early weekly drop when a prior saved-reset balance becomes unavailable", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		let state: CodexUsageState = {
 			sevenDayPercent: 42,
@@ -571,7 +575,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("does not infer an observation time when the provider omits fetchedAt", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		let state: CodexUsageState = {
 			sevenDayPercent: 42,
@@ -599,7 +603,7 @@ describe("StatusLineComponent usage refresh", () => {
 	});
 
 	it("discards a timed-out report after a newer refresh applies", async () => {
-		Settings.instance.set("tui.codexResetFireworks", true);
+		cfgTuiCodexResetFireworks.set(Settings.instance, true);
 		const stale = Promise.withResolvers<unknown>();
 		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
 		const current: CodexUsageState = {

@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-tui",
-  "version": "18.2.9",
+  "version": "18.4.12",
   "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
   "homepage": "https://omp.sh",
-  "author": "Stencil Labs, Inc.",
+  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
   "contributors": [
     "Mario Zechner"
   ],
@@ -34,7 +34,8 @@
     "lint": "oxlint .",
     "test": "bun test --parallel test/*.test.ts",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
-    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
+    "gen:glyphs": "bun scripts/gen-glyphs.ts"
   },
   "dependencies": {
     "@oh-my-pi/omptype": "catalog:",

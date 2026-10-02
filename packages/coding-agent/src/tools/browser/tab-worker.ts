@@ -22,7 +22,6 @@ import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
 import {
 	bindRunFacade,
-	CELL_BUDGET_SLACK_MS,
 	installBrowserWorkerRejectionGuard,
 	isBrowserRunOwnedRejection,
 	markBrowserRunRejection,
@@ -39,9 +38,11 @@ import {
 	type AriaSnapshotOptions,
 	assertSelectorString,
 	captureAriaSnapshot,
+	PLAYWRIGHT_ONLY_SELECTOR_RE,
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
+import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS, ZERO_MATCH_POLL_MS } from "./op-timeouts";
 import { type BrowserA11yOptions, type BrowserA11yResult, formatA11ySummary, runA11yAudit } from "./a11y/audit";
 import {
 	applyUserAgentOverride,
@@ -77,7 +78,7 @@ import {
 	clearPageStorage,
 	type StorageKind,
 } from "./storage-state";
-import { enableReact, type ReactEnableResult } from "./react/devtools-hook";
+import { enableReact, puppeteerReactHost, type ReactEnableResult } from "./react/devtools-hook";
 import { collectReactRenders, type ReactRendersAction, type ReactRendersResult } from "./react/renders";
 import { readReactSuspense, type ReactSuspenseBoundary, type ReactSuspenseOptions } from "./react/suspense";
 import {
@@ -144,6 +145,7 @@ import {
 	type WebMcpListResult,
 } from "./webmcp";
 import {
+	createCdpRecordingSource,
 	RecordingController,
 	type RecordingOptions,
 	type RecordingStartResult,
@@ -160,6 +162,7 @@ import {
 	clickAt,
 	clickElement,
 	clickQueryHandlerText,
+	fillViaHandle,
 	highlightElement,
 	type HighlightOptions,
 	type InteractionHandle,
@@ -280,72 +283,14 @@ const SELECTOR_HANDLER_PREFIXES = [
 	"p-",
 ] as const;
 
-/**
- * Playwright-only selector engines/pseudos puppeteer cannot parse. Without this guard a
- * `tab.click(":has-text(...)")` would wait the full action timeout and fail opaquely;
- * fail fast instead with a pointer to the puppeteer-native alternative. Skipped for
- * explicit query-handler prefixes (`text/`, `aria/`, …) whose payload is literal text.
- */
-const PLAYWRIGHT_ONLY_SELECTOR_RE =
-	/:has-text\(|:text\(|:text-is\(|:text-matches\(|:visible\b|:hidden\b|:nth-match\(|:near\(|:above\(|:below\(|:right-of\(|:left-of\(/;
-
 type DragTarget = string | { readonly x: number; readonly y: number };
 
-/**
- * Per-op fail-fast ceilings for `tab.*` helpers. All are kept strictly under the cell
- * budget (`timeoutMs - OP_DEADLINE_SLACK_MS`) so a stalled helper rejects with a named,
- * attributable error that leaves recovery budget — never the opaque whole-cell
- * "Browser code execution timed out" path that consumed the entire run.
- *
- * - `QUICK_OP_TIMEOUT_MS`: page-coupled reads that should resolve fast (`observe`,
- *   `screenshot`, `extract`, `ariaSnapshot`).
- * - `ACTION_OP_TIMEOUT_MS`: interactive point actions (`click`, `fill`, `type`, …) and
- *   the default for wait helpers when no explicit `{ timeout }` is given. Selector ops
- *   additionally fail fast after `ZERO_MATCH_FAIL_FAST_MS` of confirmed zero matches
- *   (see `#zeroMatchWatchdog`), so the full ceiling is only spent on elements that
- *   exist but are not yet actionable.
- *
- * `goto` and `evaluate` stay uncapped (`Number.POSITIVE_INFINITY`): navigation and user
- * code legitimately use the full cell budget.
- */
-const QUICK_OP_TIMEOUT_MS = 20_000;
-const ACTION_OP_TIMEOUT_MS = 8_000;
 /** Maximum wait for a renderer acknowledgement after a wheel event is queued. */
 const SCROLL_ACK_TIMEOUT_MS = 2_000;
-/** Headroom subtracted from the cell budget so a per-op deadline fires before it. */
-const OP_DEADLINE_SLACK_MS = CELL_BUDGET_SLACK_MS;
-/**
- * A selector op whose selector has matched nothing for this long fails fast with the
- * zero-match hint instead of burning the rest of its deadline: a wrong selector or a
- * wrong page (consent wall, pre-navigation document) is the common agent failure and
- * should cost ~2s, not the full action ceiling. Explicit `{ timeout }` waits opt out.
- */
-const ZERO_MATCH_FAIL_FAST_MS = 2_000;
-/** Poll cadence for the zero-match watchdog. */
-const ZERO_MATCH_POLL_MS = 250;
 /** Cleanup must settle inside the supervisor's 750ms post-run grace window. */
 const REQUEST_INTERCEPTION_CLEANUP_TIMEOUT_MS = 500;
 /** Bound cleanup window after a timed-out raw handle action. */
 const HANDLE_ACTION_INVALIDATION_TIMEOUT_MS = 500;
-
-export interface OpTimeouts {
-	/** Largest per-op deadline allowed — strictly below the cell budget. */
-	budgetBound: number;
-	/** Ceiling for quick page reads. */
-	quickOpMs: number;
-	/** Ceiling for interactive actions + default for waits. */
-	actionOpMs: number;
-}
-
-/** Resolve the per-op fail-fast ceilings for a given cell budget. */
-export function resolveOpTimeouts(cellTimeoutMs: number): OpTimeouts {
-	const budgetBound = Math.max(1, cellTimeoutMs - OP_DEADLINE_SLACK_MS);
-	return {
-		budgetBound,
-		quickOpMs: Math.min(budgetBound, QUICK_OP_TIMEOUT_MS),
-		actionOpMs: Math.min(budgetBound, ACTION_OP_TIMEOUT_MS),
-	};
-}
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
 export async function dispatchScroll(
@@ -360,24 +305,6 @@ export async function dispatchScroll(
 	} finally {
 		clearTimeout(timer);
 	}
-}
-
-/**
- * Effective timeout for a wait helper (`waitFor*`). A positive explicit `{ timeout }` is
- * honored but clamped to the cell budget so it still fails fast + named; raising the tool
- * `timeout` raises that cap, so a longer budget stays meaningful. No `{ timeout }` → the
- * action ceiling. Puppeteer's `{ timeout: 0 }` / `Infinity` ("disable") maps to the largest
- * bounded wait (`budgetBound`) — the harness never permits an unbounded wait. Garbage input
- * (negative, `NaN`) falls back to the action ceiling rather than the longest wait.
- */
-export function resolveWaitTimeout(cellTimeoutMs: number, explicit?: number): number {
-	const { budgetBound, actionOpMs } = resolveOpTimeouts(cellTimeoutMs);
-	if (explicit === undefined) return actionOpMs;
-	// Puppeteer "disable" sentinels — still bounded by the budget here.
-	if (explicit === 0 || explicit === Number.POSITIVE_INFINITY) return budgetBound;
-	// Positive finite → honored + clamped. Negative/NaN garbage → default, not the longest wait.
-	if (Number.isFinite(explicit) && explicit > 0) return Math.min(explicit, budgetBound);
-	return actionOpMs;
 }
 
 interface TabApi {
@@ -867,23 +794,6 @@ async function typeViaHandle(
 		throwIfAborted(signal);
 		await untilAborted(signal, () => handle.frame.page().keyboard.type(character, options));
 	}
-}
-
-/** Focus, clear any existing value, then retype — shared by `tab.fill(aria-ref)` and enriched handles. */
-async function fillViaHandle(
-	handle: ElementHandle,
-	value: string,
-	signal?: AbortSignal,
-	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
-): Promise<void> {
-	await untilAborted(signal, () =>
-		handle.evaluate(el => {
-			const node = el as unknown as { value?: string; focus?: () => void };
-			node.focus?.();
-			if ("value" in node) node.value = "";
-		}),
-	);
-	await untilAborted(signal, () => type(value));
 }
 
 /**
@@ -2004,18 +1914,12 @@ export class WorkerCore {
 					`tab.fill(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						if (parseAriaRefSelector(selector) !== null) {
-							const handle = await this.#resolveAriaRef(selector);
-							try {
-								await fillViaHandle(handle, value, sig);
-							} finally {
-								await handle.dispose().catch(() => undefined);
-							}
-							return;
+						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
+						try {
+							await fillViaHandle(handle, value, sig);
+						} finally {
+							await handle.dispose().catch(() => undefined);
 						}
-						await untilAborted(sig, () =>
-							page.locator(normalizeSelector(selector)).setTimeout(actionOpMs).fill(value, { signal: sig }),
-						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -2181,7 +2085,7 @@ export class WorkerCore {
 				),
 			recordStart: (destination, opts) =>
 				op(`tab.recordStart(${JSON.stringify(destination)})`, quickOpMs, sig =>
-					this.#recording.start(page, destination, session.cwd, opts, sig),
+					this.#recording.start(createCdpRecordingSource(page), destination, session.cwd, opts, sig),
 				),
 			recordStop: () =>
 				op("tab.recordStop()", budgetBound, sig =>
@@ -2189,7 +2093,7 @@ export class WorkerCore {
 				),
 			recordRestart: (destination, opts) =>
 				op(`tab.recordRestart(${JSON.stringify(destination)})`, budgetBound, sig =>
-					this.#recording.restart(page, destination, session.cwd, opts, {
+					this.#recording.restart(createCdpRecordingSource(page), destination, session.cwd, opts, {
 						signal: sig,
 						output,
 						excludeWebP: session.excludeWebP,
@@ -2210,8 +2114,8 @@ export class WorkerCore {
 					output.push({ type: "text", text: formatA11ySummary(result) });
 					return result;
 				}),
-			vitals: opts => op("tab.vitals()", INF, sig => collectVitals(page, opts, sig)),
-			reactEnable: () => op("tab.reactEnable()", INF, sig => enableReact(page, sig)),
+			vitals: opts => op("tab.vitals()", INF, sig => collectVitals(puppeteerReactHost(page), opts, sig)),
+			reactEnable: () => op("tab.reactEnable()", INF, sig => enableReact(puppeteerReactHost(page), sig)),
 			reactTree: opts => op("tab.reactTree()", quickOpMs, sig => readReactTree(page, opts, sig)),
 			reactInspect: id => op(`tab.reactInspect(${id})`, quickOpMs, sig => inspectReactFiber(page, id, sig)),
 			reactRenders: opts => op("tab.reactRenders()", quickOpMs, sig => collectReactRenders(page, opts, sig)),

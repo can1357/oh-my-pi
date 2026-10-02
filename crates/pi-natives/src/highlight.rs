@@ -9,6 +9,8 @@ use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
 use napi::{JsString, Result};
 use napi_derive::napi;
+use pi_shell::rayon_global_pool_available;
+use rayon::prelude::*;
 use syntect::parsing::{
 	ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxReference, SyntaxSet,
 };
@@ -525,12 +527,151 @@ fn highlight_into(
 	}
 }
 
-/// Warm syntax grammars and scope matchers on the native worker pool.
+/// Shared TypeScript warm source; a macro so `concat!` can extend it for TSX.
+macro_rules! warm_typescript {
+	() => {
+		r#"import { readFile } from "node:fs/promises";
+import type { Foo } from "./foo";
+export * from "./bar";
+/** Doc comment. */
+// line comment
+export interface Options<T extends object = {}> { readonly name?: string; items: T[]; [key: string]: unknown }
+export type Mode = "a" | "b" | `c-${string}`;
+enum Color { Red = 1, Green = "g" }
+declare module "x" {}
+@decorator()
+export abstract class Service<T> extends Base implements Api {
+	#count = 0;
+	private static readonly map = new Map<string, number>();
+	constructor(private readonly dep: Dep) { super(); }
+	get value(): number { return this.#count; }
+	async *run(this: Service<T>, ...args: unknown[]): AsyncGenerator<T> {
+		const { a, b: [c, ...d] } = obj ?? {};
+		let re = /ab+c/gi, n = 0x1f + 1_000n + 1.5e3;
+		for await (const x of stream) { yield x as T; }
+		try { await fn?.(a!, <T>b); } catch (err) { throw new Error(`bad ${err}`); } finally { n++; }
+		switch (a) { case 1: break; default: return; }
+		const arrow = async <U,>(u: U): Promise<U> => u satisfies U;
+		label: while (n-- > 0 && !done || x instanceof Y) continue label;
+		return typeof x === "string" ? x : void 0;
+	}
+}
+function f(this: void, x?: number, cb: (e: Error) => void = () => {}): asserts x is number {}
+"#
+	};
+}
+
+/// Representative sources parsed by [`warm_highlighter`].
+///
+/// syntect compiles each pattern's regex lazily, the first time the parser
+/// enters that pattern's context. For the large TypeScript/TSX grammars that
+/// first parse costs ~250ms, paid on the JS thread by whichever render first
+/// shows such a block. Parsing constructs that enter the common contexts
+/// moves that compilation to the worker pool; compiled regexes live in the
+/// shared syntax set, so later parses on any thread reuse them.
+const WARM_SNIPPETS: &[(&str, &str)] = &[
+	("ts", warm_typescript!()),
+	(
+		"tsx",
+		concat!(
+			warm_typescript!(),
+			r#"export const C = (p: Props) => <div className="x" onClick={() => go(p.id)}>{p.children}<Foo<T> bar /></div>;
+"#
+		),
+	),
+	(
+		"js",
+		r"import x from 'y';
+export default async function f(a = 1, ...b) { const { c } = a; return `t${c}` ?? null; }
+class A { #p = 1; static m() { return /re/g.test(this.#p); } }
+",
+	),
+	(
+		"bash",
+		r#"#!/usr/bin/env bash
+# comment
+set -euo pipefail
+export FOO="bar $HOME ${VAR:-default} $(date +%s)"
+for f in *.ts; do echo "$f" | grep -E 'x+' >> out.txt 2>&1; done
+if [[ -n "$1" && $# -gt 0 ]]; then cd "$(dirname "$0")" || exit 1; fi
+case "$x" in a|b) echo 'one' ;; *) printf '%s\n' "$x" ;; esac
+fn() { local arr=(1 2 3); echo "${arr[@]}" $((1 + 2)); }
+cat <<EOF
+heredoc $x
+EOF
+git log --oneline -n 5 && bun test || true
+"#,
+	),
+	(
+		"python",
+		r#"import os
+from typing import Any
+@dataclass
+class A(Base):
+    """Doc."""
+    def f(self, x: int = 1, *args, **kw) -> str:
+        # comment
+        s = f"v {x!r:>4}" + 'y' + r"\d" + b"z"
+        return [i for i in range(10) if i % 2] or {k: v for k, v in kw.items()}
+async def g(): await h(); lambda y: y ** 2
+"#,
+	),
+	(
+		"rust",
+		r##"use std::collections::HashMap;
+/// Doc
+#[derive(Debug, Clone)]
+pub struct S<'a, T: Clone> { field: &'a [T], n: u32 }
+impl<T> Trait for S<'_, T> where T: Send {
+    fn f(&mut self, x: Option<i64>) -> Result<(), Box<dyn Error>> {
+        let v = vec![1, 2]; let s = "str\n"; let c = 'c'; let r = r#"raw"#;
+        match x { Some(n) if n > 0 => println!("{n}"), _ => {} }
+        Ok(())
+    }
+}
+"##,
+	),
+	(
+		"markdown",
+		r"# Title
+Some **bold**, _italic_, `code`, [link](http://x.y) and ![img](a.png).
+> quote
+- item
+  1. nested
+| a | b |
+|---|---|
+| 1 | 2 |
+```ts
+const x = 1;
+```
+---
+",
+	),
+];
+
+/// Warm syntax grammars, scope matchers, and the regexes of commonly
+/// highlighted languages on the native worker pool.
 #[napi]
 pub fn warm_highlighter() -> task::Promise<()> {
 	task::blocking("highlight.warm", (), move |_| {
-		let _ = get_syntax_set();
+		let ss = get_syntax_set();
 		let _ = get_scope_matchers();
+		let warm = |&(lang, code): &(&str, &str)| {
+			let Some(syntax) = find_syntax(ss, lang) else {
+				return;
+			};
+			let mut parse_state = ParseState::new(syntax);
+			for line in syntect::util::LinesWithEndings::from(code) {
+				if parse_state.parse_line(line, ss).is_err() {
+					break;
+				}
+			}
+		};
+		if rayon_global_pool_available() {
+			WARM_SNIPPETS.par_iter().for_each(warm);
+		} else {
+			WARM_SNIPPETS.iter().for_each(warm);
+		}
 		Ok(())
 	})
 }
@@ -628,6 +769,17 @@ mod tests {
 			punctuation: Color::new("<p>").unwrap(),
 			inserted:    None,
 			deleted:     None,
+		}
+	}
+
+	/// A warm entry whose language fails to resolve is silently skipped, so a
+	/// renamed token or dropped grammar would quietly bring back the
+	/// first-render stall.
+	#[test]
+	fn warm_snippet_languages_resolve() {
+		let ss = get_syntax_set();
+		for (lang, _) in WARM_SNIPPETS {
+			assert!(find_syntax(ss, lang).is_some(), "warm snippet language {lang} has no syntax");
 		}
 	}
 

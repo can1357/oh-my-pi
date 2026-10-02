@@ -82,6 +82,7 @@ function createYieldingSession(): AgentSession {
 				},
 				isError: false,
 			});
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 	} as unknown as AgentSession;
@@ -282,7 +283,6 @@ describe("subagent LSP availability", () => {
 		expect(options?.restrictToolNames).toBe(true);
 		expect(options?.toolNames).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
 		expect(options?.toolNames).not.toContain("lsp");
-		expect(options?.toolNames).not.toContain("hub");
 		expect(options?.toolNames).not.toContain("bash");
 		expect(options?.toolNames).not.toContain("memory_edit");
 		expect(options?.toolNames).not.toContain("retain");

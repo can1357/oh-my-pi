@@ -24,6 +24,8 @@ type BabelImportDeclaration = {
 
 type BabelBindingPattern = {
 	type: string;
+	start?: number;
+	end?: number;
 	name?: string;
 	properties?: ReadonlyArray<unknown>;
 	elements?: ReadonlyArray<unknown | null>;
@@ -37,7 +39,10 @@ type BabelVariableDeclaration = {
 	kind: "const" | "let" | "var";
 	start: number;
 	end: number;
-	declarations?: ReadonlyArray<{ id: BabelBindingPattern }>;
+	declarations?: ReadonlyArray<{
+		id: BabelBindingPattern & { start: number; end: number };
+		init?: { start: number; end: number } | null;
+	}>;
 };
 
 type BabelClassDeclaration = {
@@ -518,10 +523,70 @@ function getLexicalBindingNames(node: BabelPublishableDecl): string[] {
 	return names;
 }
 
-function appendGlobalBindingPublish(source: string, names: readonly string[]): string {
-	if (names.length === 0) return source;
-	const assignments = names.map(name => `this[${JSON.stringify(name)}] = ${name};`).join("\n");
-	return `${source};\n${assignments}`;
+function renderGlobalVariableDeclaration(code: string, node: BabelVariableDeclaration): string {
+	const statements: string[] = [];
+	for (const declaration of node.declarations ?? []) {
+		if (!declaration.init) continue;
+		const target = code.slice(declaration.id.start, declaration.id.end);
+		const value = code.slice(declaration.init.start, declaration.init.end);
+		if (declaration.id.type === "Identifier" && typeof declaration.id.name === "string") {
+			statements.push(`this[${JSON.stringify(declaration.id.name)}] = (${value});`);
+		} else {
+			statements.push(`(${target} = (${value}));`);
+		}
+	}
+	return statements.join("\n");
+}
+
+function globalizeTopLevelDeclarations(
+	code: string,
+	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
+	targets: ReadonlyArray<{ node: BabelPublishableDecl }>,
+	bindingNames: readonly string[],
+): string {
+	const prelude = bindingNames.map(
+		name => `if (!(${JSON.stringify(name)} in this)) this[${JSON.stringify(name)}] = undefined;`,
+	);
+	const functions: string[] = [];
+	const edits: Array<{ start: number; end: number; replacement: string }> = [];
+	for (const { node } of targets) {
+		const segment = code.slice(node.start, node.end);
+		if (node.type === "VariableDeclaration") {
+			edits.push({ start: node.start, end: node.end, replacement: renderGlobalVariableDeclaration(code, node) });
+			continue;
+		}
+		if (!node.id) continue;
+		if (node.type === "FunctionDeclaration") {
+			const idStart = node.id.start - node.start;
+			const idEnd = node.id.end - node.start;
+			const expression = segment.slice(0, idStart) + segment.slice(idEnd);
+			functions.push(`this[${JSON.stringify(node.id.name)}] = (${expression});`);
+			edits.push({ start: node.start, end: node.end, replacement: "" });
+			continue;
+		}
+		edits.push({
+			start: node.start,
+			end: node.end,
+			replacement: `this[${JSON.stringify(node.id.name)}] = (${segment});`,
+		});
+	}
+
+	edits.sort((left, right) => right.start - left.start);
+	let result = code;
+	for (const edit of edits) {
+		result = result.slice(0, edit.start) + edit.replacement + result.slice(edit.end);
+	}
+
+	let directiveEnd = 0;
+	for (const node of ast.program.body) {
+		if (node.type !== "ExpressionStatement" || typeof (node as BabelExpressionStatement).directive !== "string")
+			break;
+		directiveEnd = (node as BabelExpressionStatement).end;
+	}
+	const initialization = [...prelude, ...functions].join("\n");
+	if (!initialization) return result;
+	const separator = directiveEnd > 0 ? "\n" : "";
+	return `${result.slice(0, directiveEnd)}${separator}${initialization}\n${result.slice(directiveEnd)}`;
 }
 
 function addBindingNames(pattern: unknown, names: Set<string>): void {
@@ -771,12 +836,12 @@ function instrumentBindingAssignments(
  *   let { a, b } = obj;      -> var { a, b } = obj;
  *   class Foo extends Bar {} -> var Foo = class extends Bar {};
  *
- * When the source must run inside the async wrapper (top-level `await`), demoted `var`s —
- * and the user's own top-level `var` and `function` declarations — would be scoped to the
- * wrapper function and die with the cell. In that mode we publish every top-level binding
- * back to the wrapper's lexical `this`, which is the worker global object. Every executed
- * assignment to those bindings publishes in evaluation order; there is no end-of-cell sweep
- * that could clobber a later explicit global write or publish a declaration that never ran.
+ * When the source must run inside the async wrapper (top-level `await`), local declarations
+ * would die with the cell and published functions would keep closing over stale wrapper
+ * variables. In that mode declarations become assignments on the wrapper's lexical `this`
+ * (the worker global object), while function declarations are installed at wrapper entry to
+ * preserve hoisting. Bare references — including references captured by persisted functions —
+ * then resolve the same retained global binding that later cells update.
  *
  * Nested declarations (inside functions, blocks, classes) are left alone — they're
  * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
@@ -808,12 +873,16 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 	if (targets.length === 0) return code;
 
 	const bindingNames = publishGlobals ? [...new Set(targets.flatMap(({ node }) => getLexicalBindingNames(node)))] : [];
+	if (publishGlobals) {
+		const globalized = globalizeTopLevelDeclarations(code, ast, targets, bindingNames);
+		const globalizedAst = await parseProgram(globalized);
+		return globalizedAst ? instrumentBindingAssignments(globalized, globalizedAst, bindingNames) : globalized;
+	}
 
 	targets.sort((a, b) => b.node.start - a.node.start);
 	let result = code;
 	for (const { node, demote } of targets) {
 		const segment = result.slice(node.start, node.end);
-		const declarationBindingNames = publishGlobals ? getLexicalBindingNames(node) : [];
 		let replacement: string;
 		if (!demote) {
 			replacement = segment;
@@ -827,14 +896,9 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			const hasTrailingSemi = segment.endsWith(";");
 			replacement = `var ${id.name} = class${tail}${hasTrailingSemi ? "" : ";"}`;
 		}
-		result =
-			result.slice(0, node.start) +
-			appendGlobalBindingPublish(replacement, declarationBindingNames) +
-			result.slice(node.end);
+		result = result.slice(0, node.start) + replacement + result.slice(node.end);
 	}
-	if (bindingNames.length === 0) return result;
-	const rewrittenAst = await parseProgram(result);
-	return rewrittenAst ? instrumentBindingAssignments(result, rewrittenAst, bindingNames) : result;
+	return result;
 }
 
 async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {

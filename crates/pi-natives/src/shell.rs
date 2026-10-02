@@ -1,5 +1,7 @@
 //! Brush-based shell execution exported via N-API.
 
+pub mod vfs;
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use napi::{
@@ -15,7 +17,42 @@ use pi_shell::{
 	execute_shell as core_execute_shell, minimizer,
 };
 
+use self::vfs::ShellFilesystem;
 use crate::task;
+
+/// Expand Windows 8.3 components without resolving symlinks or junctions.
+#[napi]
+#[allow(clippy::missing_const_for_fn, reason = "windows branch calls non-const path helpers")]
+pub fn expand_windows_long_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::expand_to_long_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
+
+/// Get the existing Windows 8.3 spelling; preserve the input when unavailable.
+#[napi]
+#[allow(clippy::missing_const_for_fn, reason = "windows branch calls non-const path helpers")]
+pub fn get_windows_short_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::get_short_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
 
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
@@ -64,7 +101,7 @@ impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 }
 
 /// Options for configuring a persistent shell session.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellOptions {
 	/// Environment variables to apply once per session.
 	pub session_env:   Option<HashMap<String, String>>,
@@ -72,6 +109,8 @@ pub struct ShellOptions {
 	pub snapshot_path: Option<String>,
 	/// Optional per-command output minimizer configuration.
 	pub minimizer:     Option<MinimizerOptions>,
+	/// Filesystem backing every run of this session (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
 }
 
 impl From<ShellOptions> for CoreShellOptions {
@@ -80,12 +119,16 @@ impl From<ShellOptions> for CoreShellOptions {
 			session_env:   value.session_env,
 			snapshot_path: value.snapshot_path,
 			minimizer:     value.minimizer.map(Into::into),
+			filesystem:    value
+				.filesystem
+				.map(ShellFilesystem::into_fs)
+				.unwrap_or_default(),
 		}
 	}
 }
 
 /// Options for running a shell command.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellRunOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:    String,
@@ -97,10 +140,13 @@ pub struct ShellRunOptions<'env> {
 	pub timeout_ms: Option<u32>,
 	/// Abort signal for cancelling the operation.
 	pub signal:     Option<Unknown<'env>>,
+	/// Filesystem for this run only, replacing the session's; the session's
+	/// filesystem applies again to later runs.
+	pub filesystem: Option<ShellFilesystem>,
 }
 
 /// Options for executing a shell command via brush-core.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:       String,
@@ -118,6 +164,8 @@ pub struct ShellExecuteOptions<'env> {
 	pub minimizer:     Option<MinimizerOptions>,
 	/// Abort signal for cancelling the operation.
 	pub signal:        Option<Unknown<'env>>,
+	/// Filesystem backing the command (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
 }
 
 /// Telemetry for a single minimization.
@@ -223,6 +271,7 @@ impl Shell {
 			cwd:        options.cwd,
 			env:        options.env,
 			timeout_ms: options.timeout_ms,
+			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -253,6 +302,17 @@ impl Shell {
 	pub async fn live_background_job_count(&self) -> u32 {
 		self.inner.live_background_job_count().await
 	}
+
+	/// Pids of the still-alive processes spawned by this session's in-flight
+	/// `run`, in spawn order: foreground commands, pipeline stages, and `&`
+	/// jobs started by that run. Builtins run in-process and never appear.
+	/// Empty when no run is executing; children that outlive their run are no
+	/// longer reported once it returns. Synchronous and never waits on the
+	/// running command.
+	#[napi]
+	pub fn pids(&self) -> Vec<i32> {
+		self.inner.pids()
+	}
 }
 
 /// Execute a brush shell command.
@@ -276,6 +336,10 @@ pub fn execute_shell<'env>(
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
 		minimizer:     options.minimizer.map(Into::into),
+		filesystem:    options
+			.filesystem
+			.map(ShellFilesystem::into_fs)
+			.unwrap_or_default(),
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -673,6 +737,7 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
+						filesystem: None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -720,6 +785,7 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
+						filesystem: None,
 					},
 					None,
 					cancel,
@@ -741,28 +807,48 @@ mod tests {
 	async fn timeout_drains_pipeline_output_before_stopping_reader() {
 		let shell = CoreShell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
-		// `tail` runs as an in-process builtin, so cancellation kills only the
-		// external `yes`; tail then sees EOF and flushes its final 5 lines into
-		// the post-cancel reader grace window. The deadline must be generous
-		// enough that `yes` has demonstrably spawned and produced before the
-		// timeout fires — a 50ms budget lost that race on cold CI runners and
-		// tail flushed an empty ring buffer.
-		const TIMEOUT_MS: u32 = 750;
-		let result = shell
-			.run(
-				CoreShellRunOptions {
-					command:    "yes x | tail -5".to_string(),
-					cwd:        None,
-					env:        None,
-					timeout_ms: Some(TIMEOUT_MS),
-				},
-				Some(tx),
-				CancelToken::new(Some(TIMEOUT_MS)),
-			)
-			.await
-			.expect("shell run");
-
+		// The downstream stage reads and writes exactly five complete lines
+		// before it emits READY, then blocks in a sixth read. READY therefore
+		// proves the reader, rather than merely the producer or pipe, consumed
+		// the asserted output. Cancellation makes the sixth read return EOF.
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let handle = tokio::spawn(async move {
+			shell
+				.run(
+					CoreShellRunOptions {
+						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; sleep 30; } | { for _ in 1 2 3 4 \
+						             5; do IFS= read -r line; printf '%s\\n' \"$line\"; done; printf \
+						             'READY\\n' >&2; read -r; }"
+							.to_string(),
+						cwd:        None,
+						env:        None,
+						timeout_ms: None,
+						filesystem: None,
+					},
+					Some(tx),
+					cancel,
+				)
+				.await
+		});
 		let mut output = String::new();
+		time::timeout(Duration::from_secs(30), async {
+			while !output.contains("READY") {
+				output.push_str(
+					&rx.recv_async()
+						.await
+						.expect("shell output closed before readiness"),
+				);
+			}
+		})
+		.await
+		.expect("producer did not become ready");
+		abort.abort(AbortReason::Timeout);
+		let result = time::timeout(Duration::from_secs(10), handle)
+			.await
+			.expect("shell run did not stop after timeout")
+			.expect("shell task panicked")
+			.expect("shell run");
 		while let Ok(chunk) = rx.recv_async().await {
 			output.push_str(&chunk);
 		}

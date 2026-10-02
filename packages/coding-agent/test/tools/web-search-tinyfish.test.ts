@@ -15,9 +15,9 @@ function createTinyFishFixture(authStorage: AuthStorage) {
 }
 
 const providerAuthStorage = createInMemoryAuthStorage();
-providerAuthStorage.setRuntimeApiKey("tinyfish", TEST_KEY);
+providerAuthStorage.keys.setRuntime("tinyfish", TEST_KEY);
 const providerFixture = createTinyFishFixture(providerAuthStorage);
-const providerResolverSpy = vi.spyOn(providerAuthStorage, "resolver").mockImplementation((provider, options) => {
+const providerResolverSpy = vi.spyOn(providerAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
 	expect(provider).toBe("tinyfish");
 	expect(options?.sessionId).toBe("session-tinyfish-test");
 	return async () => TEST_KEY;
@@ -25,7 +25,7 @@ const providerResolverSpy = vi.spyOn(providerAuthStorage, "resolver").mockImplem
 
 const missingAuthStorage = createInMemoryAuthStorage();
 const missingFixture = createTinyFishFixture(missingAuthStorage);
-const missingResolverSpy = vi.spyOn(missingAuthStorage, "resolver").mockImplementation((provider, options) => {
+const missingResolverSpy = vi.spyOn(missingAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
 	expect(provider).toBe("tinyfish");
 	expect(options?.sessionId).toBe("session-tinyfish-test");
 	return async () => undefined;

@@ -1,3 +1,4 @@
+import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
@@ -8,25 +9,27 @@ import {
 	type SgrMouseEvent,
 	Spacer,
 	TruncatedText,
+	visibleWidth,
 } from "../index";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { OverlayPanel } from "../chrome/overlay-box";
+import { Input } from "../components/input";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
+import type { TspPickerItem, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { node, span, text } from "../native/describe";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import { overlayCard } from "../native/overlay";
+import { isNativeRendering } from "../native/state";
 
 const OAUTH_SELECTOR_MAX_VISIBLE = 10;
 
 /** Credential presence and provenance needed by the provider picker. */
 export interface OAuthSelectorAuthSource {
-	has(providerId: string): boolean;
-	hasAuth(providerId: string): boolean;
-	getCredentialOrigin(providerId: string):
-		| {
-				kind: "runtime" | "config" | "oauth" | "api_key" | "env" | "fallback";
-				envVar?: string;
-		  }
-		| undefined;
+	readonly credentials: Pick<CredentialsApi, "has">;
+	readonly keys: Pick<KeysApi, "source">;
 }
 
 /**
@@ -42,7 +45,6 @@ const ORIGIN_LABELS = {
 	oauth: "login",
 	api_key: "api key",
 	env: "env",
-	fallback: "custom provider",
 };
 /**
  * Component that renders an OAuth provider selector.
@@ -50,6 +52,8 @@ const ORIGIN_LABELS = {
 export class OAuthSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
 	#menu: MenuSelection<OAuthProviderInfo>;
+	/** The provider search field; its value drives `#menu`'s query. */
+	#search = Object.assign(new Input(), { prompt: "" });
 	#hoveredIndex: number | null = null;
 	/** First provider index of the visible ScrollView window (last #updateList). */
 	#scrollStart = 0;
@@ -67,6 +71,13 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#spinnerFrame: number = 0;
 	#spinnerInterval?: NodeJS.Timeout;
 	#validationGeneration: number = 0;
+	#nativeItems: readonly NativeNode[] | undefined;
+	/** The `visibleItems` array {@link #nativeItems} was built from. */
+	#nativeItemsSource: readonly OAuthProviderInfo[] | undefined;
+	#nativeRoot: NativeNode | undefined;
+	/** Picker rows for the whole catalogue; dropped when an auth state changes. */
+	#pickerItems: readonly TspPickerItem[] | undefined;
+	#pickerRoot: NativeNode | undefined;
 	constructor(
 		mode: "login" | "logout",
 		authStorage: OAuthSelectorAuthSource,
@@ -78,7 +89,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			requestRender?: () => void;
 		},
 	) {
-		super(mode === "login" ? "Select provider to login" : "Select provider to logout");
+		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
 		this.#mode = mode;
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;
@@ -122,7 +133,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#updateList();
 	}
 	#hasSelectableAuth(providerId: string): boolean {
-		return this.#mode === "logout" ? this.#authStorage.has(providerId) : this.#authStorage.hasAuth(providerId);
+		return this.#mode === "logout"
+			? this.#authStorage.credentials.has(providerId)
+			: this.#authStorage.keys.source(providerId) !== undefined;
 	}
 
 	#loadProviders(disabledProviders: readonly string[] = []): void {
@@ -159,6 +172,8 @@ export class OAuthSelectorComponent extends OverlayPanel {
 				continue;
 			}
 			this.#authState.set(provider.id, "checking");
+			this.#nativeItems = undefined;
+			this.#pickerItems = undefined;
 			pending += 1;
 			void this.#validateProvider(provider.id, generation);
 		}
@@ -181,6 +196,8 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 		if (generation !== this.#validationGeneration) return;
 		this.#authState.set(providerId, isValid ? "valid" : "invalid");
+		this.#nativeItems = undefined;
+		this.#pickerItems = undefined;
 		if (![...this.#authState.values()].includes("checking")) {
 			this.#stopSpinner();
 		}
@@ -189,7 +206,8 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	}
 
 	#startSpinner(): void {
-		if (this.#spinnerInterval) return;
+		// Natively the "checking" status pulses on the terminal's clock.
+		if (this.#spinnerInterval || isNativeRendering()) return;
 		this.#spinnerInterval = setInterval(() => {
 			const frameCount = theme.spinnerFrames.length;
 			if (frameCount > 0) {
@@ -212,7 +230,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	 * the list distinguishes a real login from an env var aliasing the provider.
 	 */
 	#getSourceLabel(providerId: string): string {
-		const origin = this.#authStorage.getCredentialOrigin(providerId);
+		const origin = this.#authStorage.keys.source(providerId);
 		if (!origin) return "";
 		const detail = origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind];
 		return theme.fg("muted", ` (${detail})`);
@@ -247,13 +265,14 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 	#renderStatusLine(_total: number): string {
 		const query = this.#menu.query.trim();
-		const suffix = query ? `Search: ${this.#menu.query}` : "Type to search";
-		return theme.fg("muted", suffix);
+		if (!query) return theme.fg("muted", "Type to search");
+		const width = visibleWidth(this.#search.getValue()) + 1;
+		return theme.fg("muted", "Search: ") + (this.#search.render(width)[0] ?? "");
 	}
 
 	#getProviderSearchText(provider: OAuthProviderInfo): string {
 		let text = `${provider.name} ${provider.id}`;
-		const origin = this.#authStorage.getCredentialOrigin(provider.id);
+		const origin = this.#authStorage.keys.source(provider.id);
 		if (origin) {
 			text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
 			if (origin.envVar) text += ` ${origin.envVar}`;
@@ -264,32 +283,32 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		return text;
 	}
 
-	#setSearchQuery(query: string): void {
-		this.#menu.setQuery(query, false);
+	/** Applies the search field's value to the filter; clears any stale status. */
+	#syncSearchQuery(): void {
+		this.#menu.setQuery(this.#search.getValue(), false);
 		this.#statusMessage = undefined;
 		this.#updateList();
 	}
 
+	/** Feeds keys the selector does not bind to the search field. Backspace on an empty query and a leading space bubble. */
 	#handleSearchInput(keyData: string): boolean {
 		if (!this.#isSearchEnabled()) return false;
-
-		if (matchesKey(keyData, "backspace")) {
-			if (this.#menu.query.length === 0) return false;
-			const chars = [...this.#menu.query];
-			chars.pop();
-			this.#setSearchQuery(chars.join(""));
-			return true;
+		const before = this.#search.getValue();
+		if (before.length === 0) {
+			if (matchesKey(keyData, "backspace")) return false;
+			const printableText = extractPrintableText(keyData);
+			if (printableText !== undefined && printableText.trim().length === 0) return false;
 		}
-
-		const printableText = extractPrintableText(keyData);
-		if (printableText === undefined) return false;
-		if (this.#menu.query.length === 0 && printableText.trim().length === 0) return false;
-
-		this.#setSearchQuery(this.#menu.query + printableText);
+		const cursorBefore = this.#search.getCursor();
+		if (!this.#search.handleInput(keyData)) return false;
+		if (this.#search.getValue() !== before) this.#syncSearchQuery();
+		else if (this.#search.getCursor() !== cursorBefore) this.#updateList();
 		return true;
 	}
 
 	#updateList(): void {
+		this.#nativeRoot = undefined;
+		this.#pickerRoot = undefined;
 		this.#listContainer.clear();
 
 		const items = this.#menu.visibleItems;
@@ -360,10 +379,6 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			return;
 		}
 
-		if (this.#handleSearchInput(keyData)) {
-			return;
-		}
-
 		// Up arrow
 		if (matchesSelectUp(keyData)) {
 			this.#menu.move(-1, true);
@@ -392,6 +407,8 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			this.#confirmSelection();
 		}
+		// Everything else edits the search field
+		else this.#handleSearchInput(keyData);
 	}
 
 	/** Confirm the selected provider (Enter or mouse click). */
@@ -405,6 +422,189 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			this.#statusMessage = "Provider unavailable in this environment.";
 			this.#updateList();
 		}
+	}
+
+	/** Credential status of a provider row: `value` (state) and `detail` (origin) spans. */
+	#describeStatus(providerId: string): { value?: readonly TspSpan[]; detail?: readonly TspSpan[] } {
+		const origin = this.#authStorage.keys.source(providerId);
+		const detail = origin
+			? [
+					span(
+						origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind],
+						"muted",
+					),
+				]
+			: undefined;
+		const state = this.#authState.get(providerId);
+		if (state === "checking") return { value: [span("checking", "warning", { fx: "pulse" })], detail };
+		if (state === "invalid") return { value: [span("invalid", "error")], detail };
+		if (state === "valid" || this.#hasSelectableAuth(providerId)) {
+			return { value: [span("logged in", "success")], detail };
+		}
+		return { detail };
+	}
+
+	/** One provider card: initials mark, origin detail, auth-state dot, disabled reason. */
+	#pickerItem(provider: OAuthProviderInfo): TspPickerItem {
+		const origin = this.#authStorage.keys.source(provider.id);
+		const state = this.#authState.get(provider.id);
+		const dot: TspTone =
+			state === "checking"
+				? "pending"
+				: state === "invalid"
+					? "error"
+					: state === "valid" || this.#hasSelectableAuth(provider.id)
+						? "success"
+						: "muted";
+		const source = origin
+			? origin.kind === "env" && origin.envVar
+				? `env: ${origin.envVar}`
+				: ORIGIN_LABELS[origin.kind]
+			: undefined;
+		const detail = !source
+			? "Not configured"
+			: origin?.kind === "oauth"
+				? `Signed in · ${source}`
+				: `API key · ${source}`;
+		const initials = provider.name
+			.split(/[^\p{L}\p{N}]+/u)
+			.filter(word => word.length > 0)
+			.slice(0, 2)
+			.map(word => word[0]!.toUpperCase())
+			.join("");
+		return {
+			id: provider.id,
+			label: provider.name,
+			detail,
+			mark: { text: initials, seed: provider.id },
+			dot,
+			...(provider.available ? {} : { disabled: "Provider unavailable in this environment" }),
+		};
+	}
+
+	#describePicker(): NativeNode {
+		if (this.#pickerRoot) return this.#pickerRoot;
+		const all = this.#menu.items;
+		this.#pickerItems ??= all.map(provider => this.#pickerItem(provider));
+		const query = this.#menu.query;
+		const login = this.#mode === "login";
+		const search = this.#shouldRenderSearchStatus() ? pickerQuery(this.#search) : pickerQuery(null);
+		this.#pickerRoot = dockedPicker({
+			title: login ? "Sign in" : "Sign out",
+			subtitle: login ? "Pick a provider" : "Remove stored credentials",
+			icon: "key-round",
+			noun: "providers",
+			size: "md",
+			layout: "cards",
+			preview: "none",
+			...search,
+			placeholder: "Search providers…",
+			items: this.#pickerItems,
+			...(query.length > 0 ? { order: this.#menu.visibleItems.map(provider => provider.id) } : {}),
+			selected: this.#menu.selectedKey ?? null,
+			total: all.length,
+			empty: login ? "No OAuth providers available" : "No stored provider credentials to log out",
+			...(this.#statusMessage ? { message: this.#statusMessage } : {}),
+			actions: [
+				pickerAction(
+					"confirm",
+					login ? "Sign in" : "Sign out",
+					"enter",
+					login ? { primary: true } : { primary: true, danger: true },
+				),
+				CLOSE_ACTION,
+			],
+		});
+		return this.#pickerRoot;
+	}
+
+	override describe(cx: DescribeContext): NativeNode {
+		if (cx.supports("picker")) return this.#describePicker();
+		if (this.#nativeRoot) return this.#nativeRoot;
+		const items = this.#menu.visibleItems;
+		if (!this.#nativeItems || this.#nativeItemsSource !== items) {
+			this.#nativeItemsSource = items;
+			this.#nativeItems = items.map(provider =>
+				node(
+					"item",
+					{
+						label: provider.name,
+						tone: provider.available ? undefined : "muted",
+						...this.#describeStatus(provider.id),
+					},
+					undefined,
+					provider.id,
+				),
+			);
+		}
+		const query = this.#menu.query;
+		const children: NativeNode[] = [];
+		if (this.#shouldRenderSearchStatus()) {
+			children.push(
+				node(
+					"input",
+					{ text: this.#search.getValue(), cursor: this.#search.getCursor(), placeholder: "Type to search" },
+					undefined,
+					"search",
+				),
+			);
+		}
+		const empty =
+			this.#menu.items.length === 0
+				? this.#mode === "login"
+					? "No OAuth providers available"
+					: "No stored provider credentials to log out"
+				: "No matching providers";
+		children.push(
+			node(
+				"list",
+				{
+					selected: this.#menu.selectedKey ?? null,
+					filter: query.trim() || undefined,
+					empty: [span(empty, "muted")],
+					max: { lines: OAUTH_SELECTOR_MAX_VISIBLE },
+				},
+				this.#nativeItems,
+				"list",
+			),
+		);
+		if (this.#statusMessage) children.push(text([span(this.#statusMessage, "warning")]));
+		this.#nativeRoot = overlayCard(this.nativeRole, this.title, children);
+		return this.#nativeRoot;
+	}
+
+	/** A click (or double-click) on a provider selects and confirms it, like the SGR click in {@link routeMouse}. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const ev = pickerEvent(event, PICKER_KEY);
+		if (ev?.kind === "action") {
+			if (ev.act === "confirm") this.#confirmSelection();
+			else if (ev.act === "clear") {
+				this.#search.setValue("");
+				this.#syncSearchQuery();
+			} else if (ev.act === "close" || ev.act === "cancel") {
+				this.stopValidation();
+				this.#onCancelCallback();
+			}
+			return;
+		}
+		if (ev?.kind === "select") {
+			const index = this.#menu.visibleItems.findIndex(provider => provider.id === ev.item);
+			if (index < 0 || index === this.#menu.selectedIndex) return;
+			this.#menu.setSelectedIndex(index);
+			this.#statusMessage = undefined;
+			this.#updateList();
+			return;
+		}
+		if ((event.type !== "select" && event.type !== "activate") || (event.key !== "list" && ev?.kind !== "activate"))
+			return;
+		const index = this.#menu.visibleItems.findIndex(provider => provider.id === event.item);
+		if (index < 0) return;
+		if (index !== this.#menu.selectedIndex) {
+			this.#menu.setSelectedIndex(index);
+			this.#statusMessage = undefined;
+			this.#updateList();
+		}
+		this.#confirmSelection();
 	}
 
 	/** Move the selection one step for a wheel notch (clamped, no wrap). */

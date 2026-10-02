@@ -57,6 +57,16 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/**
+	 * When true, a fresh cache never satisfies an online-eligible refresh: the
+	 * dynamic fetch always runs (an explicit `"offline"` strategy is still
+	 * honored), and the cache serves only as the fetch-failure fallback. For
+	 * providers whose dynamic result encodes fast-changing live state that a
+	 * TTL cache would replay wrongly — e.g. Factory discovery includes live
+	 * organization model policy and upstream blocks. Cached eligibility is
+	 * an offline snapshot, not current entitlement.
+	 */
+	alwaysRefetchDynamicModels?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
@@ -217,6 +227,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
 	strategy: ModelRefreshStrategy = "online-if-uncached",
 ): Promise<ModelResolutionResult<TApi>> {
+	if (options.alwaysRefetchDynamicModels && strategy === "online-if-uncached") {
+		strategy = "online";
+	}
 	const cacheProviderId = options.cacheProviderId ?? options.providerId;
 	const now = options.now ?? Date.now;
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
@@ -631,7 +644,13 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		};
 	}
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
-	// verbatim override vocabulary), never the resolved `compat` record.
+	// verbatim override vocabulary), never the resolved `compat` record. The
+	// override is transport-scoped, so a bundled row authored for one API must
+	// not follow an id whose discovered route moved: Copilot's chat-completions
+	// rows carry `supportsReasoningEffort: false`, which would silently strip
+	// the effort dial once the id is pinned to Responses (#12901).
+	const compat =
+		dynamicModel.compatConfig ?? (dynamicModel.api === existingModel.api ? existingModel.compatConfig : undefined);
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
@@ -654,7 +673,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 				? { ...existingModel.headers, ...dynamicModel.headers }
 				: existingModel.headers,
 		resolveHeaders,
-		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
+		compat,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 	} as ModelSpec<TApi>);
 }

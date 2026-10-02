@@ -132,20 +132,20 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("honors scoped and unscoped blocks written by a previous AuthStorage instance", async () => {
 		const firstStore = await SqliteAuthCredentialStore.open(dbPath);
-		firstStore.saveOAuth(PROVIDER, oauthCredential("1"));
-		firstStore.saveOAuth(PROVIDER, oauthCredential("2"));
-		firstStore.saveOAuth(PROVIDER, oauthCredential("3"));
+		await firstStore.saveOAuth(PROVIDER, oauthCredential("1"));
+		await firstStore.saveOAuth(PROVIDER, oauthCredential("2"));
+		await firstStore.saveOAuth(PROVIDER, oauthCredential("3"));
 		const rows = firstStore.listAuthCredentials(PROVIDER);
 		const firstStorage = new AuthStorage(firstStore);
-		await firstStorage.reload();
+		await firstStorage.credentials.reload();
 		try {
-			firstStorage.upsertCredentialBlock({
+			firstStorage.blocks.upsert({
 				credentialId: rows[0]!.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "tier:fable",
 				blockedUntilMs: FUTURE_BLOCK_MS,
 			});
-			firstStorage.upsertCredentialBlock({
+			firstStorage.blocks.upsert({
 				credentialId: rows[1]!.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "",
@@ -157,9 +157,9 @@ describe("AuthStorage credential block persistence", () => {
 
 		const reopenedStore = await SqliteAuthCredentialStore.open(dbPath);
 		const reopenedStorage = new AuthStorage(reopenedStore);
-		await reopenedStorage.reload();
+		await reopenedStorage.credentials.reload();
 		try {
-			const fableKey = await reopenedStorage.getApiKey(PROVIDER, "session-3", { modelId: "claude-fable-5" });
+			const fableKey = await reopenedStorage.keys.get(PROVIDER, "session-3", { modelId: "claude-fable-5" });
 			expect(fableKey).toBe("access-3");
 		} finally {
 			reopenedStorage.close();
@@ -168,20 +168,20 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("keeps the later expiry when a shorter block is upserted for the same key", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(PROVIDER, oauthCredential("1"));
+		await store.saveOAuth(PROVIDER, oauthCredential("1"));
 		const [row] = store.listAuthCredentials(PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		try {
 			const longerBlock = FUTURE_BLOCK_MS + 60_000;
-			storage.upsertCredentialBlock({
+			storage.blocks.upsert({
 				credentialId: row.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "tier:fable",
 				blockedUntilMs: longerBlock,
 			});
-			storage.upsertCredentialBlock({
+			storage.blocks.upsert({
 				credentialId: row.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "tier:fable",
@@ -190,7 +190,7 @@ describe("AuthStorage credential block persistence", () => {
 
 			// `updatedAtMs` is the row's DB write time (issue #4980: same-deadline
 			// refreshes must be observable), so only its presence is asserted.
-			expect(storage.listCredentialBlocks([row.id])).toEqual([
+			expect(storage.blocks.list([row.id])).toEqual([
 				{
 					credentialId: row.id,
 					providerKey: PROVIDER_KEY,
@@ -206,26 +206,26 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("drops expired rows from reads and clears persisted blocks through the public delete wrapper", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(PROVIDER, oauthCredential("1"));
+		await store.saveOAuth(PROVIDER, oauthCredential("1"));
 		const [row] = store.listAuthCredentials(PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		try {
-			storage.upsertCredentialBlock({
+			storage.blocks.upsert({
 				credentialId: row.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "tier:fable",
 				blockedUntilMs: FUTURE_BLOCK_MS,
 			});
-			storage.upsertCredentialBlock({
+			storage.blocks.upsert({
 				credentialId: row.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "",
 				blockedUntilMs: EXPIRED_BLOCK_MS,
 			});
 
-			expect(storage.listCredentialBlocks([row.id])).toEqual([
+			expect(storage.blocks.list([row.id])).toEqual([
 				{
 					credentialId: row.id,
 					providerKey: PROVIDER_KEY,
@@ -234,21 +234,21 @@ describe("AuthStorage credential block persistence", () => {
 					updatedAtMs: expect.any(Number),
 				},
 			]);
-			const generationBeforeScopedDelete = storage.getGeneration();
-			storage.deleteCredentialBlock(row.id, PROVIDER_KEY, "tier:fable");
-			expect(storage.listCredentialBlocks([row.id])).toEqual([]);
-			expect(storage.getGeneration()).toBe(generationBeforeScopedDelete + 1);
-			storage.upsertCredentialBlock({
+			const generationBeforeScopedDelete = storage.credentials.generation;
+			storage.blocks.delete(row.id, PROVIDER_KEY, "tier:fable");
+			expect(storage.blocks.list([row.id])).toEqual([]);
+			expect(storage.credentials.generation).toBe(generationBeforeScopedDelete + 1);
+			storage.blocks.upsert({
 				credentialId: row.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "tier:fable",
 				blockedUntilMs: FUTURE_BLOCK_MS,
 			});
 
-			const generationBeforeDelete = storage.getGeneration();
-			storage.deleteCredentialBlocks(row.id);
-			expect(storage.listCredentialBlocks([row.id])).toEqual([]);
-			expect(storage.getGeneration()).toBe(generationBeforeDelete + 1);
+			const generationBeforeDelete = storage.credentials.generation;
+			storage.blocks.deleteAll(row.id);
+			expect(storage.blocks.list([row.id])).toEqual([]);
+			expect(storage.credentials.generation).toBe(generationBeforeDelete + 1);
 		} finally {
 			storage.close();
 		}
@@ -256,14 +256,14 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("keeps a block attached to the same credential row after a sibling is disabled", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(PROVIDER, oauthCredential("1"));
-		store.saveOAuth(PROVIDER, oauthCredential("2"));
-		store.saveOAuth(PROVIDER, oauthCredential("3"));
+		await store.saveOAuth(PROVIDER, oauthCredential("1"));
+		await store.saveOAuth(PROVIDER, oauthCredential("2"));
+		await store.saveOAuth(PROVIDER, oauthCredential("3"));
 		const rows = store.listAuthCredentials(PROVIDER);
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		try {
-			storage.upsertCredentialBlock({
+			storage.blocks.upsert({
 				credentialId: rows[1]!.id,
 				providerKey: PROVIDER_KEY,
 				blockScope: "",
@@ -274,14 +274,14 @@ describe("AuthStorage credential block persistence", () => {
 		}
 
 		const disablingStore = await SqliteAuthCredentialStore.open(dbPath);
-		disablingStore.deleteAuthCredential(rows[0]!.id, "disabled for test");
+		await disablingStore.deleteAuthCredential(rows[0]!.id, "disabled for test");
 		disablingStore.close();
 
 		const reopenedStore = await SqliteAuthCredentialStore.open(dbPath);
 		const reopenedStorage = new AuthStorage(reopenedStore);
-		await reopenedStorage.reload();
+		await reopenedStorage.credentials.reload();
 		try {
-			const key = await reopenedStorage.getApiKey(PROVIDER, "a");
+			const key = await reopenedStorage.keys.get(PROVIDER, "a");
 			expect(key).toBe("access-3");
 		} finally {
 			reopenedStorage.close();
@@ -290,8 +290,8 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("migrates v6 Codex shared blocks to meter rows while retaining a legacy mirror", async () => {
 		const setupStore = await SqliteAuthCredentialStore.open(dbPath);
-		setupStore.saveOAuth(CODEX_PROVIDER, oauthCredential("codex"));
-		setupStore.saveOAuth(PROVIDER, oauthCredential("anthropic"));
+		await setupStore.saveOAuth(CODEX_PROVIDER, oauthCredential("codex"));
+		await setupStore.saveOAuth(PROVIDER, oauthCredential("anthropic"));
 		const [codexRow] = setupStore.listAuthCredentials(CODEX_PROVIDER);
 		const [anthropicRow] = setupStore.listAuthCredentials(PROVIDER);
 		setupStore.close();
@@ -435,7 +435,7 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("mirrors a legacy Codex shared insert into meter rows while hiding shared from current APIs", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(CODEX_PROVIDER, oauthCredential("late"));
+		await store.saveOAuth(CODEX_PROVIDER, oauthCredential("late"));
 		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const blockedUntilMs = FUTURE_BLOCK_MS + 60_000;
@@ -483,7 +483,7 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("mirrors a late legacy Codex upsert before calculating scoped reconciliation", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(CODEX_PROVIDER, oauthCredential("late-reconcile"));
+		await store.saveOAuth(CODEX_PROVIDER, oauthCredential("late-reconcile"));
 		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const insertedAtMs = Date.now();
@@ -533,7 +533,7 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("keeps steady-state Codex block reads read-only while another connection owns the writer lock", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(CODEX_PROVIDER, oauthCredential("read-only"));
+		await store.saveOAuth(CODEX_PROVIDER, oauthCredential("read-only"));
 		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const blockedUntilMs = FUTURE_BLOCK_MS + 60_000;
@@ -565,7 +565,7 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("persists a Codex shared upsert as meter rows plus a hidden compatibility mirror", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(CODEX_PROVIDER, oauthCredential("upsert"));
+		await store.saveOAuth(CODEX_PROVIDER, oauthCredential("upsert"));
 		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const blockedUntilMs = FUTURE_BLOCK_MS + 60_000;
@@ -606,7 +606,7 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("recomputes and removes the legacy mirror as meter blocks are deleted", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(CODEX_PROVIDER, oauthCredential("delete-mirror"));
+		await store.saveOAuth(CODEX_PROVIDER, oauthCredential("delete-mirror"));
 		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const chatBlockedUntilMs = FUTURE_BLOCK_MS + 120_000;
@@ -647,7 +647,7 @@ describe("AuthStorage credential block persistence", () => {
 
 	it("keeps current bulk deletes and legacy shared deletes synchronized", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
-		store.saveOAuth(CODEX_PROVIDER, oauthCredential("delete-compatible"));
+		await store.saveOAuth(CODEX_PROVIDER, oauthCredential("delete-compatible"));
 		const [row] = store.listAuthCredentials(CODEX_PROVIDER);
 		if (!row) throw new Error("expected credential row");
 		const upsertMeterBlocks = (): void => {

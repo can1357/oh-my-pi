@@ -93,9 +93,9 @@ function usageStatus(usedFraction: number): UsageLimit["status"] {
 }
 
 function buildLimit(
-	id: "5h" | "7d",
+	id: "5h" | "7d" | "monthly",
 	label: string,
-	durationMs: number,
+	durationMs: number | undefined,
 	usedFraction: number | undefined,
 	resetsAt: number | undefined,
 	accountId: string | undefined,
@@ -105,7 +105,7 @@ function buildLimit(
 		id: `credits:${id}`,
 		label,
 		scope: { provider: PROVIDER, ...(accountId ? { accountId } : {}), windowId: id },
-		window: { id, label, durationMs, ...(resetsAt ? { resetsAt } : {}) },
+		window: { id, label, ...(durationMs !== undefined ? { durationMs } : {}), ...(resetsAt ? { resetsAt } : {}) },
 		amount: { used: usedFraction * 100, usedFraction, unit: "percent" },
 		status: usageStatus(usedFraction),
 	};
@@ -243,6 +243,17 @@ async function fetchAlibabaTokenPlanUsage(
 				WEEK_MS,
 				parseUsedFraction(responseData.per1WeekPercentage),
 				parsePositiveTimestamp(responseData.per1WeekResetTime),
+				accountId,
+			),
+			// Monthly-only plans report just this bucket, and the console never
+			// states its span (calendar months differ), so the window carries a
+			// reset deadline without a duration.
+			buildLimit(
+				"monthly",
+				"Monthly Credits",
+				undefined,
+				parseUsedFraction(responseData.per1MonthPercentage),
+				parsePositiveTimestamp(responseData.per1MonthResetTime),
 				accountId,
 			),
 		].filter((limit): limit is UsageLimit => limit !== undefined);

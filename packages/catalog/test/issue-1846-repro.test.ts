@@ -90,9 +90,9 @@ describe("issue #1846: Xiaomi Token Plan provider support", () => {
 		});
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
-		await storage.login("xiaomi-token-plan-sgp", {
+		await storage.oauth.login("xiaomi-token-plan-sgp", {
 			onAuth: info => {
 				authUrl = info.url;
 			},

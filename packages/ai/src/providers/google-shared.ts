@@ -4,7 +4,7 @@
 
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson } from "@oh-my-pi/pi-utils";
+import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
@@ -22,6 +22,7 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	Usage,
 } from "../types";
 import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts } from "../utils";
@@ -38,6 +39,7 @@ import type {
 	Part,
 	ThinkingConfig,
 	ThinkingLevel,
+	UsageMetadata,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
@@ -138,7 +140,7 @@ export function retainThoughtSignature(existing: string | undefined, incoming: s
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
-const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;
@@ -474,6 +476,33 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 }
 
 /**
+ * Maps Gemini `usageMetadata` onto {@link Usage} (cost zeroed for `calculateCost`).
+ *
+ * `promptTokenCount` includes `cachedContentTokenCount`, so input = prompt − cached,
+ * matching the OpenAI convention where input + cacheRead = total prompt tokens.
+ * Upstream sometimes omits `promptTokenCount` or reports a cache count above the
+ * prompt (Antigravity), so the prompt falls back to `total − candidates − thoughts`
+ * and cached tokens are clamped to it: input is never negative.
+ * Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
+ */
+export function mapGoogleUsage(metadata: UsageMetadata): Usage {
+	const candidates = metadata.candidatesTokenCount || 0;
+	const thinking = metadata.thoughtsTokenCount || 0;
+	const total = metadata.totalTokenCount || 0;
+	const prompt = metadata.promptTokenCount || Math.max(0, total - candidates - thinking);
+	const cacheRead = Math.min(metadata.cachedContentTokenCount || 0, prompt);
+	return {
+		input: prompt - cacheRead,
+		output: candidates + thinking,
+		cacheRead,
+		cacheWrite: 0,
+		totalTokens: total,
+		...(thinking > 0 ? { reasoningTokens: thinking } : {}),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+/**
  * Module-local counter for generating unique tool call IDs across Google providers.
  * Shared so that a single monotonically-increasing sequence is used regardless of which
  * Google API surface produced the stream — purely for uniqueness, not ordering semantics.
@@ -617,7 +646,13 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 
 	for await (const chunk of googleStream) {
 		if (chunk.error) {
-			const detail = chunk.error.message || chunk.error.status || "unknown error";
+			// Keep the RPC status alongside the message: an in-band quota failure
+			// is classified from this text, and `RESOURCE_EXHAUSTED` is the only
+			// account-exhaustion signal some of these chunks carry (#13090).
+			const detail =
+				chunk.error.message && chunk.error.status
+					? `${chunk.error.message} (${chunk.error.status})`
+					: chunk.error.message || chunk.error.status || "unknown error";
 			const message = `Google API stream error: ${detail}`;
 			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
 				? new AIError.GoogleApiError(message, chunk.error.code)
@@ -733,28 +768,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		}
 
 		if (chunk.usageMetadata) {
-			// promptTokenCount includes cachedContentTokenCount when cached content is used.
-			// Subtract to get non-cached input, matching the OpenAI convention where
-			// input = uncached prompt tokens and cacheRead = cached tokens so that
-			// input + cacheRead = total prompt tokens (no double-counting).
-			// Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
-			const cachedTokens = chunk.usageMetadata.cachedContentTokenCount || 0;
-			const thinkingTokens = chunk.usageMetadata.thoughtsTokenCount || 0;
-			output.usage = {
-				input: (chunk.usageMetadata.promptTokenCount || 0) - cachedTokens,
-				output: (chunk.usageMetadata.candidatesTokenCount || 0) + thinkingTokens,
-				cacheRead: cachedTokens,
-				cacheWrite: 0,
-				totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-				...(thinkingTokens > 0 ? { reasoningTokens: thinkingTokens } : {}),
-				cost: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					total: 0,
-				},
-			};
+			output.usage = mapGoogleUsage(chunk.usageMetadata);
 			calculateCost(model, output.usage, output.timestamp);
 		}
 	}
@@ -814,8 +828,14 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	// Vertex AI ignores a body field and requires the
 	// `X-Vertex-AI-LLM-Shared-Request-Type` header instead (added in
 	// streamGoogleVertex), so only emit the body field for the direct API.
-	if (model.provider === "google" && shouldSendServiceTier(options.serviceTier, model.provider)) {
-		config.serviceTier = options.serviceTier;
+	const serviceTier = options.serviceTier;
+	// `!== "ultrafast"` narrows to the Gemini wire type; `shouldSendServiceTier` already rejects it for Google.
+	if (
+		model.provider === "google" &&
+		serviceTier !== "ultrafast" &&
+		shouldSendServiceTier(serviceTier, model.provider)
+	) {
+		config.serviceTier = serviceTier;
 	}
 
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {
@@ -969,7 +989,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				if (!response.ok) {
 					const errorText = await response.text().catch(() => "");
 					throw new AIError.GoogleApiError(
-						`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText)}`,
+						`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText, response.status)}`,
 						response.status,
 						{ headers: response.headers },
 					);
@@ -1000,13 +1020,17 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			let body = await openStream();
 			stream.push({ type: "start", partial: output });
 
+			// Attach the observer only when a diagnostic listener exists: any
+			// observer turns on per-line raw capture in `readSseJson`.
+			const onSseEvent = options?.onSseEvent;
+			const sseObserver: SseEventObserver | undefined = onSseEvent
+				? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+				: undefined;
 			// Gemini occasionally finishes with `finishReason: STOP` while emitting only an empty
 			// text part and no tool call. Delivered as-is the agent receives a blank message and
 			// silently halts mid-task, so retry a bounded number of times before giving up.
 			for (let emptyAttempt = 0; ; emptyAttempt++) {
-				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, event =>
-					options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
-				);
+				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver);
 				await consumeGoogleStream({
 					googleStream,
 					output,
@@ -1101,13 +1125,30 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
 	return body;
 }
 
-function extractGoogleErrorMessage(errorText: string): string {
+/**
+ * Human-readable message for a non-2xx Google response.
+ *
+ * On a usage-limit status the RPC `status`/`details` residue is kept after the
+ * message: `parseGoogleRpcRateLimitReason` reads `RESOURCE_EXHAUSTED` plus the
+ * `google.rpc.ErrorInfo` reason to tell an account billing cap (terminal) from
+ * a per-minute throttle (retryable), and reducing the body to `error.message`
+ * hid both, so every billing 429 replayed as a transient rate limit (#13090).
+ * The Cloud Code Assist path keeps the whole raw body for the same reason.
+ */
+export function extractGoogleErrorMessage(errorText: string, status: number): string {
 	if (!errorText) return "Unknown error";
 	try {
-		const parsed = JSON.parse(errorText) as { error?: { message?: string } };
-		if (parsed.error?.message) return parsed.error.message;
+		const parsed = JSON.parse(errorText) as {
+			error?: { message?: string; status?: string; details?: unknown[] };
+		};
+		const error = parsed.error;
+		if (!error?.message) return errorText;
+		if (!AIError.isUsageLimitStatus(status)) return error.message;
+		const residue = { error: { status: error.status, details: error.details } };
+		return error.status === undefined && error.details === undefined
+			? error.message
+			: `${error.message} ${JSON.stringify(residue)}`;
 	} catch {
-		// fall through to raw text
+		return errorText;
 	}
-	return errorText;
 }

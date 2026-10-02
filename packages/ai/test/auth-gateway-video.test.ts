@@ -45,7 +45,7 @@ function model(id: string, api: Api = "openrouter-video", kind: "video" | undefi
 async function boot(): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-video-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("openrouter", "openrouter-secret");
+	storage.keys.setRuntime("openrouter", "openrouter-secret");
 	const video = model("google/veo-3.1");
 	const wrongApi = model("openrouter/auto", "openrouter", undefined);
 	const upstream: UpstreamRequest[] = [];
@@ -186,7 +186,7 @@ describe("auth-gateway asynchronous video generation", () => {
 	it("polls upstream, rewrites content URLs, and records reported completion cost", async () => {
 		harness = await boot();
 		const observed: Array<{ provider: string; model: string; costUsd?: number }> = [];
-		vi.spyOn(harness.storage, "recordObservedUsage").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
 		const submitted = await submit(harness);
 		const gatewayId = submitted.body.id as string;
 		const response = await fetch(`${harness.url}/v1/videos/${gatewayId}`, {

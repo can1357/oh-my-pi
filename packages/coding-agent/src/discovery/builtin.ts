@@ -64,7 +64,8 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	}
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
-	const userDir = await ifNonEmptyDir(getAgentDir());
+	// A load that carries its own agentDir (an SDK session created with one) reads that dir.
+	const userDir = await ifNonEmptyDir(ctx.agentDir ?? getAgentDir());
 	if (userDir) {
 		result.push({ dir: userDir, level: "user" });
 	}
@@ -72,7 +73,7 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
-function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
+export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
 	let current = cwd;
 	let depth = 0;
@@ -87,11 +88,15 @@ function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: stri
 	return ancestors;
 }
 
-async function findNearestProjectConfigDir(
-	cwd: string,
-	repoRoot?: string | null,
-): Promise<{ dir: string; depth: number } | null> {
-	for (const ancestor of getAncestorDirs(cwd, repoRoot)) {
+/**
+ * Nearest `.omp/` between cwd and the repo root. The home directory is never a
+ * project: `~/.omp` is the user config root, so a cwd under home (temp dirs on
+ * Windows, scratch folders) must not load its SYSTEM.md/RULES.md/AGENTS.md as
+ * project config — that also bypasses an overridden agent dir or profile.
+ */
+async function findNearestProjectConfigDir(ctx: LoadContext): Promise<{ dir: string; depth: number } | null> {
+	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
+		if (ancestor.dir === ctx.home) continue;
 		const configDir = await ifNonEmptyDir(ancestor.dir, PATHS.projectDir);
 		if (configDir) return { dir: configDir, depth: ancestor.depth };
 	}
@@ -163,11 +168,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 
+			const instructions = typeof serverConfig.instructions === "boolean" ? serverConfig.instructions : undefined;
+			if (instructions === undefined && serverConfig.instructions != null) {
+				logger.warn(
+					`MCP server "${serverName}": invalid instructions ${JSON.stringify(serverConfig.instructions)}, ignoring`,
+				);
+			}
+
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
+				instructions,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
@@ -255,7 +268,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 
 	// Project entries first: dedupe is first-wins, so a project literal or
 	// template claims its key before a same-scope user file can survive.
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
 	if (nearestProjectConfigDir) {
 		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM.md"), "project", "text");
 		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM_TEMPLATE.md"), "project", "template");
@@ -276,8 +289,9 @@ registerProvider<SystemPrompt>(systemPromptCapability.id, {
 
 // Skills
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	// Walk up from cwd finding .omp/skills/ in ancestors (closest first)
-	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home);
+	// Walk up from cwd finding .omp/skills/ in ancestors (closest first). Home is
+	// the user config root, never a project (see findNearestProjectConfigDir).
+	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).filter(({ dir }) => dir !== ctx.home);
 	const projectScans = ancestors.map(({ dir }) =>
 		scanSkillsFromDir(ctx, {
 			dir: path.join(dir, PATHS.projectDir, "skills"),
@@ -384,13 +398,13 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	// https://omp.sh/docs/context-files: its full body is carried on every
 	// request (system-prompt text, or image frames under snapcompact
 	// system-prompt imaging) so it keeps its hold across long sessions.
-	// User scope:    ~/.omp/agent/RULES.md
+	// User scope:    <agentDir>/RULES.md (~/.omp/agent/RULES.md by default)
 	// Project scope: nearest .omp/RULES.md walking up from cwd to repoRoot
-	const userRulesFile = path.join(getAgentDir(), "RULES.md");
+	const userRulesFile = path.join(ctx.agentDir ?? getAgentDir(), "RULES.md");
 	const userRule = await loadStickyRulesFile(userRulesFile, "user");
 	if (userRule) items.push(userRule);
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
 	if (nearestProjectConfigDir) {
 		const projectRulesFile = path.join(nearestProjectConfigDir.dir, "RULES.md");
 		const projectRule = await loadStickyRulesFile(projectRulesFile, "project");
@@ -917,7 +931,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		});
 	}
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
+	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx);
 	if (nearestProjectConfigDir) {
 		const projectPath = path.join(nearestProjectConfigDir.dir, "AGENTS.md");
 		const projectContent = await readFile(projectPath);

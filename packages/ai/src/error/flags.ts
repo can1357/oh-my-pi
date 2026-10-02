@@ -85,6 +85,8 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
 	/exceeds the available context size/i, // llama.cpp server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s*\+\s*max\s+tokens\s*\(\s*\d+\s*\)\s+exceeds\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s+leaves\s+no\s+room\s+to\s+answer\s+in\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
 	/requested tokens?.*exceed.*context (window|length|size)/i, // llama.cpp / OpenAI-compatible local servers
 	/context (window|length|size).*(exceeded|overflow|too small)/i, // Generic local server variants
 	/(prompt|input).*(too long|too large).*(context|n_ctx)/i, // llama.cpp phrasing variants
@@ -659,7 +661,8 @@ export function classify(error: unknown, api?: Api): number {
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
 				(codeStatus === 402 &&
-					(code === "payment_required" || code === "deactivated_workspace" || is402BillingCapBody(link.message)))
+					(is402BillingCapBody(link.message) ||
+						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code))))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
@@ -874,14 +877,21 @@ export function attach<E extends object>(error: E, id: number): E {
 
 /** Overflow-classification evidence, including errors received before token usage is available. */
 export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
-	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite">;
+	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
 }
 
-/** Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235). */
+/**
+ * Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235).
+ *
+ * Prefers `contextTokens` when the provider reports it: providers that run
+ * several model calls per turn (Cursor's server-side tool loop) report
+ * `input`/`cacheRead` summed across those calls, which can exceed the window
+ * many times over while the conversation itself stays small.
+ */
 export function isUsageBackedContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	const usage = message.usage;
 	if (!contextWindow || !usage) return false;
-	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	const inputTokens = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
 	return inputTokens > contextWindow;
 }
 

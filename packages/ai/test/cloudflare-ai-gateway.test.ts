@@ -163,7 +163,7 @@ describe("Cloudflare AI Gateway", () => {
 		const authStorage = new AuthStorage(store);
 		const prompts = ["persisted-token", "persisted-account", "persisted-gateway"];
 		try {
-			await authStorage.login("cloudflare-ai-gateway", {
+			await authStorage.oauth.login("cloudflare-ai-gateway", {
 				onAuth: () => {},
 				onPrompt: async () => prompts.shift() ?? "",
 			});
@@ -194,8 +194,8 @@ describe("Cloudflare AI Gateway", () => {
 				onAuth: () => {},
 				onPrompt: async () => prompts.shift() ?? "",
 			};
-			await authStorage.login("cloudflare-ai-gateway", controller);
-			await authStorage.login("cloudflare-ai-gateway", controller);
+			await authStorage.oauth.login("cloudflare-ai-gateway", controller);
+			await authStorage.oauth.login("cloudflare-ai-gateway", controller);
 
 			const credentials = store.listAuthCredentials("cloudflare-ai-gateway");
 			expect(credentials).toHaveLength(1);

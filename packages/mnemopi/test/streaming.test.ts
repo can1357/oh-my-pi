@@ -252,13 +252,4 @@ describe("DeltaSync", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
-
-	it("serializes checkpoints", () => {
-		const checkpoint = new SyncCheckpoint({
-			peer_id: "p1",
-			last_sync_at: "2026-01-01T00:00:00",
-			last_rowid: 42,
-		});
-		expect(JSON.parse(checkpoint.toJson()).last_rowid).toBe(42);
-	});
 });

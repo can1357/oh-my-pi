@@ -11,7 +11,7 @@ import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, siteHosts, withHardTimeout } from "./utils";
 
 const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 const DEFAULT_NUM_RESULTS = 5;
@@ -68,7 +68,7 @@ export async function findApiKey(
 	sessionId: string | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
-	return (await authStorage.getApiKey("tavily", sessionId, { signal })) ?? null;
+	return (await authStorage.keys.get("tavily", sessionId, { signal })) ?? null;
 }
 
 /** Exported for testing. Builds the Tavily request body from unified params. */
@@ -173,16 +173,6 @@ function hasRenderableResponse(response: SearchResponse): boolean {
 	return response.sources.length > 0;
 }
 
-/** Bare hosts from `site:` values (path parts are enforced by the central lenient filter). */
-function siteHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
-}
-
 /** Execute Tavily web search. */
 export async function searchTavily(params: SearchParams): Promise<SearchResponse> {
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
@@ -204,7 +194,7 @@ export async function searchTavily(params: SearchParams): Promise<SearchResponse
 		if (parsed.after) tavilyParams.start_date = parsed.after;
 		if (parsed.before) tavilyParams.end_date = parsed.before;
 	}
-	const keyOrResolver: ApiKey = params.authStorage.resolver("tavily", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("tavily", {
 		sessionId: params.sessionId,
 	});
 
@@ -236,7 +226,7 @@ export class TavilyProvider extends SearchProvider {
 	readonly label = "Tavily";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("tavily") || !!getEnvApiKey("tavily");
+		return authStorage.keys.source("tavily") !== undefined || !!getEnvApiKey("tavily");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

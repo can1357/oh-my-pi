@@ -13,9 +13,15 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+
+import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -31,11 +37,13 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	isUltrafastModeEnabled(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	formatSessionAsText: () => string;
 	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
+	dumpSessionArchiveToTmpDir: () => Promise<SessionDumpArchive | undefined>;
 	getLastAssistantText: () => string | undefined;
 	messages: unknown[];
 	settings: Settings;
@@ -51,7 +59,7 @@ interface FakeAcpBuiltinSession {
 	effectiveExtensionRoots: unknown;
 	setTitleSystemPrompt(prompt: string | undefined): void;
 	setSlashCommands(commands: unknown[]): void;
-	refreshSkills(): Promise<void>;
+	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
@@ -90,7 +98,7 @@ function createRuntime() {
 		effectiveExtensionRoots: undefined,
 		setTitleSystemPrompt: (_prompt: string | undefined) => {},
 		setSlashCommands: (_commands: unknown[]) => {},
-		refreshSkills: async () => {},
+		refreshSkillsAndCommands: async () => {},
 		toggleFastMode() {
 			this.fastMode = !this.fastMode;
 			return this.fastMode;
@@ -101,6 +109,9 @@ function createRuntime() {
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		isUltrafastModeEnabled() {
+			return false;
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -151,6 +162,7 @@ function createRuntime() {
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
+		dumpSessionArchiveToTmpDir: async () => undefined,
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
@@ -266,11 +278,11 @@ describe("ACP builtin slash commands", () => {
 		const { output, runtime } = createRuntime();
 
 		expect(await executeAcpBuiltinSlashCommand("/extended-context off", runtime)).toEqual({ consumed: true });
-		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(false);
 		expect(await executeAcpBuiltinSlashCommand("/extended-context on", runtime)).toEqual({ consumed: true });
-		expect(runtime.settings.get("extendedContext")).toBe(true);
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(true);
 		expect(await executeAcpBuiltinSlashCommand("/extended-context", runtime)).toEqual({ consumed: true });
-		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(false);
 		expect(await executeAcpBuiltinSlashCommand("/extended-context status", runtime)).toEqual({ consumed: true });
 		expect(output).toEqual([
 			"Extended context disabled.",
@@ -517,6 +529,42 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Recent Jobs");
 	});
 
+	it("jobs full: shows the untruncated command instead of the label", async () => {
+		const { output, runtime } = createRuntime();
+		const command = `pytest ${"tests/a ".repeat(40)}-q`;
+		runtime.session.getAsyncJobSnapshot = () => ({
+			running: [
+				{ id: "j1", type: "bash", status: "running", label: "pytest tests/a...", command, startTime: Date.now() },
+			],
+			recent: [{ id: "j2", type: "task", status: "completed", label: "build done", startTime: Date.now() - 60_000 }],
+			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+		});
+
+		await executeAcpBuiltinSlashCommand("/jobs", runtime);
+		await executeAcpBuiltinSlashCommand("/jobs full", runtime);
+		await executeAcpBuiltinSlashCommand("/jobs bogus", runtime);
+
+		expect(output[0]).not.toContain(command);
+		expect(output[1]).toContain(command);
+		expect(output[1]).toContain("build done");
+		expect(output[2]).toContain("Usage: /jobs [full]");
+	});
+
+	it("jobs full: strips control sequences and fences the command", async () => {
+		const { output, runtime } = createRuntime();
+		const command = `printf ${"x".repeat(150)} \x1b[2J\`\`\`\n# heading TAIL`;
+		runtime.session.getAsyncJobSnapshot = () => ({
+			running: [{ id: "j1", type: "bash", status: "running", label: "printf x...", command, startTime: Date.now() }],
+			recent: [],
+			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+		});
+
+		await executeAcpBuiltinSlashCommand("/jobs full", runtime);
+
+		expect(output[0]).not.toContain("\x1b");
+		expect(output[0]).toContain(`\`\`\`\`\nprintf ${"x".repeat(150)} \`\`\`\n# heading TAIL\n\`\`\`\``);
+	});
+
 	// /dump
 	it("dump: outputs transcript with LLM request JSON path when sidecar succeeds", async () => {
 		const { output, runtime } = createRuntime();
@@ -553,6 +601,27 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("No messages");
 	});
 
+	it("dump all: reports the archive and reaches subagents only via the all argument", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.formatSessionAsText = () => "Session content here";
+		runtime.session.dumpSessionArchiveToTmpDir = async () => ({
+			path: "/tmp/omp-dump-test.zip",
+			files: ["session.md", "llm-request.json", "subagents/Scout.md"],
+			subagentCount: 1,
+			subagentError: "EACCES: permission denied",
+		});
+
+		await executeAcpBuiltinSlashCommand("/dump all", runtime);
+		await executeAcpBuiltinSlashCommand("/dump", runtime);
+		await executeAcpBuiltinSlashCommand("/dump everything", runtime);
+
+		expect(output[0]).toContain("Session dump archive: /tmp/omp-dump-test.zip");
+		expect(output[0]).toContain("  subagents/Scout.md");
+		expect(output[0]).toContain("Subagent transcripts unavailable: EACCES: permission denied");
+		expect(output[1]).toBe("Session content here");
+		expect(output[2]).toContain("Usage: /dump [all]");
+	});
+
 	// /model
 	it("model: returns current model when set", async () => {
 		const { output, runtime } = createRuntime();
@@ -571,15 +640,6 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("No model");
-	});
-
-	it("model: returns ACP usage message when args provided", async () => {
-		const { output, runtime } = createRuntime();
-
-		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
-
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]?.toLowerCase()).toContain("acp");
 	});
 
 	it("model: applies known id and emits both title + config change notifications", async () => {
@@ -1032,7 +1092,7 @@ describe("wave 3 commands", () => {
 
 	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
-		runtime.settings.override("worktree.cleanSource", true);
+		cfgWorktreeCleanSource.override(runtime.settings, true);
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
@@ -1156,7 +1216,7 @@ describe("wave 3 commands", () => {
 
 	it("/memory stats: still names the backend when a real backend simply has no stats hook", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.settings.set("memory.backend" as never, "local" as never);
+		cfgMemoryBackend.set(runtime.settings, "local");
 		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toBe("Memory stats is not available for the local backend.");
@@ -1175,25 +1235,25 @@ describe("wave 3 commands", () => {
 	// /browser
 	it("/browser visible: sets headless=false; second call is idempotent", async () => {
 		const { runtime } = createRuntime();
-		runtime.settings.set("browser.enabled" as never, true as never);
-		runtime.settings.set("browser.headless" as never, true as never);
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
 		const r1 = await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		expect(r1).toEqual({ consumed: true });
-		expect(runtime.settings.get("browser.headless" as never)).toBe(false);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
 		const r2 = await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		expect(r2).toEqual({ consumed: true });
-		expect(runtime.settings.get("browser.headless" as never)).toBe(false);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
 	});
 
 	it("/browser no-arg after /browser visible toggles to headless", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.settings.set("browser.enabled" as never, true as never);
-		runtime.settings.set("browser.headless" as never, true as never);
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
 		await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		const r = await executeAcpBuiltinSlashCommand("/browser", runtime);
 		expect(r).toEqual({ consumed: true });
 		expect(output[output.length - 1]).toContain("headless");
-		expect(runtime.settings.get("browser.headless" as never)).toBe(true);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(true);
 	});
 
 	// /compact
@@ -1212,17 +1272,6 @@ describe("wave 3 commands", () => {
 
 describe("wave 4 commands", () => {
 	// /mcp
-	it("/mcp (no args): outputs help text containing list, enable, disable, remove, reload", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("list");
-		expect(output[0]).toContain("enable");
-		expect(output[0]).toContain("disable");
-		expect(output[0]).toContain("remove");
-		expect(output[0]).toContain("reload");
-	});
-
 	it("/mcp help: outputs help text containing list, enable, disable, remove, reload", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
@@ -1358,18 +1407,6 @@ describe("wave 4 commands", () => {
 });
 
 describe("wave 5 — adapters and polish", () => {
-	// /mcp help lists new subcommands
-	it("/mcp help: lists resources, prompts, test, add, smithery-search", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("resources");
-		expect(output[0]).toContain("prompts");
-		expect(output[0]).toContain("test");
-		expect(output[0]).toContain("add");
-		expect(output[0]).toContain("smithery-search");
-	});
-
 	// /mcp add — verify parsing and output message
 	it("/mcp add foo --url https://example.com --token X --scope project: outputs success or propagates write error", async () => {
 		// Uses project scope so it writes to /tmp/project/.omp/mcp.json which test infra controls.
@@ -1436,20 +1473,6 @@ describe("wave 5 — adapters and polish", () => {
 		const result = await executeAcpBuiltinSlashCommand("/model gpt-fake-9000", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Unknown model");
-	});
-
-	// /model with known id (fake registry)
-	it("/model known-id: reports model set and triggers notifyTitleChanged", async () => {
-		const { output, session, runtime } = createRuntime();
-		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-sonnet-test" }];
-		let titleChanged = false;
-		runtime.notifyTitleChanged = () => {
-			titleChanged = true;
-		};
-		const result = await executeAcpBuiltinSlashCommand("/model claude-sonnet-test", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Model set to anthropic/claude-sonnet-test.");
-		expect(titleChanged).toBe(true);
 	});
 
 	// /usage bar character

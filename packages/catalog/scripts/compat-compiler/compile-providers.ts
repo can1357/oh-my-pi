@@ -59,11 +59,13 @@ const KNOWN_APIS = [
 	"cursor-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
+	"factory-droid-agent",
+	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;
 true satisfies _MissingKnownApis extends never ? true : ["KNOWN_APIS is missing KnownApi values", _MissingKnownApis];
 
-const BUNDLE_POLICIES = ["always", "fallback", "empty"] as const satisfies readonly SeedBundlePolicy[];
+const BUNDLE_POLICIES = ["always", "fallback", "empty", "never"] as const satisfies readonly SeedBundlePolicy[];
 const DEFAULT_BUNDLE: SeedBundlePolicy = "always";
 const SEED_PROPS = ["api", "base-url", "bundle", "precedence"] as const;
 const MODEL_PROPS = ["name", "api", "base-url"] as const;

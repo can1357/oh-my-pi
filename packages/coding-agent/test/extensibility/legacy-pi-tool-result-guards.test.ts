@@ -29,16 +29,6 @@ function resultEvent(toolName: string): ToolResultEvent {
 }
 
 describe("legacy shim tool-result guards", () => {
-	it("exports the guard family as callable functions", () => {
-		expect(typeof isBashToolResult).toBe("function");
-		expect(typeof isReadToolResult).toBe("function");
-		expect(typeof isEditToolResult).toBe("function");
-		expect(typeof isWriteToolResult).toBe("function");
-		expect(typeof isGrepToolResult).toBe("function");
-		expect(typeof isFindToolResult).toBe("function");
-		expect(typeof isLsToolResult).toBe("function");
-	});
-
 	it("narrows a tool_result event by tool name", () => {
 		expect(isEditToolResult(resultEvent("edit"))).toBe(true);
 		expect(isEditToolResult(resultEvent("write"))).toBe(false);

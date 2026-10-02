@@ -6,7 +6,7 @@
  * `usage.ts` schema and the `auth-broker/wire-schemas.ts` copy must declare
  * `notes?: string[]` at the report level, or the field is lost on
  * deserialization. `usageReportSchema` (the non-broker copy) must also accept
- * the field so local `AuthStorage.fetchUsageReports` results type-check.
+ * the field so local `AuthStorage.usage.reports` results type-check.
  */
 
 import { describe, expect, it } from "bun:test";

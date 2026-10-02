@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AuthStorage, type OAuthCredential, type ResetCreditTarget } from "@oh-my-pi/pi-ai/auth-storage";
+import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { isRecord } from "@oh-my-pi/pi-ai/utils";
 
 interface ResetPost {
@@ -13,16 +14,23 @@ interface ResetFixture {
 	target: ResetCreditTarget;
 	posts: ResetPost[];
 	baseUrlResolver: () => string;
+	usageRequests: string[];
 	state: {
 		program: "cedar_ember" | "juniper_tide";
 		nextGrant: string;
 		usable: boolean;
 		remaining: number;
 		weeklyUsed: number;
+		discoveryStatus?: number;
+		genericUsageEnabled?: boolean;
 		response: unknown;
 		responseStatus: number;
+		/** Plain `/usage` leaves the programs unevaluated and every reset probe is rate-limited. */
+		resetProbeFailing?: boolean;
 		postGate?: Promise<void>;
 		postArrived?: () => void;
+		usageGate?: Promise<void>;
+		usageArrived?: () => void;
 	};
 }
 
@@ -42,6 +50,7 @@ async function fixture(): Promise<ResetFixture> {
 		responseStatus: 200,
 	};
 	const posts: ResetPost[] = [];
+	const usageRequests: string[] = [];
 	const server = Bun.serve({
 		port: 0,
 		hostname: "127.0.0.1",
@@ -56,6 +65,20 @@ async function fixture(): Promise<ResetFixture> {
 				return Response.json(state.response, { status: state.responseStatus });
 			}
 			if (url.pathname === "/api/oauth/usage") {
+				usageRequests.push(url.search);
+				state.usageArrived?.();
+				await state.usageGate;
+				// The incident's generic broker usage path is unavailable; live reset discovery still answers.
+				if (!url.search && !state.genericUsageEnabled) return new Response("usage throttled", { status: 429 });
+				if (state.resetProbeFailing && url.search !== "") {
+					return Response.json({ error: "rate_limited" }, { status: 429 });
+				}
+				if (url.search && state.discoveryStatus) {
+					return new Response("discovery throttled", {
+						status: state.discoveryStatus,
+						headers: { "retry-after": "7" },
+					});
+				}
 				const hour = 3_600_000;
 				return Response.json({
 					five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * hour).toISOString() },
@@ -99,13 +122,17 @@ async function fixture(): Promise<ResetFixture> {
 						available: state.usable && state.remaining > 0,
 						arm: state.program === "juniper_tide" ? "reset" : "control",
 					},
+					...(state.resetProbeFailing ? { cedar_ember: null, juniper_tide: null } : {}),
 				});
 			}
 			return new Response("not found", { status: 404 });
 		},
 	});
 	cleanups.push(() => server.stop(true));
-	const storage = await AuthStorage.create(":memory:");
+	// Only Claude usage: other default providers could reach the network via host API-key env vars.
+	const storage = await AuthStorage.create(":memory:", {
+		usageProviderResolver: provider => (provider === "anthropic" ? claudeUsageProvider : undefined),
+	});
 	cleanups.push(() => storage.close());
 	const credentials: OAuthCredential[] = ["org-a", "org-b"].map(orgId => ({
 		type: "oauth",
@@ -116,13 +143,14 @@ async function fixture(): Promise<ResetFixture> {
 		email: "same@example.com",
 		orgId,
 	}));
-	await storage.set("anthropic", credentials);
-	const account = storage.listOAuthAccounts("anthropic").find(row => row.orgId === "org-b");
+	await storage.credentials.set("anthropic", credentials);
+	const account = storage.oauth.accounts("anthropic").find(row => row.orgId === "org-b");
 	if (!account) throw new Error("Expected independently stored organization credential");
 	return {
 		storage,
 		posts,
 		state,
+		usageRequests,
 		target: { provider: "anthropic", credentialId: account.credentialId, creditId: "saved-reset" },
 		baseUrlResolver: () => server.url.origin,
 	};
@@ -131,14 +159,14 @@ async function fixture(): Promise<ResetFixture> {
 describe("Claude saved reset account safety", () => {
 	it("spends only the selected durable credential when both organizations share an email", async () => {
 		const f = await fixture();
-		const statuses = await f.storage.listResetCredits({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
+		const statuses = await f.storage.resets.list({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
 		expect(new Set(statuses.map(status => status.credentialId)).size).toBe(2);
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
 		expect(f.posts.map(post => [post.path, post.bearer])).toEqual([
 			["/api/organizations/org-b/reset_rate_limits", "Bearer token-org-b"],
 		]);
-		const removed = await f.storage.redeemResetCredit({
+		const removed = await f.storage.resets.redeem({
 			target: { ...f.target, credentialId: -1, email: "same@example.com" },
 			baseUrlResolver: f.baseUrlResolver,
 		});
@@ -146,10 +174,76 @@ describe("Claude saved reset account safety", () => {
 		expect(f.posts.length).toBe(1);
 	});
 
+	it("lists exact account quota evidence without a second generic usage request", async () => {
+		const f = await fixture();
+		const statuses = await f.storage.resets.list({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
+		for (const status of statuses) {
+			expect(status.report?.metadata).toMatchObject({
+				accountId: "shared-account",
+				email: "same@example.com",
+				orgId: status.orgId,
+			});
+			expect(status.report?.limits.map(limit => [limit.id, limit.amount?.usedFraction])).toEqual([
+				["anthropic:5h", 1],
+				["anthropic:7d", 0.4],
+				["anthropic:7d:fable", 1],
+			]);
+			expect(Date.now() - (status.report?.fetchedAt ?? 0)).toBeLessThan(5_000);
+		}
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1", "?cedar_ember=1&skip_spend=1"]);
+	});
+
+	it("coalesces live discovery while one caller aborts without cancelling its peer", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const controller = new AbortController();
+		const options = { provider: "anthropic", baseUrlResolver: f.baseUrlResolver };
+		const cancelled = f.storage.resets.list({ ...options, sessionId: "first-task", signal: controller.signal }).then(
+			() => false,
+			() => true,
+		);
+		await arrived.promise;
+		const surviving = f.storage.resets.list({
+			...options,
+			sessionId: "second-task",
+			signal: AbortSignal.timeout(5_000),
+		});
+		controller.abort();
+		expect(await cancelled).toBe(true);
+		release.resolve();
+		const statuses = await surviving;
+		expect(statuses.map(status => status.report?.metadata?.orgId).sort()).toEqual(["org-a", "org-b"]);
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1", "?cedar_ember=1&skip_spend=1"]);
+	});
+
+	it("returns provider throttle timing without spending or retrying discovery", async () => {
+		const f = await fixture();
+		f.state.discoveryStatus = 429;
+		const statuses = await f.storage.resets.list({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
+		expect(statuses.map(status => status.retryAfterMs)).toEqual([7_000, 7_000]);
+		expect(statuses.every(status => status.error !== undefined)).toBe(true);
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1", "?cedar_ember=1&skip_spend=1"]);
+		expect(f.posts).toEqual([]);
+	});
+
+	it("allows fresh usage after a confirmed reset despite an earlier failed usage probe", async () => {
+		const f = await fixture();
+		await f.storage.usage.reports({ baseUrlResolver: f.baseUrlResolver });
+		expect(f.usageRequests).toContain("");
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(outcome.ok).toBe(true);
+		f.state.genericUsageEnabled = true;
+		const reports = await f.storage.usage.reports({ baseUrlResolver: f.baseUrlResolver });
+		expect(reports?.some(report => report.metadata?.orgId === "org-b")).toBe(true);
+	});
+
 	it("does not spend a new offer under an old confirmation", async () => {
 		const f = await fixture();
 		f.state.nextGrant = "new-offer";
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.code).toBe("offer_changed");
 		expect(f.posts).toEqual([]);
 	});
@@ -158,14 +252,14 @@ describe("Claude saved reset account safety", () => {
 		const f = await fixture();
 		f.state.responseStatus = 502;
 		f.state.response = { error: "upstream response lost" };
-		const first = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const first = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(first.ok).toBe(false);
 		f.state.responseStatus = 200;
 		f.state.response = { result: "cooldown" };
-		const waiting = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const waiting = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(waiting.code).toBe("cooldown");
 		f.state.response = { result: "reset", resets_left: 1, cleared: ["five_hour"] };
-		const retry = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const retry = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(retry.ok).toBe(true);
 		expect(f.posts).toHaveLength(3);
 		const requestId = f.posts[0]?.body.request_id;
@@ -177,11 +271,29 @@ describe("Claude saved reset account safety", () => {
 		const f = await fixture();
 		f.state.responseStatus = 502;
 		f.state.response = { error: "upstream response lost" };
-		await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		f.state.remaining = 1;
-		const retry = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const retry = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(retry.code).toBe("already_redeemed");
 		expect(f.posts).toHaveLength(1);
+	});
+
+	it("spends a new grant once the lost response's grant has left the live offer", async () => {
+		const f = await fixture();
+		f.state.responseStatus = 502;
+		f.state.response = { error: "upstream response lost" };
+		await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		// The lost claim consumed its grant; the account later hit a wall again with a new one.
+		f.state.nextGrant = "next-grant";
+		f.state.responseStatus = 200;
+		f.state.response = { result: "reset", resets_left: 1, cleared: ["five_hour"] };
+		const retry = await f.storage.resets.redeem({
+			target: { ...f.target, creditId: "next-grant" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(retry.code).toBe("reset");
+		expect(f.posts).toHaveLength(2);
+		expect(f.posts[1]?.body.request_id).not.toBe(f.posts[0]?.body.request_id);
 	});
 
 	it("does not retry an uncertain Juniper spend without an idempotency key", async () => {
@@ -190,9 +302,9 @@ describe("Claude saved reset account safety", () => {
 		f.target.creditId = "juniper_tide";
 		f.state.responseStatus = 502;
 		f.state.response = { error: "upstream response lost" };
-		const first = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const first = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(first.ok).toBe(false);
-		const retry = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const retry = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(retry.code).toBe("reset_unconfirmed");
 		expect(f.posts).toHaveLength(1);
 		expect(f.posts[0]?.body).toEqual({ program: "juniper_tide" });
@@ -205,9 +317,9 @@ describe("Claude saved reset account safety", () => {
 		f.state.postArrived = arrived.resolve;
 		f.state.postGate = release.promise;
 		const options = { target: f.target, baseUrlResolver: f.baseUrlResolver };
-		const first = f.storage.redeemResetCredit(options);
+		const first = f.storage.resets.redeem(options);
 		await arrived.promise;
-		const second = f.storage.redeemResetCredit(options);
+		const second = f.storage.resets.redeem(options);
 		release.resolve();
 		const outcomes = await Promise.all([first, second]);
 		expect(outcomes.map(outcome => outcome.code)).toEqual(["reset", "reset"]);
@@ -216,32 +328,66 @@ describe("Claude saved reset account safety", () => {
 
 	it("clears the restored shared block but retains an exhausted uncovered model tier", async () => {
 		const f = await fixture();
-		for (const blockScope of ["", "tier:fable"]) {
-			f.storage.upsertCredentialBlock({
+		for (const blockScope of ["", "tier:fable", "auth", "account-policy"]) {
+			f.storage.blocks.upsert({
 				credentialId: f.target.credentialId,
 				providerKey: "anthropic:oauth",
 				blockScope,
 				blockedUntilMs: Date.now() + 3_600_000,
 			});
 		}
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
-		expect(f.storage.listCredentialBlocks([f.target.credentialId]).map(block => block.blockScope)).toEqual([
-			"tier:fable",
-		]);
+		expect(
+			f.storage.blocks
+				.list([f.target.credentialId])
+				.map(block => block.blockScope)
+				.sort(),
+		).toEqual(["account-policy", "auth", "tier:fable"]);
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1"]);
 	});
 
-	it("retains a shared block when a session reset leaves the weekly quota exhausted", async () => {
+	it("preserves an uncovered tier wall even when only a legacy global block existed", async () => {
 		const f = await fixture();
-		f.state.weeklyUsed = 100;
-		f.storage.upsertCredentialBlock({
+		f.storage.blocks.upsert({
 			credentialId: f.target.credentialId,
 			providerKey: "anthropic:oauth",
 			blockScope: "",
 			blockedUntilMs: Date.now() + 3_600_000,
 		});
-		const outcome = await f.storage.redeemResetCredit({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
-		expect(f.storage.listCredentialBlocks([f.target.credentialId]).map(block => block.blockScope)).toEqual([""]);
+		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual(["tier:fable"]);
+	});
+
+	it("retains a shared block when a session reset leaves the weekly quota exhausted", async () => {
+		const f = await fixture();
+		f.state.weeklyUsed = 100;
+		f.storage.blocks.upsert({
+			credentialId: f.target.credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 3_600_000,
+		});
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(outcome.ok).toBe(true);
+		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual([""]);
+	});
+
+	it("does not carry a spent reset forward when the follow-up reset probe fails", async () => {
+		const f = await fixture();
+		f.state.genericUsageEnabled = true;
+		const savedResetsByOrg = async () => {
+			const reports = await f.storage.usage.reports({ baseUrlResolver: f.baseUrlResolver });
+			return Object.fromEntries(
+				(reports ?? []).map(report => [report.metadata?.orgId, report.resetCredits?.availableCount]),
+			);
+		};
+		expect(await savedResetsByOrg()).toEqual({ "org-a": 2, "org-b": 2 });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(outcome.ok).toBe(true);
+
+		f.state.resetProbeFailing = true;
+		expect(await savedResetsByOrg()).toStrictEqual({ "org-a": 2, "org-b": undefined });
 	});
 });

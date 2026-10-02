@@ -108,6 +108,35 @@ describe("listClaudeResetCredits", () => {
 		});
 	});
 
+	it("parses discovery quota evidence with the same normalized model windows as ordinary usage", async () => {
+		const { fetch, calls } = recordingFetch(() =>
+			json(200, {
+				...cedarPayload(),
+				five_hour: { utilization: 100 },
+				seven_day: { utilization: 40 },
+				limits: [{ kind: "weekly_scoped", percent: 70, scope: { model: { display_name: "Fable" } } }],
+			}),
+		);
+		const result = await listClaudeResetCredits({
+			accessToken: "token",
+			accountId: "account_1",
+			email: "a@example.com",
+			orgId: "org_1",
+			fetch,
+		});
+		expect(result?.report?.limits.map(limit => [limit.id, limit.amount?.usedFraction])).toEqual([
+			["anthropic:5h", 1],
+			["anthropic:7d", 0.4],
+			["anthropic:7d:fable", 0.7],
+		]);
+		expect(result?.report?.metadata).toMatchObject({
+			accountId: "account_1",
+			email: "a@example.com",
+			orgId: "org_1",
+		});
+		expect(calls).toHaveLength(1);
+	});
+
 	it("falls back to the Juniper reset arm without claiming a weekly reset exists", async () => {
 		const { fetch, calls } = recordingFetch(url => {
 			if (url.searchParams.has("cedar_ember")) {
@@ -340,6 +369,36 @@ describe("Claude usage reset integration", () => {
 		expect(calls).toHaveLength(1);
 		expect(report?.limits.find(limit => limit.id === "anthropic:extra")?.amount.used).toBe(12.5);
 		expect(report?.limits.find(limit => limit.id === "anthropic:7d:fable")?.amount.usedFraction).toBe(0.61);
+	});
+
+	it("discovers resets when the usage body lists the programs as unevaluated nulls", async () => {
+		const unevaluated = {
+			five_hour: { utilization: 25, resets_at: "2099-09-23T00:00:00Z" },
+			cedar_ember: null,
+			juniper_tide: null,
+			omelette_promotional: null,
+		};
+		const { fetch, calls } = recordingFetch(url =>
+			url.searchParams.has("cedar_ember")
+				? json(200, { ...unevaluated, cedar_ember: cedarPayload().cedar_ember })
+				: json(200, unevaluated),
+		);
+		const report = await claudeUsageProvider.fetchUsage(
+			{
+				provider: "anthropic",
+				credential: {
+					type: "oauth",
+					accessToken: "token",
+					accountId: "account_1",
+					email: "user@example.com",
+					orgId: "org_1",
+				},
+			},
+			{ fetch },
+		);
+
+		expect(calls.map(call => new URL(call.url).search)).toEqual(["", "?cedar_ember=1&skip_spend=1"]);
+		expect(report?.resetCredits).toMatchObject({ availableCount: 2, nextCreditId: "grant_1" });
 	});
 
 	it("keeps the full usage report when reset discovery fails", async () => {

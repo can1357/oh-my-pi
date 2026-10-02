@@ -2,10 +2,7 @@ import { describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import {
-	buildXaiOAuthStaticSeed,
-	xaiOAuthModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { xaiOAuthModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 // Regression for https://github.com/can1357/oh-my-pi/issues/12697: xAI's
@@ -14,20 +11,6 @@ import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 // entry (reasoning false, null limits) whose thinking picker offers only
 // inherit/off.
 describe("xai-oauth grok-4.7 discovery", () => {
-	test("curates grok-4.7 in the static seed", () => {
-		const seed = buildXaiOAuthStaticSeed().find(model => model.id === "grok-4.7");
-		expect(seed).toMatchObject({
-			name: "Grok 4.7",
-			api: "openai-responses",
-			provider: "xai-oauth",
-			reasoning: true,
-			input: ["text", "image"],
-			contextWindow: 500_000,
-			maxTokens: 500_000,
-		});
-		expect(seed?.compat).toMatchObject({ supportsReasoningEffort: true, omitReasoningEffort: false });
-	});
-
 	test("refreshing sparse upstream rows yields complete grok-4.7 metadata", async () => {
 		let requestHeaders: RequestInit["headers"];
 		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {

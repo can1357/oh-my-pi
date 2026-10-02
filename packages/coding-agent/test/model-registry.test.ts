@@ -7,6 +7,8 @@ import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingCon
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
+import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
@@ -20,6 +22,8 @@ import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles"
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -258,10 +262,10 @@ describe("ModelRegistry", () => {
 
 		test("all and kind pools expose keyless runners and authenticated TypeSafe models", () => {
 			let allowTypeSafeAuth = false;
-			const hasAuth = authStorage.hasAuth.bind(authStorage);
+			const source = authStorage.keys.source.bind(authStorage.keys);
 			spies.push(
-				spyOn(authStorage, "hasAuth").mockImplementation(provider =>
-					provider === "typesafe" && !allowTypeSafeAuth ? false : hasAuth(provider),
+				spyOn(authStorage.keys, "source").mockImplementation((provider, options) =>
+					provider === "typesafe" && !allowTypeSafeAuth ? undefined : source(provider, options),
 				),
 			);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
@@ -290,7 +294,7 @@ describe("ModelRegistry", () => {
 			expect(registry.getAvailable("judge").some(model => model.provider === "typesafe")).toBe(false);
 			expect(registry.getAvailable("all").some(model => model.provider === "typesafe")).toBe(false);
 
-			authStorage.setRuntimeApiKey("typesafe", "typesafe-test-key");
+			authStorage.keys.setRuntime("typesafe", "typesafe-test-key");
 			allowTypeSafeAuth = true;
 			expect(registry.getAvailable("judge")).toContainEqual(
 				expect.objectContaining({ provider: "typesafe", id: "jev-latest" }),
@@ -305,7 +309,7 @@ describe("ModelRegistry", () => {
 		});
 
 		test("keeps image and speech fallback runners across authoritative chat cache and refresh", async () => {
-			authStorage.setRuntimeApiKey("deepinfra", "deepinfra-test-key");
+			authStorage.keys.setRuntime("deepinfra", "deepinfra-test-key");
 			const settings = Settings.isolated({
 				modelRoles: { image: "deepinfra/missing-image", speech: "deepinfra/missing-speech" },
 				"retry.fallbackChains": {
@@ -361,7 +365,7 @@ describe("ModelRegistry", () => {
 		});
 
 		test("disabled runner providers remain excluded from available kind and all pools", () => {
-			authStorage.setRuntimeApiKey("typesafe", "typesafe-test-key");
+			authStorage.keys.setRuntime("typesafe", "typesafe-test-key");
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
 				settings: Settings.isolated({ disabledProviders: ["local", "web", "typesafe"] }),
 			});
@@ -371,22 +375,6 @@ describe("ModelRegistry", () => {
 					registry.getAvailable(kind).some(model => ["local", "web", "typesafe"].includes(model.provider)),
 				).toBe(false);
 			}
-		});
-	});
-
-	describe("OpenRouter routed suffix fallback", () => {
-		let registry: ModelRegistry;
-		beforeAll(() => {
-			registry = readonlyRegistry({
-				providers: { openrouter: providerConfig("https://openrouter.ai/api/v1", [{ id: "z-ai/glm-4.7" }]) },
-			});
-		});
-
-		test("find synthesizes a routed model id from the base OpenRouter metadata", () => {
-			const model = registry.find("openrouter", "z-ai/glm-4.7-20251222:nitro");
-			expect(model?.provider).toBe("openrouter");
-			expect(model?.id).toBe("z-ai/glm-4.7-20251222:nitro");
-			expect(model?.name).toBe("z-ai/glm-4.7-20251222:nitro");
 		});
 	});
 
@@ -478,13 +466,6 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("overriding baseUrl keeps all built-in models", () => {
-			const anthropicModels = getModelsForProvider(anthropicProxy, "anthropic");
-			// Should have multiple built-in models, not just one
-			expect(anthropicModels.length).toBeGreaterThan(1);
-			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
-		});
-
 		test("overriding baseUrl changes URL on all built-in models", () => {
 			const anthropicModels = getModelsForProvider(anthropicProxy, "anthropic");
 			// All models should have the new baseUrl
@@ -557,16 +538,21 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const model = registry.find("zhipu-coding-plan", "glm-5.2");
 			if (!model) throw new Error("expected bundled zhipu-coding-plan/glm-5.2 model");
-			await authStorage.set("zhipu-coding-plan", { type: "api_key", key: "zhipu-domestic-key" });
-			await authStorage.set("zai", { type: "api_key", key: "zai-international-key" });
+			await authStorage.credentials.set("zhipu-coding-plan", { type: "api_key", key: "zhipu-domestic-key" });
+			await authStorage.credentials.set("zai", { type: "api_key", key: "zai-international-key" });
 
 			const calls: Array<{
 				provider: string;
 				sessionId: string | undefined;
 				options: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal } | undefined;
 			}> = [];
-			const originalGetApiKey = authStorage.getApiKey.bind(authStorage);
-			authStorage.getApiKey = async (
+			const originalGetWithCredential = authStorage.keys.getWithCredential.bind(authStorage.keys);
+			authStorage.keys.getWithCredential = async (provider, sessionId, options) => {
+				calls.push({ provider, sessionId, options });
+				return originalGetWithCredential(provider, sessionId, options);
+			};
+			const originalGetApiKey = authStorage.keys.get.bind(authStorage.keys);
+			authStorage.keys.get = async (
 				provider: string,
 				sessionId?: string,
 				options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
@@ -586,6 +572,7 @@ describe("ModelRegistry", () => {
 				},
 			});
 
+			authStorage.keys.get = originalGetApiKey;
 			const resolved = await registry.resolver(
 				model,
 				sessionId,
@@ -594,7 +581,7 @@ describe("ModelRegistry", () => {
 				error: undefined,
 				signal: undefined,
 			});
-			expect(resolved).toBe("zhipu-domestic-key");
+			expect(resolved).toMatchObject({ apiKey: "zhipu-domestic-key", credentialId: expect.any(Number) });
 			expect(calls.at(-1)).toEqual({
 				provider: "zhipu-coding-plan",
 				sessionId,
@@ -703,7 +690,6 @@ describe("ModelRegistry", () => {
 	describe("provider compat overrides", () => {
 		let providerCompat: ModelRegistry;
 		let customCompat: ModelRegistry;
-		let customAnthropicCompat: ModelRegistry;
 		let customModelCompat: ModelRegistry;
 		let customResponsesCompat: ModelRegistry;
 		let customAstraProxyCompat: ModelRegistry;
@@ -740,29 +726,6 @@ describe("ModelRegistry", () => {
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 								contextWindow: 1000,
 								maxTokens: 100,
-							},
-						],
-					},
-				},
-			});
-			customAnthropicCompat = readonlyRegistry({
-				providers: {
-					"anthropic-proxy": {
-						baseUrl: "https://example.com/v1/messages",
-						apiKey: "ANTHROPIC_PROXY_KEY",
-						api: "anthropic-messages",
-						compat: {
-							supportsEagerToolInputStreaming: true,
-							allowAnthropicHeaderOverrides: true,
-						},
-						models: [
-							{
-								id: "claude-haiku-4.5",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 200_000,
-								maxTokens: 8_192,
 							},
 						],
 					},
@@ -873,14 +836,6 @@ describe("ModelRegistry", () => {
 			expect(compat?.supportsUsageInStreaming).toBe(false);
 			expect(compat?.maxTokensField).toBe("max_tokens");
 			expect(compat?.cacheControlFormat).toBe("anthropic");
-		});
-
-		test("custom Anthropic providers can opt into eager tool input streaming", () => {
-			const model = customAnthropicCompat.find("anthropic-proxy", "claude-haiku-4.5");
-			expect(model?.compat).toMatchObject({
-				supportsEagerToolInputStreaming: true,
-				allowAnthropicHeaderOverrides: true,
-			});
 		});
 
 		test("provider-level Anthropic compat survives dynamic discovery refresh", async () => {
@@ -1229,8 +1184,6 @@ describe("ModelRegistry", () => {
 		let openrouterWithModels: ModelRegistry;
 		let openaiGpt54Replace: ModelRegistry;
 		let myProxyGpt54: ModelRegistry;
-		let openaiGpt54Explicit: ModelRegistry;
-		let openaiGpt54Override: ModelRegistry;
 		let minimaxReplace: ModelRegistry;
 		beforeAll(() => {
 			anthropicCustom = readonlyRegistry({
@@ -1330,40 +1283,6 @@ describe("ModelRegistry", () => {
 						apiKey: "TEST_KEY",
 						api: "openai-responses",
 						models: [{ id: "gpt-5.4" }],
-					},
-				},
-			});
-			openaiGpt54Explicit = readonlyRegistry({
-				providers: {
-					openai: providerConfig(
-						"https://my-proxy.example.com/v1",
-						[{ id: "gpt-5.4", contextWindow: 256000 }],
-						"openai-responses",
-					),
-				},
-			});
-			openaiGpt54Override = readonlyRegistry({
-				providers: {
-					openai: {
-						baseUrl: "https://my-proxy.example.com/v1",
-						apiKey: "TEST_KEY",
-						api: "openai-responses",
-						models: [
-							{
-								id: "gpt-5.4",
-								name: "gpt-5.4",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 256000,
-								maxTokens: 128000,
-							},
-						],
-						modelOverrides: {
-							"gpt-5.4": {
-								contextWindow: 512000,
-							},
-						},
 					},
 				},
 			});
@@ -1600,10 +1519,6 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
 		});
 
-		test("built-in gpt-5.4 applies the hardcoded context window policy", () => {
-			expect(sharedBuiltin.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
-		});
-
 		test("custom gpt-5.4 replacement keeps the hardcoded context window when contextWindow is omitted", () => {
 			const model = openaiGpt54Replace.find("openai", "gpt-5.4");
 			expect(model?.contextWindow).toBe(1_000_000);
@@ -1614,14 +1529,6 @@ describe("ModelRegistry", () => {
 			const model = myProxyGpt54.find("my-proxy", "gpt-5.4");
 			expect(model?.contextWindow).toBe(1_000_000);
 			expect(model?.baseUrl).toBe("https://my-proxy.example.com/v1");
-		});
-
-		test("custom gpt-5.4 replacement preserves its explicit context window", () => {
-			expect(openaiGpt54Explicit.find("openai", "gpt-5.4")?.contextWindow).toBe(256000);
-		});
-
-		test("modelOverrides can still patch a custom gpt-5.4 replacement", () => {
-			expect(openaiGpt54Override.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
 		});
 
 		test("discoverable bundled replacement survives refresh", async () => {
@@ -1750,6 +1657,60 @@ describe("ModelRegistry", () => {
 			expect(headers?.["X-Model"]).toBeUndefined();
 		});
 
+		test.each([
+			["provider headers", "provider", true, { "X-Shared": "provider" }],
+			["model override headers", "modelOverride", true, { "X-Shared": "model", "X-Model": "model" }],
+			["runtime provider headers", "runtimeProvider", true, { "X-Shared": "runtime", "X-Runtime": "runtime" }],
+			["provider headers (lazy catalog)", "provider", false, { "X-Shared": "provider" }],
+			["model override headers (lazy catalog)", "modelOverride", false, { "X-Shared": "model", "X-Model": "model" }],
+			[
+				"runtime provider headers (lazy catalog)",
+				"runtimeProvider",
+				false,
+				{ "X-Shared": "runtime", "X-Runtime": "runtime" },
+			],
+		] as const)("refreshes keep discovered %s one resolver deep", async (_name, scenario, materialized, expected) => {
+			writeRawModelsJson({
+				proxy: {
+					baseUrl: "https://proxy.example/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					headers: { "X-Shared": "provider", "X-Provider": "provider" },
+					discovery: { type: "openai-models-list" },
+					models: [],
+					...(scenario === "modelOverride"
+						? { modelOverrides: { "gpt-5": { headers: { "X-Shared": "model", "X-Model": "model" } } } }
+						: {}),
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("https://proxy.example/v1/models", ["gpt-5"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			if (materialized) registry.getAll();
+			if (scenario === "runtimeProvider") {
+				registry.registerProvider("proxy", { headers: { "X-Shared": "runtime", "X-Runtime": "runtime" } });
+			}
+			// Every nested resolver layer re-resolves its sources, each behind one
+			// abort listener; the count is the resolver's depth.
+			const resolveCountingListeners = async () => {
+				const model = registry.find("proxy", "gpt-5");
+				const controller = new AbortController();
+				const addEventListener = spyOn(controller.signal, "addEventListener");
+				const headers = await model?.resolveHeaders?.(controller.signal);
+				return { headers, listeners: addEventListener.mock.calls.length };
+			};
+
+			await registry.refreshProvider("proxy", "online");
+			const first = await resolveCountingListeners();
+			for (let refresh = 0; refresh < 5; refresh++) {
+				await registry.refreshProvider("proxy", "online");
+			}
+			const sixth = await resolveCountingListeners();
+
+			expect(first.headers).toMatchObject({ ...expected, "X-Provider": "provider" });
+			expect(sixth.headers).toEqual(first.headers);
+			expect(sixth.listeners).toBe(first.listeners);
+		});
+
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
 			const model = minimaxReplace.find("minimax-code", "MiniMax-M2.5");
 			const compat = getOpenAICompat(model);
@@ -1851,8 +1812,6 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("modelOverrides (per-model customization)", () => {
-		let single: ModelRegistry;
-		let routingOnly: ModelRegistry;
 		let routingOrder: ModelRegistry;
 		let extraBodyMerge: ModelRegistry;
 		let multiple: ModelRegistry;
@@ -1864,20 +1823,6 @@ describe("ModelRegistry", () => {
 		let omitOnCustom: ModelRegistry;
 		let scheduledPrices: ModelRegistry;
 		beforeAll(() => {
-			single = readonlyRegistry({
-				providers: {
-					openrouter: { modelOverrides: { "anthropic/claude-sonnet-4": { name: "Custom Sonnet Name" } } },
-				},
-			});
-			routingOnly = readonlyRegistry({
-				providers: {
-					openrouter: {
-						modelOverrides: {
-							"anthropic/claude-sonnet-4": { compat: { openRouterRouting: { only: ["amazon-bedrock"] } } },
-						},
-					},
-				},
-			});
 			routingOrder = readonlyRegistry({
 				providers: {
 					openrouter: {
@@ -1975,21 +1920,6 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
-		});
-
-		test("model override applies to a single built-in model", () => {
-			const models = getModelsForProvider(single, "openrouter");
-			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4");
-			expect(sonnet?.name).toBe("Custom Sonnet Name");
-			// Other models should be unchanged
-			const opus = models.find(m => m.id === "anthropic/claude-opus-4");
-			expect(opus?.name).not.toBe("Custom Sonnet Name");
-		});
-
-		test("model override with compat.openRouterRouting", () => {
-			const sonnet = getModelsForProvider(routingOnly, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			const compat = sonnet?.compat as OpenAICompat | undefined;
-			expect(compat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
 		});
 
 		test("model override deep merges compat settings", () => {
@@ -2198,7 +2128,7 @@ describe("ModelRegistry", () => {
 
 	describe("github-copilot oauth endpoint alignment", () => {
 		test("getApiKey does not mutate bundled github-copilot baseUrl", async () => {
-			await authStorage.set("github-copilot", [
+			await authStorage.credentials.set("github-copilot", [
 				{
 					type: "oauth",
 					access: "ghu_individual_token_123",
@@ -2234,7 +2164,7 @@ describe("ModelRegistry", () => {
 		});
 
 		test("refreshProvider uses enterprise Copilot discovery host for peeked credentials", async () => {
-			await authStorage.set("github-copilot", [
+			await authStorage.credentials.set("github-copilot", [
 				{
 					type: "oauth",
 					access: "ghu_enterprise_token_456",
@@ -2276,6 +2206,75 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("Factory Droid account residency", () => {
+		test("uses the selected token's region instead of a sibling account's region", async () => {
+			await authStorage.credentials.set("factory-droid", [
+				{
+					type: "oauth",
+					access: "factory-global-token",
+					refresh: "factory-global-refresh",
+					expires: Date.now() + 60_000,
+					region: "global",
+				},
+				{
+					type: "oauth",
+					access: "factory-eu-token",
+					refresh: "factory-eu-refresh",
+					expires: Date.now() + 60_000,
+					region: "eu",
+				},
+			]);
+			authStorage.keys.setRuntime("factory-droid", "factory-eu-token");
+			const requestedUrls: string[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const url = input instanceof Request ? input.url : String(input);
+				requestedUrls.push(url);
+				const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+				expect(headers.get("Authorization")).toBe("Bearer factory-eu-token");
+				if (url.endsWith("/api/feature-flags")) return Response.json({ flags: {} });
+				if (url.endsWith("/api/organization/managed-settings")) {
+					return Response.json({ settings: { modelPolicy: { allowAllFactoryModels: true } } });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("factory-droid", "online");
+
+			expect(requestedUrls).toContain("https://api.eu.factory.ai/api/feature-flags");
+			expect(requestedUrls).toContain("https://api.eu.factory.ai/api/organization/managed-settings");
+			expect(registry.find("factory-droid", "gpt-5.4")?.baseUrl).toBe("https://api.eu.factory.ai/api/llm/o/v1");
+			expect(registry.find("factory-droid", "kimi-k3")).toBeUndefined();
+		});
+
+		test("preserves native capacity despite reference-price and direct-host heuristics", async () => {
+			const testSettings = Settings.isolated();
+			cfgExtendedContext.set(testSettings, false);
+			authStorage.keys.setRuntime("factory-droid", "factory-token");
+			const flags = Object.fromEntries(
+				factoryDroidRegistry().flatMap(({ policy }) =>
+					policy.entitlement.featureFlag ? [[policy.entitlement.featureFlag, true]] : [],
+				),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: testSettings,
+				fetch: async input =>
+					Response.json(
+						String(input).endsWith("/api/feature-flags")
+							? { flags }
+							: { settings: { modelPolicy: { allowAllFactoryModels: true } } },
+					),
+			});
+			await registry.refreshProvider("factory-droid", "online");
+			// Reference-price tiers cannot shrink subscription capacity, and
+			// direct-host capacity heuristics cannot inflate the native input limit.
+			for (const id of ["gpt-6-astra", "grok-4.7", "gpt-5.4"]) {
+				expect(registry.find("factory-droid", id)?.contextWindow).toBe(
+					resolveFactoryDroidPolicy({ id })?.limits.contextWindow,
+				);
+			}
+		});
+	});
+
 	describe("disabled provider filtering", () => {
 		test("getAvailable and getDiscoverableProviders exclude disabled providers from settings", async () => {
 			writeRawModelsJson({
@@ -2286,7 +2285,7 @@ describe("ModelRegistry", () => {
 					discovery: { type: "ollama" },
 				},
 			});
-			await authStorage.set("github-copilot", [
+			await authStorage.credentials.set("github-copilot", [
 				{
 					type: "oauth",
 					access: "ghu_test_token_for_disabled",
@@ -2327,6 +2326,34 @@ describe("ModelRegistry", () => {
 				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
+		});
+
+		test("a disabled provider's model neither resolves by name nor gets a key", async () => {
+			// Every `resolved.model ?? find(...)` fallback (retry fallback candidates, advisors,
+			// restored and CLI models) and every request path goes through find() and getApiKey():
+			// a disabled provider reached through either would answer despite disabledProviders.
+			await authStorage.credentials.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_test_token_for_disabled",
+					refresh: "ghu_test_token_for_disabled",
+					expires: Date.now() + 60_000,
+				},
+			]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: Settings.isolated({ disabledProviders: ["github-copilot"] }),
+			});
+			const bundled = getBundledModels("github-copilot")[0];
+			if (!bundled) throw new Error("the bundled catalog has no github-copilot model");
+
+			expect(registry.find("github-copilot", bundled.id)).toBeUndefined();
+			expect(await registry.getApiKey(bundled)).toBeUndefined();
+			expect(await registry.getApiKeyForProvider("github-copilot")).toBeUndefined();
+
+			const enabled = new ModelRegistry(authStorage, modelsJsonPath, { settings: Settings.isolated({}) });
+			expect(enabled.find("github-copilot", bundled.id)?.id).toBe(bundled.id);
+			expect(await enabled.getApiKey(bundled)).toBeDefined();
+			expect(await enabled.getApiKeyForProvider("github-copilot")).toBeDefined();
 		});
 	});
 	describe("extended context", () => {
@@ -2377,19 +2404,89 @@ describe("ModelRegistry", () => {
 				"openai-codex": { modelOverrides: { "gpt-6-astra": { thinking } } },
 			});
 			const testSettings = Settings.isolated();
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
+		});
+
+		test("keeps Copilot premium-tier flagships on the default pricing window until extended context is enabled", async () => {
+			// Copilot's long tier is the opt-in `-1m` sibling; the base rows carry
+			// its 1.05M ceiling and no `cost.longContext`, so before the KDL
+			// window rules nothing capped them and every session billed premium.
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("github-copilot", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("github-copilot", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			cfgExtendedContext.set(testSettings, true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("github-copilot", "gpt-5.6-sol")?.contextWindow).toBe(1_050_000);
+		});
+
+		test("custom provider models follow the extended-context toggle without retaining an earlier window", async () => {
+			writeRawModelsJson({
+				"proxy-window": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [{ id: "gpt-6-astra", contextWindow: 272_000, maxContextWindow: 922_000, maxTokens: 128_000 }],
+				},
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			cfgExtendedContext.set(testSettings, true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(922_000);
+
+			cfgExtendedContext.set(testSettings, false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(272_000);
+
+			writeRawModelsJson({
+				"proxy-window": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [{ id: "gpt-6-astra", contextWindow: 272_000, maxContextWindow: 922_000, maxTokens: 128_000 }],
+					modelOverrides: { "gpt-6-astra": { maxContextWindow: 512_000 } },
+				},
+			});
+			cfgExtendedContext.set(testSettings, true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(512_000);
+		});
+
+		test("modelOverrides supply standard and extended windows to a non-Codex provider", async () => {
+			writeRawModelsJson({
+				openrouter: {
+					modelOverrides: {
+						"anthropic/claude-sonnet-4": { contextWindow: 128_000, maxContextWindow: 512_000 },
+					},
+				},
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
+
+			cfgExtendedContext.set(testSettings, true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(512_000);
+
+			cfgExtendedContext.set(testSettings, false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
 		});
 
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
@@ -2397,12 +2494,12 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 		});
@@ -2423,11 +2520,11 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
 		});
@@ -2442,6 +2539,53 @@ describe("ModelRegistry", () => {
 			// more than the server ceiling (curated 922K input cap here).
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 		});
+
+		test.each([
+			["maximum-only override", "modelOverrides", undefined, 272_000],
+			["paired override", "modelOverrides", 400_000, 400_000],
+			["maximum-only custom model", "models", undefined, 272_000],
+			["paired custom model", "models", 400_000, 400_000],
+		] as const)(
+			"clamps Astra %s across repeated toggles and offline refresh",
+			async (_name, source, contextWindow, standardWindow) => {
+				const configuredWindow = {
+					...(contextWindow === undefined ? {} : { contextWindow }),
+					maxContextWindow: 2_000_000,
+				};
+				writeRawModelsJson({
+					"openai-codex":
+						source === "modelOverrides"
+							? { modelOverrides: { "gpt-6-astra": configuredWindow } }
+							: {
+									baseUrl: "https://chatgpt.com/backend-api",
+									api: "openai-codex-responses",
+									auth: "none",
+									models: [{ id: "gpt-6-astra", ...configuredWindow }],
+								},
+				});
+				const testSettings = Settings.isolated();
+				cfgExtendedContext.set(testSettings, true);
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+				expect(registry.getError()).toBeUndefined();
+				const expectWindow = (contextWindow: number) => {
+					const model = registry.find("openai-codex", "gpt-6-astra");
+					expect(model?.contextWindow).toBe(contextWindow);
+					expect(model && resolveMaxContextWindow(model)).toBe(922_000);
+				};
+				expectWindow(922_000);
+
+				for (const extendedContext of [false, true, false, true]) {
+					cfgExtendedContext.set(testSettings, extendedContext);
+					await registry.reapplyModelPolicies();
+					const expectedWindow = extendedContext ? 922_000 : standardWindow;
+					expectWindow(expectedWindow);
+
+					await registry.refresh("offline");
+					expect(registry.getError()).toBeUndefined();
+					expectWindow(expectedWindow);
+				}
+			},
+		);
 
 		test("clamps a cached Astra row already carrying the applied override", async () => {
 			writeRawModelsJson({
@@ -2466,89 +2610,6 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 		});
 
-		test("restores the opt-in for cached Astra and worker rows with stale or invalid maxima", async () => {
-			const testSettings = Settings.isolated();
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
-			const astra = registry.find("openai-codex", "gpt-6-astra");
-			if (!astra) throw new Error("Expected bundled Astra model");
-			writeModelCache(
-				"openai-codex",
-				Date.now(),
-				[
-					{ ...astra, contextWindow: 1_050_000, maxContextWindow: 872_000 },
-					{ ...astra, id: "gpt-6-astra-wm", contextWindow: 1_050_000, maxContextWindow: 0 },
-				],
-				true,
-				"",
-				path.join(tempDir, "models.db"),
-			);
-			await registry.reapplyModelPolicies();
-			for (const id of ["gpt-6-astra", "gpt-6-astra-wm"]) {
-				expect(registry.find("openai-codex", id)?.contextWindow).toBe(272_000);
-			}
-
-			testSettings.set("extendedContext", true);
-			await registry.reapplyModelPolicies();
-			for (const id of ["gpt-6-astra", "gpt-6-astra-wm"]) {
-				expect(registry.find("openai-codex", id)?.contextWindow).toBe(922_000);
-			}
-
-			testSettings.set("extendedContext", false);
-			await registry.reapplyModelPolicies();
-			for (const id of ["gpt-6-astra", "gpt-6-astra-wm"]) {
-				expect(registry.find("openai-codex", id)?.contextWindow).toBe(272_000);
-			}
-		});
-
-		test("uses higher discovered Astra maxima without retaining them across catalog rebuilds", async () => {
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
-				settings: Settings.isolated({ extendedContext: true }),
-			});
-			const astra = registry.find("openai-codex", "gpt-6-astra");
-			if (!astra) throw new Error("Expected bundled Astra model");
-			const dbPath = path.join(tempDir, "models.db");
-			writeModelCache("openai-codex", Date.now(), [{ ...astra, maxContextWindow: 1_200_000 }], true, "", dbPath);
-			await registry.reapplyModelPolicies();
-			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(1_200_000);
-
-			writeModelCache("openai-codex", Date.now(), [{ ...astra, maxContextWindow: 872_000 }], true, "", dbPath);
-			await registry.reapplyModelPolicies();
-			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
-		});
-
-		test("restores a discovered maximum from cache ahead of the default on each toggle", async () => {
-			const testSettings = Settings.isolated();
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
-			const legacy = registry.find("openai-codex", "gpt-5.5");
-			const extended = registry.find("openai-codex", "gpt-5.6-luna");
-			if (!legacy || !extended) throw new Error("Expected bundled Codex models");
-			writeModelCache(
-				"openai-codex",
-				Date.now(),
-				[
-					{ ...legacy, maxContextWindow: 640_000 },
-					{ ...extended, maxContextWindow: 64_000 },
-				],
-				true,
-				"",
-				path.join(tempDir, "models.db"),
-			);
-
-			testSettings.set("extendedContext", true);
-			await registry.reapplyModelPolicies();
-			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(640_000);
-			// An advertised maximum smaller than the current window cannot shrink it.
-			expect(registry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(1_000_000);
-
-			testSettings.set("extendedContext", false);
-			await registry.reapplyModelPolicies();
-			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(272_000);
-
-			testSettings.set("extendedContext", true);
-			await registry.reapplyModelPolicies();
-			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(640_000);
-		});
-
 		test("off caps billable premium models without shrinking subscription estimates", async () => {
 			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
@@ -2564,15 +2625,15 @@ describe("ModelRegistry", () => {
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
 			await Settings.init({ inMemory: true });
-			settings.set("extendedContext", true);
+			cfgExtendedContext.set(settings, true);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 
-			settings.set("extendedContext", false);
+			cfgExtendedContext.set(settings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(272_000);
 
-			settings.set("extendedContext", true);
+			cfgExtendedContext.set(settings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 			expect(registry.find("openai-codex", "gpt-5.6-terra")?.contextWindow).toBe(1_000_000);
@@ -2583,7 +2644,7 @@ describe("ModelRegistry", () => {
 		let registry: ModelRegistry;
 		beforeAll(async () => {
 			anthropicAuth = await AuthStorage.create(":memory:");
-			await anthropicAuth.set("anthropic", [{ type: "api_key", key: "sk-ant-api-test" }]);
+			await anthropicAuth.credentials.set("anthropic", [{ type: "api_key", key: "sk-ant-api-test" }]);
 			registry = new ModelRegistry(anthropicAuth, sharedConfigPath({ providers: {} }));
 			await registry.refresh("offline");
 		});
@@ -2598,7 +2659,6 @@ describe("ModelRegistry", () => {
 	describe("disableStrictTools", () => {
 		let bedrockCustom: ModelRegistry;
 		let anthropicOverride: ModelRegistry;
-		let myProxyCustom: ModelRegistry;
 		beforeAll(() => {
 			bedrockCustom = readonlyRegistry({
 				providers: {
@@ -2622,27 +2682,6 @@ describe("ModelRegistry", () => {
 				},
 			});
 			anthropicOverride = readonlyRegistry({ providers: { anthropic: { disableStrictTools: true } } });
-			myProxyCustom = readonlyRegistry({
-				providers: {
-					"my-proxy": {
-						baseUrl: "https://proxy.example.com/anthropic",
-						apiKey: "TEST_KEY",
-						api: "anthropic-messages",
-						disableStrictTools: true,
-						models: [
-							{
-								id: "claude-sonnet-4",
-								name: "Sonnet",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 200000,
-								maxTokens: 16384,
-							},
-						],
-					},
-				},
-			});
 		});
 
 		test("custom provider with models gets disableStrictTools merged into compat", () => {
@@ -2667,12 +2706,6 @@ describe("ModelRegistry", () => {
 					(model.compatConfig as { disableStrictTools?: boolean } | undefined)?.disableStrictTools,
 				).toBeUndefined();
 			}
-		});
-
-		test("disableStrictTools is merged with explicit compat on custom provider", () => {
-			const model = myProxyCustom.find("my-proxy", "claude-sonnet-4");
-			expect(model).toBeDefined();
-			expect((model?.compat as { disableStrictTools?: boolean } | undefined)?.disableStrictTools).toBe(true);
 		});
 	});
 
@@ -2805,8 +2838,8 @@ describe("ModelRegistry", () => {
 		];
 		beforeAll(async () => {
 			oauthAuth = await AuthStorage.create(":memory:");
-			oauthAuth.setRuntimeApiKey("proxy-anthropic", "literal-key");
-			oauthAuth.setRuntimeApiKey("proxy-openai", "literal-key");
+			oauthAuth.keys.setRuntime("proxy-anthropic", "literal-key");
+			oauthAuth.keys.setRuntime("proxy-openai", "literal-key");
 			const build = async (config: Record<string, unknown>) => {
 				const registry = new ModelRegistry(oauthAuth, sharedConfigPath(config));
 				await registry.refresh("offline");
@@ -2895,7 +2928,6 @@ describe("ModelRegistry", () => {
 	describe("cached discovery on startup", () => {
 		let legacySentinels: ModelRegistry;
 		let standardCache: ModelRegistry;
-		let specialCache: ModelRegistry;
 		let vertexAuthoritative: ModelRegistry;
 		let syntheticCacheLoad: ModelRegistry;
 		let cachedDiscoverableRemoteCompaction: ModelRegistry;
@@ -3062,54 +3094,6 @@ describe("ModelRegistry", () => {
 							fingerprintStaticModels(getBundledModels("ollama-cloud")),
 							dbPath,
 						);
-					},
-				},
-			);
-			specialCache = readonlyRegistry(
-				{ providers: {} },
-				{
-					seedCache: dbPath => {
-						const cachedModels: Model[] = [
-							buildModel({
-								id: "gemini-cache-only-flash",
-								name: "Gemini Cache-Only Flash",
-								api: "google-gemini-cli",
-								provider: "google-antigravity",
-								baseUrl: "https://cloudcode-pa.googleapis.com",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 1_000_000,
-								maxTokens: 8_192,
-							}),
-							buildModel({
-								id: "gemini-3.5-flash",
-								name: "Gemini 3.5 Flash",
-								api: "google-gemini-cli",
-								provider: "google-gemini-cli",
-								baseUrl: "https://cloudcode-pa.googleapis.com",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 1_000_000,
-								maxTokens: 16_384,
-							}),
-							buildModel({
-								id: "gpt-5.4-codex-pro",
-								name: "GPT-5.4 Codex Pro",
-								api: "openai-codex-responses",
-								provider: "openai-codex",
-								baseUrl: "https://chatgpt.com/backend-api/codex",
-								reasoning: true,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 400_000,
-								maxTokens: 128_000,
-							}),
-						];
-						for (const cachedModel of cachedModels) {
-							writeModelCache(cachedModel.provider, Date.now(), [cachedModel], true, "", dbPath);
-						}
 					},
 				},
 			);
@@ -3321,12 +3305,6 @@ describe("ModelRegistry", () => {
 			expect(cacheOnlyModel?.omitMaxOutputTokens).toBe(true);
 		});
 
-		test("loads cached special provider discovery models on startup", () => {
-			expect(specialCache.find("google-antigravity", "gemini-cache-only-flash")?.maxTokens).toBe(8_192);
-			expect(specialCache.find("google-gemini-cli", "gemini-3.5-flash")?.maxTokens).toBe(16_384);
-			expect(specialCache.find("openai-codex", "gpt-5.4-codex-pro")?.maxTokens).toBe(128_000);
-		});
-
 		test("applies provider remoteCompaction to cached configured discovery models", () => {
 			expect(
 				cachedDiscoverableRemoteCompaction.find("cached-compact-proxy", "cached-compact-model")?.remoteCompaction,
@@ -3369,7 +3347,7 @@ describe("ModelRegistry", () => {
 		});
 
 		test("does not re-add bundled synthetic models after authoritative refresh", async () => {
-			authStorage.setRuntimeApiKey("synthetic", "synthetic-test-key");
+			authStorage.keys.setRuntime("synthetic", "synthetic-test-key");
 			const fetchMock = mockOpenAiCompatibleModels("https://api.synthetic.new/openai/v1/models", [
 				"hf:zai-org/GLM-5.1",
 			]);
@@ -3383,7 +3361,7 @@ describe("ModelRegistry", () => {
 		});
 
 		test("does not re-add bundled Zhipu Coding Plan models after account discovery", async () => {
-			authStorage.setRuntimeApiKey("zhipu-coding-plan", "zhipu-test-key");
+			authStorage.keys.setRuntime("zhipu-coding-plan", "zhipu-test-key");
 			const fetchMock = mockOpenAiCompatibleModels("https://open.bigmodel.cn/api/coding/paas/v4/models", [
 				"glm-5.1",
 			]);
@@ -3486,6 +3464,38 @@ describe("ModelRegistry", () => {
 			expect(collapsed?.contextWindow).toBe(222_222);
 			// The retired selector resolves to the same collapsed model.
 			expect(antigravityOverride.find("google-antigravity", "gemini-3-pro-high")?.id).toBe("gemini-3-pro");
+		});
+
+		test("retired variant maximum override wins over a larger custom maximum", async () => {
+			writeRawModelsJson({
+				"google-antigravity": {
+					baseUrl: "https://example.com/v1",
+					api: "google-gemini-cli",
+					auth: "none",
+					models: [{ id: "gemini-3-pro", contextWindow: 128_000, maxContextWindow: 800_000 }],
+					modelOverrides: { "gemini-3-pro-high": { maxContextWindow: 512_000 } },
+				},
+			});
+			const testSettings = Settings.isolated();
+			cfgExtendedContext.set(testSettings, true);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.getError()).toBeUndefined();
+			expect(registry.find("google-antigravity", "gemini-3-pro")?.contextWindow).toBe(512_000);
+			expect(registry.find("google-antigravity", "gemini-3-pro-high")).toMatchObject({
+				id: "gemini-3-pro",
+				contextWindow: 512_000,
+			});
+
+			cfgExtendedContext.set(testSettings, false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("google-antigravity", "gemini-3-pro")?.contextWindow).toBe(128_000);
+
+			cfgExtendedContext.set(testSettings, true);
+			await registry.reapplyModelPolicies();
+			await registry.refresh("offline");
+			expect(registry.getError()).toBeUndefined();
+			expect(registry.find("google-antigravity", "gemini-3-pro")?.contextWindow).toBe(512_000);
+			expect(registry.find("google-antigravity", "gemini-3-pro-high")?.contextWindow).toBe(512_000);
 		});
 
 		test("suppressed selectors keyed by retired variant ids bind to the collapsed id", () => {

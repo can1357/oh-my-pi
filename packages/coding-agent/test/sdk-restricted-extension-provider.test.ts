@@ -29,6 +29,8 @@ function restoreEnv(key: string, value: string | undefined): void {
 }
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgExtensionHandlersToolCallTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+
 const providerName = "restricted-session-provider";
 const modelId = "restricted-session-model";
 const apiId = "restricted-session-api";
@@ -271,7 +273,7 @@ describe("restricted sessions sharing extension providers", () => {
 	test("fails closed when inherited tool policy throws, times out, or is cancelled", async () => {
 		const blocked = path.join(tempDir, "blocked.txt");
 		await Bun.write(blocked, "must not be read");
-		settings.set("extensionHandlers.toolCallTimeoutMs", 25);
+		cfgExtensionHandlersToolCallTimeoutMs.set(settings, 25);
 		await withRestrictedChild(
 			pi => {
 				pi.on("tool_call", event => {
@@ -300,7 +302,7 @@ describe("restricted sessions sharing extension providers", () => {
 
 		try {
 			expect(parent.model?.provider).toBe(providerName);
-			expect(modelRegistry.authStorage.hasAuth(providerName)).toBe(true);
+			expect(modelRegistry.authStorage.keys.source(providerName) !== undefined).toBe(true);
 			expect(getCustomApi(apiId)).toBeDefined();
 
 			const { session: child } = await createAgentSession({
@@ -314,7 +316,7 @@ describe("restricted sessions sharing extension providers", () => {
 			try {
 				expect(child.model?.provider).toBe(providerName);
 				expect(modelRegistry.find(providerName, modelId)).toBeDefined();
-				expect(modelRegistry.authStorage.hasAuth(providerName)).toBe(true);
+				expect(modelRegistry.authStorage.keys.source(providerName) !== undefined).toBe(true);
 				expect(getCustomApi(apiId)).toBeDefined();
 			} finally {
 				await child.dispose();
@@ -376,7 +378,7 @@ describe("restricted sessions sharing extension providers", () => {
 
 			expect(providerRequests).toBe(2);
 			expect(state.proposal?.summary).toBe("fix(commit): retained extension provider");
-			expect(modelRegistry.authStorage.hasAuth(providerName)).toBe(true);
+			expect(modelRegistry.authStorage.keys.source(providerName) !== undefined).toBe(true);
 		} finally {
 			await parent.dispose();
 		}

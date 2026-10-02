@@ -8,8 +8,8 @@
  * broker-backed rotation policy and the same usage ledger.
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver } from "../auth-retry";
-import type { AuthStorage } from "../auth-storage";
+import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -20,8 +20,9 @@ import type { AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 
-export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
-	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
+/** What the gateway's routes need, whatever transport carries the requests. */
+export interface AuthGatewayRouteOptions {
+	/** Source of credentials: broker-backed for `serve`, the CLI's own for `stdio`. */
 	storage: AuthStorage;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
@@ -34,6 +35,9 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 }
+
+/** The HTTP server's options: the routes' plus its listener and inbound auth. */
+export interface AuthGatewayBootOptions extends AuthGatewayServerOptions, AuthGatewayRouteOptions {}
 
 /**
  * The client's own session key, or `undefined` when it sent none. A blank key
@@ -62,7 +66,7 @@ export function resolveGatewayAccount(
 	sessionId: string,
 	apiKey: string,
 ): string {
-	const identity = storage.getOAuthAccountIdentity(provider, sessionId);
+	const identity = storage.oauth.identity(provider, sessionId);
 	if (identity) {
 		return `oauth:${JSON.stringify([
 			identity.accountId ?? "",
@@ -78,10 +82,10 @@ export function resolveGatewayAccount(
  * Resolve the credential for one request from broker-backed storage.
  *
  * pi-ai clients never consult `AuthStorage`; the gateway resolves the bearer
- * (an OAuth access token refreshed through the broker when needed) and hands
- * it to the client. Returns the key, or the error classification the route
- * should encode in its own envelope: storage failures map through
- * {@link classifyGatewayError}, a provider without any credential is a 401.
+ * and its OAuth identity together (refreshing through the broker when needed).
+ * Keep this selection snapshot intact even if another request replaces the
+ * stored token before dispatch. Storage failures map through
+ * {@link classifyGatewayError}; a provider without any credential is a 401.
  */
 export async function resolveGatewayApiKey(
 	storage: AuthStorage,
@@ -89,10 +93,10 @@ export async function resolveGatewayApiKey(
 	sessionId: string,
 	signal: AbortSignal,
 	peer: string,
-): Promise<string | GatewayErrorClassification> {
-	let apiKey: string | undefined;
+): Promise<ResolvedApiKey | GatewayErrorClassification> {
+	let apiKey: ResolvedApiKey | undefined;
 	try {
-		apiKey = await storage.getApiKey(model.provider, sessionId, { modelId: model.id, signal });
+		apiKey = await storage.keys.getWithCredential(model.provider, sessionId, modelKeyOptions(model, signal));
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
@@ -113,17 +117,17 @@ export async function resolveGatewayApiKey(
  * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
  * `resource_exhausted`, …). The two cases need different storage actions:
  *
- * - **usage-limit** → {@link AuthStorage.markUsageLimitReached}. Marks just
+ * - **usage-limit** → {@link AuthStorage.limits.markReached}. Marks just
  *   the current session's credential as temporarily blocked (honouring
  *   `retry-after` / `resets_at` hints when present) and returns `true` only
  *   when a sibling credential is still available. Burning the credential
  *   with `invalidateCredentialMatching` here would orphan accounts whose
  *   reset window is several hours away — exactly the bug this helper exists
  *   to avoid.
- * - **auth-failure** → {@link AuthStorage.invalidateCredentialMatching}.
+ * - **auth-failure** → {@link AuthStorage.limits.invalidateMatching}.
  *   Suspect/delete the row so it doesn't get re-picked next request.
  *
- * In both branches we return the next `getApiKey` result (sticky on the
+ * In both branches we return the next `getWithCredential` result (sticky on the
  * same `sessionId`) so the client can transparently retry the pre-emit
  * failure with a fresh credential. Returning `undefined` aborts the retry
  * and surfaces the original error to the caller.
@@ -138,12 +142,12 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
-): Promise<string | undefined> {
+): Promise<ResolvedApiKey | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 		const retryAfterMs = extractProviderRetryHint(provider, message);
-		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
+		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
@@ -161,16 +165,21 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
 	}
-	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
+	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
 		format,
 		provider,
 		peer,
 		error: message,
 	});
-	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+}
+
+/** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
+function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOptions {
+	return { modelId: model.id, accountIds: model.accountAccess && Object.keys(model.accountAccess), signal };
 }
 
 /**
@@ -192,27 +201,27 @@ export function buildGatewayApiKeyResolver(
 	storage: AuthStorage,
 	model: Model<Api>,
 	sessionId: string,
-	initialKey: string,
+	initialKey: ResolvedApiKey,
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
 	onResolvedKey?: (apiKey: string) => void,
 ): ApiKeyResolver {
-	let lastKey = initialKey;
+	let lastKey = initialKey.apiKey;
 	return async ({ lastChance, error, signal }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
-			lastKey = initialKey;
+			lastKey = initialKey.apiKey;
 			return initialKey;
 		}
 		if (!lastChance) {
-			const refreshed = await storage.getApiKey(model.provider, sessionId, {
-				modelId: model.id,
-				signal: sig,
+			const refreshed = await storage.keys.getWithCredential(model.provider, sessionId, {
+				...modelKeyOptions(model, sig),
 				forceRefresh: true,
+				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			});
-			lastKey = refreshed ?? lastKey;
-			if (refreshed) onResolvedKey?.(refreshed);
+			lastKey = refreshed?.apiKey ?? lastKey;
+			if (refreshed) onResolvedKey?.(refreshed.apiKey);
 			return refreshed;
 		}
 		const next = await refreshGatewayApiKeyAfterAuthError(
@@ -226,15 +235,15 @@ export function buildGatewayApiKeyResolver(
 			format,
 			peer,
 		);
-		lastKey = next ?? lastKey;
-		if (next) onResolvedKey?.(next);
+		lastKey = next?.apiKey ?? lastKey;
+		if (next) onResolvedKey?.(next.apiKey);
 		return next;
 	};
 }
 
 /**
  * Attribute one settled upstream request to the originating client via the
- * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
+ * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
  * by the remote store). Error/aborted turns still record — the provider
  * billed whatever tokens the partial turn consumed; zero-usage results
  * (pre-flight failures) are skipped. `at` defaults to now.
@@ -247,7 +256,7 @@ export function recordGatewayUsage(
 	at?: number,
 ): void {
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
-	storage.recordObservedUsage({
+	storage.usage.observe({
 		provider: model.provider,
 		model: model.id,
 		at,

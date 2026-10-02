@@ -36,7 +36,7 @@ describe("advisor watchdog prompt discovery", () => {
 		const authStorage = createInMemoryAuthStorage();
 		let session: AgentSession | undefined;
 		try {
-			authStorage.setRuntimeApiKey("openai", "test-key");
+			authStorage.keys.setRuntime("openai", "test-key");
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 			const sessionManager = SessionManager.inMemory(cwd);
 			const result = await createAgentSession({

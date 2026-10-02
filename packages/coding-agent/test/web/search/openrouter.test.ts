@@ -7,7 +7,7 @@ import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 function createFixture() {
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("openrouter", "selected-openrouter-key");
+	authStorage.keys.setRuntime("openrouter", "selected-openrouter-key");
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	const model = buildModel({
 		id: "vendor/selected-grounding-model",

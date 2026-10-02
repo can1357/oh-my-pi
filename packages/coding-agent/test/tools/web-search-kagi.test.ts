@@ -7,7 +7,7 @@ import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types"
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const providerAuthStorage = createInMemoryAuthStorage();
-providerAuthStorage.setRuntimeApiKey("kagi", "test-kagi-key");
+providerAuthStorage.keys.setRuntime("kagi", "test-kagi-key");
 const modelRegistry = new ModelRegistry(providerAuthStorage);
 const kagiModel = modelRegistry.find("web", "kagi");
 if (!kagiModel) throw new Error("Expected bundled web/kagi model");
@@ -17,14 +17,10 @@ afterAll(() => {
 });
 
 const fakeAuthStorage = {
-	async getApiKey() {
-		return process.env.KAGI_API_KEY ?? undefined;
-	},
-	resolver() {
-		return async () => process.env.KAGI_API_KEY ?? undefined;
-	},
-	hasAuth() {
-		return Boolean(process.env.KAGI_API_KEY);
+	keys: {
+		get: async () => process.env.KAGI_API_KEY ?? undefined,
+		resolver: () => async () => process.env.KAGI_API_KEY ?? undefined,
+		source: () => (process.env.KAGI_API_KEY ? { kind: "env", concrete: true } : undefined),
 	},
 } as unknown as AuthStorage;
 

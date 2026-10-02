@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { stripVTControlCharacters } from "node:util";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
@@ -285,16 +286,16 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			component.stopAnimation();
 		}
 	});
-	// Regression: a live hub call whose streamed args have not parsed yet
-	// (op still unknown) folded to a contentless `╭─ Hub` / `╰` frame under
-	// viewport pressure. A squeezed block keeps its real render whenever it
-	// fits the allocation; only genuinely overflowing blocks fold.
-	it("keeps the real render on squeezed hub blocks when it fits", () => {
+	// Regression: a live coordination call whose streamed args have not parsed
+	// yet folded to a contentless `╭─ …` / `╰` frame under viewport pressure. A
+	// squeezed block keeps its real render whenever it fits the allocation;
+	// only genuinely overflowing blocks fold.
+	it("keeps the real render on squeezed wait blocks when it fits", () => {
 		const component = new ToolExecutionComponent(
-			"hub",
+			"wait",
 			{},
 			{},
-			{ name: "hub", label: "Hub" } as never,
+			{ name: "wait", label: "Wait" } as never,
 			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
 			process.cwd(),
 		);
@@ -302,7 +303,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			component.setTranscriptAllocation(2, { tick: 0, now: 0 });
 			const pending = component.render(80).map(row => stripVTControlCharacters(row));
 			expect(pending).toHaveLength(1);
-			expect(pending[0]).toContain("Hub");
+			expect(pending[0]).toContain("Wait");
 			expect(pending[0]).not.toContain("╭");
 
 			component.updateResult({ content: [{ type: "text", text: "done" }] }, false);
@@ -314,12 +315,12 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
-	it("folds an overflowing squeezed hub block to a frame naming its op target", () => {
+	it("folds an overflowing squeezed wait block to a single labeled frame", () => {
 		const component = new ToolExecutionComponent(
-			"hub",
-			{ op: "send", to: "Main", message: "hi" },
+			"wait",
 			{},
-			{ name: "hub", label: "Hub" } as never,
+			{},
+			{ name: "wait", label: "Wait" } as never,
 			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
 			process.cwd(),
 		);
@@ -328,7 +329,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			component.setTranscriptAllocation(1, { tick: 0, now: 0 });
 			const folded = component.render(80).map(row => stripVTControlCharacters(row));
 			expect(folded).toHaveLength(1);
-			expect(folded[0]).toContain("Hub · send → Main");
+			expect(folded[0]).toContain("Wait");
 		} finally {
 			component.stopAnimation();
 		}
@@ -345,6 +346,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	it("unregisters a live tool block from the shared ticker via the guest resync teardown", async () => {
 		installInMemoryRelay();
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
 
@@ -362,7 +364,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -377,6 +379,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				},
 				statusContainer: { clear: () => {}, disposeChildren: () => {} },
 				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
+				updatePendingMessagesDisplay: () => {},
 				compactionQueuedMessages: [],
 				streamingComponent: undefined,
 				streamingMessage: undefined,
@@ -485,177 +488,14 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			}
 		} finally {
 			writeSpy.mockRestore();
-			uninstallInMemoryRelay();
-			stopSharedSpinnerTicker();
-		}
-	});
-
-	// Regression (PR #9377 follow-up, codex review): when the staged replay
-	// inside `UiHelpers.renderInitialMessages()` throws, its own rollback only
-	// restores the untouched visible container -- it never disposes that
-	// container's children, since they were never touched. A tool block that
-	// was tracked in `pendingTools` before `#clearTransientUi()` cleared the
-	// map is now orphaned with no remaining reference, so nothing would ever
-	// call `dispose()` on it again: its shared-ticker registration must be
-	// stopped by `#finalizeSnapshot` itself on the failure path.
-	it("stops an orphaned pending tool block's ticker when guest resync staging fails", async () => {
-		installInMemoryRelay();
-		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
-		try {
-			vi.useFakeTimers();
-
-			const chatContainer = new TranscriptContainer();
-			const liveBlock = new ToolExecutionComponent(
-				"eval",
-				{ language: "py", code: "import time\ntime.sleep(10)" },
-				{},
-				undefined,
-				{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
-				process.cwd(),
-			);
-			chatContainer.addChild(liveBlock);
-			expect(vi.getTimerCount()).toBeGreaterThan(0);
-
-			await Settings.init({ inMemory: true });
-			const ctx = {
-				settings: { get: () => "" },
-				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
-				session: {
-					messages: [],
-					switchSession: () => Promise.resolve(),
-					newSession: () => Promise.resolve(),
-					agent: {
-						state: { model: undefined },
-						setModel: () => {},
-						setThinkingLevel: () => {},
-						setDisableReasoning: () => {},
-					},
-				},
-				statusContainer: { clear: () => {}, disposeChildren: () => {} },
-				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
-				compactionQueuedMessages: [],
-				streamingComponent: undefined,
-				streamingMessage: undefined,
-				transcriptMessageComponents: new WeakMap(),
-				// The block under test is tracked as a pending tool, mirroring the
-				// real state right before a resync: #clearTransientUi() clears this
-				// map without disposing the block it names.
-				pendingTools: new Map([["call-1", liveBlock]]),
-				pendingBashComponents: [],
-				pendingPythonComponents: [],
-				lastAssistantUsage: undefined,
-				initialChatRendered: true,
-				hideToolActivity: false,
-				loadingAnimation: undefined,
-				statusLine: {
-					setCollabStatus: () => {},
-					invalidate: () => {},
-					resetActiveTime: () => {},
-					markActivityStart: () => {},
-					markActivityEnd: () => {},
-				},
-				ui: { requestRender: () => {} },
-				chatContainer,
-				resetObserverRegistry: () => {},
-				eventController: { takeDisplaceableComponents: () => [] },
-				renderInitialMessages: (options?: { clearTerminalHistory?: boolean }) =>
-					uiHelpers.renderInitialMessages(options),
-				renderSessionContext: (context: unknown, options: unknown) =>
-					(uiHelpers.renderSessionContext as (c: unknown, o: unknown) => void)(context, options),
-				// Fails the staged replay itself, so renderInitialMessages()'s own
-				// rollback runs (restoring the untouched visible container) without
-				// ever reaching the success-path disposeChildren() that would
-				// otherwise unregister the orphaned block.
-				renderSessionContextIncrementally: () => Promise.reject(new Error("staged rebuild boom")),
-				viewSession: {
-					isStreaming: false,
-					buildTranscriptSessionContext: () => ({
-						messages: [],
-						thinkingLevel: "off",
-						serviceTier: undefined,
-						models: {},
-						injectedTtsrRules: [],
-						mode: "none",
-					}),
-					getToolByName: () => undefined,
-					hasBuiltInTool: () => true,
-					extensionRunner: undefined,
-					sessionManager: { getEntries: () => [], getCwd: () => "/local" },
-				},
-				reloadTodos: () => Promise.resolve(),
-				showStatus: () => {},
-				showError: () => {},
-				updateEditorTopBorder: () => {},
-				updateEditorBorderColor: () => {},
-				syncRunningSubagentBadge: () => {},
-			} as unknown as InteractiveModeContext;
-			const uiHelpers = new UiHelpers(ctx);
-
-			const roomId = "spinner-resync-failure-room";
-			const roomKey = generateRoomKey();
-			const cryptoKey = await importRoomKey(roomKey);
-			const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
-			const hostSocket = new CollabSocket({
-				wsUrl: `ws://localhost:8788/r/${roomId}`,
-				role: "host",
-				key: cryptoKey,
-			});
-			const hostOpen = Promise.withResolvers<void>();
-			hostSocket.onOpen = () => hostOpen.resolve();
-			hostSocket.onFrame = frame => {
-				if (frame.t !== "hello") return;
-				hostSocket.send({
-					t: "welcome",
-					proto: COLLAB_PROTO,
-					header: {
-						type: "session",
-						id: "resync-failure-session",
-						timestamp: "2026-06-26T00:00:00Z",
-						cwd: "/tmp",
-					},
-					state: {
-						isStreaming: false,
-						queuedMessageCount: 0,
-						sessionName: "host session",
-						cwd: "/tmp",
-						participants: [{ name: "Host", role: "host" }],
-					},
-					agents: [],
-					entryCount: 0,
-				});
-			};
-			hostSocket.connect();
-			await hostOpen.promise;
-
-			const guest = new CollabGuestLink(ctx);
-			try {
-				let joinError: unknown;
-				try {
-					await guest.join(link);
-				} catch (err) {
-					joinError = err;
-				}
-				expect(joinError).toBeInstanceOf(Error);
-				expect((joinError as Error).message).toContain("staged rebuild boom");
-
-				// The block was stopped in place, not disposed from the tree: its
-				// rendered row survives the failed resync untouched.
-				expect(chatContainer.children).toContain(liveBlock);
-				// ...but it no longer holds the shared ticker open.
-				expect(vi.getTimerCount()).toBe(0);
-			} finally {
-				hostSocket.close();
-				await guest.leave("test cleanup").catch(() => {});
-			}
-		} finally {
-			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			uninstallInMemoryRelay();
 			stopSharedSpinnerTicker();
 		}
 	});
 
 	// Regression (PR #9377 follow-up, codex review): `#handleToolExecutionEnd`
-	// settles a displaceable `hub`/`todo` result out of `pendingTools` into
+	// settles a displaceable `wait`/`todo` result out of `pendingTools` into
 	// EventController's own trackers (`#displaceablePollComponent` /
 	// `#displaceableTodoComponent`) instead of leaving it there, so enumerating
 	// only `pendingTools` before a resync misses that still-animated "waiting"
@@ -667,12 +507,13 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// `takeDisplaceableComponents()` to hand back a manually built block only
 	// proves `#finalizeSnapshot` calls whatever function sits at that name --
 	// not that the real tracker holds and clears the right component -- so
-	// this drives an actual `hub` wait (still running, so it stays
+	// this drives an actual `wait` (still running, so it stays
 	// displaceable) through a real `EventController`, the same tracker
 	// `job-poll-displacement.test.ts` exercises in isolation.
 	it("folds a displaceable poll/todo block into orphan cleanup when guest resync staging fails", async () => {
 		installInMemoryRelay();
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
 
@@ -688,14 +529,14 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			const takeDisplaceableComponents = vi.spyOn(controller, "takeDisplaceableComponents");
 			await controller.handleEvent({
 				type: "tool_execution_start",
-				toolCallId: "hub-wait-1",
-				toolName: "hub",
-				args: { op: "wait", ids: ["j0"] },
+				toolCallId: "wait-1",
+				toolName: "wait",
+				args: {},
 			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
 			await controller.handleEvent({
 				type: "tool_execution_end",
-				toolCallId: "hub-wait-1",
-				toolName: "hub",
+				toolCallId: "wait-1",
+				toolName: "wait",
 				isError: false,
 				result: {
 					content: [{ type: "text", text: "" }],
@@ -712,11 +553,11 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			const displaceableBlock = chatContainer.children.find(
 				(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 			);
-			if (!displaceableBlock) throw new Error("expected the hub wait to render a live block");
+			if (!displaceableBlock) throw new Error("expected the wait to render a live block");
 			expect(vi.getTimerCount()).toBeGreaterThan(0);
 
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -731,6 +572,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				},
 				statusContainer: { clear: () => {}, disposeChildren: () => {} },
 				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
+				updatePendingMessagesDisplay: () => {},
 				compactionQueuedMessages: [],
 				streamingComponent: undefined,
 				streamingMessage: undefined,
@@ -856,6 +698,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			}
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			uninstallInMemoryRelay();
 			stopSharedSpinnerTicker();
 		}
@@ -872,6 +715,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	it("seals rather than disposes orphaned blocks when guest resync staging fails", async () => {
 		installInMemoryRelay();
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
 
@@ -901,7 +745,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -916,6 +760,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				},
 				statusContainer: { clear: () => {}, disposeChildren: () => {} },
 				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
+				updatePendingMessagesDisplay: () => {},
 				compactionQueuedMessages: [],
 				streamingComponent: undefined,
 				streamingMessage: undefined,
@@ -1029,6 +874,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			}
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			uninstallInMemoryRelay();
 			stopSharedSpinnerTicker();
 		}

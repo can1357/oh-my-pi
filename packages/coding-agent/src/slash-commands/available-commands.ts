@@ -1,6 +1,6 @@
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import type { SkillsSettings } from "../config/settings";
+import type { SkillsSettings } from "../extensibility/settings";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";

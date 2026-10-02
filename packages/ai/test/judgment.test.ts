@@ -1,3 +1,4 @@
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { describe, expect, it } from "bun:test";
 import {
 	type ApiKeyResolveContext,
@@ -12,7 +13,6 @@ import {
 	TypeSafeApiError,
 	TypeSafeJudge,
 } from "@oh-my-pi/pi-ai";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
@@ -227,6 +227,29 @@ describe("TypeSafeJudge", () => {
 		expect(result.usage.totalTokens).toBe(6);
 	});
 
+	it("keeps estimated judge cost finite when a successful response omits token counts", async () => {
+		const responses = [{}, { input_tokens: 5 }];
+		const judge = new TypeSafeJudge({
+			apiKey: "test-key",
+			fetch: async () =>
+				Response.json({
+					model: "jev-latest",
+					answers: { urgent: { type: "noul", noul: 0.9 } },
+					usage: responses.shift(),
+				}),
+		});
+
+		const missing = (await judge.judge(request)).usage;
+		const partial = (await judge.judge(request)).usage;
+		expect(missing).toMatchObject({ input: 0, output: 0, totalTokens: 0, cost: { total: 0 } });
+		expect(partial).toMatchObject({ input: 5, output: 0, totalTokens: 5, cost: { total: 0 } });
+		const rates = { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 };
+		calculateUsageCost(rates, missing);
+		calculateUsageCost(rates, partial);
+		expect(missing.cost.total).toBe(0);
+		expect(partial.cost.total).toBeCloseTo((5 * rates.input) / 1_000_000);
+	});
+
 	it("posts OpenRouter decisions to the alpha route and carries the billed cost", async () => {
 		const urls: string[] = [];
 		const judge = new TypeSafeJudge({
@@ -334,11 +357,5 @@ describe("TypeSafeJudge", () => {
 				Response.json({ model: "jev-latest", answers: { urgent: { type: "choice", choice: "x" } }, usage: {} }),
 		});
 		await expect(mismatched.judge(request)).rejects.toThrow(/missing a "noul" answer/);
-	});
-
-	it("is loginable via the auth registry with TYPESAFE_API_KEY as env fallback", () => {
-		const definition = getProviderDefinition("typesafe");
-		expect(definition?.envKeys).toBe("TYPESAFE_API_KEY");
-		expect(typeof definition?.login).toBe("function");
 	});
 });

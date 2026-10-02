@@ -32,6 +32,20 @@ import { BlobBrokerSavingsJournal, type BlobBrokerSavingsRecord, blobBrokerSavin
 import type { LazyBlobFetcher } from "./store";
 import type { DestinationOptionValue } from "./uploader-runtime";
 
+import {
+	cfgImagesUrlsBackends,
+	cfgImagesUrlsBindHost,
+	cfgImagesUrlsCommand,
+	cfgImagesUrlsCredentials,
+	cfgImagesUrlsEnabled,
+	cfgImagesUrlsOptions,
+	cfgImagesUrlsPublicBaseUrl,
+	cfgImagesUrlsSshRemotePort,
+	cfgImagesUrlsSshTarget,
+	cfgImagesUrls,
+	cfgImagesUrlsTtlHours,
+} from "./settings";
+
 /**
  * Render-on-fetch hook handed to the snapcompact inline transformer: returns
  * URL-bearing placeholder frames for `text`, or `null` when lazy frames are
@@ -39,6 +53,8 @@ import type { DestinationOptionValue } from "./uploader-runtime";
  */
 export interface SnapcompactFrameSink {
 	framesFor(text: string, shape: snapcompact.Shape, maxFrames?: number): Promise<ImageContent[] | null>;
+	/** Changes when previously returned frames stop resolving; callers re-request cached frames. */
+	readonly generation?: number;
 }
 
 function contentHash(data: string, mimeType: string): string {
@@ -569,14 +585,14 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 	const blobsDir = getBlobsDir(settings.getAgentDir());
 	const projectHash = Bun.hash.wyhash(path.resolve(projectDir)).toString(16);
 	const savingsPath = blobBrokerSavingsJournalPath(settings, projectDir);
-	const optionsByDestination = settings.get("images.urls.options");
-	const credentialsByDestination = settings.get("images.urls.credentials");
+	const optionsByDestination = cfgImagesUrlsOptions.get(settings);
+	const credentialsByDestination = cfgImagesUrlsCredentials.get(settings);
 	const configs: BlobBrokerWorkerConfig[] = [];
-	for (const destination of settings.get("images.urls.backends")) {
+	for (const destination of cfgImagesUrlsBackends.get(settings)) {
 		if (destination === "provider-files") continue;
 		const options = destinationOptions(optionsByDestination[destination]);
 		if (destination === "command" && typeof options.command !== "string") {
-			const command = settings.get("images.urls.command");
+			const command = cfgImagesUrlsCommand.get(settings);
 			if (command) options.command = command;
 		}
 		const configuredBaseUrl = options.publicBaseUrl;
@@ -590,28 +606,93 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 			publicBaseUrl:
 				typeof configuredBaseUrl === "string"
 					? configuredBaseUrl || undefined
-					: settings.get("images.urls.publicBaseUrl") || undefined,
+					: cfgImagesUrlsPublicBaseUrl.get(settings) || undefined,
 			bindHost:
 				typeof configuredBindHost === "string"
 					? configuredBindHost || "127.0.0.1"
-					: settings.get("images.urls.bindHost") || "127.0.0.1",
+					: cfgImagesUrlsBindHost.get(settings) || "127.0.0.1",
 			sshTarget:
 				typeof configuredSshTarget === "string"
 					? configuredSshTarget || undefined
-					: settings.get("images.urls.sshTarget") || undefined,
+					: cfgImagesUrlsSshTarget.get(settings) || undefined,
 			sshRemotePort:
 				typeof configuredSshRemotePort === "number"
 					? configuredSshRemotePort
-					: settings.get("images.urls.sshRemotePort"),
+					: cfgImagesUrlsSshRemotePort.get(settings),
 			persist: {
 				blobsDir,
 				indexPath: path.join(blobsDir, `urls-index-${destination}-${projectHash}.json`),
 				savingsPath,
-				ttlMs: Math.max(0, settings.get("images.urls.ttlHours")) * 3_600_000,
+				ttlMs: Math.max(0, cfgImagesUrlsTtlHours.get(settings)) * 3_600_000,
 			},
 		});
 	}
 	return configs;
+}
+
+/**
+ * Settings-bound {@link ImageUrlService} holder. Consult {@link current} per
+ * request: any `images.urls.*` change stops the old service and builds a new
+ * one (or none when disabled). Call {@link dispose} when the session ends.
+ */
+export class LiveImageUrlService implements SnapcompactFrameSink {
+	#settings: Settings;
+	#projectDir: () => string;
+	#resolveCredential: ProviderFileCredentialResolver;
+	#current: ImageUrlService | undefined;
+	#generation = 0;
+	#unwatch: () => void;
+
+	constructor(settings: Settings, projectDir: () => string, resolveCredential: ProviderFileCredentialResolver) {
+		this.#settings = settings;
+		this.#projectDir = projectDir;
+		this.#resolveCredential = resolveCredential;
+		this.#current = this.#build();
+		this.#unwatch = cfgImagesUrls.listen(settings, () => this.#rebuild());
+	}
+
+	/** Service for the next request; `undefined` when image URLs are disabled. */
+	get current(): ImageUrlService | undefined {
+		return this.#current;
+	}
+
+	/** Bumped on every rebuild: frames minted by a replaced service no longer resolve. */
+	get generation(): number {
+		return this.#generation;
+	}
+
+	/** Lazy snapcompact frames from the current service; `null` (render eagerly) while disabled. */
+	async framesFor(text: string, shape: snapcompact.Shape, maxFrames?: number): Promise<ImageContent[] | null> {
+		const service = this.#current;
+		return service ? service.frameSink.framesFor(text, shape, maxFrames) : null;
+	}
+
+	/** Decorate `context` through the current service; identity when disabled. */
+	async decorateContext(context: Context, model: Model): Promise<Context> {
+		const service = this.#current;
+		return service ? service.decorateContext(context, model) : context;
+	}
+
+	/** Stop observing settings and shut down the current service. */
+	dispose(): void {
+		this.#unwatch();
+		this.#current?.stop();
+		this.#current = undefined;
+	}
+
+	#build(): ImageUrlService | undefined {
+		const service = createImageUrlServiceFromSettings(this.#settings, this.#projectDir(), this.#resolveCredential);
+		service?.prewarm();
+		return service;
+	}
+
+	#rebuild(): void {
+		const previous = this.#current;
+		this.#generation++;
+		this.#current = this.#build();
+		previous?.stop();
+		logger.debug("blob-broker: image URL service rebuilt from settings", { enabled: this.#current !== undefined });
+	}
 }
 
 /** Resolve the settings group into a service; `undefined` when disabled. */
@@ -620,11 +701,11 @@ export function createImageUrlServiceFromSettings(
 	projectDir: string,
 	resolveCredential: ProviderFileCredentialResolver,
 ): ImageUrlService | undefined {
-	if (!settings.get("images.urls.enabled")) return undefined;
+	if (!cfgImagesUrlsEnabled.get(settings)) return undefined;
 	const configs = resolveBlobBrokerConfigs(settings, projectDir);
 	let providerFilePosition: number | undefined;
 	let urlPosition = 0;
-	for (const destination of settings.get("images.urls.backends")) {
+	for (const destination of cfgImagesUrlsBackends.get(settings)) {
 		if (destination === "provider-files") providerFilePosition ??= urlPosition;
 		else urlPosition++;
 	}

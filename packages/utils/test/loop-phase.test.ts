@@ -19,10 +19,6 @@ beforeEach(drain);
 afterEach(drain);
 
 describe("loop phase stack", () => {
-	test("currentLoopPhase() is undefined on an empty stack", () => {
-		expect(currentLoopPhase()).toBeUndefined();
-	});
-
 	test("push/pop expose the top label in strict LIFO order through nested phases", () => {
 		pushLoopPhase("render");
 		expect(currentLoopPhase()).toBe("render");

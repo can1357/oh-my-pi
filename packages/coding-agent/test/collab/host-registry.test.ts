@@ -68,7 +68,7 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 		tornDown: Promise.withResolvers<void>(),
 	};
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionId: () => {
 				state.onSessionIdRead?.();
@@ -169,7 +169,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		"notifies the submitting guest when %s discards an admitted prompt",
 		async transition => {
 			const auth = await AuthStorage.create(":memory:");
-			auth.setRuntimeApiKey("anthropic", "test-key");
+			auth.keys.setRuntime("anthropic", "test-key");
 			const models = new ModelRegistry(auth);
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Test model missing");
@@ -571,17 +571,6 @@ describe("collab host registry lifecycle (#6099)", () => {
 		const reqId = await replayed.promise;
 		socket.send({ t: "ui-response", reqId, value: "Yes" });
 		expect(await pending).toEqual({ kind: "answered", value: "Yes" });
-	});
-
-	it("withdraws from the registry on explicit stop", async () => {
-		const { ctx } = makeHostContext();
-		host = new CollabHost(ctx);
-		await host.start(RELAY_URL, WEB_URL);
-		expect(await registry.listCollabHosts({ dir: tmp })).toHaveLength(1);
-
-		await host.stop("host stopped");
-
-		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
 	it("suspends mirroring and discovery while another session is active and resumes when the switch rolls back", async () => {

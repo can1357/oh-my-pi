@@ -233,6 +233,50 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 		expect(fetched).toBe(false);
 	});
 
+	test("reports the monthly window when the plan exposes only that bucket", async () => {
+		let requestCount = 0;
+		const fetchMock: FetchImpl = () => {
+			requestCount++;
+			return Promise.resolve(
+				requestCount === 1
+					? Response.json({ code: "200", data: { secToken: "sec-token", accountId: "account-1" } })
+					: Response.json({
+							data: {
+								DataV2: {
+									data: {
+										data: {
+											per1MonthPercentage: 0.0104,
+											per1MonthResetTime: 1_800_200_000_000,
+										},
+									},
+								},
+							},
+						}),
+			);
+		};
+		const credential = serializeAlibabaTokenPlanCredential("sk-sp-test", "session_id=test");
+
+		const report = await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock });
+
+		expect(report).toMatchObject({
+			provider: "alibaba-token-plan",
+			limits: [
+				{
+					id: "credits:monthly",
+					scope: { windowId: "monthly" },
+					window: { id: "monthly", label: "Monthly Credits", resetsAt: 1_800_200_000_000 },
+					amount: { usedFraction: 0.0104, unit: "percent" },
+				},
+			],
+		});
+		// The console never states the monthly span, so the window must not claim one.
+		expect(report?.limits[0]?.window?.durationMs).toBeUndefined();
+		// Monthly is display-only: ranking still drives off the burst/weekly windows.
+		const windows = alibabaTokenPlanRankingStrategy.findWindowLimits(report!, { modelId: "qwen3.7-plus" });
+		expect(windows.primary).toBeUndefined();
+		expect(windows.secondary).toBeUndefined();
+	});
+
 	test("fails closed when the stored console session has expired", async () => {
 		let requestCount = 0;
 		const fetchMock: FetchImpl = () => {

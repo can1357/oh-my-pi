@@ -26,6 +26,11 @@ import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types"
 import { type SearchProviderId, type SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
+import {
+	cfgProvidersWebSearchTimeoutSeconds,
+	cfgRetryFallbackChains,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
+
 const openAuthStorages: AuthStorage[] = [];
 
 function createSearchContext(modelProvider: string, modelId: string) {
@@ -68,7 +73,7 @@ describe("Anthropic provider hard-timeout wiring", () => {
 
 	it("passes a composed signal to fetch even when the caller did not supply one", async () => {
 		const context = createSearchContext("anthropic", "claude-sonnet-4-5");
-		context.authStorage.setRuntimeApiKey("anthropic", "sk-test");
+		context.authStorage.keys.setRuntime("anthropic", "sk-test");
 
 		let capturedSignal: AbortSignal | null | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
@@ -90,7 +95,7 @@ describe("Anthropic provider hard-timeout wiring", () => {
 
 	it("composes the caller signal with the hard timeout instead of forwarding it directly", async () => {
 		const context = createSearchContext("anthropic", "claude-sonnet-4-5");
-		context.authStorage.setRuntimeApiKey("anthropic", "sk-test");
+		context.authStorage.keys.setRuntime("anthropic", "sk-test");
 
 		const ac = new AbortController();
 		let capturedSignal: AbortSignal | null | undefined;
@@ -120,7 +125,7 @@ describe("Brave provider hard-timeout wiring", () => {
 
 	it("hands fetch a composed signal even with no caller signal — confirms the rollout reaches non-Anthropic providers", async () => {
 		const context = createSearchContext("web", "brave");
-		context.authStorage.setRuntimeApiKey("brave", "brave-test-key");
+		context.authStorage.keys.setRuntime("brave", "brave-test-key");
 		let capturedSignal: AbortSignal | null | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
 			capturedSignal = init?.signal;
@@ -166,7 +171,7 @@ describe("executeSearch abort propagation", () => {
 		if (!primary) throw new Error("Provider chain must contain a primary candidate");
 		const config = await Settings.init({ inMemory: true });
 		config.setModelRole("web", `web/${primary.id}`);
-		config.set("retry.fallbackChains", { web: providers.slice(1).map(candidate => `web/${candidate.id}`) });
+		cfgRetryFallbackChains.set(config, { web: providers.slice(1).map(candidate => `web/${candidate.id}`) });
 		const authStorage = createInMemoryAuthStorage();
 		openAuthStorages.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings: config });
@@ -191,8 +196,8 @@ describe("executeSearch abort propagation", () => {
 		]);
 		const config = await Settings.init({ inMemory: true });
 		config.setModelRole("web", "web/brave");
-		config.set("retry.fallbackChains", { web: [] });
-		config.set("providers.webSearchTimeoutSeconds", 180);
+		cfgRetryFallbackChains.set(config, { web: [] });
+		cfgProvidersWebSearchTimeoutSeconds.set(config, 180);
 
 		const result = await runSearchQuery({ query: "anything" }, context);
 
@@ -213,8 +218,8 @@ describe("executeSearch abort propagation", () => {
 		]);
 		const config = await Settings.init({ inMemory: true });
 		config.setModelRole("web", "web/brave");
-		config.set("retry.fallbackChains", { web: [] });
-		config.set("providers.webSearchTimeoutSeconds", 600);
+		cfgRetryFallbackChains.set(config, { web: [] });
+		cfgProvidersWebSearchTimeoutSeconds.set(config, 600);
 
 		await runSearchQuery({ query: "anything" }, context);
 
@@ -234,8 +239,8 @@ describe("executeSearch abort propagation", () => {
 		]);
 		const config = await Settings.init({ inMemory: true });
 		config.setModelRole("web", "web/brave");
-		config.set("retry.fallbackChains", { web: [] });
-		config.set("providers.webSearchTimeoutSeconds", 0);
+		cfgRetryFallbackChains.set(config, { web: [] });
+		cfgProvidersWebSearchTimeoutSeconds.set(config, 0);
 
 		await runSearchQuery({ query: "anything" }, context);
 

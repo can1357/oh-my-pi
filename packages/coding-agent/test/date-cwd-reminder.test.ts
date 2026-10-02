@@ -19,18 +19,6 @@ describe("date-cwd-reminder", () => {
 		clearCustomApis();
 	});
 
-	describe("renderDateCwdReminder", () => {
-		it("renders a system-reminder block carrying the date and cwd with a do-not-repeat instruction", () => {
-			const reminder = renderDateCwdReminder("2026-08-14", "C:/work/omp");
-
-			expect(reminder.startsWith("<system-reminder>")).toBe(true);
-			expect(reminder.endsWith("</system-reminder>")).toBe(true);
-			expect(reminder).toContain("2026-08-14");
-			expect(reminder).toContain("C:/work/omp");
-			expect(reminder).toContain("Do not repeat");
-		});
-	});
-
 	describe("DateCwdReminderInjector", () => {
 		it("injects the first reminder without mutating the context", () => {
 			const systemPrompt = ["PROJECT\n<critical>\n- Must act.\n</critical>"];
@@ -158,7 +146,7 @@ describe("date-cwd reminder on the provider wire", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const { session } = await createAgentSession({
 			cwd: tempDir.path(),

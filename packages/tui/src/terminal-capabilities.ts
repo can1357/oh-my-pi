@@ -39,10 +39,11 @@ export type TerminalId =
 	| "orca"
 	| "otty"
 	| "rio"
+	| "tern"
 	| "base"
 	| "trueColor";
 
-const CMUX_NOTIFICATION_TITLE = "Oh My Pi";
+const CMUX_NOTIFICATION_TITLE = "omp";
 const CMUX_SURFACE_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 
 /** Title and body for an out-of-band multiplexer notification (cmux, Herdr). */
@@ -282,6 +283,14 @@ export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.ZELLIJ);
 }
 
+/**
+ * Whether the agent process runs in an SSH session, so the terminal emulator
+ * is remote and host-local input/keyboard modes cannot be assumed.
+ */
+export function isSshSession(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	return Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
+}
+
 export function isNotificationSuppressed(): boolean {
 	const value = $env.PI_NOTIFICATIONS;
 	if (!value) return false;
@@ -514,11 +523,15 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_HYPERLINKS=1` off, `PI_FORCE_HYPERLINKS=1`
  *      on). Opt-out wins ties.
- *   2. Static terminal capability — terminals whose {@link TerminalInfo} marks
+ *   2. Herdr pane with no nested screen/tmux: on. Herdr hides the outer
+ *      terminal (`TERM=xterm-256color`, no `TERM_PROGRAM`), but it renders
+ *      OSC 8 in its own grid and opens links itself on Ctrl+click, so the
+ *      outer terminal's support does not matter.
+ *   3. Static terminal capability — terminals whose {@link TerminalInfo} marks
  *      `hyperlinks: false` (e.g. `base`) stay off unless the user forced on.
- *   3. GNU screen's explicit session marker (`STY`) always off, even if tmux is
+ *   4. GNU screen's explicit session marker (`STY`) always off, even if tmux is
  *      also present: a screen layer anywhere in the path cannot forward OSC 8.
- *   4. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
+ *   5. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
  *      `TERM_PROGRAM_VERSION` (tmux 3.4 stores OSC 8 as a cell attribute and
  *      forwards it to outer terminals whose `terminal-features` include
  *      `hyperlinks`). Older or unknown versions stay off; on outer terminals
@@ -526,11 +539,11 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  *      identical to today. Checked before the screen-family TERM heuristic
  *      because tmux's historical `default-terminal` is `screen-256color`, so
  *      `TERM=screen*` inside a tmux session must NOT short-circuit to off.
- *   5. screen-family TERM without `TMUX` always off: screen never gained OSC 8
+ *   6. screen-family TERM without `TMUX` always off: screen never gained OSC 8
  *      support.
- *   6. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
+ *   7. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
  *      no version available, so off.
- *   7. Otherwise honor the static terminal capability.
+ *   8. Otherwise honor the static terminal capability.
  */
 export function shouldEnableHyperlinksByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -538,6 +551,8 @@ export function shouldEnableHyperlinksByDefault(
 ): boolean {
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
+
+	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 
@@ -678,11 +693,25 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 66 text sizing are unverified, so those stay on conservative defaults;
 	// synchronized output is left to the runtime DECRQM probe.
 	otty: new TerminalInfo("otty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
-	// rio ships the Kitty graphics protocol — direct placement plus U=1 Unicode
-	// placeholders verified by the reporter (#12205). Everything unproven stays
-	// conservative: hyperlinks, DECCARA, screen-to-scrollback, and notifications
-	// keep the base defaults until verified in that terminal.
-	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, false),
+	// rio publishes its supported escape sequences at
+	// rioterm.com/docs/escape-sequence-support: OSC 8 hyperlinks are opened via
+	// the hints system (Alt+click on Windows/Linux) — live-verified on
+	// rio 0.5.28/Win11 26100 where an OSC 8 span Alt+click opened the target
+	// URL in the browser, and an OSC 52 clipboard query round-tripped. Kitty
+	// graphics direct placement plus U=1 Unicode placeholders verified by the
+	// reporter (#12205). Notifications stay on BEL: rio parses OSC 9/777 into
+	// its own notifier, but its Windows path raises an unpackaged WinRT toast
+	// with AppId "Rio" that Windows silently drops without a registered AUMID
+	// shortcut — observed as a no-op live — so flipping it would only remove
+	// the D-Bus fallback for Linux rio users. DECCARA, screen-to-scrollback,
+	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
+	// the conservative defaults.
+	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
+	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
+	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
+	// renders natively (Tern Surface Protocol) is decided by the `hello`
+	// handshake alone, never by this identity.
+	tern: new TerminalInfo("tern", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
 });
 
 /** Resolve terminal identity from environment markers used by common emulators. */
@@ -703,6 +732,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		if (caseEq(program, "orca")) return "orca";
 		if (caseEq(program, "otty")) return "otty";
 		if (caseEq(program, "rio")) return "rio";
+		if (caseEq(program, "tern")) return "tern";
 		return null;
 	}
 
@@ -1424,7 +1454,7 @@ function notificationToLine(n: TerminalNotification): string {
 // C0/C1 control characters that are unsafe inside an OSC payload (must base64).
 const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
-const OSC99_APP_NAME = "Oh My Pi";
+const OSC99_APP_NAME = "omp";
 let nextOsc99NotificationId = 1;
 
 function base64Utf8(value: string): string {

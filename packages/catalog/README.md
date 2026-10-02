@@ -1,6 +1,6 @@
 # @oh-my-pi/pi-catalog
 
-Model catalog for [oh-my-pi](https://github.com/can1357/oh-my-pi): bundled model database, provider discovery, model identity, classification, and equivalence.
+Model catalog for [omp](https://github.com/can1357/oh-my-pi): bundled model database, provider discovery, model identity, classification, and equivalence.
 
 ## What's inside
 

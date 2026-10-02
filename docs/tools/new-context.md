@@ -13,7 +13,7 @@
 ## Registration / Visibility
 
 - Requires `compaction.experimentalContextManagement = true`, an undisposed session, and a session journal whose ID matches the tool session's owner ID.
-- The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction, then restart to update available tools.
+- The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction; the running session gains the tool immediately.
 - Metadata: `approval = "write"`, `strict = true`, `loadMode = "essential"`.
 - Notes-backed rollover requires all four tools to be active: `context_notes`, `new_context`, `read`, and `grep`. Unsupported tool configurations retain the existing compaction behavior.
 
@@ -35,7 +35,7 @@ This result acknowledges a request. The tool itself does not commit a compaction
 3. The owning agent consumes successful tool results, including write-device results, and processes the request through its maintenance lifecycle before the next provider request.
 4. The experimental lifecycle commits a normal compaction boundary without generating another recursive summary. It rebuilds active context with the latest notebook and retained recent messages, leaving original journal entries available through `history://current/full`.
 
-An explicit `new_context` request bypasses the automatic mid-turn threshold toggle. Rollover still depends on the experimental capability and maintenance guards; session, branch, model, cancellation, and active-tool changes are revalidated before commit.
+An explicit `new_context` request bypasses the Auto-Compact toggle. Rollover still depends on the experimental capability and maintenance guards; session, branch, model, cancellation, and active-tool changes are revalidated before commit. If the capability disappears after acknowledgement, the stale request is dropped rather than falling back to summary-provider compaction.
 
 ## Limits and Errors
 

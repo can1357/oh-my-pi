@@ -15,7 +15,8 @@
 #     targets (linux-x64, windows-msvc x64/arm64) and linux-arm64 for zigbuild
 #
 # Rebuild + reimport (see /root/omp-kata-runner.md) after bumping the ARGs below
-# or the apt set. Keep the apt set in sync with .github/actions/setup-system-deps.
+# or the apt set. No CI job requires the apt tools any more; they stay baked
+# for interactive/agent use on the runner.
 FROM ghcr.io/actions/actions-runner:latest
 
 ARG RUST_NIGHTLY=nightly-2026-09-14

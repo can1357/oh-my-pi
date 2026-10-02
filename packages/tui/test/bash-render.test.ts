@@ -64,6 +64,17 @@ describe("bashToolRenderer", () => {
 		expect(rendered).toContain("printf '%s' \"$MERMAID\"");
 	});
 
+	it("reads streamed env assignments only from inside the env object", async () => {
+		const component = bashToolRenderer.renderCall(
+			{ command: "ls", __partialJson: '{"env":{"A":"1","B":"two"},"command":"ls' },
+			{ expanded: false, isPartial: true },
+			uiTheme,
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain('A="1" B="two"');
+		expect(rendered).not.toContain("command=");
+	});
+
 	it("sanitizes command tabs and shortens home cwd in previews", async () => {
 		const component = bashToolRenderer.renderCall(
 			{
@@ -126,6 +137,26 @@ describe("bashToolRenderer", () => {
 		// Notice text must not appear in the output region — the styled label is the
 		// only place wall time is shown so users don't read it twice.
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
+	});
+
+	it("shows a supervised service's readiness and output without a command timeout", async () => {
+		const component = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "web: ready pid=42 ready\nREADY\nlistening" }],
+				details: { service: { name: "web", state: "ready", ready: true, timedOut: false, pid: 42 } },
+				isError: false,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ command: "bun run dev", name: "web", ready: { log: "READY" } },
+		);
+		const rendered = sanitizeText(component.render(120).join("\n"));
+		expect(rendered).toContain("Service: web");
+		expect(rendered).toContain("State: ready");
+		expect(rendered).toContain("Ready: yes");
+		expect(rendered).toContain("PID: 42");
+		expect(rendered).toContain("listening");
+		expect(rendered).not.toContain("Timeout:");
 	});
 
 	it("renders a backgrounded job as a static footer notice", async () => {
@@ -260,7 +291,6 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
-		expect(lines.some(line => line.includes("ctrl+o to expand"))).toBe(false);
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

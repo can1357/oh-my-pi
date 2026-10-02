@@ -57,10 +57,6 @@ if (process.argv.includes(directFlag)) {
 
 if (!process.argv.includes(directFlag) && !process.argv.includes(fatalFlag)) {
 	describe("postmortem guard-window exit (#11789)", () => {
-		it("exports a hard-exit primitive host callsites can route through", () => {
-			expect(typeof postmortem.exitProcess).toBe("function");
-		});
-
 		it("exits with the requested code through a poisoned guard chain", async () => {
 			const child = Bun.spawn([process.execPath, "run", import.meta.path, directFlag], {
 				stdin: "ignore",

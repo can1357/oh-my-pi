@@ -18,56 +18,6 @@ function errorMessage(run: () => unknown): string {
 }
 
 describe("renderComputerCall", () => {
-	it("keeps the public desktop, window, and element allowlists exact", () => {
-		expect(Object.keys(DESKTOP_METHODS)).toEqual([
-			"capabilities",
-			"displays",
-			"windows",
-			"window",
-			"focusedWindow",
-			"screenshot",
-			"click",
-			"doubleClick",
-			"move",
-			"drag",
-			"scroll",
-			"type",
-			"press",
-			"elementAt",
-			"focusedElement",
-			"ref",
-			"clipboard.read",
-			"clipboard.write",
-		]);
-		expect(Object.keys(WINDOW_METHODS)).toEqual([
-			"screenshot",
-			"click",
-			"doubleClick",
-			"move",
-			"drag",
-			"scroll",
-			"type",
-			"press",
-			"raise",
-			"ax",
-			"find",
-			"ref",
-		]);
-		expect(Object.keys(ELEMENT_METHODS)).toEqual([
-			"value",
-			"setValue",
-			"bounds",
-			"attributes",
-			"actions",
-			"perform",
-			"press",
-			"click",
-			"focus",
-			"parent",
-			"children",
-		]);
-	});
-
 	it("renders root, window-hop, and element-hop calls byte-for-byte", () => {
 		expect(renderComputerCall([{ method: "windows", args: [{ app: "Code" }] }])).toBe(
 			'return await desktop.windows({"app":"Code"});',

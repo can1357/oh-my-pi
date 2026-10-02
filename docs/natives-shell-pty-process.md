@@ -5,6 +5,8 @@ This document covers execution/process/terminal primitives in `@oh-my-pi/pi-nati
 ## Implementation files
 
 - `crates/pi-natives/src/shell.rs`
+- `crates/pi-natives/src/shell/vfs.rs` (host-injected filesystem bridge)
+- `crates/pi-vfs/` (shared filesystem abstraction)
 - `crates/pi-shell/src/shell.rs`
 - `crates/pi-shell/src/cancel.rs`
 - `crates/pi-builtins` (embedded-shell builtins: bash builtins plus in-process utility/process commands)
@@ -34,9 +36,9 @@ Shell execution modes:
 
 Both stream merged stdout/stderr text through a threadsafe callback and return `{ exitCode?, cancelled, timedOut, minimized?, workingDir? }`.
 
-Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live `&`/`nohup` children. This lets a host retain a per-call shell while background children remain alive; dropping the shell would kill them.
+Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live jobs tracked by the session. Hosts can retain per-call shells while ordinary background jobs remain alive. Builtin `nohup <command> &` is special: brush detaches and reparents the operand so it survives shell teardown; this is not the behavior of the system `nohup` binary.
 
-`ShellOptions` supports `sessionEnv`, `snapshotPath`, and optional output `minimizer`. `ShellExecuteOptions` additionally supports command, cwd, command-scoped `env`, timeout/signal, and minimizer. `ShellRunOptions` supports command, cwd, command-scoped env, timeout, and signal.
+`ShellOptions` supports `sessionEnv`, `snapshotPath`, output `minimizer`, and `filesystem`. `ShellExecuteOptions` additionally supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, and `signal`. `ShellRunOptions` supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, `signal`, and a run-only `filesystem` override.
 
 ### Session creation and environment model
 
@@ -47,6 +49,7 @@ Rust creates `brush_core::Shell` with:
 - bash-mode builtins, with `exec` and `suspend` disabled,
 - process builtins registered unconditionally from `pi_builtins::process_builtins()` — `nohup`, `pgrep`, `pkill`, `pidwait`, `ps`, `sleep`, `timeout`, and `top` (`nohup` is withheld when `PI_DISABLE_NOHUP_BUILTIN` is set; `kill` comes from the default bash-mode set, where `pi-builtins`' richer implementation replaces brush's original),
 - in-process utility builtins registered from `pi_builtins::utility_builtins()` (see the next section),
+- an opt-in `git` builtin (`crates/pi-shell/src/git.rs`, gated by `PI_SMART_GIT`) that serves supported `git worktree add` invocations through `pi-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable. Unsupported commands/options/repository configurations run the git binary with the original arguments,
 - skip-list for shell-sensitive vars (`PS1`, `PWD`, `SHLVL`, bash function exports, etc.),
 - a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives brush parameter expansion unless the user shadows `env`.
 
@@ -55,12 +58,21 @@ Session env behavior:
 - `ShellOptions.sessionEnv` / one-shot `sessionEnv` is applied at session creation.
 - `ShellRunOptions.env` / one-shot `env` is command-scoped (`EnvironmentScope::Command`) and popped after the command.
 - `PATH` is merged specially on Windows with case-insensitive dedupe.
-- Windows-only path enrichment (`pi-shell/src/windows.rs`) appends discovered Git-for-Windows paths when present and not already included.
+- Host and forwarded session environments omit Git repository-location overrides (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), so Git rediscovers the repository from cwd. Explicit command-scoped `env` can supply them again.
+- Windows-only path enrichment (`crates/pi-shell/src/windows.rs`) appends discovered Git-for-Windows paths when present and not already included.
 - `snapshotPath`, when present, is sourced during session creation with stdout/stderr/stdin wired to null files.
+
+### Host-injected filesystem
+
+`filesystem` is `{ handler: (error: Error | null, request: ShellFsRequest) => Promise<ShellFsResponse>, nativeLocalPaths?: boolean }`. The bridge covers shell redirections, globs, cwd changes, and in-process utility file operations; paths travel verbatim, including absolute `scheme://` URLs. With `nativeLocalPaths: true`, all host paths bypass the handler and only URL paths are routed to it; otherwise the handler receives host paths too. Ordinary external programs still use the OS filesystem rather than this callback interface.
+
+Requests identify an operation (`metadata`, `readDir`, `open`, `read`, `write`, `close`, mutation operations, and others); generated `ShellFs*` types define the complete wire contract. Binary payloads use `Uint8Array`/`Buffer`; positional request offsets and other `u64` quantities use `bigint`, while responses accept exact `number | bigint`. Return `{ error: { code, message? } }` for filesystem errors; rejected promises or malformed responses are provider failures. `local`/`localTarget` responses can delegate operations to native host paths after the provider applies its access policy.
+
+The session filesystem is restored after a run-only override. Provider waits are scoped to run cancellation. Successful runs wait for dropped virtual-file closes so writes have settled; close failures are reported on stderr and fail otherwise-successful commands.
 
 ### In-process utility builtins (uutils-derived)
 
-Beyond the bash builtins, session creation registers the in-process command-line utility builtins implemented in the `pi-builtins` crate (`crates/pi-builtins`) — in-house ports of uutils coreutils/findutils/sed and jaq built on `uucore` 0.8.0. The set includes `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `ls`, `find`, `grep`, `mkdir`, `rm`, `mv`, `ln`, `sed`, `jq`, `fd`, `diff`, the checksum/`tr`/`cut`/`date` families, and more; `pi_builtins::utility_builtins()` is the authoritative list.
+Beyond the bash builtins, session creation registers the in-process command-line utility builtins implemented in the `pi-builtins` crate (`crates/pi-builtins`) — in-house ports of uutils coreutils/findutils/sed and jaq built on `uucore` 0.8.0. The set includes `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `ls`, `find`, `grep`, `mkdir`, `rm`, `mv`, `cp`, `ln`, `sed`, `jq`, `fd`, `diff`, the checksum/`tr`/`cut`/`date` families, and more; `pi_builtins::utility_builtins()` is the authoritative list.
 
 Three search-related builtins are worth calling out:
 
@@ -71,8 +83,10 @@ Three search-related builtins are worth calling out:
 Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated in `crates/pi-shell/src/shell.rs`:
 
 - `PI_DISABLE_UUTILS_BUILTINS` disables the whole utility set (bare names resolve to system binaries again),
-- `PI_DISABLE_UUTILS_DESTRUCTIVE` disables the destructive shadows (`rm`, `mv`, and `ln`, which can clobber via `-f`) together,
+- `PI_DISABLE_UUTILS_DESTRUCTIVE` disables the destructive shadows (`rm`, `mv`, `cp`, which overwrites existing files, and `ln`, which can clobber via `-f`) together,
 - `PI_DISABLE_RM_BUILTIN` / `PI_DISABLE_MV_BUILTIN` disable `rm`/`mv` individually.
+
+Builtin switches are read from `sessionEnv` first, then the process environment, during session creation. Values are truthy when present and not empty, `"0"`, or case-insensitive `"false"`; command-scoped `env` does not change registration.
 
 ### Runtime lifecycle and state transitions
 
@@ -82,7 +96,7 @@ Persistent shell (`Shell.run`) uses this state machine:
 - **Running**: first `run()` lazily creates a session, stores an abort token, executes command.
 - **Completed + keepalive**: if execution control flow is normal, abort state is cleared and session is reused.
 - **Completed + teardown**: if control flow is loop/script/shell-exit related, session is dropped.
-- **Cancelled/Timed out**: Tokio cancellation token is triggered, descendants started after the baseline snapshot receive termination waves, a 2-second graceful wait is allowed, the task may be aborted, and the persistent session is dropped if the lock can be acquired.
+- **Cancelled/Timed out**: Tokio cancellation is triggered; a per-run spawn registry targets that run's processes and descendants with TERM/KILL waves. A 2-second graceful task wait is allowed (5 seconds on Windows), the task may be aborted, and the persistent session is dropped if the lock can be acquired.
 - **Error**: session is dropped.
 
 One-shot shell (`executeShell`) always creates and drops a fresh session per call.
@@ -91,8 +105,10 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 
 - Stdout/stderr are routed into a shared pipe and read concurrently.
 - Reader decodes UTF-8 incrementally; invalid byte sequences emit `U+FFFD` replacement chunks.
+- The N-API output bridge has a bounded 64-chunk queue and awaits callback execution, backpressuring pipe readers and the child. Queued chunks are coalesced before forwarding. A single callback stalled for 30 seconds disconnects the bridge so readers can continue draining.
 - The command runs with `ProcessGroupPolicy::NewProcessGroup`.
 - After the foreground command completes, the reader drains until EOF, 250ms of idle output, or 2s maximum; reader shutdown then gets a 250ms timeout.
+- The JS forwarding pump then drains accepted output on normal completion/errors; interrupted runs allow at most 2 seconds before aborting that pump. Cancellation delays reader shutdown by 500ms on non-Windows or 2s on Windows so pipeline consumers can flush.
 - Optional minimizer configuration can capture and rewrite output. When minimization occurs, the result includes `minimized` with filter name, replacement/original text, and byte counts.
 - A successful result can include `workingDir`, reflecting the shell's cwd after execution.
 - Consumers are responsible for persisting or displaying minimizer artifacts; the native result only carries the data.
@@ -100,7 +116,7 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 ### Cancellation, timeout, and abort
 
 - `CancelToken` is constructed from `timeoutMs` and optional `AbortSignal`, then converted into the shared `pi_shell::cancel::CancelToken`.
-- On cancellation/timeout, shell cancellation token is triggered, descendant cleanup runs, then the task gets a 2-second graceful window before forced abort.
+- On cancellation/timeout, shell cancellation token is triggered, descendant cleanup runs, then the task gets a 2-second graceful window (5 seconds on Windows) before forced abort.
 - Structured result flags are used:
   - timeout -> `exitCode` omitted, `timedOut: true`.
   - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
@@ -159,16 +175,17 @@ Concurrency guard:
   - `powershell`/`pwsh` gets `-Command`,
   - other shells get `-lc`.
 - `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
+- PTY commands inherit the process environment after stripping Git repository-location overrides; explicit PTY `env` values can add them back.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.
-- `write()` sends raw bytes to PTY stdin.
+- `write(data: string)` sends the string's UTF-8 bytes to PTY stdin.
 - `resize()` sends a control message and clamps dimensions again.
 - `kill()` sends a control message that marks the run cancelled and terminates PTY process targets.
 
 Output path:
 
-- dedicated reader thread reads master stream,
-- incremental UTF-8 decode emits `U+FFFD` for invalid bytes,
-- chunks forwarded through N-API threadsafe callback.
+- a dedicated reader thread reads the master stream and incrementally decodes UTF-8, replacing invalid bytes with `U+FFFD`,
+- a bounded 64-chunk queue backpressures that reader; a separate async pump coalesces output and awaits N-API callback execution,
+- the control loop never waits on JS callback execution, so input, resize, kill, and child-status checks remain live.
 
 Termination path:
 
@@ -179,10 +196,12 @@ Termination path:
 ### Cancellation and timeout semantics
 
 - `timeoutMs` and `AbortSignal` feed a `CancelToken`.
-- Loop calls `ct.heartbeat()` periodically with a 16ms maximum wait cadence.
-- Timeout classification is based on the heartbeat error string containing `Timeout`.
-- Cancellation/kill starts a 300ms post-cancel drain window; normal child exit starts a 300ms post-exit drain window.
-- Final reader drain is 50ms on non-Windows and 500ms on Windows.
+- Preflight heartbeat checks before `openpty` and spawn reject cancellation as setup errors.
+- The running loop calls `ct.heartbeat()` with a 16ms maximum control wait cadence. Timeout classification uses a heartbeat error containing `Timeout`.
+- Cancellation, kill, or a lost JS callback terminates process targets and starts a 300ms post-cancel window. The result may still include an exit code observed while reaping.
+- On non-Windows, cancelled-child reaping polls for up to 500ms, then delegates an unfinished reap to a detached thread rather than pinning the promise.
+- Normal finite runs wait for accepted output to reach JS. A descendant that holds the slave open can end draining after 2s with an empty queue and no callback in flight; backpressure is not treated as an idle slave.
+- Interrupted runs abort a slow output pump and wait up to 300ms for it to stop; an already-queued JS callback may still run.
 
 ### Failure behavior
 
@@ -193,7 +212,6 @@ Error surfaces include:
 - PTY spawn failure,
 - writer/reader acquisition failure,
 - child status/wait failures,
-- lock poisoning,
 - control-channel disconnection (`PTY session is no longer available`).
 
 Control call failures when not running:
@@ -215,11 +233,15 @@ Current JS surface is the `Process` class:
 
 ### Behavior
 
-- `killTree(signal?)` sends the requested signal to the process and descendants, children first; on Windows the signal argument is ignored and processes are terminated via `TerminateProcess`.
-- `terminate(options?)` is async. By default it uses a 1000ms graceful phase and a 5000ms post-hard-kill wait. Passing `gracefulMs < 0` skips the graceful phase. `group: true` also targets the process group where supported; aborting its signal rejects the promise.
+- `killTree(signal?)` defaults to the hard-kill signal, sends it to the process and descendants children-first, and returns the number signalled; on Windows the signal argument is ignored and processes are terminated via `TerminateProcess`.
+- `terminate(options?)` is async and resolves whether the tree exited within its wait windows. Defaults are 1000ms graceful wait and 5000ms post-hard-kill wait. `gracefulMs < 0` skips the graceful wait, not the initial polite signal. `group: true` also targets the process group where supported; aborting its signal rejects termination waits.
 - `waitForExit(options?)` resolves `true` when the process exits and `false` on timeout; aborting its signal rejects the promise.
 
 The platform-specific implementation lives in `pi_shell::process`; `crates/pi-natives/src/ps.rs` is a N-API shim plus re-exports used by PTY termination.
+
+`execReplace(argv)` is a separate synchronous process handoff: on Unix it calls `execvp`, replacing the host process without JS/native cleanup on success. Callers must restore the terminal and flush logs first. Empty argv, interior NUL bytes, exec failures, and unsupported platforms throw; Windows callers must use spawn-and-wait instead.
+
+`expandWindowsLongPath(path)` and `getWindowsShortPath(path)` are exported from `shell.rs`. They preserve the input when expansion/short-name lookup fails and are identity functions off Windows.
 
 ## Key parsing subsystem (`keys`)
 
@@ -245,12 +267,13 @@ The parser combines:
 
 Modifier handling:
 
-- only shift/alt/ctrl/super bits are compared for key matching,
-- lock bits are masked out before comparisons.
+- high-level key IDs support shift/alt/ctrl/super,
+- Kitty matching masks caps-lock and num-lock bits before comparing modifier masks; unsupported modifier bits are not silently ignored.
 
 Layout behavior:
 
 - base-layout fallback is intentionally constrained so remapped layouts do not create false matches for ASCII letters/symbols.
+- `parseKey` and high-level `matchesKey` ignore Kitty release events; `parseKittySequence` preserves the event type (press/repeat/release) for callers that need it.
 
 ### Failure behavior
 

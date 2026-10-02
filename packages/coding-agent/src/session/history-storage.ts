@@ -75,6 +75,7 @@ export class HistoryStorage {
 	#db: Database;
 	static #instance?: HistoryStorage;
 	#sessionResolver?: () => string | undefined;
+	#addListener?: () => void;
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
@@ -189,6 +190,11 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#sessionResolver = resolver;
 	}
 
+	/** Register a callback run after each successful {@link add}, once the row is durable. */
+	setAddListener(listener: () => void): void {
+		this.#addListener = listener;
+	}
+
 	/**
 	 * Stores a prompt, replaces its provenance with the latest submission, and
 	 * bumps its use count on resubmission.
@@ -204,7 +210,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#insertBatch([{ prompt: trimmed, cwd: cwd ?? undefined, sessionId: session || undefined }]);
 		} catch (error) {
 			logger.error("HistoryStorage add failed", { error: String(error) });
+			return Promise.resolve();
 		}
+		this.#addListener?.();
 		return Promise.resolve();
 	}
 
