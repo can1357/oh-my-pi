@@ -8,6 +8,8 @@
 
 ### Added
 
+- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)): per-server tool allow/deny lists (literal names or globs) are applied at the tool-reception boundary, so the session, `/mcp test`, `/session`, and the persisted tool cache all see one consistent filtered catalog. Tool-filter entries stay literal (`${VAR}` never expands inside one); Codex `enabled_tools`/`disabled_tools` map onto the same feature.
+
 - `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
@@ -16,6 +18,9 @@
 
 ### Fixed
 
+- Fixed the bundled MCP JSON schema carrying shared fields (`timeout`, `requestIdFormat`, `auth`, `oauth`, …) as untyped `{}` placeholders on some transports; they now reference the shared `serverBase` definitions, and the new `enabledTools`/`disabledTools` fields validate on every transport.
+- Fixed scalar shared fields (`timeout`, `enabled`, `requestIdFormat`) losing `${VAR}` expansion in `.omp/mcp.json` and OMP extension configs once filters went literal; per-field expansion now covers them, and the expanded strings coerce exactly as literal values do.
+- Fixed Exa tool selection consulting the new filters (URL-semantic endpoint parsing, case-sensitive native classification, prototype-safe native set): a server whose enabled tools are non-native is kept instead of dropped.
 - Fixed HTML export hanging when a session's subagent directory held a transcript named `..jsonl`; discovery now only descends into real child directories ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 - Fixed resuming a session through a symlink or hard link to a file another omp process is writing: the resumed session no longer mixes its turns into that file and continues in a new file next to it ([#14095](https://github.com/can1357/oh-my-pi/pull/14095) by [@andrebrait](https://github.com/andrebrait))
 - Fixed moving a session to another directory replacing a session file there that another omp process is writing, or moving a session another process is writing; the move now stops with an error and leaves both files untouched ([#14095](https://github.com/can1357/oh-my-pi/pull/14095) by [@andrebrait](https://github.com/andrebrait))
