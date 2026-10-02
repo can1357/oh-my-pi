@@ -173,6 +173,12 @@ export interface EffectiveSubagentPolicy {
 	enableIrc: boolean;
 	/** Whether this run dispatches a restricted child (plan mode, restricted host, or restricted policy). */
 	restrictToolNames: boolean;
+	/**
+	 * Whether the child tool derivation runs restricted. False when no session
+	 * policy exists to bound against (fixtures/foreign sessions): the derivation
+	 * then runs legacy-unrestricted while presentation still sees the restriction.
+	 */
+	derivationRestrictToolNames?: boolean;
 	/** The parent's effective tool grant when restricted; `null` for unrestricted parents. */
 	parentEffectiveGrant: ReadonlySet<string> | null;
 }
@@ -381,10 +387,16 @@ export async function resolveEffectiveSubagentPolicy(
 	// state (CLI grant/session toggles) plus their own frontmatter. The
 	// persona's spawns whitelist (getSessionSpawns) still gates WHICH agents
 	// may spawn.
-	const restrictToolNames =
-		planMode || request.session.restrictToolNames === true || (toolPolicy?.isBaselineRestricted() ?? false);
+	const baselineRestricted = toolPolicy?.isBaselineRestricted() ?? false;
+	const restrictToolNames = planMode || request.session.restrictToolNames === true || baselineRestricted;
+	// No policy on the session (fixtures, foreign ToolSessions): fall back to the
+	// session's own restriction bit. Without a grant to bound against, the child
+	// derivation would otherwise intersect against nothing and strip every tool —
+	// so the derivation runs UNRESTRICTED there (legacy behavior), while
+	// presentation (MCP/extension preload gates) still sees the restriction.
 	const parentEffectiveGrant: ReadonlySet<string> | null =
 		restrictToolNames && toolPolicy ? toolPolicy.baselineEffectiveSet() : null;
+	const derivationRestrictToolNames = restrictToolNames && toolPolicy !== undefined;
 	return {
 		discovery,
 		agentName,
@@ -398,6 +410,7 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		restrictToolNames,
+		derivationRestrictToolNames,
 		parentEffectiveGrant,
 		isIsolated,
 		mergeMode: request.isolation?.merge ?? cfgTaskIsolationMerge.get(request.session.settings),
@@ -545,6 +558,7 @@ function buildExecutorOptions(
 				}),
 		sessionFile: lease.sessionFile,
 		parentEffectiveGrant: policy.parentEffectiveGrant,
+		derivationRestrictToolNames: policy.derivationRestrictToolNames,
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,

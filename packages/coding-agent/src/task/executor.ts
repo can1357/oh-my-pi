@@ -471,6 +471,13 @@ export interface ExecutorOptions {
 	 * main's restriction state plus its own frontmatter.
 	 */
 	parentEffectiveGrant?: ReadonlySet<string> | null;
+	/**
+	 * Whether the child tool derivation runs restricted. Only the structured
+	 * subagent path sets this (always alongside a grant when restricted).
+	 * Unset (direct runSubprocess callers) means legacy behavior: the declared
+	 * list passes through even when restrictToolNames is true.
+	 */
+	derivationRestrictToolNames?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
@@ -3861,7 +3868,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 	let toolNames = deriveChildToolNames(agent, {
 		parentEffectiveGrant: options.parentEffectiveGrant,
-		restrictToolNames: options.restrictToolNames === true,
+		restrictToolNames: options.derivationRestrictToolNames ?? false,
 		atMaxDepth,
 		evalBackends: resolveEvalBackends({ settings } as ToolSession),
 	});
