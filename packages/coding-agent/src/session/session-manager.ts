@@ -3282,6 +3282,9 @@ export class SessionManager {
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
+		enforceToolAllowlist?: boolean;
+		disallowedTools?: string[];
+		declaredTools?: string[];
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
@@ -4141,6 +4144,17 @@ export interface PersistedSessionInit {
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	restrictToolNames?: boolean;
+	/** Whether the original run enforced `tools:` as a hard allowlist for custom/extension/MCP tools. */
+	enforceToolAllowlist?: boolean;
+	/** Disallow patterns the original run applied to the active tool set. */
+	disallowedTools?: string[];
+	/**
+	 * Declarative `tools:` allowlist the original run enforced (post auto-includes),
+	 * as opposed to the effective enabled snapshot in `tools`.
+	 * Cold revival must scope from this list: tools that register after the
+	 * snapshot (late extensions, MCP reconnects) stay allowed under it.
+	 */
+	declaredTools?: string[];
 	spawns?: string;
 	readSummarize?: boolean;
 	advisor?: string;
@@ -4172,6 +4186,9 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			spawns: entry.spawns,
 			advisor: entry.advisor,
 			isolated: entry.isolated,
+			enforceToolAllowlist: entry.enforceToolAllowlist,
+			disallowedTools: entry.disallowedTools,
+			declaredTools: entry.declaredTools,
 			...(entry.compactionThreshold !== undefined ? { compactionThreshold: entry.compactionThreshold } : undefined),
 		};
 	}
