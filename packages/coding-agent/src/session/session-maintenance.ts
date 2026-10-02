@@ -44,6 +44,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	type PruneResult,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
@@ -656,6 +657,20 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	/**
+	 * Durably commit a prune pass, restoring the blanked results when the rewrite
+	 * fails so live context never diverges from the history its derived state
+	 * (advisor prefix, todo phases, provider sessions) was built from.
+	 */
+	async #persistPrune(result: PruneResult): Promise<void> {
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			result.undo();
+			throw error;
+		}
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -677,7 +692,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
+		await this.#persistPrune(result);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-tool-outputs");
@@ -723,7 +738,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
+		await this.#persistPrune(result);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-stale-tool-results");
@@ -2061,9 +2076,10 @@ export class SessionMaintenance {
 		}
 		const model = this.#model;
 		if (!model) return;
-		const method = resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings, {
+			skipRemote: this.#nativeSpeculationFailed(model),
+		});
 		if (!method) return;
-		if (method === "remote" && this.#failedNativeSpeculation === this.#nativeSpeculationKey(model)) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
 
@@ -2103,6 +2119,11 @@ export class SessionMaintenance {
 		return `${this.#host.sessionManager.getSessionId()}/${model.provider}/${model.id}`;
 	}
 
+	/** Whether `model`'s native speculation already failed for good this cycle. */
+	#nativeSpeculationFailed(model: Model): boolean {
+		return this.#failedNativeSpeculation === this.#nativeSpeculationKey(model);
+	}
+
 	/**
 	 * Grace band above the compaction threshold: when a single turn jumps past
 	 * the threshold before the background speculation armed (or even started),
@@ -2130,9 +2151,10 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
-		const method = resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings, {
+			skipRemote: this.#nativeSpeculationFailed(model),
+		});
 		if (!method) return false;
-		if (method === "remote" && this.#failedNativeSpeculation === this.#nativeSpeculationKey(model)) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
 			thresholdTokens + resolveSpeculationLeadTokens(thresholdTokens),
@@ -4220,7 +4242,7 @@ export class SessionMaintenance {
 			if (
 				candidate === "remote" &&
 				liveModel &&
-				this.#failedNativeSpeculation === this.#nativeSpeculationKey(liveModel) &&
+				this.#nativeSpeculationFailed(liveModel) &&
 				methods
 					.slice(index + 1)
 					.some(next =>

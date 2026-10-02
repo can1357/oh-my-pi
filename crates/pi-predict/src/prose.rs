@@ -317,15 +317,23 @@ pub fn mask_non_prose(text: &str) -> Cow<'_, str> {
 /// [`mask_non_prose`]; 0 for blank text.
 pub fn prose_fraction(text: &str) -> f64 {
 	let masked = mask_non_prose(text);
+	// `mask_non_prose` substitutes masked bytes with spaces, so a masked
+	// multi-byte character fans out into several spaces and `masked.chars()` no
+	// longer aligns with `text.char_indices()`; compare per character over byte
+	// ranges instead.
+	let masked_bytes = masked.as_bytes();
 	let mut total = 0usize;
 	let mut prose = 0usize;
-	for ((_, c), m) in text.char_indices().zip(masked.chars()) {
+	for (offset, c) in text.char_indices() {
 		if is_js_space(c) {
 			continue;
 		}
 		let units = c.len_utf16();
 		total += units;
-		if m != ' ' {
+		let hidden = masked_bytes[offset..offset + c.len_utf8()]
+			.iter()
+			.all(|&byte| byte == b' ');
+		if !hidden {
 			prose += units;
 		}
 	}
@@ -473,6 +481,15 @@ mod tests {
 		let prompt = "fix the `parse_args` call\n```rust\nlet value = 1;\n```\nthen <b>bold</b> it \
 		              camelCase foo_bar v2 ok";
 		assert_eq!(words(prompt), ["fix", "the", "call", "then", "it", "ok"]);
+	}
+
+	#[test]
+	fn prose_fraction_stays_aligned_after_masked_multibyte_spans() {
+		// A masked multi-byte character fans out into one space per byte, so
+		// pairing the original's chars with the masked text's chars by index
+		// misreads every later character; 5 of the 9 UTF-16 units are prose.
+		let text = "`代码`之后是正文";
+		assert!((prose_fraction(text) - 5.0 / 9.0).abs() < 1e-9);
 	}
 
 	#[test]

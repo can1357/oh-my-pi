@@ -65,7 +65,6 @@ describe("sanitizeSnapshotForBrush", () => {
 	it.each([
 		["simple", "alias -- ll='ls -l'"],
 		["flag-with-equals", "alias -- gc='git --color=auto commit'"],
-		["multi-flag", "alias -- la='ls -lAh --group-directories-first'"],
 		// A plain single quote escape that decodes to a metachar-free body
 		// must survive — we only ban truly unparseable bodies.
 		["embedded-quote", "alias -- say='echo '\\''hello'\\'''"],

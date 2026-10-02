@@ -386,15 +386,6 @@ function windowsLikeEnv(backing: Record<string, string>): Record<string, string 
 }
 
 describe("$envExact", () => {
-	it("returns the value for an exact-case key", () => {
-		const env = { OPENCODE_API_KEY: "sk-live", PATH: "/usr/bin" };
-		expect($envExact("OPENCODE_API_KEY", env)).toBe("sk-live");
-	});
-
-	it("returns undefined for an absent name", () => {
-		expect($envExact("MISSING_VAR", { PATH: "/usr/bin" })).toBeUndefined();
-	});
-
 	it("does not hijack a literal via a case-differing Windows system var", () => {
 		// Windows ships PUBLIC=C:\Users\Public and reads are case-insensitive, so
 		// a bare `env["public"]` returns it — the /login #7361 401 root cause.

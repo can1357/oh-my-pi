@@ -1,3 +1,6 @@
+import { styleSpans } from "../native/spans";
+import { node, text } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, getWidthConfigEpoch, truncateToWidth, visibleWidth } from "../utils";
 import { Text } from "./text";
@@ -85,6 +88,7 @@ export class MetricRow implements Component {
 	readonly #options: MetricRowOptions;
 	readonly #text: Text;
 	#cache: { width: number; epoch: number; source: readonly string[]; lines: readonly string[] } | undefined;
+	#native: NativeNode | undefined;
 
 	constructor(metrics: readonly MetricSpec[], options: MetricRowOptions = {}) {
 		this.#metrics = metrics;
@@ -96,12 +100,47 @@ export class MetricRow implements Component {
 		if (this.#metrics === metrics) return false;
 		this.#metrics = metrics;
 		this.#cache = undefined;
+		this.#native = undefined;
 		return true;
 	}
 
 	invalidate(): void {
 		this.#text.invalidate();
 		this.#cache = undefined;
+		this.#native = undefined;
+	}
+
+	/**
+	 * `drop` overflow becomes a transparent `status` strip whose segments keep
+	 * the metric priorities (the terminal drops the lowest first); the other
+	 * modes are one text run that wraps or truncates.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const options = this.#options;
+		if (options.overflow === "drop") {
+			const segs: NativeNode[] = [];
+			this.#metrics.forEach((metric, index) => {
+				const formatted = formatMetric(metric);
+				if (formatted === undefined) return;
+				segs.push(
+					node(
+						"seg",
+						{ side: "left", priority: metric.priority ?? 0, spans: styleSpans(formatted, options.style) },
+						undefined,
+						String(index),
+					),
+				);
+			});
+			this.#native = node("status", { transparent: true }, segs);
+			return this.#native;
+		}
+		const joined = formatMetricRow(this.#metrics, { separator: options.separator });
+		this.#native =
+			options.overflow === "wrap"
+				? text(styleSpans(joined, options.style), { wrap: "word" })
+				: text(styleSpans(joined, options.style), { wrap: "none", truncate: "end" });
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

@@ -214,7 +214,7 @@ enum KeyboardConflict {
 /// Candidates come from the process's accessibility windows, not
 /// `WindowServer`'s list, which also holds the per-window compositor surfaces
 /// of Chromium, Electron, and `WebKit` apps. `DesktopWindow::focused` cannot
-/// disambiguate: it marks every window of the active application.
+/// disambiguate: it names only the active application's key window.
 fn ensure_sole_keyboard_destination(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
 	let conflict = ax::window_records(pid)
 		.map_or(Some(KeyboardConflict::Unmapped), |records| keyboard_conflict(wid, &records));
@@ -567,9 +567,8 @@ fn post_hover(
 }
 
 /// Stamps the window-routing fields on a background pointer event and posts it
-/// through both `SkyLight` and the public per-pid queue, which drops or accepts
-/// events differently across `AppKit`, `WebKit`, and Catalyst targets. The
-/// window location is window-local, as the public route expects.
+/// with `skylight::post_dual`. The window location is window-local, as the
+/// public route expects.
 fn post_window_pointer(
 	pid: libc::pid_t,
 	wid: u32,
@@ -1037,15 +1036,19 @@ fn uncover(
 	*occluder = first
 		.window
 		.map(|window| Occluder { pid: first.pid, window });
-	ax::MacAx::new().raise(window)?;
+	// Some windows do not support AXRaise (iPhone Mirroring answers
+	// kAXErrorActionUnsupported) yet come forward on their own shortly after
+	// activation, so a failed raise is not final: the re-hit-test decides.
+	let raise_error = ax::MacAx::new().raise(window).err();
 	let deadline = Instant::now() + UNCOVER_TIMEOUT;
 	loop {
 		match covering()? {
 			None => return Ok(()),
 			Some(owner) if Instant::now() >= deadline => {
+				let raise = raise_error.map_or_else(String::new, |error| format!(" ({error})"));
 				return Err(DesktopError::input_failed(format!(
-					"window {wid} stays covered by process {} at the takeover input point, so the \
-					 input would land on the covering window; no input was sent",
+					"window {wid} stays covered by process {} at the takeover input point{raise}, so \
+					 the input would land on the covering window; no input was sent",
 					owner.pid,
 				)));
 			},

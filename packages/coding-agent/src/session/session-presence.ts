@@ -286,7 +286,7 @@ export class SessionPresencePublisher {
 		// temp file is created owner-only, not tightened afterwards, so a reader
 		// can never observe the record with looser permissions.
 		const temp = `${file}.${crypto.randomUUID()}.tmp`;
-		await Bun.write(temp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+		await fs.writeFile(temp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
 		await fs.rename(temp, file);
 	}
 }

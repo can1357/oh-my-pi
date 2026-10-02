@@ -6,6 +6,8 @@ import type { Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	CacheWarmer,
 	type CacheWarmerDeps,
+	type CacheWarmingRefreshEnd,
+	type CacheWarmingRefreshStart,
 	type CacheWarmStream,
 	getCacheWarmingDelayMs,
 	getPromptCacheTtlMs,
@@ -65,6 +67,8 @@ type ReplayScript =
 	| { kind: "generate"; usage: Usage }
 	/** The replay completes without generating (e.g. a one-token cap on a non-thinking model). */
 	| { kind: "done"; usage: Usage }
+	/** A refresh stays in flight until its run is cancelled. */
+	| { kind: "pending"; usage: Usage }
 	/** The provider rejects the replay. */
 	| { kind: "error" };
 
@@ -101,6 +105,11 @@ function scriptedStream(script: ReplayScript, record: ReplayRecord): CacheWarmSt
 					record.consumed.push(event.type);
 					yield event;
 				}
+				if (script.kind === "pending" && !signal?.aborted) {
+					const aborted = Promise.withResolvers<void>();
+					signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+					await aborted.promise;
+				}
 			} finally {
 				record.cutOff = signal?.aborted === true;
 			}
@@ -117,6 +126,7 @@ interface Harness {
 	mode: "off" | "streaming" | "idle";
 	current: boolean;
 	warmed: Array<{ message: AssistantMessage; extensionOverride: boolean }>;
+	refreshes: Array<({ type: "start" } & CacheWarmingRefreshStart) | ({ type: "end" } & CacheWarmingRefreshEnd)>;
 }
 
 function harness(overrides: Partial<CacheWarmerDeps> = {}): Harness {
@@ -127,6 +137,7 @@ function harness(overrides: Partial<CacheWarmerDeps> = {}): Harness {
 		mode: "idle",
 		current: true,
 		warmed: [],
+		refreshes: [],
 	};
 	const warmer = new CacheWarmer({
 		stream: (_model, _context, options) => {
@@ -141,6 +152,8 @@ function harness(overrides: Partial<CacheWarmerDeps> = {}): Harness {
 	warmer.onWarmed = (message, extensionOverride) => {
 		state.warmed.push({ message, extensionOverride });
 	};
+	warmer.onRefreshStart = refresh => state.refreshes.push({ type: "start", ...refresh });
+	warmer.onRefreshEnd = refresh => state.refreshes.push({ type: "end", ...refresh });
 	return Object.assign(state, { warmer });
 }
 
@@ -188,6 +201,47 @@ describe("cache warming scheduling math", () => {
 		}
 	});
 
+	test("uses the actual short TTL when Bedrock emits its five-minute fallback for long retention", () => {
+		const bedrockMessages = buildModel({
+			id: "anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "anthropic-messages",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			promptCache: { short: 300 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: { supportsLongCacheRetention: false },
+		});
+		expect(getPromptCacheTtlMs(bedrockMessages, { cacheRetention: "long" })).toBe(300_000);
+
+		const converse = buildModel({
+			id: "us.anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			promptCache: { short: 300, long: 3600 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: {
+				promptCacheMode: "explicit",
+				supportsLongPromptCacheRetention: false,
+				promptCacheMinimumTokens: 0,
+				promptCacheMaximumCheckpoints: 2,
+			},
+		});
+		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(300_000);
+		converse.compat.supportsLongPromptCacheRetention = true;
+		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(3_600_000);
+	});
+
 	test("never warms without a declared lifetime or with caching off", () => {
 		const model = makeModel();
 		model.promptCache = undefined;
@@ -195,7 +249,7 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(makeModel(), { cacheRetention: "none" })).toBeUndefined();
 	});
 
-	test("skips budget-based Anthropic thinking but allows adaptive thinking and other providers", () => {
+	test("rejects budget-based reasoning replays on Converse but preserves adaptive and effort models", () => {
 		const model = makeModel();
 		model.thinking = { mode: "anthropic-budget-effort", efforts: [Effort.High] };
 		expect(isReplayable(model, { reasoning: Effort.High })).toBe(false);
@@ -203,6 +257,28 @@ describe("cache warming scheduling math", () => {
 		expect(isReplayable(model, { reasoning: Effort.High })).toBe(true);
 		expect(isReplayable(model, { reasoning: Effort.High, forceReasoningOff: true })).toBe(true);
 		expect(isReplayable(model, undefined)).toBe(true);
+
+		const bedrock = buildModel({
+			id: "us.anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.High], requiresEffort: true },
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		});
+		expect(isReplayable(bedrock, { reasoning: Effort.High })).toBe(false);
+		expect(isReplayable(bedrock, undefined)).toBe(false);
+		expect(isReplayable(bedrock, { forceReasoningOff: true })).toBe(false);
+		bedrock.thinking = { mode: "anthropic-adaptive", efforts: [Effort.High], requiresEffort: true };
+		expect(isReplayable(bedrock, { forceReasoningOff: true })).toBe(true);
+		bedrock.thinking = { mode: "effort", efforts: [Effort.High] };
+		expect(isReplayable(bedrock, { reasoning: Effort.High })).toBe(false);
+
 		const openai = buildModel({
 			id: "gpt-5.4",
 			name: "GPT-5.4",
@@ -244,6 +320,17 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmed[0]?.message.usage.cacheRead).toBe(PROMPT_TOKENS);
 		expect(h.warmed[0]?.message.usage.cost.total).toBeGreaterThan(0);
 		expect(h.warmer.status.state).toBe("scheduled");
+		expect(h.refreshes).toEqual([
+			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{
+				type: "end",
+				phase: "streaming",
+				provider: "anthropic",
+				model: "claude-sonnet-5",
+				outcome: "hit",
+				usage: h.warmed[0]?.message.usage,
+			},
+		]);
 		await advance(SHORT_DELAY_MS);
 		expect(h.replays).toHaveLength(2);
 	});
@@ -257,6 +344,12 @@ describe("cache warmer lifecycle", () => {
 		// The paid miss is still recorded.
 		expect(h.warmed).toHaveLength(1);
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "refresh missed the cache" });
+		expect(h.refreshes.map(event => event.type)).toEqual(["start", "end"]);
+		expect(h.refreshes[1]).toMatchObject({
+			outcome: "miss",
+			usage: h.warmed[0]?.message.usage,
+			warmingStopReason: "refresh missed the cache",
+		});
 		await advance(SHORT_DELAY_MS * 4);
 		expect(h.replays).toHaveLength(1);
 	});
@@ -267,6 +360,12 @@ describe("cache warmer lifecycle", () => {
 		start(rejected);
 		await advance(SHORT_DELAY_MS);
 		expect(rejected.warmer.status).toMatchObject({ state: "inactive", reason: "refresh failed" });
+		expect(rejected.refreshes.map(event => event.type)).toEqual(["start", "end"]);
+		expect(rejected.refreshes[1]).toMatchObject({
+			outcome: "error",
+			usage: rejected.warmed[0]?.message.usage,
+			warmingStopReason: "refresh failed",
+		});
 
 		const thrown = harness({
 			stream: () => {
@@ -276,6 +375,18 @@ describe("cache warmer lifecycle", () => {
 		start(thrown);
 		await advance(SHORT_DELAY_MS);
 		expect(thrown.warmer.status).toMatchObject({ state: "inactive", reason: "refresh failed" });
+		expect(thrown.refreshes).toEqual([
+			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{
+				type: "end",
+				phase: "streaming",
+				provider: "anthropic",
+				model: "claude-sonnet-5",
+				outcome: "error",
+				warmingStopReason: "refresh failed",
+			},
+		]);
+		expect(thrown.warmed).toEqual([]);
 	});
 
 	test("stops with the below-threshold reason for a tiny context", async () => {
@@ -285,6 +396,7 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(h.replays).toHaveLength(0);
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "expected savings below threshold" });
+		expect(h.refreshes).toEqual([]);
 	});
 
 	test("idle phase uses a continuation probability", async () => {
@@ -362,6 +474,7 @@ describe("cache warmer lifecycle", () => {
 		start(stopped);
 		await advance(SHORT_DELAY_MS);
 		expect(stopped.replays).toHaveLength(0);
+		expect(stopped.refreshes).toEqual([]);
 		expect(stopped.warmer.status).toMatchObject({
 			state: "inactive",
 			reason: "stopped by extension",
@@ -388,6 +501,85 @@ describe("cache warmer lifecycle", () => {
 		expect(slow.replays).toHaveLength(0);
 		await advance(2_000);
 		expect(slow.replays).toHaveLength(1);
+	});
+
+	test("mode off aborts an in-flight refresh and still records the usage it was billed", async () => {
+		const h = harness();
+		h.script = { kind: "pending", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) };
+		start(h);
+		await advance(SHORT_DELAY_MS);
+		expect(h.refreshes).toEqual([
+			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+		]);
+		h.warmer.onAgentSettled();
+		h.mode = "off";
+		h.warmer.onModeChanged();
+		expect(h.replays[0]?.options?.signal?.aborted).toBe(true);
+		await drain();
+		expect(h.warmed).toHaveLength(1);
+		expect(h.warmed[0]?.message.usage.cacheRead).toBe(PROMPT_TOKENS);
+		expect(h.refreshes).toEqual([
+			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{
+				type: "end",
+				phase: "streaming",
+				provider: "anthropic",
+				model: "claude-sonnet-5",
+				outcome: "aborted",
+				usage: h.warmed[0]?.message.usage,
+				warmingStopReason: "cache warming disabled",
+			},
+		]);
+		await advance(SHORT_DELAY_MS * 2);
+		expect(h.replays).toHaveLength(1);
+	});
+
+	test("an aborted refresh the provider never accepted records no usage", async () => {
+		const h = harness({
+			stream: (_model, _context, options) => {
+				const rejected = Promise.withResolvers<never>();
+				options?.signal?.addEventListener("abort", () => rejected.reject(new Error("aborted")), { once: true });
+				return rejected.promise;
+			},
+		});
+		start(h);
+		await advance(SHORT_DELAY_MS);
+		h.mode = "off";
+		h.warmer.onModeChanged();
+		await drain();
+		expect(h.warmed).toEqual([]);
+		expect(h.refreshes.at(-1)).toEqual({
+			type: "end",
+			phase: "streaming",
+			provider: "anthropic",
+			model: "claude-sonnet-5",
+			outcome: "aborted",
+			warmingStopReason: "cache warming disabled",
+		});
+	});
+
+	test("a new real request closes the superseded refresh without stopping the replacement", async () => {
+		const h = harness();
+		h.script = { kind: "pending", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) };
+		start(h);
+		await advance(SHORT_DELAY_MS);
+		start(h);
+		await drain();
+		expect(h.replays[0]?.options?.signal?.aborted).toBe(true);
+		expect(h.warmed).toHaveLength(1);
+		expect(h.refreshes).toEqual([
+			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{
+				type: "end",
+				phase: "streaming",
+				provider: "anthropic",
+				model: "claude-sonnet-5",
+				outcome: "aborted",
+				usage: h.warmed[0]?.message.usage,
+			},
+		]);
+		expect(h.warmer.status.state).toBe("scheduled");
+		h.warmer.cancel();
 	});
 
 	test("mode off refuses to arm", () => {

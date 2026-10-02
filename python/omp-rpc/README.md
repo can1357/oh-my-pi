@@ -181,6 +181,36 @@ starts a fresh one there (`resumed=False`). The event filter applies only to
 session events; responses, `prompt_result`, and UI/host frames always arrive,
 so `prompt_and_wait()` still completes when `agent_end` is filtered out.
 
+## Removing Queued Messages
+
+`remove_queued_message(message, queue)` removes one matching prompt from the
+`"steering"` or `"followUp"` queue. `QueuedMessageQueue` and
+`RemoveQueuedMessageResult` are exported for typed callers:
+
+```python
+from omp_rpc import QueuedMessageQueue, RpcClient
+
+with RpcClient() as client:
+    client.follow_up("Review the diff")
+    queue: QueuedMessageQueue = "followUp"
+    result = client.remove_queued_message("Review the diff", queue)
+    print(result.removed)
+```
+
+Check `result.removed`, not the truthiness of the result object. `True` means the
+server removed the queued prompt; `False` means it did not, for example because
+the prompt was already claimed or no longer queued. This does not abort a running
+prompt. Native rejection, including an older server that does not support the
+command, raises `RpcCommandError`. Missing or non-boolean `removed` values raise
+`ValueError` rather than being treated as successful cancellation.
+
+`promote_queued_message(message)` moves one matching follow-up, with its hidden
+attachment context, to the end of the steering queue without resending it.
+Check `result.promoted` on the returned `PromoteQueuedMessageResult`; `False`
+means no matching follow-up was still queued. Never fall back to `steer()`,
+which would enqueue a duplicate. Unsupported servers raise `RpcCommandError`,
+and missing or non-boolean `promoted` values raise `ValueError`.
+
 ## Host-Owned Custom Tools
 
 RPC hosts can expose custom tools to the agent with JSON Schema metadata. The

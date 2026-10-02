@@ -2,7 +2,9 @@ import type { TextContent } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
 import { Markdown } from "../components/markdown";
 import { Text } from "../components/text";
-import type { CustomMessage } from "./messages";
+import { TELEGRAM_PROMPT_MESSAGE_TYPE, type CustomMessage } from "./messages";
+import { card, md, span } from "../native/describe";
+import type { NativeNode } from "../native/node";
 import { sanitizeDisplayLineField } from "../overlays/extensions/display-text";
 import { TRUNCATE_LENGTHS } from "../render/render-utils";
 import { getMarkdownTheme, theme } from "../theme";
@@ -29,6 +31,8 @@ export interface RemotePromptMessageOptions {
  * bridged chat, how the prompt reached this session).
  */
 export class RemotePromptMessageComponent extends Container {
+	readonly #native: NativeNode;
+
 	constructor(message: CustomMessage<RemotePromptDetails>, options: RemotePromptMessageOptions = {}) {
 		super();
 		// The sender name comes from the remote side (a collab guest, a Telegram
@@ -48,11 +52,27 @@ export class RemotePromptMessageComponent extends Container {
 						.filter((content): content is TextContent => content.type === "text")
 						.map(content => content.text)
 						.join("");
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor: (value: string) => theme.bg("userMessageBg", value),
 			color: (value: string) => theme.fgOnBg("userMessageText", "userMessageBg", value),
 		});
-		md.setIgnoreTight(true);
-		this.addChild(md);
+		markdown.setIgnoreTight(true);
+		this.addChild(markdown);
+		const head = options.via
+			? [span(`«${from}»`, "accent strong"), span(` ${options.via}`, "muted"), span(" ›", "accent strong")]
+			: [span(`«${from}» ›`, "accent strong")];
+		this.#native = card(
+			{
+				role: message.customType === TELEGRAM_PROMPT_MESSAGE_TYPE ? "omp.user.telegram" : "omp.user.collab",
+				tone: "user",
+				head,
+			},
+			[md(text)],
+		);
+	}
+
+	/** A user-toned card with sender attribution and the prompt as markdown. */
+	override describe(): NativeNode {
+		return this.#native;
 	}
 }

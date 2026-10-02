@@ -12,7 +12,7 @@
  * carry subsystem-specific message types — lives in the per-subsystem
  * `types.ts` files and is documented there.
  */
-import { type AgentMessage, isNonBlankContext } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isNonBlankContext, joinAdditionalContext } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantRetryRecovery, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
@@ -337,7 +337,7 @@ export interface ToolCallEventResult {
 	 * Trusted handler-authored instructions for the next provider request. The
 	 * host emits them after tool results with developer/system priority where
 	 * supported. Raw tool output and other untrusted data must stay in the tool
-	 * result. Non-empty values from every non-blocking handler are preserved in
+	 * result. Distinct non-empty values from every non-blocking handler are preserved in
 	 * registration order; ignored when this or a later handler blocks the call.
 	 */
 	additionalContext?: string;
@@ -346,7 +346,7 @@ export interface ToolCallEventResult {
 /**
  * Merge one handler's `tool_call` result into the running aggregation.
  * Non-blank `additionalContext` values accumulate in registration order and
- * join with a blank line at the end; `input` stays last-wins. A `block`
+ * join (repeats dropped) at the end; `input` stays last-wins. A `block`
  * result short-circuits the caller, discarding everything collected so far.
  */
 export function accumulateToolCallResult(
@@ -369,19 +369,20 @@ export function buildAggregatedToolCallResult(
 	result: ToolCallEventResult | undefined,
 	aggregated: { input?: Record<string, unknown>; additionalContext: string[] },
 ): ToolCallEventResult | undefined {
-	const { input, additionalContext } = aggregated;
-	if (additionalContext.length === 0 && input === undefined) return result;
+	const { input } = aggregated;
+	const additionalContext = joinAdditionalContext(aggregated.additionalContext);
+	if (additionalContext === undefined && input === undefined) return result;
 	const { additionalContext: _dropped, input: _droppedInput, ...controlResult } = result ?? {};
 	return {
 		...controlResult,
 		...(input !== undefined ? { input } : {}),
-		...(additionalContext.length > 0 ? { additionalContext: additionalContext.join("\n\n") } : {}),
+		...(additionalContext !== undefined ? { additionalContext } : {}),
 	};
 }
 
 /**
  * Return type for `tool_result` handlers.
- * Allows handlers to modify tool results.
+ * Allows handlers to modify tool results and attach passive context.
  */
 export interface ToolResultEventResult {
 	/** Replacement content array (text and images) */
@@ -390,6 +391,16 @@ export interface ToolResultEventResult {
 	details?: unknown;
 	/** Override isError flag */
 	isError?: boolean;
+	/**
+	 * Trusted handler-authored instructions for the next provider request,
+	 * delivered like `ToolCallEventResult.additionalContext` but outside the tool
+	 * result. Unlike `tool_call` context it is also delivered when the call
+	 * failed: the handler sees the outcome (`event.isError`) and decides, which is
+	 * how failure-specific guidance reaches the model. Distinct non-blank values from
+	 * every handler are preserved in registration order (repeats are dropped) and precede the call's
+	 * `tool_call` context. Dropped only when the loop skips the call.
+	 */
+	additionalContext?: string;
 }
 
 /** Return type for `session_before_switch` handlers */

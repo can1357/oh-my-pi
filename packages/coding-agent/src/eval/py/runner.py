@@ -2291,9 +2291,9 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
 
     A background thread reads stdin and enqueues requests so a cell parked on
     a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
-    block sibling requests: eval sessions are shared across concurrent agents
-    (subagents inherit the parent's eval session id), so multiple requests can
-    be in flight on one kernel at once. The reader thread stays blocked in a
+    block sibling requests: auto-backgrounded cells, user Python shortcuts, and
+    kernel-defined tool calls from subagents can all be in flight on one kernel
+    at once. The reader thread stays blocked in a
     ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
     native-extension imports on Windows (see ``_serve_windows``).
     """

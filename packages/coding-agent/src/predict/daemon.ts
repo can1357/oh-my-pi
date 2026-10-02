@@ -4,20 +4,18 @@
  *
  * Lazily opens one `TextPredictor` per requested engine, keeps each learning
  * engine current with `history.db` (rows past a persisted row-id cursor, on
- * open and on every `sync`), persists on a debounce and on exit, and exits
+ * open and on every `sync`), persists on a 5-minute debounce and on exit, and exits
  * after an idle window. A learning engine that starts from empty state first
  * learns the Claude Code and Codex prompt histories (`foreign-history.ts`).
  * `smollm` requests are answered by SmolLM and ngram together (`blend.ts`).
  * Engine state that fails to load is wiped and rebuilt the same way.
  */
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
-import { getHistoryDbPath, isEnoent, logger, postmortem, VERSION, withFileLock } from "@oh-my-pi/pi-utils";
-import { LineParser, writeJsonLine } from "../tiny/jsonl-socket";
-import { endpointAlive } from "../tiny/worker-server";
+import { getHistoryDbPath, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { JsonLineServer } from "../tiny/worker-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
 import { blendPredictions } from "./blend";
 import { readForeignPrompts } from "./foreign-history";
@@ -33,13 +31,21 @@ import { getSmolLmModelDir, smolLmWeightsReady } from "./smollm-weights";
 
 /** Exit after this long without a request; clients restart the daemon on demand. */
 const IDLE_EXIT_MS = 15 * 60_000;
-/** Persist learned state this long after the last change. */
-const PERSIST_DEBOUNCE_MS = 30_000;
+/**
+ * Persist learned state once changes have been quiet this long. Each persist
+ * rewrites the whole engine snapshot (~1 MB for ngram) plus `cursor.json`, so
+ * typing must not trigger one every few seconds. Durability trade-off: a crash
+ * loses only accept/reject feedback since the last persist; prompts are
+ * re-learned on the next open by ingesting `history.db` rows past the persisted
+ * cursor. Idle exit and shutdown still persist (`onStop`).
+ */
+const PERSIST_DEBOUNCE_MS = 5 * 60_000;
+/** Persist at the latest this long after the first unpersisted change, even while changes keep arriving. */
+const PERSIST_MAX_DIRTY_MS = 15 * 60_000;
 /** History rows per `observe` batch during ingestion. */
 const INGEST_BATCH = 1_000;
 /** After an engine fails to open, requests for it fail fast for this long before a retry. */
 const OPEN_RETRY_MS = 60_000;
-const SHUTDOWN_BUDGET_MS = 2_000;
 const CURSOR_FILE = "cursor.json";
 
 /** Persisted history cursor, or `undefined` when the engine has no persisted state yet. */
@@ -63,6 +69,46 @@ class SmolLmWeightsMissingError extends Error {
 		super(
 			"SmolLM weights are not downloaded yet (the editor fetches them on first use, or run `omp tiny-models download smollm`)",
 		);
+	}
+}
+
+/**
+ * Trailing debounce capped by a maximum dirty age: each change pushes the
+ * flush to `debounceMs` after it, but never past `maxDirtyMs` after the first
+ * unflushed change. Consecutive flushes are therefore at least `debounceMs`
+ * apart, and a steady stream of changes still flushes every `maxDirtyMs`.
+ */
+export class PersistCadence {
+	readonly #debounceMs: number;
+	readonly #maxDirtyMs: number;
+	readonly #flush: () => void;
+	#timer: NodeJS.Timeout | undefined;
+	#dirtySince: number | undefined;
+
+	constructor(debounceMs: number, maxDirtyMs: number, flush: () => void) {
+		this.#debounceMs = debounceMs;
+		this.#maxDirtyMs = maxDirtyMs;
+		this.#flush = flush;
+	}
+
+	/** Record a change and (re)arm the flush. */
+	touch(): void {
+		const now = Date.now();
+		this.#dirtySince ??= now;
+		const delay = Math.max(0, Math.min(this.#debounceMs, this.#dirtySince + this.#maxDirtyMs - now));
+		clearTimeout(this.#timer);
+		this.#timer = setTimeout(() => {
+			this.#timer = undefined;
+			this.#dirtySince = undefined;
+			this.#flush();
+		}, delay);
+	}
+
+	/** Drop a pending flush (the caller persists on stop instead). */
+	cancel(): void {
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+		this.#dirtySince = undefined;
 	}
 }
 
@@ -166,14 +212,18 @@ class TextPredictDaemon {
 	#historyDbPath: string;
 	#engines = new Map<TextPredictMethod, Promise<Engine>>();
 	#failedAt = new Map<TextPredictMethod, number>();
-	#connections = new Set<net.Socket>();
-	#server: net.Server | undefined;
-	#endpoint = "";
-	#idleTimer: NodeJS.Timeout | undefined;
-	#persistTimer: NodeJS.Timeout | undefined;
-	#inFlight = 0;
-	#stopped = Promise.withResolvers<void>();
-	#stopping: Promise<void> | undefined;
+	#persistCadence = new PersistCadence(PERSIST_DEBOUNCE_MS, PERSIST_MAX_DIRTY_MS, () => void this.#persistAll());
+	#server = new JsonLineServer<TextPredictRequest, TextPredictResponse>({
+		name: "text-predict",
+		cleanupLabel: "text-predict-daemon",
+		subject: "text-predict daemon",
+		idleMs: IDLE_EXIT_MS,
+		banner: textPredictReadyBanner,
+		onRequest: (request, reply) =>
+			void this.#server.busy(() => this.#dispatch(request)).then(response => reply.send(response)),
+		beforeStop: () => this.#persistCadence.cancel(),
+		onStop: () => this.#persistAll(),
+	});
 
 	constructor(agentDir: string) {
 		this.#agentDir = agentDir;
@@ -181,78 +231,15 @@ class TextPredictDaemon {
 	}
 
 	/** Bind `endpoint` and serve until idle exit or `shutdown`. */
-	async serve(endpoint: string): Promise<void> {
-		this.#endpoint = endpoint;
-		if (process.platform === "win32") {
-			await this.#listen(endpoint);
-		} else {
-			await withFileLock(`${endpoint}.bind`, async () => {
-				await this.#clearStaleSocket(endpoint);
-				await this.#listen(endpoint);
-			});
-		}
-		const cancelCleanup = postmortem.register("text-predict-daemon", () => this.#shutdown());
-		this.#armIdle();
-		process.stdout.write(`${textPredictReadyBanner(endpoint)}\n`);
-		try {
-			await this.#stopped.promise;
-		} finally {
-			cancelCleanup();
-		}
-	}
-
-	#listen(endpoint: string): Promise<void> {
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		server.once("error", reject);
-		server.listen(endpoint, () => {
-			server.off("error", reject);
-			resolve();
-		});
-		return promise;
-	}
-
-	async #clearStaleSocket(endpoint: string): Promise<void> {
-		try {
-			await fs.stat(endpoint);
-		} catch {
-			return;
-		}
-		if (await endpointAlive(endpoint)) throw new Error(`text-predict daemon already listening on ${endpoint}`);
-		await fs.unlink(endpoint);
-	}
-
-	#accept(socket: net.Socket): void {
-		this.#connections.add(socket);
-		socket.setEncoding("utf-8");
-		const parser = new LineParser(line => {
-			let request: TextPredictRequest;
-			try {
-				request = JSON.parse(line);
-			} catch (error) {
-				logger.warn("text-predict: malformed request line", { error: String(error) });
-				return;
-			}
-			void this.#dispatch(request).then(response => writeJsonLine(socket, response));
-		});
-		socket.on("data", (chunk: string) => parser.push(chunk));
-		socket.on("error", () => {
-			// "close" always follows.
-		});
-		socket.once("close", () => this.#connections.delete(socket));
+	serve(endpoint: string): Promise<void> {
+		return this.#server.serve(endpoint);
 	}
 
 	async #dispatch(request: TextPredictRequest): Promise<TextPredictResponse> {
-		this.#inFlight++;
-		this.#armIdle();
 		try {
 			return await this.#handle(request);
 		} catch (error) {
 			return { id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) };
-		} finally {
-			this.#inFlight--;
-			this.#armIdle();
 		}
 	}
 
@@ -278,7 +265,7 @@ class TextPredictDaemon {
 				const engine = await this.#engine(request.method);
 				await engine.predictor.feedback(request.before, request.prefix, request.suggestion, request.accepted);
 				engine.markDirty();
-				this.#schedulePersist();
+				this.#persistCadence.touch();
 				return { id: request.id, ok: true, op: "feedback" };
 			}
 			case "sync": {
@@ -287,11 +274,11 @@ class TextPredictDaemon {
 					const engine = await pending.catch(() => undefined);
 					if (engine) ingested += await engine.ingest(this.#historyDbPath);
 				}
-				if (ingested > 0) this.#schedulePersist();
+				if (ingested > 0) this.#persistCadence.touch();
 				return { id: request.id, ok: true, op: "sync", ingested };
 			}
 			case "shutdown":
-				setImmediate(() => void this.#shutdown().finally(() => process.exit(0)));
+				setImmediate(() => this.#server.exit("shutdown requested"));
 				return { id: request.id, ok: true, op: "shutdown" };
 		}
 	}
@@ -363,21 +350,13 @@ class TextPredictDaemon {
 		}
 		const engine = new Engine(method, stateDir, predictor, cursor);
 		const ingested = await engine.ingest(this.#historyDbPath);
-		if (ingested > 0) this.#schedulePersist();
+		if (ingested > 0) this.#persistCadence.touch();
 		logger.debug("text-predict: engine ready", {
 			method,
 			ingested,
 			ms: Math.round(performance.now() - startedAt),
 		});
 		return engine;
-	}
-
-	#schedulePersist(): void {
-		if (this.#persistTimer) return;
-		this.#persistTimer = setTimeout(() => {
-			this.#persistTimer = undefined;
-			void this.#persistAll();
-		}, PERSIST_DEBOUNCE_MS);
 	}
 
 	async #persistAll(): Promise<void> {
@@ -390,47 +369,6 @@ class TextPredictDaemon {
 				logger.warn("text-predict: persist failed", { method: engine.method, error: String(error) });
 			}
 		}
-	}
-
-	#armIdle(): void {
-		clearTimeout(this.#idleTimer);
-		this.#idleTimer = setTimeout(() => {
-			if (this.#inFlight > 0) {
-				this.#armIdle();
-				return;
-			}
-			logger.debug("text-predict: idle; exiting", { endpoint: this.#endpoint });
-			void this.#shutdown().finally(() => process.exit(0));
-		}, IDLE_EXIT_MS);
-	}
-
-	#shutdown(): Promise<void> {
-		this.#stopping ??= this.#stop();
-		return this.#stopping;
-	}
-
-	async #stop(): Promise<void> {
-		clearTimeout(this.#idleTimer);
-		clearTimeout(this.#persistTimer);
-		this.#persistTimer = undefined;
-		for (const socket of this.#connections) socket.destroy();
-		this.#connections.clear();
-		const server = this.#server;
-		this.#server = undefined;
-		if (server) {
-			const closed = Promise.withResolvers<void>();
-			server.close(() => closed.resolve());
-			await Promise.race([closed.promise, Bun.sleep(SHUTDOWN_BUDGET_MS)]);
-		}
-		await this.#persistAll();
-		if (process.platform !== "win32") {
-			try {
-				await fs.unlink(this.#endpoint);
-			} catch {
-				// Already removed.
-			}
-		}
-		this.#stopped.resolve();
 	}
 }
 

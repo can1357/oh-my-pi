@@ -88,5 +88,15 @@
 		"pageBg": "crtBlack",
 		"cardBg": "crtDarkBg",
 		"infoBg": "crtBg"
+	},
+	"terminal": {
+		"background": "crtBlack",
+		"foreground": "phosphor",
+		"chrome": "crtBlack",
+		"widget": "crtBg",
+		"ansi": [
+			"crtBg", "errorRed", "successGreen", "warnYellow", "glowBlue", "#e07ad0", "#66d9cc", "#e6d6b8",
+			"#7a6e5c", "#ff9090", "#aaee88", "crtGlow", "#99ccff", "#f0a0e8", "#99eedd", "#fff4dc"
+		]
 	}
 }

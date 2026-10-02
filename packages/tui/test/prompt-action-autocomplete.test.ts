@@ -328,6 +328,7 @@ describe("prompt action autocomplete", () => {
 					label: "a/x",
 					description: "X One",
 					icon: theme.symbol("icon.model"),
+					iconName: "model",
 				},
 			],
 		});

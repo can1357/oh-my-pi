@@ -10,6 +10,7 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import {
+	APP_NAME,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
@@ -20,9 +21,10 @@ import {
 import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
-import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
+import { type Args, reportInvalidFlagValues, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -32,7 +34,7 @@ import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
@@ -40,7 +42,6 @@ import {
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
-	type ResolveCliModelResult,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
@@ -90,6 +91,7 @@ import {
 	createAgentSession,
 	discoverAuthStorage,
 	loadSessionExtensions,
+	resolvePrewalkTarget,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
@@ -166,6 +168,7 @@ import {
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgLspEnabled } from "./lsp/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -244,6 +247,22 @@ function applyProtocolDefaults(host: ProtocolHost, targetSettings: Settings = se
 	for (const setting of all()) {
 		if (setting.definition.protocolDefault?.includes(host)) setting.pinDefault(targetSettings);
 	}
+}
+
+/** `--no-ui` only applies to RPC modes; reject it elsewhere (exit 1). */
+function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
+	if (!args.noUi || args.mode === "rpc" || args.mode === "rpc-ui") return;
+	process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc or --mode rpc-ui")}\n`);
+	process.exit(1);
+}
+
+/** Fail an interactive launch whose stdin is not a terminal: the TUI cannot run there. */
+function exitWithoutTerminal(): never {
+	process.stderr.write(
+		`${chalk.red("Error: interactive mode requires a terminal, but stdin is not a TTY.")}\n` +
+			`Pass a prompt (\`${APP_NAME} -p "…"\`), pipe one on stdin, or use \`--mode rpc\`.\n`,
+	);
+	process.exit(2);
 }
 
 /** Reads a non-TTY stdin stream as prompt text. */
@@ -465,7 +484,7 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools" | "invalidFlagValues">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -557,6 +576,11 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				: undefined,
 			args.rawArgs,
 		);
+		const effectiveArgs = reparsedArgs ?? args.parsedArgs;
+		if (effectiveArgs.invalidFlagValues.length > 0) {
+			await nextSession.dispose();
+			throw new CliUsageError(effectiveArgs.invalidFlagValues.join("\n"));
+		}
 		const requestedTools = reparsedArgs?.tools ?? args.parsedArgs.tools;
 		if (requestedTools) {
 			try {
@@ -588,7 +612,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
-	startBackgroundModelDiscovery?: () => Promise<void>,
+	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
 	telegramSessionFactory?: TelegramSessionFactory,
 ): Promise<void> {
@@ -647,7 +671,7 @@ async function runInteractiveMode(
 				recentSessions: startupLease?.recentSessions,
 			}),
 		);
-		void startBackgroundModelDiscovery?.();
+		startDeferredStartupWork?.();
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);
@@ -1500,81 +1524,22 @@ export async function buildSessionOptions(
 			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 		}
 
-		const resolveCandidate = (pattern: string) =>
-			resolveCliModel({ cliModel: pattern, modelRegistry, preferences: modelMatchPreferences });
-
-		const discoverableProviders = new Map(
-			modelRegistry.getDiscoverableProviders().map(provider => [provider.toLowerCase(), provider]),
+		const selection = await resolvePrewalkTarget(
+			targetPatterns,
+			target,
+			modelRegistry,
+			modelMatchPreferences,
+			disabledProviders,
+			{ deferUnregistered: true },
 		);
-		const refreshedProviders = new Set<string>();
-		let authenticatedResolution: ResolveCliModelResult | undefined;
-		let firstUnauthenticatedResolution: ResolveCliModelResult | undefined;
-		let lastResolution: ResolveCliModelResult | undefined;
-
-		// Preserve fallback priority. Each provider-qualified candidate gets its
-		// scoped discovery opportunity before we advance to the next candidate.
-		for (const pattern of targetPatterns) {
-			let candidate = resolveCandidate(pattern);
-			lastResolution = candidate;
-
-			// A disabled provider is unreachable; try the next fallback pattern.
-			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
-			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-				authenticatedResolution = candidate;
-				break;
-			}
-			if (candidate.model) {
-				firstUnauthenticatedResolution ??= candidate;
-				continue;
-			}
-
-			const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
-			if (!requestedProvider || refreshedProviders.has(requestedProvider)) continue;
-			const discoverableProvider = discoverableProviders.get(requestedProvider);
-			if (!discoverableProvider) continue;
-
-			refreshedProviders.add(requestedProvider);
-			await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
-
-			candidate = resolveCandidate(pattern);
-			lastResolution = candidate;
-			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
-			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-				authenticatedResolution = candidate;
-				break;
-			}
-			if (candidate.model) {
-				firstUnauthenticatedResolution ??= candidate;
-			}
-		}
-
-		const resolved =
-			authenticatedResolution ??
-			firstUnauthenticatedResolution ??
-			lastResolution ??
-			resolveCandidate(targetPatterns[0] ?? target);
-
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (disabledProviders.has(resolved.model.provider)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — provider "${resolved.model.provider}" is disabled`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
+		if (selection.deferred) {
+			// Preserve role fallback order until extensions have registered their providers.
+			options.deferredPrewalk = { target, patterns: targetPatterns };
 		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			options.prewalk = selection.prewalk;
+			for (const warning of selection.warnings) {
+				process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+			}
 		}
 	}
 
@@ -1744,6 +1709,11 @@ export async function runRootCommand(
 		}
 
 		if (parsedArgs.export) {
+			// Export loads no extensions, so none can own a value the bootstrap parse
+			// rejected: report it as the usage error it is instead of exporting.
+			if (reportInvalidFlagValues(parsedArgs)) {
+				process.exit(2);
+			}
 			let result: string;
 			try {
 				const outputPath = parsedArgs.messages.length > 0 ? parsedArgs.messages[0] : undefined;
@@ -1762,9 +1732,10 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
 		}
-		if (parsedArgs.noUi && parsedArgs.mode !== "rpc") {
-			process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc")}\n`);
-			process.exit(1);
+		// A pending invalid `--mode` leaves `mode` unset; report it (exit 2) at the
+		// post-extension recheck before judging `--no-ui` against the mode.
+		if (parsedArgs.invalidFlagValues.length === 0) {
+			rejectNoUiWithoutRpc(parsedArgs);
 		}
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
@@ -1803,8 +1774,29 @@ export async function runRootCommand(
 		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp" || mode === "telegram";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
-		const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
+		// Without a terminal on stdin the TUI cannot run, so such a launch is always
+		// headless: a piped or argv prompt runs like `-p`, and one with no prompt
+		// fails with a usage error instead of booting the interactive stack and
+		// exiting silently.
+		const stdinIsTerminal = process.stdin.isTTY === true;
+		const autoPrint =
+			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
 		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		// Without piped text the prompt must come from argv, which only the
+		// post-extension reparse can settle: an extension string flag's value
+		// (`--spawn-peer reviewer`) looks like a prompt here, and a boolean flag
+		// shadowing a built-in (`--mode compact`) hides one. Fail early only for
+		// an unambiguous argv; otherwise the recheck there decides.
+		const autoPrintNeedsArgPrompt = autoPrint && pipedInput === undefined;
+		if (
+			autoPrintNeedsArgPrompt &&
+			parsedArgs.messages.length === 0 &&
+			parsedArgs.fileArgs.length === 0 &&
+			parsedArgs.unrecognizedFlags.length === 0 &&
+			parsedArgs.invalidFlagValues.length === 0
+		) {
+			exitWithoutTerminal();
+		}
 		// Only the interactive host renders a focusable Agent Hub / subagent session
 		// tree; declare it so headless subagent optimizations (e.g. skipping replan
 		// title refresh) can tell a focusable process from a print/RPC/eval one.
@@ -1932,7 +1924,9 @@ export async function runRootCommand(
 				lightTheme: cfgThemeLight.get(settingsInstance),
 			},
 		});
-		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
+		setStartupComposerLspServers(
+			!parsedArgs.noLsp && cfgLspEnabled.get(settingsInstance) ? discoverStartupLspServers(cwd, "connecting") : null,
+		);
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",
@@ -2136,9 +2130,13 @@ export async function runRootCommand(
 			}
 		}
 		await pluginPreloadPromise;
-		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
-		}
+		// Pure file I/O: overlap it with session-option building, but land it before
+		// extensions load or the session can start project daemons.
+		const daemonPresencePromise =
+			deps === DEFAULT_RUN_ROOT_DEPENDENCIES
+				? logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd)
+				: undefined;
+		daemonPresencePromise?.catch(() => {});
 
 		scheduleMarketplaceAutoUpdate({
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
@@ -2164,6 +2162,10 @@ export async function runRootCommand(
 		// processes (mirrors, second-writer refusal). `omp -p`, ACP, RPC and SDK
 		// embedders stay out of the registry.
 		if (isInteractive) sessionOptions.presenceKind = "interactive";
+		sessionOptions.onPrewalkWarning = warning => {
+			if (isInteractive) notifs.push({ kind: "warn", message: warning });
+			else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		};
 
 		// OTEL: unless `telemetry.otlpExportEnabled` is off, register global OTLP
 		// exporters when an endpoint is configured via env, then switch on the agent
@@ -2178,6 +2180,7 @@ export async function runRootCommand(
 		if (isTelemetryExportEnabled()) {
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
+		await daemonPresencePromise;
 
 		// Handle CLI --api-key as runtime override (not persisted)
 		if (parsedArgs.apiKey) {
@@ -2197,12 +2200,26 @@ export async function runRootCommand(
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
-			// every parallel arm by ~30ms.
-			modelRegistry.refreshInBackground();
+			// every parallel arm by ~30ms. Interactive startup defers it further, behind the first
+			// frame (see `startDeferredStartupWork`), for the same reason.
+			if (!isInteractive) modelRegistry.refreshInBackground();
 			return result;
 		};
 
 		if (mode === "acp") {
+			// ACP binds extensions per `session/new`, and any of them may own a flag
+			// the bootstrap parse rejected, so pending invalid enum values are
+			// normally settled by the per-session factory. With discovery off and no
+			// explicit extension (`-e`, `--hook`, trusted) no session can load one,
+			// so fail the launch now instead of every `session/new` — without
+			// binding anything, since extension factories have side effects.
+			if (
+				sessionOptions.disableExtensionDiscovery &&
+				(sessionOptions.additionalExtensionPaths?.length ?? 0) === 0 &&
+				reportInvalidFlagValues(parsedArgs)
+			) {
+				process.exit(2);
+			}
 			const createAcpSession = createAcpSessionFactory({
 				baseOptions: sessionOptions,
 				settings: settingsInstance,
@@ -2216,6 +2233,9 @@ export async function runRootCommand(
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
 			stopStartupWatchdog();
+			// Startup is over: stop recording spans, or every later session and subagent
+			// appends to the timing tree for the life of the server.
+			logger.endTiming();
 			await runAcpMode(createAcpSession);
 		} else if (mode === "telegram") {
 			// Branch-only host runner: keep Telegram host and lifecycle code out of
@@ -2233,6 +2253,7 @@ export async function runRootCommand(
 				createSession,
 			});
 			stopStartupWatchdog();
+			logger.endTiming();
 			await runTelegramHeadless({
 				settings: settingsInstance,
 				cwd,
@@ -2297,14 +2318,22 @@ export async function runRootCommand(
 					process.stderr.write(`${chalk.yellow(`${message}\n`)}`);
 				}
 			}
-			// Fail fast on stale/typo flags (e.g. `omp --list-models`) now that we
-			// know the real extension flag set. Without this check the unrecognized
-			// token gets silently consumed and any following positional leaks as the
-			// initial prompt — kicking off a real LLM session, MCP connection, and
-			// tool calls (issue #2459). Exit code 2 matches the conventional
-			// "command line usage error" convention.
-			if (reportUnrecognizedFlags(initialArgs)) {
+			// Fail fast on stale/typo flags (e.g. `omp --list-models`) and invalid
+			// built-in enum values now that we know the real extension flag set —
+			// an extension may shadow `--mode`/`--thinking`/`--approval-mode`, so
+			// neither can be judged by the pre-extension parse. Without this check
+			// the unrecognized token gets silently consumed and any following
+			// positional leaks as the initial prompt — kicking off a real LLM
+			// session, MCP connection, and tool calls (issue #2459). Exit code 2
+			// matches the conventional "command line usage error" convention.
+			const invalidValues = reportInvalidFlagValues(initialArgs);
+			const unknownFlags = reportUnrecognizedFlags(initialArgs);
+			if (invalidValues || unknownFlags) {
 				process.exit(2);
+			}
+			rejectNoUiWithoutRpc(parsedArgs);
+			if (autoPrintNeedsArgPrompt && initialArgs.messages.length === 0 && initialArgs.fileArgs.length === 0) {
+				exitWithoutTerminal();
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0
@@ -2375,6 +2404,8 @@ export async function runRootCommand(
 				eventBus,
 				subagentEventBus,
 				preloadedExtensions: extensionsResult,
+				// runInteractiveMode validates once init has painted the first frame.
+				deferRetryFallbackValidation: isInteractive,
 			});
 
 			const sessionToolNames = session.getAllToolNames();
@@ -2421,11 +2452,21 @@ export async function runRootCommand(
 			// empty (issue #9220). Fire-and-forget: the prompt must never block on the
 			// background pass.
 			const configuredScope = parsedArgs.models ?? cfgEnabledModels.get(settingsInstance);
-			if (isInteractive && configuredScope.length > 0) {
-				void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(error =>
-					logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
-				);
-			}
+			// Interactive-only work that must not delay the first session-bound frame:
+			// runInteractiveMode calls it once init has painted. Neither feeds the first
+			// prompt: fallback-chain validation only produces header warnings, and the
+			// background refresh already raced the first prompt when it ran earlier.
+			const startDeferredStartupWork = (): void => {
+				session.validateRetryFallbackChains();
+				modelRegistry.refreshInBackground();
+				if (configuredScope.length > 0) {
+					// Must follow refreshInBackground: it waits on the in-flight refresh.
+					void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(
+						error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
+					);
+				}
+				void startBackgroundModelDiscovery?.();
+			};
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
@@ -2446,6 +2487,24 @@ export async function runRootCommand(
 				} else {
 					process.stderr.write(`${chalk.red("No models available.")}\n`);
 				}
+				const availableModels = modelRegistry.getAvailable();
+				if (parsedArgs.model && availableModels.length > 0) {
+					// Credentials work; the requested selector is what failed. Point at
+					// the nearest usable models instead of an API-key checklist.
+					const suggestions = fuzzyFilter(
+						availableModels.map(model => `${model.provider}/${model.id}`),
+						parsedArgs.model,
+						selector => selector,
+					).slice(0, 5);
+					if (suggestions.length > 0) {
+						process.stderr.write(`${chalk.yellow("\nDid you mean:")}\n`);
+						for (const selector of suggestions) process.stderr.write(`  ${selector}\n`);
+					}
+					process.stderr.write(
+						`\nRun \`${APP_NAME} models find <pattern>\` to search, or \`${APP_NAME} models\` to list all.\n`,
+					);
+					process.exit(1);
+				}
 				process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
 				process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
 				process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
@@ -2464,6 +2523,7 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
+				logger.endTiming();
 				await runRpcMode(session, {
 					setToolUIContext: mode === "rpc-ui" ? setToolUIContext : undefined,
 					headless: parsedArgs.noUi === true,
@@ -2518,7 +2578,7 @@ export async function runRootCommand(
 						initialMessage,
 						initialImages,
 						parsedArgs.join,
-						startBackgroundModelDiscovery,
+						startDeferredStartupWork,
 						startupLease,
 						telegramInteractiveFactory,
 					);
@@ -2528,6 +2588,9 @@ export async function runRootCommand(
 			} else {
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
+				// PI_TIMING prints the tree after the run; otherwise stop recording now so a
+				// long `-p` run's subagents do not keep growing it.
+				if (!$env.PI_TIMING) logger.endTiming();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 				const exitCode = await runPrintMode(session, {
 					mode,

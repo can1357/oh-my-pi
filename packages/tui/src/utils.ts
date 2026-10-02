@@ -241,6 +241,9 @@ const OSC66_PREFIX = "\x1b]66;";
 const APC_SPAN_REGEX = /\x1b_[\s\S]*?(?:\x07|\x1b\\)/g;
 const APC_PREFIX = "\x1b_";
 const PRINTABLE_ASCII_REGEX = /^[\u0020-\u007e]*$/;
+// Keep native escape parsing: a JS SGR parser costs more than Bun's scanner.
+// Test Jamo separately from the ASCII correction markers to keep scans cheap.
+const HANGUL_COMPAT_JAMO_REGEX = /[\u3131-\u318e]/;
 
 // Pin Bun.stringWidth semantics to the native width engine and guard against Bun
 // default drift: strip ANSI/OSC (don't count escape bytes) and treat
@@ -335,6 +338,18 @@ export function visibleWidth(str: string): number {
 			visibleWidthCache.set(str, str.length);
 		}
 		return str.length;
+	}
+
+	// The extra gate pays for itself on long uncached lines, not short cache
+	// misses. APC and OSC 66 still need their existing payload corrections.
+	if (
+		!cacheable &&
+		!str.includes("\t") &&
+		!HANGUL_COMPAT_JAMO_REGEX.test(str) &&
+		!str.includes(APC_PREFIX) &&
+		!str.includes(OSC66_PREFIX)
+	) {
+		return Bun.stringWidth(str, STRING_WIDTH_OPTS);
 	}
 
 	let tabCount = 0;

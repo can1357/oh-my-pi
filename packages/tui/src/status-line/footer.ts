@@ -9,7 +9,15 @@ import { shortenPath } from "../render/render-utils";
 import { sanitizeStatusText } from "../chrome/shared";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
-import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "../chrome/context-thresholds";
+import {
+	formatContextUsage,
+	getContextUsageLevel,
+	getContextUsageThemeColor,
+	getContextUsageTone,
+} from "../chrome/context-thresholds";
+import type { TspProps, TspSpan } from "@oh-my-pi/pi-wire";
+import type { NativeNode } from "../native/node";
+import { col, node, span } from "../native/describe";
 
 /**
  * Footer component that shows pwd, token stats, and context usage
@@ -23,6 +31,7 @@ export class FooterComponent implements Component {
 	#disposed = false;
 	#autoCompactEnabled: boolean = true;
 	#extensionStatuses: Map<string, string> = new Map();
+	#nativeMemo: { node: NativeNode; fingerprint: string } | undefined;
 
 	constructor(
 		private readonly session: FooterSession,
@@ -157,6 +166,90 @@ export class FooterComponent implements Component {
 					? (headState.branch ?? headState.refName ?? "HEAD")
 					: "detached";
 		return this.#cachedBranch;
+	}
+
+	/**
+	 * Native footer: a `status` bar (path and branch, usage counters, billing
+	 * and context on the left, model on the right) plus the extension statuses.
+	 * Rebuilt per call from cheap session reads; the node identity holds while
+	 * the description is unchanged.
+	 */
+	describe(): NativeNode {
+		const state = this.session.state;
+		let input = 0;
+		let output = 0;
+		let cacheRead = 0;
+		let cacheWrite = 0;
+		let cost = 0;
+		let premiumRequests = 0;
+		for (const entry of this.session.sessionManager.getEntries()) {
+			if (entry.type === "message" && entry.message?.role === "assistant") {
+				input += entry.message.usage.input;
+				output += entry.message.usage.output;
+				cacheRead += entry.message.usage.cacheRead;
+				cacheWrite += entry.message.usage.cacheWrite;
+				cost += entry.message.usage.cost.total;
+				premiumRequests += entry.message.usage.premiumRequests ?? 0;
+			}
+		}
+		const segs: NativeNode[] = [];
+		const seg = (key: string, props: TspProps<"seg">): void => {
+			segs.push(node("seg", { role: `omp.footer.${key}`, ...props }, undefined, key));
+		};
+		const pathSpans: TspSpan[] = [span(shortenPath(getProjectDir()), "path dim")];
+		const branch = this.#getCurrentBranch();
+		if (branch) pathSpans.push(span(` (${branch})`, "dim"));
+		seg("path", { side: "left", priority: 6, icon: "folder", spans: pathSpans });
+		const counters: [string, string, number][] = [
+			["input", "↑", input],
+			["output", "↓", output],
+			["cache-read", "R", cacheRead],
+			["cache-write", "W", cacheWrite],
+		];
+		for (const [key, glyph, amount] of counters) {
+			if (amount) seg(key, { side: "left", priority: 1, spans: [span(`${glyph}${formatNumber(amount)}`, "dim")] });
+		}
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const billing = formatBillingSummary({ cost, usingSubscription, premiumRequests, fractionDigits: 3 }, theme);
+		if (billing) seg("cost", { side: "left", priority: 3, spans: [span(billing, "dim")] });
+		const contextUsage = this.session.getContextUsage();
+		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+		const contextPercent = contextWindow > 0 ? (contextUsage?.percent ?? 0) : null;
+		const level =
+			contextUsage && contextPercent !== null ? getContextUsageLevel(contextPercent, contextWindow) : "normal";
+		const contextSpans: TspSpan[] = [
+			span(
+				formatContextUsage(contextPercent, contextWindow, contextUsage?.tokens ?? 0),
+				getContextUsageThemeColor(level),
+			),
+		];
+		if (this.#autoCompactEnabled && theme.icon.auto) contextSpans.push(span(` ${theme.icon.auto}`, "dim"));
+		const contextProps: TspProps<"seg"> = { side: "left", priority: 4, icon: "context", spans: contextSpans };
+		const tone = getContextUsageTone(level);
+		if (tone) contextProps.tone = tone;
+		seg("context", contextProps);
+		let model = state.model?.id || "no-model";
+		if (state.model?.thinking) {
+			const level = this.session.isAutoThinking
+				? (this.session.autoResolvedThinkingLevel() ?? `${theme.thinking.autoPending} auto`)
+				: (state.thinkingLevel ?? ThinkingLevel.Off);
+			model += ` • ${level}`;
+		}
+		seg("model", { side: "right", priority: 5, icon: "model", spans: [span(model, "dim")] });
+		const bar = node("status", { role: "omp.footer" }, segs, "bar");
+		const children: NativeNode[] = [bar];
+		if (this.#extensionStatuses.size > 0) {
+			const statuses = Array.from(this.#extensionStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, value]) => sanitizeStatusText(value))
+				.join(" ");
+			children.push(node("text", { text: statuses, wrap: "none", role: "omp.footer.extensions" }, undefined, "ext"));
+		}
+		const built = children.length === 1 ? bar : col(children, { role: "omp.footer.panel" });
+		const fingerprint = JSON.stringify(built);
+		if (this.#nativeMemo?.fingerprint === fingerprint) return this.#nativeMemo.node;
+		this.#nativeMemo = { node: built, fingerprint };
+		return built;
 	}
 
 	render(width: number): readonly string[] {

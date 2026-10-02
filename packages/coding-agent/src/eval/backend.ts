@@ -47,6 +47,8 @@ export interface ExecutorBackendResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId: string | undefined;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;

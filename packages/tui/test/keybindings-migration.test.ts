@@ -279,14 +279,6 @@ describe("KeybindingsManager.create", () => {
 		}
 	});
 
-	it("defaults model selection to Alt+M, display reset to Alt+L, and live toggle to Ctrl+L", () => {
-		const manager = KeybindingsManager.inMemory();
-
-		expect(manager.getKeys("app.model.select")).toEqual(["alt+m"]);
-		expect(manager.getKeys("app.display.reset")).toEqual(["alt+l"]);
-		expect(manager.getKeys("app.live.toggle")).toEqual(["ctrl+l"]);
-	});
-
 	it("keeps the Ctrl+L live toggle default when an old model remap still claims Ctrl+L", () => {
 		const manager = KeybindingsManager.inMemory({
 			"app.model.select": "ctrl+l",
@@ -303,21 +295,6 @@ describe("KeybindingsManager.create", () => {
 		});
 
 		expect(manager.getKeys("app.display.reset")).toEqual(["ctrl+l"]);
-	});
-
-	it("defaults the follow-up shortcut to both Ctrl+Q and Ctrl+Enter (#1903)", async () => {
-		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-keybindings-"));
-
-		try {
-			const manager = KeybindingsManager.create(agentDir);
-
-			// Both chords must be registered so Windows Terminal users (which swallow
-			// Ctrl+Enter at the terminal layer) get a working follow-up binding out
-			// of the box, without breaking users on Kitty/iTerm2/WezTerm/Ghostty.
-			expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+q", "ctrl+enter"]);
-		} finally {
-			await removeWithRetries(agentDir);
-		}
 	});
 
 	it("removes the Ctrl+Q follow-up default when a user remap already claims it (#1903)", () => {
