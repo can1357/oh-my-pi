@@ -35,6 +35,12 @@ provider "openai" {
 			cost input=12.5 output=75 cache-read=1.25 cache-write=15.625
 			limits context=400000 max-tokens=128000
 		}
+		model "gpt-6.1-sol" name="GPT-6.1 Sol" {
+			reasoning #true
+			input "text" "image"
+			cost input=2 output=10 cache-read=0.1 cache-write=2.5
+			limits context=1050000 max-tokens=128000
+		}
 
 		// Catalog cost fields are per 1M tokens: GPT transcribers map documented
 		// audio-input/output-token rates directly. Whisper's $0.006/min duration

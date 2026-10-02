@@ -77,6 +77,7 @@
 - Reduced unnecessary disk writes and improved persistence efficiency across sessions, model data, configuration, and background jobs.
 - Fixed the native composer showing the main session's effort level instead of the selected subagent's level.
 - Fixed the `omp predict` comparison view and MCP authorization prompt rendering with their full native interfaces, including clickable link actions.
+- Restored the bundled OpenAI GPT-6.1 Sol reference metadata so OpenAI-compatible model discovery exposes its reasoning support and five-level effort ladder while retaining gateway-local pricing.
 
 ## [18.4.6] - 2026-10-01
 

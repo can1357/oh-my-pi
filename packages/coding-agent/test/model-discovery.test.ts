@@ -2443,6 +2443,81 @@ describe("ModelRegistry runtime discovery", () => {
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
 	});
+	test("openai-models-list explicit refresh upgrades cached reasoning metadata without losing models", async () => {
+		const baseUrl = "http://127.0.0.1:9993";
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl,
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const cachedModel = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "openai-test",
+				baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 32_768,
+			});
+		writeModelCache(
+			"openai-test:openai-models-list-context-v3",
+			Date.now(),
+			[cachedModel("gpt-6.1-sol"), cachedModel("gpt-6-sol")],
+			true,
+			"",
+			cacheDbPath,
+		);
+
+		const noNetwork: FetchImpl = async input => {
+			throw new Error(`Unexpected offline fetch: ${String(input)}`);
+		};
+		const offlineRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: noNetwork });
+		await offlineRegistry.refreshProvider("openai-test", "offline");
+		const cachedSol = offlineRegistry.find("openai-test", "gpt-6.1-sol");
+		expect(cachedSol?.reasoning).toBe(false);
+		expect(cachedSol?.thinking).toBeUndefined();
+		expect(offlineRegistry.find("openai-test", "gpt-6-sol")).toBeDefined();
+
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url !== `${baseUrl}/v1/models`) throw new Error(`Unexpected URL: ${url}`);
+			modelListCalls++;
+			return Response.json({ data: [{ id: "gpt-6.1-sol" }, { id: "gpt-6-sol" }] });
+		};
+		const onlineRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await onlineRegistry.refreshProvider("openai-test", "online");
+		expect(modelListCalls).toBe(1);
+		const refreshedSol = onlineRegistry.find("openai-test", "gpt-6.1-sol");
+		expect(refreshedSol?.thinking?.efforts).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect((refreshedSol?.compat as OpenAICompat | undefined)?.supportsReasoningEffort).toBe(true);
+		expect(onlineRegistry.find("openai-test", "gpt-6-sol")).toBeDefined();
+
+		const reopenedRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: noNetwork });
+		await reopenedRegistry.refreshProvider("openai-test", "offline");
+		expect(reopenedRegistry.find("openai-test", "gpt-6.1-sol")?.thinking?.efforts).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect(reopenedRegistry.find("openai-test", "gpt-6-sol")).toBeDefined();
+	});
+
 	test("openai-models-list uses nested token limits with existing context precedence", async () => {
 		writeRawModelsJson({
 			"openai-test": {
@@ -2492,6 +2567,17 @@ describe("ModelRegistry runtime discovery", () => {
 		const aiproxyModel = registry.find("openai-test", "gpt-6.1-sol");
 		expect(aiproxyModel?.contextWindow).toBe(1_050_000);
 		expect(aiproxyModel?.maxTokens).toBe(128_000);
+		expect(aiproxyModel?.reasoning).toBe(true);
+		expect(aiproxyModel?.thinking?.efforts).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect((aiproxyModel?.compat as OpenAICompat | undefined)?.supportsReasoningEffort).toBe(true);
+		expect(aiproxyModel?.input).toEqual(["text", "image"]);
+		expect(aiproxyModel?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
 		const contextPriority = registry.find("openai-test", "openai-test/context-priority");
 		expect(contextPriority?.contextWindow).toBe(100_000);
@@ -2507,6 +2593,9 @@ describe("ModelRegistry runtime discovery", () => {
 			expect(model?.contextWindow).toBe(128_000);
 			expect(model?.maxTokens).toBe(32_768);
 		}
+		const noLimitsModel = registry.find("openai-test", "openai-test/no-limits");
+		expect(noLimitsModel?.reasoning).toBe(false);
+		expect(noLimitsModel?.thinking).toBeUndefined();
 
 		const independentOutputLimit = registry.find("openai-test", "openai-test/output-limit-with-invalid-input");
 		expect(independentOutputLimit?.contextWindow).toBe(128_000);
@@ -2515,6 +2604,13 @@ describe("ModelRegistry runtime discovery", () => {
 		const legacyReference = registry.find("openai-test", "gpt-6-sol");
 		expect(legacyReference?.contextWindow).toBe(1_050_000);
 		expect(legacyReference?.maxTokens).toBe(128_000);
+		expect(legacyReference?.thinking?.efforts).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
 	});
 
 	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {
