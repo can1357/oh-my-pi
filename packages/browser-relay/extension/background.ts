@@ -194,7 +194,7 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 				msg.params,
 			);
 		case "createTab": {
-			const tab = await chrome.tabs.create({ url: msg.url });
+			const tab = await chrome.tabs.create({ url: msg.url, active: false });
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };

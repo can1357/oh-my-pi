@@ -139,13 +139,13 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 - **Managed Chromium:** creates an omp-owned page in project-shared Chromium and applies stealth patches. Installation happens automatically on first use. `headed` overrides the default hidden mode.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here; Chromium-family processes use an omp-owned profile unless args specify `--user-data-dir`.
 - **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
-- **Relay (`app.relay: true`):** adopts the user's real Chrome tab. `app.target` selects by URL/title substring; without it the visible usable tab is adopted. Passing `url` navigates the adopted tab.
+- **Relay (`app.relay: true`):** creates a dedicated background tab in the user's real Chrome profile without changing the selected tab. `app.target` explicitly borrows an existing tab by URL/title substring. Passing `url` navigates the created or selected tab.
 - **Tern:** inside a Tern pane, opens a visible browser picture-in-picture over the pane using native WKWebView, not Chromium. `headed: false` or `app.tern: false` opts out; `app.tern: true` requires Tern. Automatic Tern selection falls back to Chromium with an explanatory result when Tern cannot host the page.
 - **Cmux:** drives an available cmux WKWebView surface.
 
 The native-webview backends do not provide full Puppeteer/CDP capabilities. Tern provides fetch/XHR and navigation-response logging, not complete CDP subresource coverage; routing accepts only fetch/XHR resource types. CPU/network throttling, timezone/headers/reduced-motion emulation, CSS-transformed frame input, and tracing/profiling are unsupported; `metrics` returns navigation timing and DOM counts rather than full CDP metrics. Tern PDF accepts only `path`; storage loading restores only the current origin. Inspect backend-specific errors rather than assuming Chromium behavior.
 
-Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned Chromium pages, Tern picture-in-pictures, and owned cmux surfaces closes them. Connected and relay pages remain open. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates an application owned by this process; reused processes are never killed.
+Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned Chromium and relay pages, Tern picture-in-pictures, and owned cmux surfaces closes them. Connected and explicitly borrowed relay pages remain open; the relay rejects CDP close commands for pre-existing user tabs. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates an application owned by this process; reused processes are never killed.
 
 ## Screenshots and output
 
