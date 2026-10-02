@@ -501,9 +501,6 @@ export class MCPCommandController {
 	 */
 	#showHelp(): void {
 		const helpText = [
-			"",
-			theme.bold("MCP Server Management"),
-			"",
 			"Manage Model Context Protocol (MCP) servers for external tool integrations.",
 			"",
 			theme.fg("accent", "Commands:"),
@@ -529,7 +526,7 @@ export class MCPCommandController {
 			"",
 		].join("\n");
 
-		this.#showMessage(helpText);
+		this.#showReport("MCP Server Management", helpText);
 	}
 
 	#parseAddCommand(text: string): MCPAddParsed {
@@ -1503,19 +1500,18 @@ export class MCPCommandController {
 				discoveredServers.length === 0 &&
 				disabledServerNames.size === 0
 			) {
-				this.#showMessage(
+				this.#showReport(
+					"MCP Servers",
 					[
-						"",
 						theme.fg("muted", "No MCP servers configured."),
 						"",
 						`Use ${theme.fg("accent", "/mcp add")} to add a server.`,
-						"",
 					].join("\n"),
 				);
 				return;
 			}
 
-			const lines: string[] = ["", theme.bold("Configured MCP Servers"), ""];
+			const lines: string[] = [];
 
 			// Show user-level servers
 			if (userServers.length > 0) {
@@ -1590,7 +1586,7 @@ export class MCPCommandController {
 				}
 				lines.push("");
 			}
-			this.#showMessage(lines.join("\n"));
+			this.#showReport("Configured MCP Servers", lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`Failed to list servers: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -2289,7 +2285,7 @@ export class MCPCommandController {
 		}
 
 		const servers = this.ctx.mcpManager.getConnectedServers();
-		const lines: string[] = ["", theme.bold("MCP Resources"), ""];
+		const lines: string[] = [];
 		let hasAny = false;
 
 		for (const name of servers) {
@@ -2317,9 +2313,8 @@ export class MCPCommandController {
 
 		if (!hasAny) {
 			lines.push(theme.fg("muted", "No resources available on connected servers."));
-			lines.push("");
 		}
-		this.#showMessage(lines.join("\n"));
+		this.#showReport("MCP Resources", lines.join("\n"));
 	}
 
 	/**
@@ -2332,7 +2327,7 @@ export class MCPCommandController {
 		}
 
 		const servers = this.ctx.mcpManager.getConnectedServers();
-		const lines: string[] = ["", theme.bold("MCP Prompts"), ""];
+		const lines: string[] = [];
 		let hasAny = false;
 
 		for (const name of servers) {
@@ -2358,9 +2353,8 @@ export class MCPCommandController {
 
 		if (!hasAny) {
 			lines.push(theme.fg("muted", "No prompts available on connected servers."));
-			lines.push("");
 		}
-		this.#showMessage(lines.join("\n"));
+		this.#showReport("MCP Prompts", lines.join("\n"));
 	}
 
 	/**
@@ -2375,7 +2369,7 @@ export class MCPCommandController {
 		const { enabled, subscriptions } = this.ctx.mcpManager.getNotificationState();
 		const servers = this.ctx.mcpManager.getConnectedServers();
 		const statusIcon = enabled ? theme.fg("success", "enabled") : theme.fg("warning", "disabled");
-		const lines: string[] = ["", theme.bold("MCP Notifications"), ""];
+		const lines: string[] = [];
 		lines.push(`  Status: ${statusIcon}  ${theme.fg("dim", "(mcp.notifications setting)")}`);
 		lines.push("");
 
@@ -2425,9 +2419,8 @@ export class MCPCommandController {
 
 		if (!hasAny) {
 			lines.push(theme.fg("muted", "No servers support notifications."));
-			lines.push("");
 		}
-		this.#showMessage(lines.join("\n"));
+		this.#showReport("MCP Notifications", lines.join("\n"));
 	}
 
 	async #validateSmitheryApiKey(apiKey: string): Promise<void> {
@@ -2749,5 +2742,10 @@ export class MCPCommandController {
 	 */
 	#showMessage(text: string): void {
 		showCommandMessage(this.ctx, text);
+	}
+
+	/** A read-only listing shown outside the transcript (see `InteractiveModeContext.showCommandReport`). */
+	#showReport(title: string, text: string): void {
+		this.ctx.showCommandReport({ title, body: new Text(text.trim(), 0, 0) });
 	}
 }
