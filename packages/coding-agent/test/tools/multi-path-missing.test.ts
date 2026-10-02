@@ -95,6 +95,42 @@ describe("multi-path tools tolerate missing entries", () => {
 		expect(details?.missingPaths).toEqual(["tests/**/*.ts"]);
 	});
 
+	it.each(["does/not/exist", "does/not/exist/**/*.ts"])(
+		"find succeeds with an empty result and a missing-path notice for %s",
+		async missingPath => {
+			const tool = new GlobTool(createTestSession(tempDir), { rootPathAlias: true });
+			const result = await tool.execute("find-single-missing", { path: missingPath });
+			const text = getText(result);
+			const details = result.details as { fileCount?: number; missingPaths?: string[]; files?: string[] };
+
+			expect(details.fileCount).toBe(0);
+			expect(details.files).toEqual([]);
+			expect(details.missingPaths).toEqual([missingPath]);
+			expect(text).toContain(`Path not found: ${missingPath}`);
+		},
+	);
+
+	it("find reports a single missing path from custom operations without calling glob", async () => {
+		let globCalled = false;
+		const tool = new GlobTool(createTestSession(tempDir), {
+			operations: {
+				exists: () => false,
+				glob: () => {
+					globCalled = true;
+					return [];
+				},
+			},
+		});
+		const result = await tool.execute("find-custom-single-missing", { path: "does/not/exist" });
+		const details = result.details as { fileCount?: number; missingPaths?: string[]; files?: string[] };
+
+		expect(globCalled).toBe(false);
+		expect(details.fileCount).toBe(0);
+		expect(details.files).toEqual([]);
+		expect(details.missingPaths).toEqual(["does/not/exist"]);
+		expect(getText(result)).toContain("Path not found: does/not/exist");
+	});
+
 	it("find errors only when every glob's base directory is missing", async () => {
 		const tool = new GlobTool(createTestSession(tempDir), { rootPathAlias: true });
 
@@ -103,5 +139,17 @@ describe("multi-path tools tolerate missing entries", () => {
 		});
 
 		await expect(promise).rejects.toThrow(/Path not found.*nope.*also-nope/s);
+	});
+
+	it("find retains all missing paths if the last valid root disappears after partitioning", async () => {
+		const tool = new GlobTool(createTestSession(tempDir), {
+			stat: async () => {
+				throw Object.assign(new Error("Root disappeared"), { code: "ENOENT" });
+			},
+		});
+
+		await expect(tool.execute("find-partition-race", { path: "src/**/*.ts; tests/**/*.ts" })).rejects.toThrow(
+			/Path not found: tests\/\*\*\/\*\.ts, src\/\*\*\/\*\.ts/,
+		);
 	});
 });

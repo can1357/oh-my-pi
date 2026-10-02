@@ -168,10 +168,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("`path` must contain non-empty globs or paths");
 			}
 
-			// Tolerate missing entries in a multi-path call: skip ones whose base
-			// directory is gone, and only error if every entry is missing. Single
-			// missing path keeps the original ENOENT semantics — the user explicitly
-			// asked about that one path, so silent empty results would be misleading.
+			// Tolerate missing entries in a multi-path call while retaining the
+			// existing all-missing error. A single missing path returns an empty
+			// result with explicit metadata and a notice instead of a tool error.
 			let missingPaths: string[] = [];
 			let effectivePatterns = normalizedPatterns;
 			if (normalizedPatterns.length > 1 && !this.#customOps) {
@@ -207,6 +206,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						})(),
 					];
 			const scopePath = multiPattern?.scopePath ?? formatScopePath(targets[0].searchPath);
+			const recordMissingSingleTarget = (): void => {
+				const missing = effectivePatterns[0] ?? scopePath;
+				missingPaths = [...missingPaths, missing];
+				// Partitioning can leave one surviving target from a multi-path call.
+				// If that target disappears before its scan, every path is missing.
+				if (normalizedPatterns.length > 1) {
+					throw new ToolError(`Path not found: ${missingPaths.join(", ")}`);
+				}
+			};
 
 			for (const target of targets) {
 				if (target.searchPath === "/") {
@@ -237,15 +245,18 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				});
 			};
 
-			const missingPathsNote =
-				missingPaths.length > 0 ? `Skipped missing paths: ${missingPaths.join(", ")}` : undefined;
-
 			const buildResult = (
 				files: string[],
 				opts?: { notice?: string; forceTruncated?: boolean; timedOut?: boolean },
 			): AgentToolResult<GlobToolDetails> => {
 				const notice = opts?.notice;
 				const forceTruncated = opts?.forceTruncated ?? false;
+				const missingPathsNote =
+					missingPaths.length === 0
+						? undefined
+						: normalizedPatterns.length === 1
+							? `Path not found: ${missingPaths[0]}`
+							: `Skipped missing paths: ${missingPaths.join(", ")}`;
 				if (files.length === 0) {
 					const details: GlobToolDetails = {
 						scopePath,
@@ -319,7 +330,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const perTarget = await Promise.all(
 					targets.map(async target => {
 						if (!(await customOps.exists(target.searchPath))) {
-							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+							if (isSingle) recordMissingSingleTarget();
 							return [] as string[];
 						}
 						if (!target.hasGlob && customOps.stat) {
@@ -368,7 +379,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							// ENAMETOOLONG can never name a real target; surface a clean
 							// "Path not found" instead of leaking the raw errno (issue #7597).
 							if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
-								if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+								if (isSingle) recordMissingSingleTarget();
 								return { target, result: [] };
 							}
 							throw err;
