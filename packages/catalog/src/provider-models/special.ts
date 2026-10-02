@@ -4,6 +4,11 @@ import { apiRouteFor } from "../compat/behavior";
 import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import {
+	type FactoryDroidModelDiscoveryOptions,
+	factoryDroidSeedModels,
+	fetchFactoryDroidModels,
+} from "../discovery/factory-droid";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
@@ -131,7 +136,8 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 	const { apiKey, baseUrl, clientVersion } = config;
 	return {
 		providerId: "cursor",
-		cacheProviderId: resolveModelCacheProviderId("cursor"),
+		dynamicModelsAuthoritative: true,
+		cacheProviderId: resolveModelCacheProviderId("cursor", { apiKey, baseUrl }),
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {
@@ -366,6 +372,25 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 const devinDiscovery = once(() => import("../discovery/devin"));
 
 // ---------------------------------------------------------------------------
+// Factory Droid
+// ---------------------------------------------------------------------------
+
+export function factoryDroidModelManagerOptions(
+	config: FactoryDroidModelDiscoveryOptions = {},
+): ModelManagerOptions<"factory-droid-agent"> {
+	return {
+		providerId: "factory-droid",
+		cacheProviderId: resolveModelCacheProviderId("factory-droid", config),
+		// No model-listing endpoint exists; the registry narrowed offline is the seed.
+		staticModels: factoryDroidSeedModels(config),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchFactoryDroidModels(config),
+		// Refresh current policy online; cached eligibility is not current entitlement.
+		alwaysRefetchDynamicModels: true,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Synthetic role providers
 // ---------------------------------------------------------------------------
 
@@ -415,7 +440,6 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 			: undefined),
 	};
 }
-
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

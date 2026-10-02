@@ -575,7 +575,9 @@ export async function recoverOrphanedBackups(sessionDir: string, storage: Sessio
 		if (dotIdx <= 0) continue;
 		const primaryName = trimmed.slice(0, dotIdx);
 		if (!primaryName.endsWith(".jsonl")) continue;
-		const primaryPath = path.join(sessionDir, primaryName);
+		// The primary is the backup's sibling: strip the suffix from the listed path instead of
+		// re-joining `sessionDir`, so the key keeps the storage's own spelling of the directory.
+		const primaryPath = backup.slice(0, backup.length - (name.length - primaryName.length));
 		let mtimeMs = 0;
 		try {
 			mtimeMs = storage.statSync(backup).mtimeMs;

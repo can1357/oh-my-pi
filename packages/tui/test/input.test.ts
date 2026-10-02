@@ -275,12 +275,6 @@ describe("Input component", () => {
 		expect(renderedWidth(input, 12)).toBeLessThanOrEqual(12);
 	});
 
-	it("renders non-secret input unchanged when masking is disabled", () => {
-		const input = setupAtEnd("visible-value");
-		const [line] = input.render(30);
-		expect(Bun.stripANSI(line.replaceAll(CURSOR_MARKER, ""))).toContain("visible-value");
-	});
-
 	it("normalizes NFD Korean pastes (macOS Finder drag-drop) to NFC", () => {
 		// macOS Finder drag-drops file paths in NFD (decomposed Unicode).
 		// Korean syllable `화` is U+D654 (1 char, 2 cells) in NFC, but

@@ -735,10 +735,9 @@ if "__omp_prelude_loaded__" not in globals():
             return bool(result.get("cancelled")) if isinstance(result, dict) else False
 
         def __await__(self):
-            return asyncio.get_running_loop().run_in_executor(
-                None,
-                self.wait,
-            ).__await__()
+            # `to_thread` copies the cell's contextvars into the worker; a bare
+            # `run_in_executor` drops them, so the bridge loses its run identity.
+            return asyncio.to_thread(self.wait).__await__()
 
     class AgentHandle(_Handle):
         """Background subagent handle returned by ``agent()``."""

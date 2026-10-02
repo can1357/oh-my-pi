@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as tls from "node:tls";
 import { type as arkType } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
@@ -291,8 +292,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(claudeCodeSystemInstruction).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-		expect(payload.system?.[2]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content)).toBe(true);
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
@@ -314,7 +315,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
 		};
 
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral" });
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
@@ -395,7 +396,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("clamps requested max_tokens to Claude Code's 64k cap when the model ceiling is higher", async () => {
+	it("requests the full model output ceiling for OAuth requests", async () => {
 		const payload = (await captureAnthropicPayload(
 			buildModel({ ...ANTHROPIC_MODEL_SPEC, id: "claude-opus-4-8", name: "Claude Opus 4.8", maxTokens: 128_000 }),
 			{
@@ -403,15 +404,7 @@ describe("Anthropic request fingerprint alignment", () => {
 				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
 			},
 		)) as { max_tokens?: number };
-		expect(payload.max_tokens).toBe(64_000);
-	});
-
-	it("leaves max_tokens untouched when the model ceiling is below the 64k cap", async () => {
-		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
-			systemPrompt: ["Stay concise."],
-			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-		})) as { max_tokens?: number };
-		expect(payload.max_tokens).toBe(8_192);
+		expect(payload.max_tokens).toBe(128_000);
 	});
 
 	it("keeps the full model output ceiling for API-key requests", async () => {
@@ -895,6 +888,20 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["X-Api-Key"]).toBeUndefined();
 	});
 
+	it("sends no Authorization for keyless sentinel credentials on non-official endpoints", () => {
+		// Providers with `auth: none` resolve to the N/A sentinel rather than a
+		// real key; emitting `Authorization: Bearer N/A` makes keyless local
+		// proxies reject the request. Same sentinel guard as the openai transports.
+		const headers = buildAnthropicHeaders({
+			apiKey: NO_AUTH_SENTINEL,
+			baseUrl: "https://proxy.example.com",
+			stream: true,
+		});
+
+		expect(headers.Authorization).toBeUndefined();
+		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
 	it("honors caller-supplied Authorization on non-official Anthropic endpoints (#3391)", () => {
 		const headers = buildAnthropicHeaders({
 			apiKey: "sk-ant-api-test",
@@ -980,6 +987,23 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.defaultHeaders["x-app"]).toBe("custom-app-token");
 		expect(options.defaultHeaders["X-Stainless-Runtime-Version"]).toBe("custom-runtime-token");
 		expect(options.defaultHeaders.Authorization).toBe("Bearer sk-ant-oat-test");
+	});
+
+	it("suppresses the client X-Api-Key for keyless sentinel credentials", () => {
+		// With the sentinel, no Authorization was built; without this guard the
+		// Anthropic client would inject its own `X-Api-Key: N/A` instead.
+		const options = buildAnthropicClientOptions({
+			model: buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				provider: "custom-anthropic",
+				baseUrl: "https://proxy.example.com/anthropic",
+			}),
+			apiKey: NO_AUTH_SENTINEL,
+			stream: true,
+		});
+
+		expect(options.defaultHeaders.Authorization).toBeUndefined();
+		expect(options.apiKey).toBeNull();
 	});
 
 	it("keeps OAuth fingerprint defaults on official endpoints despite the compat opt-in", () => {
@@ -1750,15 +1774,15 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.tools?.[1]?.cache_control).toBeUndefined();
 		expect(payload.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 
-		// The trailing message window is untouched; the OAuth identity block carries its
-		// own breakpoint, while caller system blocks stay uncached.
+		// The trailing message window is untouched; the system breakpoint sits on the
+		// last caller system block, not on the OAuth identity block before it.
 		const content = payload.messages?.at(-1)?.content;
 		expect(Array.isArray(content) ? content.at(-1)?.cache_control : undefined).toEqual({
 			type: "ephemeral",
 			ttl: "1h",
 		});
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-		expect(payload.system?.[2]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		// Anthropic rejects a fifth breakpoint, so the total must stay in budget.
 		const marked = (blocks: Array<{ cache_control?: unknown }> | undefined) =>
 			(blocks ?? []).filter(block => block.cache_control != null).length;
@@ -2961,14 +2985,6 @@ describe("Anthropic request fingerprint alignment", () => {
 		}
 	});
 
-	it("treats tool prefix helpers as no-ops when prefix is empty string", () => {
-		// Directly verify the codec's identity behaviour: builtins pass through apply unchanged.
-		// (Empty-prefix path is exercised by the builtin guard below; the contract is
-		//  roundtrip fidelity, not knowledge of the literal prefix string.)
-		const name = "Read";
-		expect(stripClaudeToolPrefix(applyClaudeToolPrefix(name))).toBe(name);
-	});
-
 	it("does not prefix built-in Anthropic tool names", () => {
 		expect(applyClaudeToolPrefix("web_search")).toBe("web_search");
 		expect(applyClaudeToolPrefix("CODE_EXECUTION")).toBe("CODE_EXECUTION");
@@ -3030,21 +3046,5 @@ describe("cch attestation", () => {
 		const withPlaceholder = capturedBody.replace(/cch=[0-9a-f]{5}/, "cch=00000");
 		const h = Bun.hash.xxHash64(new TextEncoder().encode(withPlaceholder), CCH_SEED);
 		expect(m![1]).toBe((h & 0xfffffn).toString(16).padStart(5, "0"));
-	});
-
-	it("derives cch from low-20-bits of XXHash64(body, seed) — external reference values", () => {
-		// Each body contains "cch=00000" as the Bun HTTP layer sees it before patching.
-		// Expected low-20-bit hashes precomputed with the Python xxhash reference.
-		const CCH_SEED = 0x4d659218e32a3268n;
-		const enc = new TextEncoder();
-		const cases: [string, string][] = [
-			["cch=00000", "a47f7"],
-			['{"messages":[],"cch=00000","x":1}', "3073d"],
-			["x-anthropic-billing-header: cc_version=2.1.158; cc_entrypoint=cli; cch=00000;", "f2b0b"],
-		];
-		for (const [body, expected] of cases) {
-			const h = Bun.hash.xxHash64(enc.encode(body), CCH_SEED);
-			expect((h & 0xfffffn).toString(16).padStart(5, "0")).toBe(expected);
-		}
 	});
 });

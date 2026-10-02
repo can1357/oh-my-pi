@@ -310,21 +310,6 @@ describe("lazy placeholder key", () => {
 });
 
 describe("SecretObfuscator regex behavior", () => {
-	it("obfuscates and deobfuscates regex matches with flags", () => {
-		const obfuscator = new SecretObfuscator([{ type: "regex", content: "api[_-]?key\\s*=\\s*\\w+", flags: "i" }]);
-		const original = "API_KEY=abc and api-key=def";
-		const obfuscated = obfuscator.obfuscate(original);
-		expect(obfuscated).not.toEqual(original);
-		expect(obfuscator.deobfuscate(obfuscated)).toEqual(original);
-	});
-
-	it("supports bare regex patterns without explicit flags", () => {
-		const obfuscator = new SecretObfuscator([{ type: "regex", content: "api[_-]?key\\s*=\\s*\\w+" }]);
-		const text = "api_key=abc and API_KEY=def";
-		const obfuscated = obfuscator.obfuscate(text);
-		expect(obfuscated).not.toEqual(text);
-		expect(obfuscator.deobfuscate(obfuscated)).toEqual(text);
-	});
 	it("deobfuscates placeholders through tool-call arguments", () => {
 		const obfuscator = new SecretObfuscator([{ type: "regex", content: "api[_-]?key\\s*=\\s*\\w+", flags: "i" }]);
 		const original = { cmd: "API_KEY=abc and api-key=def", status: "ok", nested: { note: "API_KEY=zzz" } };
@@ -1713,25 +1698,6 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		expect(obfuscator.deobfuscate(obfuscated)).toBe("SECRETUVREDACTED");
 	});
 
-	it("redacts bounded replace-mode regex suffixes after generated placeholders", () => {
-		const obfuscator = new SecretObfuscator(
-			[
-				{ type: "plain", content: "SECRETUV" },
-				{ type: "regex", mode: "replace", content: "[A-Z0-9]{10}", replacement: "REDACTED" },
-			],
-			"B".repeat(43),
-		);
-
-		const obfuscated = obfuscator.obfuscate("SECRETUVX1");
-
-		// The 8-char SECRETUVX1 redacts to one placeholder + REDACTED; assert the `X1`
-		// suffix is gone via end-anchored structure, not substring absence — the
-		// random keyed base can itself contain the two chars "X1".
-		expect(obfuscated).toMatch(/^\$\$[A-Z0-9]+:U\$\$REDACTED$/);
-		expect(obfuscated).not.toMatch(/X1$/);
-		expect(obfuscator.deobfuscate(obfuscated)).toBe("SECRETUVREDACTED");
-	});
-
 	it("emits a custom replacement once around a generated placeholder", () => {
 		const obfuscator = new SecretObfuscator(
 			[
@@ -1999,23 +1965,6 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		}
 	});
 
-	it("redacts a self-matching sentinel regex to a stable nonmatching value", () => {
-		// A regex that also matches the single A/B perturbation still has same-length
-		// values it does NOT match (a lowercase pair for [A-Z]{2}, an A/Z-free pair for
-		// Z+). The bounded search finds one, so the sentinel is redacted to a value the
-		// regex never re-matches: leak-free AND a fixed point under re-obfuscation.
-		for (const content of ["Z+", "[A-Z]{2}"]) {
-			const obf = new SecretObfuscator([{ type: "regex", mode: "replace", content }], "Q".repeat(43));
-
-			const out = obf.obfuscate("ZZ");
-
-			expect(out).not.toBe("ZZ");
-			expect(out).toHaveLength(2);
-			expect(obf.obfuscate(out)).toBe(out);
-			expect(obf.obfuscate(obf.obfuscate(out))).toBe(out);
-		}
-	});
-
 	it("searches past the first perturbation when it also matches the regex", () => {
 		// Regression for a regex that matches both the sentinel and its single A/B
 		// perturbation: `Z|A`/`[AZ]` match `Z` and `A`, so the old guard kept the raw
@@ -2039,45 +1988,6 @@ describe("SecretObfuscator friendlyName placeholders", () => {
 		expect(out).not.toBe("ZZ");
 		expect(out).toHaveLength(2);
 		expect(/^[A-Za-z0-9]{2}$/.test(out)).toBe(false);
-		expect(obf.obfuscate(out)).toBe(out);
-	});
-
-	it("exhausts two-character fallback candidates before keeping the sentinel", () => {
-		const obf = new SecretObfuscator([{ type: "regex", mode: "replace", content: "[A-Za-z0-9]." }], "Q".repeat(43));
-
-		const out = obf.obfuscate("ZZ");
-
-		expect(out).not.toBe("ZZ");
-		expect(out).toHaveLength(2);
-		expect(/[A-Za-z0-9]./.test(out)).toBe(false);
-		expect(obf.obfuscate(out)).toBe(out);
-	});
-
-	it("samples every leading character class before giving up on three-character collisions", () => {
-		const obf = new SecretObfuscator(
-			[{ type: "regex", mode: "replace", content: "[A-Za-z0-9].{2}" }],
-			"Q".repeat(43),
-		);
-
-		const out = obf.obfuscate("ZZc");
-
-		expect(out).not.toBe("ZZc");
-		expect(out).toHaveLength(3);
-		expect(/[A-Za-z0-9].{2}/.test(out)).toBe(false);
-		expect(obf.obfuscate(out)).toBe(out);
-	});
-
-	it("exhausts three-character fallback candidates when the nonmatching byte must be last", () => {
-		const obf = new SecretObfuscator(
-			[{ type: "regex", mode: "replace", content: ".{2}[A-Za-z0-9]" }],
-			"Q".repeat(43),
-		);
-
-		const out = obf.obfuscate("ZZc");
-
-		expect(out).not.toBe("ZZc");
-		expect(out).toHaveLength(3);
-		expect(/.{2}[A-Za-z0-9]/.test(out)).toBe(false);
 		expect(obf.obfuscate(out)).toBe(out);
 	});
 

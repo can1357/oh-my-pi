@@ -82,6 +82,14 @@ describe("AAAK encoding", () => {
 
 	it("leaves compact AAAK text unchanged and uses Python completion compaction order", () => {
 		expect(encode("PREF|dark-mode")).toBe("PREF|dark-mode");
-		expect(encode("TASK: backup working correctly, migration completed")).toBe("TASK: backup OK | migration DONEd");
+		expect(encode("TASK: backup working correctly, migration completed")).toBe("TASK: backup OK | migration DONE");
+	});
+
+	it("compacts status words and bare phrases only as whole words", () => {
+		expect(encode("The migration is incomplete; the tests completed.")).toBe(
+			"The migration is incomplete; the tests DONE.",
+		);
+		expect(encode("Networking needs a completeness check")).toBe("Networking needs a completeness check");
+		expect(encode("Nightly automations cover transcriptions")).toBe("Nightly automations cover transcriptions");
 	});
 });

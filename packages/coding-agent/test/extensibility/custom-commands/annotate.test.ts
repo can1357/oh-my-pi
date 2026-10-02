@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +35,8 @@ import type {
 	TextReviewAnnotation,
 	TextReviewSource,
 } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
 
 const ENTER = "\r";
@@ -232,6 +234,32 @@ describe("/annotate contracts", () => {
 		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
 		expect(pasteToEditor).toHaveBeenCalledTimes(1);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(annotation.note);
+	});
+
+	it("resolves a PR picked from the open pull request list in the live session repo", async () => {
+		const { ctx, pasteToEditor } = createContext({
+			selectResults: ["Code review", "4. Review a specific PR", "#42  Fix login  @octocat"],
+			cwd: "/live-worktree",
+		});
+		const repoSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("acme/project");
+		spyOn(github, "json").mockResolvedValue([{ number: 42, title: "Fix login", author: { login: "octocat" } }]);
+		const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff");
+		const resolvePrReviewTarget = vi.fn(
+			async (_cwd: string, _ctx: CustomCommandContext, _ref: ReviewPrRef) => target,
+		);
+		const showCodeReviewOverlay = vi.fn(async () => ({
+			action: "paste" as const,
+			annotations: [{ scope: "file" as const, path: "src/value.ts", occurrence: 1, note: "picked PR note" }],
+		}));
+
+		await runAnnotateCommand(API, "", ctx, { resolvePrReviewTarget, showCodeReviewOverlay });
+
+		expect(repoSpy).toHaveBeenCalledWith("/live-worktree");
+		expect(resolvePrReviewTarget).toHaveBeenCalledTimes(1);
+		expect(resolvePrReviewTarget.mock.calls[0]?.[0]).toBe("/live-worktree");
+		expect(resolvePrReviewTarget.mock.calls[0]?.[2]).toMatchObject({ repo: "acme/project", number: 42 });
+		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target);
+		expect(pasteToEditor.mock.calls[0]?.[0]).toContain("picked PR note");
 	});
 
 	it("freezes an explicit PR target before opening the overlay and keeps PR annotations and context exact", async () => {

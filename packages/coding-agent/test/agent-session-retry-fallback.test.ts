@@ -660,6 +660,49 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 
+	it("never falls back to a model of a provider that settings disable", async () => {
+		// A fallback candidate that availability-filtered resolution misses was
+		// looked up by name in the full catalog, so a chain naming a disabled
+		// provider's model sent the retry there anyway.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const disabledModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !disabledModel) {
+			throw new Error("Expected bundled disabled-provider fallback models");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError("Devin API error: empty response body", {
+				provider: "devin",
+				kind: "empty-body",
+			}),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			disabledProviders: [disabledModel.provider],
+			"retry.fallbackChains": {
+				default: [`${disabledModel.provider}/${disabledModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-disabled.yml"), { settings });
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		await session.prompt("Recover without the disabled provider");
+		await session.waitForIdle();
+
+		// The only candidate is unavailable, so the failure surfaces on the primary.
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+		expect(session.model?.provider).toBe(primaryModel.provider);
+	});
+
 	it("forwards retry fallback events to extension handlers", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -1714,6 +1757,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: firstFallback.contextWindow,
 		});
 
 		const swapProbe: Array<ServingModel | undefined> = [];
@@ -1752,6 +1796,7 @@ describe("AgentSession retry fallback", () => {
 				modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
 				thinkingLevel: undefined,
 				isFallback: true,
+				contextWindow: secondFallback.contextWindow,
 			},
 		]);
 		expect(session.servingModel).toEqual({
@@ -1759,6 +1804,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: secondFallback.contextWindow,
 		});
 	});
 
@@ -2626,78 +2672,6 @@ describe("AgentSession retry fallback", () => {
 		expect(retryStartEvents.map(event => event.attempt)).toEqual([1, 2, 1]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
-	});
-	it("rotates sibling credentials on 402 Payment Required without invoking model fallback", async () => {
-		const primaryModel = getBundledModel("openai", "gpt-4o") ?? getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("google", "gemini-1.5-pro") ?? getBundledModel("openai", "gpt-4o-mini");
-		if (!primaryModel || !fallbackModel) {
-			throw new Error("Expected bundled test models to exist");
-		}
-
-		const requestedCalls: Array<{ model: string; apiKey: string | undefined }> = [];
-		let currentKey = "key-A";
-		const mock = createMockModel();
-		const agent = new Agent({
-			getApiKey: () => currentKey,
-			initialState: {
-				model: primaryModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (model, context, options) => {
-				const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
-				requestedCalls.push({ model: `${model.provider}/${model.id}`, apiKey });
-				if (requestedCalls.length === 1) {
-					// The mock model keeps only the thrown error's message text, so the
-					// 402 must travel inside the message for classification to rotate.
-					mock.push({ throw: new Error("HTTP 402 Payment Required") });
-				} else {
-					mock.push({ content: ["ok:sibling-credential-success"] });
-				}
-				return mock.stream(model, context, options);
-			},
-		});
-
-		const markUsageLimitSpy = vi
-			.spyOn(modelRegistry.authStorage.limits, "markReached")
-			.mockImplementation(async () => {
-				currentKey = "key-B";
-				return { switched: true };
-			});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 1,
-			"retry.maxRetries": 2,
-			"retry.modelFallback": true,
-			"retry.fallbackChains": {
-				[`${primaryModel.provider}/${primaryModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],
-			},
-		});
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-
-		await session.prompt("Prompt requiring credential rotation");
-		await session.waitForIdle();
-
-		expect(markUsageLimitSpy).toHaveBeenCalledTimes(1);
-		expect(requestedCalls).toHaveLength(2);
-		expect(requestedCalls[0]).toEqual({
-			model: `${primaryModel.provider}/${primaryModel.id}`,
-			apiKey: "key-A",
-		});
-		expect(requestedCalls[1]).toEqual({
-			model: `${primaryModel.provider}/${primaryModel.id}`,
-			apiKey: "key-B",
-		});
-		expect(session.model?.provider).toBe(primaryModel.provider);
-		expect(session.model?.id).toBe(primaryModel.id);
 	});
 	it("rotates sibling credentials on 402 Payment is required and status-only 402 without invoking model fallback", async () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o") ?? getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -4599,64 +4573,6 @@ describe("AgentSession retry fallback", () => {
 		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after ZDR reset" });
 	});
 
-	it("auto-retries Anthropic stream-envelope failures before message_start", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
-			throw new Error("Expected bundled Anthropic test model to exist");
-		}
-
-		const envelopeError = "Anthropic stream envelope error: received content_block_start before message_start";
-		const requestedModels: string[] = [];
-
-		const mock = createMockModel({
-			responses: [{ throw: envelopeError }, { content: ["Recovered after Anthropic envelope retry"] }],
-		});
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => {
-				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				return mock.stream(requestedModel, context, options);
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
-
-		await session.prompt("Retry Anthropic envelope failure before message_start");
-		await session.waitForIdle();
-
-		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryStartEvents[0]).toMatchObject({
-			attempt: 1,
-			maxAttempts: 1,
-			errorMessage: envelopeError,
-		});
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
-		const lastAssistant = getLastAssistantMessage(session);
-		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after Anthropic envelope retry" });
-	});
-
 	it("auto-retries Anthropic stream-envelope failures before message_stop", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
@@ -5098,6 +5014,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: primaryModel.contextWindow,
 		});
 	});
 
@@ -5153,6 +5070,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		});
 
 		// Capture attribution inside the restore's synchronous `model_changed`
@@ -5180,6 +5098,8 @@ describe("AgentSession retry fallback", () => {
 		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
 		if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
 		const baseId = fastModel.id.replace(/-fast$/, "");
+		const baseModel = getBundledModel("fireworks", baseId);
+		if (!baseModel) throw new Error("Expected the bundled Fireworks base model to exist");
 
 		const requestedModels: string[] = [];
 		const mock = createMockModel();
@@ -5218,6 +5138,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `fireworks/${baseId}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: baseModel.contextWindow,
 		});
 
 		// How the previous transcript was routed says nothing about a freshly
@@ -5229,6 +5150,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `fireworks/${baseId}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: baseModel.contextWindow,
 		});
 	});
 
@@ -6180,6 +6102,46 @@ describe("AgentSession retry fallback", () => {
 		expect(session.configWarnings.filter(w => w.includes(`${primaryModel.provider}/${primaryModel.id}`))).toEqual([]);
 	});
 
+	it("surfaces deferred chain warnings once, with a config_warnings_changed event", () => {
+		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel) {
+			throw new Error("Expected bundled OpenAI test model to exist");
+		}
+		const warning = "retry.fallbackChains key references unknown model: nonexistent-provider/nonexistent-model";
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": {
+				"nonexistent-provider/nonexistent-model": [`${primaryModel.provider}/${primaryModel.id}`],
+			},
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			deferRetryFallbackValidation: true,
+		});
+		let warningEvents = 0;
+		session.subscribe(event => {
+			if (event.type === "config_warnings_changed") warningEvents++;
+		});
+
+		expect(session.configWarnings).not.toContain(warning);
+		session.validateRetryFallbackChains();
+		session.validateRetryFallbackChains();
+
+		expect(session.configWarnings.filter(w => w === warning)).toHaveLength(1);
+		expect(warningEvents).toBe(1);
+	});
+
 	it("normalizes suppression by base selector and clears it on model refresh", async () => {
 		const future = Date.now() + 60_000;
 		modelRegistry.suppressSelector("openai/gpt-4o:high", future);
@@ -6547,6 +6509,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: primaryModel.contextWindow,
 		});
 
 		await session.prompt("Fail over and die on the fallback");
@@ -6561,6 +6524,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: primaryModel.contextWindow,
 		});
 		// Both attribution and how the model was routed belong to the session they
 		// were earned in. Every real switch mints a new session id — including for
@@ -6573,6 +6537,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: fallbackModel.contextWindow,
 		});
 	});
 
@@ -6613,6 +6578,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		});
 	});
 
@@ -6643,6 +6609,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		};
 		expect(session.servingModel).toEqual(served);
 
@@ -6709,6 +6676,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: firstFallback.contextWindow,
 		});
 
 		// `model_changed` fans out synchronously from inside the swap, which is the
@@ -6729,6 +6697,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: firstFallback.contextWindow,
 		});
 		// Never the incoming candidate: mid-swap it has produced nothing.
 		expect(servingAtModelChange.length).toBeGreaterThan(0);
@@ -6804,6 +6773,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		});
 	});
 

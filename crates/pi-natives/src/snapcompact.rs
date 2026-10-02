@@ -981,6 +981,18 @@ fn contributions(src_len: usize, dst_len: usize) -> Vec<(usize, Vec<f32>)> {
 	out
 }
 
+/// `a * b + c`, fused only when the build targets FMA: without it (`x86-64-v2`
+/// baseline) `mul_add` lowers to a scalar libm `fmaf` call per element.
+#[inline(always)]
+#[allow(clippy::suboptimal_flops, reason = "`mul_add` is a slow libm call on x86-64 without FMA")]
+fn madd(a: f32, b: f32, c: f32) -> f32 {
+	if cfg!(target_feature = "fma") {
+		a.mul_add(b, c)
+	} else {
+		a * b + c
+	}
+}
+
 /// Separable Lanczos3 resize of an interleaved RGB f32 buffer.
 fn resize_rgb(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f32> {
 	let horiz = contributions(sw, dw);
@@ -992,9 +1004,9 @@ fn resize_rgb(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f3
 			let mut acc = [0f32; 3];
 			for (k, &w) in weights.iter().enumerate() {
 				let s = (begin + k) * 3;
-				acc[0] = src_row[s].mul_add(w, acc[0]);
-				acc[1] = src_row[s + 1].mul_add(w, acc[1]);
-				acc[2] = src_row[s + 2].mul_add(w, acc[2]);
+				acc[0] = madd(src_row[s], w, acc[0]);
+				acc[1] = madd(src_row[s + 1], w, acc[1]);
+				acc[2] = madd(src_row[s + 2], w, acc[2]);
 			}
 			dst_row[x * 3..x * 3 + 3].copy_from_slice(&acc);
 		}
@@ -1006,7 +1018,7 @@ fn resize_rgb(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f3
 		for (k, &w) in weights.iter().enumerate() {
 			let src_row = &tmp[(begin + k) * dw * 3..(begin + k + 1) * dw * 3];
 			for (d, &s) in dst_row.iter_mut().zip(src_row) {
-				*d = s.mul_add(w, *d);
+				*d = madd(s, w, *d);
 			}
 		}
 	}

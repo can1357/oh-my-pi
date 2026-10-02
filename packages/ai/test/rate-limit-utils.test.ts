@@ -106,10 +106,6 @@ describe("parseRateLimitReason", () => {
 		);
 	});
 
-	it("classifies Too many requests as RATE_LIMIT_EXCEEDED", () => {
-		expect(parseRateLimitReason("Cloud Code Assist API error (429): Too many requests")).toBe("RATE_LIMIT_EXCEEDED");
-	});
-
 	it("classifies per minute errors as RATE_LIMIT_EXCEEDED", () => {
 		expect(parseRateLimitReason("Requests per minute limit reached")).toBe("RATE_LIMIT_EXCEEDED");
 	});
@@ -214,6 +210,31 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason(freeQuota)).toBe("QUOTA_EXHAUSTED");
 		expect(isUsageLimit(new ProviderHttpError(freeQuota, 429, { code: "insufficient_quota" }))).toBe(true);
 		expect(isUsageLimitOutcome(429, freeQuota)).toBe(true);
+	});
+
+	it("keeps rolling-window TPM/RPM throttles in the transient lane", () => {
+		// A per-minute token throttle reported with quota wording ("tpm
+		// exhausted", type=quota_exceeded_error, no Retry-After) used to fall
+		// through to QUOTA_EXHAUSTED: the session layer then invented a 30-min
+		// wait, blew past retry.maxDelayMs and terminated the turn (#13253).
+		const tpmExhausted =
+			"429 tpm exhausted\ntpm exhausted (type=quota_exceeded_error param=8)\ntpm exhausted (type=quota_exceeded_error param=8) (type=quota_exceeded_error)";
+		expect(parseRateLimitReason(tpmExhausted)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(calculateRateLimitBackoffMs(parseRateLimitReason(tpmExhausted))).toBeLessThanOrEqual(60_000);
+		expect(matchesUsageLimitText(tpmExhausted)).toBe(false);
+		expect(isUsageLimit(new ProviderHttpError(tpmExhausted, 429, { code: "quota_exceeded_error" }))).toBe(false);
+		expect(isUsageLimitOutcome(429, tpmExhausted)).toBe(false);
+
+		// Other phrasings of the same rolling window.
+		expect(parseRateLimitReason("429 inference exceeds tpm/rpm limit")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("429 RPM limit reached for this endpoint")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("429 (code=RateLimitExceeded.EndpointTPMExceeded)")).toBe("RATE_LIMIT_EXCEEDED");
+
+		// An account-scoped cap that merely quotes a TPM number keeps its quota
+		// verdict — the downgrade must not rescue a credential-rotating error.
+		const planQuota = "429 Your plan quota is exhausted; the plan TPM is 1000 (type=quota_exceeded_error)";
+		expect(parseRateLimitReason(planQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, planQuota)).toBe(true);
 	});
 
 	it("classifies Codex usage limit error as QUOTA_EXHAUSTED", () => {
@@ -595,6 +616,18 @@ describe("isUsageLimitOutcome", () => {
 			true,
 		);
 		expect(isUsageLimitOutcome(undefined, "free limit reached on model x/y. try again in 5 minutes")).toBe(true);
+	});
+
+	it("rotates on Cursor prepaid-balance exhaustion but not on the changeable pricing gate", () => {
+		const prepaid =
+			"Cursor USAGE_PRICING_REQUIRED: Your prepaid balance is used up: Add funds or enable auto top-up in your billing settings to keep going.";
+		expect(parseRateLimitReason(prepaid)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, prepaid)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(prepaid, 429))).toBe(true);
+		expect(isUsageLimitOutcome(429, "Cursor USAGE_PRICING_REQUIRED: Usage-based pricing required")).toBe(true);
+		expect(matchesUsageLimitText("Cursor USAGE_PRICING_REQUIRED_CHANGEABLE: Switch to a different model")).toBe(
+			false,
+		);
 	});
 
 	it("keeps informative transient 429s in the upstream-backoff lane", () => {

@@ -149,7 +149,7 @@ describe("searchGemini tools serialization", () => {
 			.mockResolvedValueOnce({ apiKey: "initial-gemini-key" })
 			.mockResolvedValueOnce({ apiKey: "refreshed-gemini-key" })
 			.mockResolvedValueOnce({ apiKey: "rotated-gemini-key" });
-		const rotateSpy = vi.spyOn(apiKeyAuthStorage.limits, "rotate").mockResolvedValue(true);
+		const rotateSpy = vi.spyOn(apiKeyAuthStorage.limits, "rotate").mockResolvedValue({ switched: true });
 		const fetchMock: FetchImpl = (url, init) => {
 			requestCount += 1;
 			requestUrls.push(String(url));

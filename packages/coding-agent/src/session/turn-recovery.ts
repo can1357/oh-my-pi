@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -33,6 +33,7 @@ import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
+import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -44,6 +45,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
 	InitialRetryFallbackState,
 	UsageFallbackConfirmation,
@@ -71,6 +73,7 @@ import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
+import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 import {
@@ -89,6 +92,7 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
+const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -97,11 +101,12 @@ const HTTP2_STREAM_RESET_ERROR_RE =
 	/stream closed with error code\s+nghttp2_(?:internal_error|refused_stream)|nghttp2_(?:internal_error|refused_stream)|HTTP2(?:StreamReset|RefusedStream)/i;
 // Gateway/provider closes a stream mid-generation without its terminal chunk
 // (openai-completions "finish_reason", openai/azure responses "terminal
-// response event", Codex "terminal completion event"). Same transport-failure
-// class as the stall/reset entries: retriable, and eligible for preserved-turn
-// continuation on resolved tool turns.
+// response event", Codex "terminal completion event", Cursor "turnEnded" —
+// an HTTP/2 reset can settle as the stream end rather than the RST error).
+// Same transport-failure class as the stall/reset entries: retriable, and
+// eligible for preserved-turn continuation on resolved tool turns.
 const PREMATURE_STREAM_CLOSE_ERROR_RE =
-	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event)/i;
+	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event|Cursor stream ended before turnEnded)/i;
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
 
@@ -239,7 +244,7 @@ export interface TurnRecoveryHost {
 	 * `activeBlockUnblockAtMs` is the absolute unblock time parsed from the live
 	 * usage-limit error and never substitutes for live grant eligibility.
 	 */
-	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<boolean>;
+	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -264,6 +269,8 @@ export interface TurnRecoveryHost {
 /** Construction-time retry state restored from model selection. */
 export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Skip construction-time fallback-chain validation; the owner runs {@link TurnRecovery.validateRetryFallbackChains}. */
+	deferFallbackChainValidation?: boolean;
 }
 
 type PendingRetryError = {
@@ -303,6 +310,7 @@ export class TurnRecovery {
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
+	#streamStallContinueCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -339,6 +347,8 @@ export class TurnRecovery {
 	#fallbackChainWarnings = new Set<string>();
 	/** Whether startup validation deferred any warning pending in-flight discovery (#10048). */
 	#pendingDiscoveryDeferredValidation = false;
+	/** Whether startup fallback-chain validation has run; later checks go through the post-discovery reconcile. */
+	#fallbackChainsValidated = false;
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
@@ -350,7 +360,7 @@ export class TurnRecovery {
 			};
 			this.#markFallbackRouted();
 		}
-		this.#validateRetryFallbackChains();
+		if (!options.deferFallbackChainValidation) this.validateRetryFallbackChains();
 	}
 
 	/** Current automatic retry attempt. */
@@ -403,6 +413,7 @@ export class TurnRecovery {
 			modelIdentity: formatModelStringWithRouting(model),
 			thinkingLevel: level,
 			isFallback: this.#fallbackRouted,
+			contextWindow: model.contextWindow,
 		};
 		this.#bootstrapCache = { model, level, routed: this.#fallbackRouted, value };
 		return value;
@@ -436,6 +447,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
+		this.#streamStallContinueCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}
@@ -477,6 +489,7 @@ export class TurnRecovery {
 					modelIdentity: formatModelStringWithRouting(model),
 					thinkingLevel: level,
 					isFallback: this.#fallbackRouted,
+					contextWindow: model.contextWindow,
 				},
 				sessionId: this.#host.sessionManager.getSessionId(),
 			};
@@ -593,6 +606,77 @@ export class TurnRecovery {
 		});
 		this.#host.scheduleAgentContinue({
 			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
+	}
+
+	/**
+	 * Continue past a mid-stream transport failure (idle stall, HTTP/2 reset,
+	 * premature close, socket closed mid-body) that hit a text-only turn after
+	 * its text rendered. {@link isRetryableError} refuses to replay committed
+	 * text, and {@link classifyResolvedInterruptedToolTurn} only resumes turns
+	 * with tool calls, so the session used to stop on a pinned error. Resuming
+	 * from the trailing assistant message would be a prefill, which newer Claude
+	 * models reject: keep the partial turn in context, append a developer
+	 * reminder to pick up where the text stopped, and continue. Honors
+	 * `retry.enabled`; bounded per prompt, past the cap the error surfaces as before.
+	 * A socket close counts here but not for tool turns: without tool calls there
+	 * is no executed side effect whose resumption policy it could change.
+	 */
+	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
+		const id = this.#classifyRetryMessage(message);
+		const socketClosed =
+			message.stopReason === "error" &&
+			AIError.retriable(id) &&
+			!this.#host.streamingEditAbortTriggered() &&
+			isUnexpectedSocketCloseMessage(message.errorMessage ?? "");
+		if (!socketClosed && !this.#isMidStreamTransportFailure(message, id)) {
+			this.#streamStallContinueCount = 0;
+			return false;
+		}
+		if (!this.autoRetryEnabled || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+		if (!this.#host.textOutputCommitted()) return false;
+		let hasText = false;
+		for (const block of message.content) {
+			if (block.type === "toolCall" || block.type === "image" || block.type === "anthropicServerTool") return false;
+			if (block.type === "text" && hasNonWhitespace(block.text)) hasText = true;
+		}
+		if (!hasText) return false;
+
+		this.#streamStallContinueCount++;
+		if (this.#streamStallContinueCount > STREAM_STALL_CONTINUE_MAX_RETRIES) {
+			logger.warn("Stream kept stalling after committed text past retry cap", {
+				attempts: this.#streamStallContinueCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#streamStallContinueCount = 0;
+			return false;
+		}
+
+		logger.info("Stream failed after committed text; continuing with resume reminder", {
+			attempt: this.#streamStallContinueCount,
+			model: message.model,
+			provider: message.provider,
+			errorMessage: message.errorMessage,
+		});
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: prompt.render(streamStallContinueTemplate, {
+						retryCount: this.#streamStallContinueCount,
+						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+					}),
+				},
+			],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.scheduleAgentContinue({
+			source: "stream-stall-continue",
 			generation: this.#host.promptGeneration(),
 		});
 		return true;
@@ -989,6 +1073,8 @@ export class TurnRecovery {
 					sessionId: this.#host.sessionId(),
 					model: this.#host.model() ?? undefined,
 					metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
+					onUsage: journalJudgmentUsage(this.#host.sessionManager),
+					telemetry: this.#host.agent.telemetry,
 					signal: controller.signal,
 				});
 			} finally {
@@ -1428,30 +1514,7 @@ export class TurnRecovery {
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered() &&
 			((message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) || genericAbort);
-		const errorMessage = message.errorMessage ?? "";
-		const streamStall =
-			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
-		const transportReset =
-			message.stopReason === "error" &&
-			(HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
-				AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
-				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage)) &&
-			AIError.retriable(id) &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered();
-		// A premature gateway close (no finish_reason/terminal event) is the same
-		// transport-failure class as the stall/reset cases: mid-generation death.
-		// Preserved-turn continuation lets the retry resume after the partial
-		// output instead of surfacing the error or replaying rendered content.
-		const prematureClose =
-			message.stopReason === "error" &&
-			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) &&
-			AIError.retriable(id) &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered();
-		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose) return undefined;
+		if (!reasonlessAbort && !this.#isMidStreamTransportFailure(message, id)) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
 		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
@@ -1485,6 +1548,28 @@ export class TurnRecovery {
 		}
 		if (unresolvedToolCallIds.size > 0) return undefined;
 		return reasonlessAbort ? "reasonless-abort" : "stream-stall";
+	}
+
+	/**
+	 * Mid-generation transport death: the local idle watchdog's stream stall, an
+	 * HTTP/2 stream reset, or a gateway close without the terminal event. A
+	 * premature close (no finish_reason/terminal event) is the same failure
+	 * class as a stall or reset. Resets and closes are ignored while a
+	 * deliberate abort, disposal, or streaming-edit abort owns the stream.
+	 */
+	#isMidStreamTransportFailure(message: AssistantMessage, id: number): boolean {
+		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
+		const errorMessage = message.errorMessage ?? "";
+		if (STREAM_STALL_ERROR_RE.test(errorMessage)) return true;
+		if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.streamingEditAbortTriggered()) {
+			return false;
+		}
+		return (
+			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
+			AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
+			AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage) ||
+			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage)
+		);
 	}
 	/**
 	 * Retried turns remove the failed assistant message from active context.
@@ -1525,6 +1610,29 @@ export class TurnRecovery {
 				/OpenAI responses stream closed before a terminal response event was received/i.test(errorMessage))
 		);
 	}
+	/**
+	 * First-attempt mid-stream socket drop with streamed progress: the transport
+	 * died after the model had already emitted reasoning or tool calls, so the
+	 * failure says nothing about model health — retry the same model once before
+	 * consulting the fallback chain. A drop with no streamed content keeps the
+	 * immediate fallback (a different route may genuinely help), as do later
+	 * attempts. Never applies once the retry budget is spent (e.g.
+	 * `retry.maxRetries: 0`): there is no same-model retry left, so the
+	 * fallback-chain consult is the only recovery. Mirrors the stall handler's
+	 * socket check, extended to turns with tool calls.
+	 */
+	#isFirstAttemptMidStreamSocketDrop(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
+		if (this.#retryAttempt !== 1 || retryBudgetExhausted) return false;
+		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
+		if (this.#host.streamingEditAbortTriggered()) return false;
+		if (!isUnexpectedSocketCloseMessage(message.errorMessage ?? "")) return false;
+		return message.content.some(
+			block =>
+				(block.type === "thinking" && block.thinking.trim().length > 0) ||
+				block.type === "toolCall" ||
+				(block.type === "text" && block.text.trim().length > 0),
+		);
+	}
 
 	/** Checks whether a provider error represents a classifier refusal. */
 	isClassifierRefusal(message: AssistantMessage): boolean {
@@ -1544,7 +1652,13 @@ export class TurnRecovery {
 		return getRetryFallbackChains(this.#host.settings);
 	}
 
-	#validateRetryFallbackChains(): void {
+	/**
+	 * Validate configured fallback chains, logging each warning and appending it
+	 * to `configWarnings`. Runs once: at construction unless deferred by the owner.
+	 */
+	validateRetryFallbackChains(): void {
+		if (this.#fallbackChainsValidated) return;
+		this.#fallbackChainsValidated = true;
 		let deferred = false;
 		validateRetryFallbackChains(
 			this.#host.settings,
@@ -2344,15 +2458,47 @@ export class TurnRecovery {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
 		}
 
-		if (!retryBudgetExhausted && !staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
-			if (
-				recordedUsageLimitOutcome.switchedCredential ||
-				// Convert the parsed hint to an absolute timestamp NOW, before the
-				// hook's usage IO — a duration re-anchored after slow fetches drifts.
-				(await this.#host.maybeAutoRedeemReset(
-					parsedRetryAfterMs === undefined ? undefined : Date.now() + parsedRetryAfterMs,
-				))
-			) {
+		// Rotation can spend the same-route retry budget before the last account
+		// hits its quota. Past the budget only a confirmed reset may continue: a
+		// rotation that keeps claiming a usable sibling would otherwise retry forever.
+		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
+			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
+			let restored = false;
+			if (!rotated) {
+				const resetAbortController = new AbortController();
+				this.#retryAbortController?.abort();
+				this.#retryAbortController = resetAbortController;
+				const startedAtMs = Date.now();
+				const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
+				try {
+					for (let attempt = 0; ; attempt++) {
+						const result = await this.#host.maybeAutoRedeemReset(unblockAtMs);
+						resetAbortController.signal.throwIfAborted();
+						if (result.restored) {
+							restored = true;
+							break;
+						}
+						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
+						// Only retry the safe eligibility read, never the reset mutation or
+						// model request. Respect provider pacing within the configured wait cap.
+						const readDelayMs = Math.max(
+							1_000,
+							result.retryAfterMs,
+							calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, attempt + 1),
+						);
+						if (retrySettings.maxDelayMs > 0 && Date.now() - startedAtMs + readDelayMs > retrySettings.maxDelayMs)
+							break;
+						await sleepLong(readDelayMs, resetAbortController.signal);
+					}
+				} catch (error) {
+					if (!resetAbortController.signal.aborted) throw error;
+					if (this.#retryAbortController !== resetAbortController) return false;
+					return this.#endCancelledRetry();
+				} finally {
+					if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
+				}
+			}
+			if (rotated || restored) {
 				switchedCredential = true;
 				delayMs = 0;
 			} else {
@@ -2426,11 +2572,27 @@ export class TurnRecovery {
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
 		if (accountPolicyDenial && currentModel) {
-			switchedCredential = await this.#host.modelRegistry.authStorage.limits.rotate(
-				currentModel.provider,
-				this.#host.sessionId(),
-				{ error: errorMessage, modelId: currentModel.id },
-			);
+			// `rotate` may sleep out a sibling's short block; register its signal
+			// as the retry controller so `abortRetry()` cancels that wait exactly
+			// like the backoff sleep below.
+			const rotateAbortController = new AbortController();
+			this.#retryAbortController?.abort();
+			this.#retryAbortController = rotateAbortController;
+			try {
+				switchedCredential = (
+					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
+						error: errorMessage,
+						modelId: currentModel.id,
+						signal: rotateAbortController.signal,
+					})
+				).switched;
+			} catch (error) {
+				if (!rotateAbortController.signal.aborted) throw error;
+				if (this.#retryAbortController !== rotateAbortController) return false;
+				return this.#endCancelledRetry();
+			} finally {
+				if (this.#retryAbortController === rotateAbortController) this.#retryAbortController = undefined;
+			}
 			if (switchedCredential) delayMs = 0;
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard
@@ -2470,7 +2632,8 @@ export class TurnRecovery {
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!waitForSiblingCredential &&
-				!(retryBudgetExhausted && classifierRefusal)
+				!(retryBudgetExhausted && classifierRefusal) &&
+				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage, currentModel);
@@ -2644,18 +2807,7 @@ export class TurnRecovery {
 				return false;
 			}
 			// Aborted during sleep - emit end event so UI can clean up
-			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
-			this.#retryAbortController = undefined;
-			await this.#host.emitSessionEvent({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
-			this.#clearPendingRetryErrors();
-			this.resolveRetry();
-			return false;
+			return this.#endCancelledRetry();
 		}
 		if (this.#retryAbortController === retryAbortController) {
 			this.#retryAbortController = undefined;
@@ -2687,6 +2839,22 @@ export class TurnRecovery {
 		});
 
 		return true;
+	}
+
+	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	async #endCancelledRetry(): Promise<false> {
+		const attempt = this.#retryAttempt;
+		this.#retryAttempt = 0;
+		this.#retryAbortController = undefined;
+		await this.#host.emitSessionEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt,
+			finalError: "Retry cancelled",
+		});
+		this.#clearPendingRetryErrors();
+		this.resolveRetry();
+		return false;
 	}
 
 	/**

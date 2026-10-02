@@ -1,6 +1,7 @@
 mod ax;
 mod capture;
 mod input;
+mod process;
 mod skylight;
 
 use image::RgbaImage;
@@ -62,7 +63,7 @@ impl Backend for MacosBackend {
 			input: input_permission,
 			ax: input_permission,
 			background_window_input: input_permission && skylight::is_available(),
-			delivery_modes: vec!["background".to_string(), "foreground".to_string()],
+			takeover: skylight::takeover_available(),
 			capture_permission: permission_label(capture_permission),
 			input_permission: permission_label(input_permission),
 			ax_permission: permission_label(input_permission),
