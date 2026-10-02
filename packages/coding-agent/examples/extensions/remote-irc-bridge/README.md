@@ -31,8 +31,13 @@ bun examples/extensions/remote-irc-bridge/peer-cli.ts --namespace demo --peers l
 Terminal B — omp, with the roster the CLI wrote:
 
 ```bash
-OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json omp -e examples/extensions/remote-irc-bridge/extension.ts
+OMP_REMOTE_IRC_ROSTER=/tmp/omp-remote-irc/roster.json omp -e "$PWD/examples/extensions/remote-irc-bridge/extension.ts"
 ```
+
+Use an absolute `-e` path (the CLI prints one): `-e` resolves against omp's working directory, so a relative
+path breaks as soon as you add `--cwd`. To keep the run away from your other sessions add
+`--no-extensions --no-session --cwd /tmp/omp-remote-irc/project`; `--no-extensions` only disables discovery,
+explicit `-e` paths still load.
 
 Terminal A prints `omp session "Main" connected`. Now:
 
