@@ -13,6 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -42,6 +43,7 @@ interface FakeAcpBuiltinSession {
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	formatSessionAsText: () => string;
 	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
+	dumpSessionArchiveToTmpDir: () => Promise<SessionDumpArchive | undefined>;
 	getLastAssistantText: () => string | undefined;
 	messages: unknown[];
 	settings: Settings;
@@ -160,6 +162,7 @@ function createRuntime() {
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
+		dumpSessionArchiveToTmpDir: async () => undefined,
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
@@ -596,6 +599,27 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("No messages");
+	});
+
+	it("dump all: reports the archive and reaches subagents only via the all argument", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.formatSessionAsText = () => "Session content here";
+		runtime.session.dumpSessionArchiveToTmpDir = async () => ({
+			path: "/tmp/omp-dump-test.zip",
+			files: ["session.md", "llm-request.json", "subagents/Scout.md"],
+			subagentCount: 1,
+			subagentError: "EACCES: permission denied",
+		});
+
+		await executeAcpBuiltinSlashCommand("/dump all", runtime);
+		await executeAcpBuiltinSlashCommand("/dump", runtime);
+		await executeAcpBuiltinSlashCommand("/dump everything", runtime);
+
+		expect(output[0]).toContain("Session dump archive: /tmp/omp-dump-test.zip");
+		expect(output[0]).toContain("  subagents/Scout.md");
+		expect(output[0]).toContain("Subagent transcripts unavailable: EACCES: permission denied");
+		expect(output[1]).toBe("Session content here");
+		expect(output[2]).toContain("Usage: /dump [all]");
 	});
 
 	// /model

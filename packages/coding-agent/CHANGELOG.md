@@ -5,6 +5,13 @@
 ### Fixed
 
 - Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
+### Added
+
+- `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed HTML export hanging when a session's subagent directory held a transcript named `..jsonl`; discovery now only descends into real child directories ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ## [18.4.12] - 2026-10-02
 
