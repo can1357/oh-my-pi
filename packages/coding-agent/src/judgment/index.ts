@@ -338,6 +338,7 @@ export class ChainJudge implements Judge {
 				model: model.id,
 				baseUrl: model.baseUrl,
 				headers,
+				judgment: model.judgment,
 			});
 			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
 		}

@@ -1177,6 +1177,38 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 							? ResolvedGoogleCompat
 							: undefined;
 
+/** Wire key overrides for judgment usage fields. Defaults: `input_tokens`, `output_tokens`, `cost`. */
+export interface JudgmentUsageMap {
+	/** Wire key for input tokens; default "input_tokens". */
+	input?: string;
+	/** Wire key for output tokens; default "output_tokens". */
+	output?: string;
+	/** Wire key for billed USD inside the usage object; default "cost". */
+	cost?: string;
+}
+
+/**
+ * Per-model (+ provider baseline) overrides for System One–compatible judgment
+ * endpoints. Routes `typesafe`-family models at judgment time without new `api`
+ * values: `route` replaces the default path, `typeField` renames the answer
+ * discriminator, `typeMap` translates canonical question types to wire types,
+ * `valueMap` translates canonical answer value keys to wire value keys, and
+ * `usageMap` renames usage fields. Canonical question-type vocab: `noul`,
+ * `choice`, `score`; canonical value keys match the type (`noul`, `choice`,
+ * `score`).
+ */
+export interface JudgmentConfig {
+	/** Path appended to baseUrl, e.g. "/v1/evaluate". */
+	route?: string;
+	/** Discriminator field name; default "type". */
+	typeField?: string;
+	/** Canonical question type -> wire type, e.g. {noul:"boolean"}. */
+	typeMap?: Record<string, string>;
+	/** Canonical answer value key -> wire value key, e.g. {noul:"probability"}. */
+	valueMap?: Record<string, string>;
+	usageMap?: JudgmentUsageMap;
+}
+
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	/** Enables provider-native compaction for providers not enabled by built-in policy. */
@@ -1503,6 +1535,8 @@ export interface Model<TApi extends Api = Api> {
 	compactionModel?: string;
 	/** Provider-native compaction endpoint configuration. */
 	remoteCompaction?: RemoteCompactionConfig<TApi>;
+	/** Per-model judgment endpoint overrides (route, type/value key maps, usage keys). */
+	judgment?: JudgmentConfig;
 	/** Provider-assigned priority value (lower = higher priority). */
 	priority?: number;
 	/**
