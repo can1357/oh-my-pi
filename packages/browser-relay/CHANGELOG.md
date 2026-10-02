@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Handled fragmented `about:blank#<hash>` navigations safely in the extension service worker to prevent triggering a fatal native Chromium `NavigationRequest::BeginNavigationImpl` security assertion failure (`brk #0x0` / SIGTRAP) on Chrome 154+. Navigations to fragmented `about:blank` URLs apply fragment changes in-renderer via isolated-world evaluation while preserving CDP lifecycle events and response contracts ([#14124](https://github.com/can1357/oh-my-pi/pull/14124) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.6.3] - 2026-10-06
 
 ### Fixed
