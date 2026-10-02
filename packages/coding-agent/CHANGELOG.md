@@ -5,9 +5,16 @@
 ### Added
 
 - Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
+- Added a `goal` command for RPC hosts (`--mode rpc` and `rpc-ui`) to create, read, pause, resume and drop goals, the current goal in `get_state`, and opt-in automatic goal continuation with `goal.continuationModes: ["rpc"]` ([#13952](https://github.com/can1357/oh-my-pi/pull/13952) by [@shawnkoh](https://github.com/shawnkoh))
+- Added `--goal <objective>` for interactive launches: it starts a fresh session in goal mode and begins working on the objective immediately, without typing `/goal` ([#13879](https://github.com/can1357/oh-my-pi/pull/13879) by [@shawnkoh](https://github.com/shawnkoh))
 
 ### Fixed
 
+- Fixed the skill descriptions database and text-predict engine state ignoring XDG directories; with XDG enabled they now live under `$XDG_DATA_HOME/omp`, and an existing cache and learned prediction state are carried over on first use ([#13648](https://github.com/can1357/oh-my-pi/pull/13648) by [@Parsifa1](https://github.com/Parsifa1))
+- Subagent MCP calls now honor the parent transport's configured deadline, including `OMP_MCP_TIMEOUT_MS` and `timeout: 0`, instead of discarding long-running results at an independent 60-second proxy timeout ([#13862](https://github.com/can1357/oh-my-pi/pull/13862) by [@NikkeTryHard](https://github.com/NikkeTryHard)).
+- Fixed a fresh setup with no model configured failing its first turn with "Thinking effort high is not supported" when the auto-picked provider default has no effort levels (e.g. Devin's `swe-1-6`); the default thinking level is now fitted to the picked model ([#13657](https://github.com/can1357/oh-my-pi/pull/13657) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the `read` tool hanging, and the TUI ignoring every keystroke, when reading `/dev/stdin`, a FIFO, or another non-regular file; such paths are now rejected ([#13585](https://github.com/can1357/oh-my-pi/pull/13585) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
+- Fixed `~/.omp` being loaded as a project config directory for any non-repository cwd under home (including Windows `%TEMP%` workdirs), which applied the user's `SYSTEM.md`, `RULES.md` and `AGENTS.md` as project config and bypassed `PI_CODING_AGENT_DIR` and profiles ([#14084](https://github.com/can1357/oh-my-pi/pull/14084) by [@NaC-L](https://github.com/NaC-L)).
 - Restored the source-authored GPT-6.1 Sol reference so OpenAI-compatible discovery exposes reasoning support and the five-level effort ladder while retaining gateway-local pricing ([#14079](https://github.com/can1357/oh-my-pi/pull/14079) by [@github-nicolas-stadler](https://github.com/github-nicolas-stadler)).
 
 ## [18.4.10] - 2026-10-02

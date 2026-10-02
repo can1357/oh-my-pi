@@ -1638,6 +1638,50 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("resolves the default thinking level against the startup fallback model", async () => {
+		// Regression: with no configured model, the provider-default fallback kept
+		// the settings default thinking level (`high`) unresolved, so a reasoning
+		// model without an effort ladder failed its first turn with
+		// "Thinking effort high is not supported by devin/swe-1-6".
+		const fallbackModel = getBundledModel("devin", "swe-1-6");
+		if (!fallbackModel?.reasoning || fallbackModel.thinking) {
+			throw new Error("Expected bundled devin/swe-1-6 as a reasoning model without an effort ladder");
+		}
+
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("devin", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ enabledModels: ["devin/swe-1-6"], defaultThinkingLevel: Effort.High }),
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.model?.provider).toBe("devin");
+			expect(session.model?.id).toBe("swe-1-6");
+			expect(session.thinkingLevel).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("prefers Codex OAuth over plain OpenAI for the shared startup default", async () => {
 		const openaiDefault = getBundledModel("openai", "gpt-5.5");
 		const codexDefault = getBundledModel("openai-codex", "gpt-5.5");

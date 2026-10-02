@@ -144,7 +144,6 @@ import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
-const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
 /**
@@ -373,45 +372,6 @@ export function collectIrcPeerRoster(
 		}
 	}
 	return { peers, parkedCount, omittedCount };
-}
-
-function withAbortTimeout<T>(
-	promise: Promise<T>,
-	timeoutMs: number,
-	signal?: AbortSignal,
-	timeoutController?: AbortController,
-): Promise<T> {
-	if (signal?.aborted) {
-		return Promise.reject(new ToolAbortError());
-	}
-
-	const { promise: wrappedPromise, resolve, reject } = Promise.withResolvers<T>();
-	let settled = false;
-	const timeoutId = setTimeout(() => {
-		if (settled) return;
-		settled = true;
-		timeoutController?.abort(new DOMException(`MCP tool call timed out after ${timeoutMs}ms`, "TimeoutError"));
-		reject(new Error(`MCP tool call timed out after ${timeoutMs}ms`));
-	}, timeoutMs);
-
-	const onAbort = () => {
-		if (settled) return;
-		settled = true;
-		clearTimeout(timeoutId);
-		timeoutController?.abort();
-		reject(new ToolAbortError());
-	};
-
-	if (signal) {
-		signal.addEventListener("abort", onAbort, { once: true });
-	}
-
-	promise.then(resolve, reject).finally(() => {
-		if (signal) signal.removeEventListener("abort", onAbort);
-		clearTimeout(timeoutId);
-	});
-
-	return wrappedPromise;
 }
 
 /** Options for subagent execution */
@@ -948,8 +908,9 @@ function getUsageTokens(usage: unknown): number {
  * retry, abort handling, and result/provider metadata. The source tool is
  * re-resolved on every call by raw MCP server/tool metadata (not the normalized
  * display name), so a reconnect that swaps the instance in `getTools()` is
- * always honored. The proxy adds only the Task-specific 60s call timeout,
- * combining its abort signal with the caller's around source execution.
+ * always honored. The source transport owns the configured MCP deadline,
+ * including timeout=0; a second Task deadline would silently cap longer calls.
+ * The proxy only races caller cancellation around source execution.
  */
 export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	return mcpManager.getTools().map(tool => {
@@ -979,18 +940,13 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 					};
 				}
 				try {
-					const timeoutController = new AbortController();
-					const timeoutSignal = timeoutController.signal;
-					const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-					return await withAbortTimeout(
-						Promise.resolve(source.execute(toolCallId, params, onUpdate, ctx, combinedSignal)),
-						MCP_CALL_TIMEOUT_MS,
-						signal,
-						timeoutController,
-					);
+					return await untilAborted(signal, source.execute(toolCallId, params, onUpdate, ctx, signal));
 				} catch (error) {
 					if (error instanceof ToolAbortError) {
 						throw error;
+					}
+					if (signal?.aborted) {
+						throw new ToolAbortError();
 					}
 					return {
 						content: [

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed OpenAI-compatible discovery of GPT-6.1 Sol reasoning metadata by restoring its source-authored reference while retaining gateway-local pricing ([#14079](https://github.com/can1357/oh-my-pi/pull/14079) by [@github-nicolas-stadler](https://github.com/github-nicolas-stadler)).
+- Fixed new sessions on Fireworks failing with HTTP 404 on the first turn: the Fireworks default model is now `kimi-k3`, because Fireworks no longer serves `kimi-k2.7-code` ([#14068](https://github.com/can1357/oh-my-pi/pull/14068) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.4.10] - 2026-10-02
 
