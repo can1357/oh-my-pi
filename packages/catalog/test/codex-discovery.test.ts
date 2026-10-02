@@ -102,8 +102,8 @@ describe("Codex model discovery", () => {
 		};
 		// Reported level beats the rule's documented `medium`.
 		expect(built("gpt-5.5").vendorDefaultEffort).toBe(Effort.High);
-		// `none` is not an auto effort: the documented rule value fills in.
-		expect(built("gpt-5.6-sol").vendorDefaultEffort).toBe(Effort.Medium);
+		// A reported `none` is kept, so the rule's documented `medium` cannot replace it.
+		expect(built("gpt-5.6-sol").vendorDefaultEffort).toBe("none");
 		// Unknown wire value and no documented default: stays unset.
 		expect(built("gpt-6-astra").vendorDefaultEffort).toBeUndefined();
 	});
