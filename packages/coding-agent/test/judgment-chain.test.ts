@@ -206,6 +206,9 @@ describe("ChainJudge", () => {
 	});
 
 	it("falls back from a failed native judge only to another native judge", async () => {
+		// Local keyword models cannot reproduce calibrated native probabilities,
+		// so only native candidates survive here; a logits-based local decision
+		// model (LocalJudge) would be kept — see the local-judge suite.
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": {

@@ -14,7 +14,7 @@ import {
 	buildLocalInferenceMessages,
 	registerLocalInferenceApi,
 } from "@oh-my-pi/pi-coding-agent/tiny/local-inference-api";
-import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
+import { TINY_LOCAL_MODELS, isTinyJudgeLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import {
 	type TinyModelChatOptions,
 	TinyTitleClient,
@@ -244,15 +244,18 @@ describe("tiny model chat client", () => {
 		});
 
 		try {
-			for (const [index, spec] of TINY_LOCAL_MODELS.entries()) {
+			const chatSpecs = TINY_LOCAL_MODELS.filter(spec => !isTinyJudgeLocalModelKey(spec.key));
+			for (const [index, spec] of chatSpecs.entries()) {
 				const maxTokens = index === 0 ? 0 : 100_000;
 				expect(await client.chat(spec.key, [{ role: "user", content: "hello" }], { maxTokens })).toBe(spec.key);
 			}
-			expect(connected).toEqual(TINY_LOCAL_MODELS.map(spec => spec.key));
+			expect(connected).toEqual(chatSpecs.map(spec => spec.key));
 			expect(requests.map(request => (request.type === "chat" ? request.maxNewTokens : undefined))).toEqual([
 				1,
-				...TINY_LOCAL_MODELS.slice(1).map(() => 1024),
+				...chatSpecs.slice(1).map(() => 1024),
 			]);
+			expect(await client.chat("julia-1", [{ role: "user", content: "hi" }], {})).toBeNull();
+			expect(connected).not.toContain("julia-1");
 		} finally {
 			await client.terminate();
 		}
@@ -270,6 +273,40 @@ describe("tiny model chat client", () => {
 			controller.abort();
 
 			expect(await completion).toBeNull();
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("returns null from generate() for judge keys without connecting a worker", async () => {
+		const connected: string[] = [];
+		const client = new TinyTitleClient(async modelKey => {
+			connected.push(modelKey);
+			return new FakeTinyWorker(() => {});
+		});
+
+		try {
+			expect(await client.generate("julia-1", "hi")).toBeNull();
+			expect(connected).not.toContain("julia-1");
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("returns null from judge() for non-judge keys without connecting a worker", async () => {
+		const connected: string[] = [];
+		const client = new TinyTitleClient(async modelKey => {
+			connected.push(modelKey);
+			return new FakeTinyWorker(() => {});
+		});
+
+		try {
+			expect(
+				await client.judge("lfm2.5-230m", "s", {
+					q: { type: "noul", instructions: "i", options: ["no", "yes"] },
+				}),
+			).toBeNull();
+			expect(connected).not.toContain("lfm2.5-230m");
 		} finally {
 			await client.terminate();
 		}

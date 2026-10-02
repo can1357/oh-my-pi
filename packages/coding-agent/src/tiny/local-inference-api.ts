@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
-import { isTinyLocalModelKey } from "./models";
+import { isTinyJudgeLocalModelKey, isTinyLocalModelKey } from "./models";
 import { tinyModelClient } from "./title-client";
 import type { TinyChatMessage } from "./title-protocol";
 
@@ -110,7 +110,7 @@ async function runLocalInference(
 	context: Context,
 	options: SimpleStreamOptions | undefined,
 ): Promise<void> {
-	if (model.api !== LOCAL_INFERENCE_API || !isTinyLocalModelKey(model.id)) {
+	if (model.api !== LOCAL_INFERENCE_API || !isTinyLocalModelKey(model.id) || isTinyJudgeLocalModelKey(model.id)) {
 		emitError(stream, output, "error", `Local inference cannot run model ${model.provider}/${model.id}.`);
 		return;
 	}
