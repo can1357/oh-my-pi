@@ -816,6 +816,7 @@ describe("runSubprocess result acceptance", () => {
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
+			relaysWakeTurnOutput: () => true,
 			emitSessionEvent: async () => {},
 			wakeForIrc: (records: AgentMessage[]) => {
 				finish = observer(records);
