@@ -13,13 +13,14 @@ import {
 	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
-	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
+	resolveUsageReserve,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
 	type UsageUnit,
+	usageLimitsInReserve,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
@@ -40,7 +41,7 @@ import {
 	type UsageAccountIdentity,
 } from "../slash-commands/helpers/usage-accounts";
 
-import { cfgRetryUsageReservePct } from "../session/settings";
+import { cfgRetryUsageReservePct, cfgRetryUsageReserveTaperHours } from "../session/settings";
 
 const BAR_WIDTH = 28;
 
@@ -62,6 +63,8 @@ export interface UsageCommandArgs {
 export interface UsagePolicyDiagnosticsOptions {
 	/** Existing global fallback used when an account has no reserve override. */
 	globalReservePct: number;
+	/** Global reserve taper (hours before reset, 0 = static) used when an account has no `taperHours` override. */
+	globalReserveTaperHours?: number;
 	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
 	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 }
@@ -651,10 +654,15 @@ function formatPolicyLine(
 	const configuredReservePct = policy?.reservePct;
 	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
+	const taperHours = policy?.taperHours ?? options.globalReserveTaperHours ?? 0;
+	const taperLabel =
+		taperHours > 0
+			? `, tapers over ${taperHours}h ${policy?.taperHours === undefined ? "(global)" : "(override)"}`
+			: "";
+	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}${taperLabel}`;
 	// `omp usage` has no model/session context, so report the conservative
-	// account-wide state from the most-consumed visible window. Actual routing
-	// still scopes limits and selection in AuthStorage.
+	// account-wide state across every visible window. Actual routing still
+	// scopes limits and selection in AuthStorage.
 	// Exhaustion follows the same status-first rule as the limit rows and routing's
 	// `isUsageLimitReached`: a provider-reported "exhausted" wins over the fraction.
 	const exhausted = (limits ?? []).some(limit => resolveStatus(limit) === "exhausted");
@@ -666,9 +674,10 @@ function formatPolicyLine(
 		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
 	}
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+	const reserve = resolveUsageReserve(policy, options.globalReservePct / 100, options.globalReserveTaperHours ?? 0);
 	let state = "eligible";
 	if (exhausted || remainingFraction <= 0) state = "exhausted";
-	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
+	else if (reserve !== undefined && usageLimitsInReserve(limits ?? [], reserve, Date.now())) state = "inside reserve";
 	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
 }
 
@@ -1285,6 +1294,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: cfgRetryUsageReservePct.get(settings),
+			globalReserveTaperHours: cfgRetryUsageReserveTaperHours.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = await loadUsageSources(cmd, settings, authStorage);

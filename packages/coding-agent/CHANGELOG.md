@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `retry.usageReserveTaperHours` (Reserve Taper, default `0` = unchanged static reserve) and per-account `auth.accountPolicies[].taperHours`: the usage reserve now releases linearly to 0 over that many hours before each quota window resets, so reserved quota is spent instead of expiring unused. `omp usage` policy lines reflect the tapered reserve ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ### Changed
 
 - Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).
