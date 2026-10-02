@@ -39,10 +39,10 @@ import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCa
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { describeSegment, renderSegment, type SegmentContext } from "./segments";
-import type { TspProps } from "@oh-my-pi/pi-wire";
+import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, span } from "../native/describe";
-import { getContextMeterThresholds, getContextUsageLevel, getContextUsageTone } from "../chrome/context-thresholds";
+import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering } from "../native/state";
 import { getSeparator } from "./separators";
 import type {
@@ -3411,48 +3411,65 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			window > 0 ? `${formatNumber(ctx.contextTokens)} of ${formatNumber(window)} tokens` : "No context window",
 		];
 		if (boundaries) lines.push(`Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`);
-		if (ctx.compactionSpeculation === "running") lines.push("Compaction summary in progress");
-		else if (ctx.compactionSpeculation === "armed") lines.push("Compaction summary ready");
+		const speculation = ctx.compactionSpeculation;
+		if (speculation === "running") lines.push("Compaction summary in progress");
+		else if (speculation === "armed") lines.push("Compaction summary ready");
+		// The line spans the whole window: omp's boundary symbols sit where speculation
+		// starts and compaction fires, and the share past the speculation point is accent.
+		const used = pct === null ? null : Math.min(1, pct / 100);
+		const speculationAt =
+			boundaries?.speculationPercent == null ? null : Math.min(1, boundaries.speculationPercent / 100);
+		const marks: TspMeterMark[] = [];
+		if (boundaries) {
+			if (speculationAt !== null) {
+				const start: TspMeterMark = {
+					at: speculationAt,
+					icon: "context.speculation",
+					title: `Compaction summary starts at ${Math.round(speculationAt * 100)}%`,
+				};
+				// Lit while a background summary runs or waits armed.
+				if (speculation !== "idle") start.tone = "accent";
+				marks.push(start);
+			}
+			marks.push({
+				at: Math.min(1, boundaries.thresholdPercent / 100),
+				icon: "context.compaction",
+				title: `Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`,
+			});
+		}
 		const context = node(
 			"meter",
 			{
 				role: "omp.composer.context",
-				value: pct === null ? null : Math.min(1, pct / 100),
+				value: used,
 				style: "bar",
 				thresholds: getContextMeterThresholds(window),
-				marks: boundaries
-					? [
-							{
-								at: boundaries.thresholdPercent / 100,
-								title: `Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`,
-							},
-						]
-					: undefined,
+				...(used !== null && speculationAt !== null && used > speculationAt
+					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }
+					: {}),
+				...(marks.length > 0 ? { marks } : {}),
+				...(pct === null ? {} : { label: `${Math.round(pct)}%` }),
+				...(window > 0 ? { total: formatNumber(window) } : {}),
 				title: lines.join("\n"),
+				actions: { click: "status.context" },
 			},
 			undefined,
 			"context",
 		);
 
-		const share =
-			pct !== null && window > 0
-				? `${Math.round(pct)}% of ${formatNumber(window)}`
-				: window > 0
-					? formatNumber(window)
-					: `${formatNumber(ctx.contextTokens)} tokens`;
-		const cost = describeSegment("cost", ctx)
-			?.spans.map(part => part.t)
-			.join("");
-		if (cost) lines.push(`Session cost ${cost}`);
+		// The meter reads the context; the bar's usage is the session's cost.
+		const cost =
+			describeSegment("cost", ctx)
+				?.spans.map(part => part.t)
+				.join("") ?? "";
 		const usage = node(
 			"text",
 			{
 				role: "omp.composer.usage",
-				tone: getContextUsageTone(getContextUsageLevel(pct ?? 0, window)),
-				text: cost ? `${share} · ${cost}` : share,
+				text: cost,
 				wrap: "none",
-				title: lines.join("\n"),
-				actions: { click: "status.context" },
+				...(cost ? { title: `Session cost ${cost}` } : {}),
+				actions: { click: "status.cost" },
 			},
 			undefined,
 			"usage",

@@ -312,9 +312,9 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.headers = patch.headers;
 		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
-		// A same-id definition replaces an earlier configured lifetime even when
-		// it omits one; the rebuild then falls back to catalog policy.
-		if (patch.promptCache === undefined && base.promptCacheConfig !== undefined) {
+		// A same-id definition that omits a lifetime must not carry the previous
+		// route's catalog policy; buildModel reapplies policy for the new route.
+		if (patch.promptCache === undefined) {
 			delete result.promptCache;
 			delete result.promptCacheConfig;
 		}

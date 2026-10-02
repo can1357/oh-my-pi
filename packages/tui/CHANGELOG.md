@@ -5,46 +5,97 @@
 ### Changed
 
 - Reduced repaint CPU by skipping transcript child scans when the child list has not changed ([#13243](https://github.com/can1357/oh-my-pi/pull/13243) by [@iliaal](https://github.com/iliaal)).
+## [18.4.10] - 2026-10-02
+
 ### Added
 
-- Implemented a full-page transcript-replay surface for `Rewind` in native terminals, replacing the dotted-outline picker with a `pick`/`drop` marked page that allows branching navigation
-- Added agent lineage tracking, providing a navigation header when viewing subagents
-- Added JobsSheet overlay for viewing background jobs
-- Added support for OSC 877 protocol framing to enable Tern in Windows ConPTY environments
-- Added `Component.describeScreen` for customized native screen surface layouts
-- Added `reveal` property to native nodes to support programmatic scrolling
-- Added `edit` event protocol for native text manipulation
-
-### Changed
-
-- Notebook evaluation cells now render with dedicated input/output gutters and improved status tone signaling
-- Streaming file operations now keep their output card expanded automatically until execution settles
-- Refactored effort chip to use terminal-native effort glyphs where supported, falling back to block meters
-- Status line brand ('pi') is now excluded from the composer's homed segment set
-- The status-line cost segment renders subagent spend after the session's own spend as `(+1.27)`, and billing summaries print the `$` or subscription mark once, so a later amount billed the same way (such as advisor spend) shows bare ([#13944](https://github.com/can1357/oh-my-pi/pull/13944) by [@H4vC](https://github.com/H4vC))
+- Added ContextUsageView.setBreakdown to refresh usage card without recreating it
+- Added support for change events with flexible values in native TUI
 
 ### Fixed
 
-- Fixed search result rendering to correctly display gaps between non-adjacent context runs
-- Fixed the ask tool's Custom answer and note prompts in native terminals (Tern): the question now shows whole as markdown under a `Custom answer` / `Note for …` title, instead of being wrapped at the terminal's width, cut to three rows and split between the title and an accent-coloured block. `AskDialogCallbacks.onPrompt`/`onImagePrompt` take `{ title, question }`; `HookEditorOptions.question` carries the question and `boundPromptTitle` moved to `overlays/hook-editor`. A cut terminal title now ends in `…`.
-- Fixed text fields in native dialogs (the ask's custom answer and notes, plan review, annotations, the agent hub) being drawn as the prompt composer with a doubled `❯ >` prompt: a plain `Editor` now describes itself as `omp.field` (only the composer claims `omp.editor`) and no longer sends its terminal prompt gutter (`> `) as the native `prompt`.
+- Keep settled responses reachable in scrollback while an ask panel is open, and keep the editor at the bottom after answering ([#12398](https://github.com/can1357/oh-my-pi/issues/12398), [#13993](https://github.com/can1357/oh-my-pi/pull/13993) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed a finished `wait` whose jobs were all still running going blank, and the next `wait` removing it while its turn's usage row stayed; the card now keeps its job snapshot ([#12248](https://github.com/can1357/oh-my-pi/issues/12248), [#13978](https://github.com/can1357/oh-my-pi/pull/13978) by [@Dante-dan](https://github.com/Dante-dan)).
+- Hidden thinking blocks no longer leave a faint "Thought for Ns" row in Tern's native transcript; only the live "Thinking…" indicator shows while the model reasons.
+- Fixed long Markdown paragraphs, such as a read preview of a file with no blank line, stalling rendering: a 44 KB paragraph now renders in about 8 ms instead of 95 ms ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with many unclosed `[`, `*` or `_`, or with a long address-like word, stalling rendering for seconds ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with many unclosed `~~`, `$`, `\(` or `\[`, nested brackets or emphasis, or unclosed HTML, stalling rendering for seconds: 40 KB of unclosed `~~` took 85 s. Emphasis or links nested a thousand levels deep still render slowly, for seconds per few KB: each level restyles the text inside it ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed arrow keys acting as Escape and terminal query replies appearing as typed text when running omp on Windows over SSH ([#14034](https://github.com/can1357/oh-my-pi/issues/14034)).
+- Fixed `/model` under an `enabledModels`/`--models` scope hiding every judge, search, image, and speech model and dropping their configured role assignments (JUDGE, WEB, IMAGE, …) ([#14016](https://github.com/can1357/oh-my-pi/issues/14016))
+
+### Removed
+
+- Removed the internal `urlTokenPossible` export ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Removed the internal `autolinkSchemeScanIndex` export ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose eligibility rules used by ghost-text word completion.
+- Added a full-featured Background jobs view with selectable jobs, live status and elapsed time, working directory, process IDs, exit code, command, tailing output, and cancellation for running jobs.
+
+### Changed
+
+- `OutputSink` now limits artifact files to 16 MiB by default while preserving the beginning and end of oversized output and marking the omitted bytes. Set `artifactMaxBytes: 0` to keep artifacts unbounded; `dump()` reports omitted bytes and full-output references identify sampled artifacts.
+
+### Fixed
+
+- Reduced unnecessary composer startup-cache writes and ensured the cache database is released when it closes on Windows.
+- Fixed Shift+Enter and Ctrl+Enter prompt behavior in Windows Terminal 1.24 and earlier; Shift+Enter now inserts a newline and Ctrl+Enter sends a follow-up, matching other platforms.
+- Improved the Tern native terminal experience across background jobs, settings, debugging, logs, extension management, interactive shell, and provider streams: views remain usable and navigable, preserve output and selection behavior, support keyboard scrolling, and keep key actions accessible.
+- Fixed multi-line labels in Background jobs and multi-line titles in native-terminal prompts so their formatting remains readable.
+
+## [18.4.8] - 2026-10-01
+
+### Fixed
+
+- Fixed native-terminal (TSP) frames held back by unacknowledged credits waiting for an unrelated render after the 5-second stall fallback expired; a credit-blocked change now renders as soon as the oldest frame counts as stalled.
+
+## [18.4.7] - 2026-10-01
+
+### Added
+
+- Added an optional `terminal` section to theme JSON (`background`, `foreground`, `chrome`, `widget`, 16 `ansi` colors) naming the terminal a theme was made for, for hosts that paint the terminal themselves; the built-in themes ported from known schemes (GitHub, Nord, Dracula, Catppuccin, Solarized, Gruvbox, Tokyo Night, One, Monokai, Rosé Pine, Poimandres, Celestial) carry their scheme's.
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added a full-page transcript replay experience for Rewind in native terminals, with branching navigation through the conversation.
+- Added agent lineage navigation, including headers and links for moving between a subagent and its ancestors or returning to the main session.
+- Added a Jobs overlay for viewing background jobs.
+- Added OSC 877 protocol support for native TUI surfaces in Windows ConPTY environments.
+- Added customizable native screen layouts through Component.describeScreen and programmatic scrolling for native nodes.
+- Added native-terminal text editing support for selections in the composer and single-line inputs, including undoable host edits and safe handling of stale or token-spanning ranges.
+- Added optional dismissal handling for error banners, including a Dismiss button in native terminal strips.
+
+### Changed
+
+- Notebook evaluation cells now use dedicated input and output gutters with clearer status indicators.
+- Streaming file operations now remain expanded while running and collapse after execution completes.
+- Improved native-terminal effort indicators, using terminal glyphs where available and block meters as a fallback.
+- Updated native composer navigation when viewing a subagent to show the agent lineage and provide a direct return to the main session.
+- Native `/resume` picker sheets drop the "Resume session" heading and the This folder / All projects tabs: the search placeholder names the scope ("Search sessions in app…", "Search all sessions…") and Tab (the footer's All projects / This folder action) switches it. Picker `title` is now optional on the wire.
+- Updated the native composer's context display to span the window and provide clearer context usage and session-cost information, with shortcuts to the context and usage views.
+- Updated status-line billing summaries to show subagent spend separately from session spend and avoid repeating the same currency or subscription marker for subsequent amounts.
+
+### Fixed
+
+- Fixed search results so gaps between non-adjacent context runs are displayed correctly.
+- Fixed custom-answer and note prompts in native terminals so questions are shown completely with the correct titles and are no longer truncated or incorrectly wrapped.
+- Fixed text fields in native dialogs to render without a duplicate prompt indicator.
+- Fixed native TUI surfaces falling back to plain text rendering in Tern on Windows by accepting OSC 877 messages received through ConPTY.
+- Fixed streaming edit, patch, and write operation cards so they remain fully visible while running and collapse only after completion.
 
 ## [18.4.5] - 2026-09-30
 
 ### Added
 
 - Added Factory Droid base-credit badges; models without a dollar-price reference no longer appear free ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz), continued in [#13276](https://github.com/can1357/oh-my-pi/pull/13276) by [@DusKing1](https://github.com/DusKing1)).
-- Added a viewing header to the native composer (Tern) while a subagent is focused: `Viewing`, the agent's ancestors as links, the agent, and an `esc main` button back to the main session (`omp.composer.focus`, actions `focus:<id>`); it replaces the `pi` fact that used to name the agent among the bar's facts.
-- Added editing over a native terminal's (Tern) own text selection in the composer and single-line inputs: the TSP `edit` event (`from`/`to`/`text`/`cursor`/`len`, UTF-16 offsets) reaches `Editor.applyHostEdit`/`Input.applyHostEdit` as one undo unit; edits made against stale text are ignored, and ranges cutting into image/paste placeholders take the whole token.
-
-### Changed
-
-- `RewindSelectorComponent` describes itself as a page (`describeScreen`: a screen surface with role `omp.rewind` whose `main` is the replayed transcript's own blocks, marked with the new `mark` common prop, and whose dock is its bar) instead of a `picker` sheet; native nodes can ask to be revealed when added (`NativeNode.reveal`)
 
 ### Fixed
 
-- Fixed omp falling back to text rendering in Tern on Windows: TSP replies and events that arrive through a ConPTY as OSC 877 (`ESC ] 877 ; tsp;…`) are now accepted, so native surfaces open there.
-- Fixed streaming edit, apply_patch and write cards in native terminals (Tern) clamping the growing diff under a climbing "N more lines" count; they now stay fully open while they stream and run, then fold once settled, like thinking.
 - Fixed home directories next to shell redirections, control operators or Markdown emphasis (`<`, `>`, `&`, `|`, `*`, `_`) leaking the full path in display-only text ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 - Fixed the subagent task card showing full home paths in tool intents and arguments, while keeping search patterns literal ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 - Fixed Enter doing nothing on a fully typed slash-command argument while its completion popup was open (e.g. `/mcp list`): it now submits instead of re-accepting the identical completion; subcommands that still need a required argument (e.g. `/mcp test`) keep inserting the subcommand so you can type it ([#13885](https://github.com/can1357/oh-my-pi/pull/13885) by [@H4vC](https://github.com/H4vC)).

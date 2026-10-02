@@ -36,6 +36,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import {
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
@@ -537,7 +538,10 @@ export function buildOpenAiNativeHistory(
 						}
 					}
 				}
-				const historyItems = adaptComputerHistoryForCompaction(rawHistoryItems, model.supportsComputerUse === true);
+				const historyItems = adaptComputerHistoryForCompaction(
+					dropMalformedOpenAIResponsesToolCalls(rawHistoryItems),
+					model.supportsComputerUse === true,
+				);
 				input.push(...historyItems);
 				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
 				msgIndex++;
@@ -589,7 +593,7 @@ export function buildOpenAiNativeHistory(
 					}
 				}
 				const historyItems = adaptComputerHistoryForCompaction(
-					providerPayload.items,
+					dropMalformedOpenAIResponsesToolCalls(providerPayload.items),
 					model.supportsComputerUse === true,
 				);
 				if (providerPayload.dt) {

@@ -193,7 +193,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		const nativeChildren: NativeChild[] = [];
 		if (question !== undefined) {
 			nativeChildren.push(
-				node("md", { text: replaceTabs(sanitizeCarriageReturns(question)), role: "omp.ask.question" }, undefined, "question"),
+				node(
+					"md",
+					{ text: replaceTabs(sanitizeCarriageReturns(question)), role: "omp.ask.question" },
+					undefined,
+					"question",
+				),
 			);
 		} else if (detailLines.length > 0) {
 			nativeChildren.push(
@@ -206,7 +211,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			);
 		}
 		nativeChildren.push(this.#editor, hintsRow(nativeHints));
-		this.#nativeRoot = overlayCard(this.nativeRole, plainText(question === undefined ? titleLine : title), nativeChildren);
+		this.#nativeRoot = overlayCard(
+			this.nativeRole,
+			plainText(question === undefined ? titleLine : title),
+			nativeChildren,
+		);
 	}
 
 	/** The editor (which describes itself) under the title and detail lines, with the key hints below. */

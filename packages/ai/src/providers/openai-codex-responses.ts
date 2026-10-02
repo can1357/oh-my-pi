@@ -17,12 +17,12 @@ import {
 	fetchWithRetry,
 	getInstallId,
 	logger,
-	parseStreamingJson,
 	readSseJson,
 	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
@@ -47,6 +47,7 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -2586,7 +2587,7 @@ class CodexStreamProcessor {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
 				name: item.name,
-				arguments: parseStreamingJson(item.arguments || "{}"),
+				arguments: parseToolCallArguments(item.arguments),
 			};
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
@@ -4907,10 +4908,11 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
 				const replayItems =
 					model.supportsComputerUse === true
-						? redactedHistoryItems
-						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
+						? sanitizedHistoryItems
+						: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);

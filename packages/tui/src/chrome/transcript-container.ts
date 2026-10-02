@@ -4,6 +4,7 @@ import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { col } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { isNativeSettled, settleNative } from "../native/settle";
+import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -315,6 +316,18 @@ export class TranscriptContainer extends Container {
 		if (this.#offered?.kind === "commit" && index < this.#offered.end) return false;
 		if (this.#offered?.kind === "append" && index === this.#offered.entry) return false;
 		return true;
+	}
+
+	/**
+	 * Whether a superseded snapshot block (a repeated `wait` poll) may be
+	 * replaced by its successor. Beyond {@link canRemoveBlock}, a block directly
+	 * above a usage row stays: that row describes the turn the block belongs to,
+	 * and removing the block would leave a usage-only turn (#12248).
+	 */
+	canDisplaceBlock(component: Component): boolean {
+		if (!this.canRemoveBlock(component)) return false;
+		const next = this.children[this.children.indexOf(component) + 1];
+		return next === undefined || !isUsageRowBlock(next);
 	}
 
 	/** Lifecycle state per block in transcript order (diagnostics and tests). */

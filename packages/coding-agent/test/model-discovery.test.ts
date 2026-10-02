@@ -2443,6 +2443,79 @@ describe("ModelRegistry runtime discovery", () => {
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
 	});
+	test("openai-models-list uses nested token limits with existing context precedence", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "gpt-6.1-sol", limits: { max_input_tokens: 922_000, max_output_tokens: 128_000 } },
+							{
+								id: "openai-test/context-priority",
+								context_length: 100_000,
+								limits: { max_input_tokens: 922_000, max_output_tokens: 128_000 },
+							},
+							{ id: "openai-test/no-limits" },
+							{
+								id: "openai-test/malformed-limits",
+								limits: { max_input_tokens: "invalid", max_output_tokens: "invalid" },
+							},
+							{ id: "openai-test/incomplete-limits", limits: { max_input_tokens: 922_000 } },
+							{
+								id: "openai-test/overflowing-limits",
+								limits: { max_input_tokens: Number.MAX_SAFE_INTEGER, max_output_tokens: 32_768 },
+							},
+							{
+								id: "openai-test/output-limit-with-invalid-input",
+								limits: { max_input_tokens: "invalid", max_output_tokens: 64_000 },
+							},
+							{ id: "gpt-6-sol" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const aiproxyModel = registry.find("openai-test", "gpt-6.1-sol");
+		expect(aiproxyModel?.contextWindow).toBe(1_050_000);
+		expect(aiproxyModel?.maxTokens).toBe(128_000);
+
+		const contextPriority = registry.find("openai-test", "openai-test/context-priority");
+		expect(contextPriority?.contextWindow).toBe(100_000);
+		expect(contextPriority?.maxTokens).toBe(100_000);
+
+		for (const id of [
+			"openai-test/no-limits",
+			"openai-test/malformed-limits",
+			"openai-test/incomplete-limits",
+			"openai-test/overflowing-limits",
+		]) {
+			const model = registry.find("openai-test", id);
+			expect(model?.contextWindow).toBe(128_000);
+			expect(model?.maxTokens).toBe(32_768);
+		}
+
+		const independentOutputLimit = registry.find("openai-test", "openai-test/output-limit-with-invalid-input");
+		expect(independentOutputLimit?.contextWindow).toBe(128_000);
+		expect(independentOutputLimit?.maxTokens).toBe(64_000);
+
+		const legacyReference = registry.find("openai-test", "gpt-6-sol");
+		expect(legacyReference?.contextWindow).toBe(1_050_000);
+		expect(legacyReference?.maxTokens).toBe(128_000);
+	});
 
 	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {
 		writeRawModelsJson({

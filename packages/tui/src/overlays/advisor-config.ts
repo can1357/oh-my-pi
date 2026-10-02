@@ -44,6 +44,12 @@ import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
 
+export const ADVISOR_REVIEW_MODES = ["turn", "agent-end"] as const;
+export const ADVISOR_SYNC_BACKLOG_MODES = ["off", "1", "3", "5", "strict"] as const;
+
+export type AdvisorReviewMode = (typeof ADVISOR_REVIEW_MODES)[number];
+export type AdvisorSyncBacklog = (typeof ADVISOR_SYNC_BACKLOG_MODES)[number];
+
 /** One advisor declared in `WATCHDOG.yml`; its instructions specialize the shared baseline. */
 export interface AdvisorConfig {
 	name: string;
@@ -56,6 +62,9 @@ export interface AdvisorConfig {
 	enabled?: boolean;
 	/** Maximum non-blocker notes per advisor prompt update (default 4); blockers are exempt. */
 	maxNotesPerUpdate?: number;
+	reviewMode?: AdvisorReviewMode;
+	reviewInterval?: number;
+	syncBacklog?: AdvisorSyncBacklog;
 }
 
 /** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
@@ -115,6 +124,7 @@ export interface AdvisorConfigDeps {
 	externalEditor?: (text: string) => Promise<string | null>;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	availableToolNames: string[];
+	syncBacklog?: AdvisorSyncBacklog;
 	/** Formatted advisor-role model shown on the seeded default row (e.g. "anthropic/claude-..."). */
 	defaultModelLabel?: string;
 }
@@ -192,13 +202,44 @@ function formatAdvisorTools(tools: readonly string[] | undefined, emptyLabel: st
 	return tools.length > 0 ? tools.join(", ") : emptyLabel;
 }
 
+/** Choice value for "no per-advisor override"; matches no {@link ADVISOR_SYNC_BACKLOG_MODES} entry. */
+const SYNC_BACKLOG_INHERIT = "inherit";
+
+/** One-line cadence label: mode plus interval. */
+function formatReviewCadence(advisor: AdvisorConfig): string {
+	const reviewInterval = advisor.reviewInterval ?? 1;
+	return `${advisor.reviewMode ?? "turn"} · every ${reviewInterval} eligible update${reviewInterval === 1 ? "" : "s"}`;
+}
+
+/** Picker description for one explicit catch-up policy value. */
+function describeSyncBacklogMode(mode: AdvisorSyncBacklog): string {
+	switch (mode) {
+		case "off":
+			return "Never wait for this advisor's backlog.";
+		case "strict":
+			return "Wait for all of this advisor's scheduled reviews; no wall-clock cap.";
+		default:
+			return `Wait until fewer than ${mode} scheduled reviews remain (30s cap).`;
+	}
+}
+
 /** Soft-wrap plain text to `width`, returning at least one (possibly empty) line. */
 function wrap(text: string, width: number): string[] {
 	if (!text) return [""];
 	return Bun.wrapAnsi(text, Math.max(1, width), { trim: false }).split("\n");
 }
 
-type Screen = "list" | "detail" | "name" | "model" | "tools" | "thinking" | "instructions";
+type Screen =
+	| "list"
+	| "detail"
+	| "name"
+	| "model"
+	| "tools"
+	| "thinking"
+	| "review-mode"
+	| "review-interval"
+	| "sync-backlog"
+	| "instructions";
 
 /** Footer key hints per screen for the described overlay (the ANSI footer strings carry the same keys). */
 function screenHints(screen: Screen): (NativeHint | undefined)[] {
@@ -220,7 +261,11 @@ function screenHints(screen: Screen): (NativeHint | undefined)[] {
 				actionHint("tui.select.cancel", "back"),
 			];
 		case "thinking":
+		case "review-mode":
+		case "sync-backlog":
 			return [actionHint("tui.select.confirm", "pick"), actionHint("tui.select.cancel", "back")];
+		case "review-interval":
+			return [actionHint("tui.input.submit", "save"), actionHint("tui.select.cancel", "cancel")];
 		case "tools":
 			return [
 				actionHint("tui.select.confirm", "toggle"),
@@ -433,6 +478,44 @@ export class AdvisorConfigOverlayComponent implements Component {
 					control: { k: "action", label: model || this.#defaultModelLabel || "advisor role default", act: "edit" },
 				},
 				{
+					id: "reviewMode",
+					label: "Review mode",
+					hint: "turn reviews every primary turn; agent-end reviews only final yields.",
+					changed: advisor.reviewMode !== undefined ? true : undefined,
+					control: {
+						k: "choice",
+						value: advisor.reviewMode ?? "turn",
+						options: ADVISOR_REVIEW_MODES.map(mode => ({ value: mode, label: mode })),
+						style: "segmented",
+					},
+				},
+				{
+					id: "reviewInterval",
+					label: "Review interval",
+					hint: "Review every Nth eligible update; skipped updates join the next review.",
+					changed: advisor.reviewInterval !== undefined ? true : undefined,
+					control: { k: "number", value: advisor.reviewInterval ?? 1, min: 1, step: 1 },
+				},
+				{
+					id: "syncBacklog",
+					label: "Sync backlog",
+					hint: `Catch-up policy; inherit follows advisor.syncBacklog (currently ${this.#deps.syncBacklog ?? "off"}).`,
+					changed: advisor.syncBacklog !== undefined ? true : undefined,
+					control: {
+						k: "choice",
+						value: advisor.syncBacklog ?? SYNC_BACKLOG_INHERIT,
+						options: [
+							{ value: SYNC_BACKLOG_INHERIT, label: "inherit" },
+							...ADVISOR_SYNC_BACKLOG_MODES.map(mode => ({
+								value: mode,
+								label: mode,
+								detail: describeSyncBacklogMode(mode),
+							})),
+						],
+						style: "menu",
+					},
+				},
+				{
 					id: "tools",
 					label: "Tools",
 					hint: "None means no tools; read, grep and glob are the default.",
@@ -499,6 +582,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const overlay =
 			this.#screen === "model" ||
 			this.#screen === "thinking" ||
+			this.#screen === "review-mode" ||
+			this.#screen === "review-interval" ||
+			this.#screen === "sync-backlog" ||
 			this.#screen === "tools" ||
 			this.#screen === "instructions";
 		const editor = overlay ? this.#active : undefined;
@@ -571,6 +657,24 @@ export class AdvisorConfigOverlayComponent implements Component {
 					this.#showDetail(index);
 				} else if (event.item === "name" && typeof event.value === "string" && event.value.trim()) {
 					advisor.name = event.value.trim();
+					this.#dirty = true;
+					this.#showDetail(index);
+				} else if (event.item === "reviewMode" && (typeof event.value === "string" || event.value === null)) {
+					// `turn` is the default, stored as an omitted field; `null` resets to it.
+					const mode = event.value === null ? "turn" : ADVISOR_REVIEW_MODES.find(m => m === event.value);
+					if (!mode) return;
+					advisor.reviewMode = mode === "turn" ? undefined : mode;
+					this.#dirty = true;
+					this.#showDetail(index);
+				} else if (event.item === "reviewInterval" && (typeof event.value === "number" || event.value === null)) {
+					const interval = event.value ?? 1;
+					if (!Number.isSafeInteger(interval) || interval < 1) return;
+					advisor.reviewInterval = interval === 1 ? undefined : interval;
+					this.#dirty = true;
+					this.#showDetail(index);
+				} else if (event.item === "syncBacklog" && (typeof event.value === "string" || event.value === null)) {
+					// The inherit sentinel and `null` match no mode, so the override clears.
+					advisor.syncBacklog = ADVISOR_SYNC_BACKLOG_MODES.find(mode => mode === event.value);
 					this.#dirty = true;
 					this.#showDetail(index);
 				}
@@ -689,6 +793,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 					{ k: "Enabled", v: advisor.enabled === false ? "○ off" : "● on" },
 					{ k: "Model", v: model },
 					{ k: "Tools", v: formatAdvisorTools(advisor.tools, "no tools") },
+					{ k: "Review", v: formatReviewCadence(advisor) },
+					{ k: "Sync backlog", v: this.#syncBacklogLabel(advisor) },
 				],
 			}),
 			text([span("Instructions:", "dim")]),
@@ -822,12 +928,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
+		const syncBacklog = this.#syncBacklogLabel(advisor);
 		const lines = [
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
 			`${theme.fg("dim", "Enabled:")} ${advisor.enabled === false ? "○ off" : "● on"}`,
 			`${theme.fg("dim", "Model:")} ${model}`,
 			`${theme.fg("dim", "Tools:")} ${tools}`,
+			`${theme.fg("dim", "Review:")} ${formatReviewCadence(advisor)}`,
+			`${theme.fg("dim", "Sync backlog:")} ${syncBacklog}`,
 			"",
 			theme.fg("dim", "Instructions:"),
 		];
@@ -893,6 +1002,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor?.name === "default" &&
 			!advisor.model?.trim() &&
 			advisor.tools === undefined &&
+			advisor.reviewMode === undefined &&
+			advisor.reviewInterval === undefined &&
+			advisor.syncBacklog === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
 			advisor.maxNotesPerUpdate === undefined
@@ -902,7 +1014,12 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		return `${model} · ${tools}`;
+		return `${model} · ${tools} · review ${advisor.reviewMode ?? "turn"}/${advisor.reviewInterval ?? 1}`;
+	}
+
+	/** The advisor's explicit catch-up override, else the inherited global policy. */
+	#syncBacklogLabel(advisor: AdvisorConfig): string {
+		return advisor.syncBacklog ?? `${this.#deps.syncBacklog ?? "off"} (inherited)`;
 	}
 
 	#showList(): void {
@@ -1000,6 +1117,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#detailIndex = index;
 		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const toolsDescription = formatAdvisorTools(advisor.tools, "no tools");
+		const reviewMode = advisor.reviewMode ?? "turn";
+		const reviewInterval = advisor.reviewInterval ?? 1;
 		const items: SelectItem[] = [
 			{ value: "name", label: "Name", description: advisor.name },
 			{
@@ -1008,6 +1127,13 @@ export class AdvisorConfigOverlayComponent implements Component {
 				description: advisor.enabled === false ? "○ off" : "● on",
 			},
 			{ value: "model", label: "Model", description: modelDescription },
+			{ value: "reviewMode", label: "Review mode", description: reviewMode },
+			{ value: "reviewInterval", label: "Review interval", description: String(reviewInterval) },
+			{
+				value: "syncBacklog",
+				label: "Sync backlog",
+				description: this.#syncBacklogLabel(advisor),
+			},
 		];
 		if (advisor.model?.trim()) {
 			items.push({ value: "resetModel", label: "Reset model to advisor-role default" });
@@ -1042,6 +1168,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 				return;
 			case "model":
 				this.#showModelPicker(index);
+				return;
+			case "reviewMode":
+				this.#showReviewModePicker(index);
+				return;
+			case "reviewInterval":
+				this.#showReviewIntervalEditor(index);
+				return;
+			case "syncBacklog":
+				this.#showSyncBacklogPicker(index);
 				return;
 			case "tools":
 				this.#showToolsEditor(index, new Set(this.#doc.advisors[index].tools ?? this.#deps.defaultToolNames), 0);
@@ -1135,6 +1270,97 @@ export class AdvisorConfigOverlayComponent implements Component {
 			"thinking",
 			list,
 			`Thinking effort for ${selector} · ${editorKey("tui.select.confirm")} / click pick · ${editorKey("tui.select.cancel")} back`,
+		);
+	}
+	#showReviewModePicker(index: number): void {
+		const advisor = this.#doc.advisors[index];
+		if (!advisor) {
+			this.#showList();
+			return;
+		}
+		const current = advisor.reviewMode ?? ADVISOR_REVIEW_MODES[0];
+		const items: SelectItem[] = ADVISOR_REVIEW_MODES.map(mode => ({
+			value: mode,
+			label: mode === current ? `${mode} (current)` : mode,
+			description:
+				mode === "turn"
+					? "Review every primary turn (tool-call round)."
+					: "Review only at agent end (once per run).",
+		}));
+		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
+		list.setSelectedIndex(ADVISOR_REVIEW_MODES.indexOf(current));
+		list.onSelect = item => {
+			advisor.reviewMode = item.value === "turn" ? undefined : "agent-end";
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		list.onCancel = () => this.#showDetail(index);
+		this.#setScreen(
+			"review-mode",
+			list,
+			`${editorKey("tui.select.confirm")} / click choose review mode · ${editorKey("tui.select.cancel")} back`,
+		);
+	}
+
+	#showReviewIntervalEditor(index: number): void {
+		const advisor = this.#doc.advisors[index];
+		if (!advisor) {
+			this.#showList();
+			return;
+		}
+		const input = new Input();
+		input.setValue(String(advisor.reviewInterval ?? 1));
+		input.onSubmit = value => {
+			const interval = Number(value.trim());
+			if (!Number.isSafeInteger(interval) || interval < 1) {
+				this.#cb.notify("Review interval must be a positive integer.");
+				return;
+			}
+			advisor.reviewInterval = interval === 1 ? undefined : interval;
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		input.onEscape = () => this.#showDetail(index);
+		this.#setScreen(
+			"review-interval",
+			input,
+			`Type a positive integer · ${editorKey("tui.input.submit")} save · ${editorKey("tui.select.cancel")} cancel`,
+		);
+	}
+
+	#showSyncBacklogPicker(index: number): void {
+		const advisor = this.#doc.advisors[index];
+		if (!advisor) {
+			this.#showList();
+			return;
+		}
+		const global = this.#deps.syncBacklog ?? "off";
+		const current = advisor.syncBacklog;
+		const items: SelectItem[] = [
+			{
+				value: SYNC_BACKLOG_INHERIT,
+				label: current === undefined ? "inherit (current)" : "inherit",
+				description: `Follow the global advisor.syncBacklog setting (currently "${global}").`,
+			},
+			...ADVISOR_SYNC_BACKLOG_MODES.map(mode => ({
+				value: mode,
+				label: mode === current ? `${mode} (current)` : mode,
+				description: describeSyncBacklogMode(mode),
+			})),
+		];
+		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
+		list.setSelectedIndex(current === undefined ? 0 : ADVISOR_SYNC_BACKLOG_MODES.indexOf(current) + 1);
+		list.onSelect = item => {
+			// The inherit sentinel matches no mode, so `find` yields undefined — the override clears.
+			advisor.syncBacklog = ADVISOR_SYNC_BACKLOG_MODES.find(mode => mode === item.value);
+			this.#dirty = true;
+			this.#showDetail(index);
+		};
+		list.onCancel = () => this.#showDetail(index);
+		this.#setScreen(
+			"sync-backlog",
+			list,
+			`${editorKey("tui.select.confirm")} / click choose catch-up policy · ${editorKey("tui.select.cancel")} back`,
 		);
 	}
 

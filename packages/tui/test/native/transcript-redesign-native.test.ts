@@ -116,6 +116,33 @@ describe("native transcript redesign", () => {
 		expect(harness.errors).toEqual([]);
 	});
 
+	it("shows hidden thinking only while it streams, and nothing once it settles", async () => {
+		const component = new AssistantMessageComponent(undefined, true);
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		const message = (...content: AssistantMessage["content"]): AssistantMessage => ({
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content,
+		});
+		component.updateContent(message({ type: "thinking", thinking: "Weighing it" }), { transient: true });
+		await harness.render();
+		expect(harness.find(node => node.k === "section" && node.p?.role === "omp.thinking.live")?.p).toMatchObject({
+			collapsed: true,
+		});
+
+		component.updateContent(
+			message({ type: "thinking", thinking: "Weighing it carefully" }, { type: "text", text: "Done." }),
+		);
+		component.markTranscriptBlockFinalized();
+		await harness.render();
+		expect(
+			harness.find(node => node.k === "section" && String(node.p?.role).startsWith("omp.thinking")),
+		).toBeUndefined();
+		expect(harness.errors).toEqual([]);
+	});
+
 	it("gives a user message no head row, and routes its toolbar to omp's copy and rewind", async () => {
 		const actions: TranscriptAction[] = [];
 		setTranscriptActionHandler(action => actions.push(action));

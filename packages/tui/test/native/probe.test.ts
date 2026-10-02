@@ -62,7 +62,9 @@ describe("TSP hello probe", () => {
 	it("resolves with a hello reply torn across stdin reads, then hands events to input whole", () => {
 		const { terminal, writes, received, hellos } = setup();
 		try {
-			expect(writes.join("")).toContain('\x1b_tsp;q;{"q":"hello","v":[1],"app":"omp"}\x1b\\\x1b[c');
+			expect(writes.join("")).toContain(
+				'\x1b_tsp;q;{"q":"hello","v":[1],"app":"omp","features":["edit"]}\x1b\\\x1b[c',
+			);
 			expect(terminal.tspProbePending).toBe(true);
 			process.stdin.emit("data", HELLO_REPLY.slice(0, 30));
 			process.stdin.emit("data", HELLO_REPLY.slice(30));
@@ -89,10 +91,7 @@ describe("TSP hello probe", () => {
 			// C1 code points arrive as JSON escapes; a BEL may end the OSC form.
 			process.stdin.emit("data", '\x1b]877;tsp;e;{"ev":"input","sf":"s:1","id":"q","value":"a\\u0085b"}\x07');
 			process.stdin.emit("data", `\x1b]877;${EVENT.slice(2)}`);
-			expect(received).toEqual([
-				'\x1b_tsp;e;{"ev":"input","sf":"s:1","id":"q","value":"a\\u0085b"}\x1b\\',
-				EVENT,
-			]);
+			expect(received).toEqual(['\x1b_tsp;e;{"ev":"input","sf":"s:1","id":"q","value":"a\\u0085b"}\x1b\\', EVENT]);
 		} finally {
 			terminal.stop();
 		}

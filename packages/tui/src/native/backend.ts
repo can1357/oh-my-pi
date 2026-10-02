@@ -38,7 +38,7 @@ import {
 	type NativeThemePalette,
 	setNativeSymbolPreset,
 } from "../theme/theme";
-import type { Component, OverlayOptions } from "../tui";
+import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
 import { getNativeBlob } from "./blobs";
 import { node } from "./describe";
@@ -64,6 +64,18 @@ export interface NativeHost {
 	overlays(): readonly NativeOverlay[];
 	/** Component receiving keyboard input. */
 	focused(): Component | null;
+	/**
+	 * The user clicked into a node described by `owners[0]` (then the
+	 * components containing it, innermost first): move keyboard focus there.
+	 * `field` is the outermost owner that takes keys and whose focus target is
+	 * the clicked `editor`/`input`, if any; `sheet` tells the overlays that
+	 * don't hold the keys while the user works beside them.
+	 */
+	focusFromPointer(
+		owners: readonly Component[],
+		field: Component | null,
+		sheet: (overlay: Component) => boolean,
+	): void;
 	requestRender(): void;
 	/** The terminal switched appearance. */
 	appearanceChanged(dark: boolean): void;
@@ -80,8 +92,22 @@ export interface NativeBackendOptions {
 	readonly recordPath?: string;
 	/** Log the `rows` fallback count per frame. Defaults to `PI_TUI_NATIVE_STATS=1`. */
 	readonly stats?: boolean;
-	readonly now?: () => number;
+	/** Clock and timers (stall wake-up); defaults to `Date.now` and unref'd `setTimeout`. */
+	readonly scheduler?: RenderScheduler;
 }
+
+/** Real clock and timers that never keep the process alive on their own. */
+const DEFAULT_SCHEDULER: RenderScheduler = {
+	now: () => Date.now(),
+	scheduleImmediate: callback => {
+		setImmediate(callback);
+	},
+	scheduleRender: (callback, delayMs) => {
+		const timer = setTimeout(callback, delayMs);
+		timer.unref();
+		return { cancel: () => clearTimeout(timer) };
+	},
+};
 
 /** Frames kept for the debug `tsp` op. */
 const RECENT_FRAMES = 64;
@@ -216,7 +242,9 @@ export class NativeBackend {
 	#mirror: boolean;
 	#recordPath: string | undefined;
 	#stats: boolean;
-	#now: () => number;
+	#scheduler: RenderScheduler;
+	/** Wakes a render when the oldest unacked frame of a credit-blocked surface turns stalled. */
+	#stallTimer: RenderTimer | undefined;
 	#recent: TspFrame[] = [];
 	#sawResize = false;
 	#live = false;
@@ -237,7 +265,7 @@ export class NativeBackend {
 		this.#mirror = options.mirror === true;
 		this.#recordPath = options.recordPath ?? (Bun.env.PI_TUI_TSP_RECORD || undefined);
 		this.#stats = options.stats ?? Bun.env.PI_TUI_NATIVE_STATS === "1";
-		this.#now = options.now ?? Date.now;
+		this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
 		this.#inline = this.#newSurface("inline");
 	}
 
@@ -338,6 +366,7 @@ export class NativeBackend {
 		this.#unbindTheme?.();
 		this.#unbindTheme = undefined;
 		this.#useNerdSymbols(false);
+		this.#clearStallTimer();
 	}
 
 	/**
@@ -440,6 +469,7 @@ export class NativeBackend {
 		this.#pruneOverlayNodes(overlays);
 		if (!this.#hasCredit(surface)) {
 			surface.dirty = true;
+			this.#armStallTimer(surface);
 			return;
 		}
 		surface.dirty = false;
@@ -504,7 +534,7 @@ export class NativeBackend {
 	#hasCredit(surface: Surface): boolean {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
-		if (this.#now() - oldest < STALLED_ACK_MS) return false;
+		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
 		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
 			sf: surface.id,
 			s: surface.seq,
@@ -515,9 +545,27 @@ export class NativeBackend {
 		return true;
 	}
 
+	/** Render again once `surface`'s oldest unacked frame counts as stalled, in case no ack ever arrives. */
+	#armStallTimer(surface: Surface): void {
+		if (this.#stallTimer) return;
+		const delay = surface.unacked[0]! + STALLED_ACK_MS - this.#scheduler.now();
+		this.#stallTimer = this.#scheduler.scheduleRender(
+			() => {
+				this.#stallTimer = undefined;
+				this.#host.requestRender();
+			},
+			Math.max(0, delay),
+		);
+	}
+
+	#clearStallTimer(): void {
+		this.#stallTimer?.cancel();
+		this.#stallTimer = undefined;
+	}
+
 	#sendFrame(surface: Surface, ops: readonly TspOp[]): void {
 		surface.seq++;
-		surface.unacked.push(this.#now());
+		surface.unacked.push(this.#scheduler.now());
 		const frame: TspFrame = { sf: surface.id, s: surface.seq, ops };
 		if (surface.doc) {
 			const errors = surface.doc.applyFrame(frame);
@@ -563,7 +611,7 @@ export class NativeBackend {
 			}
 		}
 		try {
-			fs.appendFileSync(path, `${JSON.stringify({ t: this.#now(), dir, verb, params, body: payload })}\n`);
+			fs.appendFileSync(path, `${JSON.stringify({ t: this.#scheduler.now(), dir, verb, params, body: payload })}\n`);
 		} catch (error) {
 			logger.warn("TSP: recording failed; disabling", { path, error: String(error) });
 			this.#recordPath = undefined;
@@ -583,6 +631,7 @@ export class NativeBackend {
 				const newly = Math.min(event.s, surface.seq) - surface.acked;
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
+				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
 				return;
 			}
@@ -624,6 +673,16 @@ export class NativeBackend {
 			case "edit":
 				this.#routeUiEvent(event);
 				return;
+			case "focus": {
+				const reconciler = this.#surfaceFor(event.sf)?.reconciler;
+				const owners = reconciler?.owners(event.id) ?? [];
+				if (!reconciler || owners.length === 0) return;
+				const field =
+					owners.findLast(owner => owner.handleInput && reconciler.focusTarget(owner) === event.id) ?? null;
+				this.#host.focusFromPointer(owners, field, overlay => overlay.nativeSheet?.(this.#cx) === true);
+				this.#host.requestRender();
+				return;
+			}
 		}
 	}
 

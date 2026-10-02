@@ -249,13 +249,7 @@ describe("task spawn routing", () => {
 				projectAgentsDir: null,
 			});
 			const repoRoot = "/repo-root";
-			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
-				repoRoot,
-				baseline: {
-					root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
-					nested: [],
-				},
-			});
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot });
 			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => ({
 				...makeResult(opts.agentId),
 				isolated: true,

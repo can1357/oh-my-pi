@@ -136,9 +136,9 @@ Behavior:
 Practical effect:
 
 - UI/tool return shows bounded output,
-- full sanitized output is preserved in artifact file and referenced as `artifact://<id>` when file-backed artifact mirroring succeeded.
+- full sanitized output (up to the artifact cap) is preserved in artifact file and referenced as `artifact://<id>` when file-backed artifact mirroring succeeded.
 
-If artifact I/O fails, the sink stops further capture attempts, retains the existing bounded inline output, and still closes its writer. The tool's execution result is unchanged; its output metadata and terminal warning state that full output was not saved completely, without advertising the incomplete artifact as a full recovery source. `dump()` and `dispose()` share completion so concurrent finalization cannot publish success before an asynchronous write or close failure settles. The sink's disk cap is disabled by default and failed capture is not retried. Callers may explicitly configure `artifactMaxBytes` and `artifactHeadBytes` to retain a bounded head/tail artifact with an `ARTIFACT TRUNCATED` notice.
+If artifact I/O fails, the sink stops further capture attempts, retains the existing bounded inline output, and still closes its writer. The tool's execution result is unchanged; its output metadata and terminal warning state that full output was not saved completely, without advertising the incomplete artifact as a full recovery source. `dump()` and `dispose()` share completion so concurrent finalization cannot publish success before an asynchronous write or close failure settles. Failed capture is not retried. The sink caps the artifact file at `artifactMaxBytes` (default 16 MiB; tool executors pass `tools.artifactMaxBytes`, where `0` = unbounded): it keeps a head window (`artifactHeadBytes`, default 3 MiB but at most half the cap) plus a rolling tail, joined by an `ARTIFACT TRUNCATED` notice. When the cap drops bytes, `dump()` reports them as `artifactElidedBytes`, and the output notice labels `artifact://<id>` as a head/tail sample instead of full output.
 
 The capture warning also survives background job delivery, `wait` recovery, non-consuming `read proc://<id>` inspection, cancellation, and transcript rebuilds. Capture failures belong to individual jobs, not the aggregate report. Oversized recovery snapshots can persist the complete annotated report, including healthy jobs' results, and advertise it as a "full report" rather than a full original command log. Each source capture warning appears once in model-facing text and once on its own live or rebuilt terminal row. Individual incomplete captures are still not re-spilled and advertised as full original output.
 
@@ -178,12 +178,13 @@ Handled by `AgentProtocolHandler` over registered active session artifact direct
 - `write agent://<id>` sends a peer message when IRC is available; `agent://all` is write-only broadcast, not an output file
 - a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
 - extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
+- an id with no `<id>.md` yet that is registered in the agent registry (the registry `write agent://<id>` delivers to) resolves to a progress document instead of an error: the agent's status, every accepted `yield` payload so far (non-terminal sections included), and its latest assistant text, read from the live session or else its retained session file. Once `<id>.md` exists it wins. JSON-path extraction on such an id throws `Output <id> is not published yet`
 
 Failure behavior:
 
-- if no artifact directories are registered: throws `No session - agent outputs unavailable`,
-- if registered directories exist but none are present on disk: throws `No artifacts directory found`,
-- missing output throws `Not found: <id>` with available `.md` output IDs when directory listing succeeds.
+- if no artifact directories are registered and the id is not a registered agent: throws `No session - agent outputs unavailable`,
+- if registered directories exist but none are present on disk and the id is not a registered agent: throws `No artifacts directory found`,
+- an unknown id throws `Not found: <id>` followed by at most five near ids (`Did you mean: …`, fuzzy-matched against `.md` output ids and registered agents), or a pointer to `history://` when nothing is close.
 
 Read tool integration:
 

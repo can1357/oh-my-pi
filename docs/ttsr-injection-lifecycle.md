@@ -144,7 +144,7 @@ After the 50ms timeout, the scheduled task first verifies that its retry token, 
 3. if `contextMode === "discard"`, drops the targeted partial assistant output with `agent.replaceMessages(...slice(0, targetAssistantIndex))`
 4. builds injection content from pending rules using `ttsr-interrupt.md`
 5. appends a hidden runtime custom message and persists a matching `custom_message` entry with `customType: "ttsr-injection"` and `details.rules`
-6. marks/persists those rule names through a `ttsr_injection` entry and calls `agent.continue()` to retry generation
+6. marks/persists those rule names through a `ttsr_injection` entry and schedules a continuation with the session's agent-continue scheduler. If the interrupted run is still busy, the scheduler waits for it to settle and retries; skipped or failed continuations release the resume gate.
 
 Template payload is:
 
