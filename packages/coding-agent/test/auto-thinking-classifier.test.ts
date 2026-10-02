@@ -522,4 +522,71 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
 	});
+
+	describe("vendor default source", () => {
+		// No judge is registered: any classifier call would throw, so a resolved
+		// level proves the vendor path skipped classification.
+		const vendorDeps = (model: Model, maxEffort: "xhigh" | "max" = "xhigh") => ({
+			settings: Settings.isolated({
+				"providers.autoThinkingSource": "vendor",
+				"providers.autoThinkingMaxEffort": maxEffort,
+			}),
+			registry: createRegistry([]),
+			model,
+		});
+		const vendorModel = (spec: { id: string; provider: string; api: ai.Api }, thinking?: ai.ThinkingConfig) =>
+			buildModel({
+				...spec,
+				name: spec.id,
+				baseUrl: "https://example.com",
+				reasoning: true,
+				thinking,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 4096,
+			});
+
+		it("uses the vendor default without classifying, with no low floor", async () => {
+			const opus = vendorModel({ id: "claude-opus-5-5", provider: "anthropic", api: "anthropic-messages" });
+			expect(await classifyDifficulty({ request: "rename a helper" }, vendorDeps(opus))).toBe(Effort.Medium);
+
+			const lite = vendorModel({ id: "gemini-3.5-flash-lite", provider: "google", api: "google-generative-ai" });
+			expect(await classifyDifficulty({ request: "cut over the storage layer" }, vendorDeps(lite))).toBe(
+				Effort.Minimal,
+			);
+		});
+
+		it("prefers the vendor default over the model default level and snaps it onto the ladder", async () => {
+			const both = buildModel({
+				...buildLadderModel("mock-both", [Effort.Low, Effort.Medium]),
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium], defaultLevel: Effort.Medium },
+				vendorDefaultEffort: Effort.Minimal,
+			});
+			// `minimal` beats `defaultLevel`, then snaps up to the ladder floor.
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(both))).toBe(Effort.Low);
+		});
+
+		it("falls back to the model default level and respects the auto ceiling", async () => {
+			const maxDefault = vendorModel(
+				{ id: "mock-max-default", provider: "mock", api: "openai-completions" },
+				{ mode: "effort", efforts: MAX_LADDER, defaultLevel: Effort.Max },
+			);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxDefault))).toBe(Effort.XHigh);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxDefault, "max"))).toBe(Effort.Max);
+
+			// Nothing at or below the default ceiling: no level, never `max`.
+			const maxOnly = vendorModel(
+				{ id: "mock-max-only", provider: "mock", api: "openai-completions" },
+				{ mode: "effort", efforts: [Effort.Max], defaultLevel: Effort.Max },
+			);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxOnly))).toBeUndefined();
+		});
+
+		it("throws when no vendor default is known so the caller keeps its fallback", async () => {
+			await expect(
+				classifyDifficulty({ request: "x" }, vendorDeps(buildLadderModel("mock-plain", XHIGH_LADDER))),
+			).rejects.toThrow();
+		});
+	});
 });
