@@ -181,7 +181,6 @@ describe("IrcBus RemoteTransport seam", () => {
 			kind: "remote",
 			session: null,
 			status: "aborted",
-			ownerToken: OWNER,
 		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport("injected");
@@ -236,7 +235,6 @@ describe("IrcBus RemoteTransport seam", () => {
 			kind: "remote",
 			session: null,
 			status: "running",
-			ownerToken: OWNER,
 		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport("injected");
@@ -403,22 +401,55 @@ describe("IrcBus RemoteTransport seam", () => {
 		const tB = recordingTransport().transport;
 		// A bridge extension claims the namespace; the 4th arg is its source path.
 		bus.setRemoteTransport("cluster-a", tA, "/ext/bridge.ts:load-1", "/ext/bridge.ts");
-		expect(bus.namespaceOwner("cluster-a")).toBe("/ext/bridge.ts:load-1");
-		// The SAME extension re-loaded with a fresh ownerToken — e.g. inherited by a spawned subagent
-		// that shares this registry/bus — re-claims without throwing and WITHOUT overwriting the owner.
+		expect(bus.isNamespaceOwner("cluster-a", "/ext/bridge.ts:load-1")).toBe(true);
+		// The SAME extension re-loaded with a fresh ownerToken and no root (a spawned subagent inheriting
+		// the bridge in this registry) re-claims without throwing and WITHOUT becoming an owner.
 		expect(() => bus.setRemoteTransport("cluster-a", tB, "/ext/bridge.ts:load-2", "/ext/bridge.ts")).not.toThrow();
-		expect(bus.namespaceOwner("cluster-a")).toBe("/ext/bridge.ts:load-1");
+		expect(bus.isNamespaceOwner("cluster-a", "/ext/bridge.ts:load-2")).toBe(false);
 		// The re-load is a non-owner: disposing it does NOT release the shared transport...
-		bus.releaseTransportsForOwner("/ext/bridge.ts:load-2");
+		expect(bus.releaseTransportsForOwner("/ext/bridge.ts:load-2")).toEqual([]);
 		expect(bus.hasRemoteTransport()).toBe(true);
-		// ...only the original owner's release tears it down.
-		bus.releaseTransportsForOwner("/ext/bridge.ts:load-1");
+		// ...only the original owner's release tears it down, reporting the namespace as freed.
+		expect(bus.releaseTransportsForOwner("/ext/bridge.ts:load-1")).toEqual(["cluster-a"]);
 		expect(bus.hasRemoteTransport()).toBe(false);
 		// A genuinely different extension claiming the same namespace is still rejected.
 		bus.setRemoteTransport("cluster-a", tA, "/ext/bridge.ts:load-3", "/ext/bridge.ts");
 		expect(() => bus.setRemoteTransport("cluster-a", tB, "/other/bridge.ts:load-1", "/other/bridge.ts")).toThrow(
 			/already claimed/,
 		);
+	});
+
+	it("routes a co-owning root's send through its own transport and falls back to a sibling's while it reconnects (#14071)", async () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "root-a", displayName: "A", kind: "main", session: null, status: "idle" });
+		registry.register({ id: "root-b", displayName: "B", kind: "main", session: null, status: "idle" });
+		const bus = new IrcBus(registry);
+		const a = recordingTransport();
+		const b = recordingTransport();
+		bus.setRemoteTransport("cluster-a", a.transport, "load-a", "/ext/bridge.ts", "root-a");
+		bus.setRemoteTransport("cluster-a", b.transport, "load-b", "/ext/bridge.ts", "root-b");
+		// A root that already co-owns the claim re-loading the bridge is a passenger, not a third owner.
+		bus.setRemoteTransport("cluster-a", recordingTransport().transport, "load-a2", "/ext/bridge.ts", "root-a");
+		expect(bus.isNamespaceOwner("cluster-a", "load-a2")).toBe(false);
+
+		expect((await bus.send({ from: "root-a", to: "@cluster-a/x", body: "a" })).outcome).toBe("injected");
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/x", body: "b" })).outcome).toBe("injected");
+		expect(a.seen.map(m => m.body)).toEqual(["a"]);
+		expect(b.seen.map(m => m.body)).toEqual(["b"]);
+
+		// B clears its transport for a reconnect: its send still reaches the mesh through A's bridge.
+		bus.setRemoteTransport("cluster-a", undefined, "load-b", "/ext/bridge.ts", "root-b");
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/x", body: "b via a" })).outcome).toBe("injected");
+		expect(a.seen.map(m => m.body)).toEqual(["a", "b via a"]);
+
+		// A's release leaves B the sole owner (claim retained, no transport until B reinstalls).
+		expect(bus.releaseTransportsForOwner("load-a")).toEqual([]);
+		expect(bus.hasClaimedNamespace()).toBe(true);
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/x", body: "stranded?" })).outcome).toBe("failed");
+		bus.setRemoteTransport("cluster-a", b.transport, "load-b", "/ext/bridge.ts", "root-b");
+		expect((await bus.send({ from: "root-b", to: "@cluster-a/x", body: "back" })).outcome).toBe("injected");
+		expect(bus.releaseTransportsForOwner("load-b")).toEqual(["cluster-a"]);
+		expect(bus.hasClaimedNamespace()).toBe(false);
 	});
 
 	it("releaseTransportsForOwner drops the claim so the namespace can be re-claimed by another load", async () => {
@@ -441,7 +472,6 @@ describe("IrcBus RemoteTransport seam", () => {
 			kind: "remote",
 			session: null,
 			status: "running",
-			ownerToken: OWNER,
 		});
 		const bus = new IrcBus(registry);
 		bus.setRemoteTransport(NS, recordingTransport().transport, OWNER);
