@@ -4,10 +4,15 @@
 
 ### Added
 
+- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)): per-server tool allow/deny lists (literal names or globs) are applied at the tool-reception boundary, so the session, `/mcp test`, `/session`, and the persisted tool cache all see one consistent filtered catalog. Tool-filter entries stay literal (`${VAR}` never expands inside one); Codex `enabled_tools`/`disabled_tools` map onto the same feature.
+
 - `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
+- Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `auth`, `oauth`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
+- Fixed scalar shared fields (`timeout`, `enabled`, `requestIdFormat`) losing `${VAR}` expansion in `.omp/mcp.json` and OMP extension configs once filters went literal; per-field expansion now covers them, and the expanded strings coerce exactly as literal values do.
+- Fixed Exa tool selection consulting the new filters (URL-semantic endpoint parsing, case-sensitive native classification, prototype-safe native set): a server whose enabled tools are non-native is kept instead of dropped.
 - Fixed HTML export hanging when a session's subagent directory held a transcript named `..jsonl`; discovery now only descends into real child directories ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ## [18.4.12] - 2026-10-02
@@ -484,15 +489,6 @@
 
 ## [18.3.1] - 2026-09-25
 
-### Added
-
-- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)): per-server tool allow/deny lists (literal names or globs) are applied at the tool-reception boundary, so the session, `/mcp test`, `/session`, and the persisted tool cache all see one consistent filtered catalog. Tool-filter entries stay literal (`${VAR}` never expands inside one); Codex `enabled_tools`/`disabled_tools` map onto the same feature.
-
-### Fixed
-
-- Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `auth`, `oauth`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
-- Fixed scalar shared fields (`timeout`, `enabled`, `requestIdFormat`) losing `${VAR}` expansion in `.omp/mcp.json` and OMP extension configs once filters went literal; per-field expansion now covers them, and the expanded strings coerce exactly as literal values do.
-- Fixed Exa tool selection consulting the new filters (URL-semantic endpoint parsing, case-sensitive native classification, prototype-safe native set): a server whose enabled tools are non-native is kept instead of dropped.
 - Added `cp` builtin for native filesystem copy operations
 - Added native support for `local://` and `omp://` URLs in `find`, `glob`, `grep`, and AST tools
 - Added shared access to IDA databases across all omp processes in a project
