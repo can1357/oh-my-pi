@@ -329,7 +329,7 @@ describe("structured subagent primitive", () => {
 
 		const settled = await runStructuredSubagent(request({ session: parentSession, retainArtifacts: true }));
 
-		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
+		expect(dispatched[0]?.inheritedSessionAgents?.()).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {

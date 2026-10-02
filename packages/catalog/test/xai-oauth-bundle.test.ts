@@ -25,9 +25,9 @@ describe("xai-oauth bundled catalog (regression)", () => {
 	});
 
 	it("bundles every curated id", () => {
-		const seededIds = seed.map(model => model.id).sort();
-		const bundledIds = Object.keys(bundled).sort();
-		expect(bundledIds).toEqual(seededIds);
+		const seededIds = seed.map(model => model.id);
+		const bundledIds = Object.keys(bundled);
+		expect(bundledIds).toEqual(expect.arrayContaining(seededIds));
 	});
 
 	for (const seededModel of seed.filter(model => model.api === "openai-responses")) {

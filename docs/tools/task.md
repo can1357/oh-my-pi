@@ -51,6 +51,8 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 
 There is no wire label field: the one-line UI label shown in the TUI/registry is generated automatically from the `task` text by the tiny/title model (fire-and-forget), so callers never provide it.
 
+Available tool-using chat models are also exposed automatically as general-purpose agents named by their exact `provider/model` selector. Their pool follows the session picker scope and model availability, including newly discovered models. See [automatic model agents](../task-agent-discovery.md#automatic-model-agents) for filtering, live updates, and nested delegation.
+
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
 
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
