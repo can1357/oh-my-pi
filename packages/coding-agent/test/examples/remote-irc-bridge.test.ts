@@ -23,6 +23,7 @@ import {
 	type BridgeMessage,
 	encodeLine,
 	LineDecoder,
+	LineWriter,
 	type PeerMessage,
 	type Roster,
 } from "../../examples/extensions/remote-irc-bridge/protocol";
@@ -184,6 +185,16 @@ describe("examples/extensions/remote-irc-bridge", () => {
 			peer.send({ type: "ack", id: outbound.id, receipt: { to: "@demo/leia", outcome: "injected" } });
 			expect(await sending).toEqual({ to: "@demo/leia", outcome: "injected" });
 
+			// A body far larger than one socket write can carry still arrives as one intact record
+			// (the bridge queues the unwritten suffix and flushes on drain), and the ack comes back.
+			const bigBody = "x".repeat(4 * 1024 * 1024);
+			const sendingBig = IrcBus.forRegistry(agentRegistry).send({ from: "Main", to: "@demo/han", body: bigBody });
+			const big = await peer.next("outbound");
+			expect(big.toName).toBe("han");
+			expect(big.body.length).toBe(bigBody.length);
+			peer.send({ type: "ack", id: big.id, receipt: { to: "@demo/han", outcome: "injected" } });
+			expect(await sendingBig).toEqual({ to: "@demo/han", outcome: "injected" });
+
 			// Inbound: a peer line becomes deliverInbound(@demo/leia -> Main) with expectsReply forwarded;
 			// the delivery outcome goes back on the wire with omp's own message id.
 			const delivered = vi.spyOn(session, "deliverIrcMessage").mockResolvedValue("injected");
@@ -231,5 +242,61 @@ describe("remote-irc-bridge LineDecoder", () => {
 		const decoder = new LineDecoder<{ n: number }>(() => {});
 		expect(decoder.push('{"n":1}\n{"n":2}\n{"n"')).toEqual([{ n: 1 }, { n: 2 }]);
 		expect(decoder.push(":3}\n")).toEqual([{ n: 3 }]);
+	});
+});
+
+describe("remote-irc-bridge LineWriter", () => {
+	/** A socket stand-in that accepts at most `cap` bytes per write and records everything written. */
+	function cappedSocket(cap: number): { socket: Bun.Socket; written: () => string } {
+		const chunks: Uint8Array[] = [];
+		const socket = {
+			write(data: Uint8Array) {
+				const accepted = data.subarray(0, Math.min(cap, data.byteLength));
+				chunks.push(accepted);
+				return accepted.byteLength;
+			},
+		} as unknown as Bun.Socket;
+		return { socket, written: () => new TextDecoder().decode(Buffer.concat(chunks)) };
+	}
+
+	it("retains the unwritten suffix of a long record and completes it on drain, in order", () => {
+		const { socket, written } = cappedSocket(10);
+		const writer = new LineWriter();
+		writer.attach(socket);
+		const first: PeerMessage = {
+			type: "inbound",
+			id: "p1",
+			from: "leia",
+			to: "Main",
+			body: "a".repeat(50),
+			expectsReply: false,
+		};
+		const second: PeerMessage = { type: "ack", id: "m2", receipt: { to: "@demo/han", outcome: "injected" } };
+		expect(writer.write(first)).toBe(true);
+		expect(writer.write(second)).toBe(true);
+		// Each write flushes one accepted chunk of the head record; the second record waits behind
+		// the first's remainder rather than interleaving with it.
+		expect(written()).toBe(encodeLine(first).slice(0, 20));
+		// Each drain moves one more chunk; eventually both records are on the wire, whole and in order.
+		for (let i = 0; i < 20; i++) writer.flush();
+		expect(written()).toBe(encodeLine(first) + encodeLine(second));
+		const decoder = new LineDecoder<PeerMessage>(() => {
+			throw new Error("corrupt line");
+		});
+		expect(decoder.push(written())).toEqual([first, second]);
+	});
+
+	it("reports no socket and drops a replaced connection's backlog on attach", () => {
+		const writer = new LineWriter();
+		expect(writer.write({ type: "hello", agentId: "Main", namespace: "demo" })).toBe(false);
+		const stalled = cappedSocket(1);
+		writer.attach(stalled.socket);
+		writer.write({ type: "hello", agentId: "Main", namespace: "demo" });
+		const fresh = cappedSocket(Number.MAX_SAFE_INTEGER);
+		writer.attach(fresh.socket);
+		writer.flush();
+		expect(fresh.written()).toBe("");
+		writer.write({ type: "hello", agentId: "Main", namespace: "demo" });
+		expect(fresh.written()).toBe(encodeLine({ type: "hello", agentId: "Main", namespace: "demo" }));
 	});
 });
