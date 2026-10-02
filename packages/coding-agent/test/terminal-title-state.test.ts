@@ -129,9 +129,21 @@ describe("disposeTerminalTitleState", () => {
 	let prevHeadless = false;
 	let ttyDescriptor: PropertyDescriptor | undefined;
 	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
+	// The spinner contract under test is the animated one, but
+	// `isStaticTitleHost()` suppresses the interval entirely on WSL hosts. Unset
+	// the markers for this suite (and restore them) so the assertions exercise the
+	// same animated path on every host, as title-generator.test.ts does for its
+	// own WSL case.
+	let wslEnv: Array<[string, string | undefined]> = [];
 
 	beforeEach(() => {
 		vi.useFakeTimers();
+
+		wslEnv = (["WSL_DISTRO_NAME", "WSL_INTEROP"] as const).map(key => {
+			const original = process.env[key];
+			delete process.env[key];
+			return [key, original] as [string, string | undefined];
+		});
 
 		prevHeadless = setTerminalHeadless(false);
 		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -166,6 +178,11 @@ describe("disposeTerminalTitleState", () => {
 		else Reflect.deleteProperty(process.stdout, "isTTY");
 		setTerminalHeadless(prevHeadless);
 		vi.useRealTimers();
+		for (const [key, original] of wslEnv) {
+			if (original === undefined) delete process.env[key];
+			else process.env[key] = original;
+		}
+		wslEnv = [];
 	});
 
 	it("stops the spinner so no further OSC-title write fires on a tick after dispose", () => {
