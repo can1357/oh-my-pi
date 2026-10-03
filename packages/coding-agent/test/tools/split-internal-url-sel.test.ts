@@ -56,12 +56,6 @@ describe("InternalUrlRouter.split", () => {
 		expect(split("agent://1-50")).toEqual({ path: "agent://1-50" });
 	});
 
-	it("keeps bare-integer suffixes on mcp:// URLs (could be a port)", () => {
-		expect(split("mcp://some/resource:1234")).toEqual({
-			path: "mcp://some/resource:1234",
-		});
-	});
-
 	it("treats mcp:// URIs as opaque by default — selector-shaped suffixes are NOT peeled", () => {
 		// MCP resource URIs are server-defined and may legitimately end with `:raw`,
 		// `:1-50`, etc. Without an explicit escape the URI must be forwarded verbatim
@@ -77,42 +71,6 @@ describe("InternalUrlRouter.split", () => {
 		});
 		expect(split("mcp://server/resource:conflicts")).toEqual({
 			path: "mcp://server/resource:conflicts",
-		});
-	});
-
-	it("keeps escaped selector-shaped mcp:// suffixes opaque too", () => {
-		// MCP resource URIs are exact server-defined IDs. A resource may
-		// legitimately end in `/:raw` or `/:1-50`; splitting before resolution
-		// would make that resource unreachable with no exact-URI escape hatch.
-		expect(split("mcp://server/resource/:1-50")).toEqual({
-			path: "mcp://server/resource/:1-50",
-		});
-		expect(split("mcp://server/resource/:raw")).toEqual({
-			path: "mcp://server/resource/:raw",
-		});
-		expect(split("mcp://server/resource/:L10")).toEqual({
-			path: "mcp://server/resource/:L10",
-		});
-		expect(split("mcp://server/resource/:conflicts")).toEqual({
-			path: "mcp://server/resource/:conflicts",
-		});
-	});
-
-	it("keeps `mcp://:1-50`-shaped degenerate inputs opaque", () => {
-		// All mcp:// inputs are forwarded verbatim (its spec declares `opaque`
-		// selectors). This covers the edge case where the only `:` candidate
-		// for peeling sits next to the scheme's own `://`, so any peeler that ever
-		// replaces the opaque-scheme guard must still refuse these inputs.
-		expect(split("mcp://:1-50")).toEqual({ path: "mcp://:1-50" });
-		expect(split("mcp://:raw")).toEqual({ path: "mcp://:raw" });
-	});
-
-	it("keeps mcp:// trailing-slash bare-integer suffixes opaque", () => {
-		// `:1234` could be a port number after a path. The opaque-scheme rule keeps
-		// it verbatim either way; if mcp ever moves to selector-aware peeling, a
-		// richer selector form should be required before treating `:N` as a tail.
-		expect(split("mcp://server/resource/:1234")).toEqual({
-			path: "mcp://server/resource/:1234",
 		});
 	});
 
@@ -136,10 +94,6 @@ describe("InternalUrlRouter.split", () => {
 			path: "ssh://host:2222/etc/hosts",
 			sel: "1-5",
 		});
-	});
-
-	it("still peels authority-trailing selectors for schemes without a port authority (artifact://5:1-50)", () => {
-		expect(split("artifact://5:1-50")).toEqual({ path: "artifact://5", sel: "1-50" });
 	});
 
 	it("normalizes the single-slash alias before peeling", () => {

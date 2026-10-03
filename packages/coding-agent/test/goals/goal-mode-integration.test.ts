@@ -176,6 +176,33 @@ describe("InteractiveMode goal mode integration", () => {
 		await harness.cleanup();
 	});
 
+	it("starts a CLI goal before the first model turn with its goal tool active", async () => {
+		const objective = "Inspect the importer";
+		const prompt = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+			expect(harness.mode.goalModeEnabled).toBe(true);
+			expect(harness.session.getGoalModeState()?.goal.objective).toBe(objective);
+			expect(harness.session.getGoalModeState()?.enabled).toBe(true);
+			expect(harness.session.getActiveToolNames()).toContain("goal");
+			return true;
+		});
+
+		await harness.mode.startGoalAtStartup(objective);
+
+		expect(prompt).toHaveBeenCalledWith(objective, { streamingBehavior: "steer" });
+		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
+	});
+
+	it("never submits a startup objective when plan mode blocks goal activation", async () => {
+		harness.mode.planModeEnabled = true;
+		const prompt = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+		await harness.mode.startGoalAtStartup("Inspect the importer");
+
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
 	it("toggles goal tool exposure when goal mode enters and pauses", async () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 
@@ -495,6 +522,80 @@ describe("InteractiveMode goal mode integration", () => {
 
 		streaming = false;
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		await waiter.inputPromise;
+	});
+
+	it("waits for input rather than continuing an active goal with only blocked work", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{
+				name: "Approval",
+				tasks: [
+					{ content: "Prepare the proposal", status: "completed" },
+					{ content: "Apply the approved change", status: "blocked", blocker: "Awaiting user approval" },
+				],
+			},
+		]);
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "Approved" }));
+		await waiter.inputPromise;
+	});
+
+	it("drops an armed continuation when work becomes blocked, then resumes after input", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{ name: "Approval", tasks: [{ content: "Apply the change", status: "pending" }] },
+		]);
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		harness.session.setTodoPhases([
+			{
+				name: "Approval",
+				tasks: [{ content: "Apply the change", status: "blocked", blocker: "Awaiting user approval" }],
+			},
+		]);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		const approval = harness.mode.startPendingSubmission({ text: "Approved" });
+		harness.mode.onInputCallback?.(approval);
+		await waiter.inputPromise;
+		harness.mode.finishPendingSubmission(approval);
+		harness.session.setTodoPhases([
+			{ name: "Approval", tasks: [{ content: "Apply the change", status: "pending" }] },
+		]);
+		const resumed = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(resumed.getResolvedInput()?.customType).toBe("goal-continuation");
+		await resumed.inputPromise;
+	});
+
+	it("continues an active goal when actionable work remains alongside blocked work", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.setTodoPhases([
+			{
+				name: "Release",
+				tasks: [
+					{ content: "Get approval", status: "blocked", blocker: "Awaiting user approval" },
+					{ content: "Run independent checks", status: "pending" },
+				],
+			},
+		]);
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()?.customType).toBe("goal-continuation");
 		await waiter.inputPromise;
 	});
 

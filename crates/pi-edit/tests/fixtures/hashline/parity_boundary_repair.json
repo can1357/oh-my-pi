@@ -1783,6 +1783,68 @@
 					}
 				}
 			]
+		},
+		{
+			"name": "applies a same-shape if-opener replacement when an unrelated edit in the batch breaks the parse",
+			"apply": [
+				{
+					"text": "package p\n\nfunc f(x int) int {\n\tif x > 1 {\n\t\treturn 1\n\t}\n\treturn 0\n}\n",
+					"input": "PUT 4.=4:\n+\tif x > 2 {\nPUT >7:\n+\ty := (",
+					"path": "fixture.go",
+					"expect": {
+						"text": "package p\n\nfunc f(x int) int {\n\tif x > 2 {\n\t\treturn 1\n\t}\n\treturn 0\n\ty := (\n}\n",
+						"firstChangedLine": 4,
+						"warnings": [
+							"This edit introduced a syntax error near line 4: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "applies a same-shape case-label replacement when an unrelated edit in the batch breaks the parse",
+			"apply": [
+				{
+					"text": "package p\n\nfunc f(x int) int {\n\tswitch x {\n\tcase 1:\n\t\treturn 1\n\t}\n\treturn 0\n}\n",
+					"input": "PUT 5.=5:\n+\tcase 1, 2:\nPUT >8:\n+\ty := (",
+					"path": "fixture.go",
+					"expect": {
+						"text": "package p\n\nfunc f(x int) int {\n\tswitch x {\n\tcase 1, 2:\n\t\treturn 1\n\t}\n\treturn 0\n\ty := (\n}\n",
+						"firstChangedLine": 5,
+						"warnings": [
+							"This edit introduced a syntax error near line 5: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects sparing a deleted keyword closer (Lua end) when the payload claims no position inside the block",
+			"apply": [
+				{
+					"text": "local function f(x)\n  if x then\n    y = 1\n  end\n  return 0\nend\n",
+					"input": "PUT 4.=4:\n+  y = 2",
+					"path": "fixture.lua",
+					"error": "Error: `PUT 4.=4:` rejected: a selected boundary row is required for the file to parse, but the body indentation does not establish whether it belongs before or after that row. Re-read the region and re-issue with a range that excludes every unchanged boundary row."
+				}
+			]
+		},
+		{
+			"name": "applies a same-shape Rust signature replacement with lifetimes when an unrelated edit in the batch breaks the parse",
+			"apply": [
+				{
+					"text": "fn f<'a>(x: &'a str) -> &'a str {\n    x\n}\n\nfn g() {}\n",
+					"input": "PUT 1.=1:\n+fn f<'a>(x: &'a str) -> String {\nPUT >5:\n+fn h( {",
+					"path": "fixture.rs",
+					"expect": {
+						"text": "fn f<'a>(x: &'a str) -> String {\n    x\n}\n\nfn g() {}\nfn h( {\n",
+						"firstChangedLine": 1,
+						"warnings": [
+							"This edit introduced a syntax error near line 1: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+						]
+					}
+				}
+			]
 		}
 	]
 }

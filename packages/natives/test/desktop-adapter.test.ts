@@ -51,7 +51,7 @@ describe("legacy DesktopSession adapter", () => {
 		expect(session.capabilities).toMatchObject({
 			ax: false,
 			backgroundWindowInput: false,
-			deliveryModes: ["foreground"],
+			takeover: true,
 			axPermission: "unavailable",
 		});
 		await expect(session.listWindows()).rejects.toThrow(/^CaptureFailed: /);
@@ -87,16 +87,12 @@ describe("legacy DesktopSession adapter", () => {
 		]);
 	});
 
-	it("fails closed for unsupported targets, background input, and closed sessions", async () => {
+	it("fails closed for unsupported targets and closed sessions", async () => {
 		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
 		const session = new DesktopSession({ display: "all" });
 
 		await expect(session.capture("window-name")).rejects.toThrow(/^InvalidTarget: /);
 		await expect(session.capture("42")).rejects.toThrow(/^CaptureFailed: /);
-		await session.capture("desktop");
-		await expect(session.click("desktop", 1, 1, { deliveryMode: "background" })).rejects.toThrow(
-			/^BackgroundUnavailable: /,
-		);
 		await session.close();
 		await session.close();
 		await expect(session.capture("desktop")).rejects.toThrow(/^Closed: /);
@@ -132,7 +128,7 @@ describe("legacy DesktopSession adapter", () => {
 		await session.capture("42");
 
 		await expect(session.click("42", 1, 1)).rejects.toThrow(/^BackgroundUnavailable: /);
-		await expect(session.click("42", 1, 1, { deliveryMode: "foreground" })).resolves.toBeUndefined();
+		await expect(session.click("42", 1, 1, { takeover: true })).resolves.toBeUndefined();
 	});
 
 	it("invalidates a captured coordinate frame when legacy post-action geometry changes", async () => {

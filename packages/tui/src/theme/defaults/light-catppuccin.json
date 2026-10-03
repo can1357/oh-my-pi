@@ -102,5 +102,15 @@
 		"pageBg": "base",
 		"cardBg": "mantle",
 		"infoBg": "surface0"
+	},
+	"terminal": {
+		"background": "base",
+		"foreground": "text",
+		"chrome": "mantle",
+		"widget": "mantle",
+		"ansi": [
+			"subtext1", "red", "#3f9e2b", "#c17b19", "blue", "#e44fbc", "teal", "surface2",
+			"subtext0", "red", "#3f9e2b", "#c17b19", "blue", "#e44fbc", "teal", "surface1"
+		]
 	}
 }

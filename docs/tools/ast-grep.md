@@ -8,10 +8,11 @@
 - Key collaborators:
   - `crates/pi-natives/src/ast.rs` — native scan, parse, match engine
   - `crates/pi-ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
+  - `crates/pi-ast/src/ops.rs` — pattern compilation and JSON member-fragment fallback
   - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing (host paths and internal URLs) and multi-path resolution
   - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native ast-grep walks and reads through
   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
-  - `packages/coding-agent/src/tools/match-line-format.ts` — hashline match rendering
+  - `packages/tui/src/tools/match-line-format.ts` — hashline match rendering
   - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number output mode
   - `packages/natives/native/index.d.ts` — JS-visible native binding contract
 
@@ -21,6 +22,7 @@
 | --- | --- | --- | --- |
 | `pat` | `string` | Yes | Single AST pattern. The wrapper trims it and rejects empty strings. |
 | `path` | `string` | No | One file, directory, glob, internal URL or internal-URL glob, or fetched web URL — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.` (the workspace root). Empty entries are rejected. |
+| `lang` | `string` | No | Language override for all candidate files, for example `cpp` for ambiguous `.h` files. Without it, language is inferred per file. A blank override is treated as omitted by the native layer. |
 | `skip` | `number` | No | Match offset. Defaults to `0`, then `Math.floor(...)`; negatives and non-finite values fail. |
 
 Pattern grammar and language support exposed to the model:
@@ -30,7 +32,8 @@ Pattern grammar and language support exposed to the model:
 - `$$$` — match zero or more AST nodes without binding.
 - Metavariable names must be uppercase and must stand for whole AST nodes, not partial tokens or string fragments.
 - Reusing the same metavariable requires identical code at each occurrence.
-- Patterns must parse as one valid AST node for the inferred target language.
+- Prompt guidance requires one valid AST node for the inferred or explicitly selected language. The native compiler also accepts JSON member fragments such as `"key": $V` by wrapping them in an object and selecting the `pair` node; this fallback applies only to `MultipleNode` parse failures.
+- `.cu` and `.cuh` infer as C++; C++ expression-statement patterns need their trailing `;`.
 - Supported canonical languages come from `SupportLang::all_langs()` in `crates/pi-ast/src/language/mod.rs`: `astro`, `bash`, `c`, `cmake`, `cpp`, `csharp`, `dart`, `clojure`, `css`, `diff`, `dockerfile`, `emacs-lisp`, `elixir`, `erlang`, `fortran`, `go`, `graphql`, `haskell`, `hcl`, `html`, `ini`, `java`, `javascript`, `json`, `just`, `julia`, `kotlin`, `lua`, `make`, `markdown`, `nix`, `objc`, `ocaml`, `odin`, `php`, `powershell`, `protobuf`, `python`, `r`, `regex`, `ruby`, `rust`, `scala`, `solidity`, `sql`, `starlark`, `svelte`, `swift`, `toml`, `tlaplus`, `tsx`, `typescript`, `verilog`, `vue`, `xml`, `yaml`, `zig`.
 
 `ast_grep` is disabled by default (`astGrep.enabled = false`) and is a discoverable tool when enabled.
@@ -63,6 +66,7 @@ Pattern grammar and language support exposed to the model:
    - normalizes and deduplicates patterns,
    - resolves a `MatchStrictness` (`smart` by default),
    - collects candidate files from a file or gitignore-aware directory scan,
+   - filters to supported source files when `lang` is omitted; a nonblank `lang` treats every candidate as that language,
    - infers language per candidate from extension unless `lang` was provided,
    - compiles the pattern separately for each language present,
    - reads each file, reports syntax-error trees as parse issues, runs `find_all`, and optionally captures metavariable bindings.
@@ -74,7 +78,7 @@ Pattern grammar and language support exposed to the model:
 - Directory + optional glob: native scan walks the directory, then filters by compiled glob.
 - Multiple explicit paths/globs: wrapper unions them into one synthetic scope or runs per-target native calls when paths only meet at root.
 - Internal URL inputs: walked and read natively through the URL filesystem; hits are named by full URL (`local://src/a.ts`). Readable external URLs are materialized to immutable temporary files.
-- Hashline output mode vs plain line-number mode: controlled by `resolveFileDisplayMode()`; hashline mode requires the edit tool and hashline edit mode, and per-file anchors additionally require a successful whole-file snapshot (`recordFileSnapshot()`) — over-cap or unreadable files fall back to plain output. URL hits of immutable schemes get no anchor; a mutable file-backed URL (`local://`) is snapshotted against the host file `router.locate()` returns.
+- Hashline output mode vs plain line-number mode: controlled by `resolveFileDisplayMode()`; hashline mode requires the edit tool and hashline edit mode, and per-file anchors additionally require a successful whole-file snapshot (`getEditStore(session).recordSnapshotFile()`) — over-cap or unreadable files fall back to plain output. URL hits of immutable schemes get no anchor; a mutable file-backed URL (`local://`) is snapshotted against the host file `router.locate()` returns.
 
 ## Side Effects
 - Filesystem
@@ -102,7 +106,8 @@ Pattern grammar and language support exposed to the model:
   - unreadable search roots or bad glob compilation,
   - cancellation (`Aborted: Signal`) or timeout (`Aborted: Timeout`).
 - File-level parse failures and per-language pattern compile failures are non-fatal: they are accumulated in `parseErrors` and surfaced alongside successful matches; a file whose language has no compilable pattern is skipped.
-- `no matches` is not an error, even when parse issues were recorded.
+- `no matches` is not an error, even when parse issues were recorded. The wrapper marks zero-match results as useless for context maintenance.
+- An unsupported `lang` is reported as a non-fatal per-candidate parse issue; if the scope has no candidates, there is no language-resolution error to report.
 
 ## Notes
 - `pat` is always wrapped into a one-element `patterns` array by the TS tool; the model cannot send multiple patterns through `ast_grep` even though the native binding supports it.

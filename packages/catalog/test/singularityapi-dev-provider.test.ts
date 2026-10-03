@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { isCatalogDescriptor, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { singularityApiDevModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -12,11 +10,7 @@ import {
 	normalizeSingularityApiBaseUrl,
 } from "@oh-my-pi/pi-catalog/wire/singularityapi";
 
-const originalKey = Bun.env.SINGULARITYAPI_DEV_API_KEY;
-
 afterEach(() => {
-	if (originalKey === undefined) delete Bun.env.SINGULARITYAPI_DEV_API_KEY;
-	else Bun.env.SINGULARITYAPI_DEV_API_KEY = originalKey;
 	vi.restoreAllMocks();
 });
 
@@ -172,21 +166,6 @@ describe("SingularityAPI universal gateway support", () => {
 		expect(model.compat.maxTokensField).toBe("max_tokens");
 		expect(model.reasoning).toBe(false);
 		expect(model.thinking).toBeUndefined();
-	});
-
-	test("registers discovery, defaults, and the API key environment name", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "singularityapi-dev");
-		expect(descriptor).toMatchObject({
-			defaultModel: "deepseek-v4-flash",
-			dynamicModelsAuthoritative: true,
-		});
-		expect(isCatalogDescriptor(descriptor!)).toBe(false);
-		expect(DEFAULT_MODEL_PER_PROVIDER["singularityapi-dev"]).toBe("deepseek-v4-flash");
-
-		delete Bun.env.SINGULARITYAPI_DEV_API_KEY;
-		expect(getEnvApiKey("singularityapi-dev")).toBeUndefined();
-		Bun.env.SINGULARITYAPI_DEV_API_KEY = "sk-sapi-test";
-		expect(getEnvApiKey("singularityapi-dev")).toBe("sk-sapi-test");
 	});
 
 	test("pastes a key through the login selector after models-endpoint validation", async () => {

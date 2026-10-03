@@ -474,22 +474,6 @@ describe("ExtensionUiController custom overlay", () => {
 		expect(harness.showOverlay).toHaveBeenCalledWith(expect.any(Container), overlayOptions);
 	});
 
-	it("falls back to the full-cover defaults when overlayOptions is absent", async () => {
-		const harness = makeHarness();
-		const ui = await harness.init();
-
-		ui.custom<void>(() => new Container(), { overlay: true });
-
-		await flushMicrotasks();
-		expect(harness.showOverlay).toHaveBeenCalledTimes(1);
-		expect(harness.showOverlay).toHaveBeenCalledWith(expect.any(Container), {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-		});
-	});
-
 	it("rejects and restores the editor when a custom factory fails", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();

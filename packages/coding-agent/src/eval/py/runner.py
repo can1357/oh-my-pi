@@ -36,6 +36,7 @@ import codecs
 import contextvars
 import inspect
 import io
+import itertools
 import json
 import hashlib
 import linecache
@@ -50,8 +51,8 @@ import subprocess
 import sys
 import threading
 import time
-import tokenize
 import traceback
+import tokenize
 from pathlib import Path
 from typing import Any, Callable
 
@@ -919,6 +920,82 @@ def _quote_arg(text: str) -> str:
     return json.dumps(text, ensure_ascii=False)
 
 
+_STRING_START_TOKENS = {
+    getattr(tokenize, name, -1) for name in ("FSTRING_START", "TSTRING_START")
+}
+_STRING_END_TOKENS = {
+    getattr(tokenize, name, -1) for name in ("FSTRING_END", "TSTRING_END")
+}
+
+
+def _magic_line_indices(lines: list[str]) -> set[int]:
+    """Find command lines outside Python strings without lexing shell payloads."""
+    indices: set[int] = set()
+    offset = 0
+    while offset < len(lines):
+        # A synthetic enclosing expression suppresses indentation checks when
+        # restarting in the middle of a suite; this pass only identifies tokens.
+        stream = itertools.chain(
+            ("(\n",),
+            (line + "\n" for line in itertools.islice(lines, offset, None)),
+            (")\n",),
+        )
+        last_row = -1
+        string_depth = 0
+        bracket_depth = 0
+        statement_row = offset
+        try:
+            for item in tokenize.generate_tokens(lambda: next(stream, "")):
+                if item.type in _STRING_START_TOKENS:
+                    string_depth += 1
+                elif item.type in _STRING_END_TOKENS:
+                    string_depth -= 1
+                    continue
+                if string_depth:
+                    continue
+                if item.type == tokenize.OP:
+                    if item.string in ("(", "[", "{"):
+                        bracket_depth += 1
+                    elif item.string in (")", "]", "}"):
+                        bracket_depth -= 1
+                if item.type == tokenize.NL:
+                    if bracket_depth == 1:
+                        statement_row = offset + item.end[0] - 1
+                    continue
+                if item.type in (
+                    tokenize.NEWLINE, tokenize.INDENT,
+                    tokenize.DEDENT, tokenize.ENDMARKER, tokenize.COMMENT,
+                ) or (item.type == tokenize.ERRORTOKEN and item.string.isspace()):
+                    # Python < 3.12 emits indentation before `!` as one
+                    # whitespace ERRORTOKEN per column.
+                    continue
+                row = offset + item.start[0] - 2
+                if row < offset or row >= len(lines) or row == last_row or row != statement_row:
+                    continue
+                last_row = row
+                stripped = lines[row].lstrip()
+                if item.start[1] != len(lines[row]) - len(stripped):
+                    continue
+                assignment = _ASSIGN_LINE_RE.match(lines[row])
+                rhs = assignment.group("rhs").strip() if assignment else ""
+                if not stripped.startswith(("%", "!")) and not rhs.startswith(("%", "!")):
+                    continue
+                indices.add(row)
+                if stripped.startswith("%%"):
+                    return indices
+                # Shell quotes and cell/line magic arguments are not Python.
+                # Restart after the command instead of tokenizing its payload.
+                consumed = _fold_continuations(lines, row)[1] if stripped.startswith(("%", "!")) else 1
+                offset = row + consumed
+                break
+            else:
+                return indices
+        except (tokenize.TokenError, IndentationError):
+            # Leave incomplete Python source to the ordinary syntax-error path.
+            return indices
+    return indices
+
+
 def transform_cell(source: str) -> str:
     """Translate IPython-style magics + shell escapes into plain Python.
 
@@ -933,24 +1010,26 @@ def transform_cell(source: str) -> str:
       (cell magic must be the first non-whitespace token of a top-level line and
       consumes the remainder of the cell)
 
-    Python logical statements are tokenized before advancing to the next line,
-    so string contents and continued expressions cannot become magic commands.
+    Python tokenization identifies command lines outside strings and comments.
+    Real command payloads are skipped before resuming lexical scanning so shell
+    quoting cannot change how subsequent Python source is interpreted.
     """
 
     if "%" not in source and "!" not in source:
         return source
 
-    lines = source.split("\n")
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    magic_lines = _magic_line_indices(lines)
     out: list[str] = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        stripped = line.lstrip()
-        indent = line[: len(line) - len(stripped)]
-        if not stripped or stripped.startswith("#"):
+        if i not in magic_lines:
             out.append(line)
             i += 1
             continue
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
 
         # Cell magic — consumes from here to EOF.
         if stripped.startswith("%%"):
@@ -1007,18 +1086,8 @@ def transform_cell(source: str) -> str:
                 i += 1
                 continue
 
-        python_lines = (lines[index] + "\n" for index in range(i, len(lines)))
-        end = len(lines)
-        try:
-            for token in tokenize.generate_tokens(lambda: next(python_lines, "")):
-                if token.type == tokenize.NEWLINE:
-                    end = i + token.end[0]
-                    break
-        except (tokenize.TokenError, IndentationError, SyntaxError):
-            # Leave invalid Python intact for the normal compiler diagnostic.
-            pass
-        out.extend(lines[index] for index in range(i, end))
-        i = end
+        out.append(line)
+        i += 1
 
     return "\n".join(out)
 
@@ -2304,9 +2373,9 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
 
     A background thread reads stdin and enqueues requests so a cell parked on
     a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
-    block sibling requests: eval sessions are shared across concurrent agents
-    (subagents inherit the parent's eval session id), so multiple requests can
-    be in flight on one kernel at once. The reader thread stays blocked in a
+    block sibling requests: auto-backgrounded cells, user Python shortcuts, and
+    kernel-defined tool calls from subagents can all be in flight on one kernel
+    at once. The reader thread stays blocked in a
     ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
     native-extension imports on Windows (see ``_serve_windows``).
     """

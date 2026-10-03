@@ -21,6 +21,11 @@ pub struct MismatchDetails {
 	pub file_lines:         Vec<String>,
 	pub anchor_lines:       Vec<u32>,
 	pub hash_recognized:    bool,
+	/// Absolute paths this session has already issued `expected_file_hash` for.
+	/// Non-empty when `hash_recognized` is false and the tag belongs to a
+	/// different file in the same session — e.g. a worktree lane that pasted a
+	/// parent-checkout tag into its own (correctly) relative header.
+	pub tag_origin_paths:   Vec<String>,
 }
 
 /// Format the required shape of a tagged line anchor.
@@ -83,17 +88,27 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 			),
 		]
 	} else {
-		vec![
-			format!(
-				"Edit rejected{path}: hash #{} is not from this session.",
+		let mut lines = vec![format!(
+			"Edit rejected{path}: hash #{} is not from this session.",
+			details.expected_file_hash
+		)];
+		// Name the absolute paths this session has already issued the tag for,
+		// so a lane that pasted a tag from a sibling file (typically the parent
+		// checkout) doesn't follow the suggestion into a wrong-tree write.
+		// One path is the common case; show all so the model can pick the
+		// right one when more than one file shares the tag.
+		for origin in &details.tag_origin_paths {
+			lines.push(format!(
+				"Hash #{} was issued in this session for {origin}.",
 				details.expected_file_hash
-			),
-			format!(
-				"The current file hashes to #{}. Re-read the file with `read` to copy a current \
-				 [path#tag] header — never invent the tag and never reuse one from a prior session.",
-				details.actual_file_hash
-			),
-		]
+			));
+		}
+		lines.push(format!(
+			"The current file hashes to #{}. Re-read the file with `read` to copy a current \
+			 [path#tag] header — never invent the tag and never reuse one from a prior session.",
+			details.actual_file_hash
+		));
+		lines
 	};
 	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	if !context.is_empty() {

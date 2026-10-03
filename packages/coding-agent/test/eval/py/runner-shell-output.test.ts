@@ -90,6 +90,69 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 }
 
 describe("Python runner shell output streaming", () => {
+	for (const [name, lineEnding] of [
+		["CRLF", "\r\n"],
+		["bare CR", "\r"],
+	] as const) {
+		it(`normalizes ${name} line endings in quoted Python values and Bash cell magics`, async () => {
+			const frames = await runCell(
+				[
+					"text = '''first",
+					"!literal",
+					"%literal",
+					"last'''",
+					"print(repr(text))",
+					"%%bash",
+					"set -e",
+					"printf done",
+					"",
+				].join(lineEnding),
+			);
+			expect(frames.find(frame => frame.type === "done")?.status).toBe("ok");
+			expect(
+				frames
+					.filter(frame => frame.type === "stdout")
+					.map(frame => frame.data)
+					.join(""),
+			).toBe("'first\\n!literal\\n%literal\\nlast'\ndone");
+		});
+	}
+
+	it("preserves modulo operators in continued Python expressions before real magics", async () => {
+		const frames = await runCell(
+			[
+				"import os",
+				"parenthesized = (",
+				"    17",
+				"    % 5",
+				")",
+				"continued = 17 \\",
+				"    % 5",
+				"%env OMP_CONTINUED_PROBE=preserved",
+				"print(parenthesized, continued, os.environ['OMP_CONTINUED_PROBE'])",
+			].join("\n"),
+		);
+		expect(frames.find(frame => frame.type === "done")?.status).toBe("ok");
+		expect(
+			frames
+				.filter(frame => frame.type === "stdout")
+				.map(frame => frame.data)
+				.join(""),
+		).toBe("2 2 preserved\n");
+	});
+
+	it("preserves non-newline separators inside quoted Python values", async () => {
+		const contents = "before\v!literal\f%pwd\u0085after\u2028last";
+		const frames = await runCell(`text = '''${contents}'''\nprint(text.encode('utf-8').hex())`);
+		expect(frames.find(frame => frame.type === "done")?.status).toBe("ok");
+		expect(
+			frames
+				.filter(frame => frame.type === "stdout")
+				.map(frame => frame.data)
+				.join(""),
+		).toBe(`${Buffer.from(contents).toString("hex")}\n`);
+	});
+
 	it("preserves magic-looking lines in Python strings alongside real magics", async () => {
 		const contents = "first\n!literal\n%pwd\n%%bash\nvalue = !literal\nlast";
 		const frames = await runCell(

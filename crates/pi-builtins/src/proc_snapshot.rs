@@ -559,10 +559,20 @@ mod proc_snapshot {
 			None
 		}
 
-		pub const fn state(&self) -> char {
+		/// Apple `ps` state letter.
+		///
+		/// XNU leaves almost every live process in `SRUN`, so such a process
+		/// takes the letter of its most active thread, as Apple `ps` does; `?`
+		/// when its threads are unreadable (another user's process, without
+		/// root).
+		pub fn state(&self) -> char {
 			match self.info.pbi_status {
 				1 => 'I',
-				2 => 'R',
+				2 => process_threads(self)
+					.iter()
+					.map(|thread| thread.state)
+					.min_by_key(|&state| MACH_STATE_ORDER.find(state).unwrap_or(usize::MAX))
+					.unwrap_or('?'),
 				3 => 'S',
 				4 => 'T',
 				5 => 'Z',
@@ -720,6 +730,10 @@ mod proc_snapshot {
 		};
 		(actual >= size_of::<libc::proc_threadinfo>() as i32).then_some(info)
 	}
+
+	/// Thread state letters from most to least active: Apple `ps`'s
+	/// `mach_state_order`, which picks a process's letter from its threads.
+	const MACH_STATE_ORDER: &str = "RUSITH";
 
 	/// Mirrors Apple `ps`: `mach_state_order` for the state letter, and the
 	/// current priority for timesharing threads but the base priority for

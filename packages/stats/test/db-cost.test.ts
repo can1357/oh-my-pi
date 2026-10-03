@@ -1,16 +1,13 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import {
-	closeDb,
 	getCostTimeSeries,
 	getOverallStats,
-	getRecentRequests,
 	getSessionRollups,
 	getStatsByModel,
 	getStatsByProvider,
-	initDb,
-	insertMessageStats,
-} from "@oh-my-pi/omp-stats/db";
+} from "@oh-my-pi/omp-stats/rollup";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
@@ -492,7 +489,7 @@ describe("stats scheduled response costs", () => {
 			unpricedRequests: 0,
 		});
 		// The undated rows bucket at the epoch, so ask for the uncut series.
-		const series = getCostTimeSeries(90, null);
+		const series = getCostTimeSeries(null);
 		expect(series.reduce((sum, point) => sum + point.unpricedRequests, 0)).toBe(1);
 		expect(series.reduce((sum, point) => sum + point.cost, 0)).toBeCloseTo(1.25, 8);
 		// The Traces session list reads the same marker through the rollup.

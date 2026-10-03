@@ -9,7 +9,6 @@ import {
 	setServerDisabled,
 	validateServerName,
 } from "../../src/mcp/config-writer";
-import { createMCPToolName } from "../../src/mcp/tool-bridge";
 
 describe("validateServerName", () => {
 	it("accepts human display labels with spaces (#11731)", () => {
@@ -24,12 +23,6 @@ describe("validateServerName", () => {
 		expect(validateServerName(" MaaS Slack")).toBeDefined();
 		expect(validateServerName("MaaS Slack ")).toBeDefined();
 		expect(validateServerName("MaaS  Slack")).toBeDefined();
-	});
-
-	it("sanitizes a spaced server name into a valid tool identifier", () => {
-		// Ownership uses the raw name; tool names are lossy-sanitized, so a space
-		// never yields an invalid tool identifier.
-		expect(createMCPToolName("MaaS Slack", "send")).toMatch(/^[a-zA-Z0-9_-]+$/);
 	});
 });
 

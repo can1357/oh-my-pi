@@ -130,6 +130,47 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(deliveredImages).toEqual([image]);
 	});
 
+	it("exposes a process job's full command in the async job snapshot", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Owner",
+			asyncJobManager: manager,
+		});
+
+		const command = `pytest ${"tests/a ".repeat(40)}-q`;
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", command.slice(0, 120), () => gate.promise, {
+			id: "proc-job",
+			ownerId: "Owner",
+			process: { command, cwd: "/repo", pids: () => [] },
+		});
+		manager.register("task", "in-process work", () => gate.promise, { id: "task-job", ownerId: "Owner" });
+
+		const running = session.getAsyncJobSnapshot()?.running ?? [];
+		expect(running.find(job => job.id === "proc-job")?.command).toBe(command);
+		expect(running.find(job => job.id === "task-job")?.command).toBeUndefined();
+
+		gate.resolve("done");
+		await session.settleAsyncWork();
+		const recent = session.getAsyncJobSnapshot()?.recent ?? [];
+		expect(recent.find(job => job.id === "proc-job")?.command).toBe(command);
+	});
+
 	it("does not spill an incomplete background capture as full output during follow-up delivery", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });

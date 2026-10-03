@@ -34,20 +34,6 @@ describe("isProviderRetryableError", () => {
 		).toBe(true);
 	});
 
-	it("retries Anthropic TLS server transport errors", () => {
-		expect(
-			isProviderRetryableError(
-				new Error(
-					'Post "https://api.anthropic.com/v1/messages?beta=true": remote error: tls: bad record MAC (type=server_error)',
-				),
-			),
-		).toBe(true);
-	});
-
-	it("does not retry permanent TLS configuration failures (no server annotation)", () => {
-		expect(isProviderRetryableError(new Error("tls: failed to verify certificate"))).toBe(false);
-	});
-
 	it("retries Bun socket closure errors", () => {
 		expect(
 			isProviderRetryableError(

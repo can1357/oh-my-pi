@@ -1,5 +1,10 @@
 mod capture;
 mod input;
+mod keymap;
+mod mpx;
+mod toolkit;
+mod uinput;
+mod wm;
 
 use capture::X11Capture;
 use image::RgbaImage;
@@ -42,7 +47,7 @@ impl Backend for X11Backend {
 			input: true,
 			ax: self.ax.is_some(),
 			background_window_input: true,
-			delivery_modes: vec!["background".to_string(), "foreground".to_string()],
+			takeover: true,
 			capture_permission: if displays.is_ok() {
 				"granted"
 			} else {

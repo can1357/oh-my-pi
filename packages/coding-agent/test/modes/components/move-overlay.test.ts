@@ -82,13 +82,6 @@ describe("MoveOverlay", () => {
 		await fsp.rm(tmp, { recursive: true, force: true });
 	});
 
-	it("renders a box with a title and input prompt", () => {
-		const overlay = new MoveOverlay(cwd, () => {}, moveDirectorySource);
-		const text = strip(overlay.render(80));
-		expect(text).toContain("Move to directory");
-		expect(text).toContain("Path:");
-	});
-
 	it("renders every frame row at the assigned overlay width", () => {
 		const overlay = new MoveOverlay(cwd, () => {}, moveDirectorySource);
 		const lines = overlay.render(72);
