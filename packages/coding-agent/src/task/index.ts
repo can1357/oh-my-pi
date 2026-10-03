@@ -238,8 +238,8 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 
 /** Reject an out-of-range `effort` selector on internal/stale-transcript calls that bypass the wire schema. */
 function validateEffort(effort: TaskEffort | undefined, label: string): string | undefined {
-	if (effort === undefined || TASK_EFFORTS.includes(effort)) return undefined;
-	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
+	if (effort === undefined || TASK_EFFORTS.some(candidate => candidate === effort)) return undefined;
+	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use ${TASK_EFFORTS.map(candidate => JSON.stringify(candidate)).join(", ")}.`;
 }
 
 function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {

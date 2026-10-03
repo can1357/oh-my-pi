@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed task agents accepting explicit thinking efforts such as `xhigh` while preserving relative `lo`/`med`/`hi` requests ([#14207](https://github.com/can1357/oh-my-pi/pull/14207) by [@mabinogi80503](https://github.com/mabinogi80503)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
