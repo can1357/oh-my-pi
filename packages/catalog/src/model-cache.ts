@@ -146,11 +146,13 @@ export interface CacheEntry<TApi extends Api = Api> {
 let sharedDb: Database | null = null;
 let sharedDbPath: string | null = null;
 
+type CacheRowFingerprint = Omit<CacheRow, "models"> & { modelsDigest: string };
+
 interface ReadRowCacheEntry {
 	/** `PRAGMA data_version` of the shared connection when validated; null for per-call connections. */
 	dataVersion: number | null;
-	/** Raw row the entry was parsed from; null when the row was absent or rejected. */
-	row: CacheRow | null;
+	/** Payload metadata and digest, without retaining the serialized model graph. */
+	row: CacheRowFingerprint | null;
 	entry: CacheEntry<Api> | null;
 }
 
@@ -445,13 +447,15 @@ export function readModelCache<TApi extends Api>(
 			} finally {
 				stmt.finalize();
 			}
+			const rowFingerprint = row ? fingerprintCacheRow(row) : null;
 			let entry: CacheEntry<TApi> | null;
 			if (
 				cached?.entry &&
 				cached.row &&
 				row &&
+				rowFingerprint &&
 				row.materialization_policy === materializationPolicy() &&
-				cacheRowsEqual(cached.row, row)
+				cacheRowsEqual(cached.row, rowFingerprint)
 			) {
 				// Payload bytes unchanged; only side-table freshness may have moved.
 				entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, row), ttlMs, now);
@@ -461,7 +465,7 @@ export function readModelCache<TApi extends Api>(
 			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
 			readRowCache.set(key, {
 				dataVersion,
-				row: entry === null ? null : row,
+				row: entry === null ? null : rowFingerprint,
 				entry: entry as CacheEntry<Api> | null,
 			});
 			return entry;
@@ -471,8 +475,13 @@ export function readModelCache<TApi extends Api>(
 	}
 }
 
+function fingerprintCacheRow(row: CacheRow): CacheRowFingerprint {
+	const { models, ...metadata } = row;
+	return { ...metadata, modelsDigest: new Bun.CryptoHasher("sha256").update(models).digest("hex") };
+}
+
 /** Whether two rows carry the same payload record (refresh side-row columns excluded). */
-function cacheRowsEqual(left: CacheRow, right: CacheRow): boolean {
+function cacheRowsEqual(left: CacheRowFingerprint, right: CacheRowFingerprint): boolean {
 	return (
 		left.version === right.version &&
 		left.materialization_policy === right.materialization_policy &&
@@ -482,7 +491,7 @@ function cacheRowsEqual(left: CacheRow, right: CacheRow): boolean {
 		left.header_omitted_model_ids === right.header_omitted_model_ids &&
 		left.unrestorable_header_model_ids === right.unrestorable_header_model_ids &&
 		left.header_restore_version === right.header_restore_version &&
-		left.models === right.models
+		left.modelsDigest === right.modelsDigest
 	);
 }
 

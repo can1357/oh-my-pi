@@ -131,6 +131,67 @@ describe("model cache write churn", () => {
 		expect(entry?.authoritative).toBe(false);
 	});
 
+	it("reuses parsed models after an external write changes only another provider or freshness", async () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		writeModelCache("other-provider", 1_000, [model("b", "other-provider")], true, "fp", dbPath);
+		const initial = readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath);
+		expect(initial?.models.map(model => model.id)).toEqual(["a"]);
+
+		const writer = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { Database } from "bun:sqlite";
+const db = new Database(Bun.argv[1]);
+db.run("UPDATE model_cache SET authoritative = 0 WHERE provider_id = 'other-provider'");
+db.run("INSERT INTO model_cache_refresh (provider_id, payload_updated_at, updated_at, authoritative) VALUES ('rewrite-test', 1000, 2000, 0)");
+db.close();`,
+				dbPath,
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const [exitCode, stderr] = await Promise.all([writer.exited, new Response(writer.stderr).text()]);
+		expect(exitCode, stderr).toBe(0);
+
+		const refreshed = readModelCache("rewrite-test", TTL_MS, () => 2_000, dbPath);
+		expect(refreshed?.models).toBe(initial?.models);
+		expect(refreshed?.updatedAt).toBe(2_000);
+		expect(refreshed?.authoritative).toBe(false);
+		expect(refreshed?.fresh).toBe(true);
+		const expired = readModelCache("rewrite-test", TTL_MS, () => 2_000 + TTL_MS + 1, dbPath);
+		expect(expired?.models).toBe(initial?.models);
+		expect(expired?.fresh).toBe(false);
+	});
+
+	it("invalidates a same-sized payload overwrite when WAL size and row metadata stay unchanged", async () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		const original = payloadRow(dbPath, "rewrite-test");
+		if (!original) throw new Error("The seeded payload is missing");
+		const firstPayload = original.models.replace('"name":"a"', '"name":"b"');
+		const secondPayload = original.models.replace('"name":"a"', '"name":"c"');
+		expect(firstPayload).not.toBe(secondPayload);
+		expect(firstPayload.length).toBe(secondPayload.length);
+		const writer = new Database(dbPath);
+		try {
+			writer.run("PRAGMA wal_autocheckpoint = 0");
+			writer.run("UPDATE model_cache SET models = ? WHERE provider_id = 'rewrite-test'", [firstPayload]);
+			const initial = readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath);
+			expect(initial?.models[0].name).toBe("b");
+			const walSize = (await fs.stat(`${dbPath}-wal`)).size;
+			writer.run("PRAGMA wal_checkpoint(RESTART)");
+			writer.run("UPDATE model_cache SET models = ? WHERE provider_id = 'rewrite-test'", [secondPayload]);
+			expect((await fs.stat(`${dbPath}-wal`)).size).toBe(walSize);
+
+			const refreshed = readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath);
+			expect(refreshed?.models[0].name).toBe("c");
+			expect(refreshed?.updatedAt).toBe(1_000);
+			expect(refreshed?.authoritative).toBe(true);
+			expect(initial?.models[0].name).toBe("b");
+		} finally {
+			writer.close();
+		}
+	});
+
 	it("does not re-persist an unchanged snapshot while discovery keeps failing", async () => {
 		let online = true;
 		let clock = 10_000;

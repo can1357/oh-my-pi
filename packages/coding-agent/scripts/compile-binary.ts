@@ -47,12 +47,15 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
-			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
-			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).
+			// Precompile the module body; functions compile on demand so idle
+			// sessions do not retain bytecode for features they never call.
 			// Keep import.meta.resolve in bundled dependencies valid under bytecode.
 			format: "esm",
 			bytecode: true,
+			bytecodeDepth: 0,
 			minify: {
+				whitespace: true,
+				syntax: true,
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
 			},
