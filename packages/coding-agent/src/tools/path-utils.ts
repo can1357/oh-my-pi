@@ -596,6 +596,9 @@ function hasTopLevelPathDelimiter(entry: string): boolean {
 }
 
 function splitTopLevelDelimitedPath(entry: string, mode: DelimitedPathSplitMode): string[] {
+	// Selector commas belong to the final target, not the path list.
+	const target = splitPathAndSel(entry);
+	entry = target.path;
 	const parts: string[] = [];
 	let braceDepth = 0;
 	let start = 0;
@@ -617,7 +620,7 @@ function splitTopLevelDelimitedPath(entry: string, mode: DelimitedPathSplitMode)
 		parts.push(entry.slice(start, i));
 		start = i + 1;
 	}
-	parts.push(entry.slice(start));
+	parts.push(target.sel === undefined ? entry.slice(start) : `${entry.slice(start)}:${target.sel}`);
 	return parts;
 }
 
