@@ -18,7 +18,7 @@ const existingLinuxPath = "/mnt/c/Users/example/Downloads/session.html";
 const windowsPath = "C:\\Users\\example\\Downloads\\session.html";
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-const ENV_KEYS = ["WSL_DISTRO_NAME", "WSL_INTEROP"] as const;
+const ENV_KEYS = ["WSL_DISTRO_NAME", "WSL_INTEROP", "BROWSER"] as const;
 let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 function setPlatform(value: NodeJS.Platform): void {

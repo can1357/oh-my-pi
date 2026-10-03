@@ -12,6 +12,7 @@ import { col, keyed, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainText } from "../native/spans";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../login-url";
 
 /** `Enter code: ABCD-1234` style device-flow instructions: the lead-in and the code. */
 const DEVICE_CODE_INSTRUCTIONS = /^(.*\bcode:?\s+)([A-Za-z0-9][A-Za-z0-9-]{3,})\s*$/s;
@@ -29,7 +30,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	#input: TextFormField;
 	#tui: TUI;
 	#onComplete: (success: boolean, message?: string) => void;
-	#openUrl: (url: string) => void;
+	#openUrl: (url: string) => boolean;
 	#abortController = new AbortController();
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
@@ -45,7 +46,7 @@ export class LoginDialogComponent extends OverlayPanel {
 		tui: TUI,
 		providerId: string,
 		onComplete: (success: boolean, message?: string) => void,
-		openUrl: (url: string) => void,
+		openUrl: (url: string) => boolean,
 	) {
 		const providerInfo = getOAuthProviders().find(p => p.id === providerId);
 		const providerName = providerInfo?.name || providerId;
@@ -142,8 +143,28 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#nativeSteps = [];
 		this.#nativeRoot = undefined;
 
-		// Open browser (best-effort)
-		this.#openUrl(url);
+		// Byte-exact copy path that needs no terminal feature: a wrapped
+		// selection carries row breaks and padding, and OSC 52/OSC 8 are optional.
+		// `wrapCommandRow` breaks by column; plain `Text` swallows the space at a
+		// break and would display a path that does not exist.
+		const urlFile = persistLoginUrl(url);
+		this.#contentContainer.addChild(
+			new WidthAwareText(
+				contentWidth =>
+					wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), contentWidth).join("\n"),
+				0,
+				0,
+			),
+		);
+
+		// Open browser (best-effort). `false` means BROWSER=none suppressed the
+		// launch: say so, or instructions promising a browser window leave the
+		// user waiting for one that never comes.
+		if (!this.#openUrl(url)) {
+			this.#contentContainer.addChild(
+				new Text(theme.fg("dim", "Browser launch disabled by BROWSER=none. Use the URL above."), 0, 0),
+			);
+		}
 
 		this.#tui.requestRender();
 	}

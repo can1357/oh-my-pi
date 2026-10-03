@@ -69,22 +69,48 @@ function windowsOpenerCommand(target: string): string[] {
 		Buffer.from(script, "utf16le").toString("base64"),
 	];
 }
-/** Open a URL or file path in the default browser/application. Best-effort, never throws. */
-export function openPath(urlOrPath: string): void {
-	let cmd: string[];
+
+/**
+ * The argv that opens `target`, or `undefined` when nothing should be launched.
+ *
+ * `BROWSER=none` suppresses the launch for web URLs, following the opt-out that
+ * xdg-open, python's webbrowser, and gh already share. Any other `BROWSER`
+ * value is left alone: the convention allows arguments and `%s` substitution,
+ * and treating `BROWSER="firefox %s"` as an executable named `firefox %s` would
+ * break launching for people whose shells already export it. File paths ignore
+ * `BROWSER` entirely and keep going to the OS handler that knows the type.
+ *
+ * Reported 2026-08-31: "it opens default browser which never works because I
+ * keep my default browser different from other stuff". Launching the wrong
+ * browser during an OAuth login is worse than launching none, because the user
+ * ends up authenticating the wrong profile with no way back to the URL.
+ */
+export function openCommandFor(target: string): string[] | undefined {
+	if (/^https?:/i.test(target) && process.env.BROWSER?.trim().toLowerCase() === "none") return undefined;
 	switch (process.platform) {
 		case "darwin":
-			cmd = ["open", urlOrPath];
-			break;
+			return ["open", target];
 		case "win32":
-			cmd = windowsOpenerCommand(urlOrPath);
-			break;
+			return windowsOpenerCommand(target);
 		default: {
-			const wslPath = getExistingWslLocalPath(urlOrPath);
-			cmd = wslPath ? ["wslview", wslPath] : ["xdg-open", urlOrPath];
-			break;
+			const wslPath = getExistingWslLocalPath(target);
+			return wslPath ? ["wslview", wslPath] : ["xdg-open", target];
 		}
 	}
+}
+
+/**
+ * Open a URL or file path in the default browser/application. Best-effort,
+ * never throws.
+ *
+ * Returns whether a launch was attempted: `false` means `BROWSER=none`
+ * suppressed it, and the caller should present the URL itself rather than
+ * telling the user a browser is opening. A `true` still carries no guarantee
+ * the opener succeeded, only that it was invoked.
+ */
+export function openPath(urlOrPath: string): boolean {
+	const cmd = openCommandFor(urlOrPath);
+	if (!cmd) return false;
 	let child: Bun.Subprocess | undefined;
 	try {
 		child = Bun.spawn(cmd, {
@@ -102,7 +128,7 @@ export function openPath(urlOrPath: string): void {
 			target: urlOrPath,
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return;
+		return true;
 	}
 	// Detect delayed failures (exec succeeded but the opener exited non-zero)
 	// without blocking the caller. Recording them makes silent misconfigurations
@@ -122,4 +148,5 @@ export function openPath(urlOrPath: string): void {
 			// Ignore — awaiting the subprocess is best-effort telemetry.
 		},
 	);
+	return true;
 }

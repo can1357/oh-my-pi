@@ -39,7 +39,8 @@ export interface SetupHost extends SetupUiHost {
 	saveTheme(mode: "dark" | "light", name: string): void;
 	captureBrowserSession(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	copyToClipboard(text: string): Promise<void>;
-	openInBrowser(url: string): void;
+	/** `false` when `BROWSER=none` suppressed the launch. */
+	openInBrowser(url: string): boolean;
 	markComplete(version: number): Promise<void>;
 	playWelcomeIntro(): void;
 	showError(message: string): void;

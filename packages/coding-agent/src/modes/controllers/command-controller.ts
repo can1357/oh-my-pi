@@ -257,8 +257,8 @@ export class CommandController {
 		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
 	}
 
-	openInBrowser(urlOrPath: string): void {
-		openPath(urlOrPath);
+	openInBrowser(urlOrPath: string): boolean {
+		return openPath(urlOrPath);
 	}
 
 	async handleExportCommand(text: string): Promise<void> {

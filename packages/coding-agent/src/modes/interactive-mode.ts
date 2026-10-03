@@ -7782,8 +7782,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.executeCompaction(customInstructionsOrOptions, isAuto);
 	}
 
-	openInBrowser(urlOrPath: string): void {
-		this.#commandController.openInBrowser(urlOrPath);
+	openInBrowser(urlOrPath: string): boolean {
+		return this.#commandController.openInBrowser(urlOrPath);
 	}
 
 	// Selector handling

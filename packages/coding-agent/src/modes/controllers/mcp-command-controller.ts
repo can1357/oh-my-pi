@@ -60,9 +60,10 @@ import type {
 	MCPServerConnection,
 } from "../../mcp/types";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
+import { urlHyperlinkAlways, WidthAwareText } from "@oh-my-pi/pi-tui/render";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "@oh-my-pi/pi-tui/login-url";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "@oh-my-pi/pi-tui/chrome/chat-block";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
@@ -970,8 +971,10 @@ export class MCPCommandController {
 						// `openPath` is best-effort — it logs spawn failures but never
 						// throws, so we always render the copy-URL fallback beneath the
 						// "attempting to open browser" line and no earlier try/catch is
-						// worth keeping.
-						openPath(info.url);
+						// worth keeping. `false` means BROWSER=none suppressed the
+						// launch, and saying a browser is opening would leave the user
+						// waiting for one that never comes.
+						const launched = openPath(info.url);
 						// Stage the FULL authorization URL on the clipboard via OSC 52.
 						// The full URL works from any machine (unlike `launchUrl`, which
 						// only resolves against the OMP host), and OSC 52 is a
@@ -981,10 +984,42 @@ export class MCPCommandController {
 						// whether or not the terminal honors OSC 52.
 						void copyToClipboard(info.url).catch(() => {});
 						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0));
+						block.addChild(
+							launched
+								? new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0)
+								: new Text(
+										theme.fg("muted", "→ Browser launch disabled by BROWSER=none. Open the URL below."),
+										1,
+										0,
+									),
+						);
 						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
+						block.addChild(
+							new Text(
+								theme.fg("muted", launched ? "Alternative if browser did not open:" : "Log in at:"),
+								1,
+								0,
+							),
+						);
 						block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
+						{
+							// Byte-exact copy path: a wrapped selection carries row breaks
+							// and padding, and OSC 52/OSC 8 are optional terminal features.
+							// The write is fire-and-forget; the command derives from the
+							// deterministic path, so it renders now.
+							const urlFile = persistLoginUrl(info.url);
+							block.addChild(
+								new WidthAwareText(
+									contentWidth =>
+										wrapCommandRow(
+											theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`),
+											contentWidth,
+										).join("\n"),
+									1,
+									0,
+								),
+							);
+						}
 						this.ctx.ui.requestRender();
 					},
 					onProgress: (message: string) => {
@@ -2489,22 +2524,25 @@ export class MCPCommandController {
 	async #handleSmitheryBrowserLogin(): Promise<boolean> {
 		const session = await createSmitheryCliAuthSession();
 		const fallbackLoginUrl = getSmitheryLoginUrl();
-		this.#showMessage(
+		// Message reflects what actually happened: under BROWSER=none nothing
+		// launches, and "complete auth in your browser" precedes a five-minute
+		// wait for a browser that never opened.
+		const launched = openPath(session.authUrl);
+		const smitheryUrlFile = persistLoginUrl(session.authUrl);
+		this.#showMessage(contentWidth =>
 			[
 				"",
 				theme.bold("Smithery Login"),
-				theme.fg("muted", "Browser authorization started. Complete auth in your browser."),
+				launched
+					? theme.fg("muted", "Browser authorization started. Complete auth in your browser.")
+					: theme.fg("muted", "Browser launch disabled by BROWSER=none. Log in at the URL below."),
 				theme.fg("dim", "Authorize URL:"),
 				theme.fg("accent", session.authUrl),
+				...wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(smitheryUrlFile)}`), contentWidth),
 				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
 				"",
 			].join("\n"),
 		);
-		try {
-			openPath(session.authUrl);
-		} catch {
-			// URL is already shown above.
-		}
 
 		const apiKey = await this.#waitForSmitheryCliApiKey(session.sessionId, new AbortController().signal);
 		await this.#validateSmitheryApiKey(apiKey);
@@ -2740,7 +2778,7 @@ export class MCPCommandController {
 	/**
 	 * Show a message in the chat
 	 */
-	#showMessage(text: string): void {
+	#showMessage(text: string | ((contentWidth: number) => string)): void {
 		showCommandMessage(this.ctx, text);
 	}
 

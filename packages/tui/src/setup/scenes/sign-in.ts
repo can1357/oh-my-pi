@@ -17,6 +17,7 @@ import { theme } from "../../theme/theme";
 import { col, node, span, text } from "../../native/describe";
 import type { NativeChild, NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../../login-url";
 import type { SetupScene, SetupSceneController, SetupSceneHost, StyledLine } from "./types";
 
 function loginUrlLink(url: string): string {
@@ -95,6 +96,10 @@ export class SignInScene implements SetupSceneController {
 	#statusLines: readonly StyledLine[] = [];
 	#authUrl: string | undefined;
 	#authLaunchUrl: string | undefined;
+	/** Why no browser opened, when that is the case. Cleared with the URL. */
+	#launchNotice: string | undefined;
+	/** File carrying the URL byte-exact; the copy path that needs no terminal feature. */
+	#authUrlFile: string | undefined;
 	#prompt: PromptState | undefined;
 	#promptResolve: ((value: string) => void) | undefined;
 	#promptReject: ((error: Error) => void) | undefined;
@@ -165,6 +170,9 @@ export class SignInScene implements SetupSceneController {
 			tail.addChild(
 				new Text(theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`), 0, 0),
 			);
+			// With the header, not in the status lines below the multi-row URL:
+			// a short terminal clips those first.
+			if (this.#launchNotice) tail.addChild(new Text(theme.fg("dim", this.#launchNotice), 0, 0));
 			// Keep one URL row above the prompt; repeat the complete wrapped URL
 			// below so the input remains visible in the wizard's short viewport.
 			if (urlLines[0]) tail.addChild(new Text(urlLines[0], 0, 0));
@@ -180,6 +188,15 @@ export class SignInScene implements SetupSceneController {
 				tail.addChild(new Text(theme.fg("dim", this.#prompt.placeholder), 0, 0));
 			}
 			tail.addChild(this.#prompt.input);
+		}
+		// After the input so it can never push the input out of a short viewport.
+		// Byte-exact copy path: a wrapped URL selection carries row breaks and
+		// padding, and OSC 52/OSC 8 are optional terminal features.
+		const urlFile = this.#authUrlFile;
+		if (urlFile) {
+			for (const row of wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), width)) {
+				tail.addChild(new Text(row, 0, 0));
+			}
 		}
 		if (urlLines.length > 1) {
 			for (const line of urlLines) {
@@ -330,6 +347,8 @@ export class SignInScene implements SetupSceneController {
 		this.#statusLines = [{ text: "Starting OAuth flow…", color: "dim" }];
 		this.#authUrl = undefined;
 		this.#authLaunchUrl = undefined;
+		this.#launchNotice = undefined;
+		this.#authUrlFile = undefined;
 		this.#loginAbort = new AbortController();
 		this.#host.restoreFocus();
 		this.#host.requestRender();
@@ -349,6 +368,7 @@ export class SignInScene implements SetupSceneController {
 					// shortcut for wide-terminal local users.
 					this.#authUrl = info.url;
 					this.#authLaunchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : undefined;
+					this.#authUrlFile = persistLoginUrl(info.url);
 					const statusLines: StyledLine[] = [];
 					if (info.instructions) {
 						statusLines.push({ text: info.instructions, color: "warning" });
@@ -358,7 +378,9 @@ export class SignInScene implements SetupSceneController {
 					}
 					this.#statusLines = statusLines;
 					void this.#copyAuthUrl();
-					this.#host.ctx.openInBrowser(info.url);
+					this.#launchNotice = this.#host.ctx.openInBrowser(info.url)
+						? undefined
+						: "Browser launch disabled by BROWSER=none. Use the URL below.";
 					this.#host.requestRender();
 				},
 				onPrompt: prompt => this.#showPrompt(prompt),
@@ -379,6 +401,8 @@ export class SignInScene implements SetupSceneController {
 			];
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;
+			this.#launchNotice = undefined;
+			this.#authUrlFile = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.#selector.stopValidation();
@@ -389,8 +413,6 @@ export class SignInScene implements SetupSceneController {
 			if (this.#disposed) return;
 			if (this.#loginAbort?.signal.aborted) {
 				this.#statusLines = [{ text: "Login cancelled.", color: "dim" }];
-				this.#authUrl = undefined;
-				this.#authLaunchUrl = undefined;
 			} else {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
@@ -400,9 +422,11 @@ export class SignInScene implements SetupSceneController {
 						color: "dim",
 					},
 				];
-				this.#authUrl = undefined;
-				this.#authLaunchUrl = undefined;
 			}
+			this.#authUrl = undefined;
+			this.#authLaunchUrl = undefined;
+			this.#launchNotice = undefined;
+			this.#authUrlFile = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.#host.restoreFocus();

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `parseCallbackInput` rejecting an authorization code pasted from a terminal selection. A full-screen TUI paints each wrapped URL fragment as its own row, so a drag-copy carries newlines and, on terminals that pad rows, spaces; the URL parser drops the newlines but keeps a space, turning a valid `code` into a silently wrong one. Row breaks and the padding around them are now removed from any input, and spaces from redirect-URL and query-string input; a bare code keeps interior spaces, which RFC 6749 allows.
+
 ## [18.5.0] - 2026-10-03
 
 ### Fixed

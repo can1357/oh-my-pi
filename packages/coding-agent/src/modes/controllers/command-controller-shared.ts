@@ -10,6 +10,7 @@
 import { Text } from "@oh-my-pi/pi-tui";
 import type { SourceMeta } from "../../capability/types";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { WidthAwareText } from "@oh-my-pi/pi-tui/render";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { parseCommandArgs } from "../../utils/command-args";
@@ -99,11 +100,19 @@ export function* groupBySource<T>(
 /**
  * Render a message block (DynamicBorder / Text / DynamicBorder) into the chat
  * container and request a render.
+ *
+ * A width formatter instead of a string routes through `WidthAwareText`, for
+ * messages carrying rows that must wrap byte-complete (e.g. `wrapCommandRow`
+ * on a clean-copy command) — plain `Text` wraps with `wrapTextWithAnsi`,
+ * which swallows the space a break lands on.
  */
-export function showCommandMessage(ctx: InteractiveModeContext, text: string): void {
+export function showCommandMessage(
+	ctx: InteractiveModeContext,
+	text: string | ((contentWidth: number) => string),
+): void {
 	const block = new TranscriptBlock();
 	block.addChild(new DynamicBorder());
-	block.addChild(new Text(text, 1, 1));
+	block.addChild(typeof text === "string" ? new Text(text, 1, 1) : new WidthAwareText(text, 1, 1));
 	block.addChild(new DynamicBorder());
 	ctx.presentCommandOutput(block);
 }

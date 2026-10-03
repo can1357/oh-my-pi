@@ -123,7 +123,7 @@ describe("focused subagent view slash commands", () => {
 			showWarning: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
-		vi.spyOn(controller, "openInBrowser").mockImplementation(() => {});
+		vi.spyOn(controller, "openInBrowser").mockImplementation(() => true);
 
 		await controller.handleExportCommand("/export");
 

@@ -376,7 +376,7 @@ describe("setup wizard short terminals", () => {
 					},
 				},
 			},
-			openInBrowser: () => {},
+			openInBrowser: () => true,
 		} as unknown as InteractiveModeContext;
 	}
 

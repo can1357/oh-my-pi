@@ -10,7 +10,7 @@ function makeDialog(): LoginDialogComponent {
 		tui,
 		"openai-codex",
 		() => {},
-		() => {},
+		() => true,
 	);
 }
 

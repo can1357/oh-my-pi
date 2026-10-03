@@ -111,7 +111,7 @@ describe("/copy slash command", () => {
 
 describe("/open slash command", () => {
 	it("opens the last assistant link with the system opener", async () => {
-		const openSpy = spyOn(opener, "openPath").mockImplementation(() => {});
+		const openSpy = spyOn(opener, "openPath").mockImplementation(() => true);
 		const harness = createRuntimeHarness([
 			assistantText("older https://example.com/old"),
 			assistantText(
@@ -127,7 +127,7 @@ describe("/open slash command", () => {
 	});
 
 	it("reports when there is no link and rejects unknown arguments", async () => {
-		const openSpy = spyOn(opener, "openPath").mockImplementation(() => {});
+		const openSpy = spyOn(opener, "openPath").mockImplementation(() => true);
 		const harness = createRuntimeHarness([assistantText("no links")]);
 
 		expect(await executeBuiltinSlashCommand("/open", harness.runtime)).toBe(true);

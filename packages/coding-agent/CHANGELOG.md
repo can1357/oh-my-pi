@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for `BROWSER=none` when opening web URLs, the opt-out shared by xdg-open, python's webbrowser, and gh, so an OAuth login no longer hijacks a browser the user does not want. The login dialog, setup sign-in panel, and MCP OAuth block say when a launch was suppressed instead of leaving the provider's "a browser window should open" instruction standing alone. Other `BROWSER` values, which may carry arguments and `%s` substitution, are left to the platform opener, and file paths ignore the variable entirely.
+- OAuth login surfaces (login dialog, setup sign-in panel, MCP and Smithery login) now persist the authorization URL to a per-flow file under the agent directory and show a `Clean copy: cat …` (`type …` on Windows) command, a byte-exact copy path that needs no clipboard or hyperlink support from the terminal; a drag-selected wrapped URL carries row breaks and padding that corrupt `state` and `code_challenge`.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

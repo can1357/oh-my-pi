@@ -1,4 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { loginUrlWritesSettled } from "@oh-my-pi/pi-tui/login-url";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
@@ -6,6 +10,7 @@ import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/p
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import * as piUtils from "@oh-my-pi/pi-utils";
 
 const ENTER = "\n";
 const DOWN = "\x1b[B";
@@ -139,10 +144,16 @@ describe("dialogs under a native surface", () => {
 	});
 
 	it("login: Cancel runs Esc's path and Continue submits the pasted code", async () => {
+		// showAuth persists the URL under the agent dir; keep it off the real one.
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "dialogs-native-login-"));
+		vi.spyOn(piUtils, "getAgentDir").mockReturnValue(agentDir);
 		const tui = { requestRender() {}, setFocus() {} } as unknown as TUI;
 		const onComplete = vi.fn();
-		const dialog = new LoginDialogComponent(tui, "openai-codex", onComplete, () => {});
+		const dialog = new LoginDialogComponent(tui, "openai-codex", onComplete, () => true);
 		dialog.showAuth("https://auth.example.com/authorize?x=1", "Enter code: ABCD-1234");
+		await loginUrlWritesSettled();
+		vi.restoreAllMocks();
+		fs.rmSync(agentDir, { recursive: true, force: true });
 		const pending = dialog.showManualInput("Paste the authorization code:");
 		const described = dialog.describe();
 		expect(find(described, node => node.p?.role === "omp.login.code")?.node.p).toMatchObject({

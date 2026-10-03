@@ -468,7 +468,7 @@ export interface InteractiveModeContext {
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto?: boolean,
 	): Promise<CompactionOutcome>;
-	openInBrowser(urlOrPath: string): void;
+	openInBrowser(urlOrPath: string): boolean;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
