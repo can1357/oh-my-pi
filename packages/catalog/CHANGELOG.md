@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `lithosai` provider for LithosAI's hosted inference engine (`https://api.lithosai.cloud/v1`). The organization-scoped `/v1/models` roster is discovered at runtime and keyed on both the credential and the endpoint, so no rows are frozen into the catalog ([#14206](https://github.com/can1357/oh-my-pi/pull/14206) by [@iacore](https://github.com/iacore))
+
 ### Fixed
 
 - Fixed DeepSeek V4 model IDs and the V4.1 Flash alias lacking version information in model identity and dashboards ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).

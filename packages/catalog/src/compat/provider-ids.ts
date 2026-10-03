@@ -40,6 +40,7 @@ export type KnownProvider =
 	| "kilo"
 	| "kimi-code"
 	| "litellm"
+	| "lithosai"
 	| "lm-studio"
 	| "local"
 	| "meta"

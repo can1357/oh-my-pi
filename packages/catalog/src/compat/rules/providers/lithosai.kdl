@@ -1,0 +1,41 @@
+// LithosAI's hosted inference engine (api.lithosai.cloud): one
+// OpenAI-compatible chat-completions endpoint serving open-weight models —
+// Kimi K3, DeepSeek V4.1 Flash, GLM-5.3 — at full precision on the operator's
+// own GPUs. The roster is account-scoped ("Lists the models your organization
+// can call"), so `GET /v1/models` answers 401 `invalid API key` without a
+// credential, and with one it publishes bare `{id, object, created, owned_by}`
+// rows: no limits, tariffs, or capability metadata. Nothing about a row is
+// therefore discoverable, and no rows are frozen here.
+//
+// Deliberately no `discovery` node: that node enrolls a provider in
+// generate-models.ts, which would demand a live account credential on every
+// regeneration and freeze one organization's roster into models.json.
+// `dynamic-models-authoritative` prunes rows the roster drops.
+//
+// The wire facts below are transcribed from the vendor's published OpenAPI
+// document (docs.lithosai.com/openapi.yaml, `info.version: 2026-09-17`), not
+// from a live probe: the account used to read the roster carried no credit, so
+// every chat completion answered 402 `insufficient_quota` before any request
+// field could be exercised. Fields the schema documents are declared; anything
+// the schema is silent about is left at the openai-completions default.
+//
+// The roster names each model family in base, `-fast`, `-ultra` and
+// `-ultra-chat` tiers (13 ids over three families as of 2026-10-03). The
+// vendor prices base/fast/ultra as the same weights served at different
+// speeds, and nothing published defines what `-chat` changes, so no rule here
+// names a tier.
+provider "lithosai" {
+	default-model "moonshotai/Kimi-K3"
+	env "LITHOSAI_API_KEY"
+	dynamic-models-authoritative #true
+
+	// Request schema: `max_tokens` and `max_completion_tokens` are both
+	// accepted, `reasoning_effort` takes a named effort string, and the
+	// response message and streamed delta both carry `reasoning_content`.
+	// `role` enumerates `developer`; `store` is not a documented field.
+	max-tokens-field "max_tokens"
+	thinking-mode "effort"
+	reasoning-content-field "reasoning_content"
+	supports-developer-role #true
+	supports-store #false
+}
