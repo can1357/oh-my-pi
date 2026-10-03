@@ -5,6 +5,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
+import { DEFAULT_SPINNER_INTERVAL_MS, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
@@ -17,6 +18,7 @@ beforeAll(async () => {
 afterAll(() => resetSettingsForTest());
 afterEach(() => {
 	setMotionEffects(true);
+	setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
@@ -108,6 +110,25 @@ describe("status line decorative motion", () => {
 		vi.advanceTimersByTime(1000);
 		component.invalidate();
 		expect(brandColor(render())).toBe(snapped);
+		component.dispose();
+	});
+});
+
+describe("status line with a static spinner", () => {
+	it("still advances the brand's elapsed timer once a second", () => {
+		// The spinner clock was the only tick while working; static spinners made it a constant, so
+		// the cached row stayed at "0s" for the whole turn.
+		vi.useFakeTimers();
+		setSpinnerInterval(0);
+		setMotionEffects(false);
+		const { component, render } = fixture();
+		component.markActivityStart();
+		const plain = (row: string) => row.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(plain(render())).toContain("0s");
+		vi.advanceTimersByTime(2_100);
+		const later = plain(render());
+		expect(later).toContain("2s");
+		expect(later).not.toContain("0s");
 		component.dispose();
 	});
 });
