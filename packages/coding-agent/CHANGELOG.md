@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Symlinked routing configs now reload when an intermediate file or profile directory link is replaced, and continue following edits to the new target without restarting the session.
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
