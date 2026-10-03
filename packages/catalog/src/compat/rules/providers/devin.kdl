@@ -1,7 +1,7 @@
 // Catalog entry for "devin"; no deployment-contract compat rules are needed.
 
 provider "devin" {
-	default-model "swe-1-6"
+	default-model "swe-2"
 	env "DEVIN_API_KEY"
 	dynamic-models-authoritative #true
 	discovery label="Devin" oauth-provider="devin" {
@@ -12,13 +12,47 @@ provider "devin" {
 	// Cascade catalog is credential-scoped (gated per account/team), so catalog
 	// generation never fetches it: baking one account's roster into the shared
 	// bundle would misstate every other account's entitlements and leave zombie
-	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
-	// SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
-	// seed's `default-model` (`swe-1-6`) must resolve synchronously at
-	// boot, before credential-scoped runtime discovery replaces the seed. Field
-	// shape mirrors `devinModelSpec` so seeded and discovered rows are
+	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). The
+	// seed's `default-model` (`swe-2`) must resolve synchronously at boot,
+	// before credential-scoped runtime discovery replaces the seed. SWE-2 is
+	// the server's own account default (`default_override_model_config`,
+	// CLI 3000.11.3) and listed for every tier. Cascade encodes effort in the
+	// wire uid and rejects the bare `swe-2` slug, so the seed carries the three
+	// live effort lanes and the reviewed `swe-2` variant family collapses them
+	// onto the logical id (default lane `swe-2-high`). Both SWE-1.6 lanes stay
+	// seeded so a saved SWE-1.6 selection still resolves when discovery fails
+	// on a cold start. Discovery is authoritative, so an account whose roster
+	// lacks SWE-2 (an admin-curated legacy Windsurf seat) starts on its first
+	// listed model, as with any roster missing a provider default. Field shape
+	// mirrors `devinModelSpec` so seeded and discovered rows are
 	// indistinguishable downstream.
 	seed api="devin-agent" base-url="https://server.codeium.com" bundle="always" {
+		model "swe-2-high" name="SWE-2 High" {
+			reasoning #true
+			input "text" "image"
+			supports-tools #true
+			// Plan-included: upstream reports no cost dimensions; `cost-fallback`
+			// below supplies the published rate.
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262000 max-tokens=128000
+			supports-parallel-tool-calls #true
+		}
+		model "swe-2-medium" name="SWE-2 Medium" {
+			reasoning #true
+			input "text" "image"
+			supports-tools #true
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262000 max-tokens=128000
+			supports-parallel-tool-calls #true
+		}
+		model "swe-2-max" name="SWE-2 Max" {
+			reasoning #true
+			input "text" "image"
+			supports-tools #true
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262000 max-tokens=128000
+			supports-parallel-tool-calls #true
+		}
 		model "swe-1-6-fast" name="SWE-1.6 Fast" {
 			reasoning #true
 			// SWE-1.6 lanes ignore inline images despite upstream `supports_images`

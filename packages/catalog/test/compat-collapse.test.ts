@@ -1387,7 +1387,7 @@ describe("variant aliases", () => {
 		expect(resolveVariantSelector("devin", "gemini")).toBe("gemini-3-7-flash");
 		expect(resolveVariantSelector("devin", "gpt")).toBe("gpt-5-6-terra");
 		expect(resolveVariantSelector("devin", "codex")).toBe("gpt-5-3-codex");
-		expect(resolveVariantSelector("devin", "SWE")).toBe("swe-1-7-lightning");
+		expect(resolveVariantSelector("devin", "SWE")).toBe("swe-2");
 
 		// Generic labels must stay meaningless without a provider.
 		for (const alias of ["opus", "claude", "sonnet", "haiku", "gemini", "gpt", "codex", "swe"]) {
