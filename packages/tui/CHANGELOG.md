@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a shared spinner clock (`spinnerInterval` / `setSpinnerInterval` / `sharedSpinnerFrame`) so the Loader, live tool cards, and the status-line brand spinner all follow one configurable cadence; `0` pins every glyph static with no spinner timers ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+- Added a frame-rate ceiling (`maxFps` / `setMaxFps` / `minFrameIntervalMs`) that the render scheduler and the animation timers honour; renders a keystroke is waiting on keep the fixed 30 fps cadence ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+- Added a decorative-motion switch (`setMotionEffects`) that gates the status-line speculation blink and brand fade ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

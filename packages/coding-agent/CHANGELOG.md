@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `tui.spinnerInterval` setting, `PI_SPINNER_INTERVAL` environment variable, and `--spinner-interval <ms>` flag to slow every spinner — the working row, live tool cards, the status-line brand spinner, and the terminal title — or pin them static with `0`; the default cadence is unchanged ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+- Added the `tui.maxFps` setting, `PI_MAX_FPS` environment variable, and `--max-fps <n>` flag to cap how often the TUI repaints (default unchanged at 30); animations and streaming text coalesce into frames under the ceiling while keystroke echo keeps the full rate ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+- Added the `tui.motion` setting (`full` / `reduced` / `none`), `PI_MOTION` environment variable, and `--motion <mode>` flag: one switch over every animation — spinner cadence, repaint ceiling, shimmer, and the status-line blink/fade — for many-pane and reduced-motion use; an explicitly set `tui.spinnerInterval`, `tui.maxFps` or `display.shimmer` still wins over the preset. `display.shimmer` can now also be set with `PI_SHIMMER` or `--shimmer <mode>`. Defaults are unchanged ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
