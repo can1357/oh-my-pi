@@ -324,7 +324,7 @@ export const cfgTaskCompletionProbe = register({
 export const cfgTaskAgentIdleTtlMs = register({
 	id: "task.agentIdleTtlMs",
 	type: "number",
-	default: 420_000,
+	default: 5_000,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
