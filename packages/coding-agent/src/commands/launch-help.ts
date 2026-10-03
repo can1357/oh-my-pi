@@ -111,6 +111,14 @@ export const launchHelp = {
 			description:
 				"Ceiling on how often the TUI repaints, in frames per second (default 30; 1-120). Keystroke echo keeps the full rate. Overrides tui.maxFps for this run; PI_MAX_FPS takes precedence",
 		}),
+		motion: Flags.string({
+			description:
+				"One switch over every animation: full (default), reduced (spinners 250 ms, 4 fps, no shimmer or blink), or none (static). Explicit spinner-interval/max-fps/shimmer settings still win. Overrides tui.motion for this run; PI_MOTION takes precedence",
+		}),
+		shimmer: Flags.string({
+			description:
+				"Working-row text animation: classic (default), kitt, or disabled. Overrides display.shimmer for this run; PI_SHIMMER takes precedence",
+		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),
