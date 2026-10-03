@@ -169,6 +169,91 @@ export function resolveUsedFraction(limit: UsageLimit): number | undefined {
 	return undefined;
 }
 
+/** Used fraction at which a limit counts as `warning` unless a caller overrides it. */
+export const USAGE_WARNING_FRACTION = 0.9;
+
+/** Inputs a status can be resolved from when a provider omitted the field. */
+export interface UsageStatusInput {
+	/** Provider-reported status. `unknown` means "not reported" and is treated as absent. */
+	status?: UsageStatus;
+	/** Used fraction (0..1; >1 means overage). Takes precedence over `remaining`. */
+	usedFraction?: number;
+	/** Absolute remaining balance (e.g. prepaid credits) when no fraction exists. */
+	remaining?: number;
+	/** Warning threshold override for providers that classify earlier than {@link USAGE_WARNING_FRACTION}. */
+	warningAt?: number;
+}
+
+/**
+ * Map a used fraction to a status. This is the single threshold table: providers
+ * that classify their own payload use it, and the display resolver below uses it
+ * for limits whose provider reported no status. `undefined` stays `unknown`
+ * rather than defaulting to `ok` — an absent fraction is missing data, not health.
+ *
+ * Providers that deliberately classify differently (openai-codex credit-funded
+ * overage, umans' soft cap, github-copilot's unlimited rows) keep their own
+ * predicate: their emitted status feeds credential routing, so it is not
+ * interchangeable with provider-agnostic thresholds.
+ */
+export function usageStatus(usedFraction: number | undefined, warningAt = USAGE_WARNING_FRACTION): UsageStatus {
+	if (usedFraction === undefined) return "unknown";
+	if (usedFraction >= 1) return "exhausted";
+	if (usedFraction >= warningAt) return "warning";
+	return "ok";
+}
+
+/**
+ * Resolve the status a surface should display for a limit. An explicit status
+ * wins unless it is `unknown` — the enum's "not reported" value carries no
+ * information, and the credential-exhaustion check in auth storage already
+ * treats it as absent — then the used fraction decides, then an absolute
+ * remaining balance, then `unknown`.
+ *
+ * Single definition for the dashboard, the `/usage` detail view, and
+ * `omp usage`, so one payload cannot read `ok` on one surface and `exhausted`
+ * on another. Routing, gating, and reset decisions must NOT use this: they read
+ * the producer-written `UsageLimit.status` directly.
+ */
+export function resolveUsageStatus(input: UsageStatusInput): UsageStatus {
+	if (input.status !== undefined && input.status !== "unknown") return input.status;
+	const warningAt = input.warningAt ?? USAGE_WARNING_FRACTION;
+	if (input.usedFraction !== undefined) return usageStatus(input.usedFraction, warningAt);
+	if (input.remaining !== undefined) return input.remaining > 0 ? "ok" : "exhausted";
+	return "unknown";
+}
+
+/** {@link resolveUsageStatus} for a normalized limit. */
+export function resolveLimitStatus(limit: UsageLimit, warningAt?: number): UsageStatus {
+	return resolveUsageStatus({
+		status: limit.status,
+		usedFraction: resolveUsedFraction(limit),
+		remaining: limit.amount.remaining,
+		...(warningAt === undefined ? {} : { warningAt }),
+	});
+}
+
+/**
+ * Aggregate resolved statuses into the status one row should show. A group that
+ * mixes healthy and pressured members reads as `warning`, not as its worst
+ * member: the pool still has headroom, which is how the dashboard and the
+ * detail view have always rendered a bucket. `exhausted` is reported only when
+ * nothing is healthy or merely warning; `unknown` only when nothing resolved.
+ */
+export function aggregateUsageStatuses(statuses: readonly UsageStatus[]): UsageStatus {
+	const hasOk = statuses.includes("ok");
+	const hasWarning = statuses.includes("warning");
+	const hasExhausted = statuses.includes("exhausted");
+	if (hasOk) return hasWarning || hasExhausted ? "warning" : "ok";
+	if (hasWarning) return "warning";
+	if (hasExhausted) return "exhausted";
+	return "unknown";
+}
+
+/** {@link aggregateUsageStatuses} over a group of limits whose statuses may be missing. */
+export function aggregateUsageStatus(limits: readonly UsageLimit[], warningAt?: number): UsageStatus {
+	return aggregateUsageStatuses(limits.map(limit => resolveLimitStatus(limit, warningAt)));
+}
+
 /**
  * One recorded usage-limit snapshot: a single limit window of one account at
  * a point in time. The usage cache itself is latest-snapshot-only; history

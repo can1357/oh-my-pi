@@ -34,7 +34,8 @@ import type {
 	UsageScope,
 	UsageWindow,
 } from "../usage";
-import { DAY_MS, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { DAY_MS, parsePositiveTimestamp, WEEK_MS } from "./shared";
 
 const PROVIDER = "devin";
 // Seat management lives on the Cascade backend, never on the `api.devin.ai`

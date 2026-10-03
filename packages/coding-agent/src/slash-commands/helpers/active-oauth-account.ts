@@ -45,7 +45,8 @@ function normalizeIdentityValue(value: unknown): string | undefined {
  * Session marker label for an active OAuth identity: the base identifier
  * (email → accountId → projectId) suffixed with the organization when present
  * and distinct. Same-email Anthropic multi-org accounts share the base, so the
- * org suffix is the only field that tells the session's quota pool apart.
+ * org suffix is the only field that tells the session's quota pool apart —
+ * mirrors the account-list rows (`accountLabelsFor`) and login success.
  * Codex usage labels instead use live report metadata via formatCodexUsageReportLabel.
  * Returns `undefined` when no identifier is recoverable.
  */

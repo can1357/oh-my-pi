@@ -18,7 +18,8 @@ import type {
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
 import { listCodexResetCredits } from "./openai-codex-reset";
-import { HOUR_MS, usageStatus } from "./shared";
+import { usageStatus } from "../usage";
+import { HOUR_MS } from "./shared";
 
 const CODEX_USAGE_PATH = "wham/usage";
 const CODEX_VERIFIED_ACCESS_PATH = "accounts/verified_access";

@@ -17,7 +17,8 @@ import {
 import { isRecord } from "../utils";
 import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
-import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;

@@ -10,7 +10,8 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { buildUsageAmount, DAY_MS, HOUR_MS, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { buildUsageAmount, DAY_MS, HOUR_MS, WEEK_MS } from "./shared";
 
 const DEFAULT_ENDPOINT = "https://api.z.ai";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";

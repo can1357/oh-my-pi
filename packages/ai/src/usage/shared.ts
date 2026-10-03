@@ -1,5 +1,5 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import type { UsageAmount, UsageStatus } from "../usage";
+import type { UsageAmount } from "../usage";
 
 /** Milliseconds in one hour. */
 export const HOUR_MS = 60 * 60 * 1000;
@@ -22,14 +22,6 @@ export function parseIsoTimestamp(value: unknown): number | undefined {
 	if (typeof value !== "string" || !value) return undefined;
 	const parsed = Date.parse(value);
 	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-/** Maps a used fraction to the standard quota status thresholds. */
-export function usageStatus(usedFraction: number | undefined): UsageStatus {
-	if (usedFraction === undefined) return "unknown";
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
 }
 
 /**

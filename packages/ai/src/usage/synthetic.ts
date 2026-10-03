@@ -8,7 +8,8 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
-import { buildUsageAmount, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { buildUsageAmount, HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 const QUOTAS_URL = "https://api.synthetic.new/v2/quotas";
 

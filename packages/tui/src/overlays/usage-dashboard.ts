@@ -6,7 +6,14 @@
  * Enter flips into the classic full per-account report, scrollable in place.
  */
 import * as os from "node:os";
-import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	aggregateUsageStatus,
+	aggregateUsageStatuses,
+	resolveUsedFraction,
+	type UsageLimit,
+	type UsageReport,
+	type UsageStatus,
+} from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	matchesKey,
@@ -20,8 +27,14 @@ import {
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../chrome/format";
 import {
+	accountLabel,
+	accountLabelsFor,
+	aggregationLimit,
+	collapseSharedAccountReports,
 	collapseSharedUsageReports,
 	formatLimitTitle,
+	isNonEmptyString,
+	reportIdentityKey,
 	summarizeUsageResetCredits,
 	type UsageResetSummary,
 } from "./usage-display";
@@ -62,13 +75,28 @@ export interface CardWindowRow {
 	label: string;
 	/** Window label/id shown dim after the label when sibling rows share a label. */
 	windowTag?: string;
-	/** Mean used fraction across accounts (0..1, >1 = overage); undefined when unreported. */
+	/** Combined used fraction (0..1, >1 = overage); undefined when unreported. */
 	fraction: number | undefined;
-	status: UsageLimit["status"];
+	status: UsageStatus;
 	/** Reset countdown of the worst account, ms from now, when in the future. */
 	resetMs?: number;
 	/** Absolute one-sided amount (e.g. `$12.34 used`, `100 credits left`) for limits without a fraction. */
 	usedText?: string;
+	/** Number of account reports contributing to this combined row. */
+	reportedAccounts?: number;
+	/** Number of accounts eligible for this quota bucket. */
+	eligibleAccounts?: number;
+}
+/** Per-account availability summary shown in the initial usage dashboard. */
+export interface AccountAvailability {
+	/** Human-readable account identity, with a positional fallback. */
+	label: string;
+	/** Worst reported used fraction across this account's quota windows. */
+	fraction: number | undefined;
+	/** Availability derived from the account's individual limits. */
+	status: UsageStatus;
+	/** Quota windows reported by this account, when available. */
+	windows?: CardWindowRow[];
 }
 
 /** A connected account whose usage lookup produced no attributable report. */
@@ -84,11 +112,13 @@ export interface ProviderCard {
 	/** Number of represented accounts, including unavailable usage lookups. */
 	accounts: number;
 	unavailableAccounts: string[];
+	/** Availability for each account, in report order. */
+	accountStatuses: AccountAvailability[];
 	/** Window rows sorted most-pressing first. */
 	windows: CardWindowRow[];
 	/** True when every account reports no limits (e.g. enterprise plans). */
 	unlimited: boolean;
-	/** True when nothing is used anywhere (or there are no limits): collapses to a tick. */
+	/** True when nothing is used anywhere (or there are no limits). */
 	idle: boolean;
 	resetCredits?: {
 		bankedCount: number;
@@ -100,31 +130,45 @@ export interface ProviderCard {
 	daybreakAccounts?: string[];
 }
 
-/**
- * Aggregate status across a bucket's limits, mirroring the classic report:
- * a mix of healthy and pressured accounts reads as a warning, not as the
- * worst account's status.
- */
-function aggregateStatus(limits: readonly { status?: UsageLimit["status"] }[]): UsageLimit["status"] {
-	const hasOk = limits.some(limit => limit.status === "ok");
-	const hasWarning = limits.some(limit => limit.status === "warning");
-	const hasExhausted = limits.some(limit => limit.status === "exhausted");
-	if (hasOk) return hasWarning || hasExhausted ? "warning" : "ok";
-	if (hasWarning) return "warning";
-	if (hasExhausted) return "exhausted";
-	return "unknown";
+function usageLimitTitle(report: UsageReport, limit: UsageLimit, planType = planTypeKey(report)): string {
+	const label = formatLimitTitle(limit);
+	const isCodexLimit = report.provider === "openai-codex";
+	if (!isCodexLimit || !isNonEmptyString(planType) || label.toLowerCase().includes(planType.toLowerCase())) {
+		return label;
+	}
+	return `${label} (${planType})`;
 }
 
 /**
  * Card status when some connected accounts reported no usage: the missing
  * report raises the card to a warning but never hides an exhausted quota.
  */
-function statusWithUnavailableAccounts(windows: readonly { status?: UsageLimit["status"] }[]): UsageLimit["status"] {
+function statusWithUnavailableAccounts(windows: readonly { status?: UsageStatus }[]): UsageStatus {
 	if (windows.length === 0) return "unknown";
-	return aggregateStatus(windows) === "exhausted" ? "exhausted" : "warning";
+	const reported = windows
+		.map(window => window.status)
+		.filter((status): status is UsageStatus => status !== undefined);
+	return aggregateUsageStatuses(reported) === "exhausted" ? "exhausted" : "warning";
 }
 
 /** Fraction below which a window counts as untouched (renders as 100% free). */
+function accountStatus(report: UsageReport): UsageStatus {
+	if (report.limits.length === 0) return "ok";
+	return aggregateUsageStatus(report.limits);
+}
+
+function accountAvailability(report: UsageReport, label: string, nowMs: number): AccountAvailability {
+	const windows = buildWindowRows([report], nowMs);
+	const fractions = report.limits
+		.map(limit => resolveUsedFraction(limit))
+		.filter((value): value is number => value !== undefined);
+	return {
+		label,
+		fraction: fractions.length > 0 ? Math.max(...fractions) : undefined,
+		status: accountStatus(report),
+		windows,
+	};
+}
 const IDLE_FRACTION = 0.005;
 /**
  * Compact duration tag for a window (`7d`, `1d`, `5h`, `mo`), preferring the
@@ -142,19 +186,187 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
 	return id.length <= 3 ? id : id.slice(0, 1);
 }
 
+type WindowBucket = {
+	label: string;
+	limits: UsageLimit[];
+	reportedAccounts: number;
+	eligibleAccounts: number;
+};
+
+function aggregateUsedFraction(limits: readonly UsageLimit[]): number | undefined {
+	const absolute = limits.map(limit => ({
+		limit: limit.amount.limit,
+		used: limit.amount.used,
+		unit: limit.amount.unit,
+	}));
+	const unit = absolute[0]?.unit;
+	if (
+		unit !== undefined &&
+		absolute.every(
+			entry =>
+				entry.unit === unit &&
+				entry.limit !== undefined &&
+				Number.isFinite(entry.limit) &&
+				entry.limit > 0 &&
+				entry.used !== undefined &&
+				Number.isFinite(entry.used),
+		)
+	) {
+		const totalLimit = absolute.reduce((sum, entry) => sum + entry.limit!, 0);
+		if (totalLimit > 0) return absolute.reduce((sum, entry) => sum + entry.used!, 0) / totalLimit;
+	}
+
+	const fractions = limits
+		.map(limit => resolveUsedFraction(limit))
+		.filter((value): value is number => value !== undefined);
+	return fractions.length > 0 ? fractions.reduce((sum, value) => sum + value, 0) / fractions.length : undefined;
+}
+
+function planTypeKey(report: UsageReport): string | undefined {
+	const planType = report.metadata?.planType;
+	return isNonEmptyString(planType) ? planType.toLowerCase() : undefined;
+}
+
+type PlanCoverage = {
+	byReport: Map<UsageReport, string | undefined>;
+	counts: Map<string, number>;
+	unknown: number;
+};
+
+function inferPlanTypes(reports: readonly UsageReport[]): Map<string, string | undefined> {
+	const inferred = new Map<string, string | undefined>();
+	for (const report of reports) {
+		const identity = reportIdentityKey(report);
+		const plan = planTypeKey(report);
+		if (identity === undefined || plan === undefined) continue;
+		const prior = inferred.get(identity);
+		inferred.set(identity, inferred.has(identity) && prior !== plan ? undefined : plan);
+	}
+	return inferred;
+}
+
+function effectivePlanType(report: UsageReport, inferred: ReadonlyMap<string, string | undefined>): string | undefined {
+	const direct = planTypeKey(report);
+	if (direct !== undefined) return direct;
+	const identity = reportIdentityKey(report);
+	return identity === undefined ? undefined : inferred.get(identity);
+}
+
+function resolvePlanCoverage(reports: readonly UsageReport[]): PlanCoverage {
+	const inferred = inferPlanTypes(reports);
+	const byReport = new Map<UsageReport, string | undefined>();
+	const counts = new Map<string, number>();
+	let unknown = 0;
+	for (const report of reports) {
+		const plan = effectivePlanType(report, inferred);
+		byReport.set(report, plan);
+		if (plan === undefined) unknown++;
+		else counts.set(plan, (counts.get(plan) ?? 0) + 1);
+	}
+	return { byReport, counts, unknown };
+}
+
+function eligibleAccountCount(coverage: PlanCoverage, report: UsageReport): number {
+	const plan = coverage.byReport.get(report);
+	return plan === undefined ? coverage.unknown : (coverage.counts.get(plan) ?? 1);
+}
+
+function windowBucketKey(
+	report: UsageReport,
+	limit: UsageLimit,
+	planType: string | undefined,
+): { key: string; label: string } {
+	const label = usageLimitTitle(report, limit, planType);
+	const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
+	return { key: `${label}|${windowId}|${limit.scope.tier ?? ""}`, label };
+}
+
+function addLimitToBucket(
+	buckets: Map<string, WindowBucket>,
+	reportedKeys: Set<string>,
+	report: UsageReport,
+	limit: UsageLimit,
+	planType: string | undefined,
+	eligibleAccounts: number,
+): void {
+	const { key, label } = windowBucketKey(report, limit, planType);
+	const entry = buckets.get(key) ?? {
+		label,
+		limits: [],
+		reportedAccounts: 0,
+		eligibleAccounts,
+	};
+	entry.limits.push(aggregationLimit(report, limit));
+	if (!reportedKeys.has(key)) {
+		entry.reportedAccounts++;
+		reportedKeys.add(key);
+	}
+	buckets.set(key, entry);
+}
+
+function collectWindowBuckets(reports: readonly UsageReport[]): WindowBucket[] {
+	const buckets = new Map<string, WindowBucket>();
+	const coverage = resolvePlanCoverage(reports);
+	for (const report of reports) {
+		const planType = coverage.byReport.get(report);
+		const eligibleAccounts = eligibleAccountCount(coverage, report);
+		const reportedKeys = new Set<string>();
+		for (const limit of report.limits) {
+			addLimitToBucket(buckets, reportedKeys, report, limit, planType, eligibleAccounts);
+		}
+	}
+	return [...buckets.values()];
+}
+
+function buildWindowRow(bucket: WindowBucket, nowMs: number): CardWindowRow {
+	const fraction = aggregateUsedFraction(bucket.limits);
+	const worst = bucket.limits.reduce((max, limit) =>
+		(resolveUsedFraction(limit) ?? -1) > (resolveUsedFraction(max) ?? -1) ? limit : max,
+	);
+	const resetsAt = worst.window?.resetsAt;
+	return {
+		label: bucket.label,
+		windowTag: worst.window ? compactWindowTag(worst.window) : undefined,
+		fraction,
+		status: aggregateUsageStatus(bucket.limits),
+		resetMs: resetsAt !== undefined && resetsAt > nowMs ? resetsAt - nowMs : undefined,
+		usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
+		reportedAccounts: bucket.reportedAccounts,
+		eligibleAccounts: bucket.eligibleAccounts,
+	};
+}
+
+function clearUniqueWindowTags(windows: CardWindowRow[]): void {
+	for (const window of windows) {
+		const duplicated = windows.some(other => other !== window && other.label === window.label);
+		if (!duplicated) window.windowTag = undefined;
+	}
+}
+
+function buildWindowRows(reports: readonly UsageReport[], nowMs: number): CardWindowRow[] {
+	const windows = collectWindowBuckets(reports).map(bucket => buildWindowRow(bucket, nowMs));
+	windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
+	// The window tag earns its columns only when sibling rows would otherwise
+	// be indistinguishable (e.g. Antigravity's daily vs weekly "Usage (Google)").
+	clearUniqueWindowTags(windows);
+	return windows;
+}
+
 /**
  * Collapse usage reports into one compact card per provider: limits grouped by
- * quota bucket (label + window), each bucket showing the mean used fraction
- * across accounts (matching the classic report's aggregate "% free") with the
- * most-used account's reset countdown. Cards sort most-pressing first so
- * what's burning is on top-left; fully idle providers collapse into a tick.
+ * quota bucket (label + window), each bucket showing a capacity-weighted used
+ * fraction when absolute used/limit values exist, otherwise the mean fraction
+ * across reporting accounts. The most-used account supplies the reset countdown.
+ * Cards also retain one availability row per account so the initial dashboard
+ * never hides account-level capacity. Cards sort most-pressing first and retain
+ * an idle marker for model consumers.
  */
 export function buildProviderCards(
 	reports: UsageReport[],
 	nowMs: number,
 	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
 ): ProviderCard[] {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedAccountReports(collapseSharedUsageReports(reports));
 	const grouped = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
@@ -170,44 +382,7 @@ export function buildProviderCards(
 		const unavailable = unavailableAccounts
 			.filter(account => account.provider === provider)
 			.map(account => account.label);
-		const buckets = new Map<string, { label: string; limits: UsageLimit[] }>();
-		for (const report of providerReports) {
-			for (const limit of report.limits) {
-				const label = formatLimitTitle(limit);
-				const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
-				const entry = buckets.get(key) ?? { label, limits: [] };
-				entry.limits.push(limit);
-				buckets.set(key, entry);
-			}
-		}
-
-		const windows: CardWindowRow[] = [...buckets.values()].map(bucket => {
-			const fractions = bucket.limits
-				.map(limit => resolveUsedFraction(limit))
-				.filter((value): value is number => value !== undefined);
-			const fraction =
-				fractions.length > 0 ? fractions.reduce((sum, value) => sum + value, 0) / fractions.length : undefined;
-			const worst = bucket.limits.reduce((max, limit) =>
-				(resolveUsedFraction(limit) ?? -1) > (resolveUsedFraction(max) ?? -1) ? limit : max,
-			);
-			const resetsAt = worst.window?.resetsAt;
-			return {
-				label: bucket.label,
-				windowTag: worst.window ? compactWindowTag(worst.window) : undefined,
-				fraction,
-				status: aggregateStatus(bucket.limits),
-				resetMs: resetsAt !== undefined && resetsAt > nowMs ? resetsAt - nowMs : undefined,
-				usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
-			};
-		});
-		windows.sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1));
-		// The window tag earns its columns only when sibling rows would otherwise
-		// be indistinguishable (e.g. Antigravity's daily vs weekly "Usage (Google)").
-		for (const window of windows) {
-			const duplicated = windows.some(other => other !== window && other.label === window.label);
-			if (!duplicated) window.windowTag = undefined;
-		}
-
+		const windows = buildWindowRows(providerReports, nowMs);
 		const resetRows = providerReports
 			.map(report => summarizeUsageResetCredits(report.resetCredits, nowMs))
 			.filter((summary): summary is UsageResetSummary => summary !== undefined && summary.bankedCount > 0);
@@ -236,22 +411,18 @@ export function buildProviderCards(
 						unavailableReasons,
 					}
 				: undefined;
+		const labels = accountLabelsFor(providerReports);
 		const daybreakAccounts = providerReports.flatMap((report, index) =>
-			report.metadata?.daybreak === true
-				? [
-						typeof report.metadata.email === "string" && report.metadata.email
-							? report.metadata.email
-							: typeof report.metadata.accountId === "string" && report.metadata.accountId
-								? report.metadata.accountId
-								: `account ${index + 1}`,
-					]
-				: [],
+			report.metadata?.daybreak === true ? [labels[index] ?? accountLabel(report, index)] : [],
 		);
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
 			accounts: providerReports.length + unavailable.length,
 			unavailableAccounts: unavailable,
+			accountStatuses: providerReports.map((report, index) =>
+				accountAvailability(report, labels[index] ?? accountLabel(report, index), nowMs),
+			),
 			windows,
 			unlimited: windows.length === 0 && unavailable.length === 0,
 			idle:
@@ -515,7 +686,6 @@ export function formatActivityErrorDetail(error: string, homeDir = os.homedir())
 	}
 	return text.replace(/\.+$/, "");
 }
-
 const CARD_MIN_WIDTH = 32;
 const CARD_GUTTER = 3;
 const CARD_MAX_WINDOWS = 4;
@@ -529,6 +699,8 @@ interface CardRowLayout {
 	stacked: boolean;
 	labelHeights: number[];
 }
+
+const MIN_BAR_WIDTH = 8;
 
 export class UsageDashboardComponent implements Component {
 	/** The terminal draws the sheet: a large glass overlay titled Usage. */
@@ -605,21 +777,27 @@ export class UsageDashboardComponent implements Component {
 	// Subscriptions grid rendering
 	// ---------------------------------------------------------------------------
 
-	#statusIcon(status: UsageLimit["status"]): string {
+	#statusIcon(status: UsageStatus): string {
 		if (status === "exhausted") return theme.fg("error", theme.status.error);
 		if (status === "warning") return theme.fg("warning", theme.status.warning);
 		if (status === "ok") return theme.fg("success", theme.status.success);
 		return theme.fg("dim", theme.status.info);
 	}
 
-	#statusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
+	#statusColor(status: UsageStatus): "success" | "warning" | "error" | "dim" {
 		if (status === "exhausted") return "error";
 		if (status === "warning") return "warning";
 		if (status === "ok") return "success";
 		return "dim";
 	}
+	#statusLabel(status: UsageStatus): string {
+		if (status === "ok") return "available";
+		if (status === "warning") return "warning";
+		if (status === "exhausted") return "exhausted";
+		return "unknown";
+	}
 
-	#miniBar(fraction: number | undefined, status: UsageLimit["status"], width: number): string {
+	#miniBar(fraction: number | undefined, status: UsageStatus, width: number): string {
 		if (fraction === undefined) return theme.fg("dim", "·".repeat(width));
 		const clamped = Math.min(Math.max(fraction, 0), 1);
 		const filled = Math.round(clamped * width);
@@ -627,20 +805,148 @@ export class UsageDashboardComponent implements Component {
 		const empty = "░".repeat(width - filled);
 		return `${theme.fg(this.#statusColor(status), bar)}${theme.fg("dim", empty)}`;
 	}
+	#resetColumnWidth(windows: CardWindowRow[]): number {
+		let width = 0;
+		for (const window of windows) {
+			if (window.resetMs !== undefined) width = Math.max(width, formatDuration(window.resetMs).length);
+		}
+		return width;
+	}
+
+	#windowLabel(window: CardWindowRow, labelWidth: number): string {
+		const tagPlain =
+			window.windowTag && labelWidth >= 3
+				? truncateToWidth(window.windowTag, Math.max(1, Math.floor(labelWidth / 2) - 1))
+				: "";
+		const baseWidth = tagPlain ? Math.max(1, labelWidth - visibleWidth(tagPlain) - 1) : labelWidth;
+		const basePlain = truncateToWidth(sanitizeText(window.label), baseWidth);
+		const paddedBase = basePlain + " ".repeat(Math.max(0, baseWidth - visibleWidth(basePlain)));
+		return tagPlain ? `${theme.fg("muted", paddedBase)} ${theme.fg("dim", tagPlain)}` : theme.fg("muted", paddedBase);
+	}
+
+	#windowResetText(window: CardWindowRow, resetWidth: number): string {
+		const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
+		return resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
+	}
+
+	#renderWindowLine(
+		window: CardWindowRow,
+		width: number,
+		contentWidth: number,
+		indent: string,
+		labelWidth: number,
+		barWidth: number,
+		resetWidth: number,
+		coverageWidth: number,
+		totalAccounts: number,
+	): string {
+		const label = this.#windowLabel(window, labelWidth);
+		const resetText = this.#windowResetText(window, resetWidth);
+		const coverageAccounts = window.eligibleAccounts ?? totalAccounts;
+		const coverageText =
+			coverageAccounts > 1 && window.reportedAccounts !== undefined && window.reportedAccounts < coverageAccounts
+				? ` ${window.reportedAccounts}/${coverageAccounts}`
+				: "";
+		const coverageDisplay = theme.fg("dim", coverageText.padEnd(coverageWidth));
+		if (window.fraction === undefined) {
+			const usedWidth = Math.max(
+				1,
+				contentWidth - labelWidth - 1 - coverageWidth - (resetWidth > 0 ? resetWidth + 1 : 0),
+			);
+			const text = truncateToWidth(window.usedText ?? "no data", usedWidth).padEnd(usedWidth);
+			return truncateToWidth(`${indent}${label} ${theme.fg("dim", text)}${coverageDisplay}${resetText}`, width);
+		}
+		const freePct = Math.min(100, Math.max(0, Math.round((1 - window.fraction) * 100)));
+		const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
+		return truncateToWidth(
+			`${indent}${label} ${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${coverageDisplay}${resetText}`,
+			width,
+		);
+	}
+
+	#renderWindowLines(
+		windows: CardWindowRow[],
+		width: number,
+		indent: string,
+		maxWindows: number = CARD_MAX_WINDOWS,
+		totalAccounts: number = 1,
+	): string[] {
+		const contentWidth = Math.max(1, width - indent.length);
+		const hidden = Math.max(0, windows.length - maxWindows);
+		const visibleWindows = windows.slice(0, maxWindows);
+		const resetWidth = this.#resetColumnWidth(visibleWindows);
+		const coverageWidth = visibleWindows.reduce((width, window) => {
+			const coverageAccounts = window.eligibleAccounts ?? totalAccounts;
+			if (
+				coverageAccounts <= 1 ||
+				window.reportedAccounts === undefined ||
+				window.reportedAccounts >= coverageAccounts
+			) {
+				return width;
+			}
+			return Math.max(width, ` ${window.reportedAccounts}/${coverageAccounts}`.length);
+		}, 0);
+		const fixedWidth = 1 + 5 + coverageWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
+		const labelWidth = Math.max(1, Math.min(16, contentWidth - fixedWidth - 1 - MIN_BAR_WIDTH));
+		const barWidth = Math.max(0, contentWidth - labelWidth - fixedWidth - 1);
+		const lines = visibleWindows.map(window =>
+			this.#renderWindowLine(
+				window,
+				width,
+				contentWidth,
+				indent,
+				labelWidth,
+				barWidth,
+				resetWidth,
+				coverageWidth,
+				totalAccounts,
+			),
+		);
+		if (hidden > 0) lines.push(`${indent}${theme.fg("dim", `+${hidden} more`)}`);
+		return lines;
+	}
+
+	#renderAccountLines(account: AccountAvailability, width: number): string[] {
+		const freeText =
+			account.fraction === undefined
+				? ""
+				: `· ${Math.round(Math.max(0, Math.min(100, (1 - account.fraction) * 100)))}% free`;
+		const status = this.#statusLabel(account.status);
+		const statusText = `${this.#statusIcon(account.status)} ${theme.fg(this.#statusColor(account.status), status)}`;
+		const labelWidth = Math.max(1, width - 2 - visibleWidth(statusText) - freeText.length - 2);
+		const label = truncateToWidth(sanitizeText(account.label), labelWidth);
+		const accountWindows = account.windows ?? [];
+		return [
+			`  ${label} ${statusText}${freeText ? ` ${theme.fg("dim", freeText)}` : ""}`,
+			...this.#renderWindowLines(accountWindows, width, "    ", accountWindows.length),
+		];
+	}
 
 	#renderCardLines(card: ProviderCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
 		const lines: string[] = [];
-		const cardStatus =
+		const cardStatus: UsageStatus =
 			card.unavailableAccounts.length > 0
 				? statusWithUnavailableAccounts(card.windows)
 				: card.unlimited
 					? "ok"
-					: aggregateStatus(card.windows);
+					: aggregateUsageStatuses(
+							card.windows
+								.map(window => window.status)
+								.filter((status): status is UsageStatus => status !== undefined),
+						);
 		const accountsText = card.accounts > 1 ? theme.fg("dim", `${card.accounts} accts`) : "";
 		const titleBudget = width - 2 - visibleWidth(accountsText) - (accountsText ? 1 : 0);
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
+		// A single-account card renders through the shared grid geometry, the
+		// same as any other card. The per-account breakdown below exists only for
+		// the case upstream has no rendering for: a card aggregating several
+		// accounts, where one flat row list cannot say which account is spent.
+		const aggregated = card.accounts > 1;
+		if (aggregated) {
+			for (const account of card.accountStatuses) lines.push(...this.#renderAccountLines(account, width));
+		}
 
 		for (const account of card.daybreakAccounts ?? []) {
 			const label = sanitizeText(account.replace(/[\r\n\t]+/g, " "));
@@ -678,43 +984,52 @@ export class UsageDashboardComponent implements Component {
 			return lines;
 		}
 
-		const hidden = card.windows.length - CARD_MAX_WINDOWS;
-		const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
-		const contentWidth = Math.max(1, width - 2);
-		for (let index = 0; index < Math.min(card.windows.length, CARD_MAX_WINDOWS); index++) {
-			const window = card.windows[index]!;
-			const labelLines = labels[index]!;
-			const label = labelLines[0] ?? "";
-			const prefix = stacked ? "" : `${label}${" ".repeat(labelWidth - visibleWidth(label))} `;
-			if (stacked) {
-				for (let line = 0; line < labelHeights[index]; line++) {
-					lines.push(`  ${labelLines[line] ?? ""}`);
+		if (!aggregated) {
+			const hidden = card.windows.length - CARD_MAX_WINDOWS;
+			const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
+			const contentWidth = Math.max(1, width - 2);
+			for (let index = 0; index < Math.min(card.windows.length, CARD_MAX_WINDOWS); index++) {
+				const window = card.windows[index]!;
+				const labelLines = labels[index]!;
+				const label = labelLines[0] ?? "";
+				const prefix = stacked ? "" : `${label}${" ".repeat(labelWidth - visibleWidth(label))} `;
+				if (stacked) {
+					for (let line = 0; line < labelHeights[index]; line++) {
+						lines.push(`  ${labelLines[line] ?? ""}`);
+					}
+				}
+				if (window.fraction === undefined) {
+					const text = theme.fg("dim", window.usedText ?? "no data");
+					for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
+					continue;
+				}
+				const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
+				const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
+				const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
+				const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
+				for (const line of wrapTextWithAnsi(
+					`${prefix}${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`,
+					contentWidth,
+				)) {
+					lines.push(`  ${line}`);
 				}
 			}
-			if (window.fraction === undefined) {
-				const text = theme.fg("dim", window.usedText ?? "no data");
-				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
-				continue;
-			}
-			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
-			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
-			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
-			for (const line of wrapTextWithAnsi(
-				`${prefix}${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`,
-				contentWidth,
-			)) {
-				lines.push(`  ${line}`);
-			}
+			if (hidden > 0) lines.push(`  ${theme.fg("dim", `+${hidden} more`)}`);
+			return lines;
 		}
-		if (hidden > 0) lines.push(`  ${theme.fg("dim", `+${hidden} more`)}`);
+
+		// The aggregate is only an aggregate when it combines accounts: each
+		// account row above already lists that account's windows, so a
+		// single-account card would print the same rows twice under a heading
+		// that promises a combination.
+		lines.push(`  ${theme.fg("muted", "combined")}`);
+		lines.push(...this.#renderWindowLines(card.windows, width, "    ", undefined, card.accounts));
 		return lines;
 	}
 
 	#renderCardsGrid(innerWidth: number): string[] {
 		if (this.#cards.length === 0) return [theme.fg("dim", "No usage data available.")];
-		const active = this.#cards.filter(card => !card.idle);
-		const idle = this.#cards.filter(card => card.idle);
+		const active = this.#cards;
 		const columns = Math.max(1, Math.floor((innerWidth + CARD_GUTTER) / (CARD_MIN_WIDTH + CARD_GUTTER)));
 		const cardWidth = Math.floor((innerWidth - (columns - 1) * CARD_GUTTER) / columns);
 		const lines: string[] = [];
@@ -784,14 +1099,6 @@ export class UsageDashboardComponent implements Component {
 				lines.push(segments.join(" ".repeat(CARD_GUTTER)).trimEnd());
 			}
 			if (start + columns < active.length) lines.push("");
-		}
-		// Untouched providers collapse into a single tick line: their windows
-		// are all at 100% free (or have no limits), so per-window bars are noise.
-		if (idle.length > 0) {
-			if (active.length > 0) lines.push("");
-			const names = idle.map(card => card.name).join(" · ");
-			const prefix = `${theme.fg("success", theme.status.success)} `;
-			lines.push(truncateToWidth(`${prefix}${theme.fg("dim", `untouched: ${names}`)}`, innerWidth));
 		}
 		return lines;
 	}
@@ -1048,7 +1355,7 @@ export class UsageDashboardComponent implements Component {
 				? statusWithUnavailableAccounts(entry.windows)
 				: entry.unlimited
 					? "ok"
-					: aggregateStatus(entry.windows);
+					: aggregateUsageStatuses(entry.windows.map(window => window.status));
 		const head: NativeChild[] = [text([span(entry.name, "strong")], { truncate: "end" })];
 		if (entry.accounts > 1) head.push(text([span(`${entry.accounts} accounts`, "muted")]));
 		head.push(node("spacer", { grow: 1 }), statusDot(cardStatus));

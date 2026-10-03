@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Usage surfaces now classify a limit through one shared contract (`usageStatus`, `resolveUsageStatus`, `resolveLimitStatus`, `aggregateUsageStatus`) instead of per-surface rules, so a limit whose provider omitted `status` no longer reads `ok` on one surface and `exhausted` on another. An explicit `unknown` is treated as unreported rather than as a verdict, matching the credential-exhaustion check. Providers that classify deliberately (openai-codex credit-funded overage, umans' soft cap, github-copilot's unlimited rows) keep their own predicates, since their emitted status drives routing.
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

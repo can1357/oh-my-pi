@@ -3,12 +3,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
+	aggregateUsageStatus,
 	getEnvApiKey,
 	getProviderDetails,
 	type ProviderDetails,
+	resolveLimitStatus,
 	resolveUsedFraction,
 	type UsageLimit,
 	type UsageReport,
+	type UsageStatus,
 } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -90,7 +93,11 @@ import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
+	accountLabelPartsFor,
+	aggregationLimit,
+	collapseSharedAccountReports,
 	collapseSharedUsageReports,
+	composeAccountLabel,
 	formatLimitTitle,
 	summarizeUsageResetCredits,
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
@@ -1990,12 +1997,24 @@ function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme):
 	return uiTheme.fg("dim", `(${windowLabel})`);
 }
 
-/** ` (org)` suffix for providers whose orgName is an organization. */
-function orgSuffix(report: UsageReport): string {
-	const orgName = report.metadata?.orgName;
-	const orgId = report.metadata?.orgId;
-	const org = typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-	return org ? ` (${org})` : "";
+/**
+ * Account label for one column of the detail grid. Disambiguation is decided
+ * per provider row: when sibling reports render the same base label, the
+ * distinct identity parts are appended (dashboard parity), else plain label.
+ * Codex keeps the TUI's `(plan)` layout, where `orgName` is the login-time
+ * plan rather than an organization.
+ */
+function detailAccountLabels(reports: readonly UsageReport[]): string[] {
+	// Codex owns its own qualification: a workspace suffix only when two
+	// accounts share an email, plus the live plan in `(plan)`. Folding that into
+	// the generic label would print the plan as an organization and either drop
+	// the collision qualifier or duplicate it.
+	const parts = accountLabelPartsFor(reports);
+	return parts.map((part, index) => {
+		const report = reports[index]!;
+		if (report.provider !== "openai-codex") return composeAccountLabel(part, index);
+		return formatCodexTuiLabel(report, reports, part.base ?? `account ${index + 1}`);
+	});
 }
 
 /** Keep the existing TUI `(plan)` layout while using the live Codex usage plan. */
@@ -2003,45 +2022,6 @@ function formatCodexTuiLabel(report: UsageReport, peers: readonly UsageReport[],
 	const identity = formatCodexUsageReportLabel(report, peers, base, undefined, false);
 	const plan = codexUsagePlan(report);
 	return plan ? `${identity} (${plan})` : identity;
-}
-
-function formatAccountLabel(
-	limit: UsageLimit,
-	report: UsageReport,
-	peers: readonly UsageReport[],
-	index: number,
-): string {
-	const codex = report.provider === "openai-codex";
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email)
-		return codex ? formatCodexTuiLabel(report, peers, email) : `${email}${orgSuffix(report)}`;
-	const accountId =
-		typeof report.metadata?.accountId === "string" && report.metadata.accountId
-			? report.metadata.accountId
-			: limit.scope.accountId || undefined;
-	if (accountId) return codex ? formatCodexTuiLabel(report, peers, accountId) : `${accountId}${orgSuffix(report)}`;
-	const projectId =
-		typeof report.metadata?.projectId === "string" && report.metadata.projectId
-			? report.metadata.projectId
-			: limit.scope.projectId || undefined;
-	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
-	return codex ? formatCodexTuiLabel(report, peers, base) : base;
-}
-
-function formatUnlimitedReportLabel(report: UsageReport, peers: readonly UsageReport[], index: number): string {
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email)
-		return report.provider === "openai-codex"
-			? formatCodexTuiLabel(report, peers, email)
-			: `${email}${orgSuffix(report)}`;
-	const accountId = report.metadata?.accountId;
-	if (typeof accountId === "string" && accountId)
-		return report.provider === "openai-codex"
-			? formatCodexTuiLabel(report, peers, accountId)
-			: `${accountId}${orgSuffix(report)}`;
-	const projectId = report.metadata?.projectId;
-	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
-	return report.provider === "openai-codex" ? formatCodexTuiLabel(report, peers, base) : base;
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
@@ -2062,11 +2042,12 @@ function formatAccountHeaderRow(
 	uiTheme: Theme,
 	activeAccount?: OAuthAccountIdentity,
 ): string[] {
+	const labels = detailAccountLabels(reports);
 	const parts = limits.map((limit, index) => {
 		const reset = formatResetShort(limit, nowMs);
 		const report = reports[index];
 		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
-		const label = formatAccountLabel(limit, report, peers, index);
+		const label = labels[index] ?? `account ${index + 1}`;
 		return {
 			label: active ? `● ${label}` : label,
 			suffix: reset ? `(${reset})` : "",
@@ -2105,20 +2086,17 @@ function padColumn(text: string, width: number): string {
 	return `${text}${padding(width - visible)}`;
 }
 
-type AggregateDisplayStatus = NonNullable<UsageLimit["status"]> | "neutral";
+type AggregateDisplayStatus = UsageStatus | "neutral";
 
+/**
+ * Group status for one quota row: the shared aggregation rule, plus the
+ * detail view's own `neutral` state for a row that reports only an absolute
+ * spend (nothing to visualize, so it must not read as a pending/unknown quota).
+ */
 function resolveAggregateStatus(limits: UsageLimit[]): AggregateDisplayStatus {
-	const hasOk = limits.some(limit => limit.status === "ok");
-	const hasWarning = limits.some(limit => limit.status === "warning");
-	const hasExhausted = limits.some(limit => limit.status === "exhausted");
-	if (!hasOk && !hasWarning && !hasExhausted) {
-		return limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount) ? "neutral" : "unknown";
-	}
-	if (hasOk) {
-		return hasWarning || hasExhausted ? "warning" : "ok";
-	}
-	if (hasWarning) return "warning";
-	return "exhausted";
+	const status = aggregateUsageStatus(limits);
+	if (status === "unknown" && limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount)) return "neutral";
+	return status;
 }
 
 function formatAggregateAmount(limits: UsageLimit[]): string {
@@ -2188,7 +2166,7 @@ function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): stri
 	return uiTheme.fg("dim", uiTheme.status.pending);
 }
 
-function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
+function resolveStatusColor(status: UsageStatus): "success" | "warning" | "error" | "dim" {
 	if (status === "exhausted") return "error";
 	if (status === "warning") return "warning";
 	if (status === "ok") return "success";
@@ -2217,7 +2195,7 @@ function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): st
 	else if (remainder >= 1 / 3) partial = "▒";
 	const leading = "█".repeat(fullCells) + partial;
 	const empty = "░".repeat(Math.max(0, barWidth - fullCells - (partial ? 1 : 0)));
-	const color = resolveStatusColor(limit.status);
+	const color = resolveStatusColor(resolveLimitStatus(limit));
 	return `${uiTheme.fg(color, leading)}${uiTheme.fg("dim", empty)}`;
 }
 
@@ -2244,7 +2222,7 @@ export function renderUsageReports(
 	usageModelSelectors: readonly string[] = [],
 	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedAccountReports(collapseSharedUsageReports(reports));
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
@@ -2289,7 +2267,7 @@ export function renderUsageReports(
 					limits: [],
 					reports: [],
 				};
-				entry.limits.push(limit);
+				entry.limits.push(aggregationLimit(report, limit));
 				entry.reports.push(report);
 				limitGroups.set(key, entry);
 			}
@@ -2351,26 +2329,11 @@ export function renderUsageReports(
 		}
 
 		const resetAccountLines: string[] = [];
-		for (const report of providerReports) {
+		const resetLabels = detailAccountLabels(providerReports);
+		providerReports.forEach((report, reportIndex) => {
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
-			if (!resets || resets.bankedCount <= 0) continue;
-			const identityLabel =
-				typeof report.metadata?.email === "string" && report.metadata.email
-					? report.metadata.email
-					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
-						? report.metadata.accountId
-						: "account";
-			const orgName = report.metadata?.orgName;
-			const orgId = report.metadata?.orgId;
-			const orgLabel =
-				typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-			const rawLabel =
-				provider === "openai-codex"
-					? formatCodexTuiLabel(report, providerReports, identityLabel)
-					: orgLabel && orgLabel !== identityLabel
-						? `${identityLabel} (${orgLabel})`
-						: identityLabel;
-			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
+			if (!resets || resets.bankedCount <= 0) return;
+			const label = sanitizeText(resetLabels[reportIndex] ?? `account ${reportIndex + 1}`);
 			const activeOrg = activeAccount?.orgId;
 			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
 			const orgMatches = !activeOrg && !reportOrg ? true : activeOrg === reportOrg;
@@ -2400,7 +2363,7 @@ export function renderUsageReports(
 				const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
 				resetAccountLines.push(`        unavailable: ${reason}`);
 			}
-		}
+		});
 		if (resetAccountLines.length > 0) {
 			lines.push(
 				`  ${uiTheme.fg("accent", "Saved rate-limit resets")} ${uiTheme.fg("dim", "(/usage reset to spend)")}`,
@@ -2482,15 +2445,18 @@ export function renderUsageReports(
 
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
-		for (const report of unlimitedReports) {
-			const label = formatUnlimitedReportLabel(report, providerReports, 0);
+		const unlimitedLabels = detailAccountLabels(unlimitedReports);
+		unlimitedReports.forEach((report, unlimitedIndex) => {
+			const label = unlimitedLabels[unlimitedIndex] ?? `account ${unlimitedIndex + 1}`;
+			// Codex labels already carry their live plan, so only other providers
+			// get the tier appended here.
 			const tier = report.provider === "openai-codex" ? undefined : report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
 			lines.push(
 				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${daybreakSuffix}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);
-		}
+		});
 		// No per-provider footer; global header shows last check.
 	}
 

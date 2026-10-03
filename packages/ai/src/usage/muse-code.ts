@@ -1,7 +1,8 @@
 import * as AIError from "../error";
 import { parseMuseCodeCredential, requestMuseCodeKey, type MuseCodeKeyResponse } from "../registry/oauth/muse-code";
 import type { UsageAmount, UsageFetchParams, UsageLimit, UsageProvider, UsageReport, UsageWindow } from "../usage";
-import { parseIsoTimestamp, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { parseIsoTimestamp, parsePositiveTimestamp, WEEK_MS } from "./shared";
 
 const PROVIDER = "muse-code";
 const SOURCE = "api.meta.ai/muse-code/key";

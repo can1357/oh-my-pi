@@ -28,7 +28,8 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { DAY_MS, HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 const PROVIDER_ID = "xai-oauth";
 const BILLING_SOURCE = "cli-chat-proxy.grok.com/v1/billing";

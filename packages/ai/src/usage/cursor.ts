@@ -14,7 +14,8 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, parseIsoTimestamp, usageStatus } from "./shared";
+import { usageStatus } from "../usage";
+import { DAY_MS, parseIsoTimestamp } from "./shared";
 
 function parseTimestamp(value: unknown): number | undefined {
 	const numeric = toNumber(value);

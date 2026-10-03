@@ -1,7 +1,8 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageProvider, UsageReport } from "../usage";
 import { isRecord } from "../utils";
-import { HOUR_MS, parsePositiveTimestamp, usageStatus } from "./shared";
+import { usageStatus } from "../usage";
+import { HOUR_MS, parsePositiveTimestamp } from "./shared";
 
 const INTL_PROVIDER = "minimax-code";
 const INTL_BASE_URL = "https://api.minimax.io";
