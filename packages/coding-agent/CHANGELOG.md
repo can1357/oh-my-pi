@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- Fixed browser `tab.select()` and element-handle `select()` resetting a dropdown to its first option when given the option's visible label; they now match by value, then label, like the Tern backend, a single `<select>` takes the first match, and a value that matches nothing returns `[]` ([#14226](https://github.com/can1357/oh-my-pi/pull/14226) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.5.1] - 2026-10-03
 

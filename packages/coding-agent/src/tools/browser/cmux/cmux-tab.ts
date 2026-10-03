@@ -1940,14 +1940,20 @@ export class CmuxTab implements InProcessRunTab {
 				case "select": {
 					const values = Array.isArray(args.values) ? args.values.map(String) : [String(args.value || "")];
 					if (element.tagName !== "SELECT") throw new Error("tab.select() requires a <select> element");
-					const wanted = new Set(values);
-					const selected = [];
-					for (const option of Array.from(element.options)) {
-						option.selected = wanted.has(option.value);
-						if (option.selected) selected.push(option.value);
+					// Same rules as selectElementOptions in interactions.ts: value, then label.
+					const options = Array.from(element.options);
+					const wanted = [];
+					for (const value of values) {
+						const option =
+							options.find(candidate => candidate.value === value) ||
+							options.find(candidate => candidate.label === value || candidate.text.replace(/\\s+/g, " ").trim() === value);
+						if (option) wanted.push(option);
 					}
+					if (wanted.length === 0) for (const option of options) option.selected = false;
+					else if (element.multiple) for (const option of options) option.selected = wanted.includes(option);
+					else element.selectedIndex = wanted[0].index;
 					inputEvent(element);
-					return selected;
+					return wanted.length === 0 ? [] : options.filter(option => option.selected).map(option => option.value);
 				}
 				case "uploadFile": {
 					const transfer = new DataTransfer();

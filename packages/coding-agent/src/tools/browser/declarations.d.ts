@@ -1325,7 +1325,7 @@ interface BrowserTabHelpers {
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	/** Scroll the matching element into view. */
 	scrollIntoView(selector: string): Promise<void>;
-	/** Select values in the matching `<select>` element. */
+	/** Select options in the matching `<select>` element by value, then visible label. */
 	select(selector: string, ...values: string[]): Promise<string[]>;
 	/** Upload files through a matching file input, chooser trigger, or drop zone. */
 	uploadFile(selector: string, ...filePaths: string[]): Promise<void>;
@@ -1508,7 +1508,7 @@ interface BrowserElement {
 	hover(): Promise<void>;
 	/** Focus this element. */
 	focus(): Promise<void>;
-	/** Select values when this element is a `<select>`. */
+	/** Select options by value, then visible label, when this element is a `<select>`. */
 	select(...values: string[]): Promise<string[]>;
 	/** Upload files when this element is a file input. */
 	uploadFile(...filePaths: string[]): Promise<void>;

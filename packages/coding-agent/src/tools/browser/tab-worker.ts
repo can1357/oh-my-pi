@@ -171,6 +171,7 @@ import {
 	mouseDown,
 	mouseMove,
 	mouseUp,
+	selectElementOptions,
 	setElementChecked,
 	type ScrollOptions,
 	uploadFilesToElement,
@@ -661,6 +662,7 @@ export function toActionableHandle(
 		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { clickCount: 2 });
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
+		enriched.select = (...values) => selectElementOptions(enriched, values, "handle.select()");
 		enriched.highlight = options => highlightElement(enriched, options);
 		const controller = new AbortController();
 		return enrichElementQueries(enriched, (_label, fn) => fn(controller.signal));
@@ -760,6 +762,17 @@ export function toActionableHandle(
 				"handle.uncheck()",
 				signal,
 				() => setElementChecked(enriched, false, "handle.uncheck()", signal),
+				invalidate,
+			),
+		);
+	enriched.select = (...values) =>
+		guard<string[]>("handle.select()", signal =>
+			runGuardedHandleAction(
+				enriched,
+				originals,
+				"handle.select()",
+				signal,
+				() => selectElementOptions(enriched, values, "handle.select()", signal),
 				invalidate,
 			),
 		);
@@ -2717,41 +2730,7 @@ export class WorkerCore {
 	async #select(selector: string, values: string[], timeoutMs: number, signal: AbortSignal): Promise<string[]> {
 		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
 		try {
-			return (await untilAborted(signal, () =>
-				handle.evaluate((el, vals) => {
-					interface SelectOption {
-						value: string;
-						selected: boolean;
-					}
-					interface SelectLike {
-						tagName: string;
-						options: ArrayLike<SelectOption>;
-						dispatchEvent: (event: unknown) => boolean;
-					}
-					const select = el as unknown as SelectLike;
-					if (select?.tagName !== "SELECT") throw new Error("tab.select() requires a <select> element");
-					const EventCtor = (
-						globalThis as unknown as { Event: new (type: string, init?: { bubbles: boolean }) => unknown }
-					).Event;
-					const wanted = new Set(vals as string[]);
-					// Assign the full selection first, then read back: on a single
-					// <select>, un-selecting the current option mid-loop leaves the
-					// browser reporting it selected until another option takes over,
-					// which double-counted the old value in the returned list.
-					for (let i = 0; i < select.options.length; i++) {
-						const opt = select.options[i] as SelectOption;
-						opt.selected = wanted.has(opt.value);
-					}
-					const selected: string[] = [];
-					for (let i = 0; i < select.options.length; i++) {
-						const opt = select.options[i] as SelectOption;
-						if (opt.selected) selected.push(opt.value);
-					}
-					select.dispatchEvent(new EventCtor("input", { bubbles: true }));
-					select.dispatchEvent(new EventCtor("change", { bubbles: true }));
-					return selected;
-				}, values),
-			)) as string[];
+			return await selectElementOptions(handle, values, "tab.select()", signal);
 		} finally {
 			await handle.dispose().catch(() => undefined);
 		}
