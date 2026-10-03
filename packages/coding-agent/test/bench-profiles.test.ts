@@ -318,3 +318,64 @@ describe("bench --detailed", () => {
 		await expect(runDetailed({ par: 1 })).rejects.toThrow("--par");
 	});
 });
+const localModel: Model<Api> = buildModel({
+	provider: "llama.cpp",
+	id: "local-model",
+	name: "local-model",
+	api: "openai-completions",
+	baseUrl: "http://localhost:8080/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 4096,
+	contextWindow: 128_000,
+});
+
+const localRegistry: BenchModelRegistry = {
+	getAll: () => [localModel],
+	getAvailable: () => [localModel],
+	getApiKey: async () => "not-needed",
+	resolver: () => (() => Promise.resolve("not-needed")) as unknown as ApiKeyResolver,
+};
+
+describe("bench local-provider defaults", () => {
+	async function runLocal(flags: Record<string, unknown>) {
+		const stderr: string[] = [];
+		const summary = await runBenchCommand(
+			{ models: ["llama.cpp/local-model"], flags: { detailed: true, runs: 2, prompt: "hi", ...flags } },
+			{
+				createRuntime: async () => ({ modelRegistry: localRegistry, close: () => {} }),
+				randomSessionId: () => "sess",
+				writeStdout: () => {},
+				writeStderr: (t: string) => stderr.push(t),
+				setExitCode: () => {},
+				streamSimple: () => streamOf(message({})),
+				now: () => 0,
+				random: () => 0,
+				stdoutIsTTY: false,
+			},
+		);
+		return { summary, stderr };
+	}
+
+	it("warns and reports par 1 for an all-local run on the default --par", async () => {
+		const { summary, stderr } = await runLocal({});
+		expect(stderr.find(s => s.toLowerCase().includes("local provider"))).toBeDefined();
+		// Default --par is 4, but an all-local run plans and reports par 1 so the
+		// headers, summary, and the phase's own concurrency all agree.
+		expect(summary.detailed).toEqual({ runsPerPhase: 2, par: 1 });
+		expect(summary.models[0].phases.parallel?.concurrency).toBe(1);
+	});
+
+	it("respects an explicit --par on a local provider and stays quiet", async () => {
+		const { summary, stderr } = await runLocal({ par: 8 });
+		expect(stderr.find(s => s.toLowerCase().includes("local provider"))).toBeUndefined();
+		expect(summary.detailed).toEqual({ runsPerPhase: 2, par: 8 });
+		expect(summary.models[0].phases.parallel?.concurrency).toBe(8);
+	});
+
+	it("still notes the local default on stderr under --json (stdout stays pure JSON)", async () => {
+		const { stderr } = await runLocal({ json: true });
+		expect(stderr.find(s => s.toLowerCase().includes("local provider"))).toBeDefined();
+	});
+});

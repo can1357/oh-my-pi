@@ -248,7 +248,7 @@ const LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS = 300_000;
 
 // Mechanism only: provider ids identify local/proxy endpoint shape, while
 // loopback URL detection handles custom endpoints; neither is model policy.
-const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
+export const LOCAL_OPENAI_COMPAT_PROVIDERS: Record<string, true> = {
 	"llama.cpp": true,
 	"lm-studio": true,
 	vllm: true,
@@ -277,6 +277,24 @@ function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) return true;
 	if (hostname.endsWith(".local")) return true;
 	return false;
+}
+
+/**
+ * True for OpenAI-compatible endpoints served by a single local process: a
+ * known local provider id (see {@link LOCAL_OPENAI_COMPAT_PROVIDERS}) or a
+ * loopback/private baseUrl on a custom endpoint. Proxy ids are excluded —
+ * their concurrency is bounded by the remote upstream, not a local KV cache.
+ */
+export function isLocalOpenAICompatBackend(model: {
+	provider: string;
+	providerType?: string;
+	baseUrl?: string;
+}): boolean {
+	const backendProvider = model.providerType ?? model.provider;
+	return (
+		PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
+		(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(model.baseUrl))
+	);
 }
 
 function resolveReasoningDisableMode(
@@ -335,7 +353,6 @@ function detectOpenAI(
 	reasoningCapable: boolean,
 ): OpenAIDetection {
 	const provider = spec.provider;
-	const backendProvider = spec.providerType ?? provider;
 	const baseUrl = spec.baseUrl;
 	const hostModel = { provider, baseUrl };
 	const isZai = modelMatchesHost(hostModel, "zai");
@@ -345,9 +362,7 @@ function detectOpenAI(
 	const isDirectDeepseekApi = modelMatchesHost(hostModel, "deepseekDirect");
 	const isDeepseekFamily = modelMatchesHost(hostModel, "deepseekFamily") || facts.is("deepseek");
 	const isDeepseekReasoning = isDeepseekFamily && reasoningCapable;
-	const isLocalOpenAICompatBackend =
-		PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
-		(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl));
+	const localOpenAICompatBackend = isLocalOpenAICompatBackend({ provider, providerType: spec.providerType, baseUrl });
 	return {
 		facts,
 		isClinePass: provider === "cline-pass",
@@ -362,8 +377,8 @@ function detectOpenAI(
 		isVenice: modelMatchesHost(hostModel, "venice"),
 		requiresEnabledThinking: isMoonshotNative && facts.is("kimi") && facts.family("k2.7-code"),
 		isXiaomiMimo: isXiaomiHost && facts.is("mimo"),
-		isLocalOpenAICompatBackend,
-		isLocalServingBackend: isLocalOpenAICompatBackend || hasLocalLoopbackBaseUrl(baseUrl),
+		isLocalOpenAICompatBackend: localOpenAICompatBackend,
+		isLocalServingBackend: localOpenAICompatBackend || hasLocalLoopbackBaseUrl(baseUrl),
 		isOpenRouter: modelMatchesHost(hostModel, "openrouter"),
 	};
 }
