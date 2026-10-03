@@ -175,6 +175,7 @@
 ### Changed
 
 - Advisor notes merge at final boundaries with age markers and at most one permitted continuation per batch; advisor continuations no longer trigger recursive reviews ([#12387](https://github.com/can1357/oh-my-pi/pull/12387) by [@olegpulatov](https://github.com/olegpulatov)).
+- System prompt now tells the model to quote Mermaid node and edge text containing brackets or pipes, which otherwise fails to parse.
 
 ### Fixed
 
