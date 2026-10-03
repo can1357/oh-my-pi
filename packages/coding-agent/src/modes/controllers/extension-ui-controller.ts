@@ -45,6 +45,7 @@ import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
@@ -287,6 +288,7 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			getContextBreakdown: () => computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true }),
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
 		};
@@ -520,6 +522,7 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			getContextBreakdown: () => computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true }),
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 			startLive: options => this.ctx.startRemoteLive(options),
 		};
