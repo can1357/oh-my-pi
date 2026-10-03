@@ -44,7 +44,7 @@ export interface SessionSnapshot {
 
 export type WorkerInitPayload =
 	| {
-			mode: "headless";
+			mode: "headless" | "relay";
 			browserWSEndpoint: string;
 			safeDir: string;
 			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
@@ -70,6 +70,8 @@ export type WorkerInitPayload =
 			browserWSEndpoint: string;
 			safeDir: string;
 			targetId: string;
+			/** Close only targets created by this managed tab, including after worker recovery. */
+			ownsPage?: boolean;
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
