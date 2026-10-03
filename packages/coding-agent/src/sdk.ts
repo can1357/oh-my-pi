@@ -135,6 +135,8 @@ import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
 	SkillDescriptionCatalog,
+	type SkillDescriptionStore,
+	sharedSkillDescriptionStore,
 } from "./extensibility/skill-descriptions";
 import { resolvePath } from "./extensibility/utils";
 import {
@@ -398,6 +400,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -4177,14 +4180,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
-		// The process agent dir uses the process-wide store; a session rooted in
-		// another agent dir keeps its own, closed when the session is disposed.
-		const ownedSkillDescriptionStore =
-			path.resolve(agentDir) === path.resolve(getAgentDir())
-				? undefined
-				: openSessionSkillDescriptionStore(agentDir);
+		// The process agent dir uses the process-wide store; a session rooted in another agent dir
+		// keeps its own. It opens when a prompt build first compresses (never while
+		// `skills.compressDescriptions` is off) and closes with the session.
+		const keepsOwnSkillDescriptionStore = path.resolve(agentDir) !== path.resolve(getAgentDir());
+		let ownedSkillDescriptionStore: SkillDescriptionStore | undefined;
 		const skillDescriptions = new SkillDescriptionCatalog({
-			store: ownedSkillDescriptionStore,
+			// Read on every prompt build: `cfgSystemPromptInputs` rebuilds the prompt when it changes, so
+			// a change made in a live session applies to the next prompt.
+			verbatim: () => !cfgSkillsCompressDescriptions.get(settings),
+			store: () => {
+				if (!keepsOwnSkillDescriptionStore) return sharedSkillDescriptionStore();
+				ownedSkillDescriptionStore = openSessionSkillDescriptionStore(agentDir);
+				return ownedSkillDescriptionStore ?? sharedSkillDescriptionStore();
+			},
 			// Held until AgentSession exists: before then the root cost gate does not, so a request
 			// sent from the startup prompt render could go out ungated (see `startCompression` below).
 			deferCompression: true,
@@ -5227,12 +5236,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// after a reset (#13370). The tools snapshot into THIS store, not the
 		// AgentSession's own lazy field.
 		session.registerSessionChangeCallback(() => toolSession.editStore?.clear());
-		if (ownedSkillDescriptionStore) {
-			// Let in-flight compressions land before releasing the file.
-			session.addDisposer(
-				() => void skillDescriptions.waitForPending().finally(() => ownedSkillDescriptionStore.close()),
-			);
-		}
+		// Let in-flight compressions land before releasing the session's own store, if one was opened.
+		session.addDisposer(() => {
+			const owned = ownedSkillDescriptionStore;
+			if (owned) void skillDescriptions.waitForPending().finally(() => owned.close());
+		});
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
 		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the

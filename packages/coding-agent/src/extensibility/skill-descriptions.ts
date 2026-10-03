@@ -383,33 +383,55 @@ export class SkillDescriptionStore {
 	}
 }
 
+/**
+ * Where a catalog keeps compressed hints: a store, or a function that supplies one when a render
+ * first compresses (`undefined` from it: no store).
+ */
+type SkillDescriptionStoreSource = SkillDescriptionStore | (() => SkillDescriptionStore | undefined);
+
 /** One prompt/session snapshot; completing a background job never mutates its rendered descriptions. */
 export class SkillDescriptionCatalog {
-	readonly #store: SkillDescriptionStore | undefined;
+	readonly #storeSource: SkillDescriptionStoreSource | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #verbatim: boolean | (() => boolean);
 	readonly #snapshot = new Map<string, string>();
+	#store: SkillDescriptionStore | undefined;
+	#storeResolved = false;
 	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
 	#deferred: Map<string, Skill> | undefined;
 
 	/**
-	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. It is
+	 * resolved by the first render that compresses, so nothing is opened while descriptions render
+	 * verbatim: a function supplies the store then, and `undefined` from it leaves the catalog without one.
 	 * `deferCompression` holds model work until {@link startCompression}: until the owning session's
 	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
+	 * `verbatim` renders every description exactly as authored: no preview truncation, no store access,
+	 * and no compression work (`skills.compressDescriptions: false`). A function is read on every call,
+	 * so a setting changed in a live session applies to the next prompt build.
 	 */
 	constructor(
 		options: {
-			store?: SkillDescriptionStore;
+			store?: SkillDescriptionStoreSource;
 			compress?: SkillDescriptionCompressor;
 			deferCompression?: boolean;
+			verbatim?: boolean | (() => boolean);
 		} = {},
 	) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
+		this.#storeSource = options.store;
 		this.#compress = options.compress;
+		this.#verbatim = options.verbatim ?? false;
 		if (options.deferCompression) this.#deferred = new Map();
+	}
+
+	/** Whether descriptions currently render exactly as authored. */
+	get verbatim(): boolean {
+		return typeof this.#verbatim === "function" ? this.#verbatim() : this.#verbatim;
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.verbatim) return skills.map(skill => ({ ...skill }));
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -418,7 +440,8 @@ export class SkillDescriptionCatalog {
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
-		const store = this.#store;
+		if (this.verbatim) return skills.map(skill => ({ ...skill }));
+		const store = this.#resolveStore();
 		const misses = new Map<string, Skill>();
 		const rendered = skills.map(skill => {
 			const key = keyFor(skill);
@@ -457,6 +480,15 @@ export class SkillDescriptionCatalog {
 	async waitForPending(): Promise<void> {
 		if (!this.#store) return;
 		await Promise.all(pendingForStore(this.#store));
+	}
+
+	#resolveStore(): SkillDescriptionStore | undefined {
+		if (!this.#storeResolved) {
+			this.#storeResolved = true;
+			const source = this.#storeSource;
+			this.#store = typeof source === "function" ? source() : (source ?? sharedSkillDescriptionStore());
+		}
+		return this.#store;
 	}
 
 	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, Skill>): void {
