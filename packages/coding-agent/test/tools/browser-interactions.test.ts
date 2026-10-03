@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -75,6 +76,46 @@ afterAll(async () => {
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
+	test("clicks a link that wraps across two lines on the link, not on its paragraph, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-wrapped-link" };
+		const tabName = `wrapped-${crypto.randomUUID()}`;
+		const wrappedHtml = `<!doctype html><p id="para" style="width:33ch;font:16px/20px monospace;margin:0">aaaaaaaaaaaaaaaaaaaaaaa <a id="link" href="#">wrapped link</a> bbbbbbbbbbbbbbbbbbbbbbbbbbbb</p>
+<script>window.clicked = []; document.addEventListener("click", event => { clicked.push(event.target.id); event.preventDefault(); });</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(wrappedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					// The Tern backend aims with its page kit; it runs as plain page script, so its target point is
+					// checked on the same page.
+					code: `const fragments = await tab.evaluate(() => document.querySelector("#link").getClientRects().length);
+await tab.click("#link");
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const ternHit = await tab.evaluate(async () => {
+	const target = await globalThis.__ompTernKit.target({ engine: "css", query: "#link" }, "click");
+	return target.ok ? document.elementFromPoint(target.x, target.y)?.id : target.reason;
+});
+return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit };`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<{ fragments: number; clicked: string[]; ternHit: string }>(result)).toEqual({
+				fragments: 2,
+				clicked: ["link"],
+				ternHit: "link",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
 	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

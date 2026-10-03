@@ -1004,11 +1004,24 @@ const kit = {
 				return { ok: false, reason: "hidden", count, detail: "opacity:0" };
 			}
 		}
-		const left = Math.max(0, Math.min(innerWidth, rect.left));
-		const right = Math.max(0, Math.min(innerWidth, rect.right));
-		const top = Math.max(0, Math.min(innerHeight, rect.top));
-		const bottom = Math.max(0, Math.min(innerHeight, rect.bottom));
-		const inViewport = right - left >= 1 && bottom - top >= 1;
+		// A wrapped inline element (a link split over two lines) has a bounding box whose centre can
+		// fall between its fragments, on the parent; aim at its first fragment inside the viewport.
+		// Only an element without fragments falls back to its box.
+		const fragments = Array.from(el.getClientRects());
+		const fragment =
+			fragments.length === 0
+				? rect
+				: fragments.find(
+						r =>
+							Math.min(innerWidth, r.right) - Math.max(0, r.left) >= 1 &&
+							Math.min(innerHeight, r.bottom) - Math.max(0, r.top) >= 1,
+					);
+		const box = fragment ?? rect;
+		const left = Math.max(0, Math.min(innerWidth, box.left));
+		const right = Math.max(0, Math.min(innerWidth, box.right));
+		const top = Math.max(0, Math.min(innerHeight, box.top));
+		const bottom = Math.max(0, Math.min(innerHeight, box.bottom));
+		const inViewport = fragment !== undefined && right - left >= 1 && bottom - top >= 1;
 		if ((pointer || action === "point") && !inViewport) return { ok: false, reason: "offViewport", count };
 		const x = inViewport ? Math.floor((left + right) / 2) : Math.floor(rect.left + rect.width / 2);
 		const y = inViewport ? Math.floor((top + bottom) / 2) : Math.floor(rect.top + rect.height / 2);
