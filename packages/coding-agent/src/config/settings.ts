@@ -457,6 +457,11 @@ function modelRoleValueFromUnknown(value: unknown): string | undefined {
 
 /** Receives the setting whose effective value changed (see {@link Settings.onEffectiveChange}). */
 type SettingChangeListener = (setting: AnySetting) => void;
+/** Snapshot a change notification compares against; see `Settings.#changeState`. */
+interface SettingChangeState {
+	readonly value: unknown;
+	readonly configured: boolean;
+}
 
 /** Calls each listener with `setting`; a throwing listener is logged and never blocks the rest. */
 function runChangeListeners(listeners: ReadonlySet<SettingChangeListener>, setting: AnySetting): void {
@@ -890,7 +895,7 @@ export class Settings {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
 		if (layer === "override") this.#softPins.delete(setting);
-		const prev = setting.get(this);
+		const prev = this.#changeState(setting);
 		// Re-setting the persisted global value is a no-op for config.yml: staging it would still
 		// queue a full re-read, rewrite, fsync, and rename of the file.
 		const persistGlobal = layer === "global" && !this.#globalWriteIsNoop(setting.segments, value);
@@ -913,7 +918,7 @@ export class Settings {
 	unsetGlobalValue(setting: AnySetting): void {
 		const current = getByPath(this.#global, setting.segments);
 		if (current === undefined && !this.#softPins.has(setting)) return;
-		const prev = setting.get(this);
+		const prev = this.#changeState(setting);
 		this.#releaseSoftPin(setting);
 		if (current !== undefined) this.#stageGlobal(setting.segments, undefined);
 		this.#rebuildMerged();
@@ -939,7 +944,7 @@ export class Settings {
 				? !this.#globalWriteIsNoop([...setting.segments, key], value)
 				: isRecord(record) && Object.hasOwn(record, key);
 		if (!staged && !this.#softPins.has(setting)) return;
-		const prev = setting.get(this);
+		const prev = this.#changeState(setting);
 		this.#releaseSoftPin(setting);
 		if (staged) {
 			// Replace rather than mutate the record: the merged view and cached reads may share it.
@@ -1025,31 +1030,46 @@ export class Settings {
 		}
 		this.#softPins.delete(setting);
 		if (getByPath(this.#overrides, setting.segments) === undefined) return;
-		const prev = setting.get(this);
+		const prev = this.#changeState(setting);
 		deleteByPath(this.#overrides, setting.segments);
 		this.#rebuildMerged();
 		this.#fireIfChanged(setting, prev);
 	}
 
-	/** Effective value of every setting (in registration order), captured before a bulk layer refresh. */
-	#snapshot(): unknown[] {
-		return allSettings().map(setting => setting.get(this));
+	/**
+	 * What a change notification keys on: the effective value, and whether a layer or the environment
+	 * supplies it. Provenance is an input in its own right — a derivation may read `isConfigured` (the
+	 * `tui.motion` preset yields to an explicitly set knob even at the default value) — so setting a
+	 * value equal to the default, or clearing it, notifies like a value change.
+	 */
+	#changeState(setting: AnySetting): SettingChangeState {
+		return { value: setting.get(this), configured: setting.isConfigured(this) };
+	}
+
+	/** Change state of every setting (in registration order), captured before a bulk layer refresh. */
+	#snapshot(): SettingChangeState[] {
+		return allSettings().map(setting => this.#changeState(setting));
 	}
 
 	/**
-	 * Notifies change listeners for every setting whose effective value differs from
+	 * Notifies change listeners for every setting whose effective value or provenance differs from
 	 * `previous` (disk reload, save-time merge, project re-scope).
 	 */
-	#fireChangesSince(previous: readonly unknown[]): void {
+	#fireChangesSince(previous: readonly SettingChangeState[]): void {
 		const settings = allSettings();
 		for (let i = 0; i < previous.length; i++) {
 			const setting = settings[i];
-			if (!settingValuesEqual(setting.get(this), previous[i])) this.#notifyChange(setting);
+			const prev = previous[i];
+			if (setting.isConfigured(this) !== prev.configured || !settingValuesEqual(setting.get(this), prev.value)) {
+				this.#notifyChange(setting);
+			}
 		}
 	}
 
-	#fireIfChanged(setting: AnySetting, prev: unknown): void {
-		if (!Object.is(setting.get(this), prev)) this.#notifyChange(setting);
+	#fireIfChanged(setting: AnySetting, prev: SettingChangeState): void {
+		if (setting.isConfigured(this) !== prev.configured || !Object.is(setting.get(this), prev.value)) {
+			this.#notifyChange(setting);
+		}
 	}
 
 	/** Runs the listeners observing `setting`, then forwards the change to overlay children. */
@@ -1594,7 +1614,7 @@ export class Settings {
 	 * semantics that `override("modelRoles", …)` carries.
 	 */
 	#setRuntimeModelRoleOverrides(next: Record<string, string>): void {
-		const prev = cfgModelRoles.get(this);
+		const prev = this.#changeState(cfgModelRoles);
 		setByPath(this.#overrides, ["modelRoles"], next);
 		this.#rebuildMerged();
 		this.#fireIfChanged(cfgModelRoles, prev);
@@ -1653,7 +1673,7 @@ export class Settings {
 	}
 
 	#setProjectModelRoleValue(role: ModelRole | string, modelId: string | null): void {
-		const prev = cfgModelRoles.get(this);
+		const prev = this.#changeState(cfgModelRoles);
 		const projectRoles = getByPath(this.#project, ["modelRoles"]);
 		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
 		current[role] = modelId;
@@ -1680,7 +1700,7 @@ export class Settings {
 	 * stale skip in place.
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
-		const prev = cfgModelRoles.get(this);
+		const prev = this.#changeState(cfgModelRoles);
 		// Re-setting the persisted role (or clearing an absent one) stages no config.yml rewrite;
 		// the runtime-override sync below still applies.
 		if (!this.#globalWriteIsNoop(["modelRoles", role], modelId)) {

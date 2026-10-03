@@ -28,6 +28,8 @@ import {
 	type TspNode,
 	type TspOp,
 } from "@oh-my-pi/pi-wire";
+import { onMotionEffectsChange } from "../motion-effects";
+import { onSpinnerIntervalChange, spinnerAnimated } from "../spinner-clock";
 import type { Terminal } from "../terminal";
 import {
 	bindTheme,
@@ -44,6 +46,7 @@ import { getNativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
+import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
 import { setNativeRendering } from "./state";
 
@@ -250,6 +253,7 @@ export class NativeBackend {
 	#live = false;
 	#overlayNodes = new Map<Component, { key: string; node: NativeNode }>();
 	#unbindTheme: (() => void) | undefined;
+	#unbindMotion: (() => void) | undefined;
 	#palette: NativeThemePalette | undefined;
 	#paletteKey: string | undefined;
 	/** Serialized palette last sent, to skip resends of an unchanged theme. */
@@ -295,6 +299,7 @@ export class NativeBackend {
 		this.#live = true;
 		this.#useNerdSymbols(true);
 		this.#watchTheme();
+		this.#watchMotion();
 		this.#open(this.#inline);
 		setNativeRendering(true);
 		this.render();
@@ -313,6 +318,31 @@ export class NativeBackend {
 			this.#host.requestRender();
 		});
 		initial = false;
+	}
+
+	/**
+	 * The terminal clocks spinners and span effects itself, so a motion switch flip (`tui.motion`,
+	 * `tui.spinnerInterval` crossing static) re-describes every component through `quietMotion`.
+	 */
+	#watchMotion(): void {
+		this.#unbindMotion?.();
+		let animated = spinnerAnimated();
+		const flipped = () => {
+			resetQuietMotion();
+			this.#host.invalidate();
+			this.#host.requestRender();
+		};
+		const unbindSpinner = onSpinnerIntervalChange(() => {
+			const next = spinnerAnimated();
+			if (next === animated) return;
+			animated = next;
+			flipped();
+		});
+		const unbindEffects = onMotionEffectsChange(flipped);
+		this.#unbindMotion = () => {
+			unbindSpinner();
+			unbindEffects();
+		};
 	}
 
 	/** The current palette, recomputed only when its inputs changed. */
@@ -365,6 +395,8 @@ export class NativeBackend {
 		setNativeRendering(false);
 		this.#unbindTheme?.();
 		this.#unbindTheme = undefined;
+		this.#unbindMotion?.();
+		this.#unbindMotion = undefined;
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 	}
@@ -381,6 +413,7 @@ export class NativeBackend {
 		this.#live = true;
 		this.#useNerdSymbols(true);
 		this.#watchTheme();
+		this.#watchMotion();
 		const surface = this.#inline;
 		surface.reconciler.detachLive();
 		surface.unacked = [];

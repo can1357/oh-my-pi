@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, setSystemTime, spyOn, vi } from "bun:test";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { Loader, type LoaderMessageColorFn } from "@oh-my-pi/pi-tui/components/loader";
+import {
+	DEFAULT_SPINNER_INTERVAL_MS,
+	setSpinnerInterval,
+	SPINNER_INTERVAL_STATIC,
+} from "@oh-my-pi/pi-tui/spinner-clock";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -402,5 +407,90 @@ describe("Loader component", () => {
 		expect(loader.render(20).join("\n")).not.toContain("step 0");
 
 		loader.stop();
+	});
+
+	it("advances on the shared spinner clock: a slower interval slows the glyph, a static one pins it", () => {
+		vi.useFakeTimers();
+		const ui = { requestComponentRender: vi.fn() };
+		try {
+			setSpinnerInterval(500);
+			const loader = new Loader(
+				ui as unknown as TUI,
+				t => t,
+				t => t,
+				"Checking",
+				["0", "1", "2", "3"],
+			);
+			ui.requestComponentRender.mockClear();
+			// Nothing moves at the default cadence any more…
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 5);
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(0);
+			expect(loader.render(20).join("\n")).toContain("0 Checking");
+			// …and one glyph per new period.
+			vi.advanceTimersByTime(500 - DEFAULT_SPINNER_INTERVAL_MS * 5);
+			expect(loader.render(20).join("\n")).toContain("1 Checking");
+			loader.stop();
+
+			// Static: frame 0, and the only timer is the 1 Hz refresh for dynamic labels.
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			let step = 0;
+			const still = new Loader(
+				ui as unknown as TUI,
+				t => t,
+				t => t,
+				() => `step ${step}`,
+				["0", "1", "2", "3"],
+			);
+			ui.requestComponentRender.mockClear();
+			step = 1;
+			vi.advanceTimersByTime(999);
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(0);
+			expect(still.render(20).join("\n")).toContain("0 step 0");
+			vi.advanceTimersByTime(1);
+			expect(still.render(20).join("\n")).toContain("0 step 1");
+			vi.advanceTimersByTime(5000);
+			expect(still.render(20).join("\n")).toContain("0 step 1");
+			still.stop();
+		} finally {
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		}
+	});
+
+	it("applies a live interval change at once: static pins frame 0 and re-arms, animated resumes without waiting", () => {
+		vi.useFakeTimers();
+		const ui = { requestComponentRender: vi.fn() };
+		try {
+			const loader = new Loader(
+				ui as unknown as TUI,
+				t => t,
+				t => t,
+				"Checking",
+				["0", "1", "2", "3"],
+			);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(loader.render(20).join("\n")).toContain("1 Checking");
+
+			// Mid-animation → static: the glyph snaps to frame 0 immediately, not on the old 80 ms timer.
+			ui.requestComponentRender.mockClear();
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			expect(loader.render(20).join("\n")).toContain("0 Checking");
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 3);
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+			expect(loader.render(20).join("\n")).toContain("0 Checking");
+
+			// Static → animated: the first frame advances one period later, not after the 1 s refresh.
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(loader.render(20).join("\n")).toContain("1 Checking");
+			loader.stop();
+
+			// A stopped loader no longer listens.
+			ui.requestComponentRender.mockClear();
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(0);
+		} finally {
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		}
 	});
 });

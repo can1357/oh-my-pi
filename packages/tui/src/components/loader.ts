@@ -4,14 +4,16 @@ import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { describeShimmer, type ShimmerPalette, shimmerEnabled } from "../theme/shimmer";
+import { minFrameIntervalMs } from "../frame-rate";
+import { onSpinnerIntervalChange, spinnerAnimated, spinnerInterval, STATIC_SPINNER_GLYPH } from "../spinner-clock";
 import type { TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
 
-const DEFAULT_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const DEFAULT_SPINNER_FRAMES = [STATIC_SPINNER_GLYPH, "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const RENDER_INTERVAL_MS = 1000 / 30;
-/** Milliseconds between spinner-frame advances; exported so time-derived spinners elsewhere tick at the Loader cadence. */
-export const SPINNER_ADVANCE_MS = 80;
+/** Repaint cadence of a static-spinner row, so a dynamic label (countdown, elapsed) still moves. */
+const STATIC_REFRESH_MS = 1000;
 const RENDER_BACKPRESSURE_MULTIPLIER = 9;
 const MAX_BACKPRESSURE_FRAME_COST_MS = 200;
 
@@ -109,6 +111,7 @@ export class Loader extends Text {
 	#frames = DEFAULT_SPINNER_FRAMES;
 	#currentFrame = 0;
 	#intervalId?: NodeJS.Timeout;
+	#unsubscribeSpinnerInterval?: () => void;
 	#ui: TUI | null = null;
 	#lastSpinnerTick = 0;
 	#layoutSource?: readonly string[];
@@ -313,11 +316,46 @@ export class Loader extends Text {
 			this.#startNativeCountdown();
 			return;
 		}
-		const intervalMs = this.messageColorFn.animated === true ? RENDER_INTERVAL_MS : SPINNER_ADVANCE_MS;
+		this.#unsubscribeSpinnerInterval ??= onSpinnerIntervalChange(this.#onSpinnerIntervalChange);
+		const intervalMs = this.#tickIntervalMs();
 		this.#scheduleTick(intervalMs, intervalMs);
 	}
 
+	/**
+	 * A live `tui.spinnerInterval` change takes effect at once: a spinner going static pins frame 0,
+	 * and the cadence restarts from now, so a static → animated switch does not wait out the old
+	 * one-second refresh and an animated → static one does not keep ticking at the old rate.
+	 */
+	#onSpinnerIntervalChange = (): void => {
+		if (!this.#intervalId || isNativeRendering()) return;
+		clearTimeout(this.#intervalId);
+		if (!spinnerAnimated()) this.#currentFrame = 0;
+		this.#lastSpinnerTick = performance.now();
+		this.#syncText();
+		this.#requestPaint();
+		const intervalMs = this.#tickIntervalMs();
+		this.#scheduleTick(intervalMs, intervalMs);
+	};
+
+	/**
+	 * Tick cadence: shimmer drives a 30 Hz repaint; otherwise the row changes when the glyph advances
+	 * on the shared spinner clock, or — with a static spinner — once a second for its dynamic label.
+	 * Never faster than a frame can land under the `tui.maxFps` ceiling: a tick that cannot paint is
+	 * pure CPU.
+	 */
+	#tickIntervalMs(): number {
+		const base =
+			this.messageColorFn.animated === true
+				? RENDER_INTERVAL_MS
+				: spinnerAnimated()
+					? spinnerInterval()
+					: STATIC_REFRESH_MS;
+		return Math.max(base, minFrameIntervalMs());
+	}
+
 	stop() {
+		this.#unsubscribeSpinnerInterval?.();
+		this.#unsubscribeSpinnerInterval = undefined;
 		if (this.#intervalId) {
 			clearTimeout(this.#intervalId);
 			this.#intervalId = undefined;
@@ -358,21 +396,30 @@ export class Loader extends Text {
 			}
 			const startedAt = performance.now();
 			const elapsed = startedAt - this.#lastSpinnerTick;
-			const shouldAdvanceSpinner = elapsed >= SPINNER_ADVANCE_MS;
+			// Read the live cadence each tick so a setting change takes effect without a restart.
+			const animated = spinnerAnimated();
+			const advanceMs = spinnerInterval();
+			const shouldAdvanceSpinner = animated && elapsed >= advanceMs;
 			if (shouldAdvanceSpinner) {
-				const steps = Math.floor(elapsed / SPINNER_ADVANCE_MS);
+				const steps = Math.floor(elapsed / advanceMs);
 				this.#currentFrame = (this.#currentFrame + steps) % this.#frames.length;
-				this.#lastSpinnerTick += steps * SPINNER_ADVANCE_MS;
+				this.#lastSpinnerTick += steps * advanceMs;
+				this.#syncText();
+			} else if (!animated) {
+				// Static glyph (frame 0): only a dynamic message can change, and it is re-read here.
+				this.#currentFrame = 0;
 				this.#syncText();
 			}
-			if (shouldAdvanceSpinner || this.#ui?.synchronizedOutput === true) {
+			if (shouldAdvanceSpinner || !animated || this.#ui?.synchronizedOutput === true) {
 				this.#requestPaint();
 			}
 
 			const completedFrameCostMs = this.#ui?.lastFrameCostMs ?? 0;
 			const requestCostMs = performance.now() - startedAt;
 			if (this.#intervalId !== timer) return;
-			const cadenceDelayMs = Math.max(0, intervalMs - requestCostMs);
+			// Re-derive the cadence: a setting change mid-run moves the next tick, not just the next start.
+			const nextIntervalMs = this.#tickIntervalMs();
+			const cadenceDelayMs = Math.max(0, nextIntervalMs - requestCostMs);
 			// Idle for nine times the full frame cost to keep animation at or
 			// below 10% CPU even though requestComponentRender() only enqueues.
 			const boundedFrameCostMs = Math.min(
@@ -380,7 +427,7 @@ export class Loader extends Text {
 				Math.max(completedFrameCostMs, requestCostMs),
 			);
 			const backpressureDelayMs = boundedFrameCostMs * RENDER_BACKPRESSURE_MULTIPLIER;
-			this.#scheduleTick(intervalMs, Math.max(cadenceDelayMs, backpressureDelayMs));
+			this.#scheduleTick(nextIntervalMs, Math.max(cadenceDelayMs, backpressureDelayMs));
 		}, delayMs);
 		this.#intervalId = timer;
 	}
