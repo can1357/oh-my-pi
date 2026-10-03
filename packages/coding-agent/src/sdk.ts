@@ -4962,8 +4962,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// CPU parsing big `initialize` responses concurrently with the LLM stream consumer, jittering
 		// perceived latency.
 		// Turning `lsp.lazy` off mid-session kicks off the same warmup once.
-		// `lsp.enabled: false` skips discovery and warmup entirely; `lspServers` stays undefined so the
-		// welcome screen hides its LSP section.
+		// `lsp.enabled: false` skips discovery and warmup entirely; `lspServers` stays undefined.
 		let lspServers: CreateAgentSessionResult["lspServers"];
 		if (enableLsp && cfgLspEnabled.get(settings) && options.hasUI) {
 			const startupLspServers = discoverStartupLspServers(

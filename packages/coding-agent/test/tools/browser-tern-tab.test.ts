@@ -277,7 +277,7 @@ describe("TernTab", () => {
 	});
 
 	it("closes the PiP of an open that was abandoned before Tern answered", async () => {
-		const opened = Promise.withResolvers<bigint>();
+		const opened = Promise.withResolvers<number>();
 		const closed = Promise.withResolvers<unknown>();
 		daemon = await startFakeDaemon((op, id) => {
 			if (op.op === "open") {

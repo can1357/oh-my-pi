@@ -195,7 +195,10 @@ function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined):
 		}
 	}
 	db?.close();
-	closePeerCorruptHandles(dbPath, db);
+	// Only Windows refuses to unlink a file another handle still holds. Elsewhere
+	// each peer must keep its own handle until it closes it after adopting the
+	// replacement; closing it here races the peer's recovery on POSIX.
+	if (process.platform === "win32") closePeerCorruptHandles(dbPath, db);
 
 	const removed: string[] = [];
 	try {
