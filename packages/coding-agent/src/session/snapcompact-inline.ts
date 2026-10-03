@@ -17,7 +17,7 @@
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -574,7 +574,8 @@ export class SnapcompactInlineTransformer {
 		for (const swap of plan.toolResults) {
 			const target = targets.get(swap.id);
 			if (!target) continue;
-			const message = messages[target.index] as ToolResultMessage;
+			const message = messages[target.index];
+			if (message.role !== "toolResult") continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
 			let sourceImageIndex = 0;

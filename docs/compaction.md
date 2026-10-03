@@ -528,7 +528,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
-- `snapcompact.toolResults` = `false` (transient imaging of large tool results; each result's text-or-image form is decided the first time it is sent and never changes afterwards, so the prompt cache and signed thinking after it stay valid)
+- `snapcompact.toolResults` = `false` (transient imaging of large tool results; each result's text-or-image form is decided the first time it is sent and kept afterwards, so the prompt cache and signed thinking after it stay valid. One exception: when images added later push a request over the provider's image cap, the newest imaged results go back to text, which rewrites them once)
 - `snapcompact.shape` = `"auto"`
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`

@@ -545,6 +545,25 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
+	it("over the provider cap, reverts only the newest imaged results and keeps earlier ones", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const model = makeModel({ provider: "groq" });
+		const history: Message[] = [userMessage("go"), toolResult("call_1", LARGE), toolResult("call_2", LARGE)];
+		const before = await transformer.transform({ messages: history }, model);
+		expect(imageCount({ messages: [before.messages[1]] })).toBe(2);
+		expect(imageCount({ messages: [before.messages[2]] })).toBe(2);
+
+		// Two pasted screenshots would put the 5-image fallback cap at 6.
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		const pasted: Message = { role: "user", content: [screenshot, screenshot], timestamp: 0 };
+		const after = await transformer.transform({ messages: [...history, pasted] }, model);
+		expect(after.messages[1]).toEqual(before.messages[1]);
+		expect(after.messages[2]).toBe(history[2]);
+		expect(imageCount(after)).toBe(4);
+	});
+
 	it("never changes how an already-sent message goes out as the conversation grows", async () => {
 		// Every request must start with the previous request's exact bytes.
 		// Rewriting an earlier item voids the provider prompt cache from there
