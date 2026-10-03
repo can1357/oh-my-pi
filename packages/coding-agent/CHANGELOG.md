@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
-
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
@@ -18,6 +14,7 @@
 
 ### Fixed
 
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.5.1] - 2026-10-03
