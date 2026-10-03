@@ -80,4 +80,39 @@ describe("browser readable extraction", () => {
 		expect(result?.markdown).not.toContain("Use apt.");
 		expect(result?.markdown).not.toContain("Read logs.");
 	});
+
+	it("keeps block boundaries as line breaks in Readability text", async () => {
+		const paragraph = (n: number) =>
+			`<p>Paragraph ${n} explains the fare rules in enough words that Readability scores this block as article prose rather than page chrome.</p>`;
+		const html = `<!doctype html><html><head><title>Fares</title></head><body><nav>Home</nav><article><h1>Fares</h1>${paragraph(1)}${paragraph(2)}${paragraph(3)}<ul><li>Adult</li><li>Senior</li></ul><p>Transfers are <em>free</em>.<br>Passes are not.</p><pre><code>def fare(zone):\n    if zone == 1:\n        return 2.40\n\n\nprint(fare(1))</code></pre></article></body></html>`;
+
+		const result = await extractReadableFromHtml(html, "https://example.com/fares", "text");
+		const text = result?.text ?? "";
+
+		expect(text).toContain(`${paragraph(1).replace(/<\/?p>/g, "")}\n\nParagraph 2`);
+		expect(text).toContain("Adult\nSenior");
+		expect(text).toContain("Transfers are free.\nPasses are not.");
+		expect(text).toContain("def fare(zone):\n    if zone == 1:\n        return 2.40\n\n\nprint(fare(1))");
+	});
+
+	it("keeps rows, cells and inline spacing in fallback text and drops scripts and styles", async () => {
+		const html = `<main><style>p { color: red }</style><h1>Fares</h1><p><span>One </span> <b> way.</b></p><table><tr><th>Zone</th><th>Day</th><th>Price</th></tr><tr><td></td><td>Sat</td><td>$2.40</td></tr><tr><td>1</td><td></td><td>$2.40</td></tr></table><p>Ends here <br></p><p><br></p><p>Last</p><script>track()</script></main>`;
+
+		const result = await extractReadableFromHtml(html, "https://example.com/", "text", { selector: "main" });
+
+		expect(result?.text).toBe(
+			"Fares\n\nOne way.\n\nZone\tDay\tPrice\n\tSat\t$2.40\n1\t\t$2.40\n\nEnds here\n\n\nLast",
+		);
+	});
+
+	it("returns the text of a selected script element", async () => {
+		const html = `<main><p>Body.</p><script type="application/ld+json">{"a":1}</script></main>`;
+		const selector = "script[type='application/ld+json']";
+
+		const text = await extractReadableFromHtml(html, "https://example.com/", "text", { selector });
+		const markdown = await extractReadableFromHtml(html, "https://example.com/", "markdown", { selector });
+
+		expect(text?.text).toBe('{"a":1}');
+		expect(markdown?.markdown).toContain('{"a":1}');
+	});
 });
