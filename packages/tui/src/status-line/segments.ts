@@ -2,7 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
-import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
+import { sharedSpinnerFrame, TERMINAL } from "../index";
 import {
 	formatDuration,
 	formatNumber,
@@ -244,10 +244,10 @@ function brandMark(glyph: string, profile: string | undefined): string {
 	if (!profile) return glyph;
 	return glyph ? `${glyph}-${profile}` : profile;
 }
-/** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
+/** Current braille-spinner glyph on the shared spinner clock (frame 0 when spinners are static). */
 function brandSpinnerFrame(nowMs = Date.now()): string {
 	const frames = theme.getSpinnerFrames("activity");
-	return frames[Math.floor(nowMs / SPINNER_ADVANCE_MS) % frames.length] ?? "";
+	return frames[sharedSpinnerFrame(frames.length, nowMs)] ?? "";
 }
 
 /** Turn timer in omp's brand format: whole seconds → minutes → hours (capped at 99h). */

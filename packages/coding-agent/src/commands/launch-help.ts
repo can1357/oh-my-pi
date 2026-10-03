@@ -114,6 +114,10 @@ export const launchHelp = {
 		"no-context-files": Flags.boolean({ description: "Disable context files (AGENTS.md, CLAUDE.md, ...)" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
+		"spinner-interval": Flags.string({
+			description:
+				"Milliseconds between spinner frames (working row, tool cards, status line, terminal title; default 80; 0 = static). Overrides tui.spinnerInterval for this run; PI_SPINNER_INTERVAL takes precedence",
+		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),
