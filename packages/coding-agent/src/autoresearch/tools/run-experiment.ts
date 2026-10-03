@@ -1,29 +1,37 @@
+import { runExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Text } from "@oh-my-pi/pi-tui";
-import { formatBytes } from "@oh-my-pi/pi-utils";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
+import { formatBytes, procmgr } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../config/settings";
 import { executeBash } from "../../exec/bash-executor";
 import type { ToolDefinition } from "../../extensibility/extensions";
-import type { Theme } from "../../modes/theme/theme";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TailBuffer, truncateTail } from "../../session/streaming-output";
-import { replaceTabs, shortenPath } from "../../tools/render-utils";
-import * as git from "../../utils/git";
+
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	TailBuffer,
+	truncateTail,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
+
 import { parseWorkDirDirtyPaths } from "../git";
 import {
 	EXPERIMENT_MAX_BYTES,
 	EXPERIMENT_MAX_LINES,
-	formatElapsed,
-	formatNum,
 	parseAsiLines,
 	parseMetricLines,
 	tryGitPrefix,
 	tryGitStatus,
 } from "../helpers";
+import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorageIfExists } from "../storage";
-import type { AutoresearchToolFactoryOptions, RunDetails, RunExperimentProgressDetails } from "../types";
-import { DEFAULT_HARNESS_COMMAND } from "./init-experiment";
+import type { AutoresearchToolFactoryOptions } from "../types";
+import type { RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 const runExperimentSchema = type({
 	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
@@ -48,6 +56,7 @@ export function createRunExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof runExperimentSchema, RunDetails | RunExperimentProgressDetails> {
 	return {
+		...runExperimentToolRenderer,
 		name: "run_experiment",
 		label: "Run Experiment",
 		description:
@@ -56,7 +65,7 @@ export function createRunExperimentTool(
 		defaultInactive: true,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
-			const currentBranch = (await git.branch.current(ctx.cwd)) ?? null;
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
 			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
 			if (!storage || !session) {
 				return {
@@ -116,7 +125,7 @@ export function createRunExperimentTool(
 			let execution: ProcessExecutionResult;
 			try {
 				execution = await executeProcess({
-					command: resolvedCommand,
+					command: await resolveHarnessExecLine(),
 					cwd: ctx.cwd,
 					logPath: benchmarkLogPath,
 					timeoutMs,
@@ -234,38 +243,24 @@ export function createRunExperimentTool(
 				details: resultDetails,
 			};
 		},
-		renderCall(_args, _options, theme): Text {
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("run_experiment"))} ${theme.fg("muted", DEFAULT_HARNESS_COMMAND)}`,
-				0,
-				0,
-			);
-		},
-		renderResult(result, options, theme): Text {
-			if (isProgressDetails(result.details)) {
-				const header = theme.fg("warning", `Running ${result.details.elapsed}...`);
-				const preview = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
-				return new Text(preview ? `${header}\n${theme.fg("dim", preview)}` : header, 0, 0);
-			}
-			const details = result.details;
-			if (!details || !isRunDetails(details)) {
-				return new Text(replaceTabs(result.content.find(part => part.type === "text")?.text ?? ""), 0, 0);
-			}
-			const statusText = renderStatus(details, theme);
-			if (!options.expanded && details.tailOutput.trim().length === 0) {
-				return new Text(statusText, 0, 0);
-			}
-			const preview = replaceTabs(
-				options.expanded ? details.tailOutput : details.tailOutput.split("\n").slice(-5).join("\n"),
-			);
-			const suffix =
-				options.expanded && details.truncation && details.fullOutputPath
-					? `\n${theme.fg("warning", `Full output: ${shortenPath(details.fullOutputPath)}`)}`
-					: "";
-			return new Text(preview ? `${statusText}\n${theme.fg("dim", preview)}${suffix}` : statusText, 0, 0);
-		},
 	};
 }
+
+/**
+ * Shell line that actually runs the harness; the recorded command stays
+ * {@link DEFAULT_HARNESS_COMMAND}. On Windows a bare `bash` resolves through
+ * PATH to the WSL launcher (`WindowsApps\bash.exe` / `System32\bash.exe`),
+ * which runs the harness inside a Linux VM with a different toolchain and env,
+ * or fails outright when WSL is unavailable. Use the resolved host shell (Git
+ * Bash, or the configured `shellPath`) when it is POSIX.
+ */
+async function resolveHarnessExecLine(): Promise<string> {
+	if (process.platform !== "win32") return DEFAULT_HARNESS_COMMAND;
+	const { shell } = (await Settings.init()).getShellConfig();
+	if (!procmgr.isPosixShell(shell)) return DEFAULT_HARNESS_COMMAND;
+	return `'${shell.replaceAll("'", "'\\''")}' ${HARNESS_FILENAME}`;
+}
+
 async function executeProcess(opts: {
 	command: string;
 	cwd: string;
@@ -380,28 +375,4 @@ function buildRunText(details: RunDetails, outputPreview: string, bestMetric: nu
 		);
 	}
 	return lines.join("\n").trimEnd();
-}
-
-function renderStatus(details: RunDetails, theme: Theme): string {
-	if (details.timedOut) {
-		return theme.fg("error", `TIMEOUT ${details.durationSeconds.toFixed(1)}s`);
-	}
-	if (details.exitCode !== 0) {
-		return theme.fg("error", `FAIL exit=${details.exitCode} ${details.durationSeconds.toFixed(1)}s`);
-	}
-	const metric =
-		details.parsedPrimary !== null
-			? ` ${details.metricName}=${formatNum(details.parsedPrimary, details.metricUnit)}`
-			: "";
-	return theme.fg("success", `PASS ${details.durationSeconds.toFixed(1)}s${metric}`);
-}
-
-function isRunDetails(value: unknown): value is RunDetails {
-	if (typeof value !== "object" || value === null) return false;
-	return "command" in value && "durationSeconds" in value;
-}
-
-function isProgressDetails(value: unknown): value is RunExperimentProgressDetails {
-	if (typeof value !== "object" || value === null) return false;
-	return "phase" in value && (value as { phase: unknown }).phase === "running";
 }

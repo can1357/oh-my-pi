@@ -7,9 +7,11 @@ import * as path from "node:path";
 import { getBrowserRelayDir } from "@oh-my-pi/pi-utils";
 import { probeRelayServer } from "../tools/browser/relay/daemon";
 import backgroundJs from "../tools/browser/relay/extension-assets/background.js.txt" with { type: "text" };
+import licenseText from "../tools/browser/relay/extension-assets/LICENSE.txt" with { type: "text" };
 import manifestJson from "../tools/browser/relay/extension-assets/manifest.json.txt" with { type: "text" };
 import optionsHtml from "../tools/browser/relay/extension-assets/options.html.txt" with { type: "text" };
 import optionsJs from "../tools/browser/relay/extension-assets/options.js.txt" with { type: "text" };
+import thirdPartyNotices from "../tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { DEFAULT_RELAY_URL } from "../tools/browser/relay/kind";
 import { type RelayServer, startRelayServer } from "../tools/browser/relay/server";
 
@@ -29,9 +31,11 @@ export interface BrowserRelayCommandArgs {
 
 const EXTENSION_FILES: Record<string, string> = {
 	"background.js": backgroundJs,
+	LICENSE: licenseText,
 	"manifest.json": manifestJson,
 	"options.html": optionsHtml,
 	"options.js": optionsJs,
+	"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,
 };
 
 /** Default port of the relay endpoint (kept in sync with DEFAULT_RELAY_URL). */
@@ -57,7 +61,7 @@ async function runInstall(dirOverride: string | undefined): Promise<void> {
 	console.log(`  2. Click "Load unpacked" and select: ${dir}`);
 	console.log("  3. Enable the mode:  omp config set browser.relay true");
 	console.log("");
-	console.log("omp starts the relay automatically when the browser tool needs it;");
+	console.log("omp starts the relay automatically when the browser prelude needs it;");
 	console.log("run `omp browser-relay` yourself only for --token or --no-group.");
 	console.log("The extension badge shows 'on' once it reaches a relay.");
 }
@@ -100,7 +104,7 @@ async function runServe(args: BrowserRelayCommandArgs): Promise<void> {
 	const readiness = setInterval(() => {
 		if (relay.bridge.ready && !announced) {
 			announced = true;
-			console.log("Extension connected. The omp browser tool can now drive your tabs.");
+			console.log("Extension connected. The omp browser prelude can now drive your tabs.");
 		} else if (!relay.bridge.ready && announced) {
 			announced = false;
 			console.log("Extension disconnected; waiting for it to reconnect...");

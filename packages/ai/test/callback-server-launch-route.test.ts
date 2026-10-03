@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as vm from "node:vm";
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/registry/oauth/callback-server";
 import type { OAuthAuthInfo, OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 
 /**
  * Regression harness for #4418 — the `/launch` route the callback server hosts
@@ -63,6 +65,7 @@ async function startFlowAndWaitForAuth(): Promise<{
 }
 
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
@@ -117,7 +120,7 @@ describe("OAuthCallbackFlow /launch route", () => {
 		await login;
 	});
 
-	it("serves success copy that permits manual tab close", async () => {
+	it("shows manual-close guidance when the browser refuses to close the success tab", async () => {
 		const { info, login } = await startFlowAndWaitForAuth();
 		const authUrl = new URL(info.url);
 		const redirectUri = authUrl.searchParams.get("redirect_uri");
@@ -127,12 +130,36 @@ describe("OAuthCallbackFlow /launch route", () => {
 		const callbackResponse = await fetch(`${redirectUri}?code=test-code&state=${encodeURIComponent(state)}`);
 		expect(callbackResponse.status).toBe(200);
 		const html = await callbackResponse.text();
-
-		expect(html).toContain("Authentication Successful");
-		expect(html).toContain("You have successfully logged in.<br>You can now close this tab.");
-		expect(html).toContain("Close Window");
-		expect(html).not.toContain("This window will close automatically.");
 		await login;
+
+		vi.useFakeTimers();
+		const { document, window } = parseHTML(html);
+		const closeWindow = vi.fn();
+		Object.defineProperty(window, "close", { value: closeWindow, configurable: true });
+		const pageScript = document.querySelector("script:not([type])");
+		if (!pageScript?.textContent) throw new Error("OAuth callback page is missing its executable script");
+
+		const context = vm.createContext({
+			window,
+			document,
+			URLSearchParams,
+			setTimeout,
+			clearTimeout,
+		});
+		vm.runInContext(pageScript.textContent, context);
+
+		expect(closeWindow).toHaveBeenCalledTimes(1);
+		expect(document.querySelector(".btn")).not.toBeNull();
+		expect(document.getElementById("message")?.textContent).toBe("You have successfully logged in.");
+
+		vi.advanceTimersByTime(299);
+		expect(document.querySelector(".btn")).not.toBeNull();
+		vi.advanceTimersByTime(1);
+
+		expect(document.querySelector(".btn")).toBeNull();
+		expect(document.getElementById("message")?.textContent).toBe(
+			"You have successfully logged in.Please close this tab manually.",
+		);
 	});
 
 	it("suppresses launchUrl and routes /launch to the callback handler when callbackPath is /launch", async () => {

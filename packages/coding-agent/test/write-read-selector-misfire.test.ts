@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-coding-agent/utils/zip";
+import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 // A read-only step that mis-dispatches `read` as `write` passes the full read
 // expression (`src/foo.tsx:1-260:raw`) as the target. Because a literal colon
@@ -32,6 +32,9 @@ async function makeWorkspace(): Promise<string> {
 }
 
 describe("write refuses read-selector misfires", () => {
+	// Windows forbids `:` in filenames, so the literal colon-name cases are POSIX-only.
+	const posixIt = it.skipIf(process.platform === "win32");
+
 	it("fails closed on a missing selector-suffixed target with empty content and points at read()", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
@@ -43,7 +46,7 @@ describe("write refuses read-selector misfires", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("lets non-empty content deliberately create a selector-shaped filename", async () => {
+	posixIt("lets non-empty content deliberately create a selector-shaped filename", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
 		const literal = "src/components/LoraSelector.tsx:1-260:raw";
@@ -127,7 +130,7 @@ describe("write refuses read-selector misfires", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("keeps an existing literal file whose name looks like a selector list writable", async () => {
+	posixIt("keeps an existing literal file whose name looks like a selector list writable", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
 		const target = "report:1-2;archive:3-4";

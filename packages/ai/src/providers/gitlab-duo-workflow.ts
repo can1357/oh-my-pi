@@ -5,6 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
@@ -785,14 +786,8 @@ function mapGitLabDuoWorkflowMcpToolCall(args: Record<string, unknown>): {
 function parseGitLabDuoWorkflowMcpArguments(value: unknown): Record<string, unknown> {
 	if (value === undefined) return {};
 	if (typeof value === "string") {
-		try {
-			const parsed = JSON.parse(value) as unknown;
-			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-				? (parsed as Record<string, unknown>)
-				: {};
-		} catch {
-			return {};
-		}
+		const parsed = parseToolCallArguments(value);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 	}
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -915,12 +910,12 @@ function markGitLabDuoWorkflowSettingsEnsured(apiKey: string, baseUrl: string, c
 function hasGitLabDuoWorkflowExplicitNamespace(options: GitLabDuoWorkflowOptions): boolean {
 	return Boolean(
 		nonEmptyString(options.rootNamespaceId) ??
-			nonEmptyString(options.namespaceId) ??
-			nonEmptyString(Bun.env.GITLAB_DUO_NAMESPACE_ID) ??
-			nonEmptyString(options.projectId) ??
-			nonEmptyString(options.projectPath) ??
-			nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_ID) ??
-			nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_PATH),
+		nonEmptyString(options.namespaceId) ??
+		nonEmptyString(Bun.env.GITLAB_DUO_NAMESPACE_ID) ??
+		nonEmptyString(options.projectId) ??
+		nonEmptyString(options.projectPath) ??
+		nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_ID) ??
+		nonEmptyString(Bun.env.GITLAB_DUO_PROJECT_PATH),
 	);
 }
 
@@ -1846,12 +1841,10 @@ function defaultGitLabDuoWorkflowWebSocketFactory(
 	url: string,
 	options: GitLabDuoWorkflowWebSocketFactoryOptions,
 ): GitLabDuoWorkflowWebSocketLike {
-	return new (
-		WebSocket as unknown as new (
-			url: string,
-			options: Bun.WebSocketOptions,
-		) => GitLabDuoWorkflowWebSocketLike
-	)(url, { headers: options.headers });
+	return new (WebSocket as unknown as new (
+		url: string,
+		options: Bun.WebSocketOptions,
+	) => GitLabDuoWorkflowWebSocketLike)(url, { headers: options.headers });
 }
 
 export function runGitLabDuoWorkflowSocket(

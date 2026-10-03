@@ -16,6 +16,7 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import * as typebox from "../legacy-typebox";
 import { GreenCommand } from "./bundled/ci-green";
+import { AnnotateCommand } from "./bundled/annotate";
 import { ReviewCommand } from "./bundled/review";
 import type {
 	CustomCommand,
@@ -165,6 +166,12 @@ function loadBundledCommands(sharedApi: CustomCommandAPI): LoadedCustomCommand[]
 		path: "bundled:review",
 		resolvedPath: "bundled:review",
 		command: new ReviewCommand(sharedApi),
+		source: "bundled",
+	});
+	bundled.push({
+		path: "bundled:annotate",
+		resolvedPath: "bundled:annotate",
+		command: new AnnotateCommand(sharedApi),
 		source: "bundled",
 	});
 

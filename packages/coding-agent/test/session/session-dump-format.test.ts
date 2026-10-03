@@ -10,7 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Model, Usage } from "@oh-my-pi/pi-ai";
-import { formatSessionDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
+import { formatSessionDumpText, formatSubagentDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const ZERO_USAGE: Usage = {
@@ -180,6 +180,71 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		// The 16.x native-dialect transcript wrapper and envelopes must be gone.
 		expect(out).not.toContain("## Transcript");
 		expect(out).not.toContain("<|start|>");
+	});
+
+	it("heads a subagent dump with its path, persisted model, and killed status", () => {
+		const killed = formatSubagentDumpText({
+			key: "Explore/Helper",
+			aborted: true,
+			messages: [{ role: "user", content: "helper task", timestamp: 3 }],
+		});
+		expect(killed.startsWith("# Subagent: Explore/Helper\n\nModel: (unknown)\nStatus: aborted\n")).toBe(true);
+		expect(killed).toContain("## User\n\nhelper task");
+
+		const live = formatSubagentDumpText({
+			key: "Explore",
+			model: "anthropic/claude-sonnet",
+			thinkingLevel: "high",
+			messages: [{ role: "user", content: "explore task", timestamp: 2 }],
+		});
+		expect(live).toContain("Model: anthropic/claude-sonnet\nThinking Level: high\n");
+		expect(live).not.toContain("Status: aborted");
+	});
+
+	it("fences system notices under a readable title without breaking on nested code fences", () => {
+		const notice = `<system-notice>
+Background job completed with:
+\`\`\`sh
+printf 'done\\n'
+\`\`\`
+</system-notice>`;
+		const out = formatSessionDumpText({
+			messages: [
+				{
+					role: "custom",
+					customType: "async-progress",
+					content: notice,
+					display: true,
+					attribution: "agent",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(out).toContain("## System Notice: Async Progress");
+		expect(out).toContain(`\`\`\`\`xml\n${notice}\n\`\`\`\``);
+		expect(out).not.toContain("## async-progress");
+	});
+
+	it("leaves ordinary custom XML messages unchanged", () => {
+		const content = "<system-noticeable>ordinary custom content</system-noticeable>";
+		const out = formatSessionDumpText({
+			messages: [
+				{
+					role: "custom",
+					customType: "plugin-message",
+					content,
+					display: true,
+					attribution: "agent",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(out).toContain("## plugin-message");
+		expect(out).toContain(content);
+		expect(out).not.toContain("## System Notice:");
+		expect(out).not.toContain("```xml");
 	});
 
 	it("does not nest a thinking block that already carries a literal <thinking> envelope (#2700)", () => {

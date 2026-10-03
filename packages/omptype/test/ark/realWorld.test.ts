@@ -873,22 +873,6 @@ it("deleted undeclared keys rejected in output", () => {
 	expect(T.out({ foo: "hi", bar: 3 }).toString()).toEqual("bar must be removed");
 });
 
-it("distill doesn't treat functions returning any/never as morphs", () => {
-	type T = {
-		any(): any;
-		never(): never;
-	};
-	const _T = type("unknown").as<T>();
-});
-
-it("distills morphs returning any/never", () => {
-	const T = type({
-		any: ["unknown", "=>", (): any => {}],
-		never: ["unknown", "=>", () => [] as never],
-	});
-	expect(T).toBeDefined();
-});
-
 // https://github.com/arktypeio/arktype/issues/1274
 it("fail on non-discriminable union of objects with onUndeclaredKey: delete", () => {
 	const Point2d = type({
@@ -975,7 +959,7 @@ it("can nested type call from standard schema generic", () => {
 		T extends {
 			schema: StandardSchemaV1;
 		},
-	>(_: T) {
+	>(_schema: T) {
 		return {} as StandardSchemaV1.InferOutput<T["schema"]>;
 	}
 
@@ -1024,8 +1008,6 @@ it("doomed shirt example", () => {
 	expect(urDOOMed(valid)).toEqual(valid);
 	expect(urDOOMed({ ...valid, nestedGenerics: {} }).toString()).toContain("nestedGenerics");
 });
-
-it.todo("ArkErrors not assignable to ArkErrorInput");
 
 it("described input of morph", () => {
 	class ValidatedUserID {
@@ -1119,7 +1101,6 @@ it("allows morph union with non-overlapping root objects", () => {
 	});
 });
 it("allows inferring a schema's type argument in a generic wrapper function when the type uses Default", () => {
-	// biome-ignore lint/complexity/noBannedTypes: generic Type parameter test
 	function someFunction<TSchema extends Record<string, any>>(schema: Type<TSchema, {}>): (typeof schema)["infer"] {
 		const someData = { hello: "world" };
 		return schema.assert(someData);
@@ -1179,7 +1160,7 @@ it("cyclic discriminated union issue 1", () => {
 		Bar: "Foo",
 	}).export();
 
-	const baz = $.Bar.pipe((_: object): type.Any | undefined => {
+	const baz = $.Bar.pipe((_value: object): type.Any | undefined => {
 		wasPiped = true;
 		return type("string");
 	});

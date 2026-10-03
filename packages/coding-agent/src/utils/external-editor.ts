@@ -27,8 +27,6 @@ export function getEditorCommand(): string | undefined {
 export interface OpenInEditorOptions {
 	/** File extension for the temp file (default: ".md"). */
 	extension?: string;
-	/** Custom stdio configuration (default: all "inherit"). */
-	stdio?: [number | "inherit", number | "inherit", number | "inherit"];
 	/** Keep the file's trailing newline instead of trimming it from the returned text. */
 	trimTrailingNewline?: boolean;
 }
@@ -72,11 +70,12 @@ export async function openInEditor(
 		await Bun.write(tmpFile, content);
 
 		const spawnCommand = resolveEditorSpawnCommand(editorCmd, tmpFile);
-		const [stdin, stdout, stderr] = options?.stdio ?? ["inherit", "inherit", "inherit"];
+		// Inherit the real pane pty so terminal editors (including emacsclient,
+		// which resolves the device via ttyname) render into the visible pane.
 		const child = Bun.spawn(spawnCommand.cmd, {
-			stdin,
-			stdout,
-			stderr,
+			stdin: "inherit",
+			stdout: "inherit",
+			stderr: "inherit",
 			windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
 		});
 		const exitCode = await child.exited;

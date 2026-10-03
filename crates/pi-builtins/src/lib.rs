@@ -107,7 +107,13 @@ mod wait;
 
 mod builder;
 mod factory;
+#[cfg(any(feature = "util.cp", feature = "util.ln", feature = "util.mv"))]
+mod file_backup;
+#[cfg(any(feature = "util.ls", feature = "util.stat", feature = "util.find"))]
+mod fsmeta;
 mod host;
+#[cfg(any(feature = "util.cp", feature = "util.mv"))]
+mod progress;
 mod unimp;
 
 // ── Utility builtins ──────────────────────────────────────────────────────────
@@ -122,9 +128,13 @@ mod base32;
 mod base64;
 #[cfg(feature = "util.basename")]
 mod basename;
+/// Shared POSIX basic-regular-expression translation behind `grep` and `sed`.
+#[cfg(feature = "util.bre")]
+mod bre;
 #[cfg(feature = "util.cat")]
 mod cat;
-/// Shared checksum machinery behind `md5sum`, `sha*sum`, and `b2sum`.
+/// The `cksum` builtin plus the shared checksum machinery behind `md5sum`,
+/// `sha*sum`, and `b2sum`.
 #[cfg(feature = "util.cksum")]
 mod cksum;
 #[cfg(feature = "util.md5sum")]
@@ -143,6 +153,8 @@ mod sha512sum;
 mod cmp;
 #[cfg(feature = "util.comm")]
 mod comm;
+#[cfg(feature = "util.cp")]
+mod cp;
 #[cfg(feature = "util.combine")]
 mod combine;
 #[cfg(feature = "util.cut")]

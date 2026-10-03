@@ -22,6 +22,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { defaultGhHost, parseRepoRef } from "./gh-common";
+import { cfgGithubCacheEnabled, cfgGithubCacheHardTtlSec, cfgGithubCacheSoftTtlSec } from "./settings";
 import { ToolAbortError } from "./tool-errors";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -55,9 +57,6 @@ interface Row {
 	rendered: string;
 	source_url: string | null;
 }
-
-const DEFAULT_SOFT_TTL_SEC = 300; // 5 minutes
-const DEFAULT_HARD_TTL_SEC = 60 * 60 * 24 * 7; // 7 days
 
 let cachedDb: Database | null = null;
 let openAttempted = false;
@@ -104,7 +103,9 @@ export function openDb(): Database | null {
 		// Migrate any pre-existing table whose key/check constraint predates
 		// the current schema. The cache is regenerable, so we drop rows rather
 		// than running an in-place ALTER dance.
-		const userVersion = (db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined)
+		// Statements go through the query cache that close() finalizes; an unfinalized
+		// prepare() keeps the closed connection alive and the file locked on Windows.
+		const userVersion = (db.query("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
 		if (userVersion !== undefined && userVersion < 3) {
 			db.run("DROP TABLE IF EXISTS github_view_cache");
@@ -127,7 +128,7 @@ export function openDb(): Database | null {
 		`);
 		protectDbFiles(dbPath);
 		cachedDb = db;
-		// No eviction on open: the default `DEFAULT_HARD_TTL_SEC` is a coarse
+		// No eviction on open: the default hard TTL is a coarse
 		// backstop that runs before user settings load, so applying it here
 		// would nuke rows still valid under a stricter-or-laxer configured
 		// `github.cache.hardTtlSec`. The per-lookup `sweepIfDue()` in
@@ -142,7 +143,7 @@ export function openDb(): Database | null {
 function evictExpired(db: Database, hardTtlMs: number): void {
 	try {
 		const cutoff = Date.now() - hardTtlMs;
-		db.prepare("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
+		db.query("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
 	} catch (err) {
 		logger.debug("github cache: eviction failed", { err: String(err) });
 	}
@@ -202,7 +203,7 @@ const authKeyMemo = new Map<string, AuthKeyMemoEntry>();
  * The DB stores only a hash, never the token or hosts.yml contents. If no
  * credential source is visible, callers should pass `null` to bypass caching.
  */
-export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || "github.com"): string | undefined {
+export function resolveGithubCacheAuthKey(host: string = defaultGhHost()): string | undefined {
 	const hostsPath = path.join(getGhConfigDir(), "hosts.yml");
 	let envSig = "";
 	for (const name of AUTH_KEY_TOKEN_ENV_VARS) {
@@ -242,8 +243,16 @@ export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || 
 	return value;
 }
 
+/**
+ * Row identity for a repo, relative to the host `gh` defaults to. A prefix
+ * naming that same host is dropped so `github.com/owner/repo` and `owner/repo`
+ * share one row — but under `GH_HOST` the bare form means the configured
+ * instance, so an explicit `github.com/` prefix then stays and keeps its own
+ * rows instead of answering with another host's issue.
+ */
 function normalizeRepo(repo: string): string {
-	return repo.toLowerCase();
+	const ref = parseRepoRef(repo.toLowerCase());
+	return ref.host && ref.host !== defaultGhHost() ? `${ref.host}/${ref.slug}` : ref.slug;
 }
 
 export function getCached<T = unknown>(
@@ -257,7 +266,7 @@ export function getCached<T = unknown>(
 	if (!db) return null;
 	try {
 		const row = db
-			.prepare(
+			.query(
 				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			)
 			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0) as Row | undefined;
@@ -304,7 +313,7 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 	try {
 		const fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
-		db.prepare(
+		db.query(
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
 			input.authKey ?? DEFAULT_CACHE_AUTH_KEY,
@@ -335,14 +344,14 @@ export function invalidate(
 	if (!db) return;
 	try {
 		if (includeComments === undefined) {
-			db.prepare("DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ?").run(
+			db.query("DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ?").run(
 				authKey,
 				normalizeRepo(repo),
 				kind,
 				number,
 			);
 		} else {
-			db.prepare(
+			db.query(
 				"DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0);
 		}
@@ -367,9 +376,9 @@ export function invalidateAllForNumber(number: number, repo?: string): void {
 	if (!db) return;
 	try {
 		if (repo === undefined) {
-			db.prepare("DELETE FROM github_view_cache WHERE number = ?").run(number);
+			db.query("DELETE FROM github_view_cache WHERE number = ?").run(number);
 		} else {
-			db.prepare("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, normalizeRepo(repo));
+			db.query("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, normalizeRepo(repo));
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForNumber failed", { err: String(err) });
@@ -381,7 +390,7 @@ export function clearAll(): void {
 	const db = openDb();
 	if (!db) return;
 	try {
-		db.prepare("DELETE FROM github_view_cache").run();
+		db.query("DELETE FROM github_view_cache").run();
 	} catch (err) {
 		logger.debug("github cache: clear failed", { err: String(err) });
 	}
@@ -398,9 +407,9 @@ export function invalidateAllForRepo(repo?: string): void {
 	if (!db) return;
 	try {
 		if (repo === undefined) {
-			db.prepare("DELETE FROM github_view_cache").run();
+			db.query("DELETE FROM github_view_cache").run();
 		} else {
-			db.prepare("DELETE FROM github_view_cache WHERE repo = ?").run(normalizeRepo(repo));
+			db.query("DELETE FROM github_view_cache WHERE repo = ?").run(normalizeRepo(repo));
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForRepo failed", { err: String(err) });
@@ -461,29 +470,6 @@ export interface CacheLookupResult<T> {
 	fetchedAt: number;
 }
 
-function readNumberSetting(settings: Settings | undefined, key: string, fallback: number): number {
-	if (!settings) return fallback;
-	try {
-		const value = (settings as unknown as { get(k: string): unknown }).get(key);
-		if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
-	} catch {
-		// Unknown setting paths fall through to default; settings may be a
-		// stripped test stub that doesn't expose every key.
-	}
-	return fallback;
-}
-
-function readBooleanSetting(settings: Settings | undefined, key: string, fallback: boolean): boolean {
-	if (!settings) return fallback;
-	try {
-		const value = (settings as unknown as { get(k: string): unknown }).get(key);
-		if (typeof value === "boolean") return value;
-	} catch {
-		// Same fallback rationale as readNumberSetting.
-	}
-	return fallback;
-}
-
 export interface CacheTtl {
 	softMs: number;
 	hardMs: number;
@@ -491,13 +477,17 @@ export interface CacheTtl {
 }
 
 export function resolveCacheTtl(settings?: Settings): CacheTtl {
-	const softSec = readNumberSetting(settings, "github.cache.softTtlSec", DEFAULT_SOFT_TTL_SEC);
-	const hardSec = readNumberSetting(settings, "github.cache.hardTtlSec", DEFAULT_HARD_TTL_SEC);
-	const enabled = readBooleanSetting(settings, "github.cache.enabled", true);
+	if (!settings) {
+		return {
+			softMs: cfgGithubCacheSoftTtlSec.default * 1000,
+			hardMs: cfgGithubCacheHardTtlSec.default * 1000,
+			enabled: cfgGithubCacheEnabled.default,
+		};
+	}
 	return {
-		softMs: Math.max(0, softSec) * 1000,
-		hardMs: Math.max(0, hardSec) * 1000,
-		enabled,
+		softMs: Math.max(0, cfgGithubCacheSoftTtlSec.get(settings)) * 1000,
+		hardMs: Math.max(0, cfgGithubCacheHardTtlSec.get(settings)) * 1000,
+		enabled: cfgGithubCacheEnabled.get(settings),
 	};
 }
 

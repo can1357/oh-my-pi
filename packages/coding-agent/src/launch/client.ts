@@ -2,10 +2,9 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getGlobalDaemonRuntimeDir, isEexist, isEisdir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { hostHasInheritableConsole } from "../eval/py/spawn-options";
+import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
+import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
 	DAEMON_IDLE_GRACE_ENV,
@@ -18,15 +17,18 @@ import {
 	parseDaemonRpcResult,
 	parseDaemonWireMessage,
 } from "./protocol";
-import { resolveDaemonSpawnOptions } from "./spawn-options";
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_RETRY_MS = 50;
 const TOKEN_FILE = "broker.token";
-const BROKER_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
-	platform: process.platform,
-	hostHasInheritableConsole: hostHasInheritableConsole(),
-});
+/**
+ * The broker must outlive whichever omp process happened to spawn it: other
+ * clients (and persistent daemons) still hold its lease. Bun on Windows puts
+ * every non-detached child in a kill-on-close job object owned by the parent,
+ * so an undetached broker died with its spawner and took the scope's daemons
+ * with it. Detached, it has no console; its daemons then spawn hidden.
+ */
+const BROKER_SPAWN_OPTIONS = { detached: true, windowsHide: true } as const;
 
 interface PendingRequest {
 	operation: DaemonOperation;
@@ -64,23 +66,16 @@ export interface DaemonBrokerClient {
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
 
-async function canonicalProjectDir(projectDir: string): Promise<string> {
-	const resolved = path.resolve(projectDir);
-	try {
-		return await fs.realpath(resolved);
-	} catch (error) {
-		if (isEnoent(error) || isEisdir(error)) return resolved;
-		throw error;
-	}
-}
-
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const tokenPath = path.join(runtimeDir, TOKEN_FILE);
-	const tokenFile = Bun.file(tokenPath);
 	for (let attempt = 0; attempt < 100; attempt++) {
 		try {
-			const token = (await tokenFile.text()).trim();
+			// node:fs, not Bun.file().text(): on Windows (Bun 1.4.2) a Bun.file
+			// read that rejects with ENOENT holds no event-loop ref, so the loop
+			// drains mid-await — `omp --smoke-test` exited 1 via the unsettled-entry
+			// guard, and a bare script silently stops at that await.
+			const token = (await fs.readFile(tokenPath, "utf8")).trim();
 			if (token.length > 0) return token;
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
@@ -297,8 +292,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#bindSocket(await openSocket(this.#endpoint, 250));
 			return;
 		} catch {
-			// No live broker. Multiple clients may race to spawn; the broker's PID
-			// lease selects one winner before any candidate touches the socket.
+			// No live broker. Multiple clients may race to spawn; the broker's
+			// process-owned lease selects one winner before any candidate touches
+			// the socket.
 		}
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
@@ -312,7 +308,11 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				await Bun.sleep(CONNECT_RETRY_MS);
 			}
 		}
-		throw new Error(`Failed to start daemon broker: ${lastError?.message ?? "socket unavailable"}`);
+		throw new Error(
+			`Failed to start daemon broker at ${this.#endpoint} after ${CONNECT_TIMEOUT_MS / 1000}s: ` +
+				`${lastError?.message ?? "socket unavailable"}. Scope: ${this.#runtimeDir}. ` +
+				"Run `omp --smoke-test` to verify broker startup, or `omp ps` to inspect supervised processes.",
+		);
 	}
 
 	#spawnBroker(): void {
@@ -516,8 +516,14 @@ export async function closeDaemonClients(): Promise<void> {
 
 /** Exercise worker-host broker startup and authenticated RPC for distribution smoke tests. */
 export async function smokeTestDaemonBroker(): Promise<void> {
-	const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-project-"));
-	const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-run-"));
+	// Keep the broker's runtime dir under a private parent this process owns, so
+	// the broker's dead-scope sweep (pruneDeadDaemonRuntimeDirs, fired on startup)
+	// can only ever reclaim siblings inside it — never unrelated neighbours in
+	// os.tmpdir() such as tmux/ssh sockets or build trees (issue #8721).
+	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
+	const projectDir = path.join(smokeRoot, "project");
+	const runtimeDir = path.join(smokeRoot, "run");
+	await fs.mkdir(projectDir, { recursive: true });
 	const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 	try {
 		const ping = await client.request({ op: "ping" });
@@ -525,7 +531,6 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 		await client.request({ op: "shutdown" });
 	} finally {
 		client.close();
-		await fs.rm(projectDir, { recursive: true, force: true });
-		await fs.rm(runtimeDir, { recursive: true, force: true });
+		await fs.rm(smokeRoot, { recursive: true, force: true });
 	}
 }

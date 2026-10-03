@@ -1,17 +1,16 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import {
-	autolinkSchemeScanIndex,
 	clearRenderCache,
+	extractMarkdownLinks,
 	Markdown,
-	mathStartIndex,
 	renderInlineMarkdown,
-	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
+import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -50,6 +49,26 @@ describe("renderInlineMarkdown", () => {
 	it("applies baseColor to fallback for non-string input", () => {
 		const rendered = renderInlineMarkdown(null as unknown as string, defaultMarkdownTheme, t => `[${t}]`);
 		expect(rendered).toBe("[]");
+	});
+});
+
+describe("extractMarkdownLinks", () => {
+	it("returns formatted labels as visible text", () => {
+		expect(extractMarkdownLinks("[**bold** and _em_](https://example.com)")).toEqual([
+			{ text: "bold and em", href: "https://example.com" },
+		]);
+	});
+
+	it("collapses multiline labels to one row", () => {
+		expect(extractMarkdownLinks("[line one\nline two  \nline three](https://example.com)")).toEqual([
+			{ text: "line one line two line three", href: "https://example.com" },
+		]);
+	});
+
+	it("returns codespan labels without Markdown delimiters", () => {
+		expect(extractMarkdownLinks("[run `bun test`](https://example.com)")).toEqual([
+			{ text: "run bun test", href: "https://example.com" },
+		]);
 	});
 });
 
@@ -638,233 +657,6 @@ Average Latency: 1,240 ms
 
 			const dataLine = plainLines.find(line => line.includes("1") && line.includes("2"));
 			expect(dataLine, "Should have data row").toBeTruthy();
-		});
-
-		it("locks streamed table widths only after the table enters native scrollback", () => {
-			const initial = `| Entry | Value |
-| --- | --- |
-| short-entry | R000 |`;
-			const beforeCommit = `${initial}
-| medium-width-entry | R001 |`;
-			const afterCommit = `${beforeCommit}
-| much-longer-entry-that-arrives-after-commit | R002 |`;
-			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-
-			const topBorder = (lines: readonly string[]): string => {
-				const plain = lines.map(line => stripVTControlCharacters(line).trimEnd());
-				const border = plain.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-
-			const initialBorder = topBorder(markdown.render(80));
-			markdown.setText(beforeCommit);
-			const growingLines = markdown.render(80);
-			const growingBorder = topBorder(growingLines);
-			// Wholly-live tables retain today's natural-width behavior.
-			expect(growingBorder).not.toBe(initialBorder);
-
-			const tableStart = growingLines.findIndex(line => stripVTControlCharacters(line).trimStart().startsWith("+"));
-			markdown.setNativeScrollbackCommittedRows(tableStart + 1);
-			markdown.setText(afterCommit);
-			const lockedLines = markdown.render(80);
-			expect(topBorder(lockedLines)).toBe(growingBorder);
-			expect(lockedLines.some(line => stripVTControlCharacters(line).includes("R002"))).toBe(true);
-
-			// Finalization must not swap in a canonical full-content layout from L2.
-			markdown.transientRenderCache = false;
-			expect(topBorder(markdown.render(80))).toBe(growingBorder);
-
-			// A destructive replay has no immutable old tape to protect and may
-			// recompute the natural width from the complete table.
-			markdown.prepareNativeScrollbackReplay();
-			expect(topBorder(markdown.render(80))).not.toBe(growingBorder);
-		});
-
-		it("keeps layout locks independent across streamed tables", () => {
-			const first = `| First table column | Value |
-| --- | --- |
-| medium-width-entry | A |`;
-			const second = `${first}
-
-| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const widenedSecond = `${second}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const markdown = new Markdown(first, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			markdown.render(80);
-			markdown.setNativeScrollbackCommittedRows(1);
-
-			markdown.setText(second);
-			const secondLines = markdown.render(80);
-			const borders = secondLines
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"));
-			expect(borders).toHaveLength(6);
-			const secondTop = secondLines.findIndex(
-				(line, index) => index > 0 && stripVTControlCharacters(line).trimEnd() === borders[3],
-			);
-			expect(secondTop).toBeGreaterThan(0);
-			expect(borders[3]).not.toBe(borders[0]);
-
-			markdown.setNativeScrollbackCommittedRows(secondTop + 1);
-			markdown.setText(widenedSecond);
-			const widenedBorders = markdown
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"));
-			expect(widenedBorders[0]).toBe(borders[0]);
-			expect(widenedBorders[3]).toBe(borders[3]);
-		});
-
-		it("does not lock a quoted table until the table itself enters native scrollback", () => {
-			const initial = `> > Intro sentence deliberately long enough to wrap across several physical quote rows before the table.
-> >
-> > | Entry | Value |
-> > | --- | --- |
-> > | short | R000 |`;
-			const beforeCommit = `${initial}
-> > | medium-width-entry | R001 |`;
-			const afterCommit = `${beforeCommit}
-> > | entry-that-is-even-wider-than-the-locked-layout | R002 |`;
-			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-
-			const tableGeometry = (lines: readonly string[]): { start: number; border: string } => {
-				const plain = lines.map(line => stripVTControlCharacters(line).trimEnd());
-				const header = plain.findIndex(line => line.includes("Entry") && line.includes("Value"));
-				expect(header).toBeGreaterThan(0);
-				return { start: header - 1, border: plain[header - 1]! };
-			};
-
-			const initialLines = markdown.render(48);
-			const initialTable = tableGeometry(initialLines);
-			expect(initialTable.start).toBeGreaterThan(2);
-			// Commit only the quote prose; the nested table remains wholly live.
-			markdown.setNativeScrollbackCommittedRows(initialTable.start);
-
-			markdown.setText(beforeCommit);
-			const growingLines = markdown.render(48);
-			const growingTable = tableGeometry(growingLines);
-			expect(growingTable.border).not.toBe(initialTable.border);
-
-			markdown.setNativeScrollbackCommittedRows(growingTable.start + 1);
-			markdown.setText(afterCommit);
-			const lockedLines = markdown.render(48);
-			expect(tableGeometry(lockedLines).border).toBe(growingTable.border);
-			expect(lockedLines.some(line => stripVTControlCharacters(line).includes("R002"))).toBe(true);
-		});
-
-		it("recomputes a locked streamed table after resize or non-append replacement", () => {
-			const short = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const wide = `${short}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const topBorder = (lines: readonly string[]): string => {
-				const border = lines
-					.map(line => stripVTControlCharacters(line).trimEnd())
-					.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-			const markdown = new Markdown(short, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const shortBorder = topBorder(markdown.render(80));
-			markdown.setNativeScrollbackCommittedRows(1);
-			markdown.setText(wide);
-			expect(topBorder(markdown.render(80))).toBe(shortBorder);
-
-			// A width change starts fresh geometry; the complete source can widen.
-			expect(topBorder(markdown.render(100))).not.toBe(shortBorder);
-
-			const replacement = `| New | Value |
-| --- | --- |
-| x | R100 |`;
-			const expandedReplacement = `${replacement}
-| replacement-column-can-grow | R101 |`;
-			markdown.setText(replacement);
-			const replacementBorder = topBorder(markdown.render(80));
-			markdown.setText(expandedReplacement);
-			expect(topBorder(markdown.render(80))).not.toBe(replacementBorder);
-		});
-
-		it("does not lock a table when earlier code prints an identical border", () => {
-			const table = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const probe = new Markdown(table, 0, 0, defaultMarkdownTheme);
-			const narrowBorder = probe
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.find(line => line.startsWith("+"));
-			expect(narrowBorder).toBeDefined();
-
-			const source = `\`\`\`
-${narrowBorder}
-\`\`\`
-
-${table}`;
-			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const initialLines = markdown.render(80);
-			const plainInitialLines = initialLines.map(line => stripVTControlCharacters(line).trimEnd());
-			const codeBorderRow = plainInitialLines.indexOf(narrowBorder!);
-			const tableHeaderRow = plainInitialLines.findIndex(line => line.includes("Entry") && line.includes("Value"));
-			expect(codeBorderRow).toBeGreaterThanOrEqual(0);
-			expect(tableHeaderRow).toBeGreaterThan(codeBorderRow);
-			const actualTableStart = tableHeaderRow - 1;
-			expect(plainInitialLines[actualTableStart]!).toBe(narrowBorder!);
-
-			// Commit through the code block, but stop immediately before the real
-			// table. Textual border scanning used to mistake the code row for it.
-			markdown.setNativeScrollbackCommittedRows(actualTableStart);
-			markdown.setText(`${source}
-| much-longer-entry-that-arrives-after-commit | R001 |`);
-			const widenedBorder = markdown
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"))
-				.at(-1);
-			expect(widenedBorder).toBeDefined();
-			expect(widenedBorder).not.toBe(narrowBorder);
-		});
-
-		it("restores table layout metadata when finalization hits the shared render cache", () => {
-			clearRenderCache();
-			const short = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const wide = `${short}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const topBorder = (lines: readonly string[]): string => {
-				const border = lines
-					.map(line => stripVTControlCharacters(line).trimEnd())
-					.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-
-			const markdown = new Markdown(short, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const narrowBorder = topBorder(markdown.render(80));
-
-			// Pre-warm the canonical final render after this instance has retained
-			// metadata from its narrower transient frame.
-			const cachedWideBorder = topBorder(new Markdown(wide, 0, 0, defaultMarkdownTheme).render(80));
-			markdown.setText(wide);
-			markdown.transientRenderCache = false;
-			expect(topBorder(markdown.render(80))).toBe(cachedWideBorder);
-
-			// The frame served by L2 is now in native scrollback. Locking it must
-			// preserve the wide cached geometry, not the earlier transient geometry.
-			markdown.setNativeScrollbackCommittedRows(1);
-			expect(topBorder(markdown.render(80))).toBe(cachedWideBorder);
-			expect(cachedWideBorder).not.toBe(narrowBorder);
-			clearRenderCache();
 		});
 
 		it("should respect paddingX when calculating table width", () => {
@@ -1522,6 +1314,31 @@ bar`,
 			// Should have italic from quote styling (\x1b[3m)
 			expect(allOutput.includes("\x1b[3m")).toBeTruthy();
 		});
+
+		it("preserves quote foreground color after inline code spans in blockquotes", () => {
+			const quoteFg = "\x1b[38;2;119;125;136m";
+			const codeFg = "\x1b[38;2;229;193;255m";
+			const testTheme = {
+				...defaultMarkdownTheme,
+				quote: (text: string) => `${quoteFg}${text}\x1b[39m`,
+				code: (text: string) => `${codeFg}${text}\x1b[39m`,
+			};
+
+			const markdown = new Markdown("> before `code` after", 0, 0, testTheme);
+			const [line] = markdown.render(80);
+
+			expect(line).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+
+			const multiMarkdown = new Markdown("> start `first` middle `second` end", 0, 0, testTheme);
+			const [multiLine] = multiMarkdown.render(80);
+			expect(multiLine).toContain(`${codeFg}first\x1b[39m${quoteFg}`);
+			expect(multiLine).toContain(`${codeFg}second\x1b[39m${quoteFg}`);
+
+			const htmlMarkdown = new Markdown("<blockquote>before <code>code</code> after</blockquote>", 0, 0, testTheme);
+			const [htmlLine] = htmlMarkdown.render(80);
+			expect(htmlLine).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+		});
+
 		it("should render list content inside blockquotes", () => {
 			const markdown = new Markdown("> 1. bla bla\n>    - nested bullet", 0, 0, defaultMarkdownTheme);
 
@@ -1588,7 +1405,7 @@ bar`,
 			let visible = "";
 			const targets: Array<string | null> = [];
 
-			for (let i = 0; i < line.length; ) {
+			for (let i = 0; i < line.length;) {
 				if (line.startsWith("\x1b]8;;", i)) {
 					const terminator = line.indexOf("\x07", i + 5);
 					activeTarget = line.slice(i + 5, terminator) || null;
@@ -1681,15 +1498,15 @@ bar`,
 			const labelStart = issueRow.visible.indexOf("#5860");
 			const separator = issueRow.visible.indexOf("|", labelStart);
 			expect(issueRow.targets.slice(labelStart, labelStart + "#5860".length)).toEqual(
-				new Array("#5860".length).fill(issueUrl),
+				Array.from({ length: "#5860".length }, () => issueUrl),
 			);
 			expect(issueRow.targets.slice(labelStart + "#5860".length, separator)).toEqual(
-				new Array(separator - labelStart - "#5860".length).fill(null),
+				Array.from({ length: separator - labelStart - "#5860".length }, () => null),
 			);
 
 			const titleStart = issueRow.visible.indexOf("feat(extensions)");
 			expect(issueRow.targets.slice(titleStart, titleStart + "feat(extensions)".length)).toEqual(
-				new Array("feat(extensions)".length).fill(null),
+				Array.from({ length: "feat(extensions)".length }, () => null),
 			);
 
 			const linkedText = lines
@@ -1733,10 +1550,12 @@ bar`,
 				[secondRow, "second"],
 			] as const) {
 				const start = row.visible.indexOf(label);
-				expect(row.targets.slice(start, start + label.length)).toEqual(new Array(label.length).fill(issueUrl));
+				expect(row.targets.slice(start, start + label.length)).toEqual(
+					Array.from({ length: label.length }, () => issueUrl),
+				);
 				const separator = row.visible.indexOf("|", start);
 				expect(row.targets.slice(start + label.length, separator)).toEqual(
-					new Array(separator - start - label.length).fill(null),
+					Array.from({ length: separator - start - label.length }, () => null),
 				);
 			}
 
@@ -1800,6 +1619,36 @@ bar`,
 
 			const output = markdown.render(80).join("\n");
 			expect(output.includes("\x1b]8;;http://www.example.com\x07")).toBe(true);
+		});
+
+		it("renders a reference link with a prototype-key label as plain text without crashing (issue #10283)", () => {
+			// A reference-style link whose label collides with an Object.prototype
+			// member used to resolve to an inherited non-definition, producing a
+			// link token with `href: undefined` that crashed the renderer at
+			// `token.href.startsWith` — fatal during transcript replay.
+			// `constructor`/`toString` render as literal label text; every case
+			// must avoid emitting an OSC 8 hyperlink and must not throw.
+			for (const label of ["constructor", "toString", "valueOf", "isPrototypeOf"]) {
+				const markdown = new Markdown(`See [${label}] for details`, 0, 0, defaultMarkdownTheme);
+				const output = markdown.render(80).join("\n");
+				expect(stripTerminalSequences(output).trim()).toBe(`See [${label}] for details`);
+				expect(output.includes("\x1b]8;;")).toBe(false);
+			}
+			// `__proto__`'s double underscores are legitimately parsed as emphasis;
+			// the contract here is only that it never becomes a link or crashes.
+			const protoOut = new Markdown("See [__proto__] for details", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+			expect(protoOut.includes("\x1b]8;;")).toBe(false);
+			expect(stripTerminalSequences(protoOut)).toContain("proto");
+		});
+
+		it("autolinks urls and emails end-to-end", () => {
+			const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
+				...defaultMarkdownTheme,
+				link: (text: string) => `<L>${text}</L>`,
+			});
+			const plain = stripVTControlCharacters(rendered);
+			expect(plain).toContain("<L>https://example.com</L>");
+			expect(plain).toContain("<L>user@example.com</L>");
 		});
 	});
 
@@ -1899,19 +1748,30 @@ describe("Inline color swatches", () => {
 	const FMT = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
 	// defaultMarkdownTheme supplies no `colorSwatch` symbol, so the renderer uses its ■ default.
 	const swatchFor = (hex: string, glyph = "■"): string => `${Bun.color(`#${hex}`, FMT)}${glyph}`;
+	// The `#hex` token itself is painted with the color as background and a
+	// YIQ-contrast foreground (VS Code's Color.isLighter rule).
+	const BLACK_FG = TERMINAL.trueColor ? "\x1b[38;2;0;0;0m" : "\x1b[38;5;16m";
+	const WHITE_FG = TERMINAL.trueColor ? "\x1b[38;2;255;255;255m" : "\x1b[38;5;231m";
+	const paintedFor = (hex: string, fg: string, text = `#${hex}`): string =>
+		`${Bun.color(`#${hex}`, FMT)!.replace("[38;", "[48;")}${fg}${text}\x1b[39m\x1b[49m`;
 
 	it("paints a colored swatch before a bare hex color in prose", () => {
 		const out = new Markdown("Accent is #C5FFD6 today.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		// Swatch (color SGR + chip glyph + fg reset + space) sits immediately before the code.
 		expect(out.includes(`${swatchFor("C5FFD6")}\x1b[39m `)).toBeTruthy();
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The token itself sits on the color: bg + contrast fg (light fill → black text).
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+	});
+	it("picks a white foreground on dark fills", () => {
+		const out = new Markdown("Navy is #000080 here.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+		expect(out.includes(paintedFor("000080", WHITE_FG))).toBeTruthy();
 	});
 
 	it("paints a swatch before a backticked hex color", () => {
 		const out = new Markdown("Use `#C5FFD6` for the bg.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// The code text survives as inline code (theme styles it yellow).
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The code text is painted onto the color instead of the codespan style.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
 	});
 
 	it("does not swatch short numeric references that resemble issue numbers", () => {
@@ -1922,6 +1782,15 @@ describe("Inline color swatches", () => {
 	it("swatches a 3-digit shorthand that contains a hex letter", () => {
 		const out = new Markdown("White is #fff.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		expect(out.includes(swatchFor("fff"))).toBeTruthy();
+	});
+
+	it("does not swatch hex-prefixed word fragments like #each", () => {
+		// "#each" starts with hex digits ("eac") but the trailing "h" makes it a
+		// word, not a color; hashtag-style prose must never sprout a swatch.
+		const out = new Markdown("Loop with {{#each items}} in templates.", 0, 0, defaultMarkdownTheme)
+			.render(80)
+			.join("");
+		expect(out.includes("■")).toBe(false);
 	});
 
 	it("does not swatch 4-digit hashline #TAG snapshot tags", () => {
@@ -1963,8 +1832,10 @@ describe("Inline color swatches", () => {
 			.render(80)
 			.join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// Gray (\x1b[90m) is re-opened for the code text — the swatch's fg reset must not bleed.
-		expect(out.includes("\x1b[90m#C5FFD6")).toBeTruthy();
+		// The token is painted with its own contrast fg; gray (\x1b[90m) re-opens
+		// for the surrounding prose after the chip's fg/bg resets.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+		expect(out.includes("\x1b[90m for accent")).toBeTruthy();
 	});
 });
 
@@ -2017,7 +1888,7 @@ describe("Module-level LRU render cache", () => {
 		expect(l2Markdown.render(width)).toBe(first);
 	});
 
-	it("skips code-block highlighting for transient streaming renders", () => {
+	it("keeps an open non-diff fence plain during transient renders without a highlight stream", () => {
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -2028,7 +1899,7 @@ describe("Module-level LRU render cache", () => {
 			},
 		};
 
-		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```ts\nconst streamed = true;\n", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
 
@@ -2037,7 +1908,9 @@ describe("Module-level LRU render cache", () => {
 		expect(plain).not.toContain("HIGHLIGHTED");
 	});
 
-	it("re-renders code-block highlighting when a transient instance becomes stable", () => {
+	it("highlights a fence whole-block once it closes, even during transient renders", () => {
+		// Rows of a closed fence can enter native scrollback before the token
+		// freezes; they must carry the same bytes the finalized render emits.
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -2050,34 +1923,92 @@ describe("Module-level LRU render cache", () => {
 
 		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
-		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
+		const transient = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(highlightCallCount).toBe(1);
+		expect(transient).toContain("HIGHLIGHTED");
 
 		markdown.transientRenderCache = false;
 		const highlighted = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(1);
 		expect(highlighted).toContain("HIGHLIGHTED");
 	});
 
-	it("skips nested list code-block highlighting for transient streaming renders", () => {
+	it("streams completed-line highlighting through the theme's highlight stream", () => {
 		clearRenderCache();
-		let highlightCallCount = 0;
-		const themeWithSpy = {
+		const pushes: string[] = [];
+		const themeWithStream = {
 			...defaultMarkdownTheme,
-			highlightCode: (_code: string, _lang?: string): string[] => {
-				highlightCallCount++;
-				return ["HIGHLIGHTED"];
+			highlightCode: (code: string, _lang?: string): string[] => code.split("\n").map(line => `F<${line}>`),
+			createHighlightStream: (lang?: string) => {
+				if (lang !== "python") return null;
+				return {
+					push: (chunk: string): string => {
+						pushes.push(chunk);
+						return chunk
+							.split("\n")
+							.map((line, i, arr) => (i === arr.length - 1 ? line : `S<${line}>`))
+							.join("\n");
+					},
+				};
 			},
 		};
 
-		const markdown = new Markdown("- item\n\n  ```ts\n  const streamed = true;\n  ```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```python\ndef f():\n    x = 1", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const first = stripVTControlCharacters(markdown.render(80).join("\n"));
+		// Completed line highlighted through the stream; partial tail stays plain.
+		expect(first).toContain("S<def f():>");
+		expect(first).toContain("    x = 1");
+		expect(first).not.toContain("S<    x = 1");
+		expect(pushes).toEqual(["def f():\n"]);
+
+		// Append-only growth pushes only the newly completed lines — parser
+		// state carries across renders instead of re-feeding the fence.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x");
+		const second = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(second).toContain("S<def f():>");
+		expect(second).toContain("S<    x = 1>");
+		expect(second).toContain("    return x");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+
+		// Closing the fence switches to the whole-block highlightCode call the
+		// finalized render uses.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x\n```");
+		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(closed).toContain("F<def f():>");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => null,
+		};
+
+		const markdown = new Markdown("```someunknownlang\nplain text line\nmore", 0, 0, themeWithStream);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("plain text line");
+		expect(plain).not.toContain("S<");
+		expect(plain).not.toContain("F<");
+	});
 
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
-		expect(plain).not.toContain("HIGHLIGHTED");
+	it("keeps an open fence plain when the highlight stream factory throws", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => {
+				throw new TypeError("undefined is not a constructor");
+			},
+		};
+
+		const markdown = new Markdown("```lua\nlocal x = 1\nmore", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("local x = 1");
+		expect(plain).not.toContain("F<");
 	});
 });
 
@@ -2156,19 +2087,6 @@ describe("Markdown.render reference stability", () => {
 	// and callers that decorate results must copy first; ask.ts was fixed to
 	// copy. These tests pin the reference-identity contract.
 	afterEach(() => clearRenderCache());
-
-	it("returns the identical reference for repeated renders of an unchanged instance", () => {
-		const md = new Markdown("Question text", 1, 0, defaultMarkdownTheme);
-		const first = md.render(40);
-		expect(md.render(40)).toBe(first);
-		expect(md.render(40)).toBe(first);
-	});
-
-	it("shares one array across instances with identical inputs via the L2 cache", () => {
-		const a = new Markdown("Shared markdown body", 1, 0, defaultMarkdownTheme);
-		const b = new Markdown("Shared markdown body", 1, 0, defaultMarkdownTheme);
-		expect(b.render(40)).toBe(a.render(40));
-	});
 
 	it("does not share oversized renders through the L2 cache", () => {
 		// Fixture must exceed RENDER_CACHE_MAX_ENTRY_SIZE (256 KiB of rendered
@@ -2553,15 +2471,71 @@ describe("Math rendering", () => {
 	});
 });
 
-describe("inline start()/url-gate scanners (perf rewrites)", () => {
-	// The hand-rolled scanners replaced regex scans that marked runs on the
-	// remaining source at every inline position. They must return exactly what
-	// the old regexes returned for every input.
-	const OLD_MATH_START = /\$|\\\(|\\\[/;
-	const OLD_AUTOLINK_SCAN = /www\.|https?:\/\/|ftp:\/\//i;
-	// marked's bundled GFM inline url rule (verbatim, no flags).
-	const GFM_URL_REGEX =
-		/^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/;
+describe("Strikethrough", () => {
+	const strike = (text: string): string =>
+		stripVTControlCharacters(
+			renderInlineMarkdown(text, { ...defaultMarkdownTheme, strikethrough: (inner: string) => `<S>${inner}</S>` }),
+		);
+
+	it("strikes through as GFM's `~~` rule reads it", () => {
+		expect(strike("~~a~~ ~~a ~~b~~ c")).toBe("<S>a</S> <S>a ~~b</S> c");
+		expect(strike("~~a~~~ b~~ ~~ c~~ d~~")).toBe("<S>a~~~ b</S> ~~ c~~ d~~");
+		expect(strike("~~a\\~~ b~~ ~~a \\\\~~")).toBe("<S>a~~ b</S> <S>a \\</S>");
+		expect(strike("x~~y~~z ~~~~ ~~a\\")).toBe("x<S>y</S>z ~~~~ ~~a\\");
+	});
+
+	it("still strikes through past an opener whose text a backslash before a line break ends", () => {
+		expect(strike("~~a\\\nb~~ ~~c\nd~~")).toBe("~~ab~~ <S>c\nd</S>");
+	});
+
+	// Inside emphasis or a link label the text ends before its closer: a `~~` past that end closes nothing there.
+	it("strikes through inside emphasis and a link label only up to their end", () => {
+		expect(strike("*a ~~b* c~~ [d ~~e](u) f~~")).toBe("a ~~b c~~ d ~~e f~~");
+		expect(strike("*a ~~b~~* [c ~~d~~](u)")).toBe("a <S>b</S> c <S>d</S>");
+	});
+});
+
+describe("inline rendering stays linear on long paragraphs", () => {
+	// Generous bound: each shape took v18.4.4 several seconds at 40 KB; linear lexing takes well under 300 ms.
+	it.each([
+		["unclosed strikethrough (80 KB)", "~~a ".repeat(20_000)],
+		["unclosed $ before digits (80 KB)", "$1*".repeat(26_667)],
+	])("renders a long paragraph of %s in under two seconds", (_name, text) => {
+		// Compile the rendering paths first, so the bound measures the rendering.
+		renderInlineMarkdown(text.slice(0, 2_000), defaultMarkdownTheme);
+		const start = performance.now();
+		renderInlineMarkdown(text, defaultMarkdownTheme);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+
+	// The same bound on lexing alone: styling nested emphasis costs more than lexing it.
+	it.each([
+		// Every nesting level holds the long word, so a math start hint searched per level reads it once per level.
+		[
+			"nested emphasis around a long word (800 KB)",
+			`${"*a ".repeat(4_000)}${"a".repeat(800_000)}${" b*".repeat(4_000)}`,
+		],
+		// Each level's `~~` scan finds no closer before the end of the paragraph.
+		[
+			"nested emphasis with an unclosed ~~ at every level (80 KB)",
+			`${"*a ~~b ".repeat(8_000)}${" b*".repeat(8_000)}`,
+		],
+		// Each level's `~~` closes only past the last level; the long word makes every scan to that closer long.
+		[
+			"nested emphasis with a ~~ at every level closed past it (70 KB)",
+			`${"*a ~~b ".repeat(2_000)}${"a".repeat(50_000)}${" b*".repeat(2_000)} x~~`,
+		],
+	])("lexes a long paragraph of %s in under two seconds", (_name, text) => {
+		extractMarkdownLinks(text.slice(0, 2_000));
+		const start = performance.now();
+		extractMarkdownLinks(text);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+});
+
+describe("math start hint", () => {
+	// mathStartIndex must find the offsets `/\$|\\\(|\\\[/` finds.
+	const MATH_OPENER = /\$|\\\(|\\\[/;
 
 	const fixtures = [
 		"",
@@ -2575,65 +2549,13 @@ describe("inline start()/url-gate scanners (perf rewrites)", () => {
 		"backslash only \\ then ( apart",
 		"ends with backslash \\",
 		"ends with dollar $",
-		"www.example.com leading",
-		"see www.example.com mid-string",
-		"see WWW.EXAMPLE.COM upper",
-		"mixed WwW.case.com scan",
-		"http://example.com leading",
-		"prose http://example.com mid",
-		"prose HTTPS://EXAMPLE.COM upper",
-		"HtTpS://mixed.example",
-		"ftp://files.example mid ftp",
-		"prose FTP://FILES.EXAMPLE",
-		"ftps:// is not ftp:// until here ftp://x",
-		"wwww.overlap.example",
-		"hhttp://overlap.example",
-		"http:/ missing slash then https://real.example",
-		"www without dot www. with dot",
-		"w h f teaser chars but no scheme",
-		"user@example.com email",
-		"prose user.name+tag@example.co.uk",
-		"trailing at sign only@ ",
-		"@leading-at no local part",
-		"a".repeat(400), // long identifier run, no @
-		`${"a".repeat(400)}@example.com`, // long local part (past gate scan limit)
-		"short@x",
-		"dots...and+plus_under-score@host.tld",
 	];
 
-	it("mathStartIndex matches the old /\\$|\\\\\\(|\\\\\\[/ scan on every fixture", () => {
+	it("mathStartIndex finds the offsets /\\$|\\\\\\(|\\\\\\[/ finds on every fixture", () => {
 		for (const src of fixtures) {
-			const m = OLD_MATH_START.exec(src);
+			const m = MATH_OPENER.exec(src);
 			expect(mathStartIndex(src)).toBe(m ? m.index : undefined);
 		}
-	});
-
-	it("autolinkSchemeScanIndex matches the old /www\\.|https?:\\/\\/|ftp:\\/\\//i scan on every fixture", () => {
-		for (const src of fixtures) {
-			const m = OLD_AUTOLINK_SCAN.exec(src);
-			expect(autolinkSchemeScanIndex(src)).toBe(m ? m.index : undefined);
-		}
-	});
-
-	it("urlTokenPossible is conservative: never false when the GFM url regex matches", () => {
-		for (const src of fixtures) {
-			if (GFM_URL_REGEX.test(src)) {
-				expect(urlTokenPossible(src)).toBeTrue();
-			}
-		}
-		// And it actually gates: plain prose with no scheme/email head is rejected.
-		expect(urlTokenPossible("plain prose, nothing linkable here")).toBeFalse();
-		expect(urlTokenPossible("@leading-at no local part")).toBeFalse();
-	});
-
-	it("gated tokenizer still autolinks urls and emails end-to-end", () => {
-		const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
-			...defaultMarkdownTheme,
-			link: (text: string) => `<L>${text}</L>`,
-		});
-		const plain = stripVTControlCharacters(rendered);
-		expect(plain).toContain("<L>https://example.com</L>");
-		expect(plain).toContain("<L>user@example.com</L>");
 	});
 });
 

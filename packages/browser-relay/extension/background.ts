@@ -19,6 +19,24 @@ const RECONNECT_MAX_MS = 10_000;
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
+const relayInitiatedDetachTabs = new Set<number>();
+
+/**
+ * Stable per-install browser identity, persisted in `chrome.storage.local` and
+ * sent in every hello. The relay namespaces tab registries per instance, so
+ * several browsers can share one relay and a service-worker restart keeps the
+ * browser's tab registry instead of replacing another browser's connection.
+ */
+let instanceId: string | null = null;
+async function ensureInstanceId(): Promise<string> {
+	if (instanceId) return instanceId;
+	const key = "relayInstanceId";
+	const stored = await chrome.storage.local.get({ [key]: "" });
+	const existing = stored[key];
+	instanceId = typeof existing === "string" && existing.length > 0 ? existing : crypto.randomUUID();
+	await chrome.storage.local.set({ [key]: instanceId } as Record<string, string>);
+	return instanceId;
+}
 
 interface RelaySettings {
 	port: number;
@@ -144,6 +162,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
 		t: "hello",
+		instanceId: await ensureInstanceId(),
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		tabs: snapshots,
@@ -157,8 +176,14 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
 			return {};
 		case "detach":
-			await chrome.debugger.detach({ tabId: msg.tabId });
-			return {};
+			relayInitiatedDetachTabs.add(msg.tabId);
+			try {
+				await chrome.debugger.detach({ tabId: msg.tabId });
+				return {};
+			} catch (error) {
+				relayInitiatedDetachTabs.delete(msg.tabId);
+				throw error;
+			}
 		case "send":
 			return await chrome.debugger.sendCommand(
 				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
@@ -250,7 +275,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
-	post({ t: "detached", tabId: source.tabId, reason });
+	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
 
 chrome.tabs.onCreated.addListener(tab => {

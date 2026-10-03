@@ -22,6 +22,46 @@ describe("subagent warning injection", () => {
 		expect(result.hasYield).toBe(true);
 	});
 
+	it("marks structured output invalid, not silently valid, when a schema-bearing yield has no data", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "partial output",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success" }],
+			outputSchema: { type: "object", properties: { count: { type: "number" } }, required: ["count"] },
+			outputSchemaSource: "caller",
+			outputSchemaMode: "strict",
+		});
+
+		expect(result.structuredOutput?.status).toBe("invalid");
+		expect(result.structuredOutput?.error).toBe(SUBAGENT_WARNING_NULL_YIELD);
+		expect(result.structuredOutput?.data).toBeUndefined();
+		// Strict mode promises a schema violation fails the run; a null yield
+		// with an exit code left at 0 previously let the async task path
+		// report the job "completed" despite an invalid structured payload
+		// (PR #10625 review).
+		expect(result.exitCode).not.toBe(0);
+	});
+
+	it("leaves the exit code untouched for a null yield in permissive mode", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "partial output",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success" }],
+			outputSchema: { type: "object", properties: { count: { type: "number" } }, required: ["count"] },
+			outputSchemaSource: "caller",
+			outputSchemaMode: "permissive",
+		});
+
+		expect(result.structuredOutput?.status).toBe("invalid");
+		expect(result.exitCode).toBe(0);
+	});
+
 	it("injects missing-submit warning when subagent exits cleanly without yield", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "",
@@ -282,6 +322,108 @@ describe("subagent warning injection", () => {
 			overall_correctness: "incorrect",
 			explanation: "One bug blocks approval.",
 			confidence: 0.8,
+		});
+	});
+
+	it("keeps the latest value when a scalar section is yielded again after finalize", () => {
+		// Reviewer re-yields `explanation` after async jobs settle (#13448); wrapping
+		// the repeat into `["A", "B"]` failed `explanation: string` validation.
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", type: ["findings"], data: { title: "first" } },
+				{ status: "success", type: ["findings"], data: { title: "second" } },
+				{ status: "success", type: ["overall_correctness"], data: "incorrect" },
+				{ status: "success", type: ["explanation"], data: "Before jobs settled." },
+				{ status: "success", type: ["confidence"], data: 0.8 },
+				{ status: "success", type: "result" },
+				{ status: "success", type: ["explanation"], data: "After jobs settled." },
+				{ status: "success", type: "result" },
+			],
+			outputSchema: {
+				properties: {
+					overall_correctness: { enum: ["correct", "incorrect"] },
+					explanation: { type: "string" },
+					confidence: { type: "number" },
+				},
+				optionalProperties: {
+					findings: { elements: { properties: { title: { type: "string" } } } },
+				},
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.rawOutput)).toEqual({
+			findings: [{ title: "first" }, { title: "second" }],
+			overall_correctness: "incorrect",
+			explanation: "After jobs settled.",
+			confidence: 0.8,
+		});
+	});
+
+	it("keeps the latest scalar section when properties live in JTD discriminator variants", () => {
+		// A discriminator compiles to a root `oneOf`; shapes must come from the variants.
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", type: ["kind"], data: "review" },
+				{ status: "success", type: ["verdict"], data: "draft" },
+				{ status: "success", type: ["notes"], data: "only note" },
+				{ status: "success", type: ["verdict"], data: "final" },
+				{ status: "success", type: "result" },
+			],
+			outputSchema: {
+				discriminator: "kind",
+				mapping: {
+					review: {
+						properties: { verdict: { type: "string" }, notes: { elements: { type: "string" } } },
+					},
+					skip: { properties: { verdict: { type: "string" } } },
+				},
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.rawOutput)).toEqual({ kind: "review", verdict: "final", notes: ["only note"] });
+	});
+
+	it("clears a discarded scalar override after a valid replacement", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			outputSchemaMode: "strict",
+			outputSchemaSource: "caller",
+			outputSchema: {
+				type: "object",
+				required: ["explanation"],
+				properties: { explanation: { type: "string" } },
+			},
+			yieldItems: [
+				{ status: "success", type: ["explanation"], data: 42, schemaOverridden: true },
+				{ status: "success", type: "result" },
+				{ status: "success", type: ["explanation"], data: "Corrected after jobs settled." },
+				{ status: "success", type: "result" },
+			],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.structuredOutput).toEqual({
+			source: "caller",
+			mode: "strict",
+			status: "valid",
+			data: { explanation: "Corrected after jobs settled." },
 		});
 	});
 

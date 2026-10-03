@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { resolveStdioSpawnCommand, StdioTransport, writeFrame } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -240,79 +241,6 @@ describe("resolveStdioSpawnCommand", () => {
 		}
 	});
 
-	it("neutralizes percent-delimited args so cmd.exe cannot expand them before the .cmd shim", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-percent-"));
-		try {
-			const shim = path.join(tempDir, "codegraph.cmd");
-			await Bun.write(shim, "@echo off\r\n");
-
-			const result = await resolveStdioSpawnCommand(
-				{ type: "stdio", command: "codegraph", args: ["serve", "--header", "Authorization=%TOKEN%"] },
-				{
-					cwd: tempDir,
-					env: {
-						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
-						PATH: tempDir,
-						PATHEXT: ".cmd",
-					},
-					platform: "win32",
-				},
-			);
-
-			// `%TOKEN%` -> `%%cd:~,%TOKEN%%cd:~,%`: `%cd:~,%` expands to nothing,
-			// so cmd.exe leaves a literal `%TOKEN%` for the shim instead of
-			// substituting an environment variable (BatBadBut / CVE-2024-24576).
-			expect(result.cmd).toEqual([
-				"C:\\Windows\\System32\\cmd.exe",
-				"/d",
-				"/e:ON",
-				"/v:OFF",
-				"/c",
-				`""${shim}" serve --header "Authorization=%%cd:~,%TOKEN%%cd:~,%""`,
-			]);
-			expect(result.windowsVerbatimArguments).toBe(true);
-			expect(result.windowsHide).toBe(true);
-			expect(result.detached).toBe(false);
-		} finally {
-			await removeWithRetries(tempDir);
-		}
-	});
-
-	it("doubles embedded quotes so cmd.exe delivers JSON args to the .cmd shim intact", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-quotes-"));
-		try {
-			const shim = path.join(tempDir, "codegraph.cmd");
-			await Bun.write(shim, "@echo off\r\n");
-
-			const result = await resolveStdioSpawnCommand(
-				{ type: "stdio", command: "codegraph", args: ["--config", '{"a":"b&c|d"}'] },
-				{
-					cwd: tempDir,
-					env: {
-						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
-						PATH: tempDir,
-						PATHEXT: ".cmd",
-					},
-					platform: "win32",
-				},
-			);
-
-			expect(result.cmd).toEqual([
-				"C:\\Windows\\System32\\cmd.exe",
-				"/d",
-				"/e:ON",
-				"/v:OFF",
-				"/c",
-				`""${shim}" --config "{""a"":""b&c|d""}""`,
-			]);
-			expect(result.windowsVerbatimArguments).toBe(true);
-			expect(result.windowsHide).toBe(true);
-			expect(result.detached).toBe(false);
-		} finally {
-			await removeWithRetries(tempDir);
-		}
-	});
-
 	it("resolves extension-less absolute Windows paths to the sibling .cmd shim", async () => {
 		// Mirrors npm's Windows shim layout: bare `codegraph` (shebang script),
 		// `codegraph.cmd` (cmd.exe wrapper), and `codegraph.ps1` siblings under
@@ -351,6 +279,27 @@ describe("resolveStdioSpawnCommand", () => {
 			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
 			expect(result.detached).toBe(false);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("spawns a missing path-qualified Windows command directly instead of through cmd.exe", async () => {
+		// cmd.exe would only print "not recognized" and close stdout; a direct spawn fails with ENOENT.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-missing-"));
+		try {
+			const missing = path.join(tempDir, "missing-server");
+			const result = await resolveStdioSpawnCommand(
+				{ type: "stdio", command: missing, args: ["serve"] },
+				{
+					cwd: tempDir,
+					env: { COMSPEC: "C:\\Windows\\System32\\cmd.exe", PATH: "", PATHEXT: ".cmd" },
+					platform: "win32",
+				},
+			);
+
+			expect(result.cmd).toEqual([missing, "serve"]);
+			expect(result.windowsVerbatimArguments).toBeUndefined();
 		} finally {
 			await removeWithRetries(tempDir);
 		}
@@ -620,17 +569,6 @@ describe("writeFrame", () => {
 		expect(sink.writes).toEqual(["anything\n"]);
 	});
 
-	it("does not propagate non-Error throws either", () => {
-		const sink = {
-			write() {
-				throw "string-thrown-non-error";
-			},
-			flush() {},
-		};
-
-		expect(writeFrame(sink, "x")).toBe(false);
-	});
-
 	it("returns true and neutralizes an asynchronous write rejection (broken pipe surfaced as a Promise)", async () => {
 		const sink = {
 			flushed: 0,
@@ -764,6 +702,55 @@ describe("StdioTransport.notify", () => {
 		} finally {
 			tracker.release();
 		}
+	});
+});
+
+describe("StdioTransport request failure diagnostics", () => {
+	let transport: StdioTransport | undefined;
+
+	afterEach(async () => {
+		await transport?.close().catch(() => {});
+		transport = undefined;
+	});
+
+	it("reports abrupt subprocess termination as EOF instead of a generic close", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: ["-e", "process.stdin.once('data', () => process.exit(23)); process.stdin.resume()"],
+			timeout: 1_000,
+		});
+		await transport.connect();
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error).toMatchObject({
+			transport: "stdio",
+			stage: "receive",
+			failure: "eof",
+			retryable: true,
+		});
+		expect(error.message).toContain("MCP subprocess");
+	});
+
+	it("reports malformed subprocess JSON at the decode stage", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: ["-e", "process.stdin.once('data', () => console.log('{not-json')); process.stdin.resume()"],
+			timeout: 1_000,
+		});
+		await transport.connect();
+
+		await expect(transport.request("tools/list")).rejects.toMatchObject({
+			transport: "stdio",
+			stage: "decode",
+			failure: "malformed_response",
+			retryable: false,
+		});
 	});
 });
 

@@ -10,11 +10,28 @@
  */
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
 import * as commandHelp from "./cli/command-help";
-import { flagConsumesValue } from "./cli/flag-tables";
-import { launchHelp } from "./commands/launch-help";
+import {
+	EXTENSION_SHADOWABLE_STRING_FLAGS,
+	flagConsumesValue,
+	OPTIONAL_VALUE_FLAGS,
+	STRING_VALUE_FLAGS,
+	VALUELESS_FLAGS,
+} from "./cli/flag-tables";
+import type * as LaunchHelp from "./commands/launch-help";
+
+function loadLaunchHelp(): typeof LaunchHelp.launchHelp {
+	const module: typeof LaunchHelp = require("./commands/launch-help");
+	return module.launchHelp;
+}
 
 export const commands: CommandEntry[] = [
-	{ name: "launch", load: () => import("./commands/launch").then(m => m.default), help: launchHelp },
+	{
+		name: "launch",
+		load: () => import("./commands/launch").then(m => m.default),
+		get help() {
+			return loadLaunchHelp();
+		},
+	},
 	{
 		name: "acp",
 		load: () => import("./commands/acp").then(m => m.default),
@@ -51,6 +68,13 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.cleanseHelp,
 	},
 	{
+		name: "collab",
+		// Keep implementation imports behind the command boundary: this table is
+		// also imported before profile bootstrap and by native-free worker entries.
+		load: () => import("./commands/collab").then(m => m.default),
+		help: commandHelp.collabHelp,
+	},
+	{
 		name: "commit",
 		load: () => import("./commands/commit").then(m => m.default),
 		help: commandHelp.commitHelp,
@@ -81,6 +105,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.dryBalanceHelp,
 	},
 	{
+		name: "find",
+		load: () => import("./commands/find").then(m => m.default),
+		help: commandHelp.findHelp,
+	},
+	{
 		name: "gc",
 		load: () => import("./commands/gc").then(m => m.default),
 		help: commandHelp.gcHelp,
@@ -96,9 +125,25 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.galleryHelp,
 	},
 	{
+		name: "git",
+		load: () => import("./commands/git").then(m => m.default),
+		help: commandHelp.gitHelp,
+	},
+	{
 		name: "grievances",
 		load: () => import("./commands/grievances").then(m => m.default),
 		help: commandHelp.grievancesHelp,
+	},
+	{
+		name: "images",
+		load: () => import("./commands/images").then(m => m.default),
+		aliases: ["img"],
+		help: commandHelp.imagesHelp,
+	},
+	{
+		name: "if-bench",
+		load: () => import("./commands/if-bench").then(m => m.default),
+		help: commandHelp.ifBenchHelp,
 	},
 	{
 		name: "install",
@@ -111,6 +156,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.joinHelp,
 	},
 	{
+		name: "login",
+		load: () => import("./commands/login").then(m => m.default),
+		help: commandHelp.loginHelp,
+	},
+	{
 		name: "models",
 		load: () => import("./commands/models").then(m => m.default),
 		help: commandHelp.modelsHelp,
@@ -118,12 +168,33 @@ export const commands: CommandEntry[] = [
 	{
 		name: "plugin",
 		load: () => import("./commands/plugin").then(m => m.default),
+		aliases: ["plugins"],
 		help: commandHelp.pluginHelp,
+	},
+	{
+		name: "predict",
+		load: () => import("./commands/predict").then(m => m.default),
+		help: commandHelp.predictHelp,
+	},
+	{
+		name: "ps",
+		load: () => import("./commands/ps").then(m => m.default),
+		help: commandHelp.psHelp,
 	},
 	{
 		name: "say",
 		load: () => import("./commands/say").then(m => m.default),
 		help: commandHelp.sayHelp,
+	},
+	{
+		name: "clip",
+		load: () => import("./commands/clip").then(m => m.default),
+		help: commandHelp.clipHelp,
+	},
+	{
+		name: "play",
+		load: () => import("./commands/play").then(m => m.default),
+		help: commandHelp.playHelp,
 	},
 	{
 		name: "share",
@@ -146,6 +217,17 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.readHelp,
 	},
 	{
+		name: "render",
+		load: () => import("./commands/render").then(m => m.default),
+		help: commandHelp.renderHelp,
+	},
+	{
+		name: "skill",
+		load: () => import("./commands/skill").then(m => m.default),
+		aliases: ["skills"],
+		help: commandHelp.skillHelp,
+	},
+	{
 		name: "ssh",
 		load: () => import("./commands/ssh").then(m => m.default),
 		help: commandHelp.sshHelp,
@@ -154,6 +236,11 @@ export const commands: CommandEntry[] = [
 		name: "stats",
 		load: () => import("./commands/stats").then(m => m.default),
 		help: commandHelp.statsHelp,
+	},
+	{
+		name: "stream",
+		load: () => import("./commands/stream").then(m => m.default),
+		help: commandHelp.streamHelp,
 	},
 	{
 		name: "update",
@@ -176,6 +263,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.tokenHelp,
 	},
 	{
+		name: "toks",
+		load: () => import("./commands/toks").then(m => m.default),
+		help: commandHelp.toksHelp,
+	},
+	{
 		name: "ttsr",
 		load: () => import("./commands/ttsr").then(m => m.default),
 		help: commandHelp.ttsrHelp,
@@ -189,10 +281,27 @@ export const commands: CommandEntry[] = [
 	{
 		name: "search",
 		load: () => import("./commands/web-search").then(m => m.default),
-		aliases: ["q"],
+		aliases: ["q", "web-search"],
 		help: commandHelp.searchHelp,
 	},
 ];
+
+const SUBCOMMAND_NAMES = new Set<string>();
+for (const command of commands) {
+	SUBCOMMAND_NAMES.add(command.name);
+	if (command.aliases) {
+		for (const alias of command.aliases) SUBCOMMAND_NAMES.add(alias);
+	}
+}
+
+/** Commands that accept launch-global flags before their command token. */
+export const LAUNCH_FLAG_COMMANDS: Readonly<Record<string, true>> = { launch: true, acp: true };
+
+/** Whether a token names a registered top-level command or alias. */
+export function isSubcommand(first: string | undefined): boolean {
+	if (!first || first.startsWith("-") || first.startsWith("@")) return false;
+	return SUBCOMMAND_NAMES.has(first);
+}
 
 // Documented-looking plugin/marketplace verbs that are NOT registered top-level
 // commands. Without a guard `resolveCliArgv` rewrites e.g. `omp marketplace add
@@ -215,7 +324,7 @@ const RESERVED_TOP_LEVEL_WORDS: Record<string, string> = {
 	discover:
 		'`omp discover` is not a top-level command. Use `omp plugin discover [marketplace]` to browse available plugins, or run `omp launch discover` if you meant to send "discover" as a prompt.',
 	upgrade:
-		'`omp upgrade` is not a top-level command. Use `omp plugin upgrade [name@marketplace]` to upgrade plugins, or run `omp launch upgrade` if you meant to send "upgrade" as a prompt.',
+		'`omp upgrade` is not a top-level command. Use `omp plugin upgrade [name]` to upgrade plugins, or run `omp launch upgrade` if you meant to send "upgrade" as a prompt.',
 	enable:
 		'`omp enable` is not a top-level command. Use `omp plugin enable <name@marketplace>` to enable a plugin, or run `omp launch enable` if you meant to send "enable" as a prompt.',
 	disable:
@@ -255,17 +364,6 @@ export function reservedTopLevelWordMessage(argv: readonly string[]): string | u
 	return undefined;
 }
 
-/**
- * Return true when `first` matches a registered subcommand name or alias.
- *
- * Flags (`-…`) and `@file` arguments are never subcommands; for those the CLI
- * runner skips ahead to the default `launch` command.
- */
-export function isSubcommand(first: string | undefined): boolean {
-	if (!first || first.startsWith("-") || first.startsWith("@")) return false;
-	return commands.some(entry => entry.name === first || entry.aliases?.includes(first));
-}
-
 export type ResolvedCliArgv = { argv: string[] } | { error: string };
 
 /**
@@ -285,12 +383,46 @@ function leadingSubcommandIndex(argv: string[]): number {
 	return -1;
 }
 
+/** Whether `arg` names a flag from the launch surface (bare or `--flag=value`). */
+function isLaunchGlobalFlag(arg: string): boolean {
+	const eq = arg.indexOf("=");
+	const name = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
+	return (
+		STRING_VALUE_FLAGS.has(name) ||
+		OPTIONAL_VALUE_FLAGS.has(name) ||
+		VALUELESS_FLAGS.has(name) ||
+		EXTENSION_SHADOWABLE_STRING_FLAGS.has(name)
+	);
+}
+
+/**
+ * Drop recognized launch-global flags (and any value they consume) from the
+ * leading segment before a hoisted non-launch subcommand. `--cwd` and friends
+ * belong to the launch surface and mean nothing to a subcommand like `update`,
+ * whose strict parser would otherwise reject them with a cryptic
+ * `node:util.parseArgs` error (#8891). Tokens the launch tables don't recognize
+ * are kept, so a subcommand's own leading flags still reach it.
+ */
+function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
+	const kept: string[] = [];
+	for (let index = 0; index < leading.length; index += 1) {
+		const arg = leading[index];
+		if (isLaunchGlobalFlag(arg)) {
+			if (flagConsumesValue(arg, leading[index + 1])) index += 1;
+			continue;
+		}
+		kept.push(arg);
+	}
+	return kept;
+}
+
 /**
  * Decide what the CLI runner should do with raw argv: reject bare reserved
  * management words, pass help/version through untouched, route a recognized
  * subcommand (even behind leading global flags like `--approval-mode=yolo`) to
- * that command with the flags preserved, and forward everything else to
- * `launch` (#2970).
+ * that command, and forward everything else to `launch` (#2970). Leading
+ * launch-global flags are forwarded to launch-shaped commands but stripped for
+ * other subcommands that cannot parse them (#8891).
  */
 export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	const first = argv[0];
@@ -302,12 +434,18 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	if (isSubcommand(first)) return { argv };
 	// A subcommand can hide behind leading global option flags
 	// (`omp --approval-mode=yolo acp`). `run` dispatches strictly on argv[0], so
-	// hoist the subcommand to the front and keep the leading flags as its own
-	// argv; the command's parser then applies them. Genuine launch prompts (no
-	// trailing subcommand) are untouched.
+	// hoist the subcommand to the front. Launch-shaped commands share the launch
+	// flag surface, so their leading flags are forwarded and applied; every other
+	// subcommand parses only its own flags, so launch-global flags placed before
+	// it (`omp --cwd <dir> update`) are stripped rather than forwarded into a
+	// crash (#8891). Genuine launch prompts (no trailing subcommand) are untouched.
 	const subIndex = leadingSubcommandIndex(argv);
 	if (subIndex >= 0) {
-		return { argv: [argv[subIndex], ...argv.slice(0, subIndex), ...argv.slice(subIndex + 1)] };
+		const sub = argv[subIndex];
+		const leading = argv.slice(0, subIndex);
+		const trailing = argv.slice(subIndex + 1);
+		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
+		return { argv: [sub, ...forwardedLeading, ...trailing] };
 	}
 	return { argv: ["launch", ...argv] };
 }

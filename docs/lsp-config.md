@@ -10,7 +10,7 @@ Source of truth in code:
 
 ## Auto-detection
 
-When no config file contributes a server override, OMP auto-detects built-in servers by intersecting two conditions:
+OMP starts from the built-in server definitions, applies config overrides, then keeps enabled servers that meet both conditions:
 
 1. The current working directory contains at least one of the server's `rootMarkers`.
 2. The server binary is available — checked in supported project-local bin directories first (for example `node_modules/.bin/`, Python virtual environments, Ruby binstubs, and project `bin/` for Go), then `$PATH`.
@@ -29,18 +29,20 @@ OMP merges LSP config from multiple sources, lowest to highest precedence:
 |            | Cwd config dirs: `<cwd>/.omp/lsp.*`, `<cwd>/.claude/lsp.*`, `<cwd>/.codex/lsp.*`, `<cwd>/.gemini/lsp.*`      |
 |    Highest | Cwd root: `<cwd>/lsp.*` and `<cwd>/.lsp.*`                                                                   |
 
-Each location accepts `.json`, `.yaml`, and `.yml`, including hidden variants. When multiple variants coexist in one location, precedence from highest to lowest is `lsp.json`, `.lsp.json`, `lsp.yaml`, `.lsp.yaml`, `lsp.yml`, `.lsp.yml`.
+Within each config-directory row, directories are listed highest to lowest priority. Each location accepts `.json`, `.yaml`, and `.yml`, including hidden variants. When multiple variants coexist in one location, precedence from highest to lowest is `lsp.json`, `.lsp.json`, `lsp.yaml`, `.lsp.yaml`, `lsp.yml`, `.lsp.yml`. All readable variants are merged; this is not a first-file-only search.
 
 Merging is shallow per server: a higher-precedence server object overrides only its top-level fields, but object-valued fields such as `settings`, `initOptions`, `capabilities`, and `workspaceReadyTimings` replace the lower value as a whole rather than deep-merging it. Servers absent from override files remain at built-in defaults.
 
-The native user config directory follows `PI_CONFIG_DIR` and active profiles; `~/.omp/agent/lsp.json` is the default-profile spelling. This shared config lookup does not use `PI_CODING_AGENT_DIR` as an arbitrary replacement base. Project and cwd sources do not walk ancestors.
+The native user config directory follows `PI_CONFIG_DIR` and active profiles; `~/.omp/agent/lsp.json` is the default-profile spelling. This shared config lookup does not use `PI_CODING_AGENT_DIR` as an arbitrary replacement base. Claude's user directory honors `CLAUDE_CONFIG_DIR`. Foreign user sources (Claude, Codex, Gemini) are opt-in through the enabled-provider configuration; setting `CLAUDE_CONFIG_DIR` also opts Claude in unless explicitly disabled. Project and cwd sources do not walk ancestors and are not subject to that user-source opt-in.
 
 **Recommended locations:**
 
 - User-wide preferences → active native agent directory's `lsp.json`
 - Project-specific overrides → `<cwd>/.omp/lsp.json`
 
-> **Note:** Auto-detection mode is skipped only when at least one readable config contributes a non-empty server map. A config that only sets `idleTimeoutMs` still uses built-in auto-detection. With server overrides, OMP first merges them onto all defaults, then keeps servers whose root markers match the cwd, whose binary resolves, and whose merged config is not `disabled`.
+> **Note:** There is no separate configured-server mode: built-in defaults, partial overrides, and new custom servers all pass through the same root-marker/binary/`disabled` filter. A config that only sets `idleTimeoutMs` leaves server selection unchanged.
+
+Config is cached per cwd. After changing LSP files, root markers, or installed binaries, call the `lsp` tool with `action: "reload", file: "*"` (or omit `file`) to reread config and shut down clients whose configuration is no longer current.
 
 ## File shape
 
@@ -69,7 +71,7 @@ Top-level keys:
 - `servers` — map of server name to `ServerConfig` (optional wrapper; flat form is equivalent)
 - `idleTimeoutMs` — shut down idle language servers after this many milliseconds; omitted, zero, and negative values leave idle shutdown disabled
 
-Do not mix wrapped and flat server entries: when `servers` is present, sibling keys other than `idleTimeoutMs` are not treated as servers.
+Do not mix wrapped and flat server entries: when `servers` is an object, sibling keys other than `idleTimeoutMs` are not treated as servers.
 
 ## ServerConfig fields
 
@@ -77,18 +79,20 @@ Do not mix wrapped and flat server entries: when `servers` is present, sibling k
 | ----------------------- | ---------- | ------------------------: | -------------------------------------------------------------------------------------------------------- |
 | `command`               | `string`   |                       yes | Binary name (resolved through local bins / PATH) or absolute path                                        |
 | `args`                  | `string[]` |                        no | Arguments passed to the binary                                                                           |
-| `fileTypes`             | `string[]` |                       yes | File extensions this server handles, for example `[".ts", ".tsx"]`                                       |
+| `fileTypes`             | `string[]` |                       yes | Extensions or basenames, for example `[".ts", ".tsx", "Dockerfile"]`; case-insensitive, with or without a leading dot |
 | `languageId`            | `string`   |                        no | LSP language id sent in `textDocument/didOpen`; inferred from the file path when omitted                 |
 | `rootMarkers`           | `string[]` |                       yes | Files/directories indicating a project root; one-level wildcard patterns such as `*.cabal` are supported |
 | `initOptions`           | `object`   |                        no | Sent as `initializationOptions` during the LSP handshake                                                 |
 | `settings`              | `object`   |                        no | Pushed via `workspace/didChangeConfiguration`                                                            |
 | `disabled`              | `boolean`  |                        no | Set `true` to disable this server                                                                        |
-| `warmupTimeoutMs`       | `number`   |                        no | Startup timeout for this server in milliseconds                                                          |
-| `isLinter`              | `boolean`  |                        no | Marks a linter/formatter-only server; excludes it from type-intelligence operations                      |
+| `warmupTimeoutMs`       | `number`   |                        no | Warmup initialize timeout in milliseconds (default 5000; built-in marksman uses 2000) |
+| `isLinter`              | `boolean`  |                        no | Marks a dedicated linter/formatter server: excluded from type-intelligence, but preferred over type-checkers when choosing the `formatOnWrite` formatter |
 | `capabilities`          | `object`   |                        no | Opt-in server-specific features; see [Capabilities](#capabilities)                                       |
 | `workspaceReadyTimings` | `object`   |                        no | Advanced rust-analyzer workspace-readiness timing overrides; see below                                   |
 
-The required fields may be omitted from an override of a built-in server because they are inherited before validation. A genuinely new server needs all three. `resolvedCommand` and `createClient` are runtime-owned fields and must not be configured.
+The required fields may be omitted from an override of a built-in server because they are inherited before validation. A genuinely new server normally needs all three. `resolvedCommand` and `createClient` are runtime-owned fields and must not be configured.
+
+For plugin-compatible definitions, `initializationOptions` is accepted when `initOptions` is not an object. `extensionToLanguage` can supply `fileTypes` from its keys and defaults missing `rootMarkers` to `["."]`; its values do not set per-extension language IDs. Marketplace entries can provide an inline `lspServers` map or a config-file path contained within the plugin root.
 
 ### Capabilities
 
@@ -127,7 +131,7 @@ All fields are boolean and optional. They are currently used by `rust-analyzer`.
 }
 ```
 
-All four fields are optional millisecond values. This is an advanced tuning surface; normal configurations should use the defaults.
+All four fields are optional millisecond values. Defaults are `timeoutMs: 5000`, `pollMs: 100`, `settleMs: 2000`, and `statusRequestTimeoutMs: 1000`. This is an advanced tuning surface; normal configurations should use the defaults.
 
 ## Common recipes
 
@@ -168,7 +172,7 @@ servers:
 
 ### Register a custom server
 
-New servers require non-empty `command`, `fileTypes`, and `rootMarkers`. Invalid server definitions are ignored with a warning. An unreadable file or invalid JSON/YAML is ignored; the loader continues with the remaining sources.
+New native-format servers require non-empty `command`, `fileTypes`, and `rootMarkers`. Invalid new definitions are ignored with a warning; invalid overrides retain the previous server definition. An unreadable file or invalid JSON/YAML is ignored; the loader continues with the remaining sources.
 
 ```json
 {
@@ -216,12 +220,13 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | Server key                    | Language(s)                   | Binary                            |
 | ----------------------------- | ----------------------------- | --------------------------------- |
 | `rust-analyzer`               | Rust                          | `rust-analyzer`                   |
-| `clangd`                      | C, C++, ObjC                  | `clangd`                          |
+| `clangd`                      | C, C++, ObjC, CUDA            | `clangd`                          |
 | `zls`                         | Zig                           | `zls`                             |
 | `gopls`                       | Go                            | `gopls`                           |
-| `typescript-language-server`  | TypeScript, JavaScript        | `typescript-language-server`      |
+| `typescript-language-server`  | TypeScript, JavaScript (≤ 6)  | `typescript-language-server`      |
+| `typescript-native`           | TypeScript, JavaScript (7+)   | `tsc --lsp --stdio`               |
 | `denols`                      | TypeScript, JavaScript (Deno) | `deno`                            |
-| `biome`                       | TS/JS/JSON (linter)           | `biome`                           |
+| `biome`                       | TS/JS/JSON/CSS (linter)       | `biome`                           |
 | `eslint`                      | TS/JS/Vue/Svelte (linter)     | `vscode-eslint-language-server`   |
 | `vscode-html-language-server` | HTML                          | `vscode-html-language-server`     |
 | `vscode-css-language-server`  | CSS, SCSS, Less               | `vscode-css-language-server`      |
@@ -233,6 +238,7 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `pyright`                     | Python                        | `pyright-langserver`              |
 | `basedpyright`                | Python                        | `basedpyright-langserver`         |
 | `pylsp`                       | Python                        | `pylsp`                           |
+| `ty`                          | Python                        | `ty`                              |
 | `ruff`                        | Python (linter)               | `ruff`                            |
 | `jdtls`                       | Java                          | `jdtls`                           |
 | `kotlin-lsp`                  | Kotlin                        | `kotlin-lsp`                      |
@@ -268,3 +274,5 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `sourcekit-lsp`               | Swift                         | `sourcekit-lsp`                   |
 | `swiftlint`                   | Swift (linter)                | `swiftlint`                       |
 | `tlaplus`                     | TLA+                          | `tlapm_lsp`                       |
+
+Only one TypeScript server is kept per project: when the resolved `tsc` belongs to a TypeScript install without `lib/tsserver.js` (TypeScript 7+), `typescript-native` wins and `typescript-language-server` is dropped, since it cannot drive that install; otherwise `typescript-native` is dropped because older `tsc` rejects `--lsp`.

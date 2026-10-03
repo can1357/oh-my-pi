@@ -25,7 +25,15 @@
  *   3. Pack with `bun pm pack` (resolves the `catalog:`/`workspace:`
  *      protocols npm cannot, and runs each package's `prepack` lifecycle),
  *      then publish the resolved tarball with `npm publish` — see
- *      `packAndPublish` for why npm and not `bun publish`.
+ *      `publishTargetJob` for why npm and not `bun publish`.
+ *
+ * Steps 1–2 run serially in dependency order: they rewrite manifests other
+ * packages resolve through, and any failure there publishes nothing. Step 3
+ * runs concurrently (`PUBLISH_CONCURRENCY`): packing starts immediately, but a
+ * package publishes only after the workspace packages it depends on did; a
+ * failed prerequisite blocks its dependents while unrelated packages still
+ * publish. Output is printed per package and the process exits non-zero
+ * listing the packages that failed or were blocked.
  *
  * Intended for CI. Mutates `package.json` in place — if you run this
  * locally, expect a dirty working tree and `git restore` after.
@@ -35,11 +43,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import {
-	type GeneratedLeafPackage,
-	generateNpmPackages,
-	LEAF_TARGETS,
-} from "../packages/natives/scripts/gen-npm-packages.ts";
+import { generateNpmPackages, LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { fixEmitExtensions } from "./fix-emit-extensions.ts";
 
 export interface PublishPackage {
@@ -63,6 +67,11 @@ export interface PublishPackage {
 	 * without a build; publish swaps in the `prepack` bundle.
 	 */
 	publishBin?: Readonly<Record<string, string>>;
+	/**
+	 * Packages sharing a lock never run `bun pm pack` concurrently. Needed when
+	 * one package's `prepack` rewrites files another package ships.
+	 */
+	packLock?: string;
 }
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
@@ -74,12 +83,49 @@ interface PackageManifest {
 	name?: string;
 	version?: string;
 	private?: boolean;
+	license?: string;
 	files?: JsonValue[];
 	optionalDependencies?: JsonObject;
 }
 
 const repoRoot = path.join(import.meta.dir, "..");
 const isDryRun = process.argv.includes("--dry-run");
+const MIT_LICENSE = "LICENSE";
+const THIRD_PARTY_NOTICES = "THIRD-PARTY-NOTICES.txt";
+
+/** Selects the legal payload contract for a publishable first-party package. */
+export function legalPayloadFiles(license: string | undefined): string[] {
+	switch (license) {
+		case "MIT":
+			return [MIT_LICENSE, THIRD_PARTY_NOTICES];
+		default:
+			throw new Error(`Unsupported package license: ${license ?? "<missing>"}`);
+	}
+}
+
+/**
+ * Materialize the legal payload beside a package manifest before packing.
+ * Package-local license/notice files win; missing files fall back to the
+ * repository payload so generated and source packages follow one contract.
+ */
+export async function stageLegalPayloads(
+	pkgDir: string,
+	license: string | undefined,
+	write: boolean,
+	sourceRoot = repoRoot,
+): Promise<string[]> {
+	const files = legalPayloadFiles(license);
+	for (const file of files) {
+		const destination = path.join(pkgDir, file);
+		if (await Bun.file(destination).exists()) continue;
+		const source = path.join(sourceRoot, file);
+		if (!(await Bun.file(source).exists())) {
+			throw new Error(`Missing legal payload ${file} for ${path.relative(repoRoot, pkgDir)}`);
+		}
+		if (write) await fs.copyFile(source, destination);
+	}
+	return files;
+}
 
 function nativeLeafTagFromArgs(argv: readonly string[]): string | null {
 	for (let i = 0; i < argv.length; i++) {
@@ -95,6 +141,26 @@ function nativeLeafTagFromArgs(argv: readonly string[]): string | null {
 }
 
 const nativeLeafTag = nativeLeafTagFromArgs(process.argv.slice(2));
+/**
+ * Choose npm's dist-tag from a package manifest version. Unknown prereleases
+ * are rejected rather than accidentally publishing them on the stable channel.
+ */
+export function npmDistTag(version: string): string {
+	if (/^\d+\.\d+\.\d+-canary\./.test(version)) return "canary";
+	if (/^\d+\.\d+\.\d+-/.test(version)) {
+		throw new Error(`Unsupported prerelease version for npm publish: ${version}`);
+	}
+	return "latest";
+}
+
+/**
+ * coding-agent's `prepack` (`gen:bundle` → stats `gen:stats`) deletes and
+ * rebuilds `packages/stats/dist/client` and fills
+ * `packages/stats/src/embedded-client.generated.txt` until it resets it; the
+ * stats tarball ships both, so the two packs must not overlap.
+ */
+const STATS_CLIENT_LOCK = "stats-client";
+
 export const packages: PublishPackage[] = [
 	{ dir: "packages/utils", kind: "typescript" },
 	{ dir: "packages/wire", kind: "typescript" },
@@ -103,7 +169,6 @@ export const packages: PublishPackage[] = [
 	{ dir: "packages/ai", kind: "typescript" },
 	{ dir: "packages/natives", kind: "native" },
 	{ dir: "packages/tui", kind: "typescript" },
-	{ dir: "packages/hashline", kind: "typescript" },
 	{ dir: "packages/mnemopi", kind: "typescript" },
 	{ dir: "packages/snapcompact", kind: "typescript" },
 	{
@@ -112,9 +177,15 @@ export const packages: PublishPackage[] = [
 		preBuild: [["bun", "run", "build"]],
 		extraFiles: ["dist/client"],
 		extraTypeConfigs: ["tsconfig.publish.client.json"],
+		packLock: STATS_CLIENT_LOCK,
 	},
 	{ dir: "packages/agent", kind: "typescript" },
-	{ dir: "packages/coding-agent", kind: "typescript", publishBin: { omp: "dist/cli.js" } },
+	{
+		dir: "packages/coding-agent",
+		kind: "typescript",
+		publishBin: { omp: "dist/cli.js" },
+		packLock: STATS_CLIENT_LOCK,
+	},
 ];
 
 function rewriteSrcToTypes(value: string): string {
@@ -178,6 +249,9 @@ export async function rewriteManifest(pkg: PublishPackage, write: boolean): Prom
 	}
 	if (manifest.exports !== undefined) manifest.exports = rewriteExports(manifest.exports, pkg.publishJs === true);
 	const files = Array.isArray(manifest.files) ? [...manifest.files] : [];
+	for (const legalFile of legalPayloadFiles(manifest.license)) {
+		if (!files.includes(legalFile)) files.push(legalFile);
+	}
 	const hasDist = files.includes("dist");
 	if (!hasDist && !files.includes("dist/types")) files.push("dist/types");
 	if (pkg.publishJs && !hasDist && !files.includes("dist/js")) files.push("dist/js");
@@ -201,6 +275,8 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	if (pkg.publishJs) {
 		await $`bun x tsgo -p tsconfig.publish.js.json`.cwd(pkgDir);
 	}
+	const sourceManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
+	await stageLegalPayloads(pkgDir, sourceManifest.license, !isDryRun);
 	// Both emits run under `moduleResolution: "Bundler"`, so relative
 	// specifiers land extensionless — unresolvable for a `nodenext` consumer
 	// (types) and for Node ESM at runtime (js). Rewrite them to explicit `.js`.
@@ -235,10 +311,12 @@ function buildNativeOptionalDependencies(version: string): JsonObject {
 	return optionalDependencies;
 }
 
+/** Prepares the native core manifest and legal payloads for publication. */
 export async function prepareNativeCorePackage(pkgDir: string, write: boolean): Promise<PackageManifest> {
 	const manifestPath = path.join(pkgDir, "package.json");
 	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
 	if (typeof manifest.version !== "string") throw new Error(`Missing version in ${manifestPath}`);
+	const legalFiles = await stageLegalPayloads(pkgDir, manifest.license, write);
 	manifest.optionalDependencies = buildNativeOptionalDependencies(manifest.version);
 	manifest.files = [
 		"native/index.js",
@@ -247,10 +325,19 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/clipboard.d.ts",
 		"native/desktop.js",
 		"native/desktop.d.ts",
+		"native/desktop-adapter.js",
+		"native/desktop-adapter.d.ts",
+		"native/version-sentinel.js",
+		"native/version-sentinel.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
+		"native/path.js",
+		"native/path.d.ts",
+		"native/vcs.js",
+		"native/vcs.d.ts",
 		"native/embedded-addon.js",
 		"README.md",
+		...legalFiles,
 	];
 	if (write) await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 	return manifest;
@@ -292,44 +379,111 @@ export async function inspectPackedTarball(tarballPath: string): Promise<PackedT
 	return { name: manifest.name, version: manifest.version, path: tarballPath };
 }
 
-async function packAndPublish(dir: string, name: string): Promise<void> {
-	if (isDryRun) {
-		console.log(`DRY RUN bun pm pack && npm publish --access public (${path.relative(repoRoot, dir)})`);
-		return;
-	}
-	console.log(`Publishing ${name}…`);
-	const packDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pack-"));
-	try {
-		const packed = await $`bun pm pack --quiet --destination ${packDir}`.cwd(dir).quiet().nothrow();
-		const packOutput = `${packed.stdout.toString()}${packed.stderr.toString()}`.trim();
-		if (packed.exitCode !== 0) {
-			if (packOutput) console.log(packOutput);
-			process.exit(packed.exitCode ?? 1);
+/** Collects one package's output so concurrent publishes print as whole blocks. */
+export type PublishLog = (line: string) => void;
+
+/** Runs `fn` exclusively among callers sharing `key`; unkeyed callers never wait. */
+export type KeyedMutex = <T>(key: string | undefined, fn: () => Promise<T>) => Promise<T>;
+
+export function createKeyedMutex(): KeyedMutex {
+	const tails = new Map<string, Promise<void>>();
+	return async (key, fn) => {
+		if (key === undefined) return fn();
+		const previous = tails.get(key) ?? Promise.resolve();
+		const { promise: released, resolve: release } = Promise.withResolvers<void>();
+		tails.set(key, released);
+		await previous;
+		try {
+			return await fn();
+		} finally {
+			release();
 		}
-		const tarball = (await fs.readdir(packDir)).find(entry => entry.endsWith(".tgz"));
-		if (!tarball) throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
-		const packedTarball = await inspectPackedTarball(path.join(packDir, tarball));
-		// Preflight the exact packed version so reruns skip deterministically.
-		// Fail open on lookup errors; only a confirmed published version may skip publishing.
-		const preflight = await $`npm view ${`${packedTarball.name}@${packedTarball.version}`} version`.quiet().nothrow();
-		if (preflight.exitCode === 0 && preflight.stdout.toString().trim()) {
-			console.log(`Skipping ${packedTarball.name} (version already published)`);
-			return;
-		}
-		const result = await $`npm publish ${packedTarball.path} --access public`.quiet().nothrow();
-		const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
-		if (output) console.log(output);
-		if (result.exitCode !== 0) {
-			// A concurrent publisher may win after the preflight.
-			if (isVersionAlreadyPublished(output)) {
-				console.log(`Skipping ${packedTarball.name} (version already published)`);
+	};
+}
+
+/** A prepared package whose manifest is final and whose tarball can be packed. */
+interface PublishTarget {
+	dir: string;
+	name: string;
+	version: string;
+	packLock?: string;
+	/** Workspace packages this one depends on; it publishes only after they did. */
+	dependsOn?: readonly string[];
+}
+
+/**
+ * One package as a two-phase publish job: `pack` builds the tarball (safe to
+ * run before prerequisites publish), `publish` pushes it to npm, and `discard`
+ * drops the tarball when a prerequisite failed and nothing is published.
+ */
+function publishTargetJob(target: PublishTarget, packLocks: KeyedMutex): PublishJob {
+	const { dir, name, version } = target;
+	let packDir: string | undefined;
+	let packed: PackedTarball | undefined;
+	const discard = async (): Promise<void> => {
+		if (packDir) await fs.rm(packDir, { recursive: true, force: true });
+		packDir = undefined;
+	};
+	return {
+		name,
+		dependsOn: target.dependsOn,
+		async pack(log) {
+			if (isDryRun) {
+				log(
+					`DRY RUN bun pm pack && npm publish --access public --tag ${npmDistTag(version)} (${path.relative(repoRoot, dir)})`,
+				);
 				return;
 			}
-			process.exit(result.exitCode ?? 1);
-		}
-	} finally {
-		await fs.rm(packDir, { recursive: true, force: true });
-	}
+			log(`Packing ${name}…`);
+			packDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pack-"));
+			const destination = packDir;
+			// The tarball lands in a private temp dir, so the lock only needs to cover packing.
+			const result = await packLocks(target.packLock, () =>
+				$`bun pm pack --quiet --destination ${destination}`.cwd(dir).quiet().nothrow(),
+			);
+			const packOutput = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
+			if (result.exitCode !== 0) {
+				if (packOutput) log(packOutput);
+				await discard();
+				throw new Error(`bun pm pack exited with ${result.exitCode}`);
+			}
+			const tarball = (await fs.readdir(destination)).find(entry => entry.endsWith(".tgz"));
+			if (!tarball) {
+				await discard();
+				throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
+			}
+			packed = await inspectPackedTarball(path.join(destination, tarball));
+		},
+		async publish(log) {
+			if (isDryRun) return;
+			if (!packed) throw new Error(`${name} was not packed`);
+			try {
+				const tag = npmDistTag(packed.version);
+				// Preflight the exact packed version so reruns skip deterministically.
+				// Fail open on lookup errors; only a confirmed published version may skip publishing.
+				const preflight = await $`npm view ${`${packed.name}@${packed.version}`} version`.quiet().nothrow();
+				if (preflight.exitCode === 0 && preflight.stdout.toString().trim()) {
+					log(`Skipping ${packed.name} (version already published)`);
+					return;
+				}
+				log(`Publishing ${packed.name}…`);
+				const result = await $`npm publish ${packed.path} --access public --tag ${tag}`.quiet().nothrow();
+				const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
+				if (output) log(output);
+				if (result.exitCode !== 0) {
+					// A concurrent publisher may win after the preflight.
+					if (isVersionAlreadyPublished(output)) {
+						log(`Skipping ${packed.name} (version already published)`);
+						return;
+					}
+					throw new Error(`npm publish exited with ${result.exitCode}`);
+				}
+			} finally {
+				await discard();
+			}
+		},
+		discard,
+	};
 }
 
 /**
@@ -343,16 +497,108 @@ export function isVersionAlreadyPublished(output: string): boolean {
 	);
 }
 
-async function publishGeneratedLeafPackage(leaf: GeneratedLeafPackage): Promise<void> {
-	await packAndPublish(leaf.dir, leaf.manifest.name);
+export interface PublishJob {
+	name: string;
+	/** Names of jobs that must publish successfully first; unknown names are ignored. */
+	dependsOn?: readonly string[];
+	/** Optional work that may run before prerequisites publish (packing). */
+	pack?(log: PublishLog): Promise<void>;
+	publish(log: PublishLog): Promise<void>;
+	/** Called instead of `publish` when a prerequisite failed. */
+	discard?(): Promise<void>;
 }
 
-async function publishNativeLeafPackage(tag: string): Promise<void> {
+/** FIFO counting semaphore: at most `limit` sections run at once. */
+function createSemaphore(limit: number): <T>(fn: () => Promise<T>) => Promise<T> {
+	let active = 0;
+	const waiting: Array<() => void> = [];
+	return async fn => {
+		if (active >= limit) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			waiting.push(resolve);
+			await promise;
+		} else {
+			active++;
+		}
+		try {
+			return await fn();
+		} finally {
+			const next = waiting.shift();
+			if (next) next();
+			else active--;
+		}
+	};
+}
+
+function assertAcyclic(jobs: readonly PublishJob[]): void {
+	const byName = new Map(jobs.map(job => [job.name, job]));
+	const state = new Map<string, "visiting" | "done">();
+	const visit = (name: string, chain: string[]): void => {
+		const seen = state.get(name);
+		if (seen === "done") return;
+		if (seen === "visiting") throw new Error(`publish dependency cycle: ${[...chain, name].join(" -> ")}`);
+		state.set(name, "visiting");
+		for (const dep of byName.get(name)?.dependsOn ?? []) if (byName.has(dep)) visit(dep, [...chain, name]);
+		state.set(name, "done");
+	};
+	for (const job of jobs) visit(job.name, []);
+}
+
+/**
+ * Run every job concurrently with at most `concurrency` pack/publish sections
+ * in flight. A job publishes only after each `dependsOn` job published; if a
+ * prerequisite failed, the dependent is discarded and reported failed rather
+ * than published against a version that does not exist. Unrelated siblings of
+ * a failure still run. Waiting on prerequisites holds no slot, so the declared
+ * order does not need to be topological. Each job's output is buffered and
+ * written as one block when it settles. Returns failed job names in input order.
+ */
+export async function runPublishJobs(
+	jobs: readonly PublishJob[],
+	concurrency: number,
+	write: (block: string) => void = block => process.stdout.write(block),
+): Promise<string[]> {
+	assertAcyclic(jobs);
+	const slot = createSemaphore(Math.max(1, concurrency));
+	const settled = new Map(jobs.map(job => [job.name, Promise.withResolvers<boolean>()]));
+	const failed = new Set<PublishJob>();
+	const runJob = async (job: PublishJob): Promise<void> => {
+		const lines: string[] = [];
+		const log: PublishLog = line => lines.push(line);
+		let ok = false;
+		try {
+			const { pack } = job;
+			if (pack) await slot(() => pack(log));
+			const prerequisites = (job.dependsOn ?? []).filter(dep => dep !== job.name && settled.has(dep));
+			const outcomes = await Promise.all(prerequisites.map(dep => settled.get(dep)!.promise));
+			const blocked = prerequisites.filter((_, index) => !outcomes[index]);
+			if (blocked.length > 0) {
+				await job.discard?.();
+				throw new Error(`not published: prerequisite ${blocked.join(", ")} failed`);
+			}
+			await slot(() => job.publish(log));
+			ok = true;
+		} catch (err) {
+			failed.add(job);
+			lines.push(`FAILED ${job.name}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		write(`── ${job.name} ──\n${lines.map(line => `${line}\n`).join("")}`);
+		settled.get(job.name)!.resolve(ok);
+	};
+	await Promise.all(jobs.map(runJob));
+	return jobs.filter(job => failed.has(job)).map(job => job.name);
+}
+
+/** Bounded so concurrent `bun pm pack` prepack builds do not starve the runner. */
+const PUBLISH_CONCURRENCY = 6;
+
+async function publishNativeLeafPackage(tag: string): Promise<string[]> {
 	const pkg = packages.find(candidate => candidate.kind === "native");
 	if (!pkg) throw new Error("No native package configured");
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const coreManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 	if (typeof coreManifest.version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
+	await stageLegalPayloads(pkgDir, coreManifest.license ?? "MIT", !isDryRun);
 	const leaves = await generateNpmPackages({
 		packageDir: pkgDir,
 		dryRun: isDryRun,
@@ -361,43 +607,85 @@ async function publishNativeLeafPackage(tag: string): Promise<void> {
 	});
 	const leaf = leaves[0];
 	if (!leaf) throw new Error(`No native leaf generated for ${tag}`);
-	await publishGeneratedLeafPackage(leaf);
+	const target: PublishTarget = { dir: leaf.dir, name: leaf.manifest.name, version: leaf.manifest.version };
+	return runPublishJobs([publishTargetJob(target, createKeyedMutex())], 1);
 }
 
-async function publishNativePackage(pkg: PublishPackage): Promise<void> {
-	const pkgDir = path.join(repoRoot, pkg.dir);
-	const manifest = await prepareNativeCorePackage(pkgDir, !isDryRun);
-	const name = manifest.name ?? path.basename(pkg.dir);
+async function prepareNativePackage(pkg: PublishPackage): Promise<PackageManifest> {
+	const manifest = await prepareNativeCorePackage(path.join(repoRoot, pkg.dir), !isDryRun);
 	if (isDryRun) {
 		console.log(`DRY RUN native core manifest rewrite (${pkg.dir})`);
 		console.log(
 			JSON.stringify({ optionalDependencies: manifest.optionalDependencies, files: manifest.files }, null, "\t"),
 		);
 	}
-	await packAndPublish(pkgDir, name);
+	return manifest;
 }
 
-async function publishPackage(pkg: PublishPackage): Promise<void> {
-	if (pkg.kind === "native") {
-		await publishNativePackage(pkg);
-		return;
+/** Workspace dependency names a published manifest declares. */
+function workspaceDependencies(manifest: PackageManifest): string[] {
+	const names = new Set<string>();
+	for (const field of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
+		const deps = manifest[field];
+		if (deps && typeof deps === "object" && !Array.isArray(deps)) {
+			for (const name of Object.keys(deps)) names.add(name);
+		}
 	}
-	const pkgDir = path.join(repoRoot, pkg.dir);
-	const manifest = await preparePackage(pkg);
-	const name = manifest.name ?? path.basename(pkg.dir);
-	if (manifest.private) {
-		console.log(`Skipping ${name} (private)`);
-		return;
+	return [...names];
+}
+
+/**
+ * Prepare every package serially in declared order — manifest rewrites change
+ * what later packages' type emits resolve — then pack and publish
+ * concurrently, each package only after the workspace packages it depends on
+ * published. Any prepare failure publishes nothing: an unprepared package's
+ * dependents would otherwise ship against a missing version. Returns the
+ * failed package names/dirs.
+ */
+async function publishWorkspacePackages(): Promise<string[]> {
+	const failed: string[] = [];
+	const prepared: { target: PublishTarget; prepack: boolean; manifest: PackageManifest }[] = [];
+	for (const pkg of packages) {
+		try {
+			const manifest = pkg.kind === "native" ? await prepareNativePackage(pkg) : await preparePackage(pkg);
+			const name = manifest.name ?? path.basename(pkg.dir);
+			const version = manifest.version;
+			if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
+			if (manifest.private) {
+				console.log(`Skipping ${name} (private)`);
+				continue;
+			}
+			prepared.push({
+				target: { dir: path.join(repoRoot, pkg.dir), name, version, packLock: pkg.packLock },
+				prepack: typeof (manifest.scripts as JsonObject | undefined)?.prepack === "string",
+				manifest,
+			});
+		} catch (err) {
+			console.error(`FAILED preparing ${pkg.dir}: ${err instanceof Error ? err.message : String(err)}`);
+			failed.push(pkg.dir);
+		}
 	}
-	await packAndPublish(pkgDir, name);
+	if (failed.length > 0) {
+		console.error("Publishing nothing: every package must prepare before any publishes.");
+		return failed;
+	}
+	const publishing = new Set(prepared.map(({ target }) => target.name));
+	for (const entry of prepared) {
+		entry.target.dependsOn = workspaceDependencies(entry.manifest).filter(name => publishing.has(name));
+	}
+	// Packages with a prepack build (coding-agent's CLI bundle) dominate wall time; start them first.
+	const ordered = prepared.toSorted((a, b) => Number(b.prepack) - Number(a.prepack));
+	const packLocks = createKeyedMutex();
+	return runPublishJobs(
+		ordered.map(({ target }) => publishTargetJob(target, packLocks)),
+		PUBLISH_CONCURRENCY,
+	);
 }
 
 if (import.meta.main) {
-	if (nativeLeafTag) {
-		await publishNativeLeafPackage(nativeLeafTag);
-	} else {
-		for (const pkg of packages) {
-			await publishPackage(pkg);
-		}
+	const failed = nativeLeafTag ? await publishNativeLeafPackage(nativeLeafTag) : await publishWorkspacePackages();
+	if (failed.length > 0) {
+		console.error(`Failed to publish ${failed.length} package(s): ${failed.join(", ")}`);
+		process.exit(1);
 	}
 }

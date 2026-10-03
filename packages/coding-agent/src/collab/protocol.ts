@@ -7,14 +7,13 @@
  * control messages that carry no session data.
  */
 
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type {
 	BusChannel,
 	CollabUiRequest,
 	GuestFrame,
 	ParsedCollabLink,
 	Participant,
-	SessionState,
 	AgentSnapshot as WireAgentSnapshot,
 } from "@oh-my-pi/pi-wire";
 import {
@@ -24,7 +23,7 @@ import {
 	ROOM_KEY_BYTES,
 	WRITE_TOKEN_BYTES,
 } from "@oh-my-pi/pi-wire";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CollabSessionState } from "@oh-my-pi/pi-tui/status-line/types";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 
@@ -45,16 +44,7 @@ export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
 export type CollabParticipant = Participant;
 export type AgentSnapshot = WireAgentSnapshot;
 
-/** Debounced footer snapshot broadcast by the host. */
-export type CollabSessionState = SessionState & {
-	/**
-	 * Host model (full catalog object). Guests apply it to their replica
-	 * agent state so model display and context-window math are native.
-	 */
-	model?: Model;
-	/** Host status-line context numbers (guest system prompt/tools differ, so local estimates drift). */
-	contextUsage?: ContextUsage;
-};
+export type { CollabSessionState };
 
 /**
  * Encrypted payload frames (inside AES-GCM, JSON). The wire package pins the

@@ -23,7 +23,7 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -74,12 +74,16 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 			setText: (text: string) => {
 				editorText = text;
 			},
+			// The stub skips chip collapsing so assertions read the wire-format text.
+			setCollapsedText: (text: string) => {
+				editorText = text;
+			},
 			getText: () => editorText,
 			imageLinks: undefined as (string | undefined)[] | undefined,
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],
 		},
-		keybindings: { getDisplayString: () => "Alt+Up" },
+		keybindings: { getKeys: () => ["alt+up"] },
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: (text: string) => text.startsWith("/"),
@@ -194,6 +198,10 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		let editorText = opts.draftText ?? "";
 		const editor = {
 			setText: (text: string) => {
+				editorText = text;
+			},
+			// The stub skips chip collapsing so assertions read the wire-format text.
+			setCollapsedText: (text: string) => {
 				editorText = text;
 			},
 			getText: () => editorText,

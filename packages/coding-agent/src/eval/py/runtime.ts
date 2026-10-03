@@ -211,7 +211,14 @@ export function resolveExplicitPythonRuntime(
 			: interpreter.startsWith("~/")
 				? path.join(os.homedir(), interpreter.slice(2))
 				: interpreter;
-	const pythonPath = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+	// Join (rather than resolve) onto an absolute cwd so the result stays anchored to
+	// exactly the cwd given — `path.resolve` would graft the process drive onto a
+	// rooted-but-driveless Windows cwd such as `\work`.
+	const pythonPath = path.isAbsolute(expanded)
+		? expanded
+		: path.isAbsolute(cwd)
+			? path.join(cwd, expanded)
+			: path.resolve(cwd, expanded);
 	const venv = detectExplicitVenv(pythonPath);
 	if (venv) {
 		return { pythonPath, env: applyVenvEnv(baseEnv, venv.venvPath, venv.binDir), venvPath: venv.venvPath };

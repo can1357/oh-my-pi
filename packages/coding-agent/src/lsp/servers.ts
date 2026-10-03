@@ -7,9 +7,9 @@ import {
 	isRustAnalyzerClient,
 	type LspServerStatus,
 	notifySaved,
+	refreshFile,
 	sendNotification,
 	sendRequest,
-	setIdleTimeout,
 	shutdownClientInstance,
 	syncContent,
 	WARMUP_TIMEOUT_MS,
@@ -17,6 +17,7 @@ import {
 import { getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
+import { uriToFile } from "./utils";
 
 /**
  * LSP actions that do not mutate the workspace or language-server state.
@@ -75,7 +76,6 @@ export function discoverStartupLspServers(
  */
 export async function warmupLspServers(cwd: string, options?: LspWarmupOptions): Promise<LspWarmupResult> {
 	const config = loadConfig(cwd);
-	setIdleTimeout(config.idleTimeoutMs);
 	const servers: LspWarmupResult["servers"] = [];
 	const lspServers = getLspServers(config);
 
@@ -191,19 +191,6 @@ export async function notifyFileSaved(
 	throwIfAborted(signal);
 }
 
-// Cache config per cwd to avoid repeated file I/O
-export const configCache = new Map<string, LspConfig>();
-
-export function getConfig(cwd: string): LspConfig {
-	let config = configCache.get(cwd);
-	if (!config) {
-		config = loadConfig(cwd);
-		configCache.set(cwd, config);
-	}
-	setIdleTimeout(config.idleTimeoutMs);
-	return config;
-}
-
 function isCustomLinter(serverConfig: ServerConfig): boolean {
 	return Boolean(serverConfig.createClient);
 }
@@ -255,6 +242,21 @@ export function isMethodNotFoundError(err: unknown): boolean {
 	);
 }
 
+/**
+ * Build the params for the generic `workspace/didChangeConfiguration` reload.
+ *
+ * The handshake in `client.ts` pushes `{ settings: config.settings ?? {} }` right
+ * after `initialized`, so a reload has to echo those same settings back. A bare
+ * `{}` is well-formed LSP, but it means "the configuration is now empty" — the
+ * opposite of a refresh. Servers that key behaviour off their configuration
+ * (formatter options, analysis toggles, per-workspace overrides) silently drop it
+ * and serve the rest of the session on defaults, so `lsp reload` ends up erasing
+ * the configured settings instead of re-applying them (issue #8383).
+ */
+export function reloadConfigurationParams(config: ServerConfig): { settings: Record<string, unknown> } {
+	return { settings: config.settings ?? {} };
+}
+
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
 	// rust-analyzer exposes a real reload request. Only rust-analyzer implements
@@ -278,8 +280,8 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 	// as a request hangs until the tool deadline on servers that route it to
 	// the notification handler and never respond.
 	try {
-		await sendNotification(client, "workspace/didChangeConfiguration", { settings: {} }, signal);
-		return `Reloaded ${serverName}`;
+		const params = reloadConfigurationParams(client.config);
+		await sendNotification(client, "workspace/didChangeConfiguration", params, signal);
 	} catch {
 		throwIfAborted(signal);
 		// The reload notification could not be delivered — the connection is
@@ -299,4 +301,6 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 		}
 		return `Restarted ${serverName}`;
 	}
+	await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), signal)));
+	return `Reloaded ${serverName}`;
 }

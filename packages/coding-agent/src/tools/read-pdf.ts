@@ -3,7 +3,8 @@ import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../sdk";
 import type { BrowserHandle } from "./browser/registry";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const PDF_IMAGE_MEMBER_RE = /^(.*\.pdf):(.*)$/i;
 const PDF_PAGE_MEMBER_RE = /^(?:p|page[-_]?)(\d+)(?:[-_].*)?\.png$/i;
@@ -73,7 +74,7 @@ export function splitPdfImageReadPath(readPath: string): PdfImageReadTarget | nu
 	return { pdfPath, member, page };
 }
 
-/** Render one PDF page through the browser tool's shared headless Chromium. */
+/** Render one PDF page through the browser capability's shared headless Chromium. */
 export async function renderPdfPageScreenshot(
 	session: ToolSession,
 	absolutePdfPath: string,
@@ -84,6 +85,10 @@ export async function renderPdfPageScreenshot(
 		import("./browser/registry"),
 		import("./browser/tab-supervisor"),
 	]);
+	// Capture the render deadline start so `acquireTab` counts its
+	// worker-init time against this same budget (browser acquisition above
+	// already consumed part of it) instead of restarting the clock.
+	const deadlineStart = performance.now();
 	const timeoutSignal = AbortSignal.timeout(PDF_RENDER_TIMEOUT_MS);
 	const renderSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const tabName = `read-pdf-${Bun.randomUUIDv7()}`;
@@ -105,6 +110,7 @@ export async function renderPdfPageScreenshot(
 				url: url.href,
 				waitUntil: "load",
 				timeoutMs: PDF_RENDER_TIMEOUT_MS,
+				deadlineStartMs: deadlineStart,
 				signal: renderSignal,
 				ownerSessionId: session.getSessionId?.() ?? undefined,
 			}),

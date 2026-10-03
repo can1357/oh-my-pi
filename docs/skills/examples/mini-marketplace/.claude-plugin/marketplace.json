@@ -3,7 +3,9 @@
   "owner": {
     "name": "example"
   },
-  "description": "Minimal marketplace demonstrating the catalog format",
+  "metadata": {
+    "description": "Minimal marketplace demonstrating the catalog format"
+  },
   "plugins": [
     {
       "name": "my-plugin",

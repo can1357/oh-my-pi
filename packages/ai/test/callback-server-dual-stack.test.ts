@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/registry/oauth/callback-server";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 
@@ -114,6 +115,56 @@ describe("OAuthCallbackFlow loopback address families", () => {
 		await expect(flow.login()).rejects.toThrow();
 		// An unbindable `::1` is not a conflict: the IPv4 listener is the only
 		// reachable endpoint on such a host, so the flow must not fall back.
+		expect(flow.lastRedirectUri).toBe(`http://localhost:${port}/callback`);
+		expect(progress.some(msg => msg.includes("unavailable"))).toBe(false);
+	});
+
+	it("keeps a pinned port when IPv6 is disabled and the companion bind reports a misleading in-use error", async () => {
+		// Reproduce a host with IPv6 disabled at the kernel (ipv6.disable=1): the
+		// loopback interface exposes only 127.0.0.1, no ::1 (issue #8814).
+		vi.spyOn(os, "networkInterfaces").mockReturnValue({
+			lo: [
+				{
+					address: "127.0.0.1",
+					netmask: "255.0.0.0",
+					family: "IPv4",
+					mac: "00:00:00:00:00:00",
+					internal: true,
+					cidr: "127.0.0.1/8",
+				},
+			],
+		});
+		// Bun surfaces the IPv6-unavailable companion failure with the same
+		// generic "Is port X in use?" message it uses for a real collision
+		// (oven-sh/bun#7187), so the in-use message regex cannot tell them apart.
+		const realServe = Bun.serve.bind(Bun) as typeof Bun.serve;
+		vi.spyOn(Bun, "serve").mockImplementation(((options: { hostname?: string; port?: number }) => {
+			if (options.hostname === "::1") {
+				throw Object.assign(new Error(`Failed to start server. Is port ${options.port} in use?`), {
+					code: "EADDRINUSE",
+				});
+			}
+			return realServe(options as Parameters<typeof Bun.serve>[0]);
+		}) as typeof Bun.serve);
+
+		const port = freeLoopbackPort();
+		const progress: string[] = [];
+		const cancel = new AbortController();
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: () => cancel.abort("advertised"),
+				onProgress: msg => progress.push(msg),
+				signal: cancel.signal,
+			},
+			// Pinned redirect URI reproduces the Codex flow: a misclassified
+			// companion failure would abort with a bogus port-in-use error here.
+			{ preferredPort: port, redirectUri: `http://localhost:${port}/callback` },
+		);
+
+		await expect(flow.login()).rejects.toThrow();
+		// The IPv4 listener is the only reachable endpoint, so the flow must serve
+		// it and advertise the pinned URI rather than misread the companion
+		// failure as a collision and throw a ConfigurationError before onAuth.
 		expect(flow.lastRedirectUri).toBe(`http://localhost:${port}/callback`);
 		expect(progress.some(msg => msg.includes("unavailable"))).toBe(false);
 	});

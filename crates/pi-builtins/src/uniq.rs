@@ -4,7 +4,6 @@
 
 use std::{
 	ffi::OsString,
-	fs::File,
 	io::{BufRead, BufReader, BufWriter, Write},
 	num::IntErrorKind,
 	path::PathBuf,
@@ -12,13 +11,14 @@ use std::{
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
+use pi_vfs::File;
 use uucore::{
 	display::Quotable,
 	parser::shortcut_value_parser::ShortcutValueParser,
 	posix::{OBSOLETE, posix_version},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, StreamWriter, Utility, format_usage, matches_parser, strip_errno, util};
 
 mod options {
 	pub static ALL_REPEATED: &str = "all-repeated";
@@ -69,11 +69,7 @@ struct LineMeta {
 type PortResult<T> = Result<T, String>;
 
 fn io_error(context: &str, error: std::io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(pos) = message.find(" (os error ") {
-		message.truncate(pos);
-	}
-	format!("{context}: {message}")
+	format!("{context}: {}", strip_errno(&error))
 }
 
 macro_rules! write_line_terminator {
@@ -821,7 +817,7 @@ fn run_uniq(matches: &ArgMatches, host: &mut Host) -> PortResult<()> {
 	let input_file = input_path
 		.as_ref()
 		.map(|path| {
-			File::open(path).map_err(|error| {
+			host.fs().open(path).map_err(|error| {
 				io_error(
 					&format!(
 						"Could not open {}",
@@ -835,7 +831,7 @@ fn run_uniq(matches: &ArgMatches, host: &mut Host) -> PortResult<()> {
 	let output_file = output_path
 		.as_ref()
 		.map(|path| {
-			File::create(path).map_err(|error| {
+			host.fs().create(path).map_err(|error| {
 				io_error(
 					&format!(
 						"Could not open {}",
@@ -847,18 +843,33 @@ fn run_uniq(matches: &ArgMatches, host: &mut Host) -> PortResult<()> {
 		})
 		.transpose()?;
 
+	enum Output {
+		File(BufWriter<File>),
+		Stdout(StreamWriter),
+	}
+
+	// Writer first: `stdout_writer` method-borrows `host`, which must not
+	// overlap the `&mut host.stdin` held by the reader.
+	let output = match output_file {
+		Some(file) => Output::File(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)),
+		None => Output::Stdout(host.stdout_writer()),
+	};
 	let reader: Box<dyn BufRead + '_> = match input_file {
 		Some(file) => Box::new(BufReader::new(file)),
 		None => Box::new(BufReader::new(&mut host.stdin)),
 	};
-	let writer: Box<dyn Write + '_> = match output_file {
-		Some(file) => Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)),
-		None => Box::new(BufWriter::with_capacity(
-			OUTPUT_BUFFER_CAPACITY,
-			&mut host.stdout,
-		)),
-	};
-	uniq.write_uniq(reader, writer)
+	match output {
+		Output::File(mut writer) => {
+			uniq.write_uniq(reader, &mut writer)?;
+			// Close explicitly: a provider may only commit the data on close,
+			// and dropping the handle would lose that error.
+			let file = writer
+				.into_inner()
+				.map_err(|error| io_error("write error", error.into_error()))?;
+			file.close().map_err(|error| io_error("write error", error))
+		},
+		Output::Stdout(writer) => uniq.write_uniq(reader, writer),
+	}
 }
 
 fn operand_path(host: &Host, operand: Option<&std::ffi::OsStr>) -> Option<PathBuf> {

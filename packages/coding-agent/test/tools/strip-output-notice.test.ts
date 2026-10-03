@@ -8,7 +8,9 @@
  * string twice — once from the body content, once as the styled warning line.
  */
 import { describe, expect, it } from "bun:test";
-import { formatOutputNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { type OutputMeta, stripGeneratedOutputNotice, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 const truncation: OutputMeta = {
 	truncation: {
@@ -83,10 +85,6 @@ describe("stripOutputNotice", () => {
 		expect(stripOutputNotice(combined, truncation).trimEnd()).toBe(body);
 	});
 
-	it("returns input unchanged when meta is undefined", () => {
-		expect(stripOutputNotice("plain text", undefined)).toBe("plain text");
-	});
-
 	it("returns input unchanged when meta has no notice-emitting fields", () => {
 		// e.g. meta carries only `source` info; formatOutputNotice yields "".
 		const sourceOnly: OutputMeta = { source: { type: "path", value: "/tmp/x" } };
@@ -102,11 +100,50 @@ describe("stripOutputNotice", () => {
 		expect(stripOutputNotice(streaming, truncation)).toBe(streaming);
 	});
 
+	it("strips result-limit notices without metadata, with or without retry advice", () => {
+		const atCap: OutputMeta = { limits: { resultLimit: { reached: 200 } } };
+		const combined: OutputMeta = {
+			limits: {
+				resultLimit: { reached: 100, suggestion: 200 },
+				columnTruncated: { maxColumn: 512, unit: "chars" },
+			},
+		};
+		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(atCap)}`)).toBe("body");
+		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(combined)}`)).toBe("body");
+	});
+
 	it("only strips the trailing occurrence, not a coincidental earlier match", () => {
 		const noticeText = formatOutputNotice(truncation);
 		// The same notice text appearing mid-body (unlikely but possible if the
 		// command literally printed it) must be preserved when not at the tail.
 		const body = `prefix${noticeText} middle suffix`;
 		expect(stripOutputNotice(body, truncation)).toBe(body);
+	});
+
+	it("formats single-line byte windows without impossible line counts", () => {
+		const meta = outputMeta()
+			.truncation(
+				{
+					content: "head\n[…100B elided…]\ntail",
+					truncated: true,
+					truncatedBy: "middle",
+					totalLines: 1,
+					totalBytes: 200,
+					outputLines: 3,
+					outputBytes: 100,
+					elidedBytes: 100,
+					elidedLines: 0,
+					headLines: 1,
+					tailLines: 1,
+					partialByteWindows: true,
+				},
+				{ direction: "middle" },
+			)
+			.get();
+
+		const notice = formatOutputNotice(meta);
+
+		expect(notice).toContain("Showing head and tail bytes of 1 line");
+		expect(notice).not.toContain("Showing 3 of 1 lines");
 	});
 });

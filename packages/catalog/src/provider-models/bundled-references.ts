@@ -1,3 +1,4 @@
+import { isBareIdReferenceProvider } from "../compat/behavior";
 import { isZeroCostXaiOAuthReference } from "../identity/reference";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
@@ -9,8 +10,18 @@ import type { Api, Model, ModelSpec } from "../types";
  * manager, which rebuilds via `buildModel`.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { compat: _compat, compatConfig, ...rest } = model;
-	return { ...rest, compat: compatConfig } as ModelSpec<TApi>;
+	const {
+		compat: _compat,
+		compatConfig,
+		supportsComputerUse: _derivedComputerUse,
+		supportsComputerUseConfig,
+		...rest
+	} = model;
+	return {
+		...rest,
+		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
+		compat: compatConfig,
+	} as ModelSpec<TApi>;
 }
 
 export function createBundledReferenceMap<TApi extends Api>(
@@ -35,7 +46,9 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			if (isZeroCostXaiOAuthReference(candidate)) {
+			// Gateway-specific metadata must remain provider-local when proxy
+			// discovery resolves references by bare model id.
+			if (!isBareIdReferenceProvider(candidate.provider) || isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);

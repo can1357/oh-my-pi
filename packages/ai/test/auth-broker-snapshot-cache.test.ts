@@ -85,8 +85,10 @@ describe("auth-broker snapshot cache", () => {
 			const snapshot = makeSnapshot(1_000_000);
 			await writeAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, snapshot });
 
-			const stat = await fs.stat(cachePath);
-			expect(stat.mode & 0o777).toBe(0o600);
+			// POSIX permission bits do not exist on Windows (stat reports 0666).
+			if (process.platform !== "win32") {
+				expect((await fs.stat(cachePath)).mode & 0o777).toBe(0o600);
+			}
 			const payload = await fs.readFile(cachePath);
 			expect(payload[CACHE_VERSION_OFFSET]).toBe(CURRENT_CACHE_VERSION);
 			expect(new TextDecoder().decode(payload)).not.toContain("secret-api-key");
@@ -99,6 +101,26 @@ describe("auth-broker snapshot cache", () => {
 				now: () => 1_001_000,
 			});
 			expect(decoded).toEqual(snapshot);
+		});
+	});
+
+	test("sweeps abandoned temp files without touching a concurrent write", async () => {
+		await withCachePath(async cachePath => {
+			const stale = `${cachePath}.1234.stale.tmp`;
+			const active = `${cachePath}.5678.active.tmp`;
+			await Promise.all([fs.writeFile(stale, "stale"), fs.writeFile(active, "active")]);
+			const old = new Date(Date.now() - 2 * 60 * 60_000);
+			await fs.utimes(stale, old, old);
+
+			await writeAuthBrokerSnapshotCache({
+				path: cachePath,
+				token: TOKEN,
+				url: URL,
+				snapshot: makeSnapshot(Date.now()),
+			});
+
+			expect(await Bun.file(stale).exists()).toBeFalse();
+			expect(await Bun.file(active).exists()).toBeTrue();
 		});
 	});
 

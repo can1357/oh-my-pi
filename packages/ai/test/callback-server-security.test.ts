@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/registry/oauth/callback-server";
 import type { OAuthAuthInfo, OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 
@@ -14,6 +15,21 @@ class CallbackProbeFlow extends OAuthCallbackFlow {
 		return { access: code, refresh: "refresh", expires: Date.now() + 60_000 };
 	}
 }
+
+/**
+ * Whether this host can bind the IPv6 loopback at all. Probed with `Bun.serve`
+ * rather than the flow's own `os.networkInterfaces()` check, so a broken
+ * production probe fails loudly instead of skipping into a false green (same
+ * guard as `callback-server-dual-stack.test.ts`).
+ */
+const ipv6Loopback = (() => {
+	try {
+		Bun.serve({ hostname: "::1", port: 0, fetch: () => new Response("probe") }).stop(true);
+		return true;
+	} catch {
+		return false;
+	}
+})();
 
 async function startFlow(): Promise<{
 	info: OAuthAuthInfo;
@@ -33,6 +49,17 @@ async function startFlow(): Promise<{
 	void login.catch(() => undefined);
 	const info = await authFired.promise;
 	return { info, abort, login };
+}
+
+/** Record every hostname the flow hands to `Bun.serve` while still binding for real. */
+function recordBoundHostnames(): (string | undefined)[] {
+	const serve = Bun.serve;
+	const hostnames: (string | undefined)[] = [];
+	vi.spyOn(Bun, "serve").mockImplementation(options => {
+		hostnames.push(options.hostname);
+		return serve(options);
+	});
+	return hostnames;
 }
 
 afterEach(() => {
@@ -87,23 +114,59 @@ describe("OAuthCallbackFlow callback security", () => {
 	});
 
 	it("binds localhost callback URLs to the loopback interfaces only", async () => {
-		const serve = Bun.serve;
-		const hostnames: (string | undefined)[] = [];
-		vi.spyOn(Bun, "serve").mockImplementation(options => {
-			hostnames.push(options.hostname);
-			return serve(options);
-		});
+		const hostnames = recordBoundHostnames();
 
 		const { abort, login } = await startFlow();
 		try {
 			// `localhost` resolves to both loopback families, so the flow binds one
-			// literal per family: IPv4 first (it resolves the port), then the IPv6
-			// companion that keeps a wildcard-bound dev server from receiving the
-			// authorization code. Never the `localhost` name itself, and never a
-			// routable interface.
+			// literal per family: IPv4 first (it resolves the port), then — on hosts
+			// that have an IPv6 loopback — the `::1` companion. Never the
+			// `localhost` name itself, and never a routable interface.
 			expect(hostnames[0]).toBe("127.0.0.1");
-			expect(hostnames).toContain("::1");
 			expect(hostnames.every(hostname => hostname === "127.0.0.1" || hostname === "::1")).toBe(true);
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it.skipIf(!ipv6Loopback)("binds the ::1 companion when the host has an IPv6 loopback", async () => {
+		const hostnames = recordBoundHostnames();
+
+		const { abort, login } = await startFlow();
+		try {
+			// The IPv6 companion keeps a wildcard-bound dev server (`next dev` on
+			// `*:<port>`) from answering `localhost` traffic that the browser
+			// resolved to `::1` (#8081).
+			expect(hostnames).toContain("::1");
+		} finally {
+			abort.abort("test cleanup");
+			await login.catch(() => undefined);
+		}
+	});
+
+	it("serves IPv4 alone without attempting ::1 when the host has no IPv6 loopback", async () => {
+		// Reproduce an IPv6-disabled kernel (ipv6.disable=1 / disable_ipv6=1): the
+		// loopback interface exposes only 127.0.0.1 (#8814).
+		vi.spyOn(os, "networkInterfaces").mockReturnValue({
+			lo: [
+				{
+					address: "127.0.0.1",
+					netmask: "255.0.0.0",
+					family: "IPv4",
+					mac: "00:00:00:00:00:00",
+					internal: true,
+					cidr: "127.0.0.1/8",
+				},
+			],
+		});
+		const hostnames = recordBoundHostnames();
+
+		const { abort, login } = await startFlow();
+		try {
+			// No `::1` attempt at all: a misleading Bun bind error can then never be
+			// misread as a port collision and tear down the healthy IPv4 listener.
+			expect(hostnames).toEqual(["127.0.0.1"]);
 		} finally {
 			abort.abort("test cleanup");
 			await login.catch(() => undefined);

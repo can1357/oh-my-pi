@@ -168,6 +168,7 @@ fn command() -> Command {
 			Arg::new(ARG_QUERY)
 				.value_name("NAME-OR-NUMBER")
 				.num_args(0..)
+				.allow_hyphen_values(true)
 				.action(ArgAction::Append),
 		)
 }
@@ -189,13 +190,21 @@ fn print_entry(host: &mut Host, name: &str, number: i32) {
 /// Looks up one name or number argument; returns false on failure.
 fn lookup(host: &mut Host, arg: &str) -> bool {
 	if let Ok(number) = arg.parse::<i32>() {
-		// Reverse lookup: first-listed name for the number is canonical.
-		match ERRNOS.iter().find(|(_, value)| *value == number) {
+		// Kernel convention returns errors as negative errno values; resolve
+		// `-2` the same as `2`. Reverse lookup: first-listed name for the
+		// number is canonical.
+		match number
+			.checked_abs()
+			.and_then(|number| ERRNOS.iter().find(|(_, value)| *value == number))
+		{
 			Some((name, value)) => {
 				print_entry(host, name, *value);
 				true
 			},
-			None => false,
+			None => {
+				let _ = writeln!(host.stderr, "errno: unknown errno {arg}");
+				false
+			},
 		}
 	} else if let Some((name, value)) = ERRNOS
 		.iter()
@@ -277,11 +286,44 @@ mod tests {
 	}
 
 	#[test]
-	fn unknown_number_fails_silently() {
+	fn unknown_number_fails_with_stderr() {
+		// Failure mode: unknown numeric lookups exiting 1 with no diagnostic.
 		let (code, stdout, stderr) = run_errno(&["99999"]);
 		assert_eq!(code, 1);
 		assert!(stdout.is_empty());
-		assert!(stderr.is_empty());
+		assert!(stderr.contains("unknown errno 99999"), "stderr: {stderr:?}");
+	}
+
+	#[test]
+	fn negative_number_resolves_by_absolute_value() {
+		// Failure mode: clap rejecting `errno -2` as an unknown option instead
+		// of resolving the kernel-style negative errno.
+		let number = format!("-{}", libc::ENOENT);
+		let (code, stdout, stderr) = run_errno(&[&number]);
+		assert_eq!(code, 0);
+		assert!(stdout.starts_with(&format!("ENOENT {} ", libc::ENOENT)), "stdout: {stdout:?}");
+		assert!(stderr.is_empty(), "stderr: {stderr:?}");
+	}
+
+	#[test]
+	fn unknown_negative_number_fails_with_stderr() {
+		let (code, stdout, stderr) = run_errno(&["-99999"]);
+		assert_eq!(code, 1);
+		assert!(stdout.is_empty());
+		assert!(stderr.contains("unknown errno -99999"), "stderr: {stderr:?}");
+	}
+
+	#[test]
+	fn short_flags_still_win_over_hyphen_operands() {
+		// Failure mode: allow_hyphen_values swallowing `-l` as a query.
+		let (code, stdout, _) = run_errno(&["-l"]);
+		assert_eq!(code, 0);
+		assert!(
+			stdout
+				.lines()
+				.any(|line| line.starts_with(&format!("ENOENT {} ", libc::ENOENT))),
+			"-l no longer lists: {stdout:?}"
+		);
 	}
 
 	#[test]

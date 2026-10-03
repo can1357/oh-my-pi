@@ -2,8 +2,10 @@ import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
+	codexRoutingHint,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
@@ -15,12 +17,12 @@ import {
 	fetchWithRetry,
 	getInstallId,
 	logger,
-	parseStreamingJson,
 	readSseJson,
 	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
@@ -45,6 +47,7 @@ import type {
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -53,6 +56,7 @@ import {
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
+import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
@@ -72,11 +76,31 @@ import {
 	type CodexReasoningContext,
 	type CodexRequestOptions,
 	type InputItem,
+	type ReasoningConfig,
 	type RequestBody,
 	resolveCodexResponsesLite,
+	sanitizeCodexCallId,
 	transformRequestBody,
 } from "./openai-codex/request-transformer";
+import { applyCodexAccessPrograms, dropRejectedCodexAccessPrograms } from "./openai-codex/access-programs";
+import {
+	type CodexAcceptedSteer,
+	type CodexSteerAck,
+	CodexSteerPump,
+	planSteeredRequest,
+	toSteerInputItems,
+} from "./openai-codex/live-steering";
 import { CodexApiError } from "./openai-codex/response-handler";
+import { getCodexAttestationHeader } from "./openai-codex-attestation";
+export { createOpenAICodexCompactionRequestContext } from "./openai-codex-compaction";
+import { getOpenAICodexWebSocketEnvValue, isOpenAICodexWebSocketPreferred } from "./openai-codex-transport";
+export { setCodexAttestationProvider } from "./openai-codex-attestation";
+export type { CodexAttestationProvider } from "./openai-codex-attestation";
+import {
+	getOpenAIEffortControlState,
+	type OpenAIEffortControlState,
+	planStableOpenAIEffort,
+} from "./openai-configuration-update";
 import type {
 	ResponseComputerToolCall,
 	ResponseCustomToolCall,
@@ -135,13 +159,9 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	preferWebsockets?: boolean;
 	serviceTier?: ServiceTier;
 	/**
-	 * Responses Lite transport override; defaults to the model's catalog
-	 * `useResponsesLite` flag (codex-rs `use_responses_lite`). Sends
-	 * `x-openai-internal-codex-responses-lite: true` on HTTP requests and on the
-	 * WebSocket upgrade (the marker is connection-scoped there, so lite and
-	 * non-lite turns never share a pooled socket), moves instructions/tools
-	 * into input items, strips image detail, and disables parallel tool
-	 * calling — mirroring codex-rs.
+	 * Responses Lite transport opt-in. Normal inference defaults to full
+	 * Responses; provider-native compaction explicitly follows the model's
+	 * `useResponsesLite` flag.
 	 */
 	responsesLite?: boolean;
 	/**
@@ -206,23 +226,6 @@ export interface OpenAICodexCompactionResetOptions {
 	compaction: CodexCompactionContext;
 }
 
-/** Add the selected wire implementation to one logical compaction context. */
-export function createOpenAICodexCompactionRequestContext(options: {
-	context: CodexCompactionContext | undefined;
-	implementation: "responses" | "responses_compaction_v2" | "responses_compact";
-}): CodexCompactionRequestContext | undefined {
-	const context = options.context;
-	if (!context) return undefined;
-	return {
-		operationId: context.operationId,
-		trigger: context.trigger,
-		reason: context.reason,
-		implementation: options.implementation,
-		phase: context.phase,
-		strategy: context.strategy,
-	};
-}
-
 const CODEX_DEBUG = $flag("PI_CODEX_DEBUG");
 const CODEX_MAX_RETRIES = 5;
 const CODEX_RETRY_DELAY_MS = 500;
@@ -275,41 +278,6 @@ const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
 
-/**
- * Host integration boundary for just-in-time `x-oai-attestation` header
- * values (codex-rs `AttestationProvider`). Resolves to the full header value
- * — an `{"v":1,"s":0,"t":"v1.…"}` envelope — or `undefined` when no
- * attestation should be sent.
- */
-export type CodexAttestationProvider = () => Promise<string | undefined>;
-
-let codexAttestationProvider: CodexAttestationProvider | undefined;
-
-/**
- * Install the process-wide attestation hook consulted for upstream Codex
- * requests (codex-rs stores its provider on `ModelClient` construction). The
- * hook is only consulted for ChatGPT-OAuth credentials and runs just-in-time
- * per request; WebSocket handshakes resolve once per connection because the
- * header is connection-scoped there.
- */
-export function setCodexAttestationProvider(provider: CodexAttestationProvider | undefined): void {
-	codexAttestationProvider = provider;
-}
-
-/**
- * Resolve the `x-oai-attestation` header value for one upstream request.
- * Gated on ChatGPT-OAuth credentials (a Codex JWT carries `chatgpt_account_id`;
- * codex-rs gates on `auth.is_chatgpt_auth()`). A throwing hook degrades to no
- * header rather than failing the request.
- */
-export async function getCodexAttestationHeader(accountId: string | undefined): Promise<string | undefined> {
-	if (!accountId || !codexAttestationProvider) return undefined;
-	try {
-		return await codexAttestationProvider();
-	} catch {
-		return undefined;
-	}
-}
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 /** WebSocket frames cannot carry per-request HTTP headers; codex-rs mirrors the lite marker into `client_metadata` under this key. */
@@ -450,20 +418,25 @@ export interface OpenAICodexWebSocketDebugStats {
 }
 
 /**
- * Per-session transport state shared by BOTH transports: websocket turn
- * chaining (`previous_response_id` baseline), turn-state/models-etag headers,
- * websocket connection pooling, and debug stats. The name is historical — SSE-only
- * sessions use it too.
+ * Per-session transport state shared by both transports: WebSocket turn
+ * chaining, models-etag headers, connection pooling, and debug stats. The name
+ * is historical — SSE-only sessions use it too.
  */
 type CodexWebSocketSessionState = {
 	disableWebsocket: boolean;
 	lastRequest?: RequestBody;
+	/** Last completed response; an in-progress response cannot replace the retry baseline. */
 	lastResponseId?: string;
 	lastResponseItems?: InputItem[];
 	canAppend: boolean;
-	turnState?: string;
 	modelsEtag?: string;
 	connection?: CodexWebSocketConnection;
+	/**
+	 * Steering the server accepted on `connection` for `lastResponseId`. The
+	 * next request reads the server's automatic successor or sends only the
+	 * pending tool output; see {@link planSteeredRequest}.
+	 */
+	acceptedSteering?: { connection: CodexWebSocketConnection; steers: CodexAcceptedSteer[] };
 	lastTransport?: CodexTransport;
 	fallbackCount: number;
 	lastFallbackAt?: number;
@@ -471,10 +444,16 @@ type CodexWebSocketSessionState = {
 	stats: OpenAICodexWebSocketDebugStats;
 };
 
+interface CodexTurnStateCell {
+	value?: string;
+}
+
 interface CodexProviderSessionState extends ProviderSessionState {
 	webSocketSessions: Map<string, CodexWebSocketSessionState>;
 	webSocketPublicToPrivate: Map<string, string>;
 	metadataSessions: Map<string, CodexMetadataSessionState>;
+	/** `configuration_update` effort baselines, keyed by model + session. */
+	effortControls: Map<string, OpenAIEffortControlState<ReasoningConfig["effort"]>>;
 }
 
 /** Request classification encoded in Codex turn metadata. */
@@ -488,6 +467,7 @@ interface CodexMetadataSessionState {
 	turnStartedAtUnixMs?: number;
 	compactionOperationId?: string;
 	reuseTurnForNextRequest?: boolean;
+	turnStates: Map<string, CodexTurnStateCell>;
 }
 
 interface CodexCompatibilityIdentity {
@@ -495,12 +475,15 @@ interface CodexCompatibilityIdentity {
 	sessionId: string;
 	threadId: string;
 	windowId: string;
-	turnMetadataJson?: string;
+	/** Header projection: identity fields only, never the Code Mode snapshot. */
+	turnMetadataHeaderJson?: string;
 }
 
 interface CodexRequestMetadata extends CodexCompatibilityIdentity {
 	turnId: string;
+	/** Canonical body projection, including `tool_namespaces_info` when present. */
 	turnMetadataJson: string;
+	turnMetadataHeaderJson: string;
 	clientMetadata: Record<string, string>;
 }
 
@@ -517,10 +500,11 @@ const CODEX_RESERVED_METADATA_KEYS: Record<string, true> = {
 	[OPENAI_HEADERS.SUBAGENT]: true,
 	request_kind: true,
 	compaction: true,
-	// codex-rs reserves `code_mode_tool_names` for its Responses Lite Code Mode
-	// mapping (#35271); OMP never emits it, but callers must not smuggle it in
-	// as an extra either.
+	// codex-rs retired `code_mode_tool_names` in favor of `tool_namespaces_info`
+	// for its Responses Lite Code Mode mapping; both stay reserved so callers
+	// cannot smuggle them in as extras.
 	code_mode_tool_names: true,
+	tool_namespaces_info: true,
 	turn_started_at_unix_ms: true,
 	forked_from_thread_id: true,
 	parent_thread_id: true,
@@ -536,6 +520,7 @@ function createCodexMetadataSessionState(sessionId: string): CodexMetadataSessio
 		sessionId,
 		threadId: crypto.randomUUID(),
 		windowId: crypto.randomUUID(),
+		turnStates: new Map(),
 	};
 }
 
@@ -549,6 +534,33 @@ function getOrCreateCodexMetadataSessionState(
 	const created = createCodexMetadataSessionState(sessionId);
 	providerState.metadataSessions.set(sessionId, created);
 	return created;
+}
+
+function getOrCreateCodexTurnState(
+	session: CodexMetadataSessionState,
+	compatibilityKey: string | undefined,
+): CodexTurnStateCell {
+	if (!compatibilityKey) return {};
+	const existing = session.turnStates.get(compatibilityKey);
+	if (existing) return existing;
+	const created: CodexTurnStateCell = {};
+	session.turnStates.set(compatibilityKey, created);
+	return created;
+}
+
+/**
+ * Drop every compatibility-scoped sticky-routing token when a fresh logical
+ * turn begins, mirroring codex-rs's per-turn `OnceLock`. Standalone compaction
+ * owns a throwaway cell, so it never disturbs the live turn's tokens. Runs on
+ * every entry path that opens a turn — the normal stream (`createCodexRequestContext`)
+ * and the raw compaction routes (`createOpenAICodexCompatibilityMetadata`).
+ */
+function clearCodexTurnStatesForNewTurn(
+	session: CodexMetadataSessionState,
+	startNewTurn: boolean,
+	compaction: CodexCompactionRequestContext | undefined,
+): void {
+	if (startNewTurn && compaction?.phase !== "standalone_turn") session.turnStates.clear();
 }
 
 function createCodexCompatibilityIdentity(session: CodexMetadataSessionState): CodexCompatibilityIdentity {
@@ -598,6 +610,7 @@ function createCodexRequestMetadata(
 		clientMetadata?: Readonly<Record<string, string>>;
 		parentTurnId?: string;
 		compaction?: CodexCompactionRequestContext;
+		toolNamespacesInfo?: unknown;
 	},
 ): CodexRequestMetadata {
 	if (options.startNewTurn || !session.turnId) {
@@ -637,7 +650,17 @@ function createCodexRequestMetadata(
 		turnMetadata.turn_started_at_unix_ms = session.turnStartedAtUnixMs;
 	}
 	for (const key in extra) turnMetadata[key] = extra[key];
-	const turnMetadataJson = toAsciiJsonString(turnMetadata);
+	// The `x-codex-turn-metadata` header is capped at 100KB by the Codex
+	// backend, while `tool_namespaces_info` grows with the session's tool count
+	// (409 tools ~ 100KB on its own). The body's `client_metadata` is the
+	// canonical envelope, so the snapshot rides there only and the header keeps
+	// the fixed-size identity projection.
+	const turnMetadataHeaderJson = toAsciiJsonString(turnMetadata);
+	let turnMetadataJson = turnMetadataHeaderJson;
+	if (options.toolNamespacesInfo !== undefined) {
+		turnMetadata.tool_namespaces_info = options.toolNamespacesInfo;
+		turnMetadataJson = toAsciiJsonString(turnMetadata);
+	}
 	const clientMetadata: Record<string, string> = {
 		[OPENAI_HEADERS.INSTALLATION_ID]: identity.installationId,
 		session_id: identity.sessionId,
@@ -653,6 +676,7 @@ function createCodexRequestMetadata(
 		...identity,
 		turnId: session.turnId,
 		turnMetadataJson,
+		turnMetadataHeaderJson,
 		clientMetadata,
 	};
 }
@@ -661,8 +685,8 @@ function applyCodexCompatibilityHeaders(headers: Headers, metadata: CodexCompati
 	headers.set(OPENAI_HEADERS.SCOPED_SESSION_ID, metadata.sessionId);
 	headers.set(OPENAI_HEADERS.THREAD_ID, metadata.threadId);
 	headers.set(OPENAI_HEADERS.WINDOW_ID, metadata.windowId);
-	if (metadata.turnMetadataJson) {
-		headers.set(OPENAI_HEADERS.TURN_METADATA, metadata.turnMetadataJson);
+	if (metadata.turnMetadataHeaderJson) {
+		headers.set(OPENAI_HEADERS.TURN_METADATA, metadata.turnMetadataHeaderJson);
 	} else {
 		headers.delete(OPENAI_HEADERS.TURN_METADATA);
 	}
@@ -684,6 +708,7 @@ export function createOpenAICodexCompatibilityMetadata(
 		options.compaction,
 		options.startNewTurn,
 	);
+	clearCodexTurnStatesForNewTurn(session, startNewTurn, options.compaction);
 	const metadata = createCodexRequestMetadata(session, options.requestKind, {
 		startNewTurn,
 		turnStartedAtUnixMs: options.turnStartedAtUnixMs ?? (startNewTurn || !session.turnId ? Date.now() : undefined),
@@ -711,7 +736,6 @@ export function resetOpenAICodexHistoryAfterCompaction(options: OpenAICodexCompa
 	if (!isCodexProviderSessionState(providerState)) return;
 	for (const websocketState of providerState.webSocketSessions.values()) {
 		resetCodexWebSocketAppendState(websocketState);
-		if (options.compaction.phase !== "mid_turn") websocketState.turnState = undefined;
 	}
 	const sessionId = normalizeOpenAIPromptCacheKey(options.sessionId);
 	if (!sessionId) return;
@@ -733,6 +757,7 @@ interface CodexRequestContext {
 	providerSessionState?: CodexProviderSessionState;
 	isolatedTransportState?: CodexProviderSessionState;
 	websocketState?: CodexWebSocketSessionState;
+	turnState: CodexTurnStateCell;
 	responsesLite: boolean;
 	requestMetadata?: CodexRequestMetadata;
 	transformedBody: RequestBody;
@@ -755,6 +780,7 @@ interface CodexOpenItem {
 	contentIndex: number;
 	itemId?: string;
 	outputIndex?: number;
+	nativeOutputItem?: Record<string, unknown>;
 }
 
 class CodexStreamRuntime {
@@ -784,6 +810,7 @@ class CodexStreamRuntime {
 	currentItem: CodexEventItem | null = null;
 	currentBlock: CodexOutputBlock | null = null;
 	nativeOutputItems: Array<Record<string, unknown>> = [];
+	nativeOutputEntries: CodexOpenItem[] = [];
 	/** Sequential-cutoff summary sections/emitted text, global to the response (indices span reasoning items). */
 	cutoffSummaries: SequentialCutoffSummaryState = createSequentialCutoffSummaryState();
 	/** Summary deltas buffered while waiting to see whether atomic `.done` events arrive. */
@@ -820,8 +847,21 @@ class CodexStreamRuntime {
 		this.currentItem = null;
 		this.currentBlock = null;
 		this.nativeOutputItems.length = 0;
+		this.nativeOutputEntries.length = 0;
 		this.pendingSummaryDeltas.clear();
 		this.cutoffSummaries = createSequentialCutoffSummaryState();
+	}
+
+	finalizeNativeOutputItems(): Array<Record<string, unknown>> {
+		if (this.nativeOutputEntries.length === 0) return this.nativeOutputItems;
+		const ordered: Array<Record<string, unknown>> = [];
+		for (const entry of this.nativeOutputEntries) {
+			if (entry.nativeOutputItem) ordered.push(entry.nativeOutputItem);
+		}
+		ordered.push(...this.nativeOutputItems);
+		this.nativeOutputEntries.length = 0;
+		this.nativeOutputItems = ordered;
+		return ordered;
 	}
 
 	/**
@@ -970,14 +1010,6 @@ class CodexStreamRuntime {
 		const input = (rawEvent as { input?: string }).input;
 		if (typeof input === "string") finalizeCustomToolCallInputDone(entry.block, input);
 	}
-
-	handleResponseCreated(rawEvent: Record<string, unknown>): void {
-		const response = (rawEvent as { response?: { id?: string } }).response;
-		const state = this.websocketState;
-		if (state && this.transport === "websocket" && typeof response?.id === "string" && response.id.length > 0) {
-			state.lastResponseId = response.id;
-		}
-	}
 }
 
 interface CodexWhitespaceToolCallArgumentsDeltaState {
@@ -998,6 +1030,7 @@ interface CodexStreamFailureContext {
 	output: AssistantMessage;
 	options: OpenAICodexResponsesOptions | undefined;
 	requestContext: CodexRequestContext;
+	runtime?: CodexStreamRuntime;
 	startTime: number;
 	firstTokenTime?: number;
 }
@@ -1011,6 +1044,7 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 		webSocketSessions: new Map(),
 		webSocketPublicToPrivate: new Map(),
 		metadataSessions: new Map(),
+		effortControls: new Map(),
 		close: () => {
 			for (const session of state.webSocketSessions.values()) {
 				session.connection?.close("session_disposed");
@@ -1018,6 +1052,7 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 			state.webSocketSessions.clear();
 			state.webSocketPublicToPrivate.clear();
 			state.metadataSessions.clear();
+			state.effortControls.clear();
 		},
 	};
 	return state;
@@ -1031,7 +1066,9 @@ function isCodexProviderSessionState(state: ProviderSessionState | undefined): s
 		"webSocketPublicToPrivate" in state &&
 		state.webSocketPublicToPrivate instanceof Map &&
 		"metadataSessions" in state &&
-		state.metadataSessions instanceof Map
+		state.metadataSessions instanceof Map &&
+		"effortControls" in state &&
+		state.effortControls instanceof Map
 	);
 }
 
@@ -1095,17 +1132,18 @@ function toCodexHeaders(value: unknown): Headers | undefined {
 }
 
 function updateCodexSessionMetadataFromHeaders(
+	turnState: CodexTurnStateCell | undefined,
 	state: CodexWebSocketSessionState | undefined,
 	headers: Headers | Record<string, string> | null | undefined,
 ): void {
-	if (!state || !headers) return;
+	if ((!turnState && !state) || !headers) return;
 	const resolvedHeaders = headers instanceof Headers ? headers : new Headers(headers);
-	const turnState = resolvedHeaders.get(X_CODEX_TURN_STATE_HEADER);
-	if (turnState && turnState.length > 0) {
-		state.turnState = turnState;
+	const responseTurnState = resolvedHeaders.get(X_CODEX_TURN_STATE_HEADER);
+	if (turnState && turnState.value === undefined && responseTurnState && responseTurnState.length > 0) {
+		turnState.value = responseTurnState;
 	}
 	const modelsEtag = resolvedHeaders.get(X_MODELS_ETAG_HEADER);
-	if (modelsEtag && modelsEtag.length > 0) {
+	if (state && modelsEtag && modelsEtag.length > 0) {
 		state.modelsEtag = modelsEtag;
 	}
 }
@@ -1285,37 +1323,29 @@ function unrollCodexComputerToolResult(message: ToolResultMessage): ToolResultMe
 }
 
 function getCodexServiceTierCostMultiplier(
-	model: Pick<Model<"openai-codex-responses">, "id">,
+	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	serviceTier: ServiceTier | "default" | undefined,
 ): number {
-	switch (serviceTier) {
-		case "flex":
-			return 0.5;
-		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
-		default:
-			return 1;
-	}
+	// `ultrafast` has no published price (API preview, Codex credits), so it is
+	// shown at 1x rather than an invented multiplier.
+	if (serviceTier !== "flex" && serviceTier !== "priority") return 1;
+	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
 
-function resolveCodexCostServiceTier(res: unknown, req?: unknown): ServiceTier | "default" | undefined {
-	switch (res) {
-		case "flex":
-			return "flex";
-		case "priority":
-			return "priority";
-		default:
-			if (req === "flex" || req === "priority") {
-				return req;
-			}
-			return "default";
-	}
+/**
+ * The tier a Codex response was billed at. The response echo is authoritative
+ * whenever it reports a tier (the backend may serve a requested priority/flex
+ * turn as `default`); the requested tier is used only when the echo is absent.
+ */
+function resolveCodexCostServiceTier(res: ServiceTier | undefined, req?: unknown): ServiceTier | "default" | undefined {
+	const served = res ?? req;
+	return served === "flex" || served === "priority" ? served : "default";
 }
 
 function applyCodexServiceTierPricing(
-	model: Pick<Model<"openai-codex-responses">, "id">,
+	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	usage: AssistantMessage["usage"],
-	resTier: unknown,
+	resTier: ServiceTier | undefined,
 	reqTier: unknown,
 ): void {
 	const resolvedTier = resolveCodexCostServiceTier(resTier, reqTier);
@@ -1390,12 +1420,13 @@ function createCodexRequestContext(
 	}
 
 	const accountId = getCodexAccountId(apiKey);
+	applyCodexAccessPrograms(transformedBody, model, accountId);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
-	const requestHeaders = { ...(model.headers ?? {}), ...(options?.headers ?? {}) };
+	const requestHeaders = { ...model.headers, ...options?.headers };
 	const rawRequestDump: RawHttpRequestDump = {
 		provider: model.provider,
 		api: model.api,
@@ -1411,7 +1442,7 @@ function createCodexRequestContext(
 			? createCodexProviderSessionState()
 			: undefined;
 	const transportProviderSessionState = isolatedTransportState ?? providerSessionState;
-	const responsesLite = resolveCodexResponsesLite(model, options?.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options?.responsesLite);
 	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (sessionKey && publicSessionKey) {
@@ -1429,7 +1460,6 @@ function createCodexRequestContext(
 			: sharedWebsocketState;
 	if (isolatedTransportState && websocketState && sharedWebsocketState) {
 		websocketState.disableWebsocket = sharedWebsocketState.disableWebsocket;
-		websocketState.turnState = sharedWebsocketState.turnState;
 		websocketState.modelsEtag = sharedWebsocketState.modelsEtag;
 	}
 	const metadataSessionId = transportSessionId ?? crypto.randomUUID();
@@ -1437,11 +1467,11 @@ function createCodexRequestContext(
 	const compaction = options?.codexCompaction;
 	const requestKind: OpenAICodexRequestKind = compaction ? "compaction" : "turn";
 	const startNewTurn = resolveCodexStartNewTurn(metadataSession, requestKind, compaction, contextOptions.startNewTurn);
-	if (websocketState && startNewTurn) {
-		// Codex scopes turn-state to one turn. Mid-turn compaction preserves it;
-		// a pre-turn or standalone compaction starts without it.
-		websocketState.turnState = undefined;
-	}
+	const standaloneCompaction = compaction?.phase === "standalone_turn";
+	clearCodexTurnStatesForNewTurn(metadataSession, startNewTurn, compaction);
+	// Standalone compaction owns a throwaway turn. Every live cell is isolated by
+	// the same credential/backend/model/Lite key as its transport session.
+	const turnState = standaloneCompaction ? {} : getOrCreateCodexTurnState(metadataSession, sessionKey);
 	const requestMetadata = createCodexRequestMetadata(metadataSession, requestKind, {
 		startNewTurn,
 		turnStartedAtUnixMs: compaction
@@ -1452,6 +1482,7 @@ function createCodexRequestContext(
 		clientMetadata: transformedBody.client_metadata,
 		parentTurnId: options?.parentTurnId,
 		compaction,
+		toolNamespacesInfo: options?.toolNamespacesInfo,
 	});
 	transformedBody.client_metadata = requestMetadata.clientMetadata;
 	return {
@@ -1464,6 +1495,7 @@ function createCodexRequestContext(
 		providerSessionState,
 		isolatedTransportState,
 		websocketState,
+		turnState,
 		responsesLite,
 		requestMetadata,
 		codexClientVersion,
@@ -1486,16 +1518,18 @@ async function buildCodexRequestContext(
 	});
 }
 
-/** @internal Exported for tests. */
+/** Serialize normal Codex turns and V2 compaction with the same cacheable prefix. */
 export async function buildTransformedCodexRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
 	promptCacheKey = getOpenAIPromptCacheKey(options),
+	inputPrefix?: InputItem[],
 ): Promise<RequestBody> {
+	const input = convertMessages(model, context);
 	const params: RequestBody = {
 		model: model.requestModelId ?? model.id,
-		input: convertMessages(model, context),
+		input: inputPrefix?.length ? [...inputPrefix, ...input] : input,
 		stream: true,
 		prompt_cache_key: promptCacheKey,
 	};
@@ -1537,7 +1571,30 @@ export async function buildTransformedCodexRequestBody(
 		responsesLite: options?.responsesLite,
 	};
 
-	return transformRequestBody(params, model, codexOptions, { developerMessages });
+	const body = await transformRequestBody(params, model, codexOptions, { developerMessages });
+	applyCodexStableEffort(model, body, options);
+	return body;
+}
+
+/**
+ * Keep the request-level effort byte-stable across a conversation and carry
+ * later changes as `configuration_update` items (GPT-6 Astra). Requires a
+ * session id and provider session state to remember the baseline; without
+ * them every request stands alone and sends its own effort.
+ */
+function applyCodexStableEffort(
+	model: Model<"openai-codex-responses">,
+	body: RequestBody,
+	options: OpenAICodexResponsesOptions | undefined,
+): void {
+	if (!model.compat.supportsConfigurationUpdate || options?.codexCompaction) return;
+	const effort = body.reasoning?.effort;
+	if (effort === undefined || effort === "none" || !body.input) return;
+	const providerState = getCodexProviderSessionState(options?.providerSessionState);
+	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
+	if (!providerState || !sessionId) return;
+	const state = getOpenAIEffortControlState(providerState.effortControls, `${model.id}\u0000${sessionId}`);
+	body.reasoning = { ...body.reasoning, effort: planStableOpenAIEffort(state, body.input, effort) };
 }
 
 async function openInitialCodexEventStream(
@@ -1591,8 +1648,15 @@ async function openInitialCodexEventStream(
 				break;
 			}
 		}
+	} else if (websocketState) {
+		releaseIdleCodexWebSocket(websocketState);
 	}
-	return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
+	try {
+		return await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
+	} catch (error) {
+		if (!dropRejectedCodexAccessPrograms(transformedBody, model, requestContext.accountId, error)) throw error;
+		return openCodexSseTransport(model, requestContext, requestSetup, options, websocketState, transformedBody);
+	}
 }
 
 function toCodexRequestBody(body: OpenAICodexCompactionBody): RequestBody {
@@ -1651,7 +1715,7 @@ async function* streamCodexCompactionEvents(
 ): AsyncGenerator<Record<string, unknown>> {
 	let completed = false;
 	const websocketState = requestContext.websocketState;
-	const previousTurnState = websocketState?.turnState;
+	const previousTurnState = requestContext.turnState.value;
 	const previousModelsEtag = websocketState?.modelsEtag;
 	try {
 		if (initial.transport === "websocket") {
@@ -1668,50 +1732,67 @@ async function* streamCodexCompactionEvents(
 				if (state) recordCodexWebSocketFailure(state, true);
 				const fallback = await openCodexSseTransport(model, requestContext, requestSetup, options, state);
 				if (state) state.lastTransport = fallback.transport;
-				yield* drainCodexCompactionEvents(fallback.eventStream, requestContext.websocketState);
+				yield* drainCodexCompactionEvents(fallback.eventStream, requestContext);
+				completed = true;
+				return;
+			}
+			const failure = bufferedEvents.findLast(event => event.type === "error" || event.type === "response.failed");
+			if (
+				failure !== undefined &&
+				dropRejectedCodexAccessPrograms(
+					requestContext.transformedBody,
+					model,
+					requestContext.accountId,
+					createCodexProviderStreamError(failure),
+				)
+			) {
+				const replay = await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState);
+				if (websocketState) websocketState.lastTransport = replay.transport;
+				yield* drainCodexCompactionEvents(replay.eventStream, requestContext);
 				completed = true;
 				return;
 			}
 			// Apply metadata only once the WebSocket attempt succeeded: a discarded
 			// attempt must not leak its `x-codex-turn-state` into the session.
 			for (const event of bufferedEvents) {
-				applyCodexCompactionResponseMetadata(requestContext.websocketState, event);
+				applyCodexCompactionResponseMetadata(requestContext, event);
 				yield event;
 			}
 		} else {
-			yield* drainCodexCompactionEvents(initial.eventStream, requestContext.websocketState);
+			yield* drainCodexCompactionEvents(initial.eventStream, requestContext);
 		}
 		completed = true;
 	} finally {
 		if (!completed) {
 			requestSetup.requestAbortController.abort();
-			if (websocketState) {
-				websocketState.turnState = previousTurnState;
-				websocketState.modelsEtag = previousModelsEtag;
-			}
+			requestContext.turnState.value = previousTurnState;
+			if (websocketState) websocketState.modelsEtag = previousModelsEtag;
 		}
 	}
 }
 
 /**
- * Capture `x-codex-turn-state`/`x-models-etag` refreshes carried by a
- * `response.metadata` frame so a mid-turn compaction leaves the live session on
- * the latest turn state, matching the normal Codex stream processor.
+ * Capture `x-codex-turn-state`/`x-models-etag` response metadata after a
+ * compaction attempt succeeds.
  */
 function applyCodexCompactionResponseMetadata(
-	state: CodexWebSocketSessionState | undefined,
+	requestContext: CodexRequestContext,
 	event: Record<string, unknown>,
 ): void {
-	if (!state || event.type !== "response.metadata") return;
-	updateCodexSessionMetadataFromHeaders(state, toCodexHeaders(event.headers));
+	if (event.type !== "response.metadata") return;
+	updateCodexSessionMetadataFromHeaders(
+		requestContext.turnState,
+		requestContext.websocketState,
+		toCodexHeaders(event.headers),
+	);
 }
 
 async function* drainCodexCompactionEvents(
 	events: AsyncGenerator<Record<string, unknown>>,
-	state: CodexWebSocketSessionState | undefined,
+	requestContext: CodexRequestContext,
 ): AsyncGenerator<Record<string, unknown>> {
 	for await (const event of events) {
-		applyCodexCompactionResponseMetadata(state, event);
+		applyCodexCompactionResponseMetadata(requestContext, event);
 		yield event;
 	}
 }
@@ -1728,18 +1809,88 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
+	const steered = websocketState.acceptedSteering;
+	websocketState.acceptedSteering = undefined;
 	const canAppendBeforeRequest = websocketState.canAppend === true;
-	const chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
+	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
+	const websocketHeaders = createCodexHeaders(
+		requestContext.requestHeaders,
+		requestContext.accountId,
+		requestContext.apiKey,
+		requestContext.codexClientVersion,
+		requestContext.transportSessionId,
+		"websocket",
+		websocketState,
+		requestContext.turnState,
+		requestContext.responsesLite,
+		requestContext.requestMetadata,
+		await getCodexAttestationHeader(requestContext.accountId),
+		requestContext.transformedBody,
+	);
+	let websocketConnection = await getOrCreateCodexWebSocketConnection(
+		websocketState,
+		requestContext.turnState,
+		toWebSocketUrl(requestContext.url),
+		websocketHeaders,
+		model.provider,
+		requestSetup.requestSignal,
+	);
+	const timeouts: CodexWebSocketRequestTimeouts = {
+		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
+		firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
+	};
+	// Steering accepted for the previous response lives only on the socket that
+	// accepted it; a replaced socket lost it, so the input is plain history.
+	const steers = steered?.connection === websocketConnection ? steered.steers : [];
+	const liveSteers = steers.filter(steer => !websocketConnection.hasFailedSteer([steer.id]));
+	if (liveSteers.length > 0) {
+		const plan = planSteeredRequest(
+			chainedBody.previous_response_id ? chainedBody.input : undefined,
+			liveSteers.flatMap(steer => steer.items),
+		);
+		if (plan.kind === "attach") {
+			recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
+			requestContext.rawRequestDump.body = chainedBody;
+			return {
+				eventStream: websocketConnection.streamRequest(
+					{ attachSteerIds: liveSteers.map(steer => steer.id) },
+					timeouts,
+					requestSetup.requestSignal,
+					onSseEvent,
+				),
+				requestBodyForState: structuredCloneJSON(requestContext.transformedBody),
+				transport: "websocket",
+			};
+		}
+		if (plan.kind === "create") {
+			chainedBody = { ...chainedBody, input: plan.input };
+		} else {
+			// The server continues from input this request cannot line up with; a
+			// fresh socket drops its queue and the full transcript carries the input.
+			websocketConnection.close("steering-discard");
+			websocketState.connection = undefined;
+			resetCodexWebSocketAppendState(websocketState);
+			chainedBody = requestContext.transformedBody;
+			websocketConnection = await getOrCreateCodexWebSocketConnection(
+				websocketState,
+				requestContext.turnState,
+				toWebSocketUrl(requestContext.url),
+				websocketHeaders,
+				model.provider,
+				requestSetup.requestSignal,
+			);
+		}
+	}
 	// WebSocket frames cannot carry per-request HTTP headers. Canonical Codex
 	// request identity is already in `client_metadata`; connection-scoped
 	// compatibility values that can change after the upgrade ride alongside it
 	// on every `response.create`.
-	const websocketClientMetadata = { ...(chainedBody.client_metadata ?? {}) };
+	const websocketClientMetadata = { ...chainedBody.client_metadata };
 	if (requestContext.responsesLite) {
 		websocketClientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
 	}
-	if (websocketState.turnState) {
-		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = websocketState.turnState;
+	if (requestContext.turnState.value) {
+		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
 	}
 	let websocketRequest = {
 		type: "response.create",
@@ -1751,18 +1902,6 @@ async function openCodexWebSocketTransport(
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
-	const websocketHeaders = createCodexHeaders(
-		requestContext.requestHeaders,
-		requestContext.accountId,
-		requestContext.apiKey,
-		requestContext.codexClientVersion,
-		requestContext.transportSessionId,
-		"websocket",
-		websocketState,
-		requestContext.responsesLite,
-		requestContext.requestMetadata,
-		await getCodexAttestationHeader(requestContext.accountId),
-	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
 	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
 	// recorded state must reflect what was actually sent — the sequential-cutoff
@@ -1785,19 +1924,9 @@ async function openCodexWebSocketTransport(
 			retry,
 			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 		});
-	const websocketConnection = await getOrCreateCodexWebSocketConnection(
-		websocketState,
-		toWebSocketUrl(requestContext.url),
-		websocketHeaders,
-		model.provider,
-		requestSetup.requestSignal,
-	);
 	const eventStream = websocketConnection.streamRequest(
-		websocketRequest,
-		{
-			idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
-			firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
-		},
+		{ send: websocketRequest },
+		timeouts,
 		requestSetup.requestSignal,
 		onSseEvent,
 	);
@@ -1857,6 +1986,7 @@ async function openCodexSseTransport(
 				requestContext.transportSessionId,
 				wireBody,
 				state,
+				requestContext.turnState,
 				requestContext.responsesLite,
 				requestContext.codexClientVersion,
 				requestContext.requestMetadata,
@@ -1945,6 +2075,11 @@ const CODEX_STALE_PREVIOUS_RESPONSE_CODES: Record<string, true> = {
 	codex_previous_response_stale: true,
 };
 
+const CODEX_APPEND_PRESERVING_REJECTION_CODES: Record<string, true> = {
+	rate_limit_exceeded: true,
+	slow_down: true,
+};
+
 function isCodexStalePreviousResponseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (
@@ -1966,15 +2101,29 @@ function isCodexStalePreviousResponseError(error: unknown): boolean {
 	);
 }
 
+function shouldPreserveCodexWebSocketAppendState(context: CodexStreamFailureContext, error: unknown): boolean {
+	if (!(error instanceof CodexProviderStreamError) || !error.code) return false;
+	const state = context.requestContext.websocketState;
+	return (
+		Object.hasOwn(CODEX_APPEND_PRESERVING_REJECTION_CODES, error.code.toLowerCase()) &&
+		context.runtime?.transport === "websocket" &&
+		state?.canAppend === true &&
+		state.lastRequest !== undefined &&
+		state.lastResponseId !== undefined &&
+		state.lastResponseItems !== undefined
+	);
+}
+
 async function handleCodexStreamFailure(context: CodexStreamFailureContext, error: unknown): Promise<AssistantMessage> {
 	const { output } = context;
-	if (context.requestContext.websocketState) {
+	if (context.requestContext.websocketState && !shouldPreserveCodexWebSocketAppendState(context, error)) {
 		resetCodexWebSocketAppendState(context.requestContext.websocketState);
-		context.requestContext.websocketState.turnState = undefined;
 		context.requestContext.websocketState.modelsEtag = undefined;
 	}
 	const result = await AIError.finalize(error, {
 		api: context.model.api,
+		provider: context.model.provider,
+		model: context.model.id,
 		signal: context.options?.signal,
 		rawRequestDump: context.requestContext.rawRequestDump,
 	});
@@ -2007,6 +2156,12 @@ class CodexStreamProcessor {
 	requestContext: CodexRequestContext;
 	startTime: number;
 	firstTokenTime?: number;
+	/** Submits caller steering to the response currently streaming. */
+	#steerPump?: CodexSteerPump;
+	/** Socket {@link #steerPump} submits through. */
+	#steerConnection?: CodexWebSocketConnection;
+	/** A replaced attempt accepted steering its socket may still act on. */
+	#steerTainted = false;
 
 	constructor(init: {
 		runtime: CodexStreamRuntime;
@@ -2049,10 +2204,26 @@ class CodexStreamProcessor {
 					firstTokenTime = this.#handleStreamEvent(rawEvent, firstTokenTime);
 					if (this.runtime.sawTerminalEvent) break;
 				}
+				if (!this.runtime.sawTerminalEvent) {
+					CODEX_DEBUG &&
+						logger.debug("[codex] codex stream ended unexpectedly", {
+							transport: this.runtime.transport,
+							terminalEventSeen: false,
+							unexpectedStreamEnd: true,
+							sentTurnStateHeader: Boolean(this.requestContext.turnState.value),
+							sentModelsEtagHeader: Boolean(this.requestContext.websocketState?.modelsEtag),
+						});
+					throw new CodexProviderStreamError("Codex stream ended before terminal completion event", true);
+				}
+				await this.#settleSteering(true);
 				return { firstTokenTime };
 			} catch (error) {
+				// The failed attempt's response no longer takes input; a retry
+				// steers its own response.
+				await this.#retireSteering();
 				const recovered = await this.#recoverStreamError(error);
 				if (!recovered) {
+					await this.#settleSteering(false);
 					throw error;
 				}
 				stream.push({ type: "start", partial: output });
@@ -2064,6 +2235,11 @@ class CodexStreamProcessor {
 		const { output, stream } = this;
 		const eventType = typeof rawEvent.type === "string" ? rawEvent.type : "";
 		if (!eventType) return firstTokenTime;
+
+		if (eventType === "response.created") {
+			this.#startSteering(rawEvent);
+			return firstTokenTime;
+		}
 
 		if (eventType === "response.output_item.added") {
 			this.runtime.whitespaceToolCallArgumentsDelta = undefined;
@@ -2086,6 +2262,7 @@ class CodexStreamProcessor {
 					? Math.trunc(rawEvent.output_index)
 					: undefined;
 			const entry: CodexOpenItem = { item, block: this.runtime.currentBlock, contentIndex, itemId, outputIndex };
+			this.runtime.nativeOutputEntries.push(entry);
 			this.runtime.currentEntry = entry;
 			if (itemId) this.runtime.openItems.set(itemId, entry);
 			if (outputIndex !== undefined) this.runtime.openItemsByOutputIndex.set(outputIndex, entry);
@@ -2240,11 +2417,6 @@ class CodexStreamProcessor {
 			return firstTokenTime;
 		}
 
-		if (eventType === "response.created") {
-			this.runtime.handleResponseCreated(rawEvent);
-			return firstTokenTime;
-		}
-
 		if (eventType === "response.completed" || eventType === "response.done" || eventType === "response.incomplete") {
 			this.#handleResponseCompleted(rawEvent);
 			return firstTokenTime;
@@ -2254,9 +2426,13 @@ class CodexStreamProcessor {
 			// The WebSocket transport has no per-response HTTP headers; codex-rs
 			// mirrors them into this event's `headers` and reads
 			// `x-codex-turn-state` from there (ResponsesStreamEvent::turn_state).
-			// Pick up the refresh so same-turn follow-ups echo the latest turn
-			// state on either transport.
-			updateCodexSessionMetadataFromHeaders(this.requestContext.websocketState, toCodexHeaders(rawEvent.headers));
+			// Capture only the first non-empty value so same-turn follow-ups keep
+			// the server's original sticky-routing token on either transport.
+			updateCodexSessionMetadataFromHeaders(
+				this.requestContext.turnState,
+				this.requestContext.websocketState,
+				toCodexHeaders(rawEvent.headers),
+			);
 			const moderation = asRecord(rawEvent.metadata)?.[CODEX_MODERATION_METADATA_KEY];
 			if (moderation !== undefined) {
 				try {
@@ -2273,6 +2449,67 @@ class CodexStreamProcessor {
 		}
 
 		return firstTokenTime;
+	}
+
+	/** Start delivering caller steering into the response `response.created` announced. */
+	#startSteering(rawEvent: Record<string, unknown>): void {
+		const source = this.options?.liveSteering;
+		const connection = this.runtime.websocketState?.connection;
+		const responseId = asRecord(rawEvent.response)?.id;
+		if (
+			!source ||
+			!connection ||
+			this.#steerPump ||
+			typeof responseId !== "string" ||
+			this.runtime.transport !== "websocket" ||
+			!this.model.compat.supportsSteering
+		) {
+			return;
+		}
+		this.#steerConnection = connection;
+		this.#steerPump = new CodexSteerPump(source, connection, messages =>
+			toSteerInputItems(convertMessages(this.model, { messages: [...messages] })),
+		);
+		this.#steerPump.start(responseId);
+	}
+
+	/** Stop steering an attempt that is being replaced; anything it delivered taints its socket. */
+	async #retireSteering(): Promise<void> {
+		const pump = this.#steerPump;
+		if (!pump) return;
+		this.#steerPump = undefined;
+		const outcome = await pump.finish();
+		if (outcome.accepted.length > 0 || outcome.uncertain) this.#steerTainted = true;
+	}
+
+	/**
+	 * Settle steering once the stream is over. Steering accepted for the final
+	 * response is handed to the next request; anything the session cannot line
+	 * up with the server's queue drops the socket so no stray successor streams
+	 * into a later request.
+	 */
+	async #settleSteering(completed: boolean): Promise<void> {
+		const pump = this.#steerPump;
+		this.#steerPump = undefined;
+		const outcome = pump ? await pump.finish() : undefined;
+		const accepted = outcome?.accepted ?? [];
+		const tainted = this.#steerTainted || outcome?.uncertain === true;
+		const state = this.runtime.websocketState;
+		const connection = this.#steerConnection;
+		if (!state || !connection || (accepted.length === 0 && !tainted)) return;
+		if (
+			completed &&
+			!tainted &&
+			state.canAppend &&
+			state.connection === connection &&
+			state.lastResponseId === outcome?.responseId
+		) {
+			state.acceptedSteering = { connection, steers: accepted };
+			return;
+		}
+		connection.close("steering-discard");
+		if (state.connection === connection) state.connection = undefined;
+		resetCodexWebSocketAppendState(state);
 	}
 
 	#flushSummaryDeltas(entry: CodexOpenItem | null): void {
@@ -2293,7 +2530,6 @@ class CodexStreamProcessor {
 		if (!rawItem || typeof rawItem !== "object") return;
 		const item = structuredCloneJSON(rawItem) as CodexEventItem;
 		if (item.type === "image_generation_call" && item.result) item.status = "completed";
-		runtime.nativeOutputItems.push(item as unknown as Record<string, unknown>);
 
 		// Match the finalization to the OPEN ITEM that started this block, not the
 		// singleton current — interleaved items can finish out of order, so the
@@ -2302,6 +2538,9 @@ class CodexStreamProcessor {
 		// routes `output_item.done` to the block that received `output_item.added`.
 		const itemId = "id" in item && typeof item.id === "string" ? item.id : "";
 		const entry = (itemId ? runtime.openItems.get(itemId) : null) ?? runtime.openItemForEvent(rawEvent);
+		const nativeOutputItem = item as unknown as Record<string, unknown>;
+		if (entry) entry.nativeOutputItem = nativeOutputItem;
+		else runtime.nativeOutputItems.push(nativeOutputItem);
 		const block = entry?.block ?? null;
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
@@ -2348,7 +2587,7 @@ class CodexStreamProcessor {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
 				name: item.name,
-				arguments: parseStreamingJson(item.arguments || "{}"),
+				arguments: parseToolCallArguments(item.arguments),
 			};
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
@@ -2426,6 +2665,21 @@ class CodexStreamProcessor {
 			output.responseId = responseId;
 		}
 
+		const incompleteDetails =
+			response &&
+			"incomplete_details" in response &&
+			response.incomplete_details &&
+			typeof response.incomplete_details === "object"
+				? response.incomplete_details
+				: undefined;
+		const incompleteReason =
+			incompleteDetails && "reason" in incompleteDetails ? incompleteDetails.reason : undefined;
+		// Steering stopped the response at an output boundary: every item is
+		// complete and the server continues from it, so it chains and ends like a
+		// completed response.
+		const steered = status === "incomplete" && incompleteReason === "steered";
+		if (steered) logger.debug("Codex response stopped for steering", { responseId });
+
 		const state = runtime.websocketState;
 		if (state) {
 			if (runtime.transport !== "websocket") {
@@ -2435,38 +2689,32 @@ class CodexStreamProcessor {
 				resetCodexWebSocketAppendState(state);
 			} else {
 				state.lastRequest = structuredCloneJSON(runtime.requestBodyForState);
+				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
-					structuredCloneJSON(runtime.nativeOutputItems),
+					structuredCloneJSON(nativeOutputItems),
 				);
-				if (responseId && replayableResponseItems) {
+				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
 					state.lastResponseId = responseId;
 					state.lastResponseItems = replayableResponseItems;
-					state.canAppend = rawEvent.type === "response.done" || rawEvent.type === "response.completed";
+					state.canAppend = rawEvent.type === "response.done" || rawEvent.type === "response.completed" || steered;
 				} else {
-					// Without both a response id and replayable output, the append baseline cannot be trusted.
-					state.canAppend = false;
+					// No response id, or replay sanitization dropped an item the server
+					// still holds. Sanitization is 1:1-or-fewer, so either case makes the
+					// append baseline untrustworthy; next turn must replay in full.
+					resetCodexWebSocketAppendState(state);
 				}
 			}
 		}
 
-		const incompleteDetails =
-			response &&
-			"incomplete_details" in response &&
-			response.incomplete_details &&
-			typeof response.incomplete_details === "object"
-				? response.incomplete_details
-				: undefined;
 		const shouldPromoteIncompleteToolUse =
 			status === "incomplete" &&
-			incompleteDetails !== undefined &&
-			"reason" in incompleteDetails &&
-			incompleteDetails.reason === "max_output_tokens" &&
+			incompleteReason === "max_output_tokens" &&
 			hasExecutableIncompleteResponsesToolCalls(output);
 		finalizePendingResponsesToolCalls(output);
 
-		calculateCost(model, output.usage);
+		calculateCost(model, output.usage, output.timestamp);
 		applyCodexServiceTierPricing(model, output.usage, serviceTier, runtime.requestBodyForState.service_tier);
-		output.stopReason = mapOpenAIResponsesStopReason(status);
+		output.stopReason = mapOpenAIResponsesStopReason(steered ? "completed" : status);
 		promoteResponsesToolUseStopReason(
 			output,
 			endTurn === true ? true : endTurn === false ? false : undefined,
@@ -2475,6 +2723,20 @@ class CodexStreamProcessor {
 	}
 
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		if (
+			error instanceof CodexSteerCommitError &&
+			this.runtime.websocketState &&
+			this.output.content.length === 0 &&
+			!this.options?.signal?.aborted
+		) {
+			// No successor is coming: send this request explicitly, steering
+			// input included as ordinary history.
+			await this.#reopenWebSocketStream(this.runtime.websocketState);
+			return true;
+		}
+		if (await this.#tryDropRejectedAccessPrograms(error)) {
+			return true;
+		}
 		if (await this.#tryRecoverWhitespaceToolCallLoop(error)) {
 			return true;
 		}
@@ -2525,7 +2787,6 @@ class CodexStreamProcessor {
 		const websocketState = this.requestContext.websocketState;
 		if (websocketState) {
 			resetCodexWebSocketAppendState(websocketState);
-			websocketState.turnState = undefined;
 			websocketState.modelsEtag = undefined;
 		}
 
@@ -2633,6 +2894,39 @@ class CodexStreamProcessor {
 		return true;
 	}
 
+	/**
+	 * Replay the request without `access_programs` after the backend rejected the
+	 * requested cyber program (see `openai-codex/access-programs.ts`). A
+	 * rejection arrives before any output, so the replay is always safe.
+	 */
+	async #tryDropRejectedAccessPrograms(error: unknown): Promise<boolean> {
+		if (
+			hasVisibleAssistantContent(this.output) ||
+			this.options?.signal?.aborted ||
+			!dropRejectedCodexAccessPrograms(
+				this.requestContext.transformedBody,
+				this.model,
+				this.requestContext.accountId,
+				error,
+			)
+		) {
+			return false;
+		}
+		this.#closeOpenBlocksForReplay();
+		const websocketState = this.requestContext.websocketState;
+		if (websocketState) resetCodexWebSocketAppendState(websocketState);
+		this.runtime.resetAccumulators();
+		this.runtime.sawTerminalEvent = false;
+		resetOutputState(this.output);
+		this.firstTokenTime = undefined;
+		if (this.runtime.transport === "websocket" && websocketState) {
+			await this.#reopenWebSocketStream(websocketState);
+		} else {
+			await this.#reopenSseStream(websocketState);
+		}
+		return true;
+	}
+
 	async #tryRecoverPreviousResponseNotFound(error: unknown): Promise<boolean> {
 		const websocketState = this.requestContext.websocketState;
 		if (
@@ -2651,7 +2945,6 @@ class CodexStreamProcessor {
 
 		this.runtime.providerRetryAttempt += 1;
 		resetCodexWebSocketAppendState(websocketState);
-		websocketState.turnState = undefined;
 		websocketState.modelsEtag = undefined;
 		this.runtime.resetAccumulators();
 		this.runtime.sawTerminalEvent = false;
@@ -2721,21 +3014,69 @@ class CodexStreamProcessor {
 		return true;
 	}
 
+	/**
+	 * Emit balancing `*_end` events for every block that opened (pushed a
+	 * `*_start`) but never committed visible content, so a retry that resets
+	 * `output` and replays cannot leave the consumer with an orphaned
+	 * `text_start`/`thinking_start` from the abandoned attempt. Only reachable
+	 * blocks are empty text/reasoning ones — a committed tool/text block blocks
+	 * the retry upstream.
+	 */
+	#closeOpenBlocksForReplay(): void {
+		const { runtime, output, stream } = this;
+		const open = new Set<CodexOpenItem>(runtime.openItems.values());
+		for (const entry of runtime.openItemsByOutputIndex.values()) open.add(entry);
+		if (runtime.currentEntry) open.add(runtime.currentEntry);
+		for (const entry of open) {
+			const block = entry.block;
+			if (block?.type === "thinking") {
+				stream.push({
+					type: "thinking_end",
+					contentIndex: entry.contentIndex,
+					content: block.thinking,
+					partial: output,
+				});
+			} else if (block?.type === "text") {
+				stream.push({ type: "text_end", contentIndex: entry.contentIndex, content: block.text, partial: output });
+			}
+		}
+	}
+
 	async #tryRetryProviderError(error: unknown): Promise<boolean> {
+		const retryable =
+			error instanceof CodexProviderStreamError ? error.retryable : AIError.isProviderRetryableError(error);
+		// A leading `response.output_item.added` opens an empty block and emits only
+		// a `*_start` before any delta; that is replay-safe. But once any text or
+		// thinking delta has streamed — including a whitespace-only
+		// `output_text.delta`, which still reaches consumers as `text_delta` — or a
+		// visible tool/image block exists, replaying would duplicate/reorder those
+		// already-delivered events, so treat the attempt as committed. Emptiness is
+		// measured by the streamed block length (whitespace counts), not by visible
+		// final content.
+		const streamedContent = this.output.content.some(
+			block =>
+				(block.type === "text" && block.text.length > 0) ||
+				(block.type === "thinking" && block.thinking.length > 0),
+		);
 		if (
-			!(error instanceof CodexProviderStreamError && error.retryable) ||
-			this.output.content.length > 0 ||
+			!retryable ||
+			hasVisibleAssistantContent(this.output) ||
+			streamedContent ||
+			!this.runtime.canSafelyReplayWebsocketOverSse ||
 			this.runtime.providerRetryAttempt >= CODEX_MAX_RETRIES ||
 			this.options?.signal?.aborted
 		) {
 			return false;
 		}
 
+		// A leading `output_item.added` already pushed a `*_start` for the (empty)
+		// open block; balance it with the matching end before the reset+replay so
+		// consumers never see an orphaned start from the abandoned attempt.
+		this.#closeOpenBlocksForReplay();
 		this.runtime.providerRetryAttempt += 1;
 		const websocketState = this.requestContext.websocketState;
 		if (websocketState) {
 			resetCodexWebSocketAppendState(websocketState);
-			websocketState.turnState = undefined;
 			websocketState.modelsEtag = undefined;
 		}
 
@@ -2809,27 +3150,14 @@ class CodexStreamProcessor {
 		if (this.options?.signal?.aborted) {
 			throw new AIError.AbortError();
 		}
-		if (!this.runtime.sawTerminalEvent) {
-			if (this.requestContext.websocketState) {
-				resetCodexWebSocketAppendState(this.requestContext.websocketState);
-				this.requestContext.websocketState.turnState = undefined;
-				this.requestContext.websocketState.modelsEtag = undefined;
-			}
-			CODEX_DEBUG &&
-				logger.debug("[codex] codex stream ended unexpectedly", {
-					transport: this.runtime.transport,
-					terminalEventSeen: this.runtime.sawTerminalEvent,
-					unexpectedStreamEnd: true,
-					sentTurnStateHeader: Boolean(this.requestContext.websocketState?.turnState),
-					sentModelsEtagHeader: Boolean(this.requestContext.websocketState?.modelsEtag),
-				});
-			throw new CodexProviderStreamError("Codex stream ended before terminal completion event", false);
-		}
 		if (output.stopReason === "aborted" || output.stopReason === "error") {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
 
-		output.providerPayload = createOpenAIResponsesHistoryPayload(this.model.provider, this.runtime.nativeOutputItems);
+		output.providerPayload = createOpenAIResponsesHistoryPayload(
+			this.model.provider,
+			this.runtime.finalizeNativeOutputItems(),
+		);
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;
@@ -2909,6 +3237,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						url: "",
 						requestHeaders: {},
 						codexClientVersion: CODEX_CLIENT_VERSION,
+						turnState: {},
 						responsesLite: options?.responsesLite === true,
 						transformedBody: { model: model.id },
 						rawRequestDump: {
@@ -2959,7 +3288,7 @@ export async function prewarmOpenAICodexResponses(
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
-	const responsesLite = resolveCodexResponsesLite(model, options?.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options?.responsesLite);
 	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (publicSessionKey && sessionKey) {
@@ -2972,19 +3301,21 @@ export async function prewarmOpenAICodexResponses(
 		transportSessionId ?? crypto.randomUUID(),
 		providerSessionState,
 	);
+	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
 	const codexClientVersion = CODEX_CLIENT_VERSION;
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
 	const attestation = await getCodexAttestationHeader(accountId);
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,
-		{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+		{ ...model.headers, ...options?.headers },
 		accountId,
 		apiKey,
 		codexClientVersion,
 		promptCacheKey,
 		"websocket",
 		state,
+		turnState,
 		responsesLite,
 		requestIdentity,
 		attestation,
@@ -2993,6 +3324,7 @@ export async function prewarmOpenAICodexResponses(
 		"prewarmCodex:establishWs",
 		getOrCreateCodexWebSocketConnection,
 		state,
+		turnState,
 		toWebSocketUrl(url),
 		headers,
 		model.provider,
@@ -3062,12 +3394,17 @@ function recordCodexWebSocketFailure(state: CodexWebSocketSessionState, activate
 	}
 }
 
-function getCodexWebSocketEnvValue(): boolean | undefined {
-	const envVal = $env.PI_CODEX_WEBSOCKET;
-	if (envVal !== undefined) {
-		return $flag("PI_CODEX_WEBSOCKET");
-	}
-	return undefined;
+/**
+ * WebSocket not selected for this request (e.g. the preference was switched off
+ * mid-session): close an idle cached socket so it stops heartbeating and is
+ * never reused against a transcript advanced over SSE.
+ */
+function releaseIdleCodexWebSocket(state: CodexWebSocketSessionState): void {
+	const connection = state.connection;
+	if (!connection || connection.isBusy()) return;
+	connection.close("transport_not_selected");
+	state.connection = undefined;
+	resetCodexWebSocketAppendState(state);
 }
 
 function shouldUseCodexWebSocket(
@@ -3080,7 +3417,7 @@ function shouldUseCodexWebSocket(
 	// Explicitly disabled by the session state.
 	if (!state || state.disableWebsocket) return false;
 	// Env val > Preference
-	const envVal = getCodexWebSocketEnvValue();
+	const envVal = getOpenAICodexWebSocketEnvValue();
 	if (envVal !== undefined) return envVal;
 	// Negative preference overrides model preference; otherwise use the model's preference.
 	if (preferWebsockets === false) return false;
@@ -3141,14 +3478,23 @@ export function getOpenAICodexTransportDetails(
 		providerSessionState?: Map<string, ProviderSessionState>;
 	},
 ): OpenAICodexTransportDetails {
-	const envVal = getCodexWebSocketEnvValue();
-	const websocketPreferred =
-		envVal !== undefined
-			? envVal
-			: options?.preferWebsockets === false
-				? false
-				: options?.preferWebsockets === true || model.preferWebsockets === true;
+	const websocketPreferred = isOpenAICodexWebSocketPreferred(model, {
+		preferWebsockets: options?.preferWebsockets,
+	});
 	const state = getCodexWebSocketStateForPublicSession(model, options);
+	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
+	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
+	let hasTurnState = false;
+	if (sessionId) {
+		const metadataSession = providerSessionState?.metadataSessions.get(sessionId);
+		if (metadataSession) {
+			for (const cell of metadataSession.turnStates.values()) {
+				if (cell.value === undefined) continue;
+				hasTurnState = true;
+				break;
+			}
+		}
+	}
 
 	return {
 		websocketPreferred,
@@ -3159,7 +3505,7 @@ export function getOpenAICodexTransportDetails(
 		canAppend: state?.canAppend ?? false,
 		prewarmed: state?.prewarmed ?? false,
 		hasSessionState: state !== undefined,
-		hasTurnState: state?.turnState !== undefined,
+		hasTurnState,
 		lastFallbackAt: state?.lastFallbackAt,
 	};
 }
@@ -3183,6 +3529,7 @@ function parseCodexServiceTier(value: unknown): ServiceTier | undefined {
 		case "flex":
 		case "scale":
 		case "priority":
+		case "ultrafast":
 			return value;
 		default:
 			return undefined;
@@ -3390,22 +3737,37 @@ function recordCodexTurnUsageDiagnostics(
 	CODEX_DEBUG && logger.debug("[codex] codex turn diagnostics", { diagnostics: state.stats.lastTurn });
 }
 
+const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
+	service_tier: true,
+};
+
 /**
- * Shape the next websocket turn's request body: when the session's append
- * baseline is intact (same options, strict history prefix), chain via
- * `previous_response_id` + delta-only `input`; otherwise break the chain and
+ * Shape the next websocket turn's request body: when the session's strict
+ * history prefix is intact and request options other than the per-turn
+ * service_tier match, chain via previous_response_id + delta-only input;
  * replay the full transcript. SSE requests never chain — the HTTP endpoint's
  * request schema has no `previous_response_id` (codex-rs carries it only on
  * websocket `response.create` frames) and strict gateway validators 400 it
  * with `{"detail":"Unsupported parameter: previous_response_id"}`.
+ *
+ * Entering or leaving `ultrafast` still breaks the chain: that tier is a
+ * separate serving path, and codex-rs sends a full `response.create` across
+ * such a switch rather than a `previous_response_id` delta.
  */
 function buildCodexChainedRequestBody(
 	requestBody: RequestBody,
 	state: CodexWebSocketSessionState | undefined,
 ): RequestBody {
-	const chainable = state?.canAppend === true;
+	const chainable =
+		state?.canAppend === true &&
+		(state.lastRequest?.service_tier === "ultrafast") === (requestBody.service_tier === "ultrafast");
 	const appendInput = chainable
-		? buildResponsesDeltaInput(state.lastRequest, state.lastResponseItems, requestBody)
+		? buildResponsesDeltaInput(
+				state.lastRequest,
+				state.lastResponseItems,
+				requestBody,
+				CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP,
+			)
 		: null;
 	if (appendInput && appendInput.length > 0 && state?.lastResponseId) {
 		return { ...requestBody, previous_response_id: state.lastResponseId, input: appendInput };
@@ -3415,11 +3777,9 @@ function buildCodexChainedRequestBody(
 		// mutated or options changed — break the chain.
 		CODEX_DEBUG &&
 			logger.debug("[codex] codex append reset", {
-				hadTurnStateHeader: Boolean(state.turnState),
 				hadModelsEtagHeader: Boolean(state.modelsEtag),
 			});
 		resetCodexWebSocketAppendState(state);
-		state.turnState = undefined;
 		state.modelsEtag = undefined;
 	}
 	return requestBody;
@@ -3446,6 +3806,18 @@ function headersToRecord(headers: Headers): Record<string, string> {
 interface CodexWebSocketRequestTimeouts {
 	idleTimeoutMs?: number;
 	firstEventTimeoutMs?: number;
+}
+
+/** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
+type CodexWebSocketExchange =
+	| { send: Record<string, unknown> }
+	/** Read the successor the server creates from accepted steering; nothing is sent. */
+	| { attachSteerIds: readonly string[] };
+
+interface CodexSteerWaiter {
+	previousResponseId: string;
+	resolve: (ack: CodexSteerAck) => void;
+	reject: (error: Error) => void;
 }
 
 interface CodexWebSocketConnectionOptions {
@@ -3483,6 +3855,14 @@ class CodexWebSocketConnection {
 	 * previous (cleanly-completed) response that outlived the queue drain.
 	 */
 	#lastSeenResponseId?: string;
+	/** `response.steer` submissions awaiting acknowledgement, oldest first. */
+	#steerWaiters: CodexSteerWaiter[] = [];
+	/** Steering ids the server accepted on this socket. */
+	#acceptedSteers = new Set<string>();
+	/** Accepted steering the server later failed to commit to a successor. */
+	#failedSteers = new Set<string>();
+	/** Steering whose automatic successor the active attach request is reading. */
+	#attachSteerIds?: ReadonlySet<string>;
 
 	constructor(url: string, headers: Record<string, string>, options: CodexWebSocketConnectionOptions) {
 		this.#url = url;
@@ -3498,6 +3878,11 @@ class CodexWebSocketConnection {
 	/** True while a handshake (possibly started by another caller) is still in flight. */
 	isConnecting(): boolean {
 		return this.#connectPromise !== undefined;
+	}
+
+	/** True while a handshake or a request stream is in flight on this socket. */
+	isBusy(): boolean {
+		return this.#activeRequest || this.#connectPromise !== undefined;
 	}
 
 	/**
@@ -3528,14 +3913,20 @@ class CodexWebSocketConnection {
 	}
 
 	close(reason = "done"): void {
-		if (
-			this.#socket &&
-			(this.#socket.readyState === WebSocket.OPEN || this.#socket.readyState === WebSocket.CONNECTING)
-		) {
-			this.#socket.close(1000, reason);
-		}
+		const socket = this.#socket;
 		this.#socket = null;
 		this.#stopHeartbeat();
+		this.#rejectSteerWaiters(`websocket closed (${reason})`);
+		if (!socket || (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING)) return;
+		try {
+			socket.close(1000, reason);
+		} catch (error) {
+			CODEX_DEBUG &&
+				logger.debug("[codex] codex websocket close failed", {
+					error: error instanceof Error ? error.message : String(error),
+					reason,
+				});
+		}
 	}
 
 	async connect(signal?: AbortSignal): Promise<void> {
@@ -3563,12 +3954,12 @@ class CodexWebSocketConnection {
 			if (signal) signal.removeEventListener("abort", onAbort);
 		};
 		const onAbort = () => {
-			socket.close(1000, "aborted");
 			if (!settled) {
 				settled = true;
 				clearPending();
-				reject(new CodexWebSocketTransportError(`request was aborted`));
+				reject(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
 			}
+			this.close("aborted");
 		};
 		if (signal) {
 			if (signal.aborted) {
@@ -3579,7 +3970,7 @@ class CodexWebSocketConnection {
 		}
 		if (!settled) {
 			timeout = setTimeout(() => {
-				socket.close(1000, "connect-timeout");
+				this.close("connect-timeout");
 				if (!settled) {
 					settled = true;
 					clearPending();
@@ -3616,6 +4007,7 @@ class CodexWebSocketConnection {
 		socket.onclose = event => {
 			this.#socket = null;
 			this.#stopHeartbeat();
+			this.#rejectSteerWaiters(`websocket closed (${event.code})`);
 			if (!settled) {
 				settled = true;
 				clearPending();
@@ -3645,6 +4037,12 @@ class CodexWebSocketConnection {
 					}
 				}
 				notifyCodexWebSocketInbound(this.#streamObserver, parsed, text);
+				// Steering acknowledgements belong to the submitter, not to the
+				// response stream they interleave with.
+				if (typeof parsed.type === "string" && parsed.type.startsWith("response.steer.")) {
+					this.#handleSteerEvent(parsed);
+					return;
+				}
 				this.#push(parsed);
 			} catch (error) {
 				notifyCodexWebSocketMalformed(this.#streamObserver, event.data, error);
@@ -3661,7 +4059,7 @@ class CodexWebSocketConnection {
 	}
 
 	async *streamRequest(
-		request: Record<string, unknown>,
+		exchange: CodexWebSocketExchange,
 		timeouts: CodexWebSocketRequestTimeouts,
 		signal?: AbortSignal,
 		onSseEvent?: (event: RawSseEvent) => void,
@@ -3673,11 +4071,13 @@ class CodexWebSocketConnection {
 			throw new CodexWebSocketTransportError(`websocket request already in progress`);
 		}
 		if (signal?.aborted) {
-			throw new CodexWebSocketTransportError(`request was aborted`);
+			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
 		}
 		this.#activeRequest = true;
 		this.#streamObserver = onSseEvent;
 		// Drain any non-error frames left over from a prior request before sending.
+		// An attach reads exactly those frames: the successor the server started
+		// from accepted steering while no request was reading.
 		// `CodexStreamProcessor.process` breaks its `for-await` on the terminal event,
 		// which interrupts our generator at `yield next` (the post-yield `break`
 		// never runs). Any frame that landed between the consumer's break and the
@@ -3687,40 +4087,57 @@ class CodexWebSocketConnection {
 		// flip `sawFirstEvent` and silently downgrade the first-event timeout to
 		// the longer idle timeout. Transport errors are preserved so we surface
 		// the death signal instead of writing into a dead socket.
-		this.#dropStaleFrames();
+		if ("send" in exchange) {
+			this.#dropStaleFrames();
+		} else {
+			this.#attachSteerIds = new Set(exchange.attachSteerIds);
+		}
 		const onAbort = () => {
+			this.#push(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
+			// Closing can synchronously enqueue a generic onclose error.
 			this.close("aborted");
-			this.#push(new CodexWebSocketTransportError(`request was aborted`));
 		};
 		if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
 		try {
-			const debugSession = isRequestDebugEnabled()
-				? await createRequestDebugSession({
-						protocol: "websocket",
-						method: "POST",
-						url: this.#url,
-						headers: this.#headers,
-						body: request,
-					})
-				: undefined;
-			this.#debugResponseLog = debugSession
-				? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
-				: undefined;
+			if ("send" in exchange) {
+				const request = exchange.send;
+				const debugSession = isRequestDebugEnabled()
+					? await createRequestDebugSession({
+							protocol: "websocket",
+							method: "POST",
+							url: this.#url,
+							headers: this.#headers,
+							body: request,
+						})
+					: undefined;
+				this.#debugResponseLog = debugSession
+					? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
+					: undefined;
 
-			const requestPayload = JSON.stringify(request);
-			notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
-			// Re-check liveness: the debug-session await above can outlive the socket.
-			const socket = this.#socket;
-			if (!socket || socket.readyState !== WebSocket.OPEN) {
-				throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
-			}
-			try {
-				socket.send(requestPayload);
-			} catch (error) {
-				throw new CodexWebSocketTransportError(
-					`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				const requestPayload = JSON.stringify(request);
+				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
+				// Re-check liveness: the debug-session await above can outlive the socket.
+				// Preserve the abort cause: onAbort already queued a caused error, but this
+				// throw would otherwise mask it before #nextMessage() drains the queue.
+				const socket = this.#socket;
+				if (!socket || socket.readyState !== WebSocket.OPEN) {
+					if (signal?.aborted) {
+						throw new CodexWebSocketTransportError(`websocket connection is unavailable`, {
+							cause: signal.reason,
+						});
+					}
+					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
+				}
+				try {
+					socket.send(requestPayload);
+				} catch (error) {
+					throw new CodexWebSocketTransportError(
+						`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
+				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
 			}
 			let sawFirstEvent = false;
 			const { idleTimeoutMs, firstEventTimeoutMs } = timeouts;
@@ -3839,6 +4256,7 @@ class CodexWebSocketConnection {
 		} finally {
 			this.#activeRequest = false;
 			this.#streamObserver = undefined;
+			this.#attachSteerIds = undefined;
 			if (signal) {
 				signal.removeEventListener("abort", onAbort);
 			}
@@ -3846,6 +4264,83 @@ class CodexWebSocketConnection {
 			this.#debugResponseLog = undefined;
 			await debugResponseLog?.close();
 		}
+	}
+
+	/**
+	 * Submit `response.steer` for `previousResponseId`, which must be streaming
+	 * on this socket. Resolves on the server's acknowledgement.
+	 */
+	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
+		const socket = this.#socket;
+		if (!socket || socket.readyState !== WebSocket.OPEN) {
+			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));
+		}
+		const event = { type: "response.steer", previous_response_id: previousResponseId, input };
+		const payload = JSON.stringify(event);
+		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
+		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
+		this.#steerWaiters.push(waiter);
+		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
+		try {
+			socket.send(payload);
+		} catch (error) {
+			this.#steerWaiters.splice(this.#steerWaiters.indexOf(waiter), 1);
+			reject(
+				new CodexWebSocketTransportError(
+					`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
+				),
+			);
+		}
+		return promise;
+	}
+
+	/** True when the server failed to commit any of the accepted steering `ids`. */
+	hasFailedSteer(ids: readonly string[]): boolean {
+		return ids.some(id => this.#failedSteers.has(id));
+	}
+
+	#handleSteerEvent(event: Record<string, unknown>): void {
+		const steer = asRecord(event.steer);
+		const id = typeof steer?.id === "string" ? steer.id : undefined;
+		const previousResponseId = typeof steer?.previous_response_id === "string" ? steer.previous_response_id : "";
+		if (event.type === "response.steer.accepted") {
+			if (!id) return;
+			this.#acceptedSteers.add(id);
+			this.#takeSteerWaiter(previousResponseId)?.resolve({ accepted: true, id });
+			return;
+		}
+		if (event.type === "response.steer.failed") {
+			const error = asRecord(event.error);
+			const code = typeof error?.code === "string" ? error.code : undefined;
+			const message = typeof error?.message === "string" ? error.message : undefined;
+			if (id && this.#acceptedSteers.has(id)) {
+				// Accepted input that never reached a successor response.
+				this.#failedSteers.add(id);
+				if (this.#attachSteerIds?.has(id)) {
+					this.#push(
+						new CodexSteerCommitError(`steering ${id} was not committed: ${code ?? message ?? "unknown"}`),
+					);
+				}
+				return;
+			}
+			this.#takeSteerWaiter(previousResponseId)?.resolve({ accepted: false, code, message });
+			return;
+		}
+		// `response.steer.pending` restates that accepted input awaits tool output;
+		// the request planner already derives that from the transcript.
+		CODEX_DEBUG && logger.debug("[codex] codex steering event", { type: event.type, id, previousResponseId });
+	}
+
+	#takeSteerWaiter(previousResponseId: string): CodexSteerWaiter | undefined {
+		const index = this.#steerWaiters.findIndex(waiter => waiter.previousResponseId === previousResponseId);
+		return index < 0 ? undefined : this.#steerWaiters.splice(index, 1)[0];
+	}
+
+	#rejectSteerWaiters(reason: string): void {
+		const waiters = this.#steerWaiters;
+		if (waiters.length === 0) return;
+		this.#steerWaiters = [];
+		for (const waiter of waiters) waiter.reject(new CodexWebSocketTransportError(reason));
 	}
 
 	#captureHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): void {
@@ -4038,6 +4533,7 @@ class CodexWebSocketConnection {
 
 async function getOrCreateCodexWebSocketConnection(
 	state: CodexWebSocketSessionState,
+	turnState: CodexTurnStateCell,
 	url: string,
 	headers: Headers,
 	provider: string,
@@ -4084,7 +4580,7 @@ async function getOrCreateCodexWebSocketConnection(
 	logger.time("codexWs:newSocket");
 	state.connection = new CodexWebSocketConnection(url, headerRecord, {
 		onHandshakeHeaders: handshakeHeaders => {
-			updateCodexSessionMetadataFromHeaders(state, handshakeHeaders);
+			updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
 		},
 		proxy,
 	});
@@ -4118,6 +4614,7 @@ async function openCodexSseEventStream(
 	sessionId: string | undefined,
 	body: RequestBody,
 	state: CodexWebSocketSessionState | undefined,
+	turnState: CodexTurnStateCell,
 	responsesLite: boolean,
 	codexClientVersion: string,
 	requestMetadata: CodexRequestMetadata | undefined,
@@ -4135,9 +4632,11 @@ async function openCodexSseEventStream(
 		sessionId,
 		"sse",
 		state,
+		turnState,
 		responsesLite,
 		requestMetadata,
 		await getCodexAttestationHeader(accountId),
+		body,
 	);
 	// `wrapCodexSseStream` arms the iterator-level idle watchdog only after this
 	// fetch resolves. Each transport attempt needs its own pre-response timer:
@@ -4145,11 +4644,22 @@ async function openCodexSseEventStream(
 	// an internal timeout stays retryable while an explicit abort fails fast.
 	let clearPreResponseTimeout: (() => void) | undefined;
 	const fetchAttempt: FetchImpl = async (input, init) => {
+		let response: Response | undefined;
 		try {
-			return await (fetchOverride ?? fetch)(input, init);
+			response = await (fetchOverride ?? fetch)(input, init);
+			return response;
 		} finally {
-			clearPreResponseTimeout?.();
-			clearPreResponseTimeout = undefined;
+			// A successful streaming body is governed by the iterator-level idle
+			// watchdog, so disarm the pre-response guard the instant headers arrive.
+			// Keep it armed for a non-2xx response: the error body is still
+			// consumed under this deadline — by fetchWithRetry's
+			// retry-status inspection and by CodexApiError.fromResponse — otherwise a
+			// server that sends headers then stalls the body hangs the turn past every
+			// configured first-event/idle deadline (issue #12664).
+			if (!response || response.ok) {
+				clearPreResponseTimeout?.();
+				clearPreResponseTimeout = undefined;
+			}
 		}
 	};
 	const bodyJson = JSON.stringify(body);
@@ -4173,6 +4683,9 @@ async function openCodexSseEventStream(
 			body: requestBody,
 			signal,
 			prepareInit: () => {
+				// A retried non-2xx attempt leaves its guard armed for the retry-status
+				// body read; disarm it before arming the next attempt's guard.
+				clearPreResponseTimeout?.();
 				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
 				clearPreResponseTimeout = watchdog.clear;
 				return { signal: watchdog.signal };
@@ -4197,8 +4710,9 @@ async function openCodexSseEventStream(
 				});
 			response = await send(bodyJson);
 		}
-	} finally {
+	} catch (error) {
 		clearPreResponseTimeout?.();
+		throw error;
 	}
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex response", {
@@ -4209,14 +4723,27 @@ async function openCodexSseEventStream(
 			cfRay: response.headers.get("cf-ray") || null,
 		});
 	if (!response.ok) {
-		throw await CodexApiError.fromResponse(response);
+		// The pre-response guard is still armed for a non-2xx response; keep it live
+		// across the error-body read so a stalled body is bounded, then disarm once
+		// the read settles (issue #12664).
+		try {
+			throw await CodexApiError.fromResponse(response);
+		} finally {
+			clearPreResponseTimeout?.();
+		}
 	}
-	updateCodexSessionMetadataFromHeaders(state, response.headers);
+	updateCodexSessionMetadataFromHeaders(turnState, state, response.headers);
 	if (!response.body) {
 		throw new CodexProviderStreamError("No response body", false);
 	}
-	return readSseJson<Record<string, unknown>>(response.body, signal, event =>
-		onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, undefined),
+	// Attach the observer only when a diagnostic listener exists: any observer
+	// turns on per-line raw capture in `readSseJson`.
+	return readSseJson<Record<string, unknown>>(
+		response.body,
+		signal,
+		onSseEvent
+			? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, undefined)
+			: undefined,
 	);
 }
 
@@ -4228,14 +4755,29 @@ function createCodexHeaders(
 	sessionId?: string,
 	transport: CodexTransport = "sse",
 	state?: CodexWebSocketSessionState,
+	turnState?: CodexTurnStateCell,
 	responsesLite = false,
 	requestMetadata?: CodexCompatibilityIdentity,
 	attestation?: string,
+	routedRequest?: Pick<RequestBody, "model" | "service_tier">,
 ): Headers {
 	const headers = new Headers(initHeaders ?? {});
 	headers.delete("x-api-key");
 	headers.set("Authorization", `Bearer ${accessToken}`);
 	if (accountId) headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
+	// codex-rs sends the hint on every ChatGPT-OAuth request and WebSocket
+	// handshake; this provider only ever speaks to the Codex backend.
+	if (routedRequest) {
+		headers.set(OPENAI_HEADERS.ROUTING_HINT, codexRoutingHint(routedRequest.model, routedRequest.service_tier));
+	} else {
+		headers.delete(OPENAI_HEADERS.ROUTING_HINT);
+	}
+	// Region-pinned enterprise workspaces answer 401 `Workspace is not authorized
+	// in this region.` when the request's egress region does not match them and
+	// the client did not declare the workspace's residency. The access token
+	// already carries it, so this needs no configuration. A caller-supplied
+	// header still wins: a proxy fronting Codex may want a different value.
+	applyCodexResidencyHeader(headers, accessToken);
 	if (attestation) {
 		headers.set(OPENAI_HEADERS.ATTESTATION, attestation);
 	} else {
@@ -4269,8 +4811,8 @@ function createCodexHeaders(
 		headers.delete(OPENAI_HEADERS.WINDOW_ID);
 		headers.delete(OPENAI_HEADERS.TURN_METADATA);
 	}
-	if (state?.turnState) {
-		headers.set(X_CODEX_TURN_STATE_HEADER, state.turnState);
+	if (turnState?.value) {
+		headers.set(X_CODEX_TURN_STATE_HEADER, turnState.value);
 	} else {
 		headers.delete(X_CODEX_TURN_STATE_HEADER);
 	}
@@ -4334,16 +4876,14 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	const messages: ResponseInput = [];
 
 	const normalizeToolCallId = (id: string): string => {
-		if (!id.includes("|")) return id;
-		const [callId, itemId] = id.split("|");
-		const sanitizedCallId = callId.replace(/[^a-zA-Z0-9_-]/g, "_");
-		let sanitizedItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_");
+		const sep = id.search(/[\n|]/);
+		const [callId, itemId] = sep > 0 ? [id.slice(0, sep), id.slice(sep + 1)] : [id, undefined];
+		const normalizedCallId = sanitizeCodexCallId(callId);
+		let sanitizedItemId = (itemId ?? Bun.hash(id).toString(36)).replace(/[^a-zA-Z0-9_-]/g, "_");
 		if (!sanitizedItemId.startsWith("fc")) {
 			sanitizedItemId = `fc_${sanitizedItemId}`;
 		}
-		let normalizedCallId = sanitizedCallId.length > 64 ? sanitizedCallId.slice(0, 64) : sanitizedCallId;
 		let normalizedItemId = sanitizedItemId.length > 64 ? sanitizedItemId.slice(0, 64) : sanitizedItemId;
-		normalizedCallId = normalizedCallId.replace(/_+$/, "");
 		normalizedItemId = normalizedItemId.replace(/_+$/, "");
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
@@ -4368,10 +4908,11 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
 				const replayItems =
 					model.supportsComputerUse === true
-						? redactedHistoryItems
-						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
+						? sanitizedHistoryItems
+						: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);
@@ -4477,7 +5018,9 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 
 function normalizeInputMessageContent(
 	model: Model<"openai-codex-responses">,
-	content: string | Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string }>,
+	content:
+		| string
+		| Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string; url?: string }>,
 ): ResponseInputContent[] {
 	// gpt-5.x codex rejects reserved Harmony control-token spellings in input
 	// data; escape the transport copy of untrusted user text so ordinary docs or
@@ -4560,9 +5103,19 @@ export function convertOpenAICodexResponsesTools(
 }
 
 export class CodexWebSocketTransportError extends Error {
-	constructor(detail: string) {
-		super(`${CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX}: ${detail}`);
+	constructor(detail: string, options?: ErrorOptions) {
+		super(`${CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX}: ${detail}`, options);
 		this.name = "CodexWebSocketTransportError";
+	}
+}
+/**
+ * The server failed to commit accepted steering to its automatic successor, so
+ * the request that was reading that successor must be sent explicitly instead.
+ */
+class CodexSteerCommitError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CodexSteerCommitError";
 	}
 }
 class CodexWhitespaceToolCallLoopError extends Error {
@@ -4641,7 +5194,12 @@ export function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>):
 		return true;
 	}
 	const message = error?.message ?? event.message ?? event.response?.message;
-	return !!message && CODEX_RETRYABLE_EVENT_MESSAGE.test(message);
+	return (
+		!!message &&
+		(CODEX_RETRYABLE_EVENT_MESSAGE.test(message) ||
+			AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(message) ||
+			AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(message))
+	);
 }
 
 export function createCodexProviderStreamError(rawEvent: Record<string, unknown>): CodexProviderStreamError {

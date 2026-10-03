@@ -7,15 +7,20 @@
  * transport so a process supervisor (pm2, journald, k8s) captures the logs.
  *
  * Each entry includes `process.pid` so concurrent omp instances stay
- * traceable.
+ * traceable. The file is created on the first record written. Records are
+ * batched — one write per second or per 64 KiB — while `warn`/`error` records
+ * are written at once together with everything buffered before them; exit,
+ * fatal, and signal paths flush the rest. `OMP_LOG_LEVEL` optionally limits
+ * the levels written to the file (default: all).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isPromise } from "node:util/types";
-import { getLogsDir } from "./dirs";
+import { getLogsDir, localDay } from "./dirs";
 import { RotatingFileSink } from "./logger/rotating-file";
+import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents } from "./timing-buffer";
 /** Severity names accepted by the centralized logger. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
@@ -54,9 +59,13 @@ function emitToSinks(level: LogLevel, message: string, context: Record<string, u
 }
 
 const PROCESS_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.(\d+)\.log(?:\.(\d+))?$/;
+/** Per-process audit files written by earlier releases; current sinks track rotations in memory. */
 const PROCESS_AUDIT_PATTERN = /^\.omp\.(\d+)-audit\.json$/;
+/** Shared daily logs (plain, size-rolled, or gzipped) written by the winston-era logger. */
+const LEGACY_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.log(?:\.\d+)?(?:\.gz)?$/;
+/** Hash-named audit files written by winston-daily-rotate-file. */
+const LEGACY_AUDIT_PATTERN = /^\.[0-9a-f]{8,}-audit\.json$/;
 const RETAINED_STALE_LOGS_PER_PROCESS_DAY = 1;
-const RETAINED_STALE_AUDIT_FILES = 0;
 const RETAINED_STALE_LOG_DAYS = 5;
 
 function processIsRunning(pid: number): boolean {
@@ -70,9 +79,11 @@ function processIsRunning(pid: number): boolean {
 
 /**
  * Retain one newest completed-process log per process/day within the current
- * and previous four local calendar days, and remove one-use audit files. Live
- * PID namespaces are never touched. The calendar-day boundary preserves daily
- * diagnostic coverage while bounding completed-process storage and scans.
+ * and previous four local calendar days, remove completed-process audit files
+ * left by earlier releases, and age out legacy shared daily logs and their
+ * hash-named audits past the same window. Live PID namespaces are never
+ * touched. The calendar-day boundary preserves daily diagnostic coverage while
+ * bounding completed-process storage and scans.
  */
 function pruneStaleProcessLogs(dir: string): void {
 	let entries: fs.Dirent[];
@@ -82,70 +93,90 @@ function pruneStaleProcessLogs(dir: string): void {
 		return;
 	}
 	const current = new Date();
-	const currentDate =
-		`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}-` +
-		String(current.getDate()).padStart(2, "0");
+	const currentDate = localDay(current);
 	const cutoff = new Date(current);
 	cutoff.setDate(cutoff.getDate() - (RETAINED_STALE_LOG_DAYS - 1));
-	const cutoffDate =
-		`${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-` +
-		String(cutoff.getDate()).padStart(2, "0");
+	const cutoffDate = localDay(cutoff);
+	cutoff.setHours(0, 0, 0, 0);
+	const cutoffMs = cutoff.getTime();
 
-	const staleLogsByProcessDay = new Map<string, Array<{ path: string; mtimeMs: number; rollover: number }>>();
+	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
 	for (const entry of entries) {
 		if (!entry.isFile()) continue;
+		const entryPath = path.join(dir, entry.name);
+		const legacyMatch = LEGACY_LOG_PATTERN.exec(entry.name);
+		if (legacyMatch?.[1]) {
+			if (legacyMatch[1] < cutoffDate) removeBestEffort(entryPath);
+			continue;
+		}
+		if (LEGACY_AUDIT_PATTERN.test(entry.name)) {
+			try {
+				if (fs.statSync(entryPath).mtimeMs < cutoffMs) removeBestEffort(entryPath);
+			} catch {
+				// Another process may have pruned the same legacy audit.
+			}
+			continue;
+		}
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
 		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
 		const pidText = logMatch?.[2] ?? auditMatch?.[1];
 		if (!pidText || processIsRunning(Number(pidText))) continue;
-		const entryPath = path.join(dir, entry.name);
 
 		if (auditMatch) {
-			if (RETAINED_STALE_AUDIT_FILES === 0) {
-				try {
-					fs.rmSync(entryPath, { force: true });
-				} catch {
-					// Retention is best-effort; logging must still initialize.
-				}
-			}
+			removeBestEffort(entryPath);
 			continue;
 		}
 		if (!logMatch?.[1]) continue;
 		if (logMatch[1] < cutoffDate || logMatch[1] > currentDate) {
-			try {
-				fs.rmSync(entryPath, { force: true });
-			} catch {
-				// Another process may have pruned the same stale namespace.
-			}
+			removeBestEffort(entryPath);
 			continue;
 		}
 
-		try {
-			const key = `${pidText}:${logMatch[1]}`;
-			const staleLogs = staleLogsByProcessDay.get(key) ?? [];
-			staleLogs.push({
-				path: entryPath,
-				mtimeMs: fs.statSync(entryPath).mtimeMs,
-				rollover: Number(logMatch[3] ?? 0),
-			});
-			staleLogsByProcessDay.set(key, staleLogs);
-		} catch {
-			// Another process may have pruned the same stale namespace.
-		}
+		const key = `${pidText}:${logMatch[1]}`;
+		const staleLogs = staleLogsByProcessDay.get(key) ?? [];
+		staleLogs.push({
+			path: entryPath,
+			rollover: Number(logMatch[3] ?? 0),
+		});
+		staleLogsByProcessDay.set(key, staleLogs);
 	}
 
 	for (const staleLogs of staleLogsByProcessDay.values()) {
-		staleLogs.sort(
-			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
-		);
-		for (const stale of staleLogs.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) {
+		if (staleLogs.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
+		const ranked: Array<{ path: string; mtimeMs: number; rollover: number }> = [];
+		for (const stale of staleLogs) {
 			try {
-				fs.rmSync(stale.path, { force: true });
+				ranked.push({ ...stale, mtimeMs: fs.statSync(stale.path).mtimeMs });
 			} catch {
 				// Another process may have pruned the same stale namespace.
 			}
 		}
+		ranked.sort(
+			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+		);
+		for (const stale of ranked.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) removeBestEffort(stale.path);
 	}
+}
+
+function removeBestEffort(filePath: string): void {
+	try {
+		fs.rmSync(filePath, { force: true });
+	} catch {
+		// Retention is best-effort; another process may have pruned the same file.
+	}
+}
+
+const scheduledPruneDirs = new Set<string>();
+
+/** Run shared retention only after logger construction has returned to the event loop. */
+function schedulePruneStaleProcessLogs(dir: string): void {
+	if (scheduledPruneDirs.has(dir)) return;
+	scheduledPruneDirs.add(dir);
+	const immediate = setImmediate(() => {
+		scheduledPruneDirs.delete(dir);
+		pruneStaleProcessLogs(dir);
+	});
+	immediate.unref();
 }
 
 /** Ensure a logs directory exists; return the resolved path. */
@@ -230,18 +261,70 @@ function formatLogInfo(info: NormalizedLogInfo): string {
 	return JSON.stringify(entry, jsonReplacer) as string;
 }
 
+/** Longest a buffered file record waits before it is written. */
+const FILE_FLUSH_INTERVAL_MS = 1_000;
+/** Buffered bytes at which the file batch is written immediately. */
+const FILE_FLUSH_BYTES = 64 * 1024;
+
+let exitFlushInstalled = false;
+/** Set once the process is exiting: every later record is written immediately. */
+let exiting = false;
+
+function flushOnExit(): void {
+	exiting = true;
+	flush();
+}
+
 /** Build a rotating file sink with process-local rotation and shared retention. */
 function makeFileTransport(dir?: string): RotatingFileSink {
 	const logsDir = ensureDir(dir ?? getLogsDir());
-	pruneStaleProcessLogs(logsDir);
+	schedulePruneStaleProcessLogs(logsDir);
+	if (!exitFlushInstalled) {
+		exitFlushInstalled = true;
+		// Natural exit and process.exit(); signal and fatal exits that bypass the
+		// `exit` event flush through postmortem's exitProcess().
+		process.on("exit", flushOnExit);
+	}
+	// The sink opens (and creates) its file on the first batch written.
 	return new RotatingFileSink({
 		directory: logsDir,
 		filenamePrefix: "omp",
 		filenameSuffix: String(process.pid),
 		maxBytes: 10 * 1024 * 1024,
 		maxFiles: 5,
-		auditFile: path.join(logsDir, `.omp.${process.pid}-audit.json`),
+		batch: { intervalMs: FILE_FLUSH_INTERVAL_MS, maxBytes: FILE_FLUSH_BYTES },
+		// Keep the stderr guard's fd 2 on the file this sink is writing.
+		onRotate: setStderrRedirectTarget,
 	});
+}
+
+const LOG_LEVEL_RANK: Record<LogLevel, number> = { error: 0, warn: 1, info: 2, debug: 3 };
+/** `warn` and `error` records are written at once, with everything buffered before them. */
+const IMMEDIATE_FLUSH_RANK = LOG_LEVEL_RANK.warn;
+
+/**
+ * Rank of the most verbose level the file transport persists: `OMP_LOG_LEVEL`
+ * (error|warn|info|debug, case-insensitive), default `debug` (everything).
+ */
+function resolveFileLevelRank(): number {
+	const requested = process.env.OMP_LOG_LEVEL?.trim().toLowerCase();
+	return requested && Object.hasOwn(LOG_LEVEL_RANK, requested)
+		? LOG_LEVEL_RANK[requested as LogLevel]
+		: LOG_LEVEL_RANK.debug;
+}
+
+/**
+ * Write buffered file records to disk now. The file transport batches records
+ * (one write per second or per 64 KiB) and writes `warn`/`error` records
+ * immediately; process exit flushes on its own. Call this before handing the
+ * log file to something that reads it in-process. Never throws.
+ */
+export function flush(): void {
+	try {
+		activeTransports?.file?.flush();
+	} catch {
+		// Flushing diagnostics must never mask the caller's own work or failure.
+	}
 }
 
 /**
@@ -253,6 +336,8 @@ let transportOpts: { console?: boolean; file?: boolean | string } = { file: true
 interface LocalTransports {
 	readonly file: RotatingFileSink | undefined;
 	readonly console: boolean;
+	/** Rank of the most verbose level written to {@link file}. */
+	readonly fileLevelRank: number;
 }
 
 /** Local transports, constructed lazily on first log emission. */
@@ -262,6 +347,7 @@ function buildTransports(opts: { console?: boolean; file?: boolean | string }): 
 	return {
 		file: opts.file ? makeFileTransport(typeof opts.file === "string" ? opts.file : undefined) : undefined,
 		console: opts.console === true,
+		fileLevelRank: resolveFileLevelRank(),
 	};
 }
 
@@ -272,24 +358,27 @@ function getLocalTransports(): LocalTransports {
 
 function emitLocally(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	const transports = getLocalTransports();
+	const rank = LOG_LEVEL_RANK[level];
+	const file = rank <= transports.fileLevelRank ? transports.file : undefined;
+	if (!file && !transports.console) return;
 	const info = normalizeLogInfo(level, message, context);
-	if (!transports.file && !transports.console) return;
-
 	const line = formatLogInfo(info);
-	if (transports.file) transports.file.write(line);
-	if (transports.console) fs.writeSync(1, `${formatLogInfo(info)}${os.EOL}`);
+	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting);
+	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 
 /**
  * Replace the active log transports. Pass `console: true, file: false` for
  * long-running services (the auth broker, etc.) that want their structured
  * logs piped into a process supervisor instead of the rotating file.
+ * The previous file transport writes its buffered records before closing, and
+ * the file level (`OMP_LOG_LEVEL`) is re-read on each reconfiguration.
  */
 export function setTransports(opts: { console?: boolean; file?: boolean | string }): void {
 	transportOpts = opts;
 	if (!activeTransports) return; // applied lazily when local logging is first initialized
 	const previousTransports = activeTransports;
-	activeTransports = { file: undefined, console: false };
+	activeTransports = { file: undefined, console: false, fileLevelRank: previousTransports.fileLevelRank };
 	previousTransports.file?.close();
 	activeTransports = buildTransports(opts);
 }
@@ -628,7 +717,9 @@ function printSpan(span: Span, depth: number, lines: string[]): void {
 	const tag = parallel ? " [parallel]" : "";
 	const self = selfTimeOf(span);
 	const selfStr = span.children.length > 0 && self > LOGGED_TIMING_THRESHOLD_MS ? ` (self ${fmtMs(self)})` : "";
-	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag}`);
+	// Start offset from process origin: gaps between consecutive siblings are
+	// the parent's own (unspanned) work, which duration alone cannot locate.
+	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag} @${span.start.toFixed(0)}ms`);
 
 	// Split children into work spans and module-load spans for summarization.
 	const work: Span[] = [];

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { buildBedrockCompat } from "@oh-my-pi/pi-catalog/compat/bedrock";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { MODELS_DEV_PROVIDER_DESCRIPTORS, mapModelsDevToModels } from "@oh-my-pi/pi-catalog/provider-models";
+import { filterModelsDevCatalogRows } from "@oh-my-pi/pi-catalog/provider-models/models-dev-policies";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { dropUnsupportedBedrockGeoIds } from "../scripts/generated-policies";
 
 // AWS's Bedrock model card for Claude Opus 5 lists these commercial/geo
 // Programmatic Access IDs — the bare model ID plus the us./eu./au. Geo and
@@ -81,7 +81,7 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 		const mapped = allMapped.filter(
 			model => model.provider === "amazon-bedrock" && model.id.endsWith("anthropic.claude-opus-5"),
 		);
-		const opus5Ids = dropUnsupportedBedrockGeoIds(mapped).map(model => model.id);
+		const opus5Ids = filterModelsDevCatalogRows(mapped).map(model => model.id);
 
 		// Set semantics: the descriptor also derives `eu.` and `us-gov.` variants
 		// from the bare `anthropic.` row, so `eu.` legitimately arrives from both
@@ -116,7 +116,7 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 			bareSpec("some-other-provider", "jp.anthropic.claude-opus-5"),
 		];
 
-		expect(dropUnsupportedBedrockGeoIds(input).map(model => model.id)).toEqual([
+		expect(filterModelsDevCatalogRows(input).map(model => model.id)).toEqual([
 			"us.anthropic.claude-opus-5",
 			"jp.anthropic.claude-opus-4-8",
 			"jp.anthropic.claude-opus-5",
@@ -137,14 +137,46 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 				contextWindow: 1_000_000,
 				maxTokens: 128_000,
 			};
-			expect(buildBedrockCompat(spec)).toEqual({
+			expect(resolveModelPolicy(spec).compat).toEqual({
 				promptCacheMode: "explicit",
 				supportsLongPromptCacheRetention: true,
 				promptCacheMinimumTokens: 512,
 				promptCacheMaximumCheckpoints: 4,
+				supportsForcedToolChoice: true,
 				// reasoning:true adaptive-thinking family → 900s keepalive-free idle floor.
 				streamIdleTimeoutMs: 900_000,
+				streamRevision: "possible",
 			});
 		}
+	});
+
+	test("enables Opus 5.5 thinking prefix binding on Anthropic and Bedrock only from 5.5", () => {
+		const modelSpec = (id: string, api: ModelSpec["api"], provider: string): ModelSpec => ({
+			id,
+			name: id,
+			api,
+			provider,
+			baseUrl: "",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 32_000,
+		});
+
+		expect(
+			resolveModelPolicy(modelSpec("claude-opus-5-5", "anthropic-messages", "anthropic")).thinking?.prefixBinding,
+		).toBe(true);
+		expect(
+			resolveModelPolicy(modelSpec("global.anthropic.claude-opus-5-5", "bedrock-converse-stream", "amazon-bedrock"))
+				.thinking?.prefixBinding,
+		).toBe(true);
+		expect(
+			resolveModelPolicy(modelSpec("claude-opus-4-8", "anthropic-messages", "anthropic")).thinking?.prefixBinding,
+		).not.toBe(true);
+		expect(
+			resolveModelPolicy(modelSpec("global.anthropic.claude-opus-4-8", "bedrock-converse-stream", "amazon-bedrock"))
+				.thinking?.prefixBinding,
+		).not.toBe(true);
 	});
 });

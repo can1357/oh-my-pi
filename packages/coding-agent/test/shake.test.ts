@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -10,7 +10,17 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+import {
+	cfgCompactionDropUseless,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionMethodOrder,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+	cfgContextPromotionEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const usage = {
 	input: 16,
@@ -33,7 +43,7 @@ describe("AgentSession shake", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-shake-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
@@ -131,6 +141,100 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			appendRecentProtectedTail();
+			const allocateArtifactPath = vi
+				.spyOn(sessionManager, "allocateArtifactPath")
+				.mockRejectedValue(new Error("artifact directory unavailable"));
+			const saveArtifact = vi.spyOn(sessionManager, "saveArtifact").mockResolvedValue(undefined);
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.artifactId).toBeUndefined();
+			const [toolResult] = branchToolResults();
+			expect(toolResult.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
+			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("artifact://") }]);
+			saveArtifact.mockRestore();
+			allocateArtifactPath.mockRestore();
+		});
+
+		it("preserves mixed tool-result images while eliding only recoverable text", async () => {
+			const largeText = "mixed tool output ".repeat(2_000);
+			const image: ImageContent = {
+				type: "image",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+				mimeType: "image/png",
+				detail: "original",
+				providerFile: { provider: "openai", id: "file_shake_image" },
+				url: "https://images.example.invalid/shake.png",
+			};
+			const imageSnapshot = structuredClone(image);
+			seedHeavyToolResult(largeText);
+			const [mixedResult] = branchToolResults();
+			mixedResult.content = [{ type: "text", text: largeText }, image];
+			const tailBefore = recentProtectedTail("newer context");
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.imagesDropped).toBeUndefined();
+			expect(result.artifactId).toBeDefined();
+			const placeholder = mixedResult.content[0];
+			expect(placeholder?.type).toBe("text");
+			if (placeholder?.type !== "text") throw new Error("Expected shake placeholder text");
+			expect(placeholder.text).toContain("shaken");
+			expect(placeholder.text).toContain(`artifact://${result.artifactId}`);
+			expect(mixedResult.content[1]).toBe(image);
+			expect(mixedResult.content[1]).toEqual(imageSnapshot);
+
+			const tokenizer = new Tokenizer();
+			const expectedFreed = tokenizer.countTokens(largeText) - tokenizer.countTokens(placeholder.text);
+			expect(result.tokensFreed).toBe(expectedFreed);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+
+			if (!result.artifactId) throw new Error("Expected shake artifact");
+			const artifactPath = await sessionManager.getArtifactPath(result.artifactId);
+			if (!artifactPath) throw new Error("Expected persisted shake artifact");
+			expect(await Bun.file(artifactPath).text()).toContain(largeText);
+
+			const latestUser = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "user");
+			expect(
+				latestUser?.type === "message" && latestUser.message.role === "user"
+					? latestUser.message.content
+					: undefined,
+			).toEqual([{ type: "text", text: tailBefore }]);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const persistedResult = persisted
+					.getBranch()
+					.find(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === mixedResult.toolCallId,
+					);
+				const persistedImage =
+					persistedResult?.type === "message" && persistedResult.message.role === "toolResult"
+						? persistedResult.message.content.find(block => block.type === "image")
+						: undefined;
+				expect(persistedImage).toEqual(imageSnapshot);
+			} finally {
+				await persisted.close();
+			}
+
+			const imageResult = await session.shake("images");
+			expect(imageResult.imagesDropped).toBe(1);
+			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
+		});
+
 		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			sessionManager.appendMessage({
@@ -219,10 +323,13 @@ describe("AgentSession shake", () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
 			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
-			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {}, false, {
-				openaiRemoteCompaction: {
-					provider: "openai",
-					replacementHistory: [],
+			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {
+				details: {},
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replacementHistory: [],
+					},
 				},
 			});
 			sessionManager.appendMessage({
@@ -275,6 +382,129 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+	});
+
+	describe("thinking", () => {
+		it("drops both thinking variants, keeps empty turns empty, and refreshes persisted and runtime state", async () => {
+			const mixed: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "reasoning ".repeat(1_000) },
+					{ type: "redactedThinking", data: "opaque-reasoning" },
+					{ type: "text", text: "visible answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+			const thinkingOnly: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "private reasoning" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() + 1,
+			};
+			sessionManager.appendMessage(mixed);
+			sessionManager.appendMessage(thinkingOnly);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = new Tokenizer();
+			const tokensBefore = tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true });
+			const thinkingOnlyBefore = tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(3);
+			expect(mixed.content).toEqual([{ type: "text", text: "visible answer" }]);
+			expect(thinkingOnly.content).toEqual([]);
+			expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBeLessThan(tokensBefore);
+			const measuredSaving =
+				tokensBefore +
+				thinkingOnlyBefore -
+				tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true }) -
+				tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
+			expect(measuredSaving).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(measuredSaving);
+			expect(formatShakeSummary(result)).toContain(`~${result.tokensFreed} tokens freed`);
+
+			const runtimeAssistants = session.agent.state.messages.filter(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			expect(runtimeAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+			expect(runtimeAssistants.some(message => message.content.length === 0)).toBe(true);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const persistedAssistants = persisted
+					.getBranch()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
+					);
+				expect(persistedAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+				expect(persistedAssistants.some(message => message.content.length === 0)).toBe(true);
+			} finally {
+				await persisted.close();
+			}
+		});
+
+		it("does not inflate reported savings with opaque signature bytes", async () => {
+			const signed: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "short", thinkingSignature: "S".repeat(20_000) },
+					{ type: "text", text: "answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+			sessionManager.appendMessage(signed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = new Tokenizer();
+			const before = tokenizer.countMessage(signed, { excludeEncryptedReasoning: true });
+			const rawBefore = tokenizer.countMessage(signed);
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(signed, { excludeEncryptedReasoning: true }));
+			expect(result.tokensFreed).toBeLessThan(rawBefore - tokenizer.countMessage(signed));
+		});
+
+		it("updates the provider-anchored context meter for earlier thinking", async () => {
+			const prior: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "old reasoning ".repeat(1_000) },
+					{ type: "text", text: "old answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(prior);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("thinking");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
 		});
 	});
 
@@ -344,9 +574,9 @@ describe("AgentSession shake", () => {
 
 	describe("auto-shake strategy", () => {
 		it("dispatches the elide path and emits a shake action for threshold maintenance", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			// Reclaim enough that the corrected (provider − tokensFreed) figure lands
 			// inside the 80% recovery band — otherwise the #2275 post-shake check would
@@ -384,8 +614,8 @@ describe("AgentSession shake", () => {
 		});
 
 		it("keeps a successful overflow shake recovery committed before retrying", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgContextPromotionEnabled.set(session.settings, false);
 			seedHeavyToolResult("X ".repeat(20000));
 			branchToolResults()[0].useless = true;
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
@@ -439,15 +669,18 @@ describe("AgentSession shake", () => {
 			);
 		});
 
-		it("keeps a no-op incomplete shake retry committed before rollback can restore the length tail", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("contextPromotion.enabled", false);
+		it("keeps an incomplete shake retry committed before rollback can restore the length tail", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			// Over threshold: the window, not the output cap, ran out, so recovery compacts.
+			cfgCompactionThresholdTokens.set(session.settings, 10_000);
+			cfgContextPromotionEnabled.set(session.settings, false);
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			vi.spyOn(session.agent, "continue").mockResolvedValue();
 			vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
 			const shakeSpy = vi
 				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+				// Reclaims back under the recovery band, so shake retries instead of falling back.
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 20_000 });
 
 			const assistantMessage: AssistantMessage = {
 				role: "assistant",
@@ -500,9 +733,9 @@ describe("AgentSession shake", () => {
 			// Defect 1 parity for the shake strategy: the controller backing isCompacting
 			// must be installed before auto_compaction_start is emitted, so a message
 			// typed as the loader appears is queued safely rather than mis-routed.
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			let capturedIsCompacting: boolean | undefined;
 			const { promise: shakeStarted, resolve: onShakeStarted } = Promise.withResolvers<void>();
@@ -542,10 +775,10 @@ describe("AgentSession shake", () => {
 			expect(capturedIsCompacting).toBe(true);
 		});
 
-		it("falls back to context-full when shake cannot drop context below the threshold (regression #2119)", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
+		it("advances to soft compaction when shake cannot drop context below the threshold (regression #2119)", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			// Seed agent state so the post-shake estimate is well above the 1% threshold
 			// (~2K tokens for a 200K window). The mocked shake returns reclaimed=true but
@@ -590,7 +823,7 @@ describe("AgentSession shake", () => {
 				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
 			) as { errorMessage?: string; skipped?: boolean } | undefined;
 			expect(shakeEnd).toBeDefined();
-			expect(shakeEnd?.errorMessage).toMatch(/falling back to context-full/i);
+			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
 
 			// Fallback enters the context-full path so the situation actually resolves.
 			const fullStart = events.find(
@@ -600,9 +833,9 @@ describe("AgentSession shake", () => {
 		});
 
 		it("falls back when provider-reported usage stays above the threshold even though the local estimate is below it (regression #2275)", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdTokens", 5_000);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 5_000);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			// Agent state holds almost no content, so #estimatePendingPromptTokens reads
 			// well below the 5K threshold. The pre-fix post-shake check trusted that
@@ -642,7 +875,7 @@ describe("AgentSession shake", () => {
 				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
 			) as { errorMessage?: string; skipped?: boolean } | undefined;
 			expect(shakeEnd).toBeDefined();
-			expect(shakeEnd?.errorMessage).toMatch(/falling back to context-full/i);
+			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
 
 			const fullStart = events.find(
 				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
@@ -651,11 +884,11 @@ describe("AgentSession shake", () => {
 		});
 
 		it("counts pre-shake prune savings when deciding whether to fall back to context-full", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdTokens", 76384);
-			session.settings.set("compaction.thresholdPercent", -1);
-			session.settings.set("compaction.dropUseless", true);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 76384);
+			cfgCompactionThresholdPercent.set(session.settings, -1);
+			cfgCompactionDropUseless.set(session.settings, true);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			const now = Date.now();
 			sessionManager.appendMessage({
@@ -715,10 +948,10 @@ describe("AgentSession shake", () => {
 		});
 
 		it("falls back after pre-prompt shake when the floored stored conversation remains over threshold", async () => {
-			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdTokens", 8_000);
-			session.settings.set("compaction.keepRecentTokens", 1);
-			session.settings.set("contextPromotion.enabled", false);
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 8_000);
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
 
 			const seedUser: AgentMessage = {
 				role: "user",

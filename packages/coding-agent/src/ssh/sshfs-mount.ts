@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { $which, getRemoteDir, postmortem } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import {
-	getControlDir,
+	ensureSshControlDir,
 	getControlPathTemplate,
 	type SSHConnectionTarget,
 	supportsSshControlMaster,
@@ -11,7 +11,6 @@ import {
 import { buildSshTarget, sanitizeHostName } from "./utils";
 
 const REMOTE_DIR = getRemoteDir();
-const CONTROL_DIR = getControlDir();
 const CONTROL_PATH = getControlPathTemplate();
 
 const mountedPaths = new Set<string>();
@@ -115,7 +114,8 @@ export async function mountRemote(host: SSHConnectionTarget, remotePath = "/"): 
 	if (!hasSshfs()) return undefined;
 
 	const mountPath = getMountPath(host);
-	await Promise.all([ensureDir(REMOTE_DIR), ensureDir(CONTROL_DIR), ensureDir(mountPath)]);
+	ensureSshControlDir();
+	await Promise.all([ensureDir(REMOTE_DIR), ensureDir(mountPath)]);
 
 	if (await isMounted(mountPath)) {
 		if (!registered) {

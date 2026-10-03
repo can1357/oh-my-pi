@@ -1,0 +1,100 @@
+import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { mapOpenAIResponsesToolChoiceForTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
+import type { Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
+
+const encodedMuseCredential = JSON.stringify({
+	oauthAccessToken: "meta-account-access",
+	apiKey: "LLM|subscription-key",
+});
+
+describe("Muse Code provider", () => {
+	test("unwraps only the subscription Model API key for inference and discovery", () => {
+		const provider = getProviderDefinition("muse-code");
+		if (!provider?.prepareRequest || !provider.prepareModelDiscovery) {
+			throw new Error("Muse Code transport is not registered");
+		}
+		const model = buildModel(seedModels("muse-code")[0]!);
+		const request = provider.prepareRequest(model, { apiKey: encodedMuseCredential });
+		const discovery = provider.prepareModelDiscovery({ apiKey: encodedMuseCredential });
+
+		expect(request.options.apiKey).toBe("LLM|subscription-key");
+		expect(request.options.headers).toMatchObject({ "x-api-version": "1.0.0" });
+		expect(discovery).toMatchObject({ apiKey: "LLM|subscription-key", authenticated: true });
+	});
+
+	test("keeps Meta PAYG and Muse subscription credentials in separate provider pools", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await storage.credentials.reload();
+			await storage.credentials.set("meta", [{ type: "api_key", key: "LLM|payg-key", source: "login" }]);
+			await storage.credentials.set("muse-code", [
+				{
+					type: "oauth",
+					access: encodedMuseCredential,
+					refresh: "meta-refresh",
+					expires: Date.now() + 3_600_000,
+					accountId: "meta-account-1",
+				},
+			]);
+
+			expect(await storage.keys.get("meta", "payg-session")).toBe("LLM|payg-key");
+			expect(await storage.keys.get("muse-code", "muse-session")).toBe(encodedMuseCredential);
+			expect(
+				await storage.limits.markReached("muse-code", "muse-session", {
+					apiKey: encodedMuseCredential,
+					retryAfterMs: 60_000,
+				}),
+			).toMatchObject({ switched: false });
+			expect(await storage.keys.get("muse-code", "muse-session")).toBe(encodedMuseCredential);
+			expect(await storage.keys.get("meta", "payg-session")).toBe("LLM|payg-key");
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("accepts stale stored expiry for Muse device credentials without refresh", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await storage.credentials.reload();
+			await storage.credentials.set("muse-code", [
+				{
+					type: "oauth",
+					access: encodedMuseCredential,
+					refresh: "",
+					expires: Date.now() - 60_000,
+					accountId: "meta-account-1",
+				},
+			]);
+
+			expect(await storage.keys.get("muse-code", "stale-expiry-session")).toBe(encodedMuseCredential);
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("omits tool_choice on api.meta.ai, which accepts only auto", () => {
+		// Verified 2026-09-10 against muse-spark-1.3: "none", "required" and named
+		// function choices all 400 with `only "auto" is supported for tool_choice`.
+		const tool: Tool = { name: "yield", description: "Finish.", parameters: type({}) };
+		const choices: ToolChoice[] = ["none", "required", { type: "tool", name: "yield" }];
+		for (const spec of [
+			seedModels<"openai-responses">("meta")[0]!,
+			seedModels<"openai-responses">("muse-code")[0]!,
+		]) {
+			const model = buildModel(spec);
+			for (const choice of choices) {
+				expect(mapOpenAIResponsesToolChoiceForTools(choice, [tool], model)).toBeUndefined();
+			}
+		}
+	});
+});

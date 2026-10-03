@@ -1,4 +1,5 @@
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
+import type { VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import type { ChangelogCategory, ConventionalAnalysis, ConventionalDetail } from "./types";
 
 export function extractToolCall(message: AssistantMessage, name: string): ToolCall | undefined {
@@ -55,4 +56,22 @@ export function normalizeDetails(
 		changelogCategory: detail.user_visible ? detail.changelog_category : undefined,
 		userVisible: detail.user_visible ?? false,
 	}));
+}
+
+/** Render numstat entries as `git diff --stat`-style text. */
+export function renderStat(entries: VcsNumstatEntry[]): string {
+	if (entries.length === 0) return "";
+	let insertions = 0;
+	let deletions = 0;
+	const lines = entries.map(entry => {
+		const added = entry.added ?? 0;
+		const removed = entry.removed ?? 0;
+		insertions += added;
+		deletions += removed;
+		return ` ${entry.path} | ${added + removed} ${"+".repeat(Math.min(added, 40))}${"-".repeat(Math.min(removed, 40))}`;
+	});
+	lines.push(
+		` ${entries.length} file${entries.length === 1 ? "" : "s"} changed, ${insertions} insertion${insertions === 1 ? "" : "s"}(+), ${deletions} deletion${deletions === 1 ? "" : "s"}(-)`,
+	);
+	return `${lines.join("\n")}\n`;
 }

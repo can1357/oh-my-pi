@@ -1,3 +1,7 @@
+import { backgroundChrome, colorTone, sampleBackground, sampleForeground } from "../native/tone";
+import { sameItems } from "../native/memo";
+import { card, col } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import {
 	getPaddingX,
@@ -52,12 +56,29 @@ export class Box implements Component {
 
 	// Cache for rendered output
 	#cached?: Cache;
+	#native?: {
+		children: readonly Component[];
+		bg: string | undefined;
+		border: BoxBorder | undefined;
+		borderColor: string | undefined;
+		node: NativeNode;
+	};
 
 	constructor(paddingX = 1, paddingY = 1, bgFn?: (text: string) => string, border?: BoxBorder) {
 		this.#paddingX = paddingX;
 		this.#paddingY = paddingY;
 		this.#bgFn = bgFn;
 		this.#border = border;
+	}
+	/** Return container layout and child-count state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			childCount: this.children.length,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			bordered: this.#border !== undefined,
+			ignoreTight: this.#ignoreTight,
+		};
 	}
 
 	addChild(component: Component): void {
@@ -112,6 +133,46 @@ export class Box implements Component {
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
+	}
+
+	/**
+	 * A `card` when the box has a border or background: the background token
+	 * picks tone/role (user message, tool state, selection), a border colour
+	 * picks the ring tone. A plain `col` otherwise. Padding is the terminal's.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const bg = sampleBackground(this.#bgFn);
+		const border = this.#border;
+		const borderColor = border ? sampleForeground(border.color) : undefined;
+		const cached = this.#native;
+		if (
+			cached !== undefined &&
+			cached.bg === bg &&
+			cached.border === border &&
+			cached.borderColor === borderColor &&
+			sameItems(cached.children, this.children)
+		) {
+			return cached.node;
+		}
+		const children = [...this.children];
+		let described: NativeNode;
+		if (!border && !this.#bgFn) {
+			described = col(children);
+		} else {
+			const chrome = backgroundChrome(bg);
+			described = card(
+				{
+					role: chrome.role ?? "omp.panel",
+					tone: borderColor !== undefined ? (colorTone(borderColor) ?? "neutral") : (chrome.tone ?? "neutral"),
+					selected: chrome.selected,
+					// Fill without a ring: a flat inset panel.
+					inset: border ? undefined : true,
+				},
+				children,
+			);
+		}
+		this.#native = { children, bg, border, borderColor, node: described };
+		return described;
 	}
 
 	render(width: number): readonly string[] {

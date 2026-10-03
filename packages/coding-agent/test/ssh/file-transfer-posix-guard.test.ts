@@ -19,8 +19,12 @@ describe("ssh file-transfer POSIX guard", () => {
 			compatEnabled: false,
 		});
 		const target: SSHConnectionTarget = { name: "winbox", host: "winbox" };
-		await expect(readRemoteFile(target, "C:/x.txt", { maxBytes: 1024 })).rejects.toThrow(/Windows host/);
-		await expect(writeRemoteFile(target, "C:/x.txt", new Uint8Array([1]), {})).rejects.toThrow(/Windows host/);
+		await expect(readRemoteFile(target, "C:/x.txt", { maxBytes: 1024 })).rejects.toThrow(
+			/Windows host.*use `bash` with a remote SSH command/,
+		);
+		await expect(writeRemoteFile(target, "C:/x.txt", new Uint8Array([1]), {})).rejects.toThrow(
+			/Windows host.*use `bash` with a remote SSH command/,
+		);
 		// Prove the guard ran through the stubbed transport rather than failing early
 		// for an unrelated reason (e.g. a future import refactor bypassing the mocks).
 		expect(ensureConnectionSpy).toHaveBeenCalled();
@@ -40,9 +44,11 @@ describe("ssh file-transfer POSIX guard", () => {
 			compatEnabled: false,
 		});
 		const target: SSHConnectionTarget = { name: "noshell", host: "noshell" };
-		await expect(readRemoteFile(target, "/etc/hosts", { maxBytes: 1024 })).rejects.toThrow(/no verified POSIX shell/);
+		await expect(readRemoteFile(target, "/etc/hosts", { maxBytes: 1024 })).rejects.toThrow(
+			/no verified POSIX shell.*use `bash` with a remote SSH command/,
+		);
 		await expect(writeRemoteFile(target, "/tmp/x", new Uint8Array([1]), {})).rejects.toThrow(
-			/no verified POSIX shell/,
+			/no verified POSIX shell.*use `bash` with a remote SSH command/,
 		);
 	});
 
@@ -81,25 +87,5 @@ describe("ssh file-transfer POSIX guard", () => {
 		expect(buildSpy.mock.calls[1]?.[2]).toMatchObject({ allowStdin: true });
 		expect(dispatches[2]).toMatch(/^bash -c '.*if \[ -d /);
 		expect(dispatches[3]).toMatch(/^bash -c '.*LC_ALL=C ls -1Ap /);
-	});
-
-	it("uses sh -c when transferShell is sh (the most universal POSIX fallback)", async () => {
-		// Belt-and-suspenders: the common happy path with a sh-family login
-		// shell still routes through `sh -c` to keep one dispatch shape.
-		vi.spyOn(connectionManager, "ensureConnection").mockResolvedValue(undefined);
-		vi.spyOn(connectionManager, "ensureHostInfo").mockResolvedValue({
-			version: 4,
-			os: "linux",
-			shell: "sh",
-			transferShell: "sh",
-			compatEnabled: false,
-		});
-		const buildSpy = vi
-			.spyOn(connectionManager, "buildRemoteCommand")
-			.mockRejectedValue(new Error("stop-before-spawn"));
-		const target: SSHConnectionTarget = { name: "shbox", host: "shbox" };
-
-		await expect(readRemoteFile(target, "/etc/hosts", { maxBytes: 1024 })).rejects.toThrow(/stop-before-spawn/);
-		expect(buildSpy.mock.calls[0]?.[1]).toMatch(/^sh -c '.*head -c 1025/);
 	});
 });

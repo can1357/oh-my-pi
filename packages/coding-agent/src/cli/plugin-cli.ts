@@ -4,7 +4,8 @@
  * Handles `omp plugin <command>` subcommands for plugin lifecycle management.
  */
 
-import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { APP_NAME, getPluginsNodeModules, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
@@ -14,8 +15,10 @@ import {
 	getMarketplacesRegistryPath,
 	getPluginsCacheDir,
 	MarketplaceManager,
+	parsePluginId,
 } from "../extensibility/plugins/marketplace/index.js";
-import { theme } from "../modes/theme/theme";
+import type { InstalledPlugin } from "../extensibility/plugins/types";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 
 // =============================================================================
 // Types
@@ -135,7 +138,7 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 	return result;
 }
 
-import { classifyInstallTarget } from "./classify-install-target";
+import { classifyInstallTarget, handleMarketplaceInstall } from "./classify-install-target";
 
 export { classifyInstallTarget } from "./classify-install-target";
 
@@ -184,7 +187,7 @@ export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
 			await handleDiscover(cmd.args, cmd.flags);
 			break;
 		case "upgrade":
-			await handleUpgrade(cmd.args, cmd.flags);
+			await handleUpgrade(manager, cmd.args, cmd.flags);
 			break;
 	}
 }
@@ -305,9 +308,37 @@ async function handleDiscover(args: string[], _flags: PluginCommandArgs["flags"]
 	}
 }
 
-async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]): Promise<void> {
+async function handleUpgrade(
+	pluginManager: PluginManager,
+	args: string[],
+	flags: PluginCommandArgs["flags"],
+): Promise<void> {
+	let pluginId = args[0];
 	const manager = await makeMarketplaceManager();
-	const pluginId = args[0];
+	// Marketplace IDs are `name@marketplace`; anything else is either a bare
+	// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
+	// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
+	if (pluginId && !parsePluginId(pluginId)) {
+		const bareName = pluginId;
+		const candidates = (await manager.listInstalledPlugins())
+			.map(p => p.id)
+			.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
+		const uniqueCandidates = [...new Set(candidates)];
+		if (uniqueCandidates.length > 1) {
+			console.error(
+				chalk.red(
+					`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
+				),
+			);
+			process.exit(1);
+		}
+		if (uniqueCandidates.length === 1) {
+			pluginId = uniqueCandidates[0] as string;
+		} else {
+			await upgradePackagePlugin(pluginManager, bareName, flags);
+			return;
+		}
+	}
 	try {
 		if (pluginId) {
 			if (flags.scope) {
@@ -342,6 +373,46 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 	}
 }
 
+/** Upgrade an npm/git-installed plugin in place from its recorded source. */
+async function upgradePackagePlugin(
+	manager: PluginManager,
+	name: string,
+	flags: PluginCommandArgs["flags"],
+): Promise<void> {
+	if (flags.scope === "project") {
+		console.error(
+			chalk.yellow(
+				`Warning: --scope is only supported for marketplace plugins (name@marketplace). Ignoring for ${name}.`,
+			),
+		);
+	}
+	try {
+		const { from, plugin, changed } = await manager.upgrade(name);
+		if (flags.json) {
+			console.log(
+				JSON.stringify({ upgraded: plugin.name, from: from ?? null, to: plugin.version, changed }, null, 2),
+			);
+		} else if (!changed) {
+			console.log(chalk.green(`${plugin.name} is up to date (${plugin.version})`));
+		} else if (from === plugin.version) {
+			console.log(chalk.green(`Upgraded ${plugin.name} to a new revision (${plugin.version})`));
+		} else {
+			console.log(chalk.green(`Upgraded ${plugin.name}${from ? ` from ${from}` : ""} to ${plugin.version}`));
+		}
+	} catch (err) {
+		console.error(chalk.red(`Failed to upgrade ${name}: ${err instanceof Error ? err.message : err}`));
+		process.exit(1);
+	}
+}
+
+function printLinkPreview(pluginPath: string, json?: boolean): void {
+	if (json) {
+		console.log(JSON.stringify({ dryRun: true, action: "link", path: pluginPath }, null, 2));
+	} else {
+		console.log(chalk.dim(`[dry-run] Would link ${pluginPath}`));
+	}
+}
+
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
@@ -366,6 +437,24 @@ async function handleInstall(
 		const target = classifyInstallTarget(spec, knownMarketplaces);
 
 		if (target.type === "marketplace") {
+			try {
+				const handled = await handleMarketplaceInstall(
+					mktMgr,
+					target,
+					{ dryRun: flags.dryRun ?? false, force: flags.force, scope: flags.scope },
+					preview => {
+						if (flags.json) {
+							console.log(JSON.stringify(preview, null, 2));
+						} else {
+							console.log(chalk.dim(`[dry-run] Would install ${spec}`));
+						}
+					},
+				);
+				if (handled) continue;
+			} catch (err) {
+				console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+				process.exit(1);
+			}
 			try {
 				const entry = await mktMgr.installPlugin(target.name, target.marketplace, {
 					force: flags.force,
@@ -402,11 +491,7 @@ async function handleInstall(
 				);
 			}
 			if (flags.dryRun) {
-				if (flags.json) {
-					console.log(JSON.stringify({ dryRun: true, action: "link", path: target.path }, null, 2));
-				} else {
-					console.log(chalk.dim(`[dry-run] Would link ${spec}`));
-				}
+				printLinkPreview(spec, flags.json);
 				continue;
 			}
 			try {
@@ -474,9 +559,32 @@ async function handleUninstall(
 	// For uninstall, check the installed plugins registry directly.
 	// This works even if the marketplace entry was later removed from marketplaces.json.
 	const mktMgr = await makeMarketplaceManager();
-	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
+	const installedIds = (await mktMgr.listInstalledPlugins()).map(p => p.id);
+	const installedPlugins = new Set(installedIds);
 
-	for (const name of packages) {
+	// Installed marketplace IDs are `name@marketplace`, so a bare name never matches one
+	// exactly. Resolve it when exactly one marketplace supplies that name: without this the
+	// bare form falls through to the npm path, where `bun uninstall` exits 0 for a package
+	// that was never a dependency and the command reports a removal that did not happen.
+	const marketplaceIdsFor = (name: string): string[] =>
+		installedIds.filter(id => id.slice(0, id.lastIndexOf("@")) === name);
+
+	for (const rawName of packages) {
+		let name = rawName;
+		if (!installedPlugins.has(name)) {
+			const candidates = marketplaceIdsFor(name);
+			if (candidates.length === 1) {
+				name = candidates[0] as string;
+			} else if (candidates.length > 1) {
+				console.error(
+					chalk.red(
+						`${theme.status.error} ${rawName} is installed from ${candidates.length} marketplaces. Qualify it: ${candidates.join(", ")}`,
+					),
+				);
+				process.exit(1);
+			}
+		}
+
 		const viaMarketplace = installedPlugins.has(name);
 
 		if (flags.dryRun) {
@@ -517,7 +625,14 @@ async function handleUninstall(
 			continue;
 		}
 
-		// npm path
+		// npm path. `bun uninstall` exits 0 for a package that is not a dependency, so an
+		// unknown name would otherwise print a success line having removed nothing.
+		const npmPlugins = await manager.list();
+		if (!npmPlugins.some(p => p.name === name)) {
+			console.error(chalk.red(`${theme.status.error} ${rawName} is not installed`));
+			process.exit(1);
+		}
+
 		try {
 			await manager.uninstall(name);
 			if (flags.json) {
@@ -586,10 +701,19 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 	}
 }
 
-async function handleLink(manager: PluginManager, paths: string[], flags: { json?: boolean }): Promise<void> {
+async function handleLink(
+	manager: PluginManager,
+	paths: string[],
+	flags: { json?: boolean; dryRun?: boolean },
+): Promise<void> {
 	if (paths.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin link <path>`));
 		process.exit(1);
+	}
+
+	if (flags.dryRun) {
+		printLinkPreview(paths[0], flags.json);
+		return;
 	}
 
 	try {
@@ -658,8 +782,7 @@ async function handleFeatures(
 	}
 
 	const pluginName = args[0];
-	const plugins = await manager.list();
-	const plugin = plugins.find(p => p.name === pluginName);
+	const plugin = await manager.getPlugin(pluginName, { path: path.join(getPluginsNodeModules(), pluginName) });
 
 	if (!plugin) {
 		console.error(chalk.red(`Plugin "${pluginName}" not found`));
@@ -763,8 +886,7 @@ async function handleConfig(
 		process.exit(1);
 	}
 
-	const plugins = await manager.list();
-	const plugin = plugins.find(p => p.name === pluginName);
+	const plugin = await manager.getPlugin(pluginName);
 
 	if (!plugin) {
 		console.error(chalk.red(`Plugin "${pluginName}" not found`));
@@ -866,8 +988,32 @@ async function handleConfig(
 	}
 }
 
+/**
+ * Enumerate every installed plugin to validate — npm/link plugins from
+ * {@link PluginManager.list} plus marketplace runtime packages, which `list()`
+ * intentionally omits. Marketplace summaries are resolved through their trusted
+ * install path; deduped by resolved package name using the same active-scope
+ * precedence as runtime loading.
+ */
+async function collectPluginsForValidation(manager: PluginManager): Promise<InstalledPlugin[]> {
+	const byName = new Map<string, InstalledPlugin>();
+	for (const plugin of await manager.list()) {
+		byName.set(plugin.name, plugin);
+	}
+	const mktMgr = await makeMarketplaceManager();
+	for (const summary of await mktMgr.listInstalledPlugins()) {
+		const entry = summary.entries[0];
+		if (!entry) continue;
+		const fallbackName = parsePluginId(summary.id)?.name ?? summary.id;
+		const resolved = await manager.getPlugin(fallbackName, { path: entry.installPath });
+		if (!resolved) continue;
+		byName.set(resolved.name, (await manager.getPlugin(resolved.name)) ?? resolved);
+	}
+	return [...byName.values()];
+}
+
 async function handleConfigValidate(manager: PluginManager, flags: { json?: boolean }): Promise<void> {
-	const plugins = await manager.list();
+	const plugins = await collectPluginsForValidation(manager);
 	const results: Array<{ plugin: string; key: string; error: string }> = [];
 
 	for (const plugin of plugins) {

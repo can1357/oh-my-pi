@@ -1,9 +1,10 @@
+import { type UpdateNotesDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { updateNotesToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import { type } from "@oh-my-pi/omptype";
-import { Text } from "@oh-my-pi/pi-tui";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
 import type { ToolDefinition } from "../../extensibility/extensions";
-import type { Theme } from "../../modes/theme/theme";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import * as git from "../../utils/git";
+
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
@@ -13,14 +14,11 @@ const updateNotesSchema = type({
 	"append_idea?": type("string").describe("append as bullet under Ideas instead of replacing body"),
 });
 
-interface UpdateNotesDetails {
-	notes: string;
-}
-
 export function createUpdateNotesTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof updateNotesSchema, UpdateNotesDetails> {
 	return {
+		...updateNotesToolRenderer,
 		name: "update_notes",
 		label: "Update Notes",
 		description:
@@ -29,7 +27,7 @@ export function createUpdateNotesTool(
 		defaultInactive: true,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
-			const currentBranch = (await git.branch.current(ctx.cwd)) ?? null;
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
 			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
 			if (!storage || !session) {
 				return {
@@ -68,18 +66,6 @@ export function createUpdateNotesTool(
 				],
 				details: { notes: nextNotes },
 			};
-		},
-		renderCall(args, _options, theme): Text {
-			const preview = args.append_idea ?? args.body.slice(0, 100);
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("update_notes"))} ${theme.fg("muted", truncateToWidth(replaceTabs(preview), 100))}`,
-				0,
-				0,
-			);
-		},
-		renderResult(result, _options, theme: Theme): Text {
-			const text = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
-			return new Text(theme.fg("muted", text), 0, 0);
 		},
 	};
 }

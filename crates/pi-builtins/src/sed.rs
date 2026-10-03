@@ -26,7 +26,7 @@ pub mod command {
 use std::path::PathBuf; // For file descriptors and equivalent
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use crate::sed::error_handling::SedResult;
+use crate::{host::ShellPaths, sed::error_handling::SedResult};
 
 use crate::sed::{
 	error_handling::{ScriptLocation, runtime_error},
@@ -55,8 +55,10 @@ pub struct ProcessingContext {
 	pub sandbox:          bool,
 	pub unbuffered:       bool,
 	pub null_data:        bool,
-	/// Shell working directory used to resolve paths embedded in scripts.
-	pub cwd:              PathBuf,
+	/// Resolves paths embedded in scripts (`r`, `w`, `s///w`, `-f`) the way
+	/// the shell would open them, and supplies the filesystem that every
+	/// sed file access (including `-i`) goes through.
+	pub paths:            ShellPaths,
 
 	// Other context
 	/// Currently processed input file name (not script) in quoted form
@@ -576,6 +578,7 @@ use std::{cell::RefCell, mem, path::PathBuf, rc::Rc};
 use crate::sed::error_handling::{SedError, SedResult};
 
 use brush_core::openfiles::OpenFile;
+use crate::host::ShellPaths;
 use crate::sed::{
 	command::{
 		Address, Command, CommandData, ProcessingContext, RegexMode, ReplacementPart,
@@ -634,9 +637,9 @@ pub fn compile_with_stdin(
 	scripts: Vec<ScriptValue>,
 	context: &mut ProcessingContext,
 	stdin: OpenFile,
-	cwd: PathBuf,
 ) -> SedResult<Option<Rc<RefCell<Command>>>> {
-	compile_with_provider(ScriptLineProvider::with_stdin(scripts, stdin, cwd), context)
+	let provider = ScriptLineProvider::with_stdin(scripts, stdin, context.paths.clone());
+	compile_with_provider(provider, context)
 }
 
 fn compile_with_provider(
@@ -1115,102 +1118,7 @@ fn parse_command_ending(
 	Ok(())
 }
 
-/// Convert a primitive BRE pattern to a safe ERE-compatible pattern string.
-/// - Replaces `\(`, `\)`, `\?`, `\+`, `\|`, `\{` and `\}` with `(`, `)`, `?`,
-///   `+`, `|`, `{` and `}`.
-/// - Puts single-digit back-references in non-capturing groups..
-/// - Escapes ERE-only metacharacters: `+ ? { } | ( )`.
-/// - Leaves all other characters as-is.
-fn bre_to_ere(pattern: &str) -> String {
-	let mut result = String::with_capacity(pattern.len());
-	let mut chars = pattern.chars().peekable();
-
-	let mut at_beginning = true;
-	let mut previous: Option<char> = None;
-	while let Some(c) = chars.next() {
-		if c == '\\' {
-			match chars.peek() {
-				Some('(') => {
-					chars.next();
-					result.push('('); // Group start
-				},
-				Some(')') => {
-					chars.next();
-					result.push(')'); // Group end
-				},
-				Some('?') => {
-					chars.next();
-					result.push('?'); // Quantifier 0 or 1
-				},
-				Some('+') => {
-					chars.next();
-					result.push('+'); // Quantifier 1 or more
-				},
-				Some('|') => {
-					chars.next();
-					result.push('|'); // Alternation operator
-				},
-				Some('{') => {
-					chars.next();
-					result.push('{'); // Brace quantifier start
-				},
-				Some('}') => {
-					chars.next();
-					result.push('}'); // Brace quantifier end
-				},
-				Some(v) if v.is_ascii_digit() => {
-					// Back-reference.  In sed BREs these are single-digit
-					// (\1-\9) whereas fancy_regex supports multi-digit
-					// back-references. Put them in a non-capturing group
-					// to avoid having the number extend beyond the single
-					// digit. Example: In sed \11 matches group 1 followed
-					// by '1', not group 11.
-					result.push_str(&format!(r"(?:\{v})"));
-					chars.next();
-				},
-				Some(&next) => {
-					// Preserve other escaped characters.
-					chars.next();
-					result.push('\\');
-					result.push(next);
-				},
-				None => {
-					// Trailing backslash; keep it.
-					result.push('\\');
-				},
-			}
-		} else {
-			match c {
-				'+' | '?' | '{' | '}' | '|' | '(' | ')' => {
-					// Escape unsupported ERE metacharacters.
-					result.push('\\');
-					result.push(c);
-				},
-				'^' if !at_beginning && previous != Some('[') => {
-					// In BREs ^ has special meaning at the beginning
-					// and as bracket negation.  This heuristic escapes
-					// all other uses, which per POSIX are valid in EREs.
-					// "the ERE "a^b" is valid, but can never match because
-					// the 'a' prevents the expression "^b" from matching
-					// starting at the first character."
-					// POSIX 9.4.9 ERE Expression Anchoring
-					result.push('\\');
-					result.push(c);
-				},
-				'$' if chars.peek().is_some() => {
-					// Similarly for $ appearing not at the end.
-					result.push('\\');
-					result.push(c);
-				},
-				_ => result.push(c),
-			}
-		}
-		at_beginning = false;
-		previous = Some(c);
-	}
-
-	result
-}
+// The BRE→ERE translation lives in `crate::bre`, shared with `grep`.
 
 /// Compile the provided regular expression string into a corresponding engine.
 /// An empty pattern results in None, which means that the last RE employed
@@ -1227,12 +1135,20 @@ fn compile_regex(
 		return Ok(None);
 	}
 
-	// Convert basic to extended regular expression if needed.
-	let pattern = if context.regex_extended {
-		pattern
+	// Convert basic to extended regular expression if needed. A BRE the
+	// dialect cannot express is a compilation error, matching real sed:
+	// `sed 's/\{1,3\}/X/'` reports an invalid RE rather than substituting.
+	let translated = if context.regex_extended {
+		None
 	} else {
-		&bre_to_ere(pattern)
+		Some(
+			crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported).map_err(|e| {
+				compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {}", e.message()))
+					.unwrap_err()
+			})?,
+		)
 	};
+	let pattern = translated.as_deref().unwrap_or(pattern);
 
 	let mut modifiers = String::new();
 	if icase {
@@ -1395,7 +1311,7 @@ fn compile_subst_command(
 	let mut subst = Box::new(Substitution::default());
 
 	subst.replacement = compile_replacement(lines, line)?;
-	compile_subst_flags(lines, line, &mut subst, context.posix, context.sandbox, Some(&context.cwd))?;
+	compile_subst_flags(lines, line, &mut subst, context.posix, context.sandbox, &context.paths)?;
 
 	if pattern.is_empty() && (subst.ignore_case || subst.multiline) {
 		return compilation_error(
@@ -1463,7 +1379,7 @@ pub fn compile_subst_flags(
 	subst: &mut Substitution,
 	posix: bool,
 	sandbox: bool,
-	cwd: Option<&std::path::Path>,
+	paths: &ShellPaths,
 ) -> SedResult<()> {
 	let mut seen_g_or_n = false;
 
@@ -1557,16 +1473,8 @@ pub fn compile_subst_flags(
 					return compilation_error(lines, line, ERR_SANDBOX);
 				}
 				let location = ScriptLocation::at_position(lines, line);
-				let mut path = read_file_path(lines, line)?;
-				if let Some(cwd) = cwd {
-					let normalized = brush_core::sys::fs::normalize_shell_path(&path);
-					path = if normalized.is_absolute() {
-						normalized.into_owned()
-					} else {
-						cwd.join(normalized)
-					};
-				}
-				subst.write_file = Some(NamedWriter::new(path, location)?);
+				let path = read_file_path(lines, line)?;
+				subst.write_file = Some(NamedWriter::new(path, paths, location)?);
 				return Ok(()); // 'w' is the last flag allowed
 			},
 
@@ -1639,13 +1547,7 @@ fn compile_read_file_command(
 	if context.sandbox {
 		return compilation_error(lines, line, ERR_SANDBOX);
 	}
-	let mut path = read_file_path(lines, line)?;
-	let normalized = brush_core::sys::fs::normalize_shell_path(&path);
-	path = if normalized.is_absolute() {
-		normalized.into_owned()
-	} else {
-		context.cwd.join(normalized)
-	};
+	let path = context.paths.resolve(read_file_path(lines, line)?);
 	cmd.data = CommandData::Path(path);
 	Ok(CommandHandling::Continue)
 }
@@ -1662,14 +1564,8 @@ fn compile_write_file_command(
 		return compilation_error(lines, line, ERR_SANDBOX);
 	}
 	let location = ScriptLocation::at_position(lines, line);
-	let mut path = read_file_path(lines, line)?;
-	let normalized = brush_core::sys::fs::normalize_shell_path(&path);
-	path = if normalized.is_absolute() {
-		normalized.into_owned()
-	} else {
-		context.cwd.join(normalized)
-	};
-	cmd.data = CommandData::NamedWriter(NamedWriter::new(path, location)?);
+	let path = read_file_path(lines, line)?;
+	cmd.data = CommandData::NamedWriter(NamedWriter::new(path, &context.paths, location)?);
 	Ok(CommandHandling::Continue)
 }
 
@@ -2185,6 +2081,47 @@ mod tests {
 				.is_match(&mut IOChunk::new_from_str("acaa\nccc"))
 				.unwrap()
 		);
+	}
+
+	#[test]
+	fn test_compile_re_basic_leading_plus_is_a_literal() {
+		// REGRESSION: `s/^\+/X/` used to substitute at the start of EVERY
+		// line, because `\+` became `+` unconditionally and `^+` compiles as
+		// `(?:^)+`. Real sed changes only lines that begin with a plus.
+		let (lines, chars) = dummy_providers();
+		let regex = compile_regex(&lines, &chars, r"^\+", &ctx(), false, false)
+			.unwrap()
+			.expect("regex should be present");
+		assert!(regex.is_match(&mut IOChunk::new_from_str("+added")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str(" context")).unwrap());
+	}
+
+	#[test]
+	fn test_compile_re_basic_no_operand_brace_is_rejected() {
+		// Real sed refuses this rather than substituting: emitting the
+		// operator would give `{1,3}` or, after an anchor, `^{1,3}` - which
+		// fancy-regex accepts and matches at every line start.
+		let (lines, chars) = dummy_providers();
+		for pattern in [r"\{1,3\}", r"^\{1,3\}"] {
+			let err = compile_regex(&lines, &chars, pattern, &ctx(), false, false)
+				.expect_err("a brace quantifier with no operand must not compile");
+			assert!(
+				err.to_string().contains("repetition-operator operand invalid"),
+				"{pattern}: {err}"
+			);
+		}
+	}
+
+	#[test]
+	fn test_compile_re_basic_caret_is_an_anchor_inside_a_group() {
+		// `\(^a\)` anchors in a BRE; escaping the caret matched nothing.
+		let (lines, chars) = dummy_providers();
+		let regex = compile_regex(&lines, &chars, r"\(^alpha\)", &ctx(), false, false)
+			.unwrap()
+			.expect("regex should be present");
+		assert!(regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str("xalpha")).unwrap());
 	}
 
 	#[test]
@@ -2729,7 +2666,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("g");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert_eq!(subst.occurrence, 0); // 'g' means all occurrences
 	}
 
@@ -2738,7 +2675,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("p");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert!(subst.print_flag);
 	}
 
@@ -2747,7 +2684,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("I");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert!(subst.ignore_case);
 	}
 
@@ -2756,7 +2693,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("i");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert!(subst.ignore_case);
 	}
 
@@ -2765,7 +2702,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("M");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert!(subst.multiline);
 	}
 
@@ -2774,7 +2711,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("m");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert!(subst.multiline);
 	}
 
@@ -2783,7 +2720,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("3");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert_eq!(subst.occurrence, 3);
 	}
 
@@ -2792,7 +2729,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("g3");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap_err();
 		assert!(
 			err.to_string()
 				.contains("multiple 'g' or numeric flags in substitute command")
@@ -2804,7 +2741,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("2g");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap_err();
 		assert!(
 			err.to_string()
 				.contains("multiple 'g' or numeric flags in substitute command")
@@ -2816,7 +2753,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("w ");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap_err();
 		assert!(err.to_string().contains("missing file path"));
 	}
 
@@ -2827,7 +2764,7 @@ mod tests {
 		let (lines, mut chars) = make_providers(&format!("w {}", out.display()));
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert_eq!(subst.write_file.as_ref().map(|w| w.borrow().path.clone()), Some(out));
 	}
 
@@ -2836,7 +2773,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("w out.txt");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, true, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, true, &ShellPaths::default()).unwrap_err();
 		assert!(err.to_string().contains(ERR_SANDBOX));
 	}
 
@@ -2845,7 +2782,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("e");
 		let mut subst = Substitution::default();
 
-		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap();
+		compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap();
 		assert!(subst.execute);
 	}
 
@@ -2854,7 +2791,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("e");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, true, false, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, true, false, &ShellPaths::default()).unwrap_err();
 		assert!(
 			err.to_string()
 				.contains("not allowed with --posix or --sandbox")
@@ -2866,7 +2803,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("e");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, true, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, true, &ShellPaths::default()).unwrap_err();
 		assert!(
 			err.to_string()
 				.contains("not allowed with --posix or --sandbox")
@@ -2878,7 +2815,7 @@ mod tests {
 		let (lines, mut chars) = make_providers("z");
 		let mut subst = Substitution::default();
 
-		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, None).unwrap_err();
+		let err = compile_subst_flags(&lines, &mut chars, &mut subst, false, false, &ShellPaths::default()).unwrap_err();
 		assert!(err.to_string().contains("invalid substitute flag"));
 	}
 
@@ -2949,59 +2886,7 @@ mod tests {
 		assert!(err.to_string().contains("invalid reference \\2"));
 	}
 
-	// bre_to_ere
-	#[test]
-	fn test_bre_group_translation() {
-		assert_eq!(bre_to_ere(r"\(a\?b\+c\|\)"), "(a?b+c|)");
-		assert_eq!(bre_to_ere(r"a\(b\)c"), "a(b)c");
-	}
-
-	#[test]
-	fn test_bre_brace_quantifier_translation() {
-		assert_eq!(bre_to_ere(r"\{1,4\}"), "{1,4}");
-	}
-
-	#[test]
-	fn test_ere_metacharacters_escaped() {
-		assert_eq!(bre_to_ere(r"a+b?c{1}|(d)"), r"a\+b\?c\{1\}\|\(d\)");
-	}
-
-	#[test]
-	fn test_literal_backslashes_preserved() {
-		assert_eq!(bre_to_ere(r"foo\\bar"), r"foo\\bar");
-		assert_eq!(bre_to_ere(r"\."), r"\.");
-	}
-
-	#[test]
-	fn test_character_classes_unchanged() {
-		assert_eq!(bre_to_ere(r"[a-z]"), "[a-z]");
-		assert_eq!(bre_to_ere(r"[^0-9]"), "[^0-9]");
-	}
-
-	#[test]
-	fn test_anchors_and_dot_and_star() {
-		assert_eq!(bre_to_ere(r"^a.*b$"), "^a.*b$");
-	}
-
-	#[test]
-	fn test_trailing_backslash_is_preserved() {
-		assert_eq!(bre_to_ere(r"abc\"), r"abc\");
-	}
-
-	#[test]
-	fn test_caret_escaped_in_middle() {
-		assert_eq!(bre_to_ere(r"^a^[^x]c"), r"^a\^[^x]c");
-	}
-
-	#[test]
-	fn test_dollar_escaped_in_middle() {
-		assert_eq!(bre_to_ere(r"a$c$"), r"a\$c$");
-	}
-
-	#[test]
-	fn test_bre_back_reference() {
-		assert_eq!(bre_to_ere(r"\(.\)\1\(.\)\2"), r"(.)(?:\1)(.)(?:\2)");
-	}
+	// The BRE→ERE translation and its tests live in `crate::bre`.
 
 	// patch_block_endings
 
@@ -5028,11 +4913,6 @@ impl SedError {
 		Self { code, message: message.to_string() }
 	}
 
-	/// Creates an I/O error while retaining its descriptive context.
-	pub fn io(_kind: io::ErrorKind, message: impl ToString) -> Self {
-		Self::new(2, message)
-	}
-
 	/// Returns the exit status associated with this failure.
 	pub const fn code(&self) -> i32 {
 		self.code
@@ -5193,9 +5073,8 @@ pub mod fast_io {
 use std::marker::PhantomData;
 use std::{
 	cell::Cell,
-	fs::File,
 	io::{self, BufRead, BufReader, BufWriter, Read, Write},
-	path::PathBuf,
+	path::{Path, PathBuf},
 	str,
 };
 
@@ -5203,6 +5082,9 @@ use std::{
 use memchr::memchr;
 #[cfg(unix)]
 use memmap2::Mmap;
+#[cfg(unix)]
+use pi_vfs::File;
+use pi_vfs::BlockingFs;
 use crate::{host::Host, sed::error_handling::SedError};
 
 // Define two cursors for iterating over lines:
@@ -5505,7 +5387,7 @@ pub enum LineReader<'a> {
 }
 
 /// Return a LineReader that uses the ReadInput method fot the specified file.
-fn line_reader_read_input(file: File) -> io::Result<LineReader<'static>> {
+fn line_reader_read_input(file: impl Read + 'static) -> io::Result<LineReader<'static>> {
 	let boxed: Box<dyn Read> = Box::new(file);
 	let reader = BufReader::new(boxed);
 	Ok(LineReader::ReadInput(ReadLineCursor::new(reader)))
@@ -5524,27 +5406,20 @@ impl<'a> LineReader<'a> {
 
 		// input file operands resolve
 		// against the shell working directory.
-		let file = File::open(host.resolve(path))?;
+		let file = host.fs().open(host.resolve(path))?;
 
+		// Only a handle the filesystem declares host-native can be mapped;
+		// provider files, and native ones mmap rejects (pipes), stream.
 		#[cfg(unix)]
-		{
-			match unsafe { Mmap::map(&file) } {
-				Ok(mapped_file) => {
-					// SAFETY: mmap owns the data and lives in the same variant
-					let slice: &'static [u8] =
-						unsafe { std::slice::from_raw_parts(mapped_file.as_ptr(), mapped_file.len()) };
-					let cursor = MmapLineCursor::new(file, slice);
-					Ok(LineReader::MmapInput { _mapped_file: mapped_file, cursor })
-				},
-				// Fallback to ReadInput
-				Err(_) => line_reader_read_input(file),
-			}
+		if let Some(Ok(mapped_file)) = file.native().map(|native| unsafe { Mmap::map(native) }) {
+			// SAFETY: mmap owns the data and lives in the same variant
+			let slice: &'static [u8] =
+				unsafe { std::slice::from_raw_parts(mapped_file.as_ptr(), mapped_file.len()) };
+			let cursor = MmapLineCursor::new(file, slice);
+			return Ok(LineReader::MmapInput { _mapped_file: mapped_file, cursor });
 		}
 
-		#[cfg(not(unix))]
-		{
-			line_reader_read_input(file)
-		}
+		line_reader_read_input(file)
 	}
 
 	/// Opens a file directly for unit tests.
@@ -5557,7 +5432,7 @@ impl<'a> LineReader<'a> {
 	/// Open the specified file to read as a stream.
 	#[cfg(test)]
 	pub fn open_stream(path: &PathBuf) -> io::Result<Self> {
-		let file = File::open(path)?;
+		let file = std::fs::File::open(path)?;
 		line_reader_read_input(file)
 	}
 
@@ -5628,6 +5503,7 @@ struct MmapOutput {
 /// All other output is buffered and writen via BufWriter.
 pub struct OutputBuffer {
 	out:               BufWriter<Box<dyn OutputWrite + 'static>>, // Where to write
+	line_buffered:     bool, // Flush completed lines for non-file stdout
 	#[cfg(unix)]
 	max_pending_write: usize,                        /* Max bytes to keep before
 	                                                               * flushing */
@@ -5654,9 +5530,10 @@ const MAX_PENDING_WRITE_NON_FILE: usize = 64 * 1024;
 
 impl OutputBuffer {
 	#[cfg(not(unix))]
-	pub fn new(w: Box<dyn OutputWrite + 'static>) -> Self {
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
 		Self {
 			out: BufWriter::new(w),
+			line_buffered,
 			pending_newline: false,
 			#[cfg(test)]
 			low_level_flushes: 0,
@@ -5664,12 +5541,15 @@ impl OutputBuffer {
 	}
 
 	#[cfg(unix)]
-	pub fn new(w: Box<dyn OutputWrite + 'static>) -> Self {
-		// The writer is not fd-backed, so regular-file output detection is gone;
-		// always bound pending data by the pipe-sized limit.
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
 		Self {
 			out: BufWriter::new(w),
-			max_pending_write: MAX_PENDING_WRITE_NON_FILE,
+			line_buffered,
+			max_pending_write: if line_buffered {
+				MAX_PENDING_WRITE_NON_FILE
+			} else {
+				usize::MAX
+			},
 			mmap_chunk: None,
 			pending_newline: false,
 			#[cfg(test)]
@@ -5687,21 +5567,47 @@ impl OutputBuffer {
 		self.write_chunk(&IOChunk::from_content(IOChunkContent::new_owned(s, has_newline)))
 	}
 
-	/// Copy the specified file to the output.
-	pub fn copy_file(&mut self, path: &PathBuf) -> io::Result<()> {
+	/// Copy the specified file, opened through `fs`, to the output.
+	pub fn copy_file(&mut self, fs: &BlockingFs, path: &Path) -> io::Result<()> {
 		// Flush mmap writes, if any.
 		#[cfg(unix)]
 		{
 			self.flush_mmap(WriteRange::Complete)?;
 		}
 
-		let Ok(file) = File::open(path) else {
+		let Ok(file) = fs.open(path) else {
 			// Per POSIX, if the file can't be read treat it as empty.
 			return Ok(());
 		};
 
 		let mut reader = BufReader::new(file);
-		io::copy(&mut reader, &mut self.out)?;
+		if self.line_buffered {
+			let mut buf = [0; 8 * 1024];
+			loop {
+				let len = reader.read(&mut buf)?;
+				if len == 0 {
+					break;
+				}
+				self.out.write_all(&buf[..len])?;
+				if buf[..len].contains(&b'\n') {
+					self.flush_completed_line()?;
+				}
+			}
+		} else {
+			io::copy(&mut reader, &mut self.out)?;
+		}
+		Ok(())
+	}
+
+	/// Flush output through a completed line when writing to a non-file stdout.
+	fn flush_completed_line(&mut self) -> io::Result<()> {
+		if self.line_buffered {
+			#[cfg(test)]
+			{
+				self.low_level_flushes += 1;
+			}
+			self.out.flush()?;
+		}
 		Ok(())
 	}
 }
@@ -5740,6 +5646,7 @@ impl OutputBuffer {
 			self.flush_mmap(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 
 		match &new_chunk.content {
@@ -5789,6 +5696,13 @@ impl OutputBuffer {
 				self.pending_newline = !has_newline;
 			},
 		}
+
+		if self.line_buffered && new_chunk.is_newline_terminated() {
+			// Mmap output reaches the BufWriter only here; file-backed mmap
+			// output is block-buffered, so this cannot affect its fast path.
+			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_completed_line()?;
+		}
 		Ok(())
 	}
 
@@ -5819,6 +5733,7 @@ impl OutputBuffer {
 			self.flush_mmap(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
@@ -5841,6 +5756,7 @@ impl OutputBuffer {
 		if self.pending_newline {
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 
 		match &chunk.content {
@@ -5850,6 +5766,9 @@ impl OutputBuffer {
 					self.out.write_all(b"\n")?;
 				}
 				self.pending_newline = !has_newline;
+				if *has_newline {
+					self.flush_completed_line()?;
+				}
 				Ok(())
 			},
 		}
@@ -5860,6 +5779,7 @@ impl OutputBuffer {
 		if self.pending_newline {
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
@@ -5872,7 +5792,6 @@ impl OutputBuffer {
 
 #[cfg(test)]
 mod tests {
-	#[cfg(unix)]
 	use std::fs::File;
 	#[cfg(all(target_os = "linux", target_env = "gnu"))]
 	use std::io::{self, Write};
@@ -5904,7 +5823,7 @@ mod tests {
 		let tmp = NamedTempFile::new()?;
 		{
 			let file = tmp.reopen()?;
-			let mut out = OutputBuffer::new(Box::new(file));
+			let mut out = OutputBuffer::new(Box::new(file), false);
 			out.write_str("foo\n")?;
 			out.write_str("bar\n")?;
 			out.flush()?;
@@ -5939,7 +5858,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = std::fs::File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)));
+		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)), false);
 
 		// Drain reader → writer
 		while let Some(chunk) = reader.get_line()? {
@@ -5974,7 +5893,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 
 		// Read the first mmap line ("zero\n") and write it
 		if let Some(chunk) = reader.get_line()? {
@@ -6028,7 +5947,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6067,7 +5986,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6102,7 +6021,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6137,7 +6056,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6441,6 +6360,7 @@ mod tests {
 		let file = tempfile().unwrap();
 		let buf = OutputBuffer {
 			out: BufWriter::new(Box::new(file.try_clone().unwrap())),
+			line_buffered: false,
 			#[cfg(unix)]
 			max_pending_write: 8,
 			#[cfg(unix)]
@@ -7320,31 +7240,82 @@ pub mod in_place {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::{
-	fs,
+	io,
 	path::{Path, PathBuf},
 };
 
-use tempfile::NamedTempFile;
+#[cfg(unix)]
+use pi_vfs::Permissions;
+use pi_vfs::{BlockingFs, File, TempOptions};
 use uucore::display::Quotable;
 
 use brush_core::openfiles::OpenFile;
-use crate::sed::error_handling::{IoContext, SedError, SedResult};
+use crate::{
+	host::is_regular_file,
+	sed::{
+		command::ProcessingContext,
+		error_handling::{IoContext, SedError, SedResult},
+		fast_io::OutputBuffer,
+	},
+};
 
-use crate::sed::{command::ProcessingContext, fast_io::OutputBuffer};
+/// Sibling file receiving in-place output, created through the injected
+/// filesystem and removed through it unless renamed over its target.
+pub struct TempFile {
+	fs:        BlockingFs,
+	path:      PathBuf,
+	/// Kept to close explicitly; the output buffer writes through a clone.
+	file:      Option<File>,
+	persisted: bool,
+}
+
+impl TempFile {
+	/// Creates a uniquely named file (`create_new`, mode 0600) in `dir`.
+	fn create_in(fs: &BlockingFs, dir: &Path) -> io::Result<Self> {
+		let (path, file) = fs.create_temp(dir, &TempOptions::new())?;
+		Ok(Self { fs: fs.clone(), path, file: Some(file), persisted: false })
+	}
+
+	/// Closes the handle, surfacing errors a provider defers to close.
+	fn close(&mut self) -> io::Result<()> {
+		self.file.take().map_or(Ok(()), File::close)
+	}
+
+	/// Renames the file over `target`; on failure it is removed on drop.
+	fn persist(&mut self, target: &Path) -> io::Result<()> {
+		self.fs.rename(&self.path, target)?;
+		self.persisted = true;
+		Ok(())
+	}
+}
+
+impl Drop for TempFile {
+	fn drop(&mut self) {
+		if self.persisted {
+			return;
+		}
+		// Close before removing: an open handle can block removal (Windows),
+		// and dropping a virtual handle would close it asynchronously.
+		// Cleanup after an already reported failure; nothing to add.
+		let _ = self.close();
+		// Same provider without cancellation: an aborted edit must still
+		// remove its temporary file.
+		let _ = self.fs.for_cleanup().remove_file(&self.path);
+	}
+}
 
 /// Context for in-place editing
+// `output` precedes `temp_file` so on drop the output's handle closes
+// before an unpersisted temporary file is removed.
 pub struct InPlace {
 	stdout:              OpenFile,
+	fs:                  BlockingFs,
 	pub output:          OutputBuffer,
 	pub in_place:        bool,
 	pub in_place_suffix: Option<String>,
 	pub follow_symlinks: bool,
-	pub temp_file:       Option<NamedTempFile>,
+	pub temp_file:       Option<TempFile>,
 	pub original_path:   Option<PathBuf>,
 }
 
@@ -7354,8 +7325,9 @@ impl InPlace {
 	/// editing, backup the original file, or follow symlinks.
 	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile) -> Self {
 		Self {
-			stdout: stdout.clone(),
-			output:          OutputBuffer::new(Box::new(stdout.clone())),
+			output:          stdout_output(&stdout),
+			stdout,
+			fs:              context.paths.fs().clone(),
 			in_place:        context.in_place,
 			in_place_suffix: context.in_place_suffix,
 			follow_symlinks: context.follow_symlinks,
@@ -7376,7 +7348,8 @@ impl InPlace {
 	/// to the context specification.
 	pub fn begin(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		let resolved = if self.follow_symlinks {
-			fs::canonicalize(file_name)
+			self.fs
+				.canonicalize(file_name)
 				.map_err_context(|| format!("resolving symlink {}", file_name.quote()))?
 		} else {
 			file_name.to_path_buf()
@@ -7389,11 +7362,11 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = OutputBuffer::new(Box::new(self.stdout.clone()));
+			self.output = stdout_output(&self.stdout);
 			return Ok(&mut self.output);
 		}
 
-		let metadata = fs::metadata(file_name).map_err_context(|| {
+		let metadata = self.fs.metadata(file_name).map_err_context(|| {
 			format!("error Reading metadata of {} for in-place edit", file_name.quote())
 		})?;
 
@@ -7404,8 +7377,9 @@ impl InPlace {
 			));
 		}
 
-		let dir = file_name.parent().unwrap_or_else(|| Path::new("."));
-		let temp_file = NamedTempFile::new_in(dir)
+		// URL-aware: the parent of `local://out` is `local://`, not `local:`.
+		let dir = pi_vfs::parent_path(file_name).unwrap_or_else(|| Path::new("."));
+		let temp_file = TempFile::create_in(&self.fs, dir)
 			.map_err_context(|| format!("error creating temporary file in {}", dir.quote()))?;
 
 		// TODO: On Unix use fchown(metadata.{uid,dig}) and fchmod(mode)
@@ -7414,13 +7388,11 @@ impl InPlace {
 		#[cfg(unix)]
 		{
 			let mode = metadata.mode() & 0o7777;
-			let perms = fs::Permissions::from_mode(mode);
-			fs::set_permissions(temp_file.path(), perms)?;
+			self.fs.set_permissions(&temp_file.path, Permissions::from_mode(mode))?;
 		}
 
-		let output =
-			OutputBuffer::new(Box::new(temp_file.reopen().expect("reopening NamedTempFile")));
-		self.output = output;
+		let writer = temp_file.file.as_ref().expect("temporary file open").try_clone()?;
+		self.output = OutputBuffer::new(Box::new(writer), false);
 		self.temp_file = Some(temp_file);
 		self.original_path = Some(file_name.to_path_buf());
 
@@ -7436,53 +7408,49 @@ impl InPlace {
 		}
 
 		let orig = self.original_path.take().expect("original_path unset");
-		let temp = self.temp_file.take().expect("temp_file unset");
+		// Every early return below drops `temp`, removing the temporary file.
+		let mut temp = self.temp_file.take().expect("temp_file unset");
+
+		// Release the output's handle, then close the last one to surface
+		// deferred write errors before the file replaces the original.
+		self.output = stdout_output(&self.stdout);
+		temp.close()
+			.map_err_context(|| format!("error writing temporary file {}", temp.path.quote()))?;
 
 		// Backup original if suffix is provided
-		if let Some(ref suffix) = self.in_place_suffix {
-			let mut backup_path = orig.clone();
-			let file_name = backup_path
-				.file_name()
-				.expect("Missing file name for backup")
-				.to_os_string();
-			let mut backup_name = file_name;
+		if let Some(suffix) = &self.in_place_suffix {
+			let file_name = pi_vfs::file_name(&orig).expect("Missing file name for backup");
+			let mut backup_name = file_name.to_os_string();
 			backup_name.push(suffix);
-			backup_path.set_file_name(backup_name);
+			let backup_path = pi_vfs::with_file_name(&orig, backup_name);
 
 			#[cfg(windows)]
 			// Try to remove to ensure the rename won't fail on Windows.
-			let _ = fs::remove_file(&backup_path);
+			let _ = self.fs.remove_file(&backup_path);
 
-			fs::rename(&orig, &backup_path).map_err_context(|| {
+			self.fs.rename(&orig, &backup_path).map_err_context(|| {
 				format!("error backing up {} to {}", orig.quote(), backup_path.quote())
 			})?;
 		} else {
 			#[cfg(windows)]
 			// On Windows delete the original file for temp.persist to work
-			if orig.exists() {
-				fs::remove_file(&orig).map_err_context(|| {
+			if self.fs.exists(&orig) {
+				self.fs.remove_file(&orig).map_err_context(|| {
 					format!("error removing original input file {}", orig.quote())
 				})?;
 			}
 		}
 
 		// Atomically replace the original
-		match temp.persist(&orig) {
-			Ok(_) => {},
-			Err(e) => {
-				return Err(SedError::io(
-					e.error.kind(),
-					format!(
-						"error persisting temporary file {} to {}",
-						e.file.path().quote(),
-						orig.quote()
-					),
-				));
-			},
-		}
-
-		Ok(())
+		temp.persist(&orig).map_err_context(|| {
+			format!("error persisting temporary file {} to {}", temp.path.quote(), orig.quote())
+		})
 	}
+}
+
+/// Sed's standard output, line-buffered unless it is a regular file.
+fn stdout_output(stdout: &OpenFile) -> OutputBuffer {
+	OutputBuffer::new(Box::new(stdout.clone()), !is_regular_file(stdout))
 }
 
 #[cfg(test)]
@@ -7649,11 +7617,15 @@ pub mod named_writer {
 
 use std::{
 	cell::RefCell,
-	fs::{File, OpenOptions},
 	io::{BufWriter, Write},
 	path::PathBuf,
 	rc::Rc,
 };
+
+use brush_core::openfiles::{DescriptorPath, OpenFiles};
+use pi_vfs::{File, OpenOptions};
+use crate::host::{Host, ShellPaths};
+use crate::sed::fast_io::OutputBuffer;
 
 use uucore::display::Quotable;
 use crate::sed::error_handling::SedResult;
@@ -7665,46 +7637,100 @@ thread_local! {
 	 static FLUSH_LIST: RefCell<Vec<Rc<RefCell<NamedWriter>>>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Where a `w` file's lines go.
+#[derive(Debug)]
+enum Target {
+	File(BufWriter<File>),
+	/// `w /dev/stdout`: sed's own output stream, as GNU sed does, so the lines
+	/// interleave with `p` output in order instead of racing it through a
+	/// second open of the same file.
+	Stdout,
+	/// `w /dev/stderr`: sed's own error stream.
+	Stderr,
+	/// A file already flushed and closed by [`flush_all`].
+	Closed,
+}
+
 #[derive(Debug)]
 /// Writer that tracks its file name for better error messages
 pub struct NamedWriter {
+	/// The file name as the script spelled it.
 	pub path: PathBuf,
-	writer:   BufWriter<File>,
+	target:   Target,
 	location: ScriptLocation,
 }
 
 impl NamedWriter {
 	/// Create a new writer, truncate the file, and register it for flushing.
-	pub fn new(path: PathBuf, location: ScriptLocation) -> SedResult<Rc<RefCell<Self>>> {
+	///
+	/// `paths` resolves `path` the way the shell would open it and supplies
+	/// the filesystem that opens it.
+	pub fn new(
+		path: PathBuf,
+		paths: &ShellPaths,
+		location: ScriptLocation,
+	) -> SedResult<Rc<RefCell<Self>>> {
+		let target = match DescriptorPath::parse(&path) {
+			Some(DescriptorPath::Fd(OpenFiles::STDOUT_FD)) => Target::Stdout,
+			Some(DescriptorPath::Fd(OpenFiles::STDERR_FD)) => Target::Stderr,
+			_ => {
+				let file = paths
+					.fs()
+					.open_with(
+						paths.resolve(&path),
+						OpenOptions::new().create(true).write(true).truncate(true),
+					)
+					.map_err(|e| {
+						runtime_error::<()>(&location, format!("creating file {}: {}", path.quote(), e))
+							.unwrap_err()
+					})?;
+				Target::File(BufWriter::new(file))
+			},
+		};
 
-		let file = OpenOptions::new()
-			.create(true)
-			.write(true)
-			.truncate(true)
-			.open(&path)
-			.map_err(|e| {
-				runtime_error::<()>(&location, format!("creating file {}: {}", path.quote(), e))
-					.unwrap_err()
-			})?;
-
-		let writer =
-			Rc::new(RefCell::new(NamedWriter { path, writer: BufWriter::new(file), location }));
+		let writer = Rc::new(RefCell::new(NamedWriter { path, target, location }));
 
 		FLUSH_LIST.with(|list| list.borrow_mut().push(Rc::clone(&writer)));
 		Ok(writer)
 	}
 
 	/// Write a line to the file with a newline, returning descriptive errors.
-	pub fn write_line(&mut self, line: &str) -> SedResult<()> {
-		writeln!(self.writer, "{line}").map_err(|e| {
+	///
+	/// `output` is sed's current output: stdout, or the temporary file under
+	/// `-i`, in which case `/dev/stdout` still means the real stdout.
+	pub fn write_line(
+		&mut self,
+		line: &str,
+		output: &mut OutputBuffer,
+		in_place: bool,
+		host: &mut Host,
+	) -> SedResult<()> {
+		let result = match &mut self.target {
+			Target::File(writer) => writeln!(writer, "{line}"),
+			Target::Stdout if in_place => writeln!(host.stdout, "{line}"),
+			Target::Stdout => output.write_str(format!("{line}\n")),
+			Target::Stderr => writeln!(host.stderr, "{line}"),
+			Target::Closed => Err(std::io::Error::other("file already closed")),
+		};
+		result.map_err(|e| {
 			runtime_error::<()>(&self.location, format!("writing to file {}: {e}", self.path.quote()))
 				.unwrap_err()
 		})
 	}
 
-	/// Flush the writer, returning a descriptive error.
-	pub fn flush(&mut self) -> SedResult<()> {
-		self.writer.flush().map_err(|e| {
+	/// Flush the writer and close its file, returning a descriptive error.
+	///
+	/// Closing explicitly surfaces errors a filesystem provider reports only
+	/// when the handle closes, which dropping it would discard.
+	pub fn close(&mut self) -> SedResult<()> {
+		let writer = match std::mem::replace(&mut self.target, Target::Closed) {
+			Target::File(writer) => writer,
+			other => {
+				self.target = other;
+				return Ok(());
+			},
+		};
+		writer.into_inner().map_err(|e| e.into_error()).and_then(File::close).map_err(|e| {
 			runtime_error::<()>(
 				&self.location,
 				format!("writing to file {}: {}", self.path.quote(), e),
@@ -7714,14 +7740,14 @@ impl NamedWriter {
 	}
 }
 
-/// Flush buffered content to the files and drop the writers, returning
+/// Flush buffered content to the files and close them, returning
 /// descriptive errors.
 // the registry is drained (not just
 // iterated) so open files do not outlive the invocation on a reused thread.
 pub fn flush_all() -> SedResult<()> {
 	FLUSH_LIST.with(|cell| {
 		for handle in cell.borrow_mut().drain(..) {
-			handle.borrow_mut().flush()?;
+			handle.borrow_mut().close()?;
 		}
 
 		Ok(())
@@ -7746,8 +7772,9 @@ pub mod processor {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{borrow::Cow, cell::RefCell, path::PathBuf, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, io, path::PathBuf, process::Command as ProcessCommand, rc::Rc};
 
+use pi_vfs::BlockingFs;
 use uucore::display::Quotable;
 
 use crate::host::Host;
@@ -7929,31 +7956,28 @@ fn re_or_saved_re<'a>(
 }
 
 #[cfg(unix)]
-fn shell_command(cmd: &str, host: &Host) -> std::process::Command {
-	let mut c = std::process::Command::new("sh");
+fn shell_command(cmd: &str, host: &Host) -> io::Result<ProcessCommand> {
+	let mut c = ProcessCommand::new("sh");
 	c.arg("-c").arg(cmd);
-	// run relative to the shell's cwd,
-	// not the host process cwd. `output()` already keeps the child's stdio
-	// away from the host's (stdin closed, stdout/stderr captured).
-	c.current_dir(host.cwd());
+	// `output()` captures the child's stdio instead of inheriting the TUI's.
+	c.current_dir(host.native_cwd()?);
 	c.env_clear().envs(host.env());
-	c
+	Ok(c)
 }
 
 #[cfg(windows)]
-fn shell_command(cmd: &str, host: &Host) -> std::process::Command {
-	let mut c = std::process::Command::new("cmd.exe");
+fn shell_command(cmd: &str, host: &Host) -> io::Result<ProcessCommand> {
+	let mut c = ProcessCommand::new("cmd.exe");
 	c.arg("/C").arg(cmd);
-	// see the unix variant above.
-	c.current_dir(host.cwd());
+	c.current_dir(host.native_cwd()?);
 	c.env_clear().envs(host.env());
-	c
+	Ok(c)
 }
 
 // Fallback if the target OS is neither Windows nor UNIX-like
 #[cfg(not(any(unix, windows)))]
-fn shell_command(_cmd: &str, _host: &Host) -> std::process::Command {
-	unimplemented!("the 'e' substitute flag requires a platform shell (/bin/sh or cmd.exe)");
+fn shell_command(_cmd: &str, _host: &Host) -> io::Result<ProcessCommand> {
+	Err(pi_vfs::unsupported("the 'e' substitute flag requires a platform shell"))
 }
 
 /// Perform the specified RE replacement in the provided pattern space.
@@ -8071,7 +8095,7 @@ fn substitute(
 		// Execute the pattern space as a shell command if the 'e' flag is set
 		if sub.execute {
 			let cmd_str = pattern.as_str()?.to_string();
-			let output_bytes = shell_command(&cmd_str, host).output().map_err(|e| {
+			let output_bytes = shell_command(&cmd_str, host).and_then(|mut command| command.output()).map_err(|e| {
 				input_runtime_error::<()>(
 					&command.location,
 					context,
@@ -8095,8 +8119,8 @@ fn substitute(
 		}
 
 		// Write to file if needed.
-		if let Some(ref writer) = sub.write_file {
-			writer.borrow_mut().write_line(pattern.as_str()?)?;
+		if let Some(writer) = &sub.write_file {
+			writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, host)?;
 		}
 		context.substitution_made = true;
 	}
@@ -8135,7 +8159,7 @@ fn flush_appends(output: &mut OutputBuffer, context: &mut ProcessingContext) -> 
 				output.write_str(&**text)?;
 			},
 			AppendElement::Path(path) => {
-				output.copy_file(path)?;
+				output.copy_file(context.paths.fs(), path)?;
 			},
 		}
 	}
@@ -8203,6 +8227,7 @@ fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResul
 fn process_address_0(
 	commands: Option<Rc<RefCell<Command>>>,
 	output: &mut OutputBuffer,
+	fs: &BlockingFs,
 ) -> SedResult<()> {
 	// Prescan for zero-address which must produce output
 	// before any input line is read.
@@ -8215,7 +8240,7 @@ fn process_address_0(
 				if cmd.code == 'r' && matches!(cmd.addr1, Some(Address::Line(0))) && cmd.addr2.is_none()
 				{
 					let path = extract_variant!(cmd, Path);
-					output.copy_file(path)?;
+					output.copy_file(fs, path)?;
 				}
 
 				cmd.next.clone()
@@ -8235,7 +8260,7 @@ fn process_file(
 	context: &mut ProcessingContext,
 	host: &mut Host,
 ) -> SedResult<()> {
-	process_address_0(commands.clone(), output)?;
+	process_address_0(commands.clone(), output, context.paths.fs())?;
 
 	// Loop over the input lines as pattern space.
 	'lines: while let Some(mut pattern) = reader.get_line()? {
@@ -8425,7 +8450,7 @@ fn process_file(
 				'w' => {
 					// Append the pattern space to the specified file.
 					let writer = extract_variant!(command, NamedWriter);
-					writer.borrow_mut().write_line(pattern.as_str()?)?;
+					writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, host)?;
 				},
 				'x' => {
 					// Exchange the contents of the pattern and hold spaces.
@@ -8715,7 +8740,6 @@ pub mod script_line_provider {
 
 use std::{
 	fmt,
-	fs::File,
 	io::{BufRead, BufReader},
 	path::PathBuf,
 };
@@ -8723,7 +8747,7 @@ use std::{
 use uucore::display::Quotable;
 
 use brush_core::openfiles::OpenFile;
-use crate::sed::error_handling::{IoContext, SedResult};
+use crate::{host::ShellPaths, sed::error_handling::{IoContext, SedResult}};
 
 #[derive(Debug, PartialEq)]
 /// The specification of a script: through a string or a file
@@ -8738,7 +8762,7 @@ pub struct ScriptLineProvider {
 	sources: Vec<ScriptValue>,
 	state:   State,
 	stdin:   Option<OpenFile>,
-	cwd:     PathBuf,
+	paths:   ShellPaths,
 }
 
 /// Encapsulation of the script line provider's state
@@ -8757,12 +8781,12 @@ impl ScriptLineProvider {
 	/// Construct the script provider from the specified script sources
 	#[cfg(test)]
 	pub fn new(sources: Vec<ScriptValue>) -> Self {
-		Self { sources, state: State::NotStarted, stdin: None, cwd: PathBuf::from(".") }
+		Self { sources, state: State::NotStarted, stdin: None, paths: ShellPaths::default() }
 	}
 
 	/// Constructs a provider with the builtin stdin stream.
-	pub fn with_stdin(sources: Vec<ScriptValue>, stdin: OpenFile, cwd: PathBuf) -> Self {
-		Self { sources, state: State::NotStarted, stdin: Some(stdin), cwd }
+	pub fn with_stdin(sources: Vec<ScriptValue>, stdin: OpenFile, paths: ShellPaths) -> Self {
+		Self { sources, state: State::NotStarted, stdin: Some(stdin), paths }
 	}
 
 	/// Return the currently processed script line number.
@@ -8839,16 +8863,10 @@ impl ScriptLineProvider {
 						line_number: 0,
 					};
 				} else {
-					// resolve `-f` script files against the shell working
-					// directory, normalizing MSYS/WSL drive aliases (`/c/...`)
-					// to native drive paths first — mirrors `Host::resolve`.
-					let normalized = brush_core::sys::fs::normalize_shell_path(p);
-					let resolved = if normalized.is_absolute() {
-						normalized.into_owned()
-					} else {
-						self.cwd.join(normalized)
-					};
-					let file = File::open(resolved)
+					let file = self
+						.paths
+						.fs()
+						.open(self.paths.resolve(p))
 						.map_err_context(|| format!("error opening script file {}", p.quote()))?;
 					self.state = State::Active {
 						index:       next_index,
@@ -8886,7 +8904,7 @@ impl ScriptLineProvider {
 		Self {
 			sources: vec![],
 			stdin: None,
-			cwd: PathBuf::from("."),
+			paths: ShellPaths::default(),
 			state:   State::Active {
 				input_name: input_name.to_string(),
 				line_number,
@@ -9035,7 +9053,7 @@ use brush_core::{ShellExtensions, builtins::Registration};
 
 use clap::{Arg, ArgMatches, Command, arg};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, ShellPaths, Utility, format_usage, matches_parser, util};
 use crate::sed::error_handling::{SedError, SedResult};
 
 use crate::sed::{
@@ -9053,9 +9071,9 @@ const USAGE: &str = "sed [OPTION]... [script] [file]...";
 // path, and exit-code mapping live in the crate-level `run` wrapper.
 fn sed_main(matches: &ArgMatches, host: &mut Host) -> SedResult<()> {
 	let (scripts, files) = get_scripts_files(matches)?;
-	let mut context = build_context(matches, host.cwd());
+	let mut context = build_context(matches, host.paths());
 
-	let executable = compiler::compile_with_stdin(scripts, &mut context, host.stdin.file().clone(), host.resolve("."))?;
+	let executable = compiler::compile_with_stdin(scripts, &mut context, host.stdin.file().clone())?;
 	process_all_files(executable, files, &mut context, host)?;
 	Ok(())
 }
@@ -9254,7 +9272,7 @@ fn get_scripts_files(matches: &ArgMatches) -> SedResult<(Vec<ScriptValue>, Vec<P
 }
 
 // Parse CLI flag arguments and return a ProcessingContext struct based on them
-fn build_context(matches: &ArgMatches, cwd: &std::path::Path) -> ProcessingContext {
+fn build_context(matches: &ArgMatches, paths: &ShellPaths) -> ProcessingContext {
 	ProcessingContext {
 		all_output_files: matches.get_flag("all-output-files"),
 		debug:            matches.get_flag("debug"),
@@ -9271,7 +9289,7 @@ fn build_context(matches: &ArgMatches, cwd: &std::path::Path) -> ProcessingConte
 		sandbox:          matches.get_flag("sandbox"),
 		unbuffered:       matches.get_flag("unbuffered"),
 		null_data:        matches.get_flag("null-data"),
-		cwd:              cwd.to_path_buf(),
+		paths:            paths.clone(),
 
 		// Other context
 		input_name:           "<stdin>".to_string(),
@@ -9421,7 +9439,7 @@ mod tests {
 	#[test]
 	fn test_defaults() {
 		let matches = test_matches(&[]);
-		let ctx = build_context(&matches, std::path::Path::new("."));
+		let ctx = build_context(&matches, &ShellPaths::default());
 
 		assert!(!ctx.all_output_files);
 		assert!(!ctx.debug);
@@ -9456,7 +9474,7 @@ mod tests {
 			"-z",
 		]);
 
-		let ctx = build_context(&matches, std::path::Path::new("."));
+		let ctx = build_context(&matches, &ShellPaths::default());
 
 		assert!(ctx.all_output_files);
 		assert!(ctx.debug);
@@ -9476,7 +9494,7 @@ mod tests {
 	#[test]
 	fn test_multiple_same_arguments() {
 		let matches = test_matches(&["-E", "-r"]);
-		let ctx = build_context(&matches, std::path::Path::new("."));
+		let ctx = build_context(&matches, &ShellPaths::default());
 
 		assert!(ctx.regex_extended);
 	}
@@ -9484,7 +9502,7 @@ mod tests {
 	#[test]
 	fn test_in_place_with_suffix() {
 		let matches = test_matches(&["-i.bak"]);
-		let ctx = build_context(&matches, std::path::Path::new("."));
+		let ctx = build_context(&matches, &ShellPaths::default());
 
 		assert!(ctx.in_place);
 		assert_eq!(ctx.in_place_suffix, Some(".bak".to_string()));
@@ -9495,7 +9513,7 @@ mod tests {
 		// clap accepts `-Ei` as `-E -i`, so the BSD empty suffix must be
 		// removed from this valid GNU flag cluster as well.
 		let matches = test_matches(&["-Ei", "", "s/x/y/", "file.txt"]);
-		let ctx = build_context(&matches, std::path::Path::new("."));
+		let ctx = build_context(&matches, &ShellPaths::default());
 
 		assert!(ctx.regex_extended);
 		assert!(ctx.in_place);
@@ -9525,8 +9543,8 @@ mod tests {
 		let matches_default = test_matches(&[]);
 		let matches_custom = test_matches(&["-l", "120"]);
 
-		let ctx_default = build_context(&matches_default, std::path::Path::new("."));
-		let ctx_custom = build_context(&matches_custom, std::path::Path::new("."));
+		let ctx_default = build_context(&matches_default, &ShellPaths::default());
+		let ctx_custom = build_context(&matches_custom, &ShellPaths::default());
 
 		assert_eq!(ctx_default.length, 70);
 		assert_eq!(ctx_custom.length, 120);
@@ -9538,6 +9556,43 @@ mod tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "world\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn builtin_substitutes_only_plus_prefixed_lines() {
+		// THE OBSERVABLE DEFECT this change exists for, covered end to end:
+		// argument parsing, BRE compilation and substitution together.
+		// `s/^\+/PLUS/` used to rewrite the start of EVERY line, because
+		// `\+` became `+` unconditionally and `^+` compiles as `(?:^)+`.
+		let input = "alpha\n+added\n-removed\n context\n+another\n";
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/^\+/PLUS/"], input, "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "alpha\nPLUSadded\n-removed\n context\nPLUSanother\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn builtin_rejects_a_brace_quantifier_with_no_operand() {
+		// Real sed refuses this. Emitting the operator gave `^{1,3}`, which
+		// fancy-regex accepts and matches at every line start.
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/^\{1,3\}/X/"], "alpha\n+added\n", "/");
+		assert_ne!(code, 0, "must not substitute: {:?}", capture.out());
+		assert!(
+			capture.err().contains("repetition-operator operand invalid"),
+			"{}",
+			capture.err()
+		);
+	}
+
+	#[test]
+	fn builtin_treats_only_the_first_caret_of_a_branch_as_an_anchor() {
+		// Measured: `sed 's/^^/X/'` rewrites only lines that begin with a
+		// literal caret, consuming one of them.
+		let (code, capture) = crate::host::run_util::<Sed>(&["s/^^/X/"], "^a\naaa\n^^b\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "Xa\naaa\nX^b\n");
 	}
 
 	#[test]

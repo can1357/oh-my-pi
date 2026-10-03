@@ -1,0 +1,9 @@
+auth "exa" {
+	name "Exa"
+	env "EXA_API_KEY"
+	login "api-key" {
+		auth-url "https://dashboard.exa.ai/api-keys"
+		instructions "Create or copy your API key from the Exa dashboard."
+		prompt "Paste your Exa API key" placeholder="API key"
+	}
+}

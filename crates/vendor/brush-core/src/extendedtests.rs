@@ -4,13 +4,41 @@ use brush_parser::ast;
 
 use crate::{
 	ExecutionParameters, Shell, ShellFd, arithmetic, env, error, escape, expansion, extensions,
-	namedoptions, patterns, regex,
-	sys::{
-		fs::{MetadataExt, PathExt},
-		users,
-	},
+	namedoptions, pathsearch, patterns, regex,
+	sys::users,
 	variables::{self, ArrayLiteral},
 };
+
+const S_ISUID: u32 = 0o4000;
+const S_ISGID: u32 = 0o2000;
+const S_ISVTX: u32 = 0o1000;
+
+/// Metadata of `operand` (resolved against the shell's working directory),
+/// following symlinks; `None` when it cannot be read.
+async fn file_metadata(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	operand: &str,
+) -> Option<pi_vfs::Metadata> {
+	shell
+		.filesystem()
+		.metadata(shell.absolute_path(Path::new(operand)))
+		.await
+		.ok()
+}
+
+/// Whether the current user may access `operand` in the requested ways.
+async fn file_accessible(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	operand: &str,
+	read: bool,
+	write: bool,
+) -> bool {
+	shell
+		.filesystem()
+		.access(shell.absolute_path(Path::new(operand)), read, write, false)
+		.await
+		.is_ok()
+}
 
 #[async_recursion::async_recursion]
 pub(crate) async fn eval_extended_test_expr(
@@ -65,11 +93,11 @@ async fn apply_unary_predicate(
 			.await;
 	}
 
-	apply_unary_predicate_to_str(op, expanded_operand.as_str(), shell, params)
+	apply_unary_predicate_to_str(op, expanded_operand.as_str(), shell, params).await
 }
 
 #[expect(clippy::too_many_lines)]
-pub(crate) fn apply_unary_predicate_to_str(
+pub(crate) async fn apply_unary_predicate_to_str(
 	op: &ast::UnaryPredicate,
 	operand: &str,
 	shell: &Shell<impl extensions::ShellExtensions>,
@@ -78,53 +106,37 @@ pub(crate) fn apply_unary_predicate_to_str(
 	match op {
 		ast::UnaryPredicate::StringHasNonZeroLength => Ok(!operand.is_empty()),
 		ast::UnaryPredicate::StringHasZeroLength => Ok(operand.is_empty()),
-		ast::UnaryPredicate::FileExists => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists())
-		},
-		ast::UnaryPredicate::FileExistsAndIsBlockSpecialFile => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_block_device())
-		},
-		ast::UnaryPredicate::FileExistsAndIsCharSpecialFile => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_char_device())
-		},
+		ast::UnaryPredicate::FileExists => Ok(file_metadata(shell, operand).await.is_some()),
+		ast::UnaryPredicate::FileExistsAndIsBlockSpecialFile => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.file_type().is_block_device())),
+		ast::UnaryPredicate::FileExistsAndIsCharSpecialFile => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.file_type().is_char_device())),
 		ast::UnaryPredicate::FileExistsAndIsDir => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.is_dir())
+			Ok(file_metadata(shell, operand).await.is_some_and(|md| md.is_dir()))
 		},
 		ast::UnaryPredicate::FileExistsAndIsRegularFile => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.is_file())
+			Ok(file_metadata(shell, operand).await.is_some_and(|md| md.is_file()))
 		},
-		ast::UnaryPredicate::FileExistsAndIsSetgid => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_setgid())
-		},
+		ast::UnaryPredicate::FileExistsAndIsSetgid => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.mode() & S_ISGID != 0)),
 		ast::UnaryPredicate::FileExistsAndIsSymlink => {
 			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.is_symlink())
+			Ok(shell.filesystem().is_symlink(path).await)
 		},
-		ast::UnaryPredicate::FileExistsAndHasStickyBit => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_sticky_bit())
-		},
-		ast::UnaryPredicate::FileExistsAndIsFifo => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_fifo())
-		},
+		ast::UnaryPredicate::FileExistsAndHasStickyBit => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.mode() & S_ISVTX != 0)),
+		ast::UnaryPredicate::FileExistsAndIsFifo => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.file_type().is_fifo())),
 		ast::UnaryPredicate::FileExistsAndIsReadable => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.readable())
+			Ok(file_accessible(shell, operand, true, false).await)
 		},
 		ast::UnaryPredicate::FileExistsAndIsNotZeroLength => {
-			let path = shell.absolute_path(Path::new(operand));
-			if let Ok(metadata) = path.metadata() {
-				Ok(metadata.len() > 0)
-			} else {
-				Ok(false)
-			}
+			Ok(file_metadata(shell, operand).await.is_some_and(|md| md.len() > 0))
 		},
 		ast::UnaryPredicate::FdIsOpenTerminal => {
 			// Trim whitespace before parsing, matching bash behavior.
@@ -138,49 +150,45 @@ pub(crate) fn apply_unary_predicate_to_str(
 				Ok(false)
 			}
 		},
-		ast::UnaryPredicate::FileExistsAndIsSetuid => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_setuid())
-		},
+		ast::UnaryPredicate::FileExistsAndIsSetuid => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.mode() & S_ISUID != 0)),
 		ast::UnaryPredicate::FileExistsAndIsWritable => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.writable())
+			Ok(file_accessible(shell, operand, false, true).await)
 		},
 		ast::UnaryPredicate::FileExistsAndIsExecutable => {
 			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.executable())
+			Ok(pathsearch::is_executable(shell.filesystem(), &path).await)
 		},
 		ast::UnaryPredicate::FileExistsAndOwnedByEffectiveGroupId => {
-			let path = shell.absolute_path(Path::new(operand));
-			if !path.exists() {
+			let Some(md) = file_metadata(shell, operand).await else {
 				return Ok(false);
-			}
-
-			let md = path.metadata()?;
-			Ok(md.gid() == users::get_effective_gid()?)
+			};
+			// A file whose owner the filesystem does not report is not ours.
+			let Some(gid) = md.gid() else {
+				return Ok(false);
+			};
+			Ok(gid == users::get_effective_gid()?)
 		},
 		ast::UnaryPredicate::FileExistsAndModifiedSinceLastRead => {
-			let path = shell.absolute_path(Path::new(operand));
-			if !path.exists() {
+			let Some(md) = file_metadata(shell, operand).await else {
 				return Ok(false);
-			}
-
-			let md = path.metadata()?;
+			};
 			Ok(md.modified()? > md.accessed()?)
 		},
 		ast::UnaryPredicate::FileExistsAndOwnedByEffectiveUserId => {
-			let path = shell.absolute_path(Path::new(operand));
-			if !path.exists() {
+			let Some(md) = file_metadata(shell, operand).await else {
 				return Ok(false);
-			}
-
-			let md = path.metadata()?;
-			Ok(md.uid() == users::get_effective_uid()?)
+			};
+			// A file whose owner the filesystem does not report is not ours.
+			let Some(uid) = md.uid() else {
+				return Ok(false);
+			};
+			Ok(uid == users::get_effective_uid()?)
 		},
-		ast::UnaryPredicate::FileExistsAndIsSocket => {
-			let path = shell.absolute_path(Path::new(operand));
-			Ok(path.exists_and_is_socket())
-		},
+		ast::UnaryPredicate::FileExistsAndIsSocket => Ok(file_metadata(shell, operand)
+			.await
+			.is_some_and(|md| md.file_type().is_socket())),
 		ast::UnaryPredicate::ShellOptionEnabled => {
 			let shopt_name = operand;
 			if let Some(option) =
@@ -295,7 +303,7 @@ async fn apply_binary_predicate(
 					.await;
 			}
 
-			files_refer_to_same_device_and_inode_numbers(shell, left, right)
+			files_refer_to_same_device_and_inode_numbers(shell, &left, &right).await
 		},
 		ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
 			let left = expansion::basic_expand_word(shell, params, left).await?;
@@ -307,7 +315,7 @@ async fn apply_binary_predicate(
 					.await;
 			}
 
-			left_file_is_newer_or_exists_when_right_does_not(shell, left, right)
+			left_file_is_newer_or_exists_when_right_does_not(shell, &left, &right).await
 		},
 		ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
 			let left = expansion::basic_expand_word(shell, params, left).await?;
@@ -319,7 +327,7 @@ async fn apply_binary_predicate(
 					.await;
 			}
 
-			left_file_is_older_or_does_not_exist_when_right_does(shell, left, right)
+			left_file_is_older_or_does_not_exist_when_right_does(shell, &left, &right).await
 		},
 		ast::BinaryPredicate::LeftSortsBeforeRight => {
 			let left = expansion::basic_expand_word(shell, params, left).await?;
@@ -472,7 +480,7 @@ async fn apply_binary_predicate(
 	}
 }
 
-pub(crate) fn apply_binary_predicate_to_strs(
+pub(crate) async fn apply_binary_predicate_to_strs(
 	op: &ast::BinaryPredicate,
 	left: &str,
 	right: &str,
@@ -480,13 +488,13 @@ pub(crate) fn apply_binary_predicate_to_strs(
 ) -> Result<bool, error::Error> {
 	match op {
 		ast::BinaryPredicate::FilesReferToSameDeviceAndInodeNumbers => {
-			files_refer_to_same_device_and_inode_numbers(shell, left, right)
+			files_refer_to_same_device_and_inode_numbers(shell, left, right).await
 		},
 		ast::BinaryPredicate::LeftFileIsNewerOrExistsWhenRightDoesNot => {
-			left_file_is_newer_or_exists_when_right_does_not(shell, left, right)
+			left_file_is_newer_or_exists_when_right_does_not(shell, left, right).await
 		},
 		ast::BinaryPredicate::LeftFileIsOlderOrDoesNotExistWhenRightDoes => {
-			left_file_is_older_or_does_not_exist_when_right_does(shell, left, right)
+			left_file_is_older_or_does_not_exist_when_right_does(shell, left, right).await
 		},
 		ast::BinaryPredicate::LeftSortsBeforeRight => {
 			// TODO(test): According to docs, should be lexicographical order of the current
@@ -562,53 +570,45 @@ fn apply_test_binary_arithmetic_predicate(
 	}
 }
 
-fn left_file_is_older_or_does_not_exist_when_right_does(
+async fn left_file_is_older_or_does_not_exist_when_right_does(
 	shell: &Shell<impl extensions::ShellExtensions>,
-	left: impl AsRef<str>,
-	right: impl AsRef<str>,
+	left: &str,
+	right: &str,
 ) -> Result<bool, error::Error> {
-	let (l_path, r_path) = (
-		shell.absolute_path(Path::new(left.as_ref())),
-		shell.absolute_path(Path::new(right.as_ref())),
-	);
-
-	match (l_path.metadata(), r_path.metadata()) {
-		(Ok(m1), Ok(m2)) => Ok(m1.modified()? < m2.modified()?),
-		(Err(_), Ok(_)) => Ok(true),
+	match (file_metadata(shell, left).await, file_metadata(shell, right).await) {
+		(Some(m1), Some(m2)) => Ok(m1.modified()? < m2.modified()?),
+		(None, Some(_)) => Ok(true),
 		_ => Ok(false),
 	}
 }
 
-fn left_file_is_newer_or_exists_when_right_does_not(
+async fn left_file_is_newer_or_exists_when_right_does_not(
 	shell: &Shell<impl extensions::ShellExtensions>,
-	left: impl AsRef<str>,
-	right: impl AsRef<str>,
+	left: &str,
+	right: &str,
 ) -> Result<bool, error::Error> {
-	let (l_path, r_path) = (
-		shell.absolute_path(Path::new(left.as_ref())),
-		shell.absolute_path(Path::new(right.as_ref())),
-	);
-
-	match (l_path.metadata(), r_path.metadata()) {
-		(Ok(m1), Ok(m2)) => Ok(m1.modified()? > m2.modified()?),
-		(Ok(_), Err(_)) => Ok(true),
+	match (file_metadata(shell, left).await, file_metadata(shell, right).await) {
+		(Some(m1), Some(m2)) => Ok(m1.modified()? > m2.modified()?),
+		(Some(_), None) => Ok(true),
 		_ => Ok(false),
 	}
 }
 
-fn files_refer_to_same_device_and_inode_numbers(
+async fn files_refer_to_same_device_and_inode_numbers(
 	shell: &Shell<impl extensions::ShellExtensions>,
-	left: impl AsRef<str>,
-	right: impl AsRef<str>,
+	left: &str,
+	right: &str,
 ) -> Result<bool, error::Error> {
-	let (l_path, r_path) = (
-		shell.absolute_path(Path::new(left.as_ref())),
-		shell.absolute_path(Path::new(right.as_ref())),
-	);
-
-	if !l_path.readable() || !r_path.readable() {
+	if !file_accessible(shell, left, true, false).await
+		|| !file_accessible(shell, right, true, false).await
+	{
 		return Ok(false);
 	}
 
-	Ok(l_path.get_device_and_inode()? == r_path.get_device_and_inode()?)
+	// Identity comes from the filesystem; paths it cannot identify are never
+	// the same file.
+	Ok(shell
+		.filesystem()
+		.same_file(shell.absolute_path(Path::new(left)), shell.absolute_path(Path::new(right)))
+		.await?)
 }

@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -45,6 +45,25 @@ describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 });
 
 describe("isAuthRetryableError", () => {
+	it("retries typed token-refresh requests without treating other OAuth failures as retryable", () => {
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth token expired before request", {
+					kind: "token-refresh",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth provider is misconfigured", {
+					kind: "configuration",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(false);
+	});
+
 	it("treats 401/403 and usage-limit phrasing as retryable, everything else as not", () => {
 		expect(isAuthRetryableError(authError(401))).toBe(true);
 		expect(isAuthRetryableError(usageLimitError())).toBe(true);
@@ -87,6 +106,16 @@ describe("isAuthRetryableError", () => {
 		// sibling account may not share the restriction, so rotate.
 		expect(isAuthRetryableError(authError(403))).toBe(true);
 		expect(isAuthRetryableError("Error: 403 forbidden")).toBe(true);
+		// Cline's client-surface gate (403) is per-model client policy, not a
+		// credential problem: sibling keys fail identically, so rotation would
+		// only burn them.
+		expect(
+			isAuthRetryableError(
+				new Error(
+					"Error 403: deepseek/deepseek-v4-flash is only available via Cline product surfaces. If you are using an old version of Cline, please update to the latest version",
+				),
+			),
+		).toBe(false);
 		expect(isAuthRetryableError(authError(500))).toBe(false);
 		expect(isAuthRetryableError(new Error("network blip"))).toBe(false);
 		expect(isAuthRetryableError(undefined)).toBe(false);
@@ -133,20 +162,39 @@ describe("withAuth", () => {
 		]);
 	});
 
-	it("does not exhaust every sibling on pure 401 auth failures", async () => {
+	it("rotates through every distinct sibling on pure 401 auth failures until one succeeds", async () => {
 		const keys: string[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
 		const pool = ["k0", "k1", "k2", "k3"];
+		let resolveIndex = 0;
+
+		const result = await withAuth(
+			ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
+			},
+			async key => {
+				keys.push(key);
+				if (key === "k3") return "success";
+				throw authError();
+			},
+		);
+
+		expect(result).toBe("success");
+		expect(keys).toEqual(pool);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true, true]);
+	});
+
+	it("stops 401 rotation once the resolver cycles back to an attempted sibling", async () => {
+		const keys: string[] = [];
+		const pool = ["k0", "k1", "k2"];
 		let resolveIndex = 0;
 		let lastError: unknown;
 		let caught: unknown;
 
 		try {
 			await withAuth(
-				ctx => {
-					contexts.push(ctx);
-					return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
-				},
+				ctx => (ctx.error === undefined ? pool[0] : pool[++resolveIndex % pool.length]),
 				async key => {
 					keys.push(key);
 					lastError = authError();
@@ -158,8 +206,7 @@ describe("withAuth", () => {
 		}
 
 		expect(caught).toBe(lastError);
-		expect(keys).toEqual(["k0", "k1", "k2"]);
-		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true]);
+		expect(keys).toEqual(pool);
 	});
 
 	it("continues quota rotation when a refreshed 401 retry becomes a usage limit", async () => {
@@ -472,16 +519,20 @@ describe("withOAuthAccess", () => {
 	function fakeStorage(tokens: { initial?: OAuthAccess; forced?: OAuthAccess; rotated?: OAuthAccess }): FakeStorage {
 		const storage: FakeStorage = {
 			calls: [],
-			async getOAuthAccess(_provider, _sessionId, options) {
-				storage.calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) return tokens.forced;
-				// After a rotate, the next plain resolve yields the sibling.
-				if (storage.calls.includes("rotate")) return tokens.rotated;
-				return tokens.initial;
+			oauth: {
+				async access(_provider, _sessionId, options) {
+					storage.calls.push({ forceRefresh: options?.forceRefresh });
+					if (options?.forceRefresh) return tokens.forced;
+					// After a rotate, the next plain resolve yields the sibling.
+					if (storage.calls.includes("rotate")) return tokens.rotated;
+					return tokens.initial;
+				},
 			},
-			async rotateSessionCredential() {
-				storage.calls.push("rotate");
-				return tokens.rotated !== undefined;
+			limits: {
+				async rotate() {
+					storage.calls.push("rotate");
+					return { switched: tokens.rotated !== undefined };
+				},
 			},
 		};
 		return storage;
@@ -524,6 +575,68 @@ describe("withOAuthAccess", () => {
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
 	});
 
+	it("allows one token-refresh replay without rotating to a sibling", async () => {
+		const storage = fakeStorage({
+			initial: access("stale", { credentialId: 7 }),
+			forced: access("fresh", { credentialId: 7 }),
+			rotated: access("sibling", { credentialId: 8 }),
+		});
+		const firstError = new OAuthError("First token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const secondError = new OAuthError("Refreshed token also expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const attempts: string[] = [];
+		await expect(
+			withOAuthAccess(storage, "prov", async a => {
+				attempts.push(a.accessToken);
+				throw attempts.length === 1 ? firstError : secondError;
+			}),
+		).rejects.toBe(secondError);
+
+		expect(attempts).toEqual(["stale", "fresh"]);
+		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
+	});
+
+	it("honors a token-refresh request after an earlier 401 refresh", async () => {
+		const attempts: string[] = [];
+		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
+		const forced = [access("fresh-but-expired", { credentialId: 7 }), access("renewed", { credentialId: 7 })];
+		const storage: OAuthAccessSource = {
+			oauth: {
+				async access(_provider, _sessionId, options) {
+					calls.push({ forceRefresh: options?.forceRefresh });
+					if (options?.forceRefresh) return forced.shift();
+					return access("stale", { credentialId: 7 });
+				},
+			},
+			limits: {
+				async rotate() {
+					calls.push("rotate");
+					return { switched: true };
+				},
+			},
+		};
+		const refreshRequest = new OAuthError("Refreshed token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+
+		const result = await withOAuthAccess(storage, "prov", async a => {
+			attempts.push(a.accessToken);
+			if (a.accessToken === "stale") throw authError();
+			if (a.accessToken === "fresh-but-expired") throw refreshRequest;
+			return "ok";
+		});
+
+		expect(result).toBe("ok");
+		expect(attempts).toEqual(["stale", "fresh-but-expired", "renewed"]);
+		expect(calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }, { forceRefresh: true }]);
+	});
+
 	it("tries a refreshed bearer for the same credential id on 401 before rotating", async () => {
 		const storage = fakeStorage({
 			initial: access("stale", { credentialId: 7 }),
@@ -541,42 +654,42 @@ describe("withOAuthAccess", () => {
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
 	});
 
-	it("does not exhaust every OAuth sibling on pure 401 auth failures", async () => {
+	it("rotates through every distinct OAuth sibling on pure 401 auth failures", async () => {
 		const attempts: string[] = [];
 		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
 		const rotated = [access("sibling-1", { credentialId: 2 }), access("sibling-2", { credentialId: 3 })];
 		let rotateIndex = 0;
-		let lastError: unknown;
-		let caught: unknown;
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess(_provider, _sessionId, options) {
-				calls.push({ forceRefresh: options?.forceRefresh });
-				if (options?.forceRefresh) return access("fresh", { credentialId: 1 });
-				if (rotateIndex > 0) return rotated[rotateIndex - 1];
-				return access("stale", { credentialId: 1 });
+			oauth: {
+				async access(_provider, _sessionId, options) {
+					calls.push({ forceRefresh: options?.forceRefresh });
+					if (options?.forceRefresh) return access("fresh", { credentialId: 1 });
+					if (rotateIndex > 0) return rotated[rotateIndex - 1];
+					return access("stale", { credentialId: 1 });
+				},
 			},
-			async rotateSessionCredential() {
-				calls.push("rotate");
-				rotateIndex += 1;
-				return true;
+			limits: {
+				async rotate() {
+					calls.push("rotate");
+					rotateIndex += 1;
+					return { switched: true };
+				},
 			},
 		};
 
-		try {
-			await withOAuthAccess(storage, "prov", async a => {
-				attempts.push(a.accessToken);
-				lastError = authError();
-				throw lastError;
-			});
-		} catch (error) {
-			caught = error;
-		}
+		const result = await withOAuthAccess(storage, "prov", async a => {
+			attempts.push(a.accessToken);
+			if (a.accessToken === "sibling-2") return "success";
+			throw authError();
+		});
 
-		expect(caught).toBe(lastError);
-		expect(attempts).toEqual(["stale", "fresh", "sibling-1"]);
+		expect(result).toBe("success");
+		expect(attempts).toEqual(["stale", "fresh", "sibling-1", "sibling-2"]);
 		expect(calls).toEqual([
 			{ forceRefresh: undefined },
 			{ forceRefresh: true },
+			"rotate",
+			{ forceRefresh: undefined },
 			"rotate",
 			{ forceRefresh: undefined },
 		]);
@@ -622,14 +735,18 @@ describe("withOAuthAccess", () => {
 	it("passes the failed OAuth bearer to rotation", async () => {
 		const rotationTargets: Array<{ apiKey: string | undefined; credentialId: number | undefined }> = [];
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				return rotationTargets.length === 0
-					? access("dead", { credentialId: 17 })
-					: access("sibling", { credentialId: 18 });
+			oauth: {
+				async access() {
+					return rotationTargets.length === 0
+						? access("dead", { credentialId: 17 })
+						: access("sibling", { credentialId: 18 });
+				},
 			},
-			async rotateSessionCredential(_provider, _sessionId, options) {
-				rotationTargets.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
-				return true;
+			limits: {
+				async rotate(_provider, _sessionId, options) {
+					rotationTargets.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
+					return { switched: true };
+				},
 			},
 		};
 		const attempts: string[] = [];
@@ -651,13 +768,17 @@ describe("withOAuthAccess", () => {
 		let lastError: unknown;
 		let caught: unknown;
 		const storage: OAuthAccessSource = {
-			async getOAuthAccess() {
-				const credentialId = nextCredential++;
-				return access(`token-${credentialId}`, { credentialId });
+			oauth: {
+				async access() {
+					const credentialId = nextCredential++;
+					return access(`token-${credentialId}`, { credentialId });
+				},
 			},
-			async rotateSessionCredential() {
-				rotateCalls += 1;
-				return true;
+			limits: {
+				async rotate() {
+					rotateCalls += 1;
+					return { switched: true };
+				},
 			},
 		};
 

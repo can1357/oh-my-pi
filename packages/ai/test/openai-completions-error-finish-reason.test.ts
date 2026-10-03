@@ -8,6 +8,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Mirrors the transient-transport alternative the session retry gate matches on.
@@ -53,6 +54,93 @@ function completionChunk(extra: Record<string, unknown>): unknown {
 		...extra,
 	};
 }
+
+describe("final tool-call arguments", () => {
+	const tool = {
+		name: "write",
+		description: "Write a file",
+		parameters: {
+			type: "object",
+			properties: { i: { type: "string" }, path: { type: "string" }, content: { type: "string" } },
+		},
+	};
+	const args = { i: "Writing file", path: "repaired.txt", content: "hello" };
+	async function streamCall(raw: string | Record<string, unknown>, finishReason: string) {
+		return streamOpenAICompletions(
+			completionsModel,
+			{ ...baseContext(), tools: [tool] },
+			{
+				apiKey: "test-key",
+				fetch: createSseFetch([
+					completionChunk({
+						choices: [
+							{
+								index: 0,
+								delta: {
+									tool_calls: [
+										{
+											index: 0,
+											id: "call_write",
+											type: "function",
+											function: { name: "write", arguments: raw },
+										},
+									],
+								},
+							},
+						],
+					}),
+					completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] }),
+					"[DONE]",
+				]),
+			},
+		).result();
+	}
+
+	for (const finishReason of ["tool_calls", "stop"]) {
+		it.each([
+			JSON.stringify(args).slice(0, -2),
+			JSON.stringify(args).slice(0, -1),
+			JSON.stringify(args) + " garbage",
+		])("refuses incomplete or trailing-garbage arguments under " + finishReason + ": %s", async raw => {
+			const result = await streamCall(raw, finishReason);
+			expect(result.stopReason).toBe("toolUse");
+			const call = result.content.find(block => block.type === "toolCall");
+			if (!call) throw new Error("Expected tool call");
+			expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+			expect(() => validateToolArguments(tool, call)).toThrow("Tool call arguments are not valid JSON");
+		});
+
+		it.each([
+			[JSON.stringify(args), args],
+			["{i:'Writing file',path:'repaired.txt',content:'hello',}", args],
+			["{i:'Writing file',path:'repaired.txt',content:hello,}", args],
+			["", {}],
+			[" \n\t", {}],
+			[args, args],
+		] as const)(
+			"preserves complete, repairable and empty arguments under " + finishReason + ": %j",
+			async (raw, expected) => {
+				const result = await streamCall(raw, finishReason);
+				expect(result.stopReason).toBe("toolUse");
+				const call = result.content.find(block => block.type === "toolCall");
+				if (!call) throw new Error("Expected tool call");
+				expect(call.arguments).toEqual(expected);
+				expect(validateToolArguments(tool, call)).toEqual(expected);
+			},
+		);
+	}
+
+	it("caps raw invalid argument diagnostics without retaining executable preview keys", async () => {
+		const raw = JSON.stringify({ ...args, content: "x".repeat(600) }).slice(0, -2);
+		const result = await streamCall(raw, "tool_calls");
+		const call = result.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		const bounded = raw.slice(0, 512) + "… [truncated " + (raw.length - 512) + " chars]";
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: bounded });
+		// The validation error shows the same bound, not a second truncation of it.
+		expect(() => validateToolArguments(tool, call)).toThrow(`Raw JSON:\n${bounded}`);
+	});
+});
 
 describe("finish_reason: error", () => {
 	it("maps to a retryable error message", async () => {
@@ -105,6 +193,84 @@ describe("finish_reason: error", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
+	}, 10_000);
+});
+
+describe("in-band SSE error envelope", () => {
+	it("surfaces a queue-full error carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([
+			{
+				error: {
+					object: "error",
+					message: "The request queue is full.",
+					type: "SERVICE_UNAVAILABLE",
+					param: null,
+					code: 503,
+				},
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(503);
+		expect(result.errorMessage).toContain("The request queue is full.");
+	}, 10_000);
+
+	it("surfaces a flat error string carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([{ error: "rate limit exceeded" }, "[DONE]"]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("rate limit exceeded");
+	}, 10_000);
+
+	it("surfaces a flat message-only error carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([{ message: "provider temporarily unavailable" }, "[DONE]"]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("provider temporarily unavailable");
+	}, 10_000);
+
+	it("does not replay after content precedes an in-band error", async () => {
+		let attempts = 0;
+		const baseFetch = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Partial" } }] }),
+			{
+				error: {
+					message: "Request timed out in the queue.",
+					type: "REQUEST_TIMEOUT",
+				},
+			},
+			"[DONE]",
+		]);
+		const fetchMock: FetchImpl = async (input, init) => {
+			attempts++;
+			return baseFetch(input, init);
+		};
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(attempts).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(408);
+		expect(result.content).toEqual([{ type: "text", text: "Partial" }]);
 	}, 10_000);
 });
 
@@ -195,5 +361,64 @@ describe("premature stream closure", () => {
 		expect(attempts).toBeGreaterThan(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "Hi" }]);
+	}, 10_000);
+});
+
+describe("uppercase finish_reason", () => {
+	// Some OpenAI-compatible gateways fronting Gemini backends emit the native
+	// uppercase reasons (`STOP`, `MAX_TOKENS`) instead of the lowercase OpenAI
+	// contract values. `mapStopReason` must fold case and map `MAX_TOKENS` to
+	// `length`, not surface a clean completion as an error.
+	it("maps STOP to a clean stop", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "STOP" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	}, 10_000);
+
+	it("maps MAX_TOKENS to length", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "MAX_TOKENS" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("length");
+		expect(result.errorMessage).toBeUndefined();
+	}, 10_000);
+});
+
+describe("non-string finish_reason", () => {
+	// A malformed provider SSE can put a non-string `finish_reason` on the
+	// chunk. Folding case must not throw on it — it falls through to the
+	// unknown-reason error path with the original value surfaced.
+	it("falls through to an error instead of throwing", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: 42 }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider finish_reason: 42");
 	}, 10_000);
 });

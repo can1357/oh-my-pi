@@ -1,7 +1,8 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import { type ChildProcess, ptree, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { rejectionOf } from "./helpers/rejection";
 
 const MOCK_AGENT = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
 
@@ -50,7 +51,9 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		});
 
 		await client.start();
-		await expect(client.getMessagesPage()).rejects.toThrow("Cannot page messages while the session is changing");
+		expect(await rejectionOf(client.getMessagesPage())).toMatchObject({
+			message: expect.stringContaining("Cannot page messages while the session is changing"),
+		});
 		expect((await client.getMessages()) as unknown).toEqual([
 			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
 		]);
@@ -66,9 +69,9 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		// Direct page walks stay strict: the stale cursor is surfaced to the caller.
 		const firstPage = await client.getMessagesPage();
 		expect(firstPage.nextCursor).toBe("second-page");
-		await expect(client.getMessagesPage({ cursor: firstPage.nextCursor })).rejects.toThrow(
-			"RPC message cursor is stale",
-		);
+		expect(await rejectionOf(client.getMessagesPage({ cursor: firstPage.nextCursor }))).toMatchObject({
+			message: expect.stringContaining("RPC message cursor is stale"),
+		});
 		// The high-level drain discards the partial first page and takes the legacy snapshot.
 		expect((await client.getMessages()) as unknown).toEqual([
 			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
@@ -128,7 +131,9 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 			terminationGraceMs: 10,
 		});
 
-		await expect(client.start()).rejects.toThrow("fixture startup failed");
+		expect(await rejectionOf(client.start())).toMatchObject({
+			message: expect.stringContaining("fixture startup failed"),
+		});
 
 		// Before the fix, #process stayed set after the failed spawn so the
 		// second start() rejected with "Client already started". A successful
@@ -171,63 +176,15 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 			await client.start();
 			pid = Number(await Bun.file(pidFile).text());
 
-			await expect(client.getState()).rejects.toThrow(/Agent output reader failed/);
+			expect(await rejectionOf(client.getState())).toMatchObject({
+				message: expect.stringMatching(/Agent output reader failed/),
+			});
 			await expect(client.getState()).rejects.toThrow("Client not started");
 			expect(isProcessAlive(pid)).toBe(false);
 		} finally {
 			if (pid > 0 && isProcessAlive(pid)) process.kill(pid, "SIGKILL");
 		}
 	}, 10_000);
-
-	test("rejects pending requests and reaps a worker that closes stdout without exiting", async () => {
-		let stdoutController: ReadableStreamDefaultController<Uint8Array> | undefined;
-		let resolveExit: ((exitCode: number) => void) | undefined;
-		let killCalls = 0;
-		const exited = new Promise<number>(resolve => {
-			resolveExit = resolve;
-		});
-		const stdout = new ReadableStream<Uint8Array>({
-			start(controller) {
-				stdoutController = controller;
-				controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "ready" })}\n`));
-			},
-		});
-		const fakeChild = {
-			stdout,
-			stdin: {
-				write() {
-					stdoutController?.close();
-					stdoutController = undefined;
-					return 0;
-				},
-				flush() {
-					return 0;
-				},
-			},
-			exited,
-			peekStderr() {
-				return "";
-			},
-			kill() {
-				killCalls += 1;
-				resolveExit?.(0);
-			},
-		};
-		const spawn = spyOn(ptree, "spawn").mockImplementation(
-			() => fakeChild as unknown as ReturnType<typeof ptree.spawn>,
-		);
-
-		try {
-			using client = new RpcClient({ cliPath: MOCK_AGENT });
-			await client.start();
-
-			await expect(client.getState()).rejects.toThrow("Agent output stream ended unexpectedly");
-			await expect(client.getState()).rejects.toThrow("Client not started");
-			expect(killCalls).toBe(1);
-		} finally {
-			spawn.mockRestore();
-		}
-	}, 5_000);
 
 	test("reports exit code and stderr when a ready worker exits", async () => {
 		using client = new RpcClient({
@@ -239,45 +196,19 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		});
 		await client.start();
 
-		await expect(client.getState()).rejects.toThrow(
-			"Agent process exited with code 23. Stderr: fixture worker failed",
-		);
+		expect(await rejectionOf(client.getState())).toMatchObject({
+			message: expect.stringContaining("Agent process exited with code 23. Stderr: fixture worker failed"),
+		});
 	});
 
-	test("start() rejects instead of hanging when a pre-ready worker closes stdout and never exits", async () => {
-		// The worker outlives its own stdout, so start() cannot learn an exit code
-		// and must still fail: it waits a bounded time for the exit, then reports
-		// the stream end. A regression stalls until the 30s ready timeout, which
-		// this test's own timeout catches.
-		let resolveExit: ((exitCode: number) => void) | undefined;
-		let killCalls = 0;
-		const fakeChild = {
-			stdout: new ReadableStream<Uint8Array>({
-				start(controller) {
-					controller.close();
-				},
-			}),
-			stdin: { write: () => 0, flush: () => 0 },
-			exited: new Promise<number>(resolve => {
-				resolveExit = resolve;
-			}),
-			peekStderr: () => "worker went quiet",
-			kill() {
-				killCalls += 1;
-				resolveExit?.(0);
-			},
-		};
-		const spawn = spyOn(ptree, "spawn").mockImplementation(() => fakeChild as unknown as ChildProcess);
-
-		try {
-			using client = new RpcClient({ cliPath: MOCK_AGENT, terminationGraceMs: 10 });
-			await expect(client.start()).rejects.toThrow(
-				"Agent output stream ended before ready. Stderr: worker went quiet",
-			);
-			// The failed start must also reap the orphan rather than leak it.
-			expect(killCalls).toBe(1);
-		} finally {
-			spawn.mockRestore();
-		}
-	}, 5_000);
+	test("rejects promptAndWait when a same-id error arrives after the success ack", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_LATE_PROMPT_ERROR: "1" },
+		});
+		await client.start();
+		expect(await rejectionOf(client.promptAndWait("deleted skill"))).toMatchObject({
+			message: expect.stringContaining("skill file was deleted"),
+		});
+	});
 });

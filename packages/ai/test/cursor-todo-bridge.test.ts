@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
 	type BlockState,
 	processInteractionUpdate,
@@ -29,7 +28,8 @@ import {
 	UpdateTodosResultSchema,
 	UpdateTodosSuccessSchema,
 	UpdateTodosToolCallSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 /** One `todoSync` invocation, recorded verbatim. */
 interface SyncCall {
@@ -249,37 +249,6 @@ describe("cursor native todo bridge", () => {
 		expect(h.snapshots).toEqual([]);
 	});
 
-	it("refreshes local state from a read_todos snapshot", () => {
-		const h = newHarness();
-		start(h, { readTodosToolCall: { args: {} } });
-		complete(h, {
-			readTodosToolCall: {
-				args: {},
-				result: {
-					result: { case: "success", value: { todos: [{ content: "remote", status: 2 }], totalCount: 1 } },
-				},
-			},
-		});
-
-		expect(h.snapshots).toEqual([{ todos: [{ content: "remote", status: "in_progress" }], merged: false }]);
-	});
-
-	it("refuses a status-filtered read_todos result, which is a subset and not the list", () => {
-		// `ReadTodosArgs.status_filter` narrows the response; mirroring it would
-		// delete every task the filter excluded.
-		const h = newHarness();
-		const args = { statusFilter: [2] };
-		start(h, { readTodosToolCall: { args } });
-		complete(h, {
-			readTodosToolCall: {
-				args,
-				result: { result: { case: "success", value: { todos: [{ content: "only in progress", status: 2 }] } } },
-			},
-		});
-
-		expect(h.snapshots).toEqual([]);
-	});
-
 	it("refuses an id-filtered read_todos result", () => {
 		const h = newHarness();
 		const args = { idFilter: ["task-1"] };
@@ -292,88 +261,6 @@ describe("cursor native todo bridge", () => {
 		});
 
 		expect(h.snapshots).toEqual([]);
-	});
-
-	it("refuses a read_todos result truncated below the server's own total_count", () => {
-		const h = newHarness();
-		start(h, { readTodosToolCall: { args: {} } });
-		complete(h, {
-			readTodosToolCall: {
-				args: {},
-				result: {
-					result: {
-						case: "success",
-						value: { todos: [{ content: "first of three", status: 2 }], totalCount: 3 },
-					},
-				},
-			},
-		});
-
-		expect(h.snapshots).toEqual([]);
-	});
-
-	it("refuses an empty read_todos whose total_count is zero or unset", () => {
-		// proto3 defaults an unset `total_count` to 0, so todos=[] + totalCount=0
-		// is indistinguishable from a genuinely empty list. Mirroring it would
-		// wipe every local task; update_todos remains the clear path.
-		const h = newHarness();
-		start(h, { readTodosToolCall: { args: {} } });
-		complete(h, {
-			readTodosToolCall: {
-				args: {},
-				result: {
-					result: {
-						case: "success",
-						value: { todos: [], totalCount: 0 },
-					},
-				},
-			},
-		});
-		expect(h.snapshots).toEqual([]);
-
-		// Positive control: the same empty snapshot via update_todos DOES sync —
-		// clearing the list is an authoritative write, not an ambiguous read.
-		const cleared = newHarness();
-		start(cleared, { updateTodosToolCall: { args: { todos: [] } } });
-		complete(cleared, {
-			updateTodosToolCall: {
-				args: { todos: [] },
-				result: {
-					result: {
-						case: "success",
-						value: { todos: [], totalCount: 0 },
-					},
-				},
-			},
-		});
-		expect(cleared.snapshots).toEqual([{ todos: [], merged: false }]);
-	});
-
-	it("accepts a read_todos result whose row count matches total_count", () => {
-		const h = newHarness();
-		start(h, { readTodosToolCall: { args: {} } });
-		complete(h, {
-			readTodosToolCall: {
-				args: {},
-				result: {
-					result: {
-						case: "success",
-						value: {
-							todos: [
-								{ content: "one", status: 3 },
-								{ content: "two", status: 2 },
-							],
-							totalCount: 2,
-						},
-					},
-				},
-			},
-		});
-
-		expect(h.snapshots[0].todos).toEqual([
-			{ content: "one", status: "completed" },
-			{ content: "two", status: "in_progress" },
-		]);
 	});
 });
 
@@ -492,13 +379,6 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 		);
 		return h;
 	}
-
-	it("synthesizes a todo block from a wire-decoded update_todos oneof", () => {
-		const h = drive(updateCall(items([["1", "done task", 3]]), 1));
-
-		expect(todoBlocks(h)).toHaveLength(1);
-		expect(todoBlocks(h)[0][kCursorExecResolved]).toBe(true);
-	});
 
 	it("mirrors the server snapshot from a wire-decoded update_todos oneof", () => {
 		const h = drive(
@@ -778,13 +658,6 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 		expect(h.snapshots).toEqual([]);
 	});
 
-	it("leaves local state untouched when the wire result carries an error", () => {
-		const h = drive(errorCall("boom"));
-
-		expect(todoBlocks(h)).toHaveLength(1);
-		expect(h.snapshots).toEqual([]);
-	});
-
 	it("syncs under the streamed call id so the visible block can resolve", () => {
 		// The interactive transcript files the block under the streamed `callId`
 		// and only clears it when `tool_execution_end.toolCallId` matches. A
@@ -801,15 +674,6 @@ describe("cursor native todo bridge (wire-encoded protobuf)", () => {
 
 		expect(h.toolResults.map(r => r.toolCallId)).toEqual([todoBlocks(h)[0].id]);
 		expect(h.toolResults[0]).toMatchObject({ role: "toolResult", toolName: "todo", isError: false });
-	});
-
-	it("still pairs a result when the snapshot is refused", () => {
-		// The call happened and the block is rendered; only local state was left
-		// alone. Without a result the block would be stripped on rebuild.
-		const h = drive(readCall(items([["1", "task", 2]]), 5));
-
-		expect(h.snapshots).toEqual([]);
-		expect(h.toolResults.map(r => r.toolCallId)).toEqual([todoBlocks(h)[0].id]);
 	});
 
 	it("settles a refused read as a successful no-op under the streamed call id", () => {

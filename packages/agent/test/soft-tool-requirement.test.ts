@@ -10,7 +10,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, ToolChoice } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { createUserMessage } from "./helpers";
+import { createHarmonyMitigationModel, createUserMessage } from "./helpers";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -249,7 +249,7 @@ describe("agentLoop soft tool requirement", () => {
 			responses: [{ content: [leak] }, { content: ["clean retry"] }],
 		});
 		const config: AgentLoopConfig = {
-			model: mock.model,
+			model: createHarmonyMitigationModel(),
 			convertToLlm: identityConverter,
 			getToolChoice: () => queue.shift(),
 		};

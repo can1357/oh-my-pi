@@ -4,14 +4,35 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
-import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import {
+	type MinimizerOptions,
+	PtySession,
+	Shell,
+	type ShellFilesystem,
+	type ShellRunResult,
+} from "@oh-my-pi/pi-natives";
+import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
-import { Settings, type ShellMinimizerSettings } from "../config/settings";
-import { OutputSink } from "../session/streaming-output";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
+import { Settings } from "../config/settings";
+import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	resolveOutputMaxColumns,
+	resolveOutputSinkArtifactMaxBytes,
+	resolveOutputSinkHeadBytes,
+} from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
+
+import {
+	cfgBashDirenv,
+	cfgBashDirenvLoadTimeoutMs,
+	cfgShellMinimizer,
+	cfgShellPath,
+	type ShellMinimizerSettings,
+} from "./settings";
 
 export interface BashExecutorOptions {
 	cwd?: string;
@@ -26,6 +47,19 @@ export interface BashExecutorOptions {
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of brush parsing directly. */
 	useUserShell?: boolean;
+	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
+	pty?: BashPtyOptions;
+	/**
+	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
+	 * `cwd` included). External shells and processes never see it.
+	 */
+	filesystem?: ShellFilesystem;
+	/**
+	 * Invoked once the embedded shell starts the command, with a probe of the
+	 * live pids it spawned (empty once the run ends). Not called on the
+	 * user-shell paths.
+	 */
+	onStart?: (pids: () => readonly number[]) => void;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -42,6 +76,14 @@ export interface BashExecutorOptions {
 	) => Promise<string | undefined>;
 }
 
+/** Viewport + raw-output callback enabling the user-shell PTY path (`!` hotkey). */
+export interface BashPtyOptions {
+	cols: number;
+	rows: number;
+	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
+	onChunk: (chunk: string) => void;
+}
+
 export interface BashResult {
 	output: string;
 	exitCode: number | undefined;
@@ -54,13 +96,21 @@ export interface BashResult {
 	outputLines: number;
 	outputBytes: number;
 	artifactId?: string;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
+	artifactError?: OutputArtifactError;
 	workingDir?: string;
+	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
+	images?: ImageContent[];
 }
 
 /** POSIX-safe variable name — gates which direnv unsets we inject into the
  *  command line, so a hostile `.envrc` can't smuggle shell syntax through
  *  `unset`. `.envrc` never produces non-identifier names in practice. */
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
+const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
@@ -148,6 +198,13 @@ const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
 const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
+// Upper bound on how long a quarantined session's cleanup may pend before the
+// record is force-released. Native cancellation normally settles `runPromise`
+// in ~2s, but a wedged native run (e.g. a grandchild holding the stdout pipe)
+// could otherwise leave the run promise pending for the life of the process,
+// leaking the session key in `brokenShellSessions`/`shellSessionQuarantines`
+// (#10308). The backing timer is unref'd so it never keeps the process alive.
+const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
 
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
@@ -174,15 +231,30 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	interval.unref?.();
 }
 
+/**
+ * A timer promise that resolves after {@link QUARANTINE_CLEANUP_TIMEOUT_MS}.
+ * Used to bound quarantine cleanup; the timer is unref'd so it never keeps the
+ * process alive on its own.
+ */
+function quarantineCleanupDeadline(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, QUARANTINE_CLEANUP_TIMEOUT_MS);
+	timer.unref?.();
+	return promise;
+}
+
 function quarantineShellSession(
 	sessionKey: string,
 	runPromise: Promise<ShellRunResult>,
 	abortCleanupPromise: Promise<void> | undefined,
 ): void {
 	brokenShellSessions.add(sessionKey);
-	const cleanup = abortCleanupPromise
+	const settled = abortCleanupPromise
 		? Promise.allSettled([runPromise, abortCleanupPromise])
 		: Promise.allSettled([runPromise]);
+	// Defensive bound: a never-settling `runPromise` must not pin the quarantine
+	// record for the life of the process (#10308).
+	const cleanup = Promise.race([settled, quarantineCleanupDeadline()]);
 	shellSessionQuarantines.set(sessionKey, cleanup);
 	void cleanup
 		.finally(() => {
@@ -192,6 +264,24 @@ function quarantineShellSession(
 			}
 		})
 		.catch(() => undefined);
+}
+
+/**
+ * Drops every persistent Shell owned by an agent session (keys built with
+ * `agentSessionKey` as the {@link BashExecutorOptions.sessionKey}). The map is
+ * process-global, so without this each disposed session keeps its native shell
+ * for the life of the process. A Shell with live background jobs is retained
+ * until they exit, matching the `:async:` teardown; an in-flight run keeps its
+ * own reference and drops the Shell when it settles.
+ */
+export function releaseShellSessions(agentSessionKey: string | undefined): void {
+	if (!agentSessionKey) return;
+	const prefix = `${agentSessionKey}\n`;
+	for (const [key, shell] of shellSessions) {
+		if (!key.startsWith(prefix)) continue;
+		shellSessions.delete(key);
+		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
+	}
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
@@ -321,7 +411,7 @@ function buildUserShellCommand(shell: string, args: string[], command: string): 
 }
 
 function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): ShellConfig {
-	const customShellPath = settings.get("shellPath");
+	const customShellPath = cfgShellPath.get(settings);
 	const envShell = Bun.env.SHELL;
 	if (customShellPath || process.platform === "win32" || !envShell || envShell === baseConfig.shell) {
 		return baseConfig;
@@ -340,6 +430,88 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 	};
 }
 
+/**
+ * Env for the user-shell PTY path: keep the non-interactive guards (pagers,
+ * editors, credential prompts) but restore color — the PTY makes stdout a
+ * TTY, so TERM/NO_COLOR/CI are all that keep tools monochrome.
+ */
+function buildUserShellPtyEnv(
+	shellEnv: Record<string, string>,
+	commandEnv: Record<string, string>,
+): Record<string, string> {
+	const env: Record<string, string> = { ...shellEnv, ...commandEnv, TERM: "xterm-256color" };
+	delete env.NO_COLOR;
+	delete env.CI;
+	return env;
+}
+
+/**
+ * Run a user-shell command on a headless PTY. Interactive zsh/fish startup
+ * (zle, job control, gitstatus) requires a real TTY — piping through the
+ * embedded shell produces `can't change option: zle` noise and colorless
+ * output. Raw bytes stream to `pty.onChunk` for virtual-terminal rendering;
+ * the sink keeps the sanitized capture for the transcript and the model.
+ */
+async function executeUserShellPty(run: {
+	shell: string;
+	args: string[];
+	command: string;
+	cwd: string | undefined;
+	env: Record<string, string>;
+	pty: BashPtyOptions;
+	timeoutMs: number | undefined;
+	signal: AbortSignal | undefined;
+	sink: OutputSink;
+	graphics: TerminalGraphicsDecoder;
+	dump: (notice?: string) => Promise<OutputSummary & { images?: ImageContent[] }>;
+}): Promise<BashResult> {
+	const session = new PtySession();
+	const result = await session.startArgv(
+		{
+			application: run.shell,
+			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
+			cwd: run.cwd,
+			env: run.env,
+			timeoutMs: run.timeoutMs,
+			signal: run.signal,
+			cols: run.pty.cols,
+			rows: run.pty.rows,
+		},
+		(err, chunk) => {
+			if (err || !chunk) return;
+			run.pty.onChunk(chunk);
+			// Preserve raw bytes for the terminal display, but extract graphics
+			// before the transcript sink sanitizes or truncates the clean text.
+			const clean = run.graphics.push(chunk);
+			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
+		},
+	);
+	if (result.timedOut) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			timedOut: true,
+			...(await run.dump(
+				run.timeoutMs !== undefined
+					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
+					: "Command timed out",
+			)),
+		};
+	}
+	if (result.cancelled) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			...(await run.dump("Command cancelled")),
+		};
+	}
+	return {
+		exitCode: result.exitCode,
+		cancelled: false,
+		...(await run.dump()),
+	};
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
@@ -347,22 +519,39 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
 	const { shell, args, env: shellEnv, prefix } = shellConfig;
 	const bashShell = isBashShell(shell);
+	// `!` hotkey commands on zsh/fish run in a real PTY: interactive shell
+	// startup (zle, job control, gitstatus) needs a TTY, and tools only emit
+	// color when stdout is one. bash keeps the snapshot + embedded-shell path;
+	// `cd` keeps the persistent shell so the session cwd can follow it.
+	const ptyRequest = options?.pty;
+	const usePty =
+		ptyRequest !== undefined &&
+		options?.useUserShell === true &&
+		!bashShell &&
+		supportsAutoUserShell(shell) &&
+		$env.PI_NO_PTY !== "1" &&
+		!isPersistentShellCdCommand(command);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
-	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
+	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
+	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
+	if (virtualCwd && (usePty || !options?.filesystem)) {
+		throw new Error(`Working directory ${commandCwd} needs the embedded shell with an injected filesystem`);
+	}
 	// Fold the repo's direnv/devenv env into the command + env so devenv tools
 	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
 	// signal + timeout so an aborted / short-timeout call can't hang on a cold
 	// `.envrc` load before the abort listener is installed. The helper applies
-	// the configured shell `prefix` after any `unset -v` it prepends.
+	// the configured shell `prefix` after any `unset -v` it prepends. A URL cwd
+	// has no `.envrc` on the host.
 	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
 		callerEnv: options?.env,
 		signal: options?.signal,
-		timeoutMs: settings.get("bash.direnvLoadTimeoutMs"),
+		timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
 		callerTimeoutMs: options?.timeout,
-		direnvSetting: settings.get("bash.direnv"),
+		direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
 		commandPrefix: prefix,
 	});
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
@@ -375,29 +564,68 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
+	const graphics = new TerminalGraphicsDecoder();
 	const sink = new OutputSink({
-		onChunk: options?.onChunk,
+		onChunk: usePty ? undefined : options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
+		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
-		chunkThrottleMs: options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
+		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
 	});
 
 	// sink.push() is synchronous — buffer management, counters, and onChunk
 	// all run inline. File writes (artifact path) are handled asynchronously
 	// inside the sink. No promise chain needed.
 	let acceptingChunks = true;
+	let graphicsFinished = false;
+	let decodedImages: ImageContent[] = [];
 	const enqueueChunk = (chunk: string) => {
-		if (acceptingChunks) sink.push(chunk);
+		if (!acceptingChunks) return;
+		const clean = graphics.push(chunk);
+		if (clean) sink.push(clean);
+	};
+	const dump = async (notice?: string): Promise<OutputSummary & { images?: ImageContent[] }> => {
+		if (!graphicsFinished) {
+			graphicsFinished = true;
+			const tail = graphics.finish();
+			if (tail) sink.push(tail);
+			decodedImages = await graphics.images();
+		}
+		return {
+			...(await sink.dump(notice)),
+			...(decodedImages.length > 0 ? { images: decodedImages } : {}),
+		};
 	};
 
 	if (options?.signal?.aborted) {
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await sink.dump("Command cancelled")),
+			...(await dump("Command cancelled")),
 		};
+	}
+
+	if (usePty && ptyRequest) {
+		const requestedMs = options?.timeout;
+		try {
+			return await executeUserShellPty({
+				shell,
+				args,
+				command: preflight.command,
+				cwd: commandCwd,
+				env: buildUserShellPtyEnv(shellEnv, commandEnv),
+				pty: ptyRequest,
+				timeoutMs: requestedMs === 0 ? undefined : Math.max(1_000, requestedMs ?? 300_000),
+				signal: options?.signal,
+				sink,
+				graphics,
+				dump,
+			});
+		} finally {
+			await sink.dispose();
+		}
 	}
 
 	const shellOptions = {
@@ -480,6 +708,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				env: commandEnv,
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
+				filesystem: options?.filesystem,
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -487,6 +716,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				}
 			},
 		);
+		options?.onStart?.(() => executionShell.pids());
 
 		const ey = new ExponentialYield();
 		const winner = await ey.race<
@@ -506,15 +736,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
+			let notice = "Command cancelled";
+			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
+				const seconds = Math.round(deadlineTimeoutMs / 1000);
+				// With an explicit timeout the native shell owns enforcement and
+				// this JS timer is only a backstop. If it still wins, the native
+				// run never returned — any output is stuck in the undrained pipe,
+				// so this is not a confirmed empty run (#10308).
+				notice = nativeOwnsTimeout
+					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
+					: `Command timed out after ${seconds} seconds`;
+			}
 			return {
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
-				...(await sink.dump(
-					winner.kind === "timeout" && deadlineTimeoutMs !== undefined
-						? `Command timed out after ${Math.round(deadlineTimeoutMs / 1000)} seconds`
-						: "Command cancelled",
-				)),
+				...(await dump(notice)),
 			};
 		}
 		if (timeoutTimer) {
@@ -535,7 +772,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				timedOut: true,
-				...(await sink.dump(annotation)),
+				...(await dump(annotation)),
 			};
 		}
 
@@ -548,27 +785,35 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			return {
 				exitCode: undefined,
 				cancelled: true,
-				...(await sink.dump("Command cancelled")),
+				...(await dump("Command cancelled")),
 			};
 		}
 
-		// When the native minimizer rewrote the output, swap the sink's accumulated
-		// raw stream for the minimized text, persist the original as a session
-		// artifact, and splice an `artifact://<id>` footer into the visible text so
-		// the agent can retrieve the raw bytes losslessly.
+		// When the native minimizer rewrote the output, persist the original and
+		// swap the sink's accumulated raw stream for the minimized text with an
+		// `artifact://<id>` footer so the agent can retrieve the raw bytes
+		// losslessly. The minimized text is a lossy summary, so substitute it
+		// only once the original is addressable — a caller that returns no id
+		// (or an unavailable allocator) must keep the raw stream rather than
+		// silently dropping the diagnostics the summary elided.
 		const minimized = winner.result.minimized;
 		if (minimized && minimized.text !== minimized.originalText) {
-			sink.replace(minimized.text);
-			if (options?.onMinimizedSave) {
-				const artifactId = await options.onMinimizedSave(minimized.originalText, {
-					filter: minimized.filter,
-					inputBytes: minimized.inputBytes,
-					outputBytes: minimized.outputBytes,
-				});
-				if (artifactId) {
-					const sep = minimized.text.endsWith("\n") ? "" : "\n";
-					sink.push(`${sep}[raw output: artifact://${artifactId}]\n`);
-				}
+			const artifactId = options?.onMinimizedSave
+				? await options.onMinimizedSave(minimized.originalText, {
+						filter: minimized.filter,
+						inputBytes: minimized.inputBytes,
+						outputBytes: minimized.outputBytes,
+					})
+				: undefined;
+			if (artifactId) {
+				// The decoder above already owns image extraction from the streamed
+				// lossless output. Scrub any graphics frames repeated by the native
+				// minimizer without feeding them back into that decoder.
+				const minimizedGraphics = new TerminalGraphicsDecoder();
+				const minimizedText = minimizedGraphics.push(minimized.text) + minimizedGraphics.finish();
+				sink.replace(minimizedText);
+				const sep = minimizedText.endsWith("\n") ? "" : "\n";
+				sink.push(`${sep}[raw output: artifact://${artifactId}]\n`);
 			}
 		}
 
@@ -577,7 +822,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
-			...(await sink.dump()),
+			...(await dump()),
 		};
 	} catch (err) {
 		resetSession = true;

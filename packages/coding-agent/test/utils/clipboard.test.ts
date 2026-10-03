@@ -15,7 +15,7 @@ type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
 
 type SpawnCall = { cmd: string[]; options: SpawnOptions };
 type SpawnOutput = string | Uint8Array;
-
+type SpawnOutputSource = SpawnOutput | SpawnOutput[] | ((cmd: string[]) => SpawnOutput);
 function streamOf(body: SpawnOutput): ReadableStream<Uint8Array> {
 	const stream = new Response(body).body;
 	if (!stream) throw new Error("Failed to create response stream.");
@@ -33,14 +33,15 @@ function fakeProcess(stdout: SpawnOutput, exitCode = 0): Subprocess {
 	} as unknown as Subprocess;
 }
 
-function spySpawn(calls: SpawnCall[], stdout: SpawnOutput | SpawnOutput[], exitCode: number | number[] = 0) {
+function spySpawn(calls: SpawnCall[], stdout: SpawnOutputSource, exitCode: number | number[] = 0) {
 	function mockSpawn(opts: SpawnOptions & { cmd: string[] }): Subprocess;
 	function mockSpawn(cmd: string[], opts?: SpawnOptions): Subprocess;
 	function mockSpawn(first: string[] | (SpawnOptions & { cmd: string[] }), second?: SpawnOptions): Subprocess {
 		const cmd = Array.isArray(first) ? first : first.cmd;
 		const options = Array.isArray(first) ? (second ?? ({} as SpawnOptions)) : (first as SpawnOptions);
 		calls.push({ cmd, options });
-		const output = Array.isArray(stdout) ? (stdout[calls.length - 1] ?? "") : stdout;
+		const output =
+			typeof stdout === "function" ? stdout(cmd) : Array.isArray(stdout) ? (stdout[calls.length - 1] ?? "") : stdout;
 		const code = Array.isArray(exitCode) ? (exitCode[calls.length - 1] ?? 0) : exitCode;
 		return fakeProcess(output, code);
 	}
@@ -154,19 +155,15 @@ describe("readImageFromClipboard dispatch", () => {
 		expect(nativeSpy).not.toHaveBeenCalled();
 	});
 
-	it("uses the PowerShell bridge on native Windows when arboard has no image payload", async () => {
+	it("trusts the native no-image answer on Windows without spawning PowerShell", async () => {
+		// Regression: a text-only clipboard used to wait ~1s on a cold
+		// powershell.exe GetImage() before Ctrl+V could paste the text.
 		setPlatform("win32");
-		const calls: SpawnCall[] = [];
-		spySpawn(calls, RED_1X1_PNG_BASE64);
+		const spawnSpy = vi.spyOn(Bun, "spawn");
 		vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
 
-		const image = await readImageFromClipboard();
-
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
-		expect(image?.mimeType).toBe("image/png");
-		expect(Array.from(image!.data.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-		expect(calls[0]?.cmd).toContain("-Sta");
+		expect(await readImageFromClipboard()).toBeNull();
+		expect(spawnSpy).not.toHaveBeenCalled();
 	});
 
 	it("falls back to PowerShell when native Windows image conversion fails", async () => {
@@ -195,6 +192,21 @@ describe("readImageFromClipboard dispatch", () => {
 		await readImageFromClipboard();
 		expect(spawnSpy).not.toHaveBeenCalled();
 		expect(nativeSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("treats a throwing native image read as no image on linux with a display", async () => {
+		// Regression: an xclip-written text-only selection makes arboard's
+		// image read throw ("Unknown error ... incorrect type received from
+		// clipboard") instead of reporting no image. readImageFromClipboard
+		// must not propagate that — the smart-paste text fallback depends on
+		// a null return.
+		setPlatform("linux");
+		process.env.DISPLAY = ":0";
+		vi.spyOn(native, "readImageFromClipboard").mockRejectedValue(
+			new Error("Unknown error while interacting with the clipboard: incorrect type received from clipboard"),
+		);
+
+		expect(await readImageFromClipboard()).toBeNull();
 	});
 
 	it.each(["image/png", "image/jpeg", "image/gif", "image/webp"] as const)(
@@ -287,10 +299,20 @@ describe("readTextFromClipboard", () => {
 
 		expect(await readTextFromClipboard()).toBe("from xsel");
 		expect(calls.map(call => call.cmd)).toEqual([
-			["wl-paste", "--type", "text/plain", "--no-newline"],
+			["wl-paste", "--type", "text", "--no-newline"],
 			["xclip", "-selection", "clipboard", "-o"],
 			["xsel", "--clipboard", "--output"],
 		]);
+	});
+
+	it("requests UTF-8-capable text instead of the first Wayland MIME offer", async () => {
+		setPlatform("linux");
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, cmd => (cmd.includes("text") ? "已提交75个样本" : "<strong>formatted text</strong>"));
+
+		expect(await readTextFromClipboard()).toBe("已提交75个样本");
+		expect(calls.map(call => call.cmd)).toEqual([["wl-paste", "--type", "text", "--no-newline"]]);
 	});
 
 	it("returns pbpaste stdout on darwin without touching execSync", async () => {
@@ -348,7 +370,38 @@ describe("readTextFromClipboard", () => {
 			clearInterval(timer);
 		}
 		// If the read blocked the loop, ticks would stay at 0. A yielding
-		// implementation fires several ticks in the ~80ms window.
-		expect(ticks).toBeGreaterThanOrEqual(2);
+		// implementation must turn the loop to resolve the 80ms sleep, which
+		// fires the expired interval at least once — even under heavy parallel
+		// test load, where wall-clock tick counts are unreliable.
+		expect(ticks).toBeGreaterThanOrEqual(1);
+	});
+
+	it("reads Windows text natively with LF newlines and no PowerShell spawn", async () => {
+		setPlatform("win32");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		vi.spyOn(native, "readTextFromClipboard").mockResolvedValue("line one\r\nline two");
+
+		expect(await readTextFromClipboard()).toBe("line one\nline two");
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
+	it("returns an empty string when the Windows clipboard holds no text", async () => {
+		setPlatform("win32");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		vi.spyOn(native, "readTextFromClipboard").mockResolvedValue(null);
+
+		expect(await readTextFromClipboard()).toBe("");
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
+	it("falls back to PowerShell when the native Windows text read fails", async () => {
+		setPlatform("win32");
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "from powershell\r\n");
+		vi.spyOn(native, "readTextFromClipboard").mockRejectedValue(new Error("Failed to access clipboard"));
+
+		expect(await readTextFromClipboard()).toBe("from powershell\n");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
 	});
 });

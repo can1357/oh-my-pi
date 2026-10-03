@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type GenerateBranchSummaryOptions,
 	generateBranchSummary,
@@ -183,7 +184,7 @@ describe("branch summarization", () => {
 		];
 
 		// Budget tight enough that the useless blob alone would blow it out.
-		const { messages } = prepareBranchEntries(entries, 100);
+		const { messages } = prepareBranchEntries(entries, new Tokenizer(), 100);
 
 		const userMessages = messages.filter((m): m is Extract<typeof m, { role: "user" }> => m.role === "user");
 		expect(userMessages).toHaveLength(1);
@@ -226,7 +227,7 @@ describe("branch summarization", () => {
 			},
 		];
 
-		const { messages } = prepareBranchEntries(entries, 700);
+		const { messages } = prepareBranchEntries(entries, new Tokenizer(), 700);
 
 		expect(messages.some(m => m.role === "toolResult")).toBe(true);
 	});

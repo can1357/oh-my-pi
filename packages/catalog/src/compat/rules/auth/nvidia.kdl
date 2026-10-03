@@ -1,0 +1,11 @@
+auth "nvidia" {
+	name "NVIDIA"
+	login "api-key" {
+		auth-url "https://org.ngc.nvidia.com/setup/personal-keys"
+		instructions "Copy your API key from NVIDIA NGC Personal Keys"
+		prompt "Paste your NVIDIA API key" placeholder="nvapi-..."
+		// A real auth rejection (401/403) is fatal; any other validation-endpoint
+		// failure is non-fatal — skip validation and trust the supplied key.
+		validate "chat-completions" label="nvidia" base-url="https://integrate.api.nvidia.com/v1" model="nvidia/llama-3.1-nemotron-70b-instruct" optional=#true
+	}
+}

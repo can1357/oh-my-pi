@@ -1,20 +1,33 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import { getProjectDir, prompt } from "@oh-my-pi/pi-utils";
+import { getProjectDir, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
 import { skillCapability } from "../capability/skill";
-import type { SourceMeta } from "../capability/types";
-import type { SkillsSettings } from "../config/settings";
-import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
+import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import type { SkillsSettings } from "./settings";
+import {
+	type Skill as CapabilitySkill,
+	isUserSourceEnabled,
+	loadCapability,
+	type SkillFrontmatter,
+} from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
+import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
 import type { SkillPromptDetails } from "../session/messages";
 import { expandTilde } from "../tools/path-utils";
+
+export { allowsSkillTokens, SKILL_TOKEN_RE };
+
+/** Provider id for skills loaded from `skills.customDirectories` (see `loadSkills`). */
+const CUSTOM_DIR_PROVIDER_ID = "custom";
+
 export interface Skill {
 	name: string;
 	description: string;
@@ -44,6 +57,145 @@ export interface SkillWarning {
 export interface LoadSkillsResult {
 	skills: Skill[];
 	warnings: SkillWarning[];
+}
+
+/**
+ * Namespace a skill takes when its bare name is already claimed by a different
+ * skill. Prefers the provider-supplied plugin identity (`_source.pluginName`,
+ * set by every registry-backed provider) when present, since installed plugin
+ * caches (`<marketplace>/<plugin>/<version>/skills/...`) put a version string,
+ * not the plugin name, in the path segment owning `skills/` — path parsing
+ * alone would namespace by version and change on every plugin update.
+ * Otherwise derived from the path so every other provider gets one without
+ * plumbing: the directory owning `skills/` (a plugin or package root), else
+ * the directory holding the skill (a custom skills root), else the provider.
+ * Dotted homes (`~/.claude/skills`) are not meaningful names.
+ */
+function skillNamespace(skill: Pick<CapabilitySkill, "path" | "_source">): string {
+	let root = skill._source.pluginName;
+	if (root === undefined) {
+		const segments = skill.path.split(/[\\/]/);
+		const skillsIndex = segments.lastIndexOf("skills");
+		// `<root>/skills/**/SKILL.md` → root; marketplace caches name the root
+		// `<marketplace>___<plugin>___<version>` → plugin.
+		// `<root>/<skill>/SKILL.md` (no `skills/` segment) → root.
+		const pathRoot = skillsIndex > 0 ? segments[skillsIndex - 1] : segments[segments.length - 3];
+		const cached = pathRoot?.split("___");
+		root = cached?.length === 3 ? cached[1] : pathRoot;
+	}
+	if (!root || root.startsWith(".")) return skill._source.provider;
+	// Namespaces are addressed through `/skill:<ns>/<name>` and `skill://<ns>/<name>`,
+	// so they must be a single token: collapse runs of whitespace and other
+	// non-name characters to `-` (a distinct root whose sanitized namespace
+	// collides just resolves through the normal `~N` suffix path).
+	const safe = root.replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "");
+	return safe || skill._source.provider;
+}
+
+interface AdmittedBody {
+	/** Pre-collision frontmatter name. Kept explicitly because a legal raw
+	 * name may itself end in `~N`, making a registered alias like
+	 * `<ns>/foo~2` indistinguishable from a generated collision suffix. */
+	rawName: string;
+	body: string;
+	/** Parsed frontmatter, compared alongside `body` for the identical-content
+	 * collapse: two skills can share a body but differ in `description`,
+	 * `allowed-tools`, or another field, and must not be silently merged. */
+	frontmatter: SkillFrontmatter | undefined;
+	namespace: string;
+	filePath: string;
+}
+
+interface CollisionResolution {
+	name: string;
+	warning?: string;
+	/** Registered names the candidate makes redundant: byte-identical content it
+	 * now covers under the bare name. Removed without an alias or a warning. */
+	dropped: string[];
+	/** The current bare holder, moved to `newName` to make room for an outranking candidate. */
+	displaced?: { newName: string; warning: string };
+}
+
+/**
+ * Resolve a same-name skill against what is already loaded.
+ * - Precedence, when raw names collide:
+ *   1. An authored skill always outranks a registry-installed package
+ *      (`omp skill install`, the `skillshare` provider) — installed steps
+ *      aside regardless of admission order.
+ *   2. A custom-directory skill always outranks a provider skill (#7190's
+ *      override contract) — the provider skill steps aside even though it
+ *      was admitted first (custom directories are merged after providers).
+ *   3. Otherwise, whichever was admitted first — provider-priority order for
+ *      providers, array order within `skills.customDirectories` for custom
+ *      directories — keeps the bare name.
+ * - A candidate that outranks the bare holder always takes the bare name (the
+ *   override contract is about which FILE is authoritative, not which text
+ *   renders the same). Registered copies with identical body AND frontmatter
+ *   are dropped rather than kept as aliases; if the bare holder itself is
+ *   identical it is dropped too, otherwise it is namespaced as
+ *   `<namespace>/<name>` (a taken slot gets a numeric `~N` suffix).
+ * - Any other candidate identical to a registered copy → silently dropped
+ *   (`undefined`); a differing one is namespaced.
+ */
+function resolveCollision(
+	skillMap: Map<string, Skill>,
+	admitted: Map<string, AdmittedBody>,
+	candidate: Skill,
+	candidateBody: string,
+	candidateFrontmatter: SkillFrontmatter | undefined,
+	namespace: string,
+): CollisionResolution | undefined {
+	const existingEntries = [...admitted.entries()].filter(([_, e]) => e.rawName === candidate.name);
+	if (existingEntries.length === 0) {
+		return { name: candidate.name, dropped: [] };
+	}
+
+	const bareSkill = skillMap.get(candidate.name);
+	const candidateInstalled = candidate._source?.provider === SKILLSHARE_PROVIDER_ID;
+	const bareInstalled = bareSkill?._source?.provider === SKILLSHARE_PROVIDER_ID;
+	const candidateCustom = candidate._source?.provider === CUSTOM_DIR_PROVIDER_ID;
+	const bareCustom = bareSkill?._source?.provider === CUSTOM_DIR_PROVIDER_ID;
+	const identical = existingEntries
+		.filter(([_, e]) => e.body === candidateBody && Bun.deepEquals(e.frontmatter, candidateFrontmatter))
+		.map(([name]) => name);
+
+	if (bareSkill && ((bareInstalled && !candidateInstalled) || (candidateCustom && !bareCustom))) {
+		if (identical.includes(candidate.name)) return { name: candidate.name, dropped: identical };
+		const bareEntry = admitted.get(candidate.name)!;
+		let namespacedBare = `${bareEntry.namespace}/${bareEntry.rawName}`;
+		for (let n = 2; skillMap.has(namespacedBare) && !identical.includes(namespacedBare); n++)
+			namespacedBare = `${bareEntry.namespace}/${bareEntry.rawName}~${n}`;
+		return {
+			name: candidate.name,
+			dropped: identical,
+			displaced: {
+				newName: namespacedBare,
+				warning: `name collision: ${bareInstalled ? "installed " : ""}"${bareEntry.rawName}" from ${bareSkill.filePath} is overridden by ${candidate.filePath}; available as "${namespacedBare}"`,
+			},
+		};
+	}
+	if (identical.length > 0) return undefined;
+
+	// Otherwise the already-admitted skill keeps the bare name (first-admitted
+	// wins, or the authored skill over an installed package); only the new
+	// candidate is namespaced.
+	let namespaced = `${namespace}/${candidate.name}`;
+	for (let n = 2; skillMap.has(namespaced); n++) {
+		namespaced = `${namespace}/${candidate.name}~${n}`;
+	}
+	if (bareSkill && !bareInstalled && candidateInstalled) {
+		return {
+			name: namespaced,
+			dropped: [],
+			warning: `name collision: installed "${candidate.name}" from ${candidate.filePath} is overridden by ${bareSkill.filePath}; available as "${namespaced}"`,
+		};
+	}
+	const referencePath = existingEntries[0][1].filePath;
+	return {
+		name: namespaced,
+		dropped: [],
+		warning: `name collision: "${candidate.name}" from ${candidate.filePath} differs from ${referencePath}; available as "${namespaced}"`,
+	};
 }
 
 let activeSkills: readonly Skill[] = [];
@@ -90,7 +242,7 @@ export interface LoadSkillsFromDirOptions {
 
 export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Promise<LoadSkillsResult> {
 	const [rawProviderId, rawLevel] = options.source.split(":", 2);
-	const providerId = rawProviderId || "custom";
+	const providerId = rawProviderId || CUSTOM_DIR_PROVIDER_ID;
 	const level: "user" | "project" = rawLevel === "project" ? "project" : "user";
 	const result = await scanSkillsFromDir(
 		{ cwd: getProjectDir(), home: os.homedir(), repoRoot: null },
@@ -120,6 +272,14 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/** Disabled extension ids (`disabledExtensions`); `skill:<name>` entries hide those skills. */
+	disabledExtensions?: string[];
+	/**
+	 * Session-local extension roots. Post-startup reloads pass their live
+	 * session value so explicit roots, discovery mode, and configured
+	 * extensions all survive outside the construction-time invocation scope.
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
 }
 
 /**
@@ -130,8 +290,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const {
 		cwd = getProjectDir(),
 		enabled = true,
-		enableCodexUser = true,
-		enableClaudeUser = true,
+		enableCodexUser = false,
+		enableClaudeUser = false,
 		enableClaudeProject = true,
 		enablePiUser = true,
 		enablePiProject = true,
@@ -141,44 +301,48 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		ignoredSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
+		extensionRoots,
 	} = options;
 
 	// Early return if skills are disabled
 	if (!enabled) {
 		return { skills: [], warnings: [] };
 	}
-	// Fall-through gate for third-party CLI providers (claude-plugins, opencode,
-	// gemini, github, ...) that share user intent with the named third-party
-	// source toggles but don't have a dedicated control of their own. Only the
-	// third-party toggles count here: the OMP-native providers (`agents`,
-	// `native`) get explicit branches in `isSourceEnabled` below, so folding
-	// them into the fallback would re-enable unrelated third-party CLIs whenever
-	// the user kept the default `.agent[s]/skills` toggles on while turning off
-	// Codex/Claude/Pi (issue #2401 / PR #2405 review).
-	const anyThirdPartySkillToggleEnabled =
-		enableCodexUser || enableClaudeUser || enableClaudeProject || enablePiUser || enablePiProject;
-
 	function isSourceEnabled(source: SourceMeta): boolean {
 		const { provider, level } = source;
 		// Managed skills (auto-learn) are OMP-native and discovered unconditionally
 		// — third-party CLI toggles must never silently hide them (cf. #2401). The
 		// master `enabled` flag above still gates them.
 		if (provider === MANAGED_SKILLS_PROVIDER_ID) return true;
-		if (provider === "codex" && level === "user") return enableCodexUser;
-		if (provider === "claude" && level === "user") return enableClaudeUser;
+		if (provider === "codex" && level === "user") return enableCodexUser || isUserSourceEnabled("codex");
+		if (provider === "claude" && level === "user") return enableClaudeUser || isUserSourceEnabled("claude");
 		if (provider === "claude" && level === "project") return enableClaudeProject;
 		if (provider === "native" && level === "user") return enablePiUser;
 		if (provider === "native" && level === "project") return enablePiProject;
 		if (provider === "agents" && level === "user") return enableAgentsUser;
 		if (provider === "agents" && level === "project") return enableAgentsProject;
-		return anyThirdPartySkillToggleEnabled;
+		// User-scope claude-plugins skills carry the root's origin (#10743). omp's
+		// own installs (`omp` registry, `--plugin-dir`) are not the foreign
+		// ~/.claude/plugins tree, so the foreign opt-in gate applies only to
+		// claude-origin roots — parity with allowedRoots() in
+		// discovery/claude-plugins.ts. Without this, #10666's root-level fix is
+		// re-dropped here for every user-level claude-plugins skill.
+		if (provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") return true;
+		if (level === "user") return isUserSourceEnabled(provider);
+		return true;
 	}
 
 	// Use capability API to load all skills
-	const result = await loadCapability<CapabilitySkill>(skillCapability.id, { cwd, disabledExtensions });
+	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
+		cwd,
+		disabledExtensions,
+		extensionRoots,
+	});
 
 	const skillMap = new Map<string, Skill>();
 	const realPathSet = new Set<string>();
+	/** Admission per registered skill name; identical raw name + body collapses silently. */
+	const admitted = new Map<string, AdmittedBody>();
 	const collisionWarnings: SkillWarning[] = [];
 
 	// Check if skill name matches any of the include patterns
@@ -199,17 +363,74 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	// Select authored skills from the pre-dedup superset. `loadCapability`
 	// dedupes before source toggles, so a disabled high-priority provider must
 	// not hide an enabled lower-priority provider with the same skill name.
-	const seenAuthoredSkillNames = new Set<string>();
+	// Same-name candidates survive here; `admit` below resolves them by content
+	// (identical → dropped) or namespace (different → `<ns>/<name>`). Exclusions
+	// apply to the raw name so a namespaced alias cannot bypass them; include
+	// patterns are matched against the final name the user actually sees.
 	const filteredSkills = result.all.filter(capSkill => {
 		if (capSkill._source.provider === MANAGED_SKILLS_PROVIDER_ID) return false;
 		if (disabledSkillNames.has(capSkill.name)) return false;
 		if (!isSourceEnabled(capSkill._source)) return false;
-		if (matchesIgnorePatterns(capSkill.name)) return false;
-		if (!matchesIncludePatterns(capSkill.name)) return false;
-		if (seenAuthoredSkillNames.has(capSkill.name)) return false;
-		seenAuthoredSkillNames.add(capSkill.name);
-		return true;
+		return !matchesIgnorePatterns(capSkill.name);
 	});
+
+	/**
+	 * Resolve the skill's final name, apply the exclusion filters to it, and
+	 * store it. Returns the stored name, or undefined when the skill was a
+	 * duplicate, excluded, or rejected. Include patterns run once every name is
+	 * final (see the end of this function): filtering here would drop the bare
+	 * skill and leave a namespaced candidate with nothing to collide against.
+	 *
+	 * Every authored skill — any provider, any custom directory — is admitted
+	 * here, which makes this the one place to reserve `/` and `\`: they belong
+	 * to the `<namespace>/<name>` form and `skill://<name>/<path>` resolution,
+	 * so a raw name (frontmatter is untrusted for registry installs) must never
+	 * claim a namespaced address.
+	 */
+	function admit(
+		skill: Skill,
+		body: string,
+		frontmatter: SkillFrontmatter | undefined,
+		namespace: string,
+	): string | undefined {
+		if (/[\\/]/.test(skill.name)) {
+			collisionWarnings.push({
+				skillPath: skill.filePath,
+				message: `Skill name "${skill.name}" contains a path separator, skipping: ${skill.filePath}`,
+			});
+			return undefined;
+		}
+		const resolved = resolveCollision(skillMap, admitted, skill, body, frontmatter, namespace);
+		if (!resolved) return undefined;
+		const { name, warning, dropped, displaced } = resolved;
+		if (disabledSkillNames.has(name) || matchesIgnorePatterns(name)) return undefined;
+
+		for (const droppedName of dropped) {
+			skillMap.delete(droppedName);
+			admitted.delete(droppedName);
+			// The alias no longer exists: retract the warning that advertised it.
+			const stale = collisionWarnings.findIndex(w => w.message.endsWith(`available as "${droppedName}"`));
+			if (stale !== -1) collisionWarnings.splice(stale, 1);
+		}
+		if (displaced) {
+			// The bare holder; `name` is overwritten by the candidate below.
+			const displacedSkill = skillMap.get(name)!;
+			const displacedEntry = admitted.get(name)!;
+			displacedSkill.name = displaced.newName;
+			if (!disabledSkillNames.has(displaced.newName) && !matchesIgnorePatterns(displaced.newName)) {
+				skillMap.set(displaced.newName, displacedSkill);
+				admitted.set(displaced.newName, displacedEntry);
+			}
+			collisionWarnings.push({ skillPath: displacedSkill.filePath, message: displaced.warning });
+		}
+
+		if (warning) collisionWarnings.push({ skillPath: skill.filePath, message: warning });
+		const rawName = skill.name;
+		skill.name = name;
+		skillMap.set(name, skill);
+		admitted.set(name, { rawName, body, frontmatter, namespace, filePath: skill.filePath });
+		return name;
+	}
 
 	// Batch resolve all real paths in parallel
 	const realPaths = await Promise.all(
@@ -232,25 +453,18 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			continue;
 		}
 
-		const existing = skillMap.get(capSkill.name);
-		if (existing) {
-			collisionWarnings.push({
-				skillPath: capSkill.path,
-				message: `name collision: "${capSkill.name}" already loaded from ${existing.filePath}, skipping this one`,
-			});
-		} else {
-			skillMap.set(capSkill.name, {
-				name: capSkill.name,
-				description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-				filePath: capSkill.path,
-				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-				source: `${capSkill._source.provider}:${capSkill.level}`,
-				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-				_source: capSkill._source,
-			});
+		const skill: Skill = {
+			name: capSkill.name,
+			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
+			filePath: capSkill.path,
+			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
+			source: `${capSkill._source.provider}:${capSkill.level}`,
+			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			_source: capSkill._source,
+		};
+		if (admit(skill, capSkill.content, capSkill.frontmatter, skillNamespace(capSkill)) !== undefined)
 			realPathSet.add(resolvedPath);
-		}
 	}
 
 	const customDirectoryResults = await Promise.all(
@@ -260,7 +474,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				{ cwd, home: os.homedir(), repoRoot: null },
 				{
 					dir: expandedDir,
-					providerId: "custom",
+					providerId: CUSTOM_DIR_PROVIDER_ID,
 					level: "user",
 					requireDescription: true,
 				},
@@ -269,12 +483,17 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		}),
 	);
 
-	const allCustomSkills: Array<{ skill: Skill; path: string }> = [];
+	const allCustomSkills: Array<{
+		skill: Skill;
+		path: string;
+		body: string;
+		frontmatter: SkillFrontmatter | undefined;
+		namespace: string;
+	}> = [];
 	for (const { expandedDir, scanResult } of customDirectoryResults) {
 		for (const capSkill of scanResult.items) {
 			if (disabledSkillNames.has(capSkill.name)) continue;
 			if (matchesIgnorePatterns(capSkill.name)) continue;
-			if (!matchesIncludePatterns(capSkill.name)) continue;
 			allCustomSkills.push({
 				skill: {
 					name: capSkill.name,
@@ -288,6 +507,9 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
+				body: capSkill.content,
+				frontmatter: capSkill.frontmatter,
+				namespace: skillNamespace(capSkill),
 			});
 		}
 		collisionWarnings.push(...(scanResult.warnings ?? []).map(message => ({ skillPath: expandedDir, message })));
@@ -304,31 +526,10 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	);
 
 	for (let i = 0; i < allCustomSkills.length; i++) {
-		const { skill } = allCustomSkills[i];
+		const { skill, body, frontmatter, namespace } = allCustomSkills[i];
 		const resolvedPath = customRealPaths[i];
 		if (realPathSet.has(resolvedPath)) continue;
-
-		const existing = skillMap.get(skill.name);
-		if (existing) {
-			// A skill name claimed by a DEFAULT-path provider (e.g.
-			// ~/.claude/skills/<name>) yields to the explicitly configured
-			// skills.customDirectories entry — the user's custom dir is the
-			// higher-priority source (issue #7190). Only same-source custom
-			// duplicates keep first-wins.
-			const isCustomExisting = existing.source.startsWith("custom:");
-			if (!isCustomExisting) {
-				skillMap.set(skill.name, skill);
-				realPathSet.add(resolvedPath);
-				continue;
-			}
-			collisionWarnings.push({
-				skillPath: skill.filePath,
-				message: `name collision: "${skill.name}" already loaded from ${existing.filePath}, skipping this one`,
-			});
-		} else {
-			skillMap.set(skill.name, skill);
-			realPathSet.add(resolvedPath);
-		}
+		if (admit(skill, body, frontmatter, namespace) !== undefined) realPathSet.add(resolvedPath);
 	}
 
 	// Managed (auto-learn) skills resolve dead-last with first-wins. Source from
@@ -391,7 +592,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		realPathSet.add(resolvedPath);
 	}
 
-	const skills = Array.from(skillMap.values());
+	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
 	return {
@@ -420,9 +621,9 @@ export interface ParsedSkillInvocation {
 	name: string;
 	/** User-supplied arguments (everything outside the `/skill:<name>` token). */
 	args: string;
+	/** The draft as submitted (trimmed), token in place — drives the transcript layout. */
+	prompt: string;
 }
-
-const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
 
 /**
  * Detect a `/skill:<name>` invocation in a user draft.
@@ -433,69 +634,50 @@ const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
  *     args=`fix the bug focus on auth` — the surrounding prose collapsed
  *     into a single args string.
  *
- * Mid-prompt detection is disabled when the draft itself starts with a
- * different slash command (e.g. `/compact /skill:foo`) or a local-execution
- * sigil — `!cmd` / `!!cmd` for the bash tool and `$ cmd` / `$$ cmd` for the
- * python tool. Those handlers run after the skill-command dispatcher and
- * their bodies routinely contain `/skill:<name>` references that are not
- * meant as skill invocations.
+ * Mid-prompt detection is gated by {@link allowsSkillTokens}.
  */
 export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
 	const trimmedStart = text.trimStart();
+	const prompt = trimmedStart.trimEnd();
 	if (trimmedStart.startsWith("/skill:")) {
-		const spaceIndex = trimmedStart.indexOf(" ");
+		const spaceIndex = trimmedStart.search(/\s/);
 		const name =
 			spaceIndex === -1 ? trimmedStart.slice("/skill:".length) : trimmedStart.slice("/skill:".length, spaceIndex);
 		if (!name) return undefined;
 		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
-		return { name, args };
+		return { name, args, prompt };
 	}
-	if (trimmedStart.startsWith("/")) return undefined;
-	if (startsWithLocalExecutionPrefix(trimmedStart)) return undefined;
-	const match = MID_PROMPT_SKILL_RE.exec(text);
+	if (!allowsSkillTokens(trimmedStart)) return undefined;
+	SKILL_TOKEN_RE.lastIndex = 0;
+	const match = SKILL_TOKEN_RE.exec(text);
 	if (!match) return undefined;
-	const leading = match[1] ?? "";
-	const trailing = match[3] ?? "";
-	const tokenStart = match.index + leading.length;
-	const tokenEnd = match.index + match[0].length - trailing.length;
-	const name = match[2] ?? "";
-	if (!name) return undefined;
+	const tokenStart = match.index + match[1].length;
+	const tokenEnd = match.index + match[0].length;
+	const name = match[2];
 	const before = text.slice(0, tokenStart).trimEnd();
 	const after = text.slice(tokenEnd).trimStart();
 	const args = [before, after]
 		.filter(part => part.length > 0)
 		.join(" ")
 		.trim();
-	return { name, args };
-}
-
-/**
- * Whether the (already left-trimmed) draft begins with a TUI local-execution
- * sigil that downstream branches will consume verbatim — `!`/`!!` for the bash
- * tool and `$`/`$$` followed by ASCII whitespace for the python tool. Mirrors
- * `pythonCommandPrefixLength` in `modes/controllers/input-controller` so the
- * two checks agree without forcing a circular import.
- */
-function startsWithLocalExecutionPrefix(trimmedStart: string): boolean {
-	if (trimmedStart.startsWith("!")) return true;
-	if (trimmedStart.charCodeAt(0) !== 36 /* $ */) return false;
-	if (trimmedStart.charCodeAt(1) === 123 /* { */) return false;
-	const sigilLength = trimmedStart.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
-	const next = trimmedStart.charCodeAt(sigilLength);
-	if (Number.isNaN(next)) return true;
-	return next === 32 /* space */ || next === 9 /* tab */ || next === 10 /* LF */ || next === 13 /* CR */;
+	return { name, args, prompt };
 }
 
 export type SkillInvocationKind = "user" | "autoload";
 
+/** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
+export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
+
 export async function buildSkillPromptMessage(
 	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
-	args: string,
+	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
 	const content = await Bun.file(skill.filePath).text();
-	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-	const trimmedArgs = args.trim();
+	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
+	// diagnostics to the loader, which already parsed this frontmatter.
+	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+	const trimmedArgs = input.args.trim();
 	let message: string;
 	if (invocation === "user") {
 		// User-invoked skills announce themselves and expose their skill directory
@@ -525,6 +707,7 @@ export async function buildSkillPromptMessage(
 			name: skill.name,
 			path: skill.filePath,
 			args: trimmedArgs || undefined,
+			prompt: input.prompt,
 			lineCount: body ? body.split("\n").length : 0,
 		},
 	};

@@ -78,9 +78,9 @@ fn filter_rspec(input: &str, exit_code: i32) -> String {
 	// capped at MAX_RENDERED_FAILURES with a `[…N failures elided…]` marker. The
 	// buffered blocks are rendered into `out` the moment the `Failures:` section
 	// ends — at the summary line or the `Failed examples:` boundary — so real
-	// rspec ordering (`Failures:` details, then summary, then `Failed examples:`)
-	// keeps each detail block under its own `Failures:` header instead of being
-	// appended after the `Failed examples:` list.
+	// rspec ordering (`Failures:` details, then summary, then `Failed
+	// examples:`) keeps each detail block under its own `Failures:` header
+	// instead of being appended after the `Failed examples:` list.
 	let mut blocks: Vec<String> = Vec::new();
 	let mut current = String::new();
 	let mut rendered_blocks = false;
@@ -196,10 +196,11 @@ fn strip_rspec_noise(input: &str) -> String {
 	// (after the run completes), never inside a numbered `Failures:` block. The
 	// donor's patterns (`simplecov`, `coverage/`, `.simplecov`) are unscoped
 	// substring/prefix tests, so a failure whose description or assertion path
-	// mentions SimpleCov coverage (e.g. `1) SimpleCov configuration loads`, or an
-	// assertion about a `coverage/index.html` artifact) would falsely enter the
-	// strip and swallow the entire failure block up to the next blank line. Gate
-	// the strip to OUTSIDE the `Failures:` section so failure diagnostics survive.
+	// mentions SimpleCov coverage (e.g. `1) SimpleCov configuration loads`, or
+	// an assertion about a `coverage/index.html` artifact) would falsely enter
+	// the strip and swallow the entire failure block up to the next blank line.
+	// Gate the strip to OUTSIDE the `Failures:` section so failure diagnostics
+	// survive.
 	let mut in_failures = false;
 
 	for line in input.lines() {
@@ -212,10 +213,11 @@ fn strip_rspec_noise(input: &str) -> String {
 			|| is_rspec_summary_line(trimmed)
 			|| trimmed.starts_with("Finished in ")
 		{
-			// rspec always prints the `Finished in …` timing line AFTER the failure
-			// details and BEFORE the trailing coverage block, so it reliably closes
-			// the `Failures:` region even when the summary line trails the coverage
-			// block (SimpleCov prints between timing and summary).
+			// rspec always prints the `Finished in …` timing line AFTER the
+			// failure details and BEFORE the trailing coverage block, so it
+			// reliably closes the `Failures:` region even when the summary line
+			// trails the coverage block (SimpleCov prints between timing and
+			// summary).
 			in_failures = false;
 		}
 
@@ -230,9 +232,9 @@ fn strip_rspec_noise(input: &str) -> String {
 		}
 		// Only strip the SimpleCov/coverage block when NOT inside a `Failures:`
 		// section. The `coverage report` banner is anchored to its actual shape
-		// (`Coverage report generated …`) rather than a bare `coverage/` prefix, so
-		// a failure-detail line asserting on a `coverage/`-prefixed artifact path is
-		// not mistaken for the banner.
+		// (`Coverage report generated …`) rather than a bare `coverage/` prefix,
+		// so a failure-detail line asserting on a `coverage/`-prefixed artifact
+		// path is not mistaken for the banner.
 		if !in_failures
 			&& (is_coverage_banner(&lower)
 				|| lower.contains("simplecov")
@@ -507,13 +509,14 @@ fn leading_number(s: &str) -> Option<usize> {
 /// `filter_minitest`.
 fn filter_rake(input: &str, exit_code: i32) -> String {
 	// On a FAILING non-test task that prints no `rake aborted!` header, the
-	// keep-lines pass below would retain only individually keyword-matching lines
-	// and silently drop the keyword-less diagnostic body (offending records,
-	// `Expected positive integer, got -3`-style value detail) — exactly the
-	// failure-detail the task warns must survive. The head/tail safety net only
-	// fires when `out` is empty, which a single keyword line defeats. So when the
-	// task failed and produced no `rake aborted!` traceback, preserve the full
-	// diagnostic via head/tail rather than the lossy keep-lines pass.
+	// keep-lines pass below would retain only individually keyword-matching
+	// lines and silently drop the keyword-less diagnostic body (offending
+	// records, `Expected positive integer, got -3`-style value detail) —
+	// exactly the failure-detail the task warns must survive. The head/tail
+	// safety net only fires when `out` is empty, which a single keyword line
+	// defeats. So when the task failed and produced no `rake aborted!`
+	// traceback, preserve the full diagnostic via head/tail rather than the
+	// lossy keep-lines pass.
 	if exit_code != 0 && !input.lines().any(|line| line.trim() == "rake aborted!") {
 		return primitives::head_tail_lines(input, 80, 80);
 	}
@@ -947,8 +950,9 @@ mod tests {
 
 	#[test]
 	fn rspec_failure_doc_run_keeps_failed_examples_and_summary() {
-		// The donor snip/tests/fixtures/rspec_raw.txt: a 3-failure doc run with no
-		// `Failures:` detail block, only the doc tree + `Failed examples:` list.
+		// The donor snip/tests/fixtures/rspec_raw.txt: a 3-failure doc run with
+		// no `Failures:` detail block, only the doc tree + `Failed examples:`
+		// list.
 		let input = "Randomized with seed 12345\n\nUserController\n  GET /users\n    returns a list \
 		             of users\n\nFinished in 0.45623 seconds (files took 1.23 seconds to load)\n42 \
 		             examples, 3 failures, 2 pending\n\nFailed examples:\n\nrspec \
@@ -1051,8 +1055,8 @@ mod tests {
 
 	#[test]
 	fn rspec_coverage_path_assertion_in_failure_survives() {
-		// A failure-detail line asserting on a `coverage/`-prefixed path must not be
-		// mistaken for the SimpleCov coverage banner and swallowed.
+		// A failure-detail line asserting on a `coverage/`-prefixed path must not
+		// be mistaken for the SimpleCov coverage banner and swallowed.
 		let input = "Failures:\n\n  1) Report generates coverage artifact\n     Failure/Error: \
 		             expect(File).to exist\n       coverage/index.html should exist\n     # \
 		             ./spec/report_spec.rb:9\n\n1 example, 1 failure\n";
@@ -1083,9 +1087,9 @@ mod tests {
 	#[test]
 	fn rake_failing_task_without_aborted_keeps_diagnostic_body() {
 		// A FAILING non-test rake task that prints no `rake aborted!` header but
-		// emits one keyword line plus keyword-less diagnostic body: the body lines
-		// (offending records + `Expected positive integer, got -3` value detail)
-		// must survive — the keep-lines pass alone would drop them.
+		// emits one keyword line plus keyword-less diagnostic body: the body
+		// lines (offending records + `Expected positive integer, got -3` value
+		// detail) must survive — the keep-lines pass alone would drop them.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let context = MinimizerCtx {
 			program:    "rake",

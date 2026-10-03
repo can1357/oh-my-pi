@@ -1,0 +1,13 @@
+// TypeSafe (System One judgments) answers typed questions over JSON state via
+// `POST /v1/systemone`. Its judgment models are catalogued under the `judge`
+// kind; this auth entry supplies both live `/v1/models` discovery and requests.
+auth "typesafe" {
+	name "TypeSafe"
+	env "TYPESAFE_API_KEY"
+	login "api-key" {
+		auth-url "https://console.typesafe.ai/"
+		instructions "Create or copy your API key from the TypeSafe console."
+		prompt "Paste your TypeSafe API key" placeholder="API key"
+		validate "models-endpoint" label="TypeSafe" url="https://api.typesafe.ai/v1/models" base-url-env="TYPESAFE_BASE_URL"
+	}
+}

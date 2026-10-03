@@ -1,5 +1,6 @@
-import { stripTypePrefix } from "../../commit/analysis/summary";
 import { validateSummary } from "../../commit/analysis/validation";
+import { stripTypePrefix } from "../../commit/conventional/markdown";
+import { isPastTenseFirstWord } from "../../commit/conventional/validation";
 import type { CommitType, ConventionalDetail } from "../../commit/types";
 import { normalizeUnicode } from "../../edit/normalize";
 
@@ -8,59 +9,6 @@ export const MAX_DETAIL_ITEMS = 6;
 
 const fillerWords = ["comprehensive", "various", "several", "improved", "enhanced", "better"];
 const metaPhrases = ["this commit", "this change", "updated code", "modified files"];
-const pastTenseVerbs = new Set([
-	"added",
-	"adjusted",
-	"aligned",
-	"bumped",
-	"changed",
-	"cleaned",
-	"clarified",
-	"consolidated",
-	"converted",
-	"corrected",
-	"created",
-	"deployed",
-	"deprecated",
-	"disabled",
-	"documented",
-	"dropped",
-	"enabled",
-	"expanded",
-	"extracted",
-	"fixed",
-	"hardened",
-	"implemented",
-	"improved",
-	"integrated",
-	"introduced",
-	"migrated",
-	"moved",
-	"optimized",
-	"patched",
-	"prevented",
-	"reduced",
-	"refactored",
-	"removed",
-	"renamed",
-	"reorganized",
-	"replaced",
-	"resolved",
-	"restored",
-	"restructured",
-	"reworked",
-	"secured",
-	"simplified",
-	"stabilized",
-	"standardized",
-	"streamlined",
-	"tightened",
-	"tuned",
-	"updated",
-	"upgraded",
-	"validated",
-]);
-const pastTenseEdExceptions = new Set(["hundred", "red", "bed"]);
 
 export function normalizeSummary(summary: string, type: CommitType, scope: string | null): string {
 	const stripped = stripTypePrefix(summary, type, scope);
@@ -77,10 +25,7 @@ export function validateSummaryRules(summary: string): { errors: string[]; warni
 
 	const words = summary.trim().split(/\s+/);
 	const firstWord = words[0]?.toLowerCase() ?? "";
-	const normalizedFirst = firstWord.replace(/[^a-z]/g, "");
-	const hasPastTense =
-		pastTenseVerbs.has(normalizedFirst) ||
-		(normalizedFirst.endsWith("ed") && !pastTenseEdExceptions.has(normalizedFirst));
+	const hasPastTense = isPastTenseFirstWord(firstWord);
 	if (!hasPastTense) {
 		errors.push("Summary must start with a past-tense verb");
 	}

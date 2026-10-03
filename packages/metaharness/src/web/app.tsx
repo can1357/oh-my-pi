@@ -1822,7 +1822,7 @@ function RunsPage({ selected }: { selected: string | null }) {
 						{trace && (
 							<div ref={traceRef} className="h-2/5 overflow-auto border-t border-zinc-800 bg-zinc-950/60">
 								{(traceData?.entries ?? []).map((e, i) => (
-									// biome-ignore lint/suspicious/noArrayIndexKey: tail window, entries have no ids
+									// oxlint-disable-next-line react/no-array-index-key -- tail window, entries have no ids
 									<div key={i} className="border-b border-zinc-900 px-4 py-2">
 										<div className="text-xs text-zinc-500">
 											{e.kind === "assistant" ? (e.model ?? "assistant") : (e.tool ?? e.kind)}

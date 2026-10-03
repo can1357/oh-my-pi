@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
@@ -9,10 +10,18 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+
+import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -21,17 +30,20 @@ interface FakeAcpBuiltinSession {
 	sessionFile: string | undefined;
 	sessionId: string;
 	sessionName: string;
+	titleGenerationSignal: AbortSignal;
 	_todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	_switchedTo: string | undefined;
 	_movedFromEmptySessionFile: string | undefined;
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	isUltrafastModeEnabled(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	formatSessionAsText: () => string;
 	dumpLlmRequestToTmpDir: () => Promise<string | undefined>;
+	dumpSessionArchiveToTmpDir: () => Promise<SessionDumpArchive | undefined>;
 	getLastAssistantText: () => string | undefined;
 	messages: unknown[];
 	settings: Settings;
@@ -42,45 +54,35 @@ interface FakeAcpBuiltinSession {
 	markMovedFromEmptySessionFile(sessionFile: string): void;
 	fork(): Promise<boolean>;
 	handoff(instr?: string): Promise<{ document: string; savedPath?: string } | undefined>;
+	dispose(): Promise<void>;
 	exportToHtml(outputPath?: string): Promise<string>;
+	effectiveExtensionRoots: unknown;
+	setTitleSystemPrompt(prompt: string | undefined): void;
+	setSlashCommands(commands: unknown[]): void;
+	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
+	getHindsightSessionState(): undefined;
+	applyMemoryBackend(): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
+	scopedModels: Array<{ model: { provider: string; id: string } }>;
+	modelRegistry: {
+		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
+		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
+	};
 	setModel(model: unknown): Promise<void>;
+	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
 	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
-}
-
-interface FakeAcpBuiltinSessionManager {
-	_sessionFile: string | undefined;
-	_cwd: string;
-	_entries: { type: string }[];
-	_customEntries: Array<{ customType: string; data: unknown }>;
-	_movedTo: string | undefined;
-	_flushed: boolean;
-	_droppedSessions: string[];
-	_sessionName: string | undefined;
-	getSessionId(): string;
-	getSessionFile(): string | undefined;
-	getEntries(): { type: string }[];
-	getBranch(): { type: string }[];
-	appendCustomEntry(customType: string, data?: unknown): string;
-	flush(): Promise<void>;
-	moveTo(newCwd: string): Promise<void>;
-	setSessionFile(sessionFile: string): Promise<void>;
-	dropSession(sessionPath: string): Promise<void>;
-	getCwd(): string;
-	setSessionName(name: string, source: string): Promise<boolean>;
 }
 
 function createRuntime() {
 	const settings = Settings.isolated();
 	const output: string[] = [];
-	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
 		forcedToolChoice: undefined as string | undefined,
@@ -88,9 +90,15 @@ function createRuntime() {
 		sessionFile: undefined,
 		sessionId: "fake-session-id",
 		sessionName: "Fake Session",
+		titleGenerationSignal: new AbortController().signal,
 		_todoPhases: [],
 		_switchedTo: undefined,
 		_movedFromEmptySessionFile: undefined,
+		dispose: async () => {},
+		effectiveExtensionRoots: undefined,
+		setTitleSystemPrompt: (_prompt: string | undefined) => {},
+		setSlashCommands: (_commands: unknown[]) => {},
+		refreshSkillsAndCommands: async () => {},
 		toggleFastMode() {
 			this.fastMode = !this.fastMode;
 			return this.fastMode;
@@ -101,6 +109,9 @@ function createRuntime() {
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		isUltrafastModeEnabled() {
+			return false;
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -145,9 +156,13 @@ function createRuntime() {
 			this._todoPhases = phases;
 		},
 		async refreshBaseSystemPrompt() {},
+		// Headless `/move` and `/wt` rebind memory for the destination project.
+		getHindsightSessionState: () => undefined,
+		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
+		dumpSessionArchiveToTmpDir: async () => undefined,
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
@@ -156,10 +171,16 @@ function createRuntime() {
 		async compact(_args?: string) {},
 		getContextUsage: () => undefined,
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
+		scopedModels: [],
+		modelRegistry: {
+			getAll: () => session.getAvailableModels(),
+			getAvailable: () => session.getAvailableModels(),
+		},
 		async setModel(_model: unknown) {},
+		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
-	fakeSessionManager = {
+	const fakeSessionManager = {
 		_sessionFile: undefined as string | undefined,
 		_cwd: "/tmp/project",
 		_entries: [] as { type: string }[],
@@ -190,6 +211,17 @@ function createRuntime() {
 		async moveTo(newCwd: string) {
 			this._cwd = newCwd;
 			this._movedTo = newCwd;
+		},
+		captureState() {
+			return { cwd: this._cwd, sessionDir: "/tmp/fake-sessions", movedTo: this._movedTo };
+		},
+		restoreState(snapshot: { cwd: string }) {
+			this._cwd = snapshot.cwd;
+			this._movedTo = snapshot.cwd;
+		},
+		async rollbackMove(snapshot: { cwd: string; sessionDir: string }) {
+			await this.moveTo(snapshot.cwd);
+			this.restoreState(snapshot);
 		},
 		async setSessionFile(sessionFile: string) {
 			this._sessionFile = path.resolve(sessionFile);
@@ -240,6 +272,24 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("toggles extended context with explicit controls and reports state", async () => {
+		const { output, runtime } = createRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/extended-context off", runtime)).toEqual({ consumed: true });
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context on", runtime)).toEqual({ consumed: true });
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context", runtime)).toEqual({ consumed: true });
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context status", runtime)).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Extended context disabled.",
+			"Extended context enabled.",
+			"Extended context disabled.",
+			"Extended context is off.",
+		]);
 	});
 
 	it("forces a tool and returns remaining prompt text", async () => {
@@ -349,10 +399,11 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	it("routes saved reset redemption through /usage reset", async () => {
-		const { output, runtime } = createRuntime();
+		const { runtime } = createRuntime();
 		let redeemedTarget: ResetCreditTarget | undefined;
 		runtime.session.listResetCredits = async () => [
 			{
+				provider: "openai-codex",
 				credentialId: 42,
 				accountId: "account-1",
 				email: "user@example.com",
@@ -366,11 +417,74 @@ describe("ACP builtin slash commands", () => {
 			return { ok: true, code: "reset", email: target.email };
 		};
 
-		const result = await executeAcpBuiltinSlashCommand("/usage reset active", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/usage reset openai-codex/active", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(redeemedTarget).toEqual({ credentialId: 42, accountId: "account-1", email: "user@example.com" });
-		expect(output).toEqual(["Reset applied for user@example.com — your rate-limit window has been refreshed."]);
+		expect(redeemedTarget).toEqual({
+			provider: "openai-codex",
+			credentialId: 42,
+			accountId: "account-1",
+			email: "user@example.com",
+		});
+	});
+
+	it("pins Claude's provider, credential, organization, and selected grant for same-email accounts", async () => {
+		const { runtime } = createRuntime();
+		let redeemedTarget: ResetCreditTarget | undefined;
+		runtime.session.listResetCredits = async () => [
+			{
+				provider: "openai-codex",
+				credentialId: 7,
+				email: "shared@example.com",
+				availableCount: 1,
+				credits: [],
+				active: true,
+			},
+			{
+				provider: "anthropic",
+				credentialId: 9,
+				accountId: "claude-account",
+				email: "shared@example.com",
+				orgId: "org-claude",
+				availableCount: 2,
+				redeemableCount: 1,
+				nextCreditId: "grant-next",
+				credits: [
+					{
+						id: "grant-next",
+						title: "Claude reset",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: true,
+						requiresLimit: true,
+						clears: ["anthropic:5h", "anthropic:7d"],
+						blocking: [],
+						usedFractions: {},
+					},
+				],
+				active: true,
+			},
+		];
+		runtime.session.redeemResetCredit = async target => {
+			redeemedTarget = target;
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				cleared: ["anthropic:5h", "anthropic:7d"],
+			};
+		};
+
+		await executeAcpBuiltinSlashCommand("/usage reset anthropic/9", runtime);
+
+		expect(redeemedTarget).toEqual({
+			provider: "anthropic",
+			credentialId: 9,
+			accountId: "claude-account",
+			email: "shared@example.com",
+			orgId: "org-claude",
+			creditId: "grant-next",
+		});
 	});
 
 	it("does not dispatch the legacy /reset-usage command", async () => {
@@ -415,6 +529,42 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Recent Jobs");
 	});
 
+	it("jobs full: shows the untruncated command instead of the label", async () => {
+		const { output, runtime } = createRuntime();
+		const command = `pytest ${"tests/a ".repeat(40)}-q`;
+		runtime.session.getAsyncJobSnapshot = () => ({
+			running: [
+				{ id: "j1", type: "bash", status: "running", label: "pytest tests/a...", command, startTime: Date.now() },
+			],
+			recent: [{ id: "j2", type: "task", status: "completed", label: "build done", startTime: Date.now() - 60_000 }],
+			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+		});
+
+		await executeAcpBuiltinSlashCommand("/jobs", runtime);
+		await executeAcpBuiltinSlashCommand("/jobs full", runtime);
+		await executeAcpBuiltinSlashCommand("/jobs bogus", runtime);
+
+		expect(output[0]).not.toContain(command);
+		expect(output[1]).toContain(command);
+		expect(output[1]).toContain("build done");
+		expect(output[2]).toContain("Usage: /jobs [full]");
+	});
+
+	it("jobs full: strips control sequences and fences the command", async () => {
+		const { output, runtime } = createRuntime();
+		const command = `printf ${"x".repeat(150)} \x1b[2J\`\`\`\n# heading TAIL`;
+		runtime.session.getAsyncJobSnapshot = () => ({
+			running: [{ id: "j1", type: "bash", status: "running", label: "printf x...", command, startTime: Date.now() }],
+			recent: [],
+			delivery: { queued: 0, delivering: false, pendingJobIds: [] },
+		});
+
+		await executeAcpBuiltinSlashCommand("/jobs full", runtime);
+
+		expect(output[0]).not.toContain("\x1b");
+		expect(output[0]).toContain(`\`\`\`\`\nprintf ${"x".repeat(150)} \`\`\`\n# heading TAIL\n\`\`\`\``);
+	});
+
 	// /dump
 	it("dump: outputs transcript with LLM request JSON path when sidecar succeeds", async () => {
 		const { output, runtime } = createRuntime();
@@ -451,6 +601,27 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("No messages");
 	});
 
+	it("dump all: reports the archive and reaches subagents only via the all argument", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.formatSessionAsText = () => "Session content here";
+		runtime.session.dumpSessionArchiveToTmpDir = async () => ({
+			path: "/tmp/omp-dump-test.zip",
+			files: ["session.md", "llm-request.json", "subagents/Scout.md"],
+			subagentCount: 1,
+			subagentError: "EACCES: permission denied",
+		});
+
+		await executeAcpBuiltinSlashCommand("/dump all", runtime);
+		await executeAcpBuiltinSlashCommand("/dump", runtime);
+		await executeAcpBuiltinSlashCommand("/dump everything", runtime);
+
+		expect(output[0]).toContain("Session dump archive: /tmp/omp-dump-test.zip");
+		expect(output[0]).toContain("  subagents/Scout.md");
+		expect(output[0]).toContain("Subagent transcripts unavailable: EACCES: permission denied");
+		expect(output[1]).toBe("Session content here");
+		expect(output[2]).toContain("Usage: /dump [all]");
+	});
+
 	// /model
 	it("model: returns current model when set", async () => {
 		const { output, runtime } = createRuntime();
@@ -469,15 +640,6 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("No model");
-	});
-
-	it("model: returns ACP usage message when args provided", async () => {
-		const { output, runtime } = createRuntime();
-
-		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
-
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]?.toLowerCase()).toContain("acp");
 	});
 
 	it("model: applies known id and emits both title + config change notifications", async () => {
@@ -515,6 +677,51 @@ describe("ACP builtin slash commands", () => {
 		expect(configNotified).toBe(0);
 	});
 
+	// /switch resolves like `omp bench`: fuzzy ids, @role aliases, :level suffixes
+	it("switch opus:low: fuzzy-resolves a session-only model with the thinking suffix", async () => {
+		const { output, runtime, session } = createRuntime();
+		const available = [
+			{ provider: "anthropic", id: "claude-opus-4-5", contextWindow: 200_000 },
+			{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200_000 },
+		];
+		session.getAvailableModels = () => available;
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
+
+		const result = await executeAcpBuiltinSlashCommand("/switch opus:low", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(temporarySpy).toHaveBeenCalledWith(available[0], "low");
+		expect(setModelSpy).not.toHaveBeenCalled();
+		expect(output[0]).toContain("Session-only model: anthropic/claude-opus-4-5");
+	});
+
+	it("switch @smol: resolves the configured role alias", async () => {
+		const { runtime, session } = createRuntime();
+		const available = [
+			{ provider: "anthropic", id: "claude-opus-4-5", contextWindow: 200_000 },
+			{ provider: "anthropic", id: "claude-haiku-4-5", contextWindow: 200_000 },
+		];
+		session.getAvailableModels = () => available;
+		runtime.settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+
+		await executeAcpBuiltinSlashCommand("/switch @smol", runtime);
+
+		expect(temporarySpy).toHaveBeenCalledWith(available[1], undefined);
+	});
+
+	it("switch unknown: reports the selector and leaves the model alone", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-opus-4-5" }];
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+
+		await executeAcpBuiltinSlashCommand("/switch gpt-fake-9000", runtime);
+
+		expect(temporarySpy).not.toHaveBeenCalled();
+		expect(output[0]).toContain("Unknown model: gpt-fake-9000");
+	});
+
 	// Removed TUI-only and dropped commands fall through as false
 	it("removed commands return false (fall through to model)", async () => {
 		const removedCommands = [
@@ -531,8 +738,7 @@ describe("ACP builtin slash commands", () => {
 			"/copy",
 			"/btw hi",
 			"/new",
-			"/drop",
-			"/handoff",
+			"/delete",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {
@@ -761,6 +967,13 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toContain("TUI editor");
 	});
 
+	it("/todo expand: returns HUD-only usage message in ACP mode", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/todo expand", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("interactive HUD");
+	});
+
 	it("/todo unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo foobar", runtime);
@@ -810,6 +1023,178 @@ describe("wave 3 commands", () => {
 		}
 	});
 
+	// /wt
+	it("/wt: refuses outside a git checkout", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-plain-"));
+		fakeSessionManager._cwd = plainDir;
+		try {
+			const result = await executeAcpBuiltinSlashCommand("/wt feature", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Not inside a git repository");
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+		} finally {
+			await fs.rm(plainDir, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/x", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const movedTo = fakeSessionManager._movedTo;
+			expect(movedTo).toBeDefined();
+			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/x`);
+			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			const headRef = (await Bun.file(path.join(movedTo!, ".git")).text()).trim();
+			expect(headRef.startsWith("gitdir: ")).toBe(true);
+			const branches = await git("worktree", "list", "--porcelain");
+			expect(branches).toContain("branch refs/heads/feature/x");
+			// The source checkout is untouched.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("edited\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		cfgWorktreeCleanSource.override(runtime.settings, true);
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			// The reset source is compared byte-for-byte; Git for Windows'
+			// system `core.autocrlf=true` would restore it as CRLF.
+			await git("config", "core.autocrlf", "false");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/clean", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const movedTo = fakeSessionManager._movedTo;
+			expect(movedTo).toBeDefined();
+			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/clean`);
+			expect(output[0]).toContain("uncommitted changes moved, source checkout cleaned");
+			// The worktree carries all uncommitted changes.
+			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			// The source checkout was reset and cleaned.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("committed\n");
+			expect(await Bun.file(path.join(repoDir, "untracked.txt")).exists()).toBe(false);
+			// Ignored files survive in the source checkout.
+			expect(await Bun.file(path.join(repoDir, "build/out.txt")).text()).toBe("ignored\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+			expect(await git("status", "--porcelain")).toBe("");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-flush-fail-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "dirty\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/flush-fail", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Failed to save pending settings: disk full");
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("dirty\n");
+			// Assert aborted BEFORE branch or worktree snapshot creation
+			const branchExists = await git("branch", "--list", "feature/flush-fail");
+			expect(branchExists).toBe("");
+			const worktrees = await git("worktree", "list", "--porcelain");
+			expect(worktrees).not.toContain("feature/flush-fail");
+			const wtDirs = await fs.readdir(worktreeBase).catch(() => []);
+			expect(wtDirs).toEqual([]);
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	// /memory
 	it("/memory unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
@@ -834,7 +1219,7 @@ describe("wave 3 commands", () => {
 
 	it("/memory stats: still names the backend when a real backend simply has no stats hook", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.settings.set("memory.backend" as never, "local" as never);
+		cfgMemoryBackend.set(runtime.settings, "local");
 		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toBe("Memory stats is not available for the local backend.");
@@ -853,25 +1238,25 @@ describe("wave 3 commands", () => {
 	// /browser
 	it("/browser visible: sets headless=false; second call is idempotent", async () => {
 		const { runtime } = createRuntime();
-		runtime.settings.set("browser.enabled" as never, true as never);
-		runtime.settings.set("browser.headless" as never, true as never);
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
 		const r1 = await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		expect(r1).toEqual({ consumed: true });
-		expect(runtime.settings.get("browser.headless" as never)).toBe(false);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
 		const r2 = await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		expect(r2).toEqual({ consumed: true });
-		expect(runtime.settings.get("browser.headless" as never)).toBe(false);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
 	});
 
 	it("/browser no-arg after /browser visible toggles to headless", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.settings.set("browser.enabled" as never, true as never);
-		runtime.settings.set("browser.headless" as never, true as never);
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
 		await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		const r = await executeAcpBuiltinSlashCommand("/browser", runtime);
 		expect(r).toEqual({ consumed: true });
 		expect(output[output.length - 1]).toContain("headless");
-		expect(runtime.settings.get("browser.headless" as never)).toBe(true);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(true);
 	});
 
 	// /compact
@@ -890,17 +1275,6 @@ describe("wave 3 commands", () => {
 
 describe("wave 4 commands", () => {
 	// /mcp
-	it("/mcp (no args): outputs help text containing list, enable, disable, remove, reload", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("list");
-		expect(output[0]).toContain("enable");
-		expect(output[0]).toContain("disable");
-		expect(output[0]).toContain("remove");
-		expect(output[0]).toContain("reload");
-	});
-
 	it("/mcp help: outputs help text containing list, enable, disable, remove, reload", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
@@ -1001,6 +1375,21 @@ describe("wave 4 commands", () => {
 	});
 
 	// /plugins
+	it("/plugin list: the singular alias dispatches the plugins builtin", async () => {
+		const npmSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([
+			{ name: "@czottmann/pi-automode", version: "1.16.0" } as never,
+		]);
+		const installedSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		try {
+			const { output, runtime } = createRuntime();
+			const result = await executeAcpBuiltinSlashCommand("/plugin list", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("@czottmann/pi-automode@1.16.0");
+		} finally {
+			npmSpy.mockRestore();
+			installedSpy.mockRestore();
+		}
+	});
 
 	// /todo start with in_progress status in fuzzy list
 	it("/todo start: resolves ambiguous matches by preferring active tasks", async () => {
@@ -1021,18 +1410,6 @@ describe("wave 4 commands", () => {
 });
 
 describe("wave 5 — adapters and polish", () => {
-	// /mcp help lists new subcommands
-	it("/mcp help: lists resources, prompts, test, add, smithery-search", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("resources");
-		expect(output[0]).toContain("prompts");
-		expect(output[0]).toContain("test");
-		expect(output[0]).toContain("add");
-		expect(output[0]).toContain("smithery-search");
-	});
-
 	// /mcp add — verify parsing and output message
 	it("/mcp add foo --url https://example.com --token X --scope project: outputs success or propagates write error", async () => {
 		// Uses project scope so it writes to /tmp/project/.omp/mcp.json which test infra controls.
@@ -1101,20 +1478,6 @@ describe("wave 5 — adapters and polish", () => {
 		expect(output[0]).toContain("Unknown model");
 	});
 
-	// /model with known id (fake registry)
-	it("/model known-id: reports model set and triggers notifyTitleChanged", async () => {
-		const { output, session, runtime } = createRuntime();
-		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-sonnet-test" }];
-		let titleChanged = false;
-		runtime.notifyTitleChanged = () => {
-			titleChanged = true;
-		};
-		const result = await executeAcpBuiltinSlashCommand("/model claude-sonnet-test", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Model set to anthropic/claude-sonnet-test.");
-		expect(titleChanged).toBe(true);
-	});
-
 	// /usage bar character
 	it("/usage: includes bar character when usedFraction is 0.5", async () => {
 		const { output, runtime } = createRuntime();
@@ -1149,7 +1512,7 @@ describe("wave 5 — adapters and polish", () => {
 			contextWindow: 200_000,
 		};
 		(session as unknown as Record<string, unknown>).skills = [];
-		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] } };
+		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] }, tokenizer: new Tokenizer() };
 		(session as unknown as Record<string, unknown>).systemPrompt = ["You are a helpful assistant."];
 		session.messages = [
 			{ role: "user", content: "Hello, how are you?" },
@@ -1197,6 +1560,27 @@ describe("wave 5 — adapters and polish", () => {
 });
 
 describe("/move preflight flush", () => {
+	it("disposes the session when headless workspace rollback cannot recover", async () => {
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-fatal-"));
+		const originalProjectDir = getProjectDir();
+		const { output, runtime, session } = createRuntime();
+		const dispose = spyOn(session, "dispose");
+		const reloadForCwd = spyOn(runtime.settings, "reloadForCwd").mockRejectedValue(
+			new Error("workspace reload failed"),
+		);
+		try {
+			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(dispose).toHaveBeenCalledTimes(1);
+			expect(output.some(text => text.includes("failed to re-align workspace"))).toBe(true);
+		} finally {
+			reloadForCwd.mockRestore();
+			dispose.mockRestore();
+			setProjectDir(originalProjectDir);
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
 	it("aborts text-mode /move when pending settings flush fails", async () => {
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-"));
 		try {
@@ -1229,6 +1613,9 @@ describe("/move preflight flush", () => {
 			expect(flushed).toBe(true);
 			expect(fakeSessionManager!._movedTo).toBe(targetDir);
 			expect(output[0]).toContain("Moved to");
+			// The success path must chdir the process and project-dir cache to the
+			// target; otherwise bash tools and discovery run in the wrong project.
+			expect(getProjectDir()).toBe(path.resolve(targetDir));
 		} finally {
 			setProjectDir(originalProjectDir);
 			await fs.rm(targetDir, { recursive: true, force: true });

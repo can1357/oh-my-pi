@@ -2,6 +2,7 @@ import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type { Context, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
+import { applyInferenceHeaders } from "./inference-headers";
 import {
 	buildGoogleGenerateContentParams,
 	type GoogleGenAIRequestPlan,
@@ -38,9 +39,14 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 			const url = `${base}/models/${model.id}:streamGenerateContent?alt=sse`;
 			const headers: Record<string, string> = {
 				"x-goog-api-key": apiKey,
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
+				...model.headers,
+				...options?.headers,
 			};
+			applyInferenceHeaders(headers, {
+				provider: model.provider,
+				protocol: "google",
+				sessionId: options?.sessionId ?? options?.promptCacheKey,
+			});
 			return { params, url, headers, fetch: options?.fetch };
 		},
 	});

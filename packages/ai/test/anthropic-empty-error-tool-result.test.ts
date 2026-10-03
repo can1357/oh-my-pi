@@ -20,6 +20,13 @@ const anthropicModel: Model<"anthropic-messages"> = buildModel({
 	baseUrl: "https://api.anthropic.com",
 });
 
+const visionModel: Model<"anthropic-messages"> = buildModel({
+	...baseModel,
+	input: ["text", "image"],
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+});
+
 const user: UserMessage = {
 	role: "user",
 	content: "run the tool",
@@ -92,6 +99,26 @@ describe("anthropic empty error tool_result encoding", () => {
 		};
 
 		const block = getToolResultBlock(anthropicModel, toolResult);
+		expect(block.is_error).toBe(false);
+		expect(block.content).toBe("");
+	});
+
+	it("encodes empty successful tool results as empty string, not empty array, on image-capable models", () => {
+		// Regression: vision-capable models serialize whitespace-only successful
+		// tool results as `content: []` on the wire. Official Anthropic accepts it,
+		// but strict Anthropic-compatible endpoints (Z.AI GLM, api.z.ai/api/anthropic)
+		// reject the whole request with 400 code 1213 ("The prompt parameter was
+		// not received normally"). `content: ""` is accepted by both.
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "toolu_empty_error",
+			toolName: "write",
+			content: [{ type: "text", text: "" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const block = getToolResultBlock(visionModel, toolResult);
 		expect(block.is_error).toBe(false);
 		expect(block.content).toBe("");
 	});

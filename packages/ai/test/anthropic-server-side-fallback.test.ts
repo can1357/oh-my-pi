@@ -490,7 +490,7 @@ describe("anthropic assistant replay block ordering (tool_use partition)", () =>
 		]);
 	});
 
-	it("interleaved signed thinking: signature-chain order preserved, tool_use deferred to the tail", () => {
+	it("interleaved signed thinking stays beside the tool calls that produced it", () => {
 		const params = convertAnthropicMessages(
 			[
 				assistant([
@@ -509,8 +509,8 @@ describe("anthropic assistant replay block ordering (tool_use partition)", () =>
 		);
 		expect(assistantParam(params).content).toEqual([
 			{ type: "thinking", thinking: "first", signature: "sig-1" },
-			{ type: "thinking", thinking: "second", signature: "sig-2" },
 			{ type: "tool_use", id: "call_a", name: "read", input: {} },
+			{ type: "thinking", thinking: "second", signature: "sig-2" },
 			{ type: "tool_use", id: "call_b", name: "grep", input: {} },
 		]);
 	});

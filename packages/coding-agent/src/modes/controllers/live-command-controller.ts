@@ -2,13 +2,15 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
-import { LiveVisualizer } from "../../live/visualizer";
+import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { vocalizer } from "../../tts/vocalizer";
-import type { AssistantMessageComponent } from "../components/assistant-message";
-import type { CustomEditor } from "../components/custom-editor";
-import { theme } from "../theme/theme";
+import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
-import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
+import { createAssistantMessageComponent } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
+
+import { cfgLiveVoice } from "../../live/settings";
 
 const ANIMATION_INTERVAL_MS = 80;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
@@ -103,11 +105,10 @@ export class LiveCommandController {
 		});
 		this.#mountVisualizer(visualizer);
 
-		let session: LiveSessionController;
 		const options: LiveSessionControllerOptions = {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
-			voice: this.#ctx.settings.get("live.voice"),
+			voice: cfgLiveVoice.get(this.#ctx.settings),
 			callbacks: {
 				onPhase: phase => {
 					if (this.#visualizer !== visualizer) return;
@@ -134,7 +135,7 @@ export class LiveCommandController {
 				onTerminal: error => this.#finish(session, error),
 			},
 		};
-		session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
+		const session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
 		this.#session = session;
 
 		try {

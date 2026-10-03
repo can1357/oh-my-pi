@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -123,7 +124,11 @@ def test_get_pull_request_parses_head_repo_and_author() -> None:
             json={
                 "number": 9,
                 "html_url": "https://github.com/octo/widget/pull/9",
-                "head": {"ref": "farm/abc12345/fix", "repo": {"full_name": "octo/widget"}},
+                "head": {
+                    "ref": "farm/abc12345/fix",
+                    "sha": "abc1234567890123456789012345678901234567",
+                    "repo": {"full_name": "octo/widget"},
+                },
                 "base": {"ref": "main"},
                 "state": "open",
                 "user": {"login": "robomp-bot"},
@@ -133,6 +138,7 @@ def test_get_pull_request_parses_head_repo_and_author() -> None:
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     pr = _run_async(client.get_pull_request("octo/widget", 9))
     assert pr.head_ref == "farm/abc12345/fix"
+    assert pr.head_sha == "abc1234567890123456789012345678901234567"
     assert pr.head_repo == "octo/widget"
     assert pr.author == "robomp-bot"
 
@@ -166,7 +172,15 @@ def test_list_pr_files_parses_changed_file_summary() -> None:
         assert request.url.params.get("per_page") == "100"
         return httpx.Response(
             200,
-            json=[{"filename": "src/app.py", "status": "modified", "additions": 5, "deletions": 2}],
+            json=[
+                {
+                    "filename": "src/app.py",
+                    "status": "modified",
+                    "additions": 5,
+                    "deletions": 2,
+                    "patch": "@@ -8,3 +8,5 @@\n ctx\n+added\n ctx2",
+                }
+            ],
         )
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
@@ -175,6 +189,20 @@ def test_list_pr_files_parses_changed_file_summary() -> None:
     assert files[0].path == "src/app.py"
     assert files[0].additions == 5
     assert files[0].deletions == 2
+    assert files[0].patch.startswith("@@ -8,3 +8,5")
+
+
+def test_list_pr_files_defaults_missing_patch_to_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/widget/pulls/9/files"
+        return httpx.Response(
+            200,
+            json=[{"filename": "src/app.py", "status": "modified", "additions": 5, "deletions": 2}],
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    files = _run_async(client.list_pr_files("octo/widget", 9))
+    assert files[0].patch == ""
 
 
 def test_list_pr_files_paginates_past_first_page() -> None:
@@ -245,6 +273,48 @@ def test_submit_pr_review_posts_comment_event_and_inline_comments() -> None:
         "body": "summary",
         "event": "COMMENT",
         "comments": [{"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "finding"}],
+    }
+
+
+def test_submit_pr_review_forgejo_uses_new_position_payload() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": 44,
+                "user": {"login": "robomp-bot"},
+                "body": "summary",
+                "state": "COMMENTED",
+                "submitted_at": "t",
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    review = _run_async(
+        client.submit_pr_review(
+            repo="octo/widget",
+            pr_number=9,
+            body="summary",
+            event="COMMENT",
+            comments=[
+                {"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "finding"},
+                {"path": "src/old.py", "line": 5, "side": "LEFT", "body": "removed-line finding"},
+            ],
+        )
+    )
+    assert review.id == 44
+    assert captured["path"] == "/repos/octo/widget/pulls/9/reviews"
+    assert captured["body"] == {
+        "body": "summary",
+        "event": "COMMENT",
+        "comments": [
+            {"path": "src/app.py", "body": "finding", "new_position": 12},
+            {"path": "src/old.py", "body": "removed-line finding", "old_position": 5},
+        ],
     }
 
 
@@ -359,3 +429,108 @@ def test_close_issue_propagates_error() -> None:
     with pytest.raises(GitHubError) as exc:
         _run_async(client.close_issue("octo/widget", 42))
     assert exc.value.status == 404
+
+
+def test_release_action_reads_parse_runs_jobs_and_failed_steps() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/octo/widget/actions/runs":
+            assert request.url.params["head_sha"] == "abc"
+            assert request.url.params["per_page"] == "100"
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 10,
+                            "name": "CI",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "head_branch": "main",
+                            "head_sha": "abc",
+                            "html_url": "https://example/runs/10",
+                            "run_attempt": 2,
+                        }
+                    ]
+                },
+            )
+        assert request.url.path == "/repos/octo/widget/actions/runs/10/jobs"
+        assert request.url.params["filter"] == "latest"
+        return httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {
+                        "id": 20,
+                        "run_id": 10,
+                        "name": "test",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "html_url": "https://example/jobs/20",
+                        "steps": [
+                            {"name": "checkout", "conclusion": "success"},
+                            {"name": "tests", "conclusion": "failure"},
+                            {"name": "cleanup", "conclusion": "skipped"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    runs = _run_async(client.list_workflow_runs("octo/widget", head_sha="abc"))
+    jobs = _run_async(client.list_workflow_jobs("octo/widget", runs[0].id))
+    assert runs[0].run_attempt == 2
+    assert runs[0].head_sha == "abc"
+    assert jobs[0].failed_steps == ("tests",)
+
+
+def test_job_log_tail_follows_redirect_and_caps_retained_bytes() -> None:
+    payload = b"discard\n" + (b"x" * (4 * 1024 * 1024)) + b"\nlast\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/logs"):
+            return httpx.Response(302, headers={"location": "https://logs.example/job.txt"})
+        assert request.url.host == "logs.example"
+        return httpx.Response(200, content=payload)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    tail = _run_async(client.get_job_log_tail("octo/widget", 20, tail_lines=2))
+    assert len(tail.encode()) <= 4 * 1024 * 1024
+    assert tail.endswith("\nlast")
+    assert "discard" not in tail
+
+
+def test_tag_dereference_and_release_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/git/ref/tags/v1.2.3"):
+            return httpx.Response(200, json={"object": {"type": "tag", "sha": "tag-object"}})
+        if request.url.path.endswith("/git/tags/tag-object"):
+            return httpx.Response(200, json={"object": {"type": "commit", "sha": "commit-sha"}})
+        assert request.url.path.endswith("/releases/tags/v1.2.3")
+        return httpx.Response(
+            200,
+            json={
+                "tag_name": "v1.2.3",
+                "name": "1.2.3",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://example/releases/v1.2.3",
+                "assets": [{"name": "omp-darwin-arm64.tar.gz"}],
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    assert _run_async(client.get_tag_sha("octo/widget", "v1.2.3")) == "commit-sha"
+    release = _run_async(client.get_release_by_tag("octo/widget", "v1.2.3"))
+    assert release is not None
+    assert release.asset_names == ("omp-darwin-arm64.tar.gz",)
+
+
+def test_missing_tag_and_release_return_none() -> None:
+    client = GitHubClient(
+        "tok",
+        transport=httpx.MockTransport(lambda request: httpx.Response(404, json={"message": "Not Found"})),
+    )
+    assert _run_async(client.get_tag_sha("octo/widget", "v1.2.3")) is None
+    assert _run_async(client.get_release_by_tag("octo/widget", "v1.2.3")) is None

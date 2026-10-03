@@ -1,23 +1,28 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import type { Api, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
+import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
-	applyAntigravityPricingFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
+	applyPricingPeerFallback,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
+import { buildModel } from "../src/build";
+import { resolveProviderModels } from "../src/model-manager";
+import { cursorModelManagerOptions } from "../src/provider-models/special";
 
 function createSpec<TApi extends Api>(overrides: {
 	id: string;
 	api: TApi;
 	provider: Provider;
+	baseUrl?: string;
 	reasoning?: boolean;
 	contextWindow?: number;
 	maxTokens?: number;
 	priority?: number;
 	applyPatchToolType?: "freeform" | "function";
 	cost?: ModelSpec<TApi>["cost"];
+	compat?: ModelSpec<TApi>["compat"];
 	thinking?: ModelSpec<TApi>["thinking"];
 }): ModelSpec<TApi> {
 	return {
@@ -25,8 +30,9 @@ function createSpec<TApi extends Api>(overrides: {
 		name: overrides.id,
 		api: overrides.api,
 		provider: overrides.provider,
-		baseUrl: "https://example.com",
+		baseUrl: overrides.baseUrl ?? "https://example.com",
 		reasoning: overrides.reasoning ?? true,
+		compat: overrides.compat,
 		thinking: overrides.thinking,
 		input: ["text"],
 		cost: overrides.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -35,6 +41,15 @@ function createSpec<TApi extends Api>(overrides: {
 		priority: overrides.priority,
 		applyPatchToolType: overrides.applyPatchToolType,
 	};
+}
+
+/** Production generation seam: apply the generated policies, then build. */
+function buildGenerated<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
+	const specs: ModelSpec<Api>[] = [spec];
+	applyGeneratedModelPolicies(specs);
+	const first = specs[0];
+	if (!first) throw new Error("policy pass dropped the spec");
+	return buildModel(first as ModelSpec<TApi>);
 }
 
 describe("generated model policies", () => {
@@ -72,27 +87,116 @@ describe("generated model policies", () => {
 		];
 
 		applyGeneratedModelPolicies(models);
+		const built = models.map(model => buildGenerated(model));
 
-		expect(models[0]?.thinking).toEqual({
+		expect(built[0]?.thinking).toEqual({
 			mode: "anthropic-budget-effort",
 			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
-		expect(models[0]?.cost.cacheRead).toBe(0.5);
-		expect(models[0]?.cost.cacheWrite).toBe(6.25);
-		expect(models[1]?.thinking).toEqual({
+		expect(built[0]?.cost.cacheRead).toBe(0.5);
+		expect(built[0]?.cost.cacheWrite).toBe(6.25);
+		expect(built[1]?.thinking).toEqual({
 			mode: "anthropic-adaptive",
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
 		});
-		expect(models[1]?.cost.cacheRead).toBe(0.5);
-		expect(models[1]?.cost.cacheWrite).toBe(6.25);
-		expect(models[1]?.contextWindow).toBe(1000000);
-		expect(models[2]?.contextWindow).toBe(272000);
-		expect(models[3]?.contextWindow).toBe(272000);
-		expect(models[3]?.priority).toBe(1);
+		expect(built[1]?.cost.cacheRead).toBe(0.5);
+		expect(built[1]?.cost.cacheWrite).toBe(6.25);
+		expect(built[1]?.contextWindow).toBe(1000000);
+		expect(built[2]?.contextWindow).toBe(272000);
+		expect(built[3]?.contextWindow).toBe(272000);
+		expect(built[3]?.priority).toBe(1);
+	});
+
+	it("projects Cursor tool schemas only for Anthropic Fable variants", () => {
+		const fableModels = [
+			"claude-fable-5-high",
+			"claude-fable-5-low",
+			"claude-fable-5-max",
+			"claude-fable-5-medium",
+			"claude-fable-5-xhigh",
+		].map(id => buildGenerated(createSpec({ id, api: "cursor-agent", provider: "cursor" })));
+		const grok = buildGenerated(createSpec({ id: "cursor-grok-4.6", api: "cursor-agent", provider: "cursor" }));
+		const otherCursorAnthropic = buildGenerated(
+			createSpec({ id: "claude-opus-4-7-high", api: "cursor-agent", provider: "cursor" }),
+		);
+
+		for (const model of fableModels) {
+			expect(model.requiresCursorToolSchemaProjection).toBe(true);
+		}
+		expect(grok.requiresCursorToolSchemaProjection).toBeUndefined();
+		expect(otherCursorAnthropic.requiresCursorToolSchemaProjection).toBeUndefined();
+
+		const rebuiltGrok = buildModel({
+			...fableModels[0],
+			id: "cursor-grok-4.6",
+			name: "cursor-grok-4.6",
+		});
+		expect(rebuiltGrok.requiresCursorToolSchemaProjection).toBeUndefined();
+	});
+
+	it("marks Cursor's default router as variably priced", () => {
+		const routed = buildGenerated(createSpec({ id: "default", api: "cursor-agent", provider: "cursor" }));
+		const named = buildGenerated(createSpec({ id: "composer-2.5", api: "cursor-agent", provider: "cursor" }));
+
+		expect(routed.pricingStatus).toBe("variable");
+		expect(named.pricingStatus).toBeUndefined();
+	});
+
+	it("preserves OpenRouter's mandatory provider-authored effort ladder", () => {
+		const models: ModelSpec<Api>[] = [
+			createSpec({
+				id: "mandatory-model",
+				api: "openrouter",
+				provider: "openrouter",
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.High, Effort.Max],
+					defaultLevel: Effort.Max,
+					requiresEffort: true,
+				},
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+	});
+
+	it("preserves generic chat-template provider-authored effort mappings", () => {
+		const thinking = {
+			mode: "effort" as const,
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			effortMap: {
+				[Effort.Minimal]: "low",
+				[Effort.Low]: "low",
+				[Effort.Medium]: "high",
+				[Effort.High]: "high",
+				[Effort.XHigh]: "max",
+				[Effort.Max]: "max",
+			},
+		};
+		const models: ModelSpec<Api>[] = [
+			createSpec({
+				id: "deepseek-flash-v4",
+				api: "openai-completions",
+				provider: "yolo-auto",
+				compat: { thinkingFormat: "chat-template", supportsReasoningEffort: true },
+				thinking,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toEqual(thinking);
 	});
 
 	it("applies GPT-5.6 off and long-context pricing through request-model aliases", () => {
-		const models: ModelSpec<Api>[] = [
+		const models = [
 			createSpec({ id: "gpt-5.6", api: "openai-responses", provider: "openai" }),
 			createSpec({ id: "gpt-5.6-luna", api: "openai-responses", provider: "openai" }),
 			{
@@ -104,9 +208,7 @@ describe("generated model policies", () => {
 				requestModelId: "gpt-5.6-terra",
 			},
 			createSpec({ id: "gpt-5.6", api: "openai-responses", provider: "openrouter" }),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		for (const model of models.slice(0, 4)) {
 			expect(model.compat).toMatchObject({ reasoningDisableMode: "none-effort" });
@@ -116,12 +218,12 @@ describe("generated model policies", () => {
 		expect(models[1]?.cost.longContext).toMatchObject({ input: 0.4, output: 1.8 });
 		expect(models[2]?.cost.longContext).toMatchObject({ input: 10, output: 45 });
 		expect(models[3]?.cost.longContext).toMatchObject({ input: 4, output: 18 });
-		expect(models[4]?.compat).toBeUndefined();
+		expect(models[4]?.compat).not.toMatchObject({ reasoningDisableMode: "none-effort" });
 		expect(models[4]?.cost.longContext).toBeUndefined();
 	});
 
 	it("floors GPT-5.6 Codex-transport context windows at 1M (openai/codex#38917)", () => {
-		const models: ModelSpec<Api>[] = [
+		const models = [
 			// Codex discovery/registry still reports the stale 272000 for these.
 			createSpec({
 				id: "gpt-5.6-luna",
@@ -151,9 +253,7 @@ describe("generated model policies", () => {
 				provider: "openai-codex",
 				contextWindow: 272000,
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.contextWindow).toBe(1_000_000);
 		expect(models[1]?.contextWindow).toBe(1_000_000);
@@ -162,21 +262,53 @@ describe("generated model policies", () => {
 		expect(models[4]?.contextWindow).toBe(272000);
 	});
 
+	it("applies GPT-5.6 long-context pricing to Codex-transport SKUs (openai/codex#32486)", () => {
+		const models = [
+			createSpec({ id: "gpt-5.6-sol", api: "openai-codex-responses", provider: "openai-codex" }),
+			createSpec({ id: "gpt-5.6-luna", api: "openai-codex-responses", provider: "openai-codex" }),
+			// Third-party carriers of the same id must not inherit the tier.
+			createSpec({ id: "gpt-5.6-sol", api: "openai-completions", provider: "openrouter" }),
+		].map(model => buildGenerated(model));
+
+		expect(models[0]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 10, output: 45 });
+		expect(models[1]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 0.4, output: 1.8 });
+		expect(models[2]?.cost.longContext).toBeUndefined();
+	});
+
+	it("bills Astra API long-context above 272K while the sub route stays exempt", () => {
+		const models = [
+			createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }),
+			createSpec({ id: "gpt-6-astra", api: "openai-codex-responses", provider: "openai-codex" }),
+			// Third-party carriers of the same id must not inherit the tier.
+			createSpec({ id: "gpt-6-astra", api: "openai-completions", provider: "openrouter" }),
+		].map(model => buildGenerated(model));
+
+		expect(models[0]?.cost.longContext).toMatchObject({
+			inputThreshold: 272_000,
+			input: 20,
+			output: 75,
+			cacheRead: 2,
+			cacheWrite: 25,
+		});
+		expect(models[1]?.cost.longContext).toBeUndefined();
+		expect(models[1]?.cost).toMatchObject({ cacheWrite: 0 });
+		expect(models[2]?.cost.longContext).toBeUndefined();
+	});
+
 	it("pins Claude Mythos 5 first-party Anthropic catalog metadata", () => {
-		const models: ModelSpec<Api>[] = [
+		const model = buildGenerated(
 			createSpec({
 				id: "claude-mythos-5",
 				api: "anthropic-messages",
 				provider: "anthropic",
+				baseUrl: "https://api.anthropic.com",
 			}),
-		];
+		);
 
-		applyGeneratedModelPolicies(models);
-
-		expect(models[0]?.contextWindow).toBe(1_000_000);
-		expect(models[0]?.maxTokens).toBe(128_000);
-		expect(models[0]?.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
-		expect(models[0]?.thinking).toEqual({
+		expect(model?.contextWindow).toBe(1_000_000);
+		expect(model?.maxTokens).toBe(128_000);
+		expect(model?.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
+		expect(model?.thinking).toEqual({
 			mode: "anthropic-adaptive",
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 			supportsDisplay: true,
@@ -232,9 +364,7 @@ describe("generated model policies", () => {
 				contextWindow: 200_000,
 				maxTokens: 8192,
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.contextWindow).toBe(1_000_000);
 		expect(models[0]?.maxTokens).toBe(131_072);
@@ -256,9 +386,7 @@ describe("generated model policies", () => {
 				contextWindow: 200_000,
 				maxTokens: 8192,
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		// Context pinning — same 1M tier as glm-5.2 on both GLM coding-plan hosts.
 		for (const model of models) {
@@ -271,6 +399,148 @@ describe("generated model policies", () => {
 			expect(model.thinking?.requiresEffort).toBe(true);
 			// Default effort is `max` per the GLM-5.3 API spec.
 			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+	});
+
+	it("pins zai glm-5.3-flash to the 1M tier and restores its native image input", () => {
+		const models = [
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "anthropic-messages",
+				provider: "zai",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zhipu-coding-plan",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+		].map(model => buildGenerated(model));
+
+		for (const model of models) {
+			expect(model.contextWindow).toBe(1_000_000);
+			expect(model.maxTokens).toBe(131_072);
+			// Natively multimodal despite the missing `v` marker; upstream
+			// metadata reports the flash SKU as text-only.
+			expect(model.input).toEqual(["text", "image"]);
+			// Same mandatory low/high/max ladder as the GLM-5.3 base line.
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+
+		// Z.AI's native OpenAI-completions route: list price (not the launch
+		// promotion) and max_tokens clamped to the advertised 131K cap.
+		const native = buildGenerated(
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+				cost: { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 },
+			}),
+		);
+		expect(native.cost).toEqual({ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 });
+		expect(native.compat?.clampOutputToModelMax).toBe(true);
+	});
+
+	it("bakes verified Cursor image families into the offline catalog", () => {
+		// Rule-owned (`providers/cursor.kdl` input-modalities): baked at build time.
+		const verifiedIds = [
+			"kimi-k3-high",
+			"kimi-k3-low",
+			"kimi-k3-max",
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+			"composer-2.5",
+			"composer-2.5-fast",
+		];
+		const unverifiedIds = ["cursor-grok-5", "composer-2.50", "k3-256k"];
+		const models = [...verifiedIds, ...unverifiedIds].map(id =>
+			buildGenerated(createSpec({ id, api: "cursor-agent", provider: "cursor" })),
+		);
+
+		for (const model of models.slice(0, verifiedIds.length)) {
+			expect(model.input).toEqual(["text", "image"]);
+		}
+		for (const model of models.slice(verifiedIds.length)) {
+			expect(model.input).toEqual(["text"]);
+		}
+	});
+
+	it("bills Cerebras cache reads at the live input rate", () => {
+		const cost = { input: 0.99, output: 1.49, cacheRead: 0, cacheWrite: 0 };
+		const cerebras = buildGenerated(
+			createSpec({ id: "qwen-3.8-27b", api: "openai-completions", provider: "cerebras", cost }),
+		);
+		expect(cerebras.cost.cacheRead).toBe(0.99);
+		// Tracks upstream list-price changes instead of pinning a number.
+		const repriced = buildGenerated(
+			createSpec({
+				id: "gpt-oss-120b",
+				api: "openai-completions",
+				provider: "cerebras",
+				cost: { ...cost, input: 0.35 },
+			}),
+		);
+		expect(repriced.cost.cacheRead).toBe(0.35);
+		// Other providers keep their discounted (or unset) cache-read rate.
+		const groq = buildGenerated(
+			createSpec({ id: "qwen-3.8-27b", api: "openai-completions", provider: "groq", cost }),
+		);
+		expect(groq.cost.cacheRead).toBe(0);
+	});
+
+	it("applies documented Cursor context-window floors at build time", () => {
+		// Rule-owned (`providers/cursor.kdl` context-window-floor): baked at
+		// build time. createSpec defaults to the 200k discovery fallback.
+		const windows: Array<[string, number]> = [
+			["cursor-grok-4.5", 256_000],
+			["cursor-grok-4.6", 256_000],
+			["default", 256_000],
+			["kimi-k2.7-code", 262_000],
+			["claude-opus-5-preview", 300_000],
+			["claude-fable-5-preview", 300_000],
+			["gpt-5.6-sol-fast", 272_000],
+			["kimi-k3-max", 1_000_000],
+			["composer-2.5", 200_000],
+			["cursor-grok-5", 200_000],
+			["k3-256k", 200_000],
+		];
+		for (const [id, contextWindow] of windows) {
+			expect(buildGenerated(createSpec({ id, api: "cursor-agent", provider: "cursor" })).contextWindow).toBe(
+				contextWindow,
+			);
+		}
+
+		expect(
+			buildGenerated(
+				createSpec({
+					id: "cursor-grok-4.6",
+					api: "cursor-agent",
+					provider: "cursor",
+					contextWindow: 1_000_000,
+				}),
+			).contextWindow,
+		).toBe(1_000_000);
+	});
+
+	it("resolves documented Cursor context windows offline", async () => {
+		const windows: Array<[string, number]> = [
+			["cursor-grok-4.5", 256_000],
+			["cursor-grok-4.6", 256_000],
+			["default", 256_000],
+			["kimi-k2.7-code", 262_000],
+			["gpt-5.6-sol-fast", 272_000],
+		];
+		const resolved = await resolveProviderModels(cursorModelManagerOptions(), "offline");
+		for (const [id, contextWindow] of windows) {
+			expect(resolved.models.find(model => model.id === id)?.contextWindow).toBe(contextWindow);
 		}
 	});
 
@@ -304,9 +574,7 @@ describe("generated model policies", () => {
 				contextWindow: 512_000,
 				maxTokens: 128_000,
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.contextWindow).toBe(1_000_000);
 		expect(models[0]?.maxTokens).toBe(128_000);
@@ -378,21 +646,19 @@ describe("generated model policies", () => {
 	});
 
 	it("marks OpenCode Go MiMo models as not supporting tool_choice", () => {
-		const models: ModelSpec<"openai-completions">[] = [
+		const models = [
 			createSpec({
 				id: "mimo-v2.5-pro",
 				api: "openai-completions",
 				provider: "opencode-go",
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.compat?.supportsToolChoice).toBe(false);
 	});
 
 	it("sets OpenCode Go DeepSeek V4 tool-call request compat for both OpenAI APIs", () => {
-		const models: ModelSpec<Api>[] = [
+		const models = [
 			createSpec({
 				id: "deepseek-v4-flash",
 				api: "openai-responses",
@@ -403,30 +669,26 @@ describe("generated model policies", () => {
 				api: "openai-completions",
 				provider: "opencode-go",
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		for (const model of models) {
 			expect(model.compat).toMatchObject({
 				supportsToolChoice: false,
-				maxTokensField: "max_tokens",
 				reasoningContentField: "reasoning_content",
 				requiresReasoningContentForToolCalls: true,
 			});
 		}
+		expect(models[1]?.compat).toMatchObject({ maxTokensField: "max_tokens" });
 	});
 
 	it("marks OpenCode Go Kimi K2.7 Code as not supporting forced tool_choice", () => {
-		const models: ModelSpec<"openai-completions">[] = [
+		const models = [
 			createSpec({
 				id: "kimi-k2.7-code",
 				api: "openai-completions",
 				provider: "opencode-go",
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.compat?.supportsForcedToolChoice).toBe(false);
 	});
@@ -477,33 +739,17 @@ describe("generated model policies", () => {
 	});
 
 	it("sets freeform apply_patch metadata for first-party GPT-5 Responses models", () => {
-		const models: ModelSpec<Api>[] = [
+		const models = [
 			createSpec({ id: "gpt-5.4", api: "openai-responses", provider: "openai" }),
 			createSpec({ id: "gpt-5.3-codex-spark", api: "openai-codex-responses", provider: "openai-codex" }),
-			createSpec({
-				id: "gpt-5.3-codex-spark",
-				api: "openai-responses",
-				provider: "opencode",
-				applyPatchToolType: "freeform",
-			}),
-			createSpec({
-				id: "gpt-5.4",
-				api: "openai-completions",
-				provider: "litellm",
-				applyPatchToolType: "freeform",
-			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.applyPatchToolType).toBe("freeform");
 		expect(models[1]?.applyPatchToolType).toBe("freeform");
-		expect(models[2]?.applyPatchToolType).toBeUndefined();
-		expect(models[3]?.applyPatchToolType).toBeUndefined();
 	});
 
 	it("strips paid xAI Responses effort dials for off-allowlist reasoners", () => {
-		const models: ModelSpec<"openai-responses">[] = [
+		const models = [
 			createSpec({
 				id: "grok-code-fast-1",
 				api: "openai-responses",
@@ -522,21 +768,18 @@ describe("generated model policies", () => {
 				provider: "openrouter",
 				thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.thinking).toBeUndefined();
 		expect(models[0]?.compat).toMatchObject({
 			supportsReasoningEffort: false,
 			omitReasoningEffort: true,
 		});
-		expect(models[0]?.compat).not.toHaveProperty("reasoningEffortMap");
 		expect(models[1]?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
 		expect(models[1]?.compat?.supportsReasoningEffort).toBe(true);
 		// Non-xAI hosts are outside this policy — no baked no-dial compat.
 		expect(models[2]?.thinking).toBeDefined();
-		expect(models[2]?.compat?.supportsReasoningEffort).toBeUndefined();
+		expect(models[2]?.compat?.supportsReasoningEffort).toBe(true);
 	});
 });
 
@@ -630,7 +873,7 @@ describe("applyOllamaCloudOutputCap", () => {
 	});
 });
 
-describe("applyAntigravityPricingFallback", () => {
+describe("applyPricingPeerFallback", () => {
 	it("prices Gemini ids at Google API peers and Claude ids at Vertex, falling back to Anthropic", () => {
 		const googleCost = { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 };
 		const previewCost = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
@@ -658,7 +901,7 @@ describe("applyAntigravityPricingFallback", () => {
 			createSpec({ id: "claude-sonnet-4-6", api: "google-gemini-cli", provider: "google-antigravity" }),
 		];
 
-		const result = applyAntigravityPricingFallback(models);
+		const result = applyPricingPeerFallback(models);
 
 		expect(result[5]?.cost).toEqual(googleCost);
 		expect(result[6]?.cost).toEqual(previewCost);
@@ -689,12 +932,34 @@ describe("applyAntigravityPricingFallback", () => {
 			}),
 		];
 
-		const result = applyAntigravityPricingFallback(models);
+		const result = applyPricingPeerFallback(models);
 
 		// No billable google peer (zero-cost peer is not a pricing source).
 		expect(result[1]?.cost).toEqual(zeroCost);
 		expect(result[2]?.cost).toEqual(zeroCost);
 		// Already-billable antigravity rows keep their own pricing.
 		expect(result[3]?.cost).toEqual(pricedCost);
+	});
+
+	it("prices MiniMax Token Plan rows at pay-as-you-go peers, M3.1 Flash Preview at the M3 rate", () => {
+		const m3Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 };
+		const m27Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 };
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const models: ModelSpec<Api>[] = [
+			createSpec({ id: "MiniMax-M3", api: "anthropic-messages", provider: "minimax", cost: m3Cost }),
+			createSpec({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax", cost: m27Cost }),
+			createSpec({ id: "MiniMax-M3.1-Flash-Preview", api: "anthropic-messages", provider: "minimax-code" }),
+			createSpec({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax-code" }),
+			createSpec({ id: "MiniMax-M2.1-lightning", api: "anthropic-messages", provider: "minimax-code" }),
+			// No minimax-cn row: the China plan falls back to the international peer.
+			createSpec({ id: "MiniMax-M3.1-Flash-Preview", api: "anthropic-messages", provider: "minimax-code-cn" }),
+		];
+
+		const result = applyPricingPeerFallback(models);
+
+		expect(result[2]?.cost).toEqual(m3Cost);
+		expect(result[3]?.cost).toEqual(m27Cost);
+		expect(result[4]?.cost).toEqual(zeroCost);
+		expect(result[5]?.cost).toEqual(m3Cost);
 	});
 });

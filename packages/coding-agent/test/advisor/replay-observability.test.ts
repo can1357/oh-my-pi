@@ -39,7 +39,6 @@ describe("advisor context reset observability", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -81,7 +80,6 @@ describe("advisor context reset observability", () => {
 			};
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => [],
-				enqueueAdvice: () => {},
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -123,7 +121,6 @@ describe("advisor context reset observability", () => {
 			};
 			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
-				enqueueAdvice: () => {},
 				notifyFailure: error => failures.push(error),
 			});
 

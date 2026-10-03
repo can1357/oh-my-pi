@@ -15,6 +15,7 @@
  */
 import { agenticFixtures } from "./agentic";
 import { codeintelFixtures } from "./codeintel";
+import { coordinationFixtures } from "./coordination";
 import { editFixtures } from "./edit";
 import { fsFixtures } from "./fs";
 import { interactionFixtures } from "./interaction";
@@ -22,8 +23,11 @@ import { memoryFixtures } from "./memory";
 import { miscFixtures } from "./misc";
 import { searchFixtures } from "./search";
 import { shellFixtures } from "./shell";
+import { statusLineFixtures } from "./status-line";
 import { webFixtures } from "./web";
 
+export * from "./composer";
+export * from "./segments";
 export * from "./types";
 
 export const galleryFixtures = {
@@ -33,8 +37,10 @@ export const galleryFixtures = {
 	...searchFixtures,
 	...editFixtures,
 	...agenticFixtures,
+	...coordinationFixtures,
 	...memoryFixtures,
 	...webFixtures,
 	...codeintelFixtures,
+	...statusLineFixtures,
 	...miscFixtures,
 };

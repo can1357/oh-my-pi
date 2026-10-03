@@ -1,11 +1,14 @@
 # Cargo environment for the workspace.
 #
-# audiopus_sys 0.2.2 builds its vendored Opus via the `cmake` crate, and the
-# bundled opus CMakeLists still declares `cmake_minimum_required(VERSION 3.1)`.
-# CMake 4.0 removed compatibility with < 3.5, so any dev host with a modern
-# cmake fails `cargo check`/`cargo clippy` on pi-voice with
-# "Compatibility with CMake < 3.5 has been removed from CMake." The bazel build
-# already sets this override for the same crate (see the audiopus_sys
-# annotation in MODULE.bazel); mirror it here so the cargo path works too.
+# Native CMake builds use Ninja: Xcode's GNU make 3.81 can block while reading
+# cargo's forwarded jobserver pipe. CI images and the Nix dev shell include
+# Ninja; macOS dev hosts need `brew install ninja`.
 [env]
-CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+CMAKE_GENERATOR = "Ninja"
+# Store each crate's metadata only in its .rmeta instead of duplicating it into
+# every rlib. Measured on a reqwest-sized graph: 196 MB -> 130 MB target dir at
+# identical build times. Requires the pinned nightly (rust-toolchain.toml).
+# The accepted spelling is toolchain-coupled: this nightly accepts a bare
+# boolean, while older nightlies took `"DoNotEmbed"`.
+[unstable]
+embed-metadata = false

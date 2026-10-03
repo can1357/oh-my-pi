@@ -1,33 +1,58 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
+import { TtyWriter } from "@oh-my-pi/pi-natives";
+import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
+import { TSP_VERSION } from "@oh-my-pi/pi-wire";
 import {
-	$env,
-	isBunTestRuntime,
-	isTerminalHeadless,
-	logger,
-	postmortem,
-	restoreTerminalStderr,
-	suppressTerminalStderr,
-} from "@oh-my-pi/pi-utils";
+	encodeBundledGlyphRegistrations,
+	encodeGlyphCoverageQuery,
+	encodeGlyphSupportQuery,
+	GLYPH_CONFIRMATION_CODEPOINT,
+	isGlyphProtocolSequence,
+	parseGlyphProtocolReply,
+} from "./glyph-protocol";
 import { setKittyProtocolActive } from "./keys";
+import { encodeTspHelloQuery, parseTspMessage, TSP_PREFIX, type TspHello } from "./native/encode";
 import { StdinBuffer } from "./stdin-buffer";
 import {
 	isInsideTerminalMultiplexer,
+	isSshSession,
 	NotifyProtocol,
 	setCellDimensions,
 	setOsc99Supported,
+	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
+import { translateWindowsAltGrSequence } from "./windows-altgr";
+import { Win32InputModeDecoder } from "./windows-input-mode";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
-function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	if (!env.SSH_CONNECTION && !env.SSH_TTY && !env.SSH_CLIENT) return true;
-	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
+
+/**
+ * Terminal → program TSP messages through a Windows ConPTY: its input parser
+ * discards APC strings but passes OSC through, so Tern writes
+ * `ESC ] 877 ; tsp;… ESC \` there instead of `ESC _ tsp;… ESC \`.
+ */
+const TSP_OSC_PREFIX = `\x1b]877;${TSP_PREFIX.slice(2)}`;
+
+/**
+ * The TSP message a reassembled input string holds, in APC form, or
+ * `undefined` while its terminator has not arrived. An OSC 877 message may end
+ * with ST or BEL (a JSON body never contains BEL).
+ */
+function completeTspInput(buffered: string): string | undefined {
+	if (!buffered.startsWith(TSP_OSC_PREFIX)) return buffered.endsWith("\x1b\\") ? buffered : undefined;
+	const terminator = buffered.endsWith("\x1b\\") ? 2 : buffered.endsWith("\x07") ? 1 : 0;
+	if (terminator === 0) return undefined;
+	return `${TSP_PREFIX}${buffered.slice(TSP_OSC_PREFIX.length, -terminator)}\x1b\\`;
 }
 
 function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): boolean {
@@ -141,62 +166,113 @@ export function chunkForConPTY(data: string, maxChunkBytes: number = MAX_CONPTY_
 }
 
 /**
- * Hard cap on bytes queued to a stalled stdout before its consumer is declared
- * gone. A live terminal drains within milliseconds, so a backlog this large —
- * far above any legitimate paint (a full session resume is a few MiB) — means
- * the PTY reader has stopped consuming entirely. Without the cap, `#safeWrite`
- * keeps handing cosmetic frames (the `hub wait` spinner, 500 ms progress
- * snapshots) to a writable buffer that never drains, growing RSS without bound
- * until the host runs out of memory. See #6854.
+ * Backlog ceiling that arms the stall watchdog. A live terminal keeps this
+ * near zero; crossing it means either a genuinely wedged PTY reader (#6854) or
+ * a single legitimately-huge frame — a `--resume` transcript repaint of many
+ * inline images is one multi-tens-of-MiB write (#10430). The two are told
+ * apart by {@link StdoutStallWatchdog} (drain progress), not by this number
+ * alone: inter-frame production is already gated at 256 KiB
+ * (`TUI.#deferRenderForOutputBacklog`), so the only way to reach this cap is a
+ * lone oversized frame or a reader that has stopped consuming entirely.
  */
 const MAX_STDOUT_BACKLOG_BYTES = 64 * 1024 * 1024;
 
 /**
- * Turns an unbounded, never-draining stdout writable buffer into a bounded
- * disconnect signal.
+ * Backlog at or below which stdout is healthy again: the pump has kept up, the
+ * TUI resumes composing frames, and a {@link StdoutStallWatchdog} episode ends.
+ * The TUI render gate (`TUI.#MAX_PENDING_OUTPUT_BYTES`) is this same value, so
+ * the watchdog stays armed across the entire range where frames are deferred —
+ * otherwise a consumer that wedges between this level and the arm cap is never
+ * re-sampled and the session freezes instead of disconnecting (#10434 review).
+ */
+export const STDOUT_BACKLOG_CLEAR_BYTES = 256 * 1024;
+
+/**
+ * How long an armed backlog may go without any drain progress before the
+ * consumer is declared gone. A slow-but-alive terminal keeps reaching new
+ * low-water marks (so it never trips), but a live one can also stop reading
+ * for seconds at a time: a busy tmux server holding a slow client, or a
+ * container's attach stream. Waiting costs no memory, because frames are
+ * deferred while the backlog is up (`TUI.#deferRenderForOutputBacklog`), so the
+ * window is long enough to ride those out; a reader that never comes back is
+ * still torn down within it.
+ */
+const STDOUT_STALL_TIMEOUT_MS = 60_000;
+
+/** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
+const STDOUT_STALL_POLL_MS = 250;
+
+/**
+ * Bounds a never-draining stdout backlog without killing a single large but
+ * actively-draining frame.
  *
  * `process.stdout.write()` returns `false` once its buffer exceeds the stream
- * high-water mark; the bytes stay queued and are only freed when the consumer
- * drains (the `drain` event). While the consumer keeps up, writes are accepted
- * and nothing accumulates. When it stalls, every subsequent write piles onto
- * the buffer — a stalled-but-alive PTY reader never throws, so the write path
- * has no other signal that output is going nowhere. This guard sums the bytes
- * queued since backpressure began and reports when that backlog crosses the
- * cap, at which point the caller treats the terminal as disconnected.
+ * high-water mark, and the off-thread pump's `pending()` climbs the same way;
+ * a stalled-but-alive PTY reader never throws, so the byte count is the only
+ * signal that output is going nowhere. Tripping on the instantaneous count
+ * alone is wrong: a legitimate oversized frame (a resume repaint of dozens of
+ * inline screenshots, #10430) briefly exceeds the cap and then drains.
+ *
+ * An episode starts when the backlog first exceeds `armBytes` and lasts until
+ * it drains back to `clearBytes` (healthy). The backlog can fall below
+ * `armBytes` while still unhealthy, so the episode must outlive that dip
+ * (#10434): during it the watchdog declares the terminal disconnected only when
+ * the backlog makes no drain progress (no new low-water mark) for `stallMs` —
+ * a draining terminal keeps lowering the mark and never trips, while a wedged
+ * one (#6854) still tears down within the window.
  *
  * Exported for unit testing; `ProcessTerminal` is the sole production user.
  */
-export class OutputBacklogGuard {
-	#bytes = 0;
-	#tracking = false;
+export class StdoutStallWatchdog {
+	#lowWater = Number.POSITIVE_INFINITY;
+	#stalledSinceMs = 0;
+	#armed = false;
 
-	constructor(private readonly capBytes: number = MAX_STDOUT_BACKLOG_BYTES) {}
+	constructor(
+		private readonly armBytes: number = MAX_STDOUT_BACKLOG_BYTES,
+		private readonly clearBytes: number = STDOUT_BACKLOG_CLEAR_BYTES,
+		private readonly stallMs: number = STDOUT_STALL_TIMEOUT_MS,
+	) {}
 
-	/** True once a refused write started a backlog that has not yet drained. */
-	get tracking(): boolean {
-		return this.#tracking;
+	/** True while an episode is active and the backlog must be polled to completion. */
+	get armed(): boolean {
+		return this.#armed;
 	}
 
 	/**
-	 * Record one `stdout.write()`: `accepted` is that call's return value and
-	 * `bytes` its encoded size. Returns true when the pending backlog now
-	 * exceeds the cap and the terminal should be treated as disconnected.
+	 * Feed the current pending-byte count and clock reading. Returns true once an
+	 * armed episode has gone `stallMs` with no drain progress, at which point the
+	 * caller treats the terminal as disconnected.
 	 */
-	record(accepted: boolean, bytes: number): boolean {
-		if (!this.#tracking) {
-			// Consumer is keeping up; nothing is queued.
-			if (accepted) return false;
-			// First refused write: backpressure has begun.
-			this.#tracking = true;
+	sample(pending: number, nowMs: number): boolean {
+		if (!this.#armed) {
+			// Idle: only an oversized backlog starts an episode.
+			if (pending <= this.armBytes) return false;
+			this.#armed = true;
+			this.#lowWater = pending;
+			this.#stalledSinceMs = nowMs;
+			return false;
 		}
-		this.#bytes += bytes;
-		return this.#bytes > this.capBytes;
+		if (pending <= this.clearBytes) {
+			// Drained back to a healthy level: the episode is over.
+			this.reset();
+			return false;
+		}
+		if (pending < this.#lowWater) {
+			// Drain progress: a new low-water mark restarts the stall clock.
+			this.#lowWater = pending;
+			this.#stalledSinceMs = nowMs;
+			return false;
+		}
+		// Still unhealthy with no new low-water mark since the clock started.
+		return nowMs - this.#stalledSinceMs >= this.stallMs;
 	}
 
-	/** Called on the stdout `drain` event: the buffer emptied, backlog cleared. */
+	/** Episode ended (drained) or terminal torn down: stop watching. */
 	reset(): void {
-		this.#bytes = 0;
-		this.#tracking = false;
+		this.#armed = false;
+		this.#lowWater = Number.POSITIVE_INFINITY;
+		this.#stalledSinceMs = 0;
 	}
 }
 
@@ -229,6 +305,20 @@ function registerPostmortemTerminalRestore(): void {
 /** Record alternate-screen state (called by the TUI on `?1049h`/`?1049l` writes). */
 export function setAltScreenActive(active: boolean): void {
 	altScreenActive = active;
+}
+/**
+ * Route an out-of-band escape sequence (e.g. an OSC title update) through the
+ * active terminal's output path. While a TUI owns stdout, frame paints go
+ * through the off-thread write pump and can split across multiple write(2)
+ * calls; a direct main-thread `process.stdout.write` can land between two of
+ * them — mid escape sequence — and the host terminal then prints the payload
+ * as literal text at the cursor position. Returns false when no terminal has
+ * started, in which case the caller owns stdout and may write directly.
+ */
+export function writeThroughActiveTerminal(data: string): boolean {
+	if (!activeTerminal) return false;
+	activeTerminal.write(data);
+	return true;
 }
 
 const stdoutErrorHandlers = new Set<(err: Error) => void>();
@@ -358,12 +448,14 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[?5522l" + // Disable enhanced paste notifications
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
+					"\x1b[?9001l" + // Disable win32-input-mode fallback (Windows console)
 					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
 					// with no prior save), corrupting the shell handoff on exit.
 					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
+					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
 					"\x1b[?25h", // Show cursor
 			);
 			altScreenActive = false;
@@ -377,11 +469,80 @@ export function emergencyTerminalRestore(): void {
 }
 /** Terminal-reported appearance (dark/light mode). */
 export type TerminalAppearance = "dark" | "light";
+/** Options for {@link Terminal.start}. */
+export interface TerminalStartOptions {
+	/**
+	 * Paint-only start: skip raw mode, stdin ownership, and every probe that
+	 * elicits a response on stdin. The host tty keeps cooked-mode line editing
+	 * (kernel echo lands at the hardware cursor), and typed bytes stay queued
+	 * in the kernel until {@link Terminal.enableInput} takes ownership and
+	 * replays them through `onInput`. Used for the startup prepaint so typing
+	 * echoes even while module loading blocks the event loop.
+	 */
+	deferInput?: boolean;
+	/**
+	 * Reports whether the event loop is stalled or just recovered from a
+	 * stall. Once the terminal confirms bracketed paste, an unmarked multiline
+	 * burst is an input-method commit (IME, dictation) delivered as one paste
+	 * on a responsive loop, but keystrokes a stall batched into one read —
+	 * replayed as keys so Enter submits — while this returns true. Without a
+	 * probe every such burst is treated as an input-method commit.
+	 */
+	isLoopStalled?: () => boolean;
+}
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
+/**
+ * Fired once per DEC private mode when DECRQM support resolves.
+ * `confirmed` is false when only the DA1 sentinel arrived.
+ * `status` is the DECRPM value (0 unrecognized, 1/2 set/reset, 3 permanently
+ * set, 4 permanently reset) when the terminal answered DECRQM.
+ */
+export type PrivateModeReportHandler = (mode: number, supported: boolean, confirmed?: boolean, status?: number) => void;
+/**
+ * Fired once when the Glyph Protocol handshake resolves. `supported` is true
+ * only after the bundled icons were written and the terminal confirmed (via a
+ * `q` coverage query) that a registered codepoint is served from its
+ * glossary, so a host can safely repaint — or switch to the nerd preset.
+ */
+export type GlyphProtocolReportHandler = (supported: boolean) => void;
+/**
+ * Outcome of the Tern Surface Protocol `hello` probe: the terminal's reply,
+ * or null when it answered the DA1 sentinel first (no TSP) or the probe was
+ * skipped (`PI_TUI_NATIVE=0`, multiplexers).
+ */
+export type TspHelloHandler = (hello: TspHello | null) => void;
+
+/**
+ * Cursor shapes addressable via DECSCUSR (`CSI <n> SP q`). `"default"` (0) hands the shape back to
+ * the terminal's own configuration, which is what teardown restores rather than guessing a shape
+ * the user never chose.
+ */
+export type CursorShape = "default" | "block" | "underline" | "bar";
+
+export const CURSOR_SHAPE_CODES: Record<CursorShape, number> = {
+	default: 0,
+	block: 2,
+	underline: 4,
+	bar: 6,
+};
 export interface Terminal {
 	// Start the terminal with input, resize, and host-disconnect handlers.
-	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void;
+	start(
+		onInput: (data: string) => void,
+		onResize: () => void,
+		onDisconnect?: () => void,
+		options?: TerminalStartOptions,
+	): void;
+
+	/**
+	 * Take ownership of stdin after a `deferInput` start: enable raw mode,
+	 * attach input handlers, and run the capability probes start() skipped.
+	 * Bytes the user typed in cooked mode meanwhile are replayed through
+	 * `onInput`. No-op when input was never deferred. Optional so custom
+	 * Terminals built against older pi-tui versions keep working.
+	 */
+	enableInput?(): void;
 
 	// Stop the terminal and restore state
 	stop(): void;
@@ -400,6 +561,28 @@ export interface Terminal {
 	// Get terminal dimensions
 	get columns(): number;
 	get rows(): number;
+	/**
+	 * Output bytes accepted but not yet delivered to the terminal, when the
+	 * implementation can report it. The renderer skips composing new frames
+	 * while this backlog is deep, so a slow terminal receives only fresh
+	 * frames instead of a queue of stale ones. Optional so custom Terminals
+	 * built against older pi-tui versions keep working.
+	 */
+	readonly pendingOutputBytes?: number;
+
+	/**
+	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
+	 * neither the cursor nor the painted rows survive a resize under the
+	 * application's own model. Measured on Windows conhost: resizing the
+	 * pseudoconsole makes it re-emit its whole viewport from `CSI H` with
+	 * absolute addressing while the application writes nothing, and it re-homes
+	 * the cursor, so a DSR reply after a resize reports column 1 instead of the
+	 * column the application parked. The renderer's resize anchor recovery needs
+	 * both properties, so it takes the rebuild path instead when this is set.
+	 * Optional so custom Terminals built against older pi-tui versions keep
+	 * working; absent means the terminal itself owns the grid.
+	 */
+	readonly hostOwnsGridOnResize?: boolean;
 
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
@@ -427,6 +610,12 @@ export interface Terminal {
 	// (crash/exit restore paths).
 	hideCursor(force?: boolean): void; // Hide the cursor
 	showCursor(force?: boolean): void; // Show the cursor
+
+	// Cursor shape (DECSCUSR). Written whenever it changes, whether or not the
+	// hardware cursor is currently visible: reshaping a hidden cursor has no
+	// visible effect, and `stop()` restores the user's configured shape. Hosts
+	// that render a software cursor simply never call this.
+	setCursorShape?(shape: CursorShape): void;
 
 	// Clear operations
 	clearLine(): void; // Clear current line
@@ -480,8 +669,34 @@ export interface Terminal {
 	 * status resolves. `confirmed` is false when the terminal answered the DA1
 	 * sentinel without answering DECRQM, which proves only that querying support
 	 * is unavailable — not that the private mode itself is unsupported.
+	 * `status` is the DECRPM value when the terminal answered DECRQM.
 	 */
-	onPrivateModeReport?(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void;
+	onPrivateModeReport?(callback: PrivateModeReportHandler): void;
+	/**
+	 * Register a callback fired once the startup Glyph Protocol handshake
+	 * resolves (see {@link GlyphProtocolReportHandler}). A subscriber that
+	 * arrives after the handshake already resolved is called immediately with
+	 * the stored outcome. Optional so custom Terminals built against older
+	 * pi-tui versions keep working.
+	 */
+	onGlyphProtocolReport?(callback: GlyphProtocolReportHandler): void;
+	/**
+	 * Register a callback fired once the Tern Surface Protocol `hello` probe
+	 * resolves (see {@link TspHelloHandler}); a resolved outcome is replayed to
+	 * late subscribers. TSP events arriving afterwards are delivered through
+	 * `onInput` as complete `ESC _ tsp;e;… ESC \` strings. Optional so custom
+	 * Terminals built against older pi-tui versions keep working.
+	 */
+	onTspHello?(callback: TspHelloHandler): void;
+	/** True while the `hello` probe awaits its reply or DA1 sentinel. */
+	readonly tspProbePending?: boolean;
+	/**
+	 * The environment names a Tern Surface Protocol terminal
+	 * (`TERM_PROGRAM=tern`) and the `hello` probe will run: the TUI takes input
+	 * at start and opens its surface before the reply, which then confirms or
+	 * revokes it.
+	 */
+	readonly tspExpected?: boolean;
 }
 
 /**
@@ -493,9 +708,9 @@ export interface Terminal {
  * single predicate.
  */
 export function isConPTYHosted(): boolean {
-	if (process.platform === "win32") return true;
-	// WSL: stdout still crosses into ConPTY at the `wslhost` boundary.
-	return process.platform === "linux" && (!!$env.WSL_DISTRO_NAME || !!$env.WSL_INTEROP);
+	// win32 always hosts through ConPTY; under WSL stdout still crosses into
+	// ConPTY at the `wslhost` boundary.
+	return process.platform === "win32" || isWsl(process.platform, $env);
 }
 
 /** Discriminated owner of an outstanding DA1 sentinel in the unified probe FIFO. */
@@ -503,7 +718,9 @@ type Da1SentinelOwner =
 	| { kind: "keyboard" }
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
-	| { kind: "osc99Probe"; id: string };
+	| { kind: "osc99Probe"; id: string }
+	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
+	| { kind: "tsp" };
 
 let nextOsc99ProbeId = 1;
 
@@ -532,6 +749,25 @@ function isPrivateModeSupported(status: string): boolean {
 	return status !== "0" && status !== "4";
 }
 
+/** Construction-time overrides for {@link ProcessTerminal}. */
+export interface ProcessTerminalOptions {
+	/**
+	 * Force ConPTY-hosted behavior on or off. Defaults to live detection via
+	 * {@link isConPTYHosted}. Tests set this so the kitty-flag, write-chunking
+	 * and resize-routing ({@link Terminal.hostOwnsGridOnResize}) paths stay
+	 * hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
+	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
+	 */
+	conpty?: boolean;
+	/**
+	 * Whether stdin is a native Windows console handle (win32, not WSL), whose
+	 * console host answers `CSI ? 9001 h` with win32-input-mode key records.
+	 * Defaults to `process.platform === "win32"`; only consulted when `conpty`
+	 * is also true.
+	 */
+	nativeWindowsConsole?: boolean;
+}
+
 /**
  * Real terminal using process.stdin/stdout
  */
@@ -539,11 +775,17 @@ export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
+	/** True between a `deferInput` start() and enableInput(). */
+	#inputDeferred = false;
+	#isLoopStalled?: () => boolean;
 	#stdoutResizeListener?: () => void;
 	#kittyProtocolActive = false;
 	#kittyEnableSeq: string | null = null;
 	#modifyOtherKeysActive = false;
 	#modifyOtherKeysTimeout?: Timer;
+	// Windows console fallback when kitty is unavailable: key records arrive as
+	// win32-input-mode sequences and are decoded before reaching the handler.
+	#win32InputDecoder?: Win32InputModeDecoder;
 	#stdinBuffer?: StdinBuffer;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
@@ -564,25 +806,41 @@ export class ProcessTerminal implements Terminal {
 	// unknown (fresh start, resize, or an alt-screen switch newer than the
 	// last cursor sequence — some hosts keep DECTCEM per buffer).
 	#cursorVisible: boolean | undefined;
+	// Last DECSCUSR shape written, so per-keystroke mode changes dedupe.
+	// `undefined` = never set, i.e. the terminal's own configured shape.
+	#cursorShape: CursorShape | undefined;
 	// Captured at construction and re-read at start(): when true, every real
 	// terminal side effect (writes, probes, raw mode, SIGWINCH, timers) is
 	// suppressed. Defaults on under `bun test` — see isTerminalHeadless().
 	#headless = isTerminalHeadless();
+	// Captured once at construction: whether stdout flows through a ConPTY
+	// pseudo-console. Gates the kitty-flag choice (#1216) and large-write
+	// chunking (#safeWrite). Live-detected by default; tests inject a fixed
+	// value so WSL env does not change behavior. See {@link ProcessTerminalOptions}.
+	readonly #conpty: boolean;
+	readonly #nativeWindowsConsole: boolean;
 	#writeLogPath = $env.PI_TUI_WRITE_LOG || "";
 	#stdoutErrorCleanup?: () => void;
 	#stdoutErrorHandler = (err: Error) => {
 		this.#markTerminalDisconnected("stdout failed", err);
 	};
-	// Bounds the stdout writable buffer against a stalled PTY consumer: a
-	// stalled-but-alive reader never throws, so #safeWrite has no error to catch
-	// and the writable buffer grows without bound as cosmetic frames pile up.
-	// See OutputBacklogGuard and #6854.
-	#stdoutBacklog = new OutputBacklogGuard();
-	#stdoutDrainArmed = false;
-	#stdoutDrainHandler = () => {
-		this.#stdoutDrainArmed = false;
-		this.#stdoutBacklog.reset();
-	};
+	// Bounds the stdout backlog against a stalled PTY consumer without killing a
+	// single large-but-draining frame: a stalled-but-alive reader never throws,
+	// so the pending byte count is the only stall signal, and a legitimate
+	// oversized frame (a resume repaint of many inline images) must be allowed
+	// to drain. See StdoutStallWatchdog, #6854, and #10430.
+	#stdoutStall = new StdoutStallWatchdog();
+	#stdoutStallTimer?: Timer;
+	// Off-thread output pump (unix TTYs): Bun's `process.stdout.write` blocks
+	// the event loop until the terminal drains, so a slow/occluded emulator
+	// froze the whole TUI for the duration of a multi-MB repaint. The pump
+	// enqueues frames and performs the blocking write(2) on its own thread;
+	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
+	#outputPump?: TtyWriter;
+	// Upper bound on the pump's backlog: the count its last enqueue or read
+	// reported. Only #safeWrite enqueues and the pump thread only drains, so
+	// the live backlog cannot exceed this until the next enqueue refreshes it.
+	#pumpBacklogBound = 0;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -602,11 +860,23 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
+	/**
+	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
+	 * coverage reply sent after the bundle was written.
+	 */
+	#glyphProtocolPhase: "idle" | "support" | "confirm" = "idle";
+	#glyphProtocolReplyBuffer = "";
+	#glyphProtocolResult: boolean | undefined;
+	#glyphProtocolCallbacks: GlyphProtocolReportHandler[] = [];
+	#tspPending = false;
+	#tspResult: TspHello | null | undefined;
+	#tspCallbacks: TspHelloHandler[] = [];
+	#tspReplyBuffer = "";
 	#privateCsiResponseBuffer = "";
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
 	#privateModeSupport = new Map<number, boolean>();
-	#privateModeCallbacks: Array<(mode: number, supported: boolean, confirmed: boolean) => void> = [];
+	#privateModeCallbacks: PrivateModeReportHandler[] = [];
 	/** Whether DEC 2048 in-band resize notifications are currently enabled. */
 	#inBandResizeActive = false;
 	/** Reassembly buffer for a DEC 2048 in-band resize report split across stdin reads. */
@@ -615,7 +885,17 @@ export class ProcessTerminal implements Terminal {
 	#reportedRows?: number;
 	#mode2031DebounceTimer?: Timer;
 	#windowsTerminalAppearancePollTimer?: Timer;
+	#progressActive = false;
+	// Ghostty expires OSC 9;4 state without a heartbeat. Persistent hosts such
+	// as Windows Terminal restart their indeterminate animation on every write.
+	readonly #keepProgressAlive = TERMINAL.id === "ghostty";
+	#bracketedPasteRefreshTimer?: Timer;
 	#progressTimer?: Timer;
+
+	constructor(options?: ProcessTerminalOptions) {
+		this.#conpty = options?.conpty ?? isConPTYHosted();
+		this.#nativeWindowsConsole = options?.nativeWindowsConsole ?? process.platform === "win32";
+	}
 
 	get kittyProtocolActive(): boolean {
 		return this.#kittyProtocolActive;
@@ -693,14 +973,47 @@ export class ProcessTerminal implements Terminal {
 		return token;
 	}
 
-	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
+	onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.#privateModeCallbacks.push(callback);
 	}
 
-	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void {
+	onGlyphProtocolReport(callback: GlyphProtocolReportHandler): void {
+		this.#glyphProtocolCallbacks.push(callback);
+		// The handshake runs from enableInput(), which can precede the host's
+		// subscription during startup; replay so the outcome is never missed.
+		if (this.#glyphProtocolResult !== undefined) callback(this.#glyphProtocolResult);
+	}
+
+	onTspHello(callback: TspHelloHandler): void {
+		this.#tspCallbacks.push(callback);
+		if (this.#tspResult !== undefined) callback(this.#tspResult);
+	}
+
+	get tspProbePending(): boolean {
+		return this.#tspPending;
+	}
+
+	get tspExpected(): boolean {
+		// A multiplexer started from Tern can leave `TERM_PROGRAM=tern` behind
+		// while swallowing APC, even when `PI_TUI_NATIVE=1` forces the probe.
+		return (
+			$env.TERM_PROGRAM?.toLowerCase() === "tern" &&
+			!isInsideTerminalMultiplexer($env) &&
+			!isTerminalHeadless() &&
+			this.#shouldQueryTspSupport()
+		);
+	}
+
+	start(
+		onInput: (data: string) => void,
+		onResize: () => void,
+		onDisconnect?: () => void,
+		options?: TerminalStartOptions,
+	): void {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
+		this.#isLoopStalled = options?.isLoopStalled;
 		// The host terminal's cursor visibility is unknown until we write it.
 		this.#cursorVisible = undefined;
 
@@ -715,12 +1028,65 @@ export class ProcessTerminal implements Terminal {
 		// Register for emergency cleanup
 		activeTerminal = this;
 		terminalEverStarted = true;
+		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
+		// prebuilt natives module without the export falls back to direct writes.
+		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
+		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
+		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+			try {
+				this.#outputPump = new TtyWriter(1);
+				this.#pumpBacklogBound = 0;
+			} catch (err) {
+				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
+			}
+		}
 
-		// Keep unmanaged fd-2 writes (macOS libmalloc/framework diagnostics) off
-		// the viewport while we own the terminal; released in stop(). See
-		// stderr-guard in pi-utils (mirrors openai/codex#24459).
+		// Keep unmanaged native fd-2 writes off the viewport while we own the
+		// terminal; released in stop(). See stderr-guard in pi-utils.
 		suppressTerminalStderr();
 
+		// Set up resize handler immediately. The OS refreshes process.stdout
+		// dimensions before firing `resize`, so it is authoritative for geometry:
+		// reconcile any stale cached DEC 2048 report before notifying the renderer.
+		this.#stdoutResizeListener = () => {
+			// Conservative: some hosts reset modes across a resize/reattach, so
+			// re-establish cursor visibility on the next explicit call.
+			this.#cursorVisible = undefined;
+			this.#reconcileInBandGeometryOnResize();
+			this.#resizeHandler?.();
+		};
+		process.stdout.on("resize", this.#stdoutResizeListener);
+
+		// Refresh terminal dimensions - they may be stale after suspend/resume
+		// (SIGWINCH is lost while process is stopped). Unix only.
+		if (process.platform !== "win32") {
+			process.kill(process.pid, "SIGWINCH");
+		}
+
+		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
+
+		if (options?.deferInput) {
+			this.#inputDeferred = true;
+			return;
+		}
+		this.#attachInput();
+	}
+
+	enableInput(): void {
+		if (!this.#inputDeferred) return;
+		this.#inputDeferred = false;
+		if (this.#headless || this.#dead) return;
+		this.#attachInput();
+	}
+
+	/**
+	 * Own stdin: raw mode, input listeners, and the capability probes that
+	 * elicit stdin responses. Split from start() so a `deferInput` prepaint can
+	 * leave the tty in cooked mode (kernel echo + line editing) while startup
+	 * module loading blocks the event loop, then adopt the kernel-buffered
+	 * keystrokes here once the app can process them.
+	 */
+	#attachInput(): void {
 		// A multiplexer or SSH disconnect can leave isTTY true after its pty has
 		// been revoked. Raw mode is then impossible, so take the normal terminal
 		// disconnect path rather than letting Bun abort startup with EIO.
@@ -751,24 +1117,6 @@ export class ProcessTerminal implements Terminal {
 		// See #6374.
 		this.#safeWrite("\x1b[?1l\x1b>");
 
-		// Set up resize handler immediately. The OS refreshes process.stdout
-		// dimensions before firing `resize`, so it is authoritative for geometry:
-		// reconcile any stale cached DEC 2048 report before notifying the renderer.
-		this.#stdoutResizeListener = () => {
-			// Conservative: some hosts reset modes across a resize/reattach, so
-			// re-establish cursor visibility on the next explicit call.
-			this.#cursorVisible = undefined;
-			this.#reconcileInBandGeometryOnResize();
-			this.#resizeHandler?.();
-		};
-		process.stdout.on("resize", this.#stdoutResizeListener);
-
-		// Refresh terminal dimensions - they may be stale after suspend/resume
-		// (SIGWINCH is lost while process is stopped). Unix only.
-		if (process.platform !== "win32") {
-			process.kill(process.pid, "SIGWINCH");
-		}
-
 		// On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
 		// VT escape sequences (e.g. \x1b[Z for Shift+Tab) instead of raw console
 		// events that lose modifier information. Must run after setRawMode(true)
@@ -781,8 +1129,6 @@ export class ProcessTerminal implements Terminal {
 		// Explicit probes are safe only after their response parser and stdin
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
-		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
-
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
 		// sequences in order, so if DA1 arrives before OSC 11 response,
@@ -794,6 +1140,15 @@ export class ProcessTerminal implements Terminal {
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
+
+		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
+		// triggers the bundled icon registration so the nerd symbol preset renders
+		// without a patched font installed.
+		this.#queryGlyphProtocolSupport();
+
+		// Tern Surface Protocol `hello`, same DA1 sentinel FIFO. A reply switches
+		// the TUI to describing its UI instead of painting rows.
+		this.#queryTspSupport();
 
 		// Subscribe to Mode 2031 appearance change notifications.
 		// When the terminal reports a change, we re-query OSC 11 to get the
@@ -820,6 +1175,12 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
+		// 2004 (bracketed paste) is queried only to confirm the terminal brackets
+		// pastes; once confirmed, StdinBuffer's unbracketed raw-paste heuristic
+		// consults the host's stall probe so keystrokes an event-loop stall
+		// batches into one read stay keys (#12540) while input-method commits
+		// still land as one paste (#13344).
+		this.#queryPrivateMode(2004);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
@@ -932,7 +1293,9 @@ export class ProcessTerminal implements Terminal {
 				this.#privateCsiResponseBuffer.length === 0 &&
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
-				this.#osc99ResponseBuffer.length === 0
+				this.#osc99ResponseBuffer.length === 0 &&
+				this.#glyphProtocolReplyBuffer.length === 0 &&
+				this.#tspReplyBuffer.length === 0
 			) {
 				if (this.#inputHandler) {
 					this.#inputHandler(sequence);
@@ -1091,6 +1454,18 @@ export class ProcessTerminal implements Terminal {
 						this.#resolveOsc99Support(owner.id, false);
 						break;
 					}
+					case "glyphProtocol": {
+						// The support-phase sentinel is answered after the `s` reply that
+						// already advanced the handshake; only a sentinel from the phase
+						// still awaiting its reply means that reply never came.
+						if (owner.phase === this.#glyphProtocolPhase) this.#resolveGlyphProtocolSupport(false);
+						break;
+					}
+					case "tsp": {
+						// DA1 before any `tsp;r` reply: the terminal doesn't speak TSP.
+						this.#resolveTspSupport(null);
+						break;
+					}
 				}
 				return;
 			}
@@ -1110,6 +1485,7 @@ export class ProcessTerminal implements Terminal {
 					this.#safeWrite("\x1b[>4;0m");
 					this.#modifyOtherKeysActive = false;
 				}
+				this.#disableWin32InputMode();
 				// Any reply to `\x1b[?u` means the terminal speaks the kitty keyboard
 				// protocol. The reported flag value is the *current* stack-top — fresh
 				// terminals report 0 — so support is implied by the reply itself, not by
@@ -1118,7 +1494,7 @@ export class ProcessTerminal implements Terminal {
 				const reportedFlags = parseInt(match[1]!, 10);
 				this.#kittyProtocolActive = true;
 				setKittyProtocolActive(true);
-				if (isConPTYHosted()) {
+				if (this.#conpty) {
 					// ConPTY (native Windows and WSL) drops Shift+letter keypresses
 					// entirely when flag 4 (report alternate keys) is set. Use flag 1
 					// (disambiguate only), preserving flag 2 if already active.
@@ -1175,6 +1551,40 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
+			// Tern Surface Protocol APC (`ESC _ tsp ; … ESC \`), or its OSC 877
+			// framing through a ConPTY: the hello reply resolves the probe; events
+			// go to the input handler whole, in APC form, where the TUI routes them
+			// to the native backend before key matching.
+			if (this.#tspReplyBuffer || sequence.startsWith(TSP_PREFIX) || sequence.startsWith(TSP_OSC_PREFIX)) {
+				if (this.#tspReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#tspReplyBuffer = "";
+				} else {
+					this.#tspReplyBuffer += sequence;
+					const message = completeTspInput(this.#tspReplyBuffer);
+					if (message === undefined) return;
+					this.#tspReplyBuffer = "";
+					this.#handleTspMessage(message);
+					return;
+				}
+			}
+
+			// Glyph Protocol APC replies (`ESC _ 25a1 ; … ESC \`). Swallowed for
+			// the whole session, not just while the probe is outstanding: an APC is
+			// exclusively terminal->host data, and registrations use `reply=0`, so
+			// any late `r`/`c` acknowledgement must never reach the composer.
+			if (this.#glyphProtocolReplyBuffer || sequence.startsWith("\x1b_25a1;")) {
+				if (this.#glyphProtocolReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#glyphProtocolReplyBuffer = "";
+				} else {
+					this.#glyphProtocolReplyBuffer += sequence;
+					if (!this.#glyphProtocolReplyBuffer.endsWith("\x1b\\")) return;
+					const reply = this.#glyphProtocolReplyBuffer;
+					this.#glyphProtocolReplyBuffer = "";
+					this.#handleGlyphProtocolReply(reply);
+					return;
+				}
+			}
+
 			// Mode 2031 change notification: re-query OSC 11 with 100ms debounce
 			// (Neovim convention — coalesces rapid notifications during transitions)
 			const appearanceMatch = sequence.match(appearanceDsrPattern);
@@ -1187,14 +1597,30 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 			if (this.#inputHandler) {
-				this.#inputHandler(sequence);
+				const win32Keys = this.#win32InputDecoder?.decode(sequence);
+				if (win32Keys !== undefined) {
+					for (const key of win32Keys) this.#inputHandler(key);
+					return;
+				}
+				// Windows console hosts drop AltGr text under kitty (AltGr+F → `CSI 102;3u`);
+				// recover it from the active layout before any keybinding sees an Alt chord.
+				const altGrText =
+					this.#kittyProtocolActive && this.#conpty && process.platform === "win32"
+						? translateWindowsAltGrSequence(sequence)
+						: undefined;
+				this.#inputHandler(altGrText ?? sequence);
 			}
 		});
 
-		// Re-wrap paste content with bracketed paste markers for existing editor handling
-		this.#stdinBuffer.on("paste", (content: string) => {
+		// Re-wrap paste content with bracketed paste markers for existing editor
+		// handling. An Enter that shared the paste's stdin read rides along so
+		// paste and submit reach the component focused right now, not one the
+		// paste itself is about to open. Under win32-input-mode the console host
+		// encodes pasted line breaks as key records; decode them as text (#14065).
+		this.#stdinBuffer.on("paste", (content: string, enter?: string) => {
 			if (this.#inputHandler) {
-				this.#inputHandler(`\x1b[200~${content}\x1b[201~`);
+				const text = this.#win32InputDecoder?.decodePaste(content) ?? content;
+				this.#inputHandler(`\x1b[200~${text}\x1b[201~${enter ?? ""}`);
 			}
 		});
 
@@ -1300,6 +1726,128 @@ export class ProcessTerminal implements Terminal {
 		setOsc99Supported(supported);
 	}
 
+	#shouldQueryGlyphProtocolSupport(): boolean {
+		// `PI_NO_GLYPH_PROTOCOL=1` keeps the terminal's own font coverage (tofu
+		// included) — the registration shadows a system Nerd Font at render time.
+		if ($env.PI_NO_GLYPH_PROTOCOL === "1") return false;
+		// Same multiplexer rule as the OSC 99 probe: tmux/screen cannot route the
+		// APC reply back to the sending pane, so it would leak as literal text.
+		if (isInsideTerminalMultiplexer($env)) return false;
+		return !isBunTestRuntime() || $env.PI_TUI_GLYPH_PROTOCOL_PROBE === "1";
+	}
+
+	#queryGlyphProtocolSupport(): void {
+		setTerminalGlyphProtocol(false);
+		this.#glyphProtocolPhase = "idle";
+		this.#glyphProtocolResult = undefined;
+		this.#glyphProtocolReplyBuffer = "";
+		if (this.#dead || !this.#shouldQueryGlyphProtocolSupport()) return;
+		this.#glyphProtocolPhase = "support";
+		this.#da1SentinelOwners.push({ kind: "glyphProtocol", phase: "support" });
+		this.#safeWrite(`${encodeGlyphSupportQuery()}\x1b[c`);
+	}
+
+	#handleGlyphProtocolReply(sequence: string): void {
+		if (!isGlyphProtocolSequence(sequence)) return;
+		const reply = parseGlyphProtocolReply(sequence);
+		if (!reply) {
+			logger.debug("Glyph Protocol: unparsable reply", { sequence });
+			return;
+		}
+		if (reply.verb === "s" && this.#glyphProtocolPhase === "support") {
+			// Every bundled payload is `fmt=glyf`; a terminal that recognises the
+			// protocol but advertises no formats would reject each registration.
+			if (!reply.formats.includes("glyf") || this.#dead) {
+				this.#resolveGlyphProtocolSupport(false);
+				return;
+			}
+			// Registrations are fire-and-forget (`reply=0`); the coverage query
+			// that follows them is the success check — the terminal processes the
+			// stream in order, so a `glossary` answer proves the bundle landed.
+			this.#glyphProtocolPhase = "confirm";
+			this.#da1SentinelOwners.push({ kind: "glyphProtocol", phase: "confirm" });
+			this.#safeWrite(
+				`${encodeBundledGlyphRegistrations()}${encodeGlyphCoverageQuery(GLYPH_CONFIRMATION_CODEPOINT)}\x1b[c`,
+			);
+			return;
+		}
+		if (reply.verb === "q" && this.#glyphProtocolPhase === "confirm" && reply.cp === GLYPH_CONFIRMATION_CODEPOINT) {
+			const confirmed = reply.coverage.includes("glossary");
+			if (!confirmed) logger.warn("Glyph Protocol: registered codepoint not served from glossary", reply);
+			this.#resolveGlyphProtocolSupport(confirmed);
+			return;
+		}
+		// Registrations are sent with `reply=0`, so this is a terminal that
+		// ignored the reply gate or a stray acknowledgement: keep it out of input.
+		if ((reply.verb === "r" || reply.verb === "c") && reply.status !== 0) {
+			logger.warn("Glyph Protocol: registration rejected", reply);
+		}
+	}
+
+	#shouldQueryTspSupport(): boolean {
+		const override = $env.PI_TUI_NATIVE;
+		if (override === "0") return false;
+		if (override === "1") return true;
+		// Multiplexers swallow APC, so the reply could never arrive.
+		if (isInsideTerminalMultiplexer($env)) return false;
+		return !isBunTestRuntime();
+	}
+
+	#queryTspSupport(): void {
+		this.#tspPending = false;
+		this.#tspResult = undefined;
+		this.#tspReplyBuffer = "";
+		if (this.#dead) return;
+		if (!this.#shouldQueryTspSupport()) {
+			this.#tspResult = null;
+			for (const cb of this.#tspCallbacks) cb(null);
+			return;
+		}
+		this.#tspPending = true;
+		this.#da1SentinelOwners.push({ kind: "tsp" });
+		this.#safeWrite(`${encodeTspHelloQuery()}\x1b[c`);
+	}
+
+	#handleTspMessage(sequence: string): void {
+		const message = parseTspMessage(sequence);
+		if (message?.verb === "r") {
+			if (message.reply.r === "hello") this.#resolveTspSupport(message.reply);
+			return;
+		}
+		this.#inputHandler?.(sequence);
+	}
+
+	#resolveTspSupport(hello: TspHello | null): void {
+		if (!this.#tspPending) return;
+		this.#tspPending = false;
+		const result = hello !== null && hello.v === TSP_VERSION ? hello : null;
+		if (hello !== null && result === null) logger.warn("TSP: unsupported protocol version", { v: hello.v });
+		this.#tspResult = result;
+		for (const cb of this.#tspCallbacks) {
+			try {
+				cb(result);
+			} catch (error) {
+				logger.warn("TSP: hello subscriber failed", { error: String(error) });
+			}
+		}
+	}
+
+	/** Finish the handshake in either phase and notify subscribers once. */
+	#resolveGlyphProtocolSupport(supported: boolean): void {
+		if (this.#glyphProtocolPhase === "idle") return;
+		this.#glyphProtocolPhase = "idle";
+		this.#glyphProtocolReplyBuffer = "";
+		this.#glyphProtocolResult = supported;
+		setTerminalGlyphProtocol(supported);
+		for (const cb of this.#glyphProtocolCallbacks) {
+			try {
+				cb(supported);
+			} catch {
+				// Ignore subscriber errors — capability reporting must not crash input.
+			}
+		}
+	}
+
 	/**
 	 * Parse an OSC 11 background color response and compute BT.601 luminance.
 	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
@@ -1315,6 +1863,7 @@ export class ProcessTerminal implements Terminal {
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
 		const changed = mode !== this.#appearance;
 		this.#appearance = mode;
+		// oxlint-disable-next-line unicorn/no-useless-spread -- callbacks may unsubscribe while reporting
 		for (const cb of [...this.#appearanceReportCallbacks]) {
 			try {
 				cb(mode, requestToken);
@@ -1333,10 +1882,28 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#enableModifyOtherKeysFallback(): void {
-		if (this.#kittyProtocolActive || this.#modifyOtherKeysActive) return;
-		if (!shouldEnableModifyOtherKeysFallback()) return;
+		if (this.#kittyProtocolActive || this.#modifyOtherKeysActive || this.#win32InputDecoder) return;
+		const ssh = isSshSession();
+		if (this.#conpty && this.#nativeWindowsConsole && !ssh) {
+			// The Windows console host ignores modifyOtherKeys and folds Shift+Enter
+			// into a bare CR. win32-input-mode is answered by the console host
+			// serving this process, so it works under every local ConPTY terminal.
+			// Under sshd the console host is fed the remote terminal's VT stream,
+			// and the mode splits arrow keys into Escape plus literal text (#14034).
+			this.#safeWrite("\x1b[?9001h");
+			this.#win32InputDecoder = new Win32InputModeDecoder();
+			return;
+		}
+		// A remote terminal with no identifying env may not understand the request.
+		if (ssh && (TERMINAL.id === "base" || TERMINAL.id === "trueColor")) return;
 		this.#safeWrite("\x1b[>4;2m");
 		this.#modifyOtherKeysActive = true;
+	}
+
+	#disableWin32InputMode(): void {
+		if (!this.#win32InputDecoder) return;
+		this.#safeWrite("\x1b[?9001l");
+		this.#win32InputDecoder = undefined;
 	}
 
 	/**
@@ -1376,7 +1943,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#handlePrivateModeReport(mode: number, status: string): void {
-		this.#resolvePrivateMode(mode, isPrivateModeSupported(status), true);
+		this.#resolvePrivateMode(mode, isPrivateModeSupported(status), true, Number.parseInt(status, 10));
 		if (isXtermScrollToBottomMode(mode) && isPrivateModeSet(status)) {
 			this.#disableXtermScrollToBottomMode(mode);
 		}
@@ -1388,18 +1955,33 @@ export class ProcessTerminal implements Terminal {
 	 * unsupported response from an absent response followed by the DA1 sentinel.
 	 * Enables DEC 2048 in-band resize only after positive confirmation.
 	 */
-	#resolvePrivateMode(mode: number, supported: boolean, confirmed: boolean): void {
+	#resolvePrivateMode(mode: number, supported: boolean, confirmed: boolean, status?: number): void {
 		if (this.#privateModeSupport.has(mode)) return;
 		this.#privateModeSupport.set(mode, supported);
 		for (const cb of this.#privateModeCallbacks) {
 			try {
-				cb(mode, supported, confirmed);
+				cb(mode, supported, confirmed, status);
 			} catch {
 				// Ignore subscriber errors — capability reporting must not crash input.
 			}
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
 		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
+		// Confirmed bracketed-paste support means a genuine paste arrives
+		// wrapped, so an unmarked multiline burst is an input-method commit
+		// (#13344) unless an event-loop stall batched typed keys into one read
+		// (#12540). Let the host's stall probe decide per burst. `supported` is
+		// only true here after an explicit DECRPM reply (the DA1-sentinel
+		// fallback resolves unsupported).
+		if (mode === 2004 && supported) {
+			this.#stdinBuffer?.setRawPasteStallProbe(this.#isLoopStalled);
+			// A terminal can reset this mode after the initial probe (for example,
+			// iTerm2's Terminal State toggle). Keep the mode asserted while we own
+			// the TTY, since a stalled loop now replays unmarked bursts as keys.
+			this.#bracketedPasteRefreshTimer ??= setInterval(() => {
+				if (this.#active && !this.#dead) this.#safeWrite("\x1b[?2004h");
+			}, 1000);
+		}
 	}
 
 	#syncWindowsTerminalAppearancePolling(mode2031Supported: boolean): void {
@@ -1501,6 +2083,7 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[>4;0m");
 			this.#modifyOtherKeysActive = false;
 		}
+		this.#disableWin32InputMode();
 
 		const previousHandler = this.#inputHandler;
 		this.#inputHandler = undefined;
@@ -1530,6 +2113,11 @@ export class ProcessTerminal implements Terminal {
 	stop(): void {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
+		this.#inputDeferred = false;
+		if (this.#bracketedPasteRefreshTimer) {
+			clearInterval(this.#bracketedPasteRefreshTimer);
+			this.#bracketedPasteRefreshTimer = undefined;
+		}
 		if (this.#headless) return;
 		// Unregister from emergency cleanup
 		if (activeTerminal === this) {
@@ -1541,7 +2129,9 @@ export class ProcessTerminal implements Terminal {
 		// step throws.
 		restoreTerminalStderr();
 
-		if (this.#clearProgressTimer()) {
+		this.#clearProgressTimer();
+		if (this.#progressActive) {
+			this.#progressActive = false;
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 
@@ -1559,6 +2149,13 @@ export class ProcessTerminal implements Terminal {
 		// Disable bracketed paste mode
 		this.#safeWrite("\x1b[?2004l");
 		this.#safeWrite("\x1b[?5522l");
+
+		// Hand the cursor shape back to the user's terminal configuration; a Vim
+		// Normal-mode block must not outlive the session in their shell.
+		if (this.#cursorShape !== undefined && this.#cursorShape !== "default") {
+			this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES.default} q`);
+		}
+		this.#cursorShape = undefined;
 
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
 		// no-ops otherwise). Covers crash paths that reach stop() without the
@@ -1597,6 +2194,15 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#glyphProtocolPhase = "idle";
+		this.#glyphProtocolResult = undefined;
+		this.#glyphProtocolReplyBuffer = "";
+		this.#glyphProtocolCallbacks = [];
+		setTerminalGlyphProtocol(false);
+		this.#tspPending = false;
+		this.#tspResult = undefined;
+		this.#tspReplyBuffer = "";
+		this.#tspCallbacks = [];
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
 		this.#da1SentinelOwners.length = 0;
@@ -1620,6 +2226,7 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[>4;0m");
 			this.#modifyOtherKeysActive = false;
 		}
+		this.#disableWin32InputMode();
 
 		this.#restoreWindowsVTInput();
 		// Clean up StdinBuffer
@@ -1643,12 +2250,15 @@ export class ProcessTerminal implements Terminal {
 			process.stdout.removeListener("resize", this.#stdoutResizeListener);
 			this.#stdoutResizeListener = undefined;
 		}
-		if (this.#stdoutDrainArmed) {
-			process.stdout.removeListener("drain", this.#stdoutDrainHandler);
-			this.#stdoutDrainArmed = false;
-		}
-		this.#stdoutBacklog.reset();
+		this.#disarmStdoutStallWatchdog();
 		this.#resizeHandler = undefined;
+		// Flush the restore sequences enqueued above (bounded — a stalled PTY
+		// must not wedge exit), then retire the pump. Later writes (emergency
+		// restore's showCursor) fall back to direct stdout writes.
+		if (this.#outputPump) {
+			this.#outputPump.stop(1000);
+			this.#outputPump = undefined;
+		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
 		// re-interpreted after raw mode is disabled. This fixes a race condition
@@ -1679,6 +2289,11 @@ export class ProcessTerminal implements Terminal {
 	#markTerminalDisconnected(reason: string, err?: unknown): void {
 		if (this.#dead) return;
 		this.#dead = true;
+		if (this.#bracketedPasteRefreshTimer) {
+			clearInterval(this.#bracketedPasteRefreshTimer);
+			this.#bracketedPasteRefreshTimer = undefined;
+		}
+		this.#disarmStdoutStallWatchdog();
 		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
 
 		const disconnectHandler = this.#disconnectHandler;
@@ -1724,6 +2339,31 @@ export class ProcessTerminal implements Terminal {
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
 		this.#trackCursorVisibility(data);
+		const pump = this.#outputPump;
+		if (pump) {
+			let pending: number;
+			try {
+				pending = pump.write(data);
+			} catch (err) {
+				this.#markTerminalDisconnected("stdout failed", err);
+				return;
+			}
+			// A live enqueue reports at least this chunk's UTF-8 size, never below
+			// its UTF-16 length; a dead pump enqueues nothing and reports only the
+			// remainder it is dropping (soon zero). Only a report that small can
+			// come from a dead pump, so the native `dead` read is skipped otherwise.
+			if ((pending < data.length || data.length === 0) && pump.dead) {
+				this.#markTerminalDisconnected("stdout failed; output pump died");
+				return;
+			}
+			this.#pumpBacklogBound = pending;
+			// Feed the live backlog to the stall watchdog rather than tripping on
+			// the instantaneous byte count: a single large-but-draining frame (a
+			// resume repaint of many inline images) must open normally, while a
+			// never-draining reader is still torn down (#6854, #10430).
+			this.#trackStdoutBacklog(pending);
+			return;
+		}
 		// A console-sharing child process may have flipped the console codepage
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
@@ -1742,26 +2382,19 @@ export class ProcessTerminal implements Terminal {
 			// and a code-unit cap would let CJK transcript rows expand past the
 			// threshold. See #2034 and #2095.
 			const bytes = Buffer.byteLength(data, "utf8");
-			let accepted: boolean;
-			if (isConPTYHosted() && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
-				accepted = true;
+			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
 				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
 					if (this.#dead) break;
-					accepted = process.stdout.write(chunk);
+					process.stdout.write(chunk);
 				}
 			} else {
-				accepted = process.stdout.write(data);
+				process.stdout.write(data);
 			}
-			// A stalled-but-alive PTY consumer never throws: write() just returns
-			// false and queues the bytes. Bound that never-draining backlog by
-			// declaring the terminal disconnected once it crosses the cap — the
-			// same clean-exit path a dead terminal takes (#6854).
-			if (this.#stdoutBacklog.record(accepted, bytes)) {
-				this.#markTerminalDisconnected("stdout backlog exceeded cap; PTY consumer stalled");
-			} else if (this.#stdoutBacklog.tracking && !this.#stdoutDrainArmed) {
-				this.#stdoutDrainArmed = true;
-				process.stdout.once("drain", this.#stdoutDrainHandler);
-			}
+			// A stalled-but-alive PTY consumer never throws: write() just queues the
+			// bytes and writableLength grows. Feed that backlog to the stall watchdog
+			// so a genuinely wedged reader is bounded (#6854) without killing a lone
+			// oversized frame that is still draining (#10430).
+			this.#trackStdoutBacklog(process.stdout.writableLength ?? 0);
 		} catch (err) {
 			this.#markTerminalDisconnected("stdout failed", err);
 		}
@@ -1770,6 +2403,71 @@ export class ProcessTerminal implements Terminal {
 	get columns(): number {
 		if (this.#inBandResizeActive && this.#reportedColumns) return this.#reportedColumns;
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
+	}
+	/**
+	 * With the output pump, a backlog bound at or below
+	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:
+	 * both consumers (the render gate and the stall watchdog) act only on a
+	 * backlog above that level, so the bound already decides them and spares a
+	 * native read on every frame.
+	 */
+	get pendingOutputBytes(): number {
+		const pump = this.#outputPump;
+		if (pump) {
+			if (this.#pumpBacklogBound > STDOUT_BACKLOG_CLEAR_BYTES) this.#pumpBacklogBound = pump.pending();
+			return this.#pumpBacklogBound;
+		}
+		// Stream fallback: bytes queued past the high-water mark by refused writes.
+		return process.stdout.writableLength ?? 0;
+	}
+
+	get hostOwnsGridOnResize(): boolean {
+		// #conpty, not a fresh isConPTYHosted() call: the construction override
+		// must gate every ConPTY-dependent path uniformly, or an injected
+		// `conpty` value models one host for writes and kitty flags and the
+		// opposite host for resize routing.
+		return this.#conpty;
+	}
+
+	/**
+	 * Reconcile the stdout backlog after a write or a poll. The watchdog runs an
+	 * episode from the moment the backlog crosses the arm cap until it drains to
+	 * a healthy level; while an episode is armed we keep a poll running because,
+	 * once the render gate (256 KiB) defers frames, no write is guaranteed to
+	 * re-sample the backlog — so a consumer that wedges anywhere above the
+	 * healthy threshold, even after the backlog dips below the arm cap, is still
+	 * caught. See {@link StdoutStallWatchdog}, #6854, #10430, and #10434.
+	 */
+	#trackStdoutBacklog(pending: number): void {
+		if (this.#stdoutStall.sample(pending, Date.now())) {
+			this.#disarmStdoutStallWatchdog();
+			this.#markTerminalDisconnected("stdout backlog stalled without draining; PTY consumer stalled");
+			return;
+		}
+		if (!this.#stdoutStall.armed) {
+			this.#disarmStdoutStallWatchdog();
+			return;
+		}
+		if (!this.#stdoutStallTimer) {
+			this.#stdoutStallTimer = setInterval(() => this.#pollStdoutStall(), STDOUT_STALL_POLL_MS);
+			this.#stdoutStallTimer.unref?.();
+		}
+	}
+
+	#pollStdoutStall(): void {
+		if (this.#dead) {
+			this.#disarmStdoutStallWatchdog();
+			return;
+		}
+		this.#trackStdoutBacklog(this.pendingOutputBytes);
+	}
+
+	#disarmStdoutStallWatchdog(): void {
+		this.#stdoutStall.reset();
+		if (this.#stdoutStallTimer) {
+			clearInterval(this.#stdoutStallTimer);
+			this.#stdoutStallTimer = undefined;
+		}
 	}
 
 	get rows(): number {
@@ -1799,6 +2497,17 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
+	 * Set the hardware cursor shape (DECSCUSR). Deduped against the last shape written so a
+	 * per-keystroke mode indicator does not add a sequence to every frame; {@link stop} restores
+	 * `"default"` so the user's own cursor configuration survives exit.
+	 */
+	setCursorShape(shape: CursorShape): void {
+		if (this.#cursorShape === shape) return;
+		this.#cursorShape = shape;
+		this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES[shape]} q`);
+	}
+
+	/**
 	 * Sniff outgoing data for the last cursor-visibility change so the tracked
 	 * state stays correct for sequences embedded in frame buffers
 	 * (TUI#cursorControlSequence appends ?25h/?25l inside the paint write). An
@@ -1812,7 +2521,9 @@ export class ProcessTerminal implements Terminal {
 			if (final === 0x68 /* h */ || final === 0x6c /* l */) break;
 			idx = idx === 0 ? -1 : data.lastIndexOf("\x1b[?25", idx - 1);
 		}
-		if (data.lastIndexOf("\x1b[?1049") > idx) {
+		// Only a switch after the last cursor sequence matters: search that tail
+		// rather than the whole frame.
+		if (data.indexOf("\x1b[?1049", idx + 1) !== -1) {
 			this.#cursorVisible = undefined;
 			return;
 		}
@@ -1839,14 +2550,17 @@ export class ProcessTerminal implements Terminal {
 	setProgress(active: boolean): void {
 		if (this.#headless) return;
 		if (active) {
+			if (this.#progressActive) return;
+			this.#progressActive = true;
 			this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
-			if (!this.#progressTimer) {
+			if (this.#keepProgressAlive && !this.#progressTimer) {
 				this.#progressTimer = setInterval(() => {
 					this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 				this.#progressTimer.unref?.();
 			}
 		} else {
+			this.#progressActive = false;
 			this.#clearProgressTimer();
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}

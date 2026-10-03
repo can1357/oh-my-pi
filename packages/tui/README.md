@@ -77,6 +77,49 @@ interface Component {
 
 ## Built-in Components
 
+### Composition
+
+Build screens from persistent components and update their data, selection, expansion, or size through setters. Layouts own child bounds and mouse-coordinate translation; controllers retain domain workflows and asynchronous operations. Propagate `invalidate()` after theme changes and `dispose()` when removing an owned component tree.
+
+| Family | Components | Import |
+| --- | --- | --- |
+| Layout | `Stack`, `Row`, `SplitPane` | package root |
+| Panels | `OverlayPanel`, `PanelRows`, `PanelDivider` | `/chrome` |
+| Menus | `SelectList`, `MenuSelection` | package root |
+| Forms | `Form`, `FormField`, `TextFormField`, `SelectFormField`, `SettingsFormField` | package root |
+| Wizard steps | `WizardStep` | package root |
+| Viewports | `ScrollView`, including child rendering, follow-tail, and keyed range anchoring | package root |
+| Trees | `TreeView` | package root |
+| Disclosure | `Disclosure`, with lazy summary/detail children | package root |
+| Messages | `FramedMessageComponent`, `MessageNoticeComponent`, `MessageDividerComponent` | `/chrome` |
+| Tool output | `ToolCard`, `framedToolCard`, `plainToolCard`, `OutputPane` | `/render` |
+| Transcripts | `TranscriptBrowser` | package root |
+| Data | `MetricRow`, `ProgressBar`, `Table`, `KeyValueList`, `Section` | package root |
+
+```typescript
+import { Disclosure, SplitPane, Text } from "@oh-my-pi/pi-tui";
+
+const diagnostics = new Disclosure({
+	summary: new Text("2 build diagnostics", 0, 0),
+	body: () => new Text("src/index.ts:12 — unused import\nsrc/config.ts:8 — missing property", 0, 0),
+});
+
+const view = new SplitPane({
+	left: new Text("Build diagnostics", 0, 0),
+	right: diagnostics,
+	leftSize: { fixed: 24 },
+	rightMinWidth: 30,
+	splitAt: 60,
+	narrowPane: "right",
+	height: 12,
+});
+
+diagnostics.setExpanded(true);
+view.setHeight(16);
+```
+
+`ScrollView.revealRange()` preserves manual scrolling while a selection is unchanged; `mode: "once"` supports asynchronously arriving initial selections. `OutputPane.append()` accepts incremental terminal output, including carriage-return updates; call `finish()` when the stream ends.
+
 ### Container
 
 Groups child components.
@@ -539,7 +582,7 @@ interface Terminal {
 **Built-in implementations:**
 
 - `ProcessTerminal` - Uses `process.stdin/stdout`
-- `VirtualTerminal` - For testing (uses ghostty-web)
+- `VirtualTerminal` - For testing (uses kitty-vt-wasm)
 
 ## Utilities
 

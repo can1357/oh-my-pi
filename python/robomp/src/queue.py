@@ -394,6 +394,18 @@ class WorkerPool:
                 attempts=row.attempts,
                 slot_uid=slot_uid,
             )
+        elif event == "workflow_run" and action == "completed":
+            await tasks.handle_release_ci(
+                settings=self.settings,
+                db=self.db,
+                github=self.github,
+                sandbox=self.sandbox,
+                git_transport=self.git_transport,
+                payload=row.payload,
+                delivery_id=row.delivery_id,
+                attempts=row.attempts,
+                slot_uid=slot_uid,
+            )
         elif event == "issue_comment" and action == "created":
             issue = row.payload.get("issue") or {}
             if "pull_request" in issue:

@@ -19,10 +19,10 @@ export function startJsEvalProcess(
 		},
 		{
 			mode: "isolated",
-			// The subprocess starts with its real cwd at the worker-host entry dir
-			// (a `resolveWorkerSpawnCmd` requirement); mirror the session cwd so
-			// cell code using relative paths or spawning children resolves against
-			// the project instead of the install dir. Worker threads cannot pass
+			// The subprocess inherits the agent's cwd (or the package root under
+			// the `bun test` fallback of `resolveWorkerSpawnCmd`); mirror the
+			// session cwd so cell code using relative paths or spawning children
+			// resolves against the session's project. Worker threads cannot pass
 			// this — `process.chdir` is unavailable there.
 			chdir: cwd => process.chdir(cwd),
 			interceptUnhandledRejections,

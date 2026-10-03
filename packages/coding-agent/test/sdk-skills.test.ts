@@ -14,7 +14,10 @@ import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
-function createIsolatedSkillsSettings(): Settings {
+import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
+import { cfgSkillsCustomDirectories } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+
+function createIsolatedSkillsSettings(extensions: string[] = []): Settings {
 	return Settings.isolated({
 		"skills.enabled": true,
 		"skills.enableCodexUser": false,
@@ -22,6 +25,7 @@ function createIsolatedSkillsSettings(): Settings {
 		"skills.enableClaudeProject": false,
 		"skills.enablePiUser": false,
 		"skills.enablePiProject": true,
+		extensions,
 	});
 }
 
@@ -128,7 +132,6 @@ Loaded via symbolic link.
 		createExtensionSkill(explicitPackage, "sdk-explicit-skill");
 		createExtensionSkill(settingsPackage, "sdk-settings-skill");
 		createExtensionSkill(installedPackage, "sdk-installed-skill");
-		fs.writeFileSync(path.join(tempDir, ".omp", "settings.json"), JSON.stringify({ extensions: [settingsPackage] }));
 		fs.mkdirSync(path.join(tempHomeDir, ".omp", "plugins"), { recursive: true });
 		fs.writeFileSync(
 			path.join(tempHomeDir, ".omp", "plugins", "package.json"),
@@ -154,7 +157,7 @@ Loaded via symbolic link.
 			({ session } = await createAgentSession({
 				...baseSessionOptions,
 				sessionManager: SessionManager.inMemory(),
-				settings: createIsolatedSkillsSettings(),
+				settings: createIsolatedSkillsSettings([settingsPackage]),
 				disableExtensionDiscovery: true,
 			}));
 
@@ -167,7 +170,7 @@ Loaded via symbolic link.
 			({ session } = await createAgentSession({
 				...baseSessionOptions,
 				sessionManager: SessionManager.inMemory(),
-				settings: createIsolatedSkillsSettings(),
+				settings: createIsolatedSkillsSettings([settingsPackage]),
 			}));
 
 			const mergedSkillNames = session.skills.map(skill => skill.name);
@@ -243,12 +246,41 @@ This skill is added after session creation.
 		expect(session.skills.some((s: Skill) => s.name === "runtime-added-skill")).toBe(false);
 	});
 
+	it("a live skills.customDirectories edit exposes the directory's skills without restart", async () => {
+		const settings = createIsolatedSkillsSettings();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+		});
+		const customDir = path.join(tempDir, "live-custom-skills");
+		fs.mkdirSync(path.join(customDir, "live-custom-skill"), { recursive: true });
+		fs.writeFileSync(
+			path.join(customDir, "live-custom-skill", "SKILL.md"),
+			"---\nname: live-custom-skill\ndescription: Added through a live settings edit.\n---\nbody\n",
+		);
+		expect(session.skills.some((s: Skill) => s.name === "live-custom-skill")).toBe(false);
+
+		// Command pickers (TUI autocomplete, RPC/ACP) rebuild on this notification.
+		const skillAnnounced = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribeCommandMetadataChanged(() => {
+			if (session.skills.some((s: Skill) => s.name === "live-custom-skill")) skillAnnounced.resolve();
+		});
+		cfgSkillsCustomDirectories.set(settings, [customDir]);
+		await skillAnnounced.promise;
+		unsubscribe();
+
+		expect(session.systemPrompt.join("\n")).toContain("live-custom-skill");
+	});
+
 	it("manage_skill hot-registers managed skills in the active session", async () => {
 		const originalAgentDir = getAgentDir();
 		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
 		setAgentDir(managedAgentDir);
 		const settings = createIsolatedSkillsSettings();
-		settings.set("autolearn.enabled", true);
+		cfgAutolearnEnabled.set(settings, true);
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: managedAgentDir,

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -19,6 +20,12 @@ import {
 	type SessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+import { cfgAsyncEnabled, cfgAsyncMaxJobs } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgBashAutoBackgroundEnabled,
+	cfgBashAutoBackgroundThresholdMs,
+} from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 const TEST_MODEL: Model = buildModel({
 	id: "claude-sonnet-4-20250514",
@@ -78,7 +85,7 @@ class LazyFakeSession {
 	queuedMessageCount = 0;
 	systemPrompt = "system";
 	disposed = false;
-	settings = { get: (_path: string) => false };
+	settings = Settings.isolated({ "plan.enabled": false });
 
 	constructor(cwd: string) {
 		this.sessionManager = SessionManager.inMemory(cwd);
@@ -191,6 +198,7 @@ describe("ACP lazy startup", () => {
 						fileArgs: [],
 						unknownFlags: new Map(),
 						unrecognizedFlags: [],
+						invalidFlagValues: [],
 						noSkills: true,
 						noRules: true,
 						noTools: true,
@@ -203,10 +211,10 @@ describe("ACP lazy startup", () => {
 						settings,
 						runAcpMode: async () => {
 							observed = {
-								asyncEnabled: settings.get("async.enabled"),
-								asyncMaxJobs: settings.get("async.maxJobs"),
-								bashAutoBackground: settings.get("bash.autoBackground.enabled"),
-								bashAutoBackgroundThresholdMs: settings.get("bash.autoBackground.thresholdMs"),
+								asyncEnabled: cfgAsyncEnabled.get(settings),
+								asyncMaxJobs: cfgAsyncMaxJobs.get(settings),
+								bashAutoBackground: cfgBashAutoBackgroundEnabled.get(settings),
+								bashAutoBackgroundThresholdMs: cfgBashAutoBackgroundThresholdMs.get(settings),
 							};
 							throw new Error(stopMessage);
 						},
@@ -228,7 +236,7 @@ describe("ACP lazy startup", () => {
 		await expect(runAcpStartup(Settings.isolated())).resolves.toEqual({
 			asyncEnabled: true,
 			asyncMaxJobs: 100,
-			bashAutoBackground: false,
+			bashAutoBackground: true,
 			bashAutoBackgroundThresholdMs: 60000,
 		});
 	});
@@ -242,7 +250,8 @@ describe("ACP lazy startup", () => {
 		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
 
 		const explicit = {
-			"task.isolation.mode": "rcopy",
+			"task.isolation.enabled": true,
+			"isolation.backend": "rcopy",
 			"task.isolation.apply": false,
 			"task.isolation.merge": "branch",
 			"task.isolation.commits": "ai",
@@ -265,7 +274,7 @@ describe("ACP lazy startup", () => {
 		const rpcOnlyExplicit = {
 			"async.enabled": false,
 			"async.maxJobs": 7,
-			"bash.autoBackground.enabled": true,
+			"bash.autoBackground.enabled": false,
 			"bash.autoBackground.thresholdMs": 5_000,
 		} as const;
 		const allPaths = [
@@ -282,7 +291,9 @@ describe("ACP lazy startup", () => {
 			const observe = () => {
 				observed = {};
 				for (const key of allPaths) {
-					observed[key] = settings.get(key);
+					const setting = lookup(key);
+					if (!setting) throw new Error(`Unknown setting: ${key}`);
+					observed[key] = setting.get(settings);
 				}
 				throw new Error(stopMessage);
 			};
@@ -295,6 +306,7 @@ describe("ACP lazy startup", () => {
 						fileArgs: [],
 						unknownFlags: new Map(),
 						unrecognizedFlags: [],
+						invalidFlagValues: [],
 						noSkills: true,
 						noRules: true,
 						noTools: true,
@@ -333,7 +345,10 @@ describe("ACP lazy startup", () => {
 		const client = new TestClient();
 		let createCalls = 0;
 		const creationStarted = Promise.withResolvers<void>();
-		const blockedCreation = Promise.withResolvers<AgentSession>();
+		const blockedCreation = Promise.withResolvers<{
+			session: AgentSession;
+			setToolUIContext: () => void;
+		}>();
 
 		const agentConnection = new ClientSideConnection(
 			() => client,
@@ -347,7 +362,10 @@ describe("ACP lazy startup", () => {
 				if (createCalls === 1) {
 					return await blockedCreation.promise;
 				}
-				return new LazyFakeSession(cwd) as unknown as AgentSession;
+				return {
+					session: new LazyFakeSession(cwd) as unknown as AgentSession,
+					setToolUIContext: () => {},
+				};
 			},
 		);
 
@@ -356,7 +374,6 @@ describe("ACP lazy startup", () => {
 			expect(initializeResponse).toEqual(
 				expect.objectContaining({
 					protocolVersion: 1,
-					agentInfo: expect.objectContaining({ name: "oh-my-pi" }),
 				}),
 			);
 			expect(createCalls).toBe(0);
@@ -365,7 +382,10 @@ describe("ACP lazy startup", () => {
 			await creationStarted.promise;
 			expect(createCalls).toBe(1);
 
-			blockedCreation.resolve(new LazyFakeSession("/tmp/acp-lazy-startup") as unknown as AgentSession);
+			blockedCreation.resolve({
+				session: new LazyFakeSession("/tmp/acp-lazy-startup") as unknown as AgentSession,
+				setToolUIContext: () => {},
+			});
 			const sessionResponse = await newSessionPromise;
 			expect(sessionResponse.sessionId).toEqual(expect.any(String));
 		} finally {
@@ -417,6 +437,7 @@ describe("ACP lazy startup", () => {
 					fileArgs: [],
 					unknownFlags: new Map(),
 					unrecognizedFlags: [],
+					invalidFlagValues: [],
 					noSkills: true,
 					noRules: true,
 					noTools: true,
@@ -439,7 +460,7 @@ describe("ACP lazy startup", () => {
 					},
 					settings,
 					runAcpMode: async createAcpSession => {
-						session = await createAcpSession(cwd);
+						session = (await createAcpSession(cwd)).session;
 						throw new Error("stop test ACP mode");
 					},
 				},

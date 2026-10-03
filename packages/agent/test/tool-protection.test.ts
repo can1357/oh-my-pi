@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction/entries";
 import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import { AGGRESSIVE_SHAKE_CONFIG, collectShakeRegions } from "@oh-my-pi/pi-agent-core/compaction/shake";
 import type { AssistantMessage, TextContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+
+const tokenizer = new Tokenizer();
 
 function usage(): Usage {
 	return {
@@ -61,7 +64,11 @@ describe("conditional tool-result protection", () => {
 			fileResult,
 		];
 
-		const result = pruneToolOutputs(entries, { ...DEFAULT_PRUNE_CONFIG, protectTokens: 0, minimumSavings: 0 });
+		const result = pruneToolOutputs(entries, tokenizer, {
+			...DEFAULT_PRUNE_CONFIG,
+			protectTokens: 0,
+			minimumSavings: 0,
+		});
 
 		expect(result.prunedCount).toBe(1);
 		expect((skillResult.message as ToolResultMessage).prunedAt).toBeUndefined();
@@ -86,7 +93,7 @@ describe("conditional tool-result protection", () => {
 
 		// protectTokens: 0 isolates the matcher behavior from the aggressive
 		// preset's recent-tail window (covered by shake.test.ts).
-		const regions = collectShakeRegions(entries, { ...AGGRESSIVE_SHAKE_CONFIG, protectTokens: 0 });
+		const regions = collectShakeRegions(entries, tokenizer, { ...AGGRESSIVE_SHAKE_CONFIG, protectTokens: 0 });
 
 		expect(regions).toHaveLength(1);
 		expect(regions[0]?.kind).toBe("toolResult");

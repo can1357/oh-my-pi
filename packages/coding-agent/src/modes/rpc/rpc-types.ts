@@ -6,24 +6,26 @@
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { AssistantMessageEvent, Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
-import type { FileEntry } from "../../session/session-entries";
+import type { CacheWarmingMode } from "../../session/cache-warmer";
+import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
-import type {
-	AgentProgress,
-	SubagentEventPayload,
-	SubagentLifecyclePayload,
-	SubagentProgressPayload,
-} from "../../task";
-import type { TodoPhase } from "../../tools/todo";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
+import type { GoalModeState } from "../../goals/state";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
+
+/** `set_event_filter` projection: `"full"` keeps both accumulated snapshots in `message_update`, `"delta"` sends only the increment. */
+export type RpcMessageUpdates = "full" | "delta";
 
 export type RpcCommand =
 	// Protocol
@@ -33,20 +35,36 @@ export type RpcCommand =
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "remove_queued_message"; message: string; queue: "steering" | "followUp" }
+	| { id?: string; type: "promote_queued_message"; message: string }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "open_session"; sessionDir: string }
 
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| {
+			id?: string;
+			type: "goal";
+			op: RpcGoalOp;
+			objective?: string;
+			token_budget?: number;
+	  }
+	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
+	| { id?: string; type: "get_entries"; since?: string }
+	| { id?: string; type: "get_tree" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
+	| { id?: string; type: "set_event_filter"; events: string[] | null; messageUpdates?: RpcMessageUpdates }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "cancel_subagent"; subagentId: string }
+	| { id?: string; type: "steer_subagent"; subagentId: string; message: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -56,6 +74,7 @@ export type RpcCommand =
 	// Thinking
 	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
 	| { id?: string; type: "cycle_thinking_level" }
+	| { id?: string; type: "get_available_thinking_levels" }
 
 	// Queue modes
 	| { id?: string; type: "set_steering_mode"; mode: "all" | "one-at-a-time" }
@@ -65,6 +84,9 @@ export type RpcCommand =
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
+
+	// Cache warming
+	| { id?: string; type: "set_cache_warming"; mode: CacheWarmingMode }
 
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
@@ -79,6 +101,7 @@ export type RpcCommand =
 	| { id?: string; type: "export_html"; outputPath?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "branch"; entryId: string }
+	| { id?: string; type: "fork"; entryId?: string }
 	| { id?: string; type: "get_branch_messages" }
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
@@ -90,7 +113,18 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string }
+
+	// Word prediction (composer ghost text); `cursor` is a UTF-16 offset into `text`
+	| { id?: string; type: "predict_word"; text: string; cursor: number }
+	| {
+			id?: string;
+			type: "predict_word_feedback";
+			text: string;
+			cursor: number;
+			suggestion: string;
+			accepted: boolean;
+	  };
 
 // ============================================================================
 // RPC State
@@ -113,12 +147,22 @@ export interface RpcSessionState {
 	tokensPerSecond: number | null;
 	messageCount: number;
 	queuedMessageCount: number;
+	/** Background jobs or deliveries can still inject a follow-up and wake the session. */
+	hasPendingAsyncWork: boolean;
+	/** Same predicate as `session_settled`: idle with nothing queued or pending. */
+	isSettled: boolean;
+	/** Displayable queue-chip text for pending user-authored messages, mirroring
+	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
+	 *  (and the `queue_update` event) instead of tracking chips independently. */
+	queuedMessages: { steering: string[]; followUp: string[] };
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Current goal-mode state; `null` when the session has no goal. */
+	goal: GoalModeState | null;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -135,10 +179,57 @@ export interface RpcAvailableCommandsUpdateFrame {
 	commands: RpcAvailableSlashCommand[];
 }
 
+/** How a prompt's work ended, as reported by its {@link RpcPromptResultFrame}. */
+export type RpcPromptStatus = "completed" | "aborted" | "error";
+
+/**
+ * Failure detail for a `prompt_result` with `status: "error"`. `message` is the
+ * provider's error text without OMP-local diagnostics (e.g. request dump paths).
+ */
+export interface RpcPromptError {
+	message: string;
+	provider?: string;
+	model?: string;
+	/** HTTP status reported by the provider, when the failure came from a request. */
+	httpStatus?: number;
+	/** The failure is classified transient: resubmitting later may succeed. OMP's own retries are already exhausted. */
+	retryable: boolean;
+}
+
+/**
+ * Terminal frame emitted exactly once per accepted `prompt`/`abort_and_prompt`,
+ * after all work the prompt caused has settled. Correlate on `id`.
+ */
 export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
+	/** False when the prompt completed locally (slash command) or failed before reaching the agent. */
 	agentInvoked: boolean;
+	status: RpcPromptStatus;
+	error?: RpcPromptError;
+	/**
+	 * The agent yielded and nothing will wake the session again: no run is live and no
+	 * queued message or background job (async bash/task/eval) will inject a follow-up.
+	 * When false, a {@link RpcSessionSettledFrame} follows once that work is done.
+	 */
+	sessionSettled: boolean;
+}
+
+/**
+ * Emitted when the session goes quiet after agent activity: the last run yielded
+ * and no background work remains that could inject messages and wake it again.
+ * Distinct from a terminal `agent_end`, which only means one run yielded.
+ */
+export interface RpcSessionSettledFrame {
+	type: "session_settled";
+}
+
+/** `open_session` result: `resumed` is false when a fresh session was started in the directory. */
+export interface RpcOpenSessionResult {
+	cancelled: boolean;
+	resumed: boolean;
+	sessionId: string;
+	sessionFile?: string;
 }
 
 export interface RpcReadyFrame {
@@ -207,9 +298,12 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
 	| { id?: string; type: "response"; command: "steer"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
+	| { id?: string; type: "response"; command: "remove_queued_message"; success: true; data: { removed: boolean } }
+	| { id?: string; type: "response"; command: "promote_queued_message"; success: true; data: { promoted: boolean } }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -220,6 +314,8 @@ export type RpcResponse =
 			success: true;
 			data: { enabled: boolean; active: boolean };
 	  }
+	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
+	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -227,9 +323,30 @@ export type RpcResponse =
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_entries";
+			success: true;
+			data: { entries: SessionEntry[]; leafId: string | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_tree";
+			success: true;
+			data: { tree: SessionTreeNode[]; leafId: string | null };
+	  }
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_event_filter";
+			success: true;
+			data: { events: string[] | null; messageUpdates: RpcMessageUpdates };
+	  }
 	| {
 			id?: string;
 			type: "response";
@@ -251,6 +368,14 @@ export type RpcResponse =
 			success: true;
 			data: RpcSubagentMessagesResult;
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "cancel_subagent";
+			success: true;
+			data: { cancelled: boolean };
+	  }
+	| { id?: string; type: "response"; command: "steer_subagent"; success: true }
 
 	// Model
 	| {
@@ -284,6 +409,13 @@ export type RpcResponse =
 			success: true;
 			data: { level: Effort } | null;
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_available_thinking_levels";
+			success: true;
+			data: { levels: ThinkingLevel[] };
+	  }
 
 	// Queue modes
 	| { id?: string; type: "response"; command: "set_steering_mode"; success: true }
@@ -293,6 +425,9 @@ export type RpcResponse =
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
+
+	// Cache warming
+	| { id?: string; type: "response"; command: "set_cache_warming"; success: true; data: { mode: CacheWarmingMode } }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
@@ -307,6 +442,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "branch"; success: true; data: { text: string; cancelled: boolean } }
+	| { id?: string; type: "response"; command: "fork"; success: true; data: { cancelled: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -338,6 +474,10 @@ export type RpcResponse =
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
 
+	// Word prediction
+	| { id?: string; type: "response"; command: "predict_word"; success: true; data: { suffix: string | null } }
+	| { id?: string; type: "response"; command: "predict_word_feedback"; success: true }
+
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
 
@@ -362,15 +502,67 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+/** Message lifecycle event kinds that RPC mode stamps with a `messageId`. */
+export type RpcMessageEventType = "message_start" | "message_update" | "message_end";
+
+/**
+ * Message lifecycle frame as written by RPC mode. `messageId` is shared by the
+ * `message_start`, every `message_update`, and the `message_end` of one message;
+ * it is unique within the RPC process.
+ */
+export type RpcMessageEventFrame = Extract<AgentSessionEvent, { type: RpcMessageEventType }> & { messageId: string };
+
+type WithoutPartial<T> = T extends unknown ? Omit<T, "partial"> : never;
+
+/** Raw-protocol opt-in projection; terminal subtype fields are preserved. */
+export type RpcDeltaMessageUpdateFrame = Omit<
+	Extract<RpcMessageEventFrame, { type: "message_update" }>,
+	"message" | "assistantMessageEvent"
+> & {
+	message: Pick<AgentMessage, "role">;
+	assistantMessageEvent: WithoutPartial<AssistantMessageEvent>;
+};
+
+/** Session event as written to stdout by default: message lifecycle events carry a `messageId`. */
+export type RpcAgentSessionEventFrame =
+	| Exclude<AgentSessionEvent, { type: RpcMessageEventType }>
+	| RpcMessageEventFrame;
+
+/** Every session event shape RPC mode can write, including the opt-in `messageUpdates: "delta"` projection. */
+export type RpcProjectedSessionEventFrame = RpcAgentSessionEventFrame | RpcDeltaMessageUpdateFrame;
+
+export type RpcSessionEventFrame = RpcAgentSessionEventFrame | RpcSubagentFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)
 // ============================================================================
+/** Positional presentation metadata for an RPC select option. */
+export interface RpcExtensionUISelectOptionDetail {
+	description?: string;
+}
+
+/** One question of an RPC `ask` dialog. Options never include "Other"; hosts always offer free text. */
+export interface RpcAskDialogQuestion {
+	id: string;
+	question: string;
+	header?: string;
+	options: Array<{ label: string; description?: string; preview?: string }>;
+	multi?: boolean;
+	/** Index of the recommended option. */
+	recommended?: number;
+}
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
-	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "select";
+			title: string;
+			options: string[];
+			optionDetails?: RpcExtensionUISelectOptionDetail[];
+			timeout?: number;
+	  }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {
 			type: "extension_ui_request";
@@ -387,6 +579,14 @@ export type RpcExtensionUIRequest =
 			title: string;
 			prefill?: string;
 			promptStyle?: boolean;
+	  }
+	/** Emitted only after the host opts in with `set_ask_dialog`. */
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "ask";
+			questions: RpcAskDialogQuestion[];
+			timeout?: number;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
@@ -439,6 +639,8 @@ export interface RpcHostToolDefinition {
 	hidden?: boolean;
 	/** How this host tool is presented when enabled; omission normalizes to `"discoverable"` at the adapter boundary. */
 	loadMode?: ToolLoadMode;
+	/** Whether this host tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 }
 
 /** Emitted by the RPC server when it needs the host to execute a registered tool. */
@@ -535,7 +737,13 @@ export interface RpcHostUriResult {
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
-	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
+	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean }
+	/** Answers to an `ask` request, one per question in request order. */
+	| {
+			type: "extension_ui_response";
+			id: string;
+			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
+	  };
 
 // ============================================================================
 // Helper type for extracting command types

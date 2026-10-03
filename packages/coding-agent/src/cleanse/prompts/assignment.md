@@ -8,13 +8,13 @@
 
 # Assignment
 
-Repair wave {{wave}}, worker {{worker}}.
+Repair worker {{worker}}. Further diagnostics for your files may arrive as chat messages while you work; fix those too before yielding.
 
 ## Write scope
 
 {{write_scope}}
 
-Read related code freely. Project-level diagnostics MAY require the smallest necessary edit outside named files; use `hub` before touching a peer-owned file.
+Read related code freely. Project-level diagnostics MAY require the smallest necessary edit outside named files; message its owner via `write agent://<id>` before touching a peer-owned file.
 
 ## Diagnostics
 

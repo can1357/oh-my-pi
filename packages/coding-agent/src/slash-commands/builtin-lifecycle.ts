@@ -1,12 +1,26 @@
+import { clearSubmittedText } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { setProjectDir } from "@oh-my-pi/pi-utils";
-import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
+import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
-import type { FreshSessionResult } from "../session/agent-session";
+import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
+import { buildReplanTitleContext, USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
+import { toggleSessionPin } from "../session/session-pins";
+import {
+	cleanSourceCheckoutIfConfigured,
+	createSessionWorktree,
+	defaultSessionWorktreeBranch,
+	formatSessionWorktreeSummary,
+	type SessionWorktree,
+} from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { isLowSignalTitleInput } from "../tiny/text";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -23,11 +37,27 @@ function formatFreshSessionResult(result: FreshSessionResult): string {
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
 }
 
+/** Null reports no usable title; undefined silently discards an invalidated request. */
+async function generateRenameTitle(session: AgentSession, signal?: AbortSignal): Promise<string | null | undefined> {
+	const { sessionManager } = session;
+	const context = buildReplanTitleContext(session.messages);
+	if (!context || isLowSignalTitleInput(context)) return null;
+	const revision = sessionManager.reserveTitleRevision();
+	const sessionId = sessionManager.getSessionId();
+	const titleSignal = session.titleGenerationSignal;
+	const title = await session.generateTitle(context, undefined, signal);
+	return !titleSignal.aborted &&
+		sessionManager.getSessionId() === sessionId &&
+		sessionManager.titleRevision === revision
+		? title
+		: undefined;
+}
+
 export const shutdownHandlerTui = (
 	_command: ParsedSlashCommand,
 	runtime: TuiSlashCommandRuntime,
 ): SlashCommandResult => {
-	runtime.ctx.editor.setText("");
+	clearSubmittedText(runtime);
 	void runtime.ctx.shutdown();
 	return commandConsumed();
 };
@@ -37,7 +67,8 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	const verb = args.trim().toLowerCase();
 	if (verb === "" || verb === "elide") return "elide";
 	if (verb === "images") return "images";
-	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
+	if (verb === "thinking") return "thinking";
+	return { error: `Unknown /shake mode "${verb}". Use elide, images, or thinking.` };
 }
 
 /** Format the session's workspace directories (cwd + additional) for display. */
@@ -47,10 +78,80 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
+async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	await runtime.output(text);
+	await runtime.session.dispose();
+	return commandConsumed();
+}
+
+/** A move rollback failed: re-align the workspace to wherever the session ended up and report it. */
+async function reportFailedRollback(runtime: SlashCommandRuntime, rollbackError: unknown): Promise<SlashCommandResult> {
+	const actual = runtime.sessionManager.getCwd();
+	try {
+		await rescopeHeadlessToCwd(runtime, actual);
+	} catch {
+		return fatalMoveFailure(
+			`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+			runtime,
+		);
+	}
+	return usage(
+		`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+		runtime,
+	);
+}
+
+/**
+ * Relocate the headless session to `resolvedPath` (an existing directory):
+ * flush settings, move the session file, re-scope the process, rolling back
+ * on failure. Returns a result when the move did not complete; `undefined`
+ * on success so the caller can report its own confirmation.
+ */
+async function relocateHeadlessSession(
+	runtime: SlashCommandRuntime,
+	resolvedPath: string,
+): Promise<SlashCommandResult | undefined> {
+	try {
+		await runtime.settings.flush();
+	} catch (err) {
+		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
+	}
+	const previousState = runtime.sessionManager.captureState();
+	try {
+		await runtime.session.moveSession(resolvedPath);
+	} catch (err) {
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		setProjectDir(resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+		} catch (rollbackError) {
+			return reportFailedRollback(runtime, rollbackError);
+		}
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		await rescopeHeadlessToCwd(runtime, resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+			await rescopeHeadlessToCwd(runtime, previousState.cwd);
+		} catch (rollbackError) {
+			return reportFailedRollback(runtime, rollbackError);
+		}
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	await runtime.notifyConfigChanged?.();
+	await runtime.notifyTitleChanged?.();
+	return undefined;
+}
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ssh",
+		icon: "host",
 		description: "Manage SSH hosts (add, list, remove)",
 		acpDescription: "Manage SSH connections",
 		inlineHint: "<subcommand>",
@@ -67,20 +168,22 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handle: handleSshAcp,
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleSSHCommand(command.text);
 		},
 	},
 	{
 		name: "new",
+		icon: "plus",
 		description: "Start a new session",
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleClearCommand();
 		},
 	},
 	{
 		name: "fresh",
+		icon: "restart",
 		description: "Reset provider stream state without changing the local transcript",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Fresh: unavailable while streaming" : "Fresh: ready",
@@ -96,30 +199,33 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleFreshCommand();
 		},
 	},
 	{
 		name: "clear",
+		icon: "eraser",
 		description: "Clear the conversation context in place, keeping the session",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Clear: unavailable while streaming" : "Clear: drop context, keep session",
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleResetContextCommand();
 		},
 	},
 	{
-		name: "drop",
+		name: "delete",
+		icon: "trash",
 		description: "Delete the current session and start a new one",
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleDropCommand();
+			clearSubmittedText(runtime);
+			await runtime.ctx.handleDeleteCommand();
 		},
 	},
 	{
 		name: "compact",
+		icon: "compress",
 		description: "Manually compact the session context",
 		acpDescription: "Compact the conversation",
 		subcommands: COMPACT_MODES.map(mode => ({
@@ -136,29 +242,46 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
 			if ("error" in parsed) return usage(parsed.error, runtime);
-			const before = runtime.session.getContextUsage?.();
-			const beforeTokens = before?.tokens;
-			try {
-				await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
-			} catch (err) {
-				// Compaction precondition failures (no model, already compacted, too
-				// small) and provider errors propagate as plain Errors; surface them
-				// via runtime.output so they don't fail the ACP prompt turn.
-				return usage(`Compaction failed: ${errorMessage(err)}`, runtime);
+			const runCompact = async (): Promise<void> => {
+				const before = runtime.session.getContextUsage?.();
+				const beforeTokens = before?.tokens;
+				try {
+					await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
+				} catch (err) {
+					// RPC `abort` and ACP `session/cancel` propagate their explicit
+					// USER_INTERRUPT_LABEL through the compaction abort signal. The client
+					// already saw the interrupt it sent; emitting anything here would
+					// append an out-of-turn chunk. Other cancellations (including an
+					// extension veto) remain visible.
+					if (err instanceof CompactionCancelledError && err.cause === USER_INTERRUPT_LABEL) return;
+					// Compaction precondition failures (no model, already compacted, too
+					// small) and provider errors propagate as plain Errors; surface them
+					// via runtime.output so they don't fail the ACP prompt turn.
+					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
+					return;
+				}
+				const after = runtime.session.getContextUsage?.();
+				const afterTokens = after?.tokens;
+				if (beforeTokens != null && afterTokens != null) {
+					const saved = beforeTokens - afterTokens;
+					await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
+				} else {
+					await runtime.output("Compaction complete.");
+				}
+			};
+			// Provider-backed: background-dispatch under RPC so the serialized command
+			// queue stays free for `abort` (SlashCommandRuntime.runCommandInBackground).
+			// ACP/TUI have no such hook and keep the inline await.
+			if (runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(runCompact);
+				return commandConsumed();
 			}
-			const after = runtime.session.getContextUsage?.();
-			const afterTokens = after?.tokens;
-			if (beforeTokens != null && afterTokens != null) {
-				const saved = beforeTokens - afterTokens;
-				await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
-			} else {
-				await runtime.output("Compaction complete.");
-			}
+			await runCompact();
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			if ("error" in parsed) {
 				runtime.ctx.showWarning(parsed.error);
 				return;
@@ -168,13 +291,15 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "shake",
+		icon: "vibrate",
 		description: "Drop heavy content from context (tool results, large blocks)",
 		acpDescription: "Shake heavy content out of the conversation context",
 		subcommands: [
 			{ name: "elide", description: "Strip tool results + large blocks (default)" },
 			{ name: "images", description: "Strip image blocks" },
+			{ name: "thinking", description: "Drop all thinking blocks" },
 		],
-		acpInputHint: "[elide|images]",
+		acpInputHint: "[elide|images|thinking]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const mode = parseShakeMode(command.args);
@@ -184,7 +309,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const mode = parseShakeMode(command.args);
 			if (typeof mode !== "string") {
 				runtime.ctx.showWarning(mode.error);
@@ -195,23 +320,80 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "handoff",
-		description: "Hand off session context to a new session",
+		icon: "handoff",
+		description: "Summarize the session into a handoff document and compact in place",
+		acpDescription: "Summarize the session into a handoff document and compact in place",
 		inlineHint: "[focus instructions]",
 		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before handing off.", runtime);
+			}
+			if (runtime.session.isGeneratingHandoff) {
+				return usage("Handoff generation is already in progress.", runtime);
+			}
+			const runHandoff = async (): Promise<void> => {
+				let result: HandoffResult | undefined;
+				try {
+					result = await runtime.session.handoff(command.args || undefined);
+				} catch (err) {
+					const message = errorMessage(err);
+					// A user interrupt (ACP `session/cancel`, TUI Esc) already settled the
+					// owning turn: `AgentSession.abort()` forwards its reason into the
+					// handoff abort controller, and `throwIfHandoffAborted` rethrows a
+					// reasoned abort verbatim — so the throw arrives as
+					// `USER_INTERRUPT_LABEL`, not "Handoff cancelled". Emitting anything
+					// here would append an out-of-turn chunk after the client already saw
+					// `stopReason: "cancelled"`, so consume silently.
+					if (message === USER_INTERRUPT_LABEL) {
+						return;
+					}
+					// `session.handoff()` normalizes an unreasoned cancellation to this
+					// exact message; every other throw is a real failure (no model
+					// selected, nothing to hand off, already compacted, provider error)
+					// and is surfaced verbatim behind the same "<verb> failed:" prefix
+					// `/compact` uses.
+					if (message === "Handoff cancelled") {
+						await runtime.output("Handoff cancelled.");
+						return;
+					}
+					// Persist the real failure so it stays debuggable after the client
+					// message scrolls away (same rationale as the TUI path, #7993).
+					logger.error("Handoff failed", { error: message });
+					await runtime.output(`Handoff failed: ${message}`);
+					return;
+				}
+				if (!result) {
+					await runtime.output("Handoff cancelled.");
+					return;
+				}
+				// `savedPath` is deliberately not reported: `SessionHandoff` only writes
+				// the document to disk when `options.autoTriggered` is set, which the
+				// user-invoked path never passes.
+				await runtime.output("Context handed off and compacted in place.");
+			};
+			if (runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(runHandoff);
+				return commandConsumed();
+			}
+			await runHandoff();
+			return commandConsumed();
+		},
 		handleTui: async (command, runtime) => {
 			const customInstructions = command.args || undefined;
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleHandoffCommand(customInstructions);
 		},
 	},
 	{
 		name: "resume",
+		icon: "history",
 		description: "Resume a different session",
 		inlineHint: "[session id|@claude|@codex]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const sessionArg = command.args.trim();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const foreignSource = sessionArg === "@claude" ? "claude" : sessionArg === "@codex" ? "codex" : undefined;
 			if (foreignSource) {
 				runtime.ctx.showSessionSelector(foreignSource);
@@ -235,59 +417,131 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "pin",
+		icon: "pin",
+		description: "Pin or unpin a session at the top of the resume list",
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sessionArg = command.args.trim();
+			let sessionId: string | undefined;
+			if (sessionArg) {
+				const match = await resolveResumableSession(
+					sessionArg,
+					runtime.cwd,
+					runtime.sessionManager.getSessionDir(),
+					{ allowGlobalFallback: true },
+				);
+				if (!match) {
+					return usage(`Session "${sessionArg}" not found.`, runtime);
+				}
+				sessionId = match.session.id;
+			} else {
+				sessionId = runtime.sessionManager.getSessionId();
+				if (!sessionId) {
+					return usage("No active session to pin.", runtime);
+				}
+			}
+			const pinned = await toggleSessionPin(sessionId);
+			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			return commandConsumed();
+		},
+	},
+	{
 		name: "btw",
-		description: "Ask an ephemeral side question using the current session context",
-		inlineHint: "<question>",
+		icon: "question",
+		description: "Ask a side question, or browse this session's BTW history",
+		inlineHint: "[question]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleBtwCommand(question);
 		},
 	},
 	{
 		name: "tan",
+		icon: "rocket",
 		description: "Run a full background agent on tangential work",
 		inlineHint: "<work>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const work = command.text.slice(`/${command.name}`.length).trim();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleTanCommand(work);
 		},
 	},
 	{
 		name: "omfg",
+		icon: "rule",
 		description: "Forge a TTSR rule from a complaint to stop a recurring behavior",
 		inlineHint: "<complaint>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const complaint = command.text.slice(`/${command.name}`.length).trim();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleOmfgCommand(complaint);
 		},
 	},
 	{
+		name: "cleanse",
+		icon: "stethoscope",
+		description: "Detect and fix project diagnostics with weighted parallel subagents",
+		inlineHint: "[request] [--all]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const args = command.text.slice(`/${command.name}`.length).trim();
+			clearSubmittedText(runtime);
+			await runtime.ctx.handleCleanseCommand(args);
+		},
+	},
+	{
 		name: "retry",
+		icon: "redo",
 		description: "Retry the last failed agent turn",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before retrying.", runtime);
+			}
+			const didRetry = await runtime.session.retry();
+			if (!didRetry) {
+				return usage("Nothing to retry.", runtime);
+			}
+			await runtime.output("Retrying the last failed turn.");
+			// `AgentSession.retry()` only schedules the continuation as a
+			// post-prompt task; it returns before the retried turn streams. Hosts
+			// whose prompt turn owns the event subscription (ACP) must stay open
+			// across that turn — `AcpAgent.prompt` installs the subscription
+			// before running the command and `#finishPrompt` unsubscribes, so
+			// returning early would silently swallow the entire retried turn
+			// (model output and tool calls). RPC and TUI omit this hook: they
+			// stream the continuation through their own session subscription, and
+			// blocking their command queue here would strand a follow-up `abort`.
+			await runtime.keepTurnOpenUntilIdle?.();
+			// `retry()` returned true, so a real agent turn is now scheduled — RPC
+			// hosts must not be told this was local-only work.
+			return commandConsumed({ agentInvoked: true });
+		},
 		handleTui: async (_command, runtime) => {
 			const didRetry = await runtime.ctx.session.retry();
 			if (!didRetry) {
 				runtime.ctx.showStatus("Nothing to retry");
 			}
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
 		name: "debug",
+		icon: "bug",
 		description: "Open debug tools selector",
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.showDebugSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
 		name: "memory",
+		icon: "memory",
 		description: "Inspect and operate memory maintenance",
 		acpDescription: "Manage memory",
 		acpInputHint: "<subcommand>",
@@ -295,6 +549,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			{ name: "view", description: "Show current memory injection payload" },
 			{ name: "stats", description: "Show memory backend statistics" },
 			{ name: "diagnose", description: "Run memory backend diagnostics" },
+			{ name: "queue", description: "Show pending memory deltas awaiting consolidation" },
+			{ name: "sync", description: "Run memory consolidation now" },
 			{ name: "clear", description: "Clear persisted memory data and artifacts" },
 			{ name: "reset", description: "Alias for clear" },
 			{ name: "enqueue", description: "Enqueue memory consolidation maintenance" },
@@ -337,6 +593,20 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					await runtime.output("Memory consolidation enqueued.");
 					return commandConsumed();
 				}
+				case "queue": {
+					const payload = await backend.queuePreview?.({
+						agentDir: runtime.settings.getAgentDir(),
+						cwd: runtime.cwd,
+						session: runtime.session,
+					});
+					await runtime.output(payload ?? `Memory queue is not available for the ${backend.id} backend.`);
+					return commandConsumed();
+				}
+				case "sync": {
+					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await runtime.output("Memory consolidation ran.");
+					return commandConsumed();
+				}
 				case "stats":
 				case "diagnose": {
 					const hook = verb === "stats" ? backend.stats : backend.diagnose;
@@ -350,43 +620,95 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 						runtime,
 					);
 				default:
-					return usage("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild>", runtime);
+					return usage("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync>", runtime);
 			}
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleMemoryCommand(command.text);
 		},
 	},
 	{
 		name: "rename",
-		description: "Rename the current session",
-		inlineHint: "<title>",
+		icon: "pencil",
+		description: "Rename the current session (omit title to generate)",
+		inlineHint: "[title]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (!command.args) return usage("Usage: /rename <title>", runtime);
-			const ok = await runtime.sessionManager.setSessionName(command.args, "user");
-			if (!ok) {
-				await runtime.output("Session name not changed (a user-set name takes precedence).");
+			const session = runtime.session;
+			const sessionManager = runtime.sessionManager;
+			const runRename = async (): Promise<void> => {
+				const sessionId = sessionManager.getSessionId();
+				const titleSignal = session.titleGenerationSignal;
+				let titleRevision = sessionManager.titleRevision;
+				const isCurrent = () =>
+					runtime.session === session &&
+					runtime.sessionManager === sessionManager &&
+					!runtime.signal?.aborted &&
+					!titleSignal.aborted &&
+					sessionManager.getSessionId() === sessionId &&
+					sessionManager.titleRevision === titleRevision;
+				try {
+					const generation = command.args || generateRenameTitle(session, runtime.signal);
+					titleRevision = sessionManager.titleRevision;
+					const title = typeof generation === "string" ? generation : await generation;
+					if (!isCurrent() || title === undefined) return;
+					if (!title) {
+						await runtime.output("Could not generate a session title. Use /rename <title> to set one.");
+						return;
+					}
+					const persistence = sessionManager.setSessionName(title, "user");
+					titleRevision = sessionManager.titleRevision;
+					const ok = await persistence;
+					if (!isCurrent()) return;
+					if (!ok) {
+						await runtime.output("Session name not changed (a user-set name takes precedence).");
+						return;
+					}
+					await runtime.notifyTitleChanged?.();
+					if (!isCurrent()) return;
+					await runtime.output(`Session renamed to ${title}.`);
+				} catch (err) {
+					if (!isCurrent()) return;
+					if (command.args || !runtime.runCommandInBackground) throw err;
+					await runtime.output(`Rename failed: ${errorMessage(err)}`);
+				}
+			};
+			if (!command.args && runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(runRename);
 				return commandConsumed();
 			}
-			await runtime.notifyTitleChanged?.();
-			await runtime.output(`Session renamed to ${command.args}.`);
+			await runRename();
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const title = command.args.trim();
+			clearSubmittedText(runtime);
+			const session = runtime.ctx.session;
+			const sessionManager = runtime.ctx.sessionManager;
+			const sessionId = sessionManager.getSessionId();
+			const titleSignal = session.titleGenerationSignal;
+			const generation = command.args.trim() || generateRenameTitle(session);
+			const titleRevision = sessionManager.titleRevision;
+			const title = typeof generation === "string" ? generation : await generation;
+			if (
+				runtime.ctx.session !== session ||
+				runtime.ctx.sessionManager !== sessionManager ||
+				titleSignal.aborted ||
+				sessionManager.getSessionId() !== sessionId ||
+				sessionManager.titleRevision !== titleRevision ||
+				title === undefined
+			)
+				return;
 			if (!title) {
-				runtime.ctx.showError("Usage: /rename <title>");
-				runtime.ctx.editor.setText("");
+				runtime.ctx.showStatus("Could not generate a session title. Use /rename <title> to set one.");
 				return;
 			}
-			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleRenameCommand(title);
 		},
 	},
 	{
 		name: "move",
+		icon: "folderMove",
 		description: "Move the current session to a different directory",
 		acpDescription: "Move the current session to a different directory",
 		inlineHint: "[<path>]",
@@ -403,35 +725,55 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			} catch {
 				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
 			}
-			try {
-				await runtime.settings.flush();
-			} catch (err) {
-				return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
-			}
-			try {
-				await runtime.session.moveSession(resolvedPath);
-			} catch (err) {
-				return usage(`Move failed: ${errorMessage(err)}`, runtime);
-			}
-			setProjectDir(resolvedPath);
-			await runtime.settings.reloadForCwd(resolvedPath);
-			applyProviderGlobalsFromSettings(runtime.settings);
-			// Reload plugin/capability caches so the next prompt sees commands and
-			// capabilities scoped to the new cwd.
-			await runtime.reloadPlugins();
-			await runtime.notifyConfigChanged?.();
-			await runtime.notifyTitleChanged?.();
+			const failure = await relocateHeadlessSession(runtime, resolvedPath);
+			if (failure) return failure;
 			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.addToHistory(command.text);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},
 	},
 	{
+		name: "wt",
+		aliases: ["worktree"],
+		icon: "folderMove",
+		description: "Move this session into a new worktree, changes included",
+		acpDescription: "Move this session into a new worktree, changes included",
+		inlineHint: "[<branch>]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) return usage("Cannot create a worktree while streaming.", runtime);
+			const branch = command.args.trim() || defaultSessionWorktreeBranch();
+			const sourceCwd = runtime.sessionManager.getCwd();
+			let worktree: SessionWorktree;
+			try {
+				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch);
+			} catch (err) {
+				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
+			}
+			const failure = await relocateHeadlessSession(runtime, worktree.path);
+			if (failure) return failure;
+			const cleanup = await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
+			if (cleanup.errorMessage !== undefined) {
+				await runtime.output(
+					`Warning: Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`,
+				);
+			}
+			await runtime.output(formatSessionWorktreeSummary(worktree, cleanup.cleaned));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.addToHistory(command.text);
+			clearSubmittedText(runtime);
+			await runtime.ctx.handleWorktreeCommand(command.args || undefined);
+		},
+	},
+	{
 		name: "add-dir",
+		icon: "folderPlus",
 		description: "Add a workspace directory to this session (multi-root)",
 		acpDescription: "Add a workspace directory to this session",
 		inlineHint: "<path>",
@@ -463,6 +805,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "remove-dir",
+		icon: "folderMinus",
 		description: "Remove a workspace directory from this session",
 		acpDescription: "Remove a workspace directory from this session",
 		inlineHint: "<path>",
@@ -503,4 +846,25 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
 	},
+	{
+		name: "restart",
+		icon: "restart",
+		description: "Restart omp with the same launch flags, resuming this session",
+		handleTui: async (_command, runtime) => {
+			clearSubmittedText(runtime);
+			await runtime.ctx.restart();
+		},
+	},
 ];
+async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
+	setProjectDir(cwd);
+	await runtime.settings.reloadForCwd(cwd);
+	await rebindMemoryBackendForCwd(runtime.session);
+	clearClaudePluginRootsCache();
+	const src = discoverTitleSystemPromptFile(cwd);
+	const p = await resolvePromptInput(src, "title system prompt");
+	runtime.session.setTitleSystemPrompt(p);
+	await runtime.session.refreshSkillsAndCommands();
+	await runtime.refreshCommands?.();
+	await runtime.reloadPlugins();
+}

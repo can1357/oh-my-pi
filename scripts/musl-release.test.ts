@@ -53,7 +53,9 @@ describe("musl release artifacts", () => {
 		);
 	});
 
-	test("selects the musl asset when the Linux host reports musl", async () => {
+	// install.sh is the POSIX (Linux/macOS) installer and the test fakes the host by shadowing
+	// uname/ldd/curl via PATH; MSYS sh on Windows prepends /usr/bin, so the stubs never win.
+	test.skipIf(process.platform === "win32")("selects the musl asset when the Linux host reports musl", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-musl-install-"));
 		tempDirs.push(dir);
 		const binDir = path.join(dir, "bin");
@@ -66,9 +68,9 @@ describe("musl release artifacts", () => {
 			"curl",
 			`#!/bin/sh
 case "$*" in
-  *api.github.com*) echo '{"tag_name":"v1.0.0"}' ;;
+  *api.github.com*) echo '{"tag_name":"v1.0.0","mentions_count":0}' ;;
   *) while [ "$#" -gt 0 ]; do
-       [ "$1" = "-o" ] && { printf binary > "$2"; exit 0; }
+       [ "$1" = "-o" ] && { printf '%s\n' '#!/bin/sh' 'echo "omp v1.0.0"' > "$2"; exit 0; }
        shift
      done ;;
 esac
@@ -83,7 +85,8 @@ esac
 		});
 
 		expect(result.exitCode, result.stderr).toBe(0);
+		expect(result.stdout).toContain("Using version: v1.0.0");
 		expect(result.stdout).toContain("Downloading omp-linux-musl-x64...");
-		expect(await Bun.file(path.join(installDir, "omp")).text()).toBe("binary");
+		expect(await Bun.file(path.join(installDir, "omp")).text()).toBe('#!/bin/sh\necho "omp v1.0.0"\n');
 	});
 });

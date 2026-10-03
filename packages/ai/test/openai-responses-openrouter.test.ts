@@ -103,6 +103,7 @@ async function capturePseudoChatRequest(
 		disableReasoning?: boolean;
 		openrouterVariant?: string;
 	} = {},
+	requestContext: Context = context,
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -110,7 +111,7 @@ async function capturePseudoChatRequest(
 		return createChatDoneResponse();
 	});
 
-	const stream = streamOpenAICompletions(model as unknown as Model<"openai-completions">, context, {
+	const stream = streamOpenAICompletions(model as unknown as Model<"openai-completions">, requestContext, {
 		apiKey: "test-key",
 		...options,
 		fetch: fetchMock,
@@ -131,6 +132,7 @@ async function capturePseudoResponsesRequest(
 		disableReasoning?: boolean;
 		openrouterVariant?: string;
 	} = {},
+	requestContext: Context = context,
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -138,7 +140,7 @@ async function capturePseudoResponsesRequest(
 		return createSseResponse();
 	});
 
-	const stream = streamOpenAIResponses(model as unknown as Model<"openai-responses">, context, {
+	const stream = streamOpenAIResponses(model as unknown as Model<"openai-responses">, requestContext, {
 		apiKey: "test-key",
 		...options,
 		fetch: fetchMock,
@@ -183,6 +185,37 @@ afterEach(() => {
 });
 
 describe("OpenRouter pseudo API dual-surface request parity", () => {
+	it("preserves V4.1 Flash images and max reasoning on both APIs without changing the older V4 Flash chat image guard", async () => {
+		const imageContext: Context = {
+			messages: [
+				{ role: "user", content: [{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }], timestamp: 1 },
+			],
+		};
+		const model = buildOpenRouterModel({
+			id: "deepseek/deepseek-v4.1-flash",
+			reasoning: true,
+			input: ["text", "image"],
+		});
+		const chat = await capturePseudoChatRequest(model, { reasoning: Effort.Max }, imageContext);
+		const responses = await capturePseudoResponsesRequest(model, { reasoning: Effort.Max }, imageContext);
+		expect(chat.model).toBe("deepseek/deepseek-v4.1-flash");
+		expect(responses.model).toBe("deepseek/deepseek-v4.1-flash");
+		expect(chat.reasoning).toMatchObject({ effort: "max" });
+		expect(responses.reasoning).toMatchObject({ effort: "max" });
+		expect(chat.messages).toContainEqual({
+			role: "user",
+			content: [{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } }],
+		});
+		expect(JSON.stringify(responses.input)).toContain('"image_url":"data:image/png;base64,ZmFrZQ=="');
+		const oldModel = buildOpenRouterModel({
+			id: "deepseek/deepseek-v4-flash",
+			reasoning: true,
+			input: ["text", "image"],
+		});
+		const oldChat = await capturePseudoChatRequest(oldModel, {}, imageContext);
+		expect(JSON.stringify(oldChat.messages)).not.toContain("image_url");
+	});
+
 	it("builds equivalent Anthropic reasoning payloads for chat and Responses", async () => {
 		const routing = { only: ["anthropic"], order: ["anthropic", "openai"] };
 		const model = buildOpenRouterModel(
@@ -462,6 +495,77 @@ describe("OpenRouter Responses request shape", () => {
 		}
 
 		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
+	});
+
+	it("replays foreign tool-call history without a fabricated reasoning id", async () => {
+		// Meta (via OpenRouter Responses) validates reasoning ids against its own
+		// store and rejects a minted `rs_…` with "Referenced reasoning item … was
+		// not found or has expired", failing every turn once a Claude/Bedrock or
+		// DeepSeek turn with a tool call sits in the history. Muse's compat filters
+		// reasoning history and forbids synthetic items outright, so nothing is
+		// synthesized for it; targets that still require the item get it id-less.
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const foreignTurn: AssistantMessage = {
+			role: "assistant",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			model: "global.anthropic.claude-fable-5-1",
+			stopReason: "toolUse",
+			usage,
+			content: [
+				{ type: "text", text: "<thinking>\nCheck the build.\n</thinking>\nRunning cargo check." },
+				{
+					type: "toolCall",
+					id: "tooluse_1PyTNHRXRnPxuFbunJ5ham",
+					name: "bash",
+					arguments: { command: "cargo check" },
+				},
+			],
+			timestamp: 1,
+		};
+		const history: Context = {
+			messages: [
+				{ role: "user", content: "check", timestamp: 0 },
+				foreignTurn,
+				{
+					role: "toolResult",
+					toolCallId: "tooluse_1PyTNHRXRnPxuFbunJ5ham",
+					toolName: "bash",
+					content: [{ type: "text", text: "Finished" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		};
+		const museBody = await capturePseudoResponsesRequest(
+			buildOpenRouterModel({ id: "meta/muse-spark-1.3", reasoning: true }),
+			{ reasoning: Effort.Medium },
+			history,
+		);
+		const museInput = museBody.input as Array<Record<string, unknown>>;
+		expect(museInput.filter(item => item.type === "reasoning")).toHaveLength(0);
+		expect(museInput.some(item => item.type === "function_call")).toBe(true);
+
+		const body = await capturePseudoResponsesRequest(
+			buildOpenRouterModel({ id: "moonshotai/kimi-k2.5", reasoning: true }),
+			{ reasoning: Effort.Medium },
+			history,
+		);
+		const input = body.input as Array<Record<string, unknown>>;
+		const reasoning = input.filter(item => item.type === "reasoning");
+		expect(reasoning).toHaveLength(1);
+		expect(reasoning[0]).not.toHaveProperty("id");
+		expect(input.findIndex(item => item.type === "reasoning")).toBeLessThan(
+			input.findIndex(item => item.type === "function_call"),
+		);
 	});
 });
 

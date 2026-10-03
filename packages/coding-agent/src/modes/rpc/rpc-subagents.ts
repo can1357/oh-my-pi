@@ -1,9 +1,11 @@
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { type AgentRef, AgentRegistry } from "../../registry/agent-registry";
+import type { AgentSession } from "../../session/agent-session";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
+import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import {
-	type AgentProgress,
 	type SubagentEventPayload,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -109,27 +111,30 @@ export class RpcSubagentRegistry {
 	#transcriptSessionFilesBySubagentId = new Map<string, string>();
 	#staleSubagentIds = new Set<string>();
 	#unsubscribers: Array<() => void> = [];
+	#eventUnsubscribe: (() => void) | undefined;
+	#observabilityBus: EventBus | undefined;
 	#output: RpcSubagentOutput;
 	#subscriptionLevel: RpcSubagentSubscriptionLevel = "off";
 
-	constructor(eventBus: EventBus, output: RpcSubagentOutput) {
+	constructor(observabilityBus: EventBus, output: RpcSubagentOutput) {
+		this.#observabilityBus = observabilityBus;
 		this.#output = output;
 		this.#unsubscribers.push(
-			eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			observabilityBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
 				this.handleLifecycle(data as SubagentLifecyclePayload);
 			}),
-			eventBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
+			observabilityBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
 				this.handleProgress(data as SubagentProgressPayload);
-			}),
-			eventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
-				this.handleEvent(data as SubagentEventPayload);
 			}),
 		);
 	}
 
 	dispose(): void {
+		this.#eventUnsubscribe?.();
+		this.#eventUnsubscribe = undefined;
 		for (const unsubscribe of this.#unsubscribers) unsubscribe();
 		this.#unsubscribers = [];
+		this.#observabilityBus = undefined;
 		this.#subagents.clear();
 		this.#transcriptSessionFilesBySubagentId.clear();
 		this.#staleSubagentIds.clear();
@@ -147,6 +152,15 @@ export class RpcSubagentRegistry {
 	}
 
 	setSubscriptionLevel(level: RpcSubagentSubscriptionLevel): void {
+		const observabilityBus = this.#observabilityBus;
+		if (level === "events" && !this.#eventUnsubscribe && observabilityBus) {
+			this.#eventUnsubscribe = observabilityBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+				this.handleEvent(data as SubagentEventPayload);
+			});
+		} else if (level !== "events" && this.#eventUnsubscribe) {
+			this.#eventUnsubscribe();
+			this.#eventUnsubscribe = undefined;
+		}
 		this.#subscriptionLevel = level;
 	}
 
@@ -262,4 +276,37 @@ export class RpcSubagentRegistry {
 
 		throw new Error("get_subagent_messages requires subagentId or sessionFile");
 	}
+}
+
+/** A running subagent from this session's roster, bound to its live registry ref. */
+export interface RpcOwnedSubagent {
+	ref: AgentRef;
+	session: AgentSession;
+}
+
+/**
+ * Resolve a `get_subagents` id to its running, live registry ref, or
+ * `undefined` when the host must not reach it (unknown, finished, accepted,
+ * parked, aborted, or another session's agent).
+ *
+ * Agent ids are unique only within one parent session's artifacts scope, and
+ * the process-global registry keeps the latest ref per id, so the ref must
+ * carry the transcript file this session's roster recorded
+ * (`<artifactsDir>/<id>.jsonl`). The ref must also still be `running`: it goes
+ * `idle` once the parent accepts its result, before the terminal lifecycle
+ * frame prunes the roster, and a running ref always holds a live session.
+ */
+export function resolveOwnedLiveSubagent(
+	subagentRegistry: Pick<RpcSubagentRegistry, "getSubagents">,
+	subagentId: string,
+): RpcOwnedSubagent | undefined {
+	const snapshot = subagentRegistry.getSubagents().find(candidate => candidate.id === subagentId);
+	// Progress can briefly report a terminal status before the terminal
+	// lifecycle frame prunes the snapshot; treat that as not running.
+	if ((snapshot?.status !== "running" && snapshot?.status !== "pending") || !snapshot.sessionFile) return undefined;
+	const ref = AgentRegistry.global().get(subagentId);
+	if (ref?.kind !== "sub" || ref.status !== "running" || !ref.session || ref.sessionFile !== snapshot.sessionFile) {
+		return undefined;
+	}
+	return { ref, session: ref.session };
 }

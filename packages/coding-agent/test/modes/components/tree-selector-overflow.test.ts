@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
 let counter = 0;
@@ -39,7 +39,7 @@ function renderSelector(tree: SessionTreeNode, leafId: string, width: number): s
 		() => {},
 		() => {},
 	);
-	return selector.render(width).map(line => Bun.stripANSI(line));
+	return selector.renderContent(width).map(line => Bun.stripANSI(line));
 }
 
 describe("TreeSelectorComponent deep branching overflow", () => {
@@ -63,15 +63,5 @@ describe("TreeSelectorComponent deep branching overflow", () => {
 		expect(selectedRow).toBeDefined();
 		expect(selectedRow!).toContain("user:");
 		expect(selectedRow!).toMatch(/branch-\d+-b/);
-	});
-
-	it("preserves prefix budget so the selected entry text remains legible at narrow width", () => {
-		const { root, leaf } = buildBranchyTree(40);
-		const width = 80;
-		const rendered = renderSelector(root, leaf.entry.id, width);
-
-		const selectedRow = rendered.find(line => line.trimStart().startsWith("›"));
-		expect(selectedRow).toBeDefined();
-		expect(selectedRow!).toContain("user:");
 	});
 });

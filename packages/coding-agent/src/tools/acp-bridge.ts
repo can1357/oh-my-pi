@@ -8,12 +8,12 @@
  * never be pushed into the editor.
  */
 
+import { InternalUrlRouter } from "../internal-urls";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import type { ToolSession } from ".";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
-import { isInternalUrlPath } from "./path-utils";
 import { resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /**
  * Return `true` when an ACP client bridge write is appropriate for this path.
@@ -22,22 +22,23 @@ import { ToolError } from "./tool-errors";
  * active plan file while plan mode is enabled — both are OMP-internal artifacts
  * that must stay off the editor's buffer.
  */
-export function shouldRouteWriteThroughBridge(
+export async function shouldRouteWriteThroughBridge(
 	session: ToolSession,
 	requestedPath: string,
 	absolutePath: string,
-): boolean {
-	if (isInternalUrlPath(requestedPath)) return false;
+): Promise<boolean> {
+	const router = InternalUrlRouter.instance();
+	if (router.canHandle(requestedPath)) return false;
 	// OMP-owned session artifacts (plan files, scratch notes) must stay off the
 	// editor buffer even when addressed by their absolute sandbox path — e.g.
 	// after tag-based path recovery rebinds a bare `plan.md#tag` onto the
 	// `local://` artifact, `requestedPath` is the absolute path, not the URL.
-	if (targetsLocalSandbox(session, absolutePath)) return false;
+	if (await targetsLocalSandbox(session, absolutePath)) return false;
 
 	const state = session.getPlanModeState?.();
-	if (!state?.enabled || !isInternalUrlPath(state.planFilePath)) return true;
+	if (!state?.enabled || !router.canHandle(state.planFilePath)) return true;
 
-	return absolutePath !== resolvePlanPath(session, state.planFilePath);
+	return absolutePath !== (await resolvePlanPath(session, state.planFilePath));
 }
 
 /**
@@ -81,10 +82,9 @@ export async function routeWriteThroughBridge(
 	content: string,
 	signal?: AbortSignal,
 ): Promise<BridgeWriteResult | undefined> {
-	if (!shouldRouteWriteThroughBridge(session, requestedPath, absolutePath)) return undefined;
-
 	const bridge = session.getClientBridge?.();
 	if (!bridge?.capabilities.writeTextFile || !bridge.writeTextFile) return undefined;
+	if (!(await shouldRouteWriteThroughBridge(session, requestedPath, absolutePath))) return undefined;
 
 	const changeType = (await Bun.file(absolutePath).exists()) ? FileChangeType.Changed : FileChangeType.Created;
 	// The ACP protocol has no cancellation for fs writes; the most we can do is

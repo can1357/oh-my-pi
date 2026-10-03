@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
+	buildReplanTitleContext,
 	type CustomMessage,
 	convertToLlm,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
@@ -57,16 +58,6 @@ function interruptedThinkingContinuity(): CustomMessage {
 }
 
 describe("convertToLlm", () => {
-	it("presents user-invoked skill prompts as user turns", () => {
-		const [message] = convertToLlm([customMessage(SKILL_PROMPT_MESSAGE_TYPE, "user")]);
-
-		expect(message?.role).toBe("user");
-		if (message?.role !== "user") {
-			throw new Error(`Expected user role, received ${message?.role ?? "none"}`);
-		}
-		expect(message.attribution).toBe("user");
-	});
-
 	it("keeps auto-applied skill prompts and other custom messages as developer turns", () => {
 		const [autoSkill, otherCustom] = convertToLlm([
 			customMessage(SKILL_PROMPT_MESSAGE_TYPE, "agent"),
@@ -75,6 +66,31 @@ describe("convertToLlm", () => {
 
 		expect(autoSkill?.role).toBe("developer");
 		expect(otherCustom?.role).toBe("developer");
+	});
+
+	it("replays tool calls saved under an xd:// alias by their bare device name", () => {
+		const saved = {
+			...abortedAssistant([{ type: "toolCall", id: "call_1|fc_1", name: "xd://recall", arguments: { q: "x" } }]),
+			stopReason: "toolUse",
+		} satisfies AssistantMessage;
+		const [assistant, result] = convertToLlm([
+			saved,
+			{
+				role: "toolResult",
+				toolCallId: "call_1|fc_1",
+				toolName: "xd://recall",
+				content: [{ type: "text", text: "remembered" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(assistant?.role === "assistant" && assistant.content).toEqual([
+			{ type: "toolCall", id: "call_1|fc_1", name: "recall", arguments: { q: "x" } },
+		]);
+		expect(result?.role === "toolResult" && [result.toolCallId, result.toolName]).toEqual(["call_1|fc_1", "recall"]);
+		// Persisted history stays untouched; only the provider view is canonical.
+		expect(saved.content[0]).toMatchObject({ name: "xd://recall" });
 	});
 
 	it("strips the demoted trailing thinking run from the assistant LLM view when its continuity message follows", () => {
@@ -232,7 +248,7 @@ describe("replaceLlmImagesWithText", () => {
 			{
 				role: "toolResult",
 				toolCallId: "c1",
-				toolName: "inspect_image",
+				toolName: "read",
 				content: [{ type: "image", data: "bbbb", mimeType: "image/png" }],
 				isError: false,
 				timestamp: 2,
@@ -279,5 +295,60 @@ describe("replaceLlmImagesWithText", () => {
 		]);
 
 		expect(replaceLlmImagesWithText(converted, "[image omitted]")).toBe(converted);
+	});
+});
+
+describe("buildReplanTitleContext", () => {
+	it("titles a user skill invocation from skill args, not the expanded skill body", () => {
+		const skill: CustomMessage<SkillPromptDetails> = {
+			role: "custom",
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content:
+				'[IMPORTANT: User invoked the "implement" skill]\n\nImplement the work described by the user.\n\nUse this skill.',
+			display: true,
+			details: {
+				name: "implement",
+				path: "/tmp/implement/SKILL.md",
+				args: "issues/07-manual-llm.md 创建临时工作树实现",
+				lineCount: 20,
+			},
+			attribution: "user",
+			timestamp: 1,
+		};
+		const context = buildReplanTitleContext([skill, settledAssistant("先读 implement 技能、ticket 07")]);
+
+		expect(context).toContain("07-manual-llm.md");
+		expect(context).toContain("ticket 07");
+		expect(context).not.toContain("Use this skill.");
+		expect(context).not.toContain("IMPORTANT");
+	});
+
+	it("does not feed an autoloaded skill prompt into title context", () => {
+		const skill = customMessage(SKILL_PROMPT_MESSAGE_TYPE, "agent");
+		skill.details = { name: "atomic-commit", path: "/tmp/SKILL.md", lineCount: 1, args: "issues/07-manual-llm.md" };
+
+		expect(buildReplanTitleContext([skill])).toBe("");
+	});
+
+	it("prefers the operator /skill chip over persisted name and args", () => {
+		const skill: CustomMessage<SkillPromptDetails> = {
+			role: "custom",
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "Use this skill.",
+			display: true,
+			details: {
+				name: "implement",
+				path: "/tmp/implement/SKILL.md",
+				args: "issues/07-manual-llm.md",
+				lineCount: 1,
+				__queueChipText: "/skill:implement issues/08-app-settings.md",
+			},
+			attribution: "user",
+			timestamp: 1,
+		};
+		const context = buildReplanTitleContext([skill]);
+
+		expect(context).toContain("08-app-settings.md");
+		expect(context).not.toContain("07-manual-llm.md");
 	});
 });

@@ -31,21 +31,20 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
 
 /**
- * Runtime dependencies injected into setters that need to validate input or
- * warn about bad values. `args.ts` constructs one object at module load and
- * passes it to each {@link STRING_SETTERS} call.
+ * Runtime dependencies injected into setters that need to validate input.
+ * `args.ts` constructs one object at module load and passes it to each
+ * {@link STRING_SETTERS} call.
  *
  * Keeping these out of the setter closures means this module stays free of
  * runtime imports from `@oh-my-pi/pi-utils`, which is the whole reason it can
  * be safely imported by `profile-bootstrap.ts` before `setProfile` runs.
  */
 export interface ParseDeps {
-	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
 	parseThinking: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
 	normalizeToolNames: (values: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
@@ -123,6 +122,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--mode": (result, value) => {
 		if (value === "text" || value === "json" || value === "rpc" || value === "acp" || value === "rpc-ui") {
 			result.mode = value;
+		} else {
+			result.invalidFlagValues.push(
+				`Invalid --mode value: ${JSON.stringify(value)}. Expected one of: text, json, rpc, rpc-ui, acp.`,
+			);
 		}
 	},
 	"--fork": (result, value) => {
@@ -139,6 +142,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--slow": (result, value) => {
 		result.slow = value;
+	},
+	"--goal": (result, value) => {
+		if (!value.trim()) throw new CliUsageError("--goal requires a non-empty objective.");
+		result.goal = value.trim();
 	},
 	"--plan": (result, value) => {
 		result.plan = value;
@@ -165,6 +172,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
+	},
+	"--system-prompt-template": (result, value) => {
+		result.systemPromptTemplate = value;
 	},
 	"--append-system-prompt": (result, value) => {
 		result.appendSystemPrompt = value;
@@ -194,14 +204,13 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--thinking": (result, value, deps) => {
 		const thinking = deps.parseThinking(value);
-		if (thinking !== undefined) {
-			result.thinking = thinking;
-		} else {
-			deps.logger.warn("Invalid thinking level passed to --thinking", {
-				level: value,
-				validThinkingLevels: deps.thinkingEfforts,
-			});
+		if (thinking === undefined) {
+			result.invalidFlagValues.push(
+				`Invalid --thinking value: ${JSON.stringify(value)}. Expected one of: ${deps.thinkingEfforts.join(", ")}.`,
+			);
+			return;
 		}
+		result.thinking = thinking;
 	},
 	"--export": (result, value) => {
 		result.export = value;
@@ -223,15 +232,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--skills": (result, value) => {
 		result.skills = value.split(",").map(s => s.trim());
 	},
-	"--approval-mode": (result, value, deps) => {
-		if (value === "always-ask" || value === "write" || value === "yolo") {
-			result.approvalMode = value;
-		} else {
-			deps.logger.warn("Invalid value passed to --approval-mode", {
-				value,
-				validValues: ["always-ask", "write", "yolo"],
-			});
+	"--approval-mode": (result, value) => {
+		if (value !== "always-ask" && value !== "write" && value !== "yolo") {
+			result.invalidFlagValues.push(
+				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, write, yolo.`,
+			);
+			return;
 		}
+		result.approvalMode = value;
 	},
 };
 
@@ -313,6 +321,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-skills",
 	"--no-rules",
 	"--no-title",
+	"--no-ui",
 	"--auto-approve",
 	"--yolo",
 ]);
@@ -357,4 +366,54 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 	}
 	if (isUnknownLongValueCandidate(flag)) return valueLike;
 	return false;
+}
+
+/**
+ * Session-source launch flags dropped when relaunching into an existing
+ * session: the restart supplies its own `--resume`, and replaying a stale
+ * continue/fork/import selector would re-run its one-shot session choice.
+ */
+const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
+	"--resume",
+	"-r",
+	"--session",
+	"--continue",
+	"-c",
+	"--fork",
+	"--from-claude",
+	"--from-codex",
+]);
+
+/**
+ * Rewrite the launch argv for an in-place self-restart (`/restart`).
+ *
+ * Keeps every configuration flag as launched, but drops:
+ * - session-source flags ({@link SESSION_SOURCE_FLAGS}, including inline
+ *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ * - positionals (prompt messages, `@file` args, subcommand tokens) — their
+ *   effect is already in the resumed transcript, so replaying them would
+ *   duplicate the initial prompt.
+ *
+ * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
+ * its value token with it and an unknown extension flag keeps its value.
+ * `resumeSessionId` is omitted for a session that never materialized on disk;
+ * the relaunch then starts fresh with the same configuration.
+ */
+export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
+	const kept: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") break; // end-of-options: the rest is literal prompt text
+		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
+		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
+		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
+		if (SESSION_SOURCE_FLAGS.has(flag)) {
+			if (consumesNext) i++;
+			continue;
+		}
+		kept.push(arg);
+		if (consumesNext) kept.push(argv[++i]);
+	}
+	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	return kept;
 }

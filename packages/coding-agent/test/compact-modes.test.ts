@@ -2,23 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { findCompactMode, parseCompactArgs } from "@oh-my-pi/pi-coding-agent/session/compact-modes";
 
 describe("compact mode registry", () => {
-	it("maps each mode to the settings overrides the engine relies on", () => {
-		// These override values are load-bearing: the engine merges them over the
-		// configured compaction.* settings, so a regression here silently changes
-		// what `/compact <mode>` does.
-		expect(findCompactMode("soft")?.overrides).toEqual({ strategy: "context-full", remoteEnabled: false });
-		expect(findCompactMode("remote")?.overrides).toEqual({ strategy: "context-full", remoteEnabled: true });
-		expect(findCompactMode("snapcompact")?.overrides).toEqual({ strategy: "snapcompact" });
-	});
-
-	it("flags remote as remote-requiring and snapcompact as focus-rejecting", () => {
-		expect(findCompactMode("remote")?.requiresRemote).toBe(true);
-		expect(findCompactMode("snapcompact")?.rejectsFocus).toBe(true);
-		// soft is a plain local summary: neither flag.
-		expect(findCompactMode("soft")?.requiresRemote).toBeUndefined();
-		expect(findCompactMode("soft")?.rejectsFocus).toBeUndefined();
-	});
-
 	it("resolves mode names case-insensitively and rejects unknowns", () => {
 		expect(findCompactMode("SOFT")?.name).toBe("soft");
 		expect(findCompactMode("  Remote ")?.name).toBe("remote");

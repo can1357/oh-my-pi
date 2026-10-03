@@ -1,5 +1,7 @@
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../stream";
 import type {
 	Api,
@@ -16,7 +18,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block-symbols";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -82,6 +84,7 @@ type OllamaChatChunk = {
 	done?: boolean;
 	done_reason?: string;
 	prompt_eval_count?: number;
+	prompt_eval_cached_count?: number;
 	eval_count?: number;
 };
 
@@ -303,26 +306,6 @@ function convertTools(tools: Tool[] | undefined): OllamaFunctionTool[] | undefin
 	}));
 }
 
-/**
- * Ollama Cloud rejects `num_predict` above this value with HTTP 400
- * (`max_tokens (...) exceeds model's maximum output tokens (65536)`).
- * The cap currently applies uniformly to cloud-served models; the cloud-side
- * limit was confirmed empirically against `deepseek-v4-pro`/`-flash` and is
- * the same cap surfaced for every other Ollama Cloud model we've probed.
- *
- * Acts as a wire-level safety net so stale `models.db` rows (or custom
- * `modelOverrides` re-enabling `num_predict`) cannot 400 the request — even
- * when `model.omitMaxOutputTokens` was never applied. See #3392.
- */
-const OLLAMA_CLOUD_NUM_PREDICT_CAP = 65_536;
-
-function resolveNumPredict(model: Model<"ollama-chat">, requested: number): number {
-	if (model.provider === "ollama-cloud") {
-		return Math.min(requested, OLLAMA_CLOUD_NUM_PREDICT_CAP);
-	}
-	return requested;
-}
-
 function createChatBody(model: Model<"ollama-chat">, context: Context, options: OllamaChatOptions | undefined) {
 	const think = mapReasoning(model, options?.reasoning, options?.disableReasoning);
 	const toolChoice = mapToolChoice(options?.toolChoice);
@@ -331,7 +314,13 @@ function createChatBody(model: Model<"ollama-chat">, context: Context, options: 
 	const runtimeOptions: { num_predict?: number; temperature?: number; top_p?: number } = {};
 	let hasRuntimeOptions = false;
 	if (options?.maxTokens !== undefined && !model.omitMaxOutputTokens) {
-		runtimeOptions.num_predict = resolveNumPredict(model, options.maxTokens);
+		// Ollama Cloud rejects `num_predict` above 65536 with HTTP 400 uniformly
+		// across cloud-served models (confirmed empirically, #3392). Deliberately
+		// keyed on the provider id, not catalog policy: this is a wire-level
+		// safety net that must hold even for stale `models.db` rows and custom
+		// `modelOverrides` that never passed through catalog resolution.
+		runtimeOptions.num_predict =
+			model.provider === "ollama-cloud" ? Math.min(options.maxTokens, 65_536) : options.maxTokens;
 		hasRuntimeOptions = true;
 	}
 	if (options?.temperature !== undefined) {
@@ -417,7 +406,7 @@ function endToolCallBlock(stream: AssistantMessageEventStream, output: Assistant
 	}
 	const toolCall = block as InternalToolCallBlock;
 	if (toolCall[kStreamingPartialJson]) {
-		toolCall.arguments = parseStreamingJson<Record<string, unknown>>(toolCall[kStreamingPartialJson]);
+		toolCall.arguments = parseToolCallArguments(toolCall[kStreamingPartialJson]);
 		clearStreamingPartialJson(toolCall);
 	}
 	stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
@@ -472,7 +461,7 @@ const streamOllamaOnce = (
 		let activeThinkingIndex: number | undefined;
 		let activeTextIndex: number | undefined;
 		const activeToolIndices = new Set<number>();
-		const streamMarkupHealingPattern = getStreamMarkupHealingPattern(model.provider, model.id);
+		const streamMarkupHealingPattern = getStreamMarkupHealingPattern(model);
 		const streamMarkupHealing = streamMarkupHealingPattern
 			? new StreamMarkupHealing({ pattern: streamMarkupHealingPattern })
 			: undefined;
@@ -712,9 +701,18 @@ const streamOllamaOnce = (
 					if (healedToolCallEmitted && output.stopReason === "stop") {
 						output.stopReason = "toolUse";
 					}
-					output.usage.input = chunk.prompt_eval_count ?? 0;
+					// Ollama reports prompt cache splits as prompt_eval_cached_count
+					// (cached) vs prompt_eval_count (total; cached + uncached =
+					// total). Map cached → cacheRead, uncached → input so
+					// cache_turn/cache_hit status segments and the cache-prefix
+					// audit see real hit rates. Local Ollama omits the cached
+					// field; the ?? 0 fallbacks keep local behavior
+					// byte-identical to before.
+					output.usage.cacheRead = chunk.prompt_eval_cached_count ?? 0;
+					output.usage.input = (chunk.prompt_eval_count ?? 0) - output.usage.cacheRead;
 					output.usage.output = chunk.eval_count ?? 0;
-					output.usage.totalTokens = output.usage.input + output.usage.output;
+					output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
+					calculateCost(model, output.usage, output.timestamp);
 				}
 			}
 			if (streamMarkupHealing) {
@@ -728,6 +726,7 @@ const streamOllamaOnce = (
 			}
 			endActiveThinkingBlock();
 			endActiveTextBlock();
+			for (const index of activeToolIndices) endToolCallBlock(stream, output, index);
 			if (output.stopReason === "length" && !hasVisibleAssistantContent(output)) {
 				output.stopReason = "error";
 				output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;
@@ -785,4 +784,6 @@ const streamOllamaOnce = (
 
 /** Retry EOS-only Ollama completions before the agent loop sees an empty stop. */
 export const streamOllama: StreamFunction<"ollama-chat"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOllamaOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOllamaOnce, {
+		retryEmptyCompletion: true,
+	});

@@ -3,8 +3,12 @@
  * Release script for pi-mono
  *
  * Usage:
- *   bun scripts/release.ts <version|major|minor|patch>   Full release (preflight, version, changelog, commit, push, watch)
+ *   bun scripts/release.ts <version|major|minor|patch|canary>
+ *                                                        Full release (preflight, version, changelog, commit,
+ *                                                        push, watch)
  *   bun scripts/release.ts watch                         Watch CI for current commit
+ *   bun scripts/release.ts deps                          Full third-party dependency refresh (bun.lock + Cargo.lock);
+ *                                                        land it via PR/main CI before the next release
  *
  * Example: bun scripts/release.ts minor
  */
@@ -37,6 +41,28 @@ export function validateExplicitVersion(version: string): string | null {
 
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
+}
+
+/** Exits unless HEAD contains origin/main, so the release push can fast-forward. */
+async function checkUpToDate(): Promise<void> {
+	await git(["fetch", "origin", "main"]).quiet();
+	const head = (await git(["rev-parse", "HEAD"]).text()).trim();
+	// Local-only commits are fine: the release push sends them along with the
+	// release commit. Behind or diverged is not: that push would be rejected.
+	const behind = await git(["merge-base", "--is-ancestor", "origin/main", "HEAD"]).quiet().nothrow();
+	if (behind.exitCode !== 0) {
+		const remote = (await git(["rev-parse", "origin/main"]).text()).trim();
+		console.error(
+			`Error: HEAD (${head.slice(0, 8)}) is behind or diverged from origin/main (${remote.slice(0, 8)}). Pull first.`,
+		);
+		process.exit(1);
+	}
+	const ahead = Number((await git(["rev-list", "--count", "origin/main..HEAD"]).text()).trim());
+	console.log(
+		ahead > 0
+			? `  HEAD is ${ahead} unpushed commit(s) ahead of origin/main (pushed with the release)`
+			: "  HEAD matches origin/main",
+	);
 }
 
 // =============================================================================
@@ -188,14 +214,17 @@ async function cmdWatch(): Promise<void> {
 	process.exit(success ? 0 : 1);
 }
 
-function parseVersion(v: string): [number, number, number] {
-	const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
+export function parseVersion(v: string): [number, number, number] {
+	const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)(?:-canary\.\d+)?$/);
 	if (!match) throw new Error(`Invalid version: ${v}`);
 	return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
 }
 
-function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
+export function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
 	const [major, minor, patch] = parseVersion(current);
+	if (bump === "patch" && /-canary\.\d+$/.test(current)) {
+		return `${major}.${minor}.${patch}`;
+	}
 	switch (bump) {
 		case "major":
 			return `${major + 1}.0.0`;
@@ -206,6 +235,29 @@ function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string
 	}
 }
 
+export function bumpCanaryVersion(current: string): string {
+	const [major, minor, patch] = parseVersion(current);
+	const canaryMatch = current.match(/-canary\.(\d+)$/);
+	if (canaryMatch) {
+		return `${major}.${minor}.${patch}-canary.${parseInt(canaryMatch[1], 10) + 1}`;
+	}
+	return `${major}.${minor}.${patch + 1}-canary.1`;
+}
+
+async function cmdDeps(): Promise<void> {
+	console.log("\n=== Full dependency refresh ===\n");
+	await $`rm -f bun.lock`;
+	await $`bun install`;
+	await $`cargo generate-lockfile`;
+	await generateNixBunDeps(resolveNixBunDepsGenerator());
+	await $`bun scripts/gen-clippy-bazelrc.ts`;
+	// Cargo.lock changed, so the crate_universe entry in MODULE.bazel.lock is
+	// stale; without a refresh every fresh CI bazel server re-splices (~4 min).
+	await $`bun scripts/gen-bazel-lock.ts`;
+	console.log("\nDependencies refreshed. Land these lockfile changes through a PR (or push to main) and");
+	console.log("let CI go green BEFORE the next release; `release` no longer refreshes third-party deps.");
+}
+
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
@@ -213,11 +265,16 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	// accepted and written into every package.json / Cargo.toml / tag. The
 	// validator also normalizes a leading `v` to the bare version so every
 	// downstream write (manifests, Cargo.toml, tag) uses `17.2.8`, not `v17.2.8`.
-	if (versionOrBump !== "major" && versionOrBump !== "minor" && versionOrBump !== "patch") {
+	if (
+		versionOrBump !== "major" &&
+		versionOrBump !== "minor" &&
+		versionOrBump !== "patch" &&
+		versionOrBump !== "canary"
+	) {
 		const normalized = validateExplicitVersion(versionOrBump);
 		if (normalized === null) {
 			console.error(
-				`Error: Invalid version "${versionOrBump}". Expected a semver like 17.2.8 or v17.2.8 (prereleases such as 17.2.8-rc.1 are not supported by this release path), or a bump keyword (major/minor/patch).`,
+				`Error: Invalid version "${versionOrBump}". Expected a semver like 17.2.8 or v17.2.8 (prereleases such as 17.2.8-rc.1 are not supported by this release path), or a bump keyword (major/minor/patch/canary).`,
 			);
 			process.exit(1);
 		}
@@ -242,14 +299,28 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log("  Working directory clean");
 
+	await checkUpToDate();
+
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
+
+	// Step 4 refreshes MODULE.bazel.lock through bazel; fail before touching
+	// any file rather than half-way through the version rewrite.
+	const bazel = Bun.which("bazelisk") ?? Bun.which("bazel");
+	if (!bazel) {
+		console.error("Error: bazelisk (or bazel) not on PATH; needed to refresh MODULE.bazel.lock.");
+		process.exit(1);
+	}
+	console.log(`  Bazel: ${bazel}`);
 
 	const latestTag = (await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).text()).trim();
 	let version = versionOrBump;
 	if (version === "major" || version === "minor" || version === "patch") {
 		version = bumpVersion(latestTag, version);
 		console.log(`Bumping ${versionOrBump} version from ${latestTag} -> ${version}`);
+	} else if (version === "canary") {
+		version = bumpCanaryVersion(latestTag);
+		console.log(`Bumping canary version from ${latestTag} -> ${version}`);
 	}
 
 	if (compareVersions(version, latestTag) <= 0) {
@@ -313,56 +384,48 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log();
 
-	// 3b. Rename the pi-natives version sentinel so any `.node` left on disk from
-	// a previous release physically cannot expose the symbol the new `index.js`
-	// expects. The JS loader derives `VERSION_SENTINEL_EXPORT` from `package.json`
-	// at runtime, so the only thing that has to move on the Rust side is the
-	// `js_name = "__piNativesV…"` literal. `gen-enums.ts` regenerates the matching
-	// entries in `packages/natives/native/{index.d.ts,index.js}` on the next napi
-	// build, but bump them here too so the committed surface tracks the version
-	// without waiting for a local rebuild on the release host.
-	console.log(`Bumping pi-natives version sentinel to v${version}…`);
-	const sentinelJsId = version.replace(/[^A-Za-z0-9]/g, "_");
-	const sentinelName = `__piNativesV${sentinelJsId}`;
-	const sentinelFiles = [
-		"crates/pi-natives/src/lib.rs",
-		"packages/natives/native/index.d.ts",
-		"packages/natives/native/index.js",
-	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
-	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
-	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
-		console.error(
-			`Error: pi-natives version sentinel did not move to ${sentinelName} in crates/pi-natives/src/lib.rs. ` +
-				"The `__piNativesV…` literal may have been removed or renamed; restore it before releasing.",
-		);
-		process.exit(1);
-	}
-	console.log(`  sentinel: ${sentinelName}\n`);
+	// pi-natives addons carry no per-release Rust edit: every install stamps
+	// `packages/natives/package.json#version` into the addon post-link
+	// (scripts/stamp-native-version.ts via scripts/bazel-natives.ts), so the
+	// version bump above is the only native-facing change.
 
-	// 4. Regenerate lockfiles
-	console.log("Regenerating lockfiles...");
-	await $`rm -f bun.lock`;
+	// 4. Regenerate lockfiles and generated configs
+	// Only workspace member versions change here; third-party deps are refreshed
+	// separately via `bun scripts/release.ts deps` so they get CI before release.
 	await $`bun install`;
-	await $`cargo generate-lockfile`;
+	await $`cargo update --workspace`;
 	await generateNixBunDeps(nixBunDepsGenerator);
+	// bazel/clippy.bazelrc mirrors [workspace.lints] in Cargo.toml; regenerate
+	// it here (like the lockfiles) so the bazel clippy policy can never drift.
+	// The release_gate CI job runs the matching `--check`.
+	await $`bun scripts/gen-clippy-bazelrc.ts`;
+	// MODULE.bazel.lock caches the crate_universe extension result keyed by
+	// Cargo.toml/Cargo.lock hashes, which the bump just rewrote. Unrefreshed,
+	// every bazel job of the release run re-splices the cargo workspace
+	// (~4 min each). One local evaluation (~1-4 min) fixes all of them. The
+	// bazel_lock CI job runs the matching `--check`.
+	await $`bun scripts/gen-bazel-lock.ts`;
 	console.log();
 
 	// 5. Update changelogs
-	console.log("Updating CHANGELOGs...");
-	// Omit `since` so the fixer resolves its own baseline: the `clog` tag (last
-	// authoritative rewrite) when newer than `latestTag`, else `latestTag`. This
-	// keeps a release run from re-promoting bullets a prior `--recover` restored.
-	const fixResult = await runChangelogFixer({});
-	for (const fixed of fixResult.changedFiles) {
-		console.log(
-			`  Fixed ${fixed.path}: ${fixed.promotedItems} promoted, ` +
-				`${fixed.mergedDuplicateHeadings} duplicate heading(s) merged, ` +
-				`${fixed.removedEmptyHeadings} empty heading(s) removed`,
-		);
+	if (versionOrBump === "canary") {
+		console.log("Skipping CHANGELOGs for canary release.\n");
+	} else {
+		console.log("Updating CHANGELOGs...");
+		// Omit `since` so the fixer resolves its own baseline: the `clog` tag (last
+		// authoritative rewrite) when newer than `latestTag`, else `latestTag`. This
+		// keeps a release run from re-promoting bullets a prior `--recover` restored.
+		const fixResult = await runChangelogFixer({});
+		for (const fixed of fixResult.changedFiles) {
+			console.log(
+				`  Fixed ${fixed.path}: ${fixed.promotedItems} promoted, ` +
+					`${fixed.mergedDuplicateHeadings} duplicate heading(s) merged, ` +
+					`${fixed.removedEmptyHeadings} empty heading(s) removed`,
+			);
+		}
+		await updateChangelogsForRelease(version);
+		console.log();
 	}
-	await updateChangelogsForRelease(version);
-	console.log();
 
 	// 6. Run checks
 	console.log("Running checks...");
@@ -430,23 +493,33 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 
 if (import.meta.main) {
 	const arg = process.argv[2];
+	const usage = () => {
+		console.error("Usage:");
+		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
+		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		console.error("  bun scripts/release.ts deps                          Full third-party dependency refresh");
+	};
 
 	if (!arg) {
-		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch>   Full release");
-		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		usage();
 		process.exit(1);
 	}
 
 	if (arg === "watch") {
 		await cmdWatch();
-	} else if (arg === "major" || arg === "minor" || arg === "patch" || validateExplicitVersion(arg) !== null) {
+	} else if (arg === "deps") {
+		await cmdDeps();
+	} else if (
+		arg === "major" ||
+		arg === "minor" ||
+		arg === "patch" ||
+		arg === "canary" ||
+		validateExplicitVersion(arg) !== null
+	) {
 		await cmdRelease(arg);
 	} else {
 		console.error(`Unknown command or invalid version: ${arg}`);
-		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch>   Full release");
-		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		usage();
 		process.exit(1);
 	}
 }

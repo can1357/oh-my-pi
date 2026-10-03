@@ -219,6 +219,7 @@ async function resolvePublishedFloorTag(targetVersion: string): Promise<string |
 	const candidates = (raw as Array<{ tagName?: unknown; isDraft?: unknown; isPrerelease?: unknown }>)
 		.filter(t => t.isDraft !== true && t.isPrerelease !== true)
 		.map(t => (typeof t.tagName === "string" ? t.tagName : ""))
+		.filter(tag => !tag.includes("-canary."))
 		.filter(tag => /^v\d+\.\d+\.\d+$/.test(tag))
 		.filter(tag => compareVersions(tag, targetVersion) < 0)
 		.sort((a, b) => compareVersions(b, a));
@@ -233,6 +234,15 @@ async function main(): Promise<void> {
 	}
 	const version = tagInput.replace(/^v/, "").trim();
 	const outputPath = process.argv[3] ?? "release-notes.md";
+	if (/^\d+\.\d+\.\d+-canary\.\d+$/.test(version)) {
+		const upcomingVersion = version.replace(/-canary\.\d+$/, "");
+		await Bun.write(
+			outputPath,
+			`This is a canary prerelease of ${upcomingVersion}. Install it with \`omp update --canary\`.\n`,
+		);
+		console.log(`Wrote canary release notes to ${outputPath}.`);
+		return;
+	}
 	const floor = await resolvePublishedFloorTag(version);
 	if (floor) {
 		console.log(`Aggregating CHANGELOG sections in (${floor}, ${version}].`);

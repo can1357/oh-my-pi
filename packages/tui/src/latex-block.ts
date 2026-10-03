@@ -23,6 +23,8 @@
 // scratch here on this module's ANSI-aware Box model.
 
 import { latexColorScope, latexToUnicode, MATH_FONT_COMMANDS } from "./latex-to-unicode";
+import { node } from "./native/describe";
+import type { NativeNode } from "./native/node";
 import { visibleWidth } from "./utils";
 
 /**
@@ -460,6 +462,7 @@ function gridBox(rows: Box[][], align: (col: number) => CellAlign, gap: (col: nu
 	let ncols = 0;
 	for (const row of rows) ncols = Math.max(ncols, row.length);
 	if (ncols === 0 || rows.length === 0) return textBox("");
+	// oxlint-disable-next-line unicorn/no-new-array -- grid-width allocation
 	const widths = new Array<number>(ncols).fill(0);
 	for (const row of rows) {
 		row.forEach((cell, j) => {
@@ -1425,6 +1428,15 @@ function splitLines(src: string): string[] {
 	}
 	lines.push(src.slice(last));
 	return lines;
+}
+
+/**
+ * The native form of {@link latexToBlock}: the TeX source as a `math` node
+ * the terminal typesets (display style by default, `display: false` for
+ * inline `$…$` math).
+ */
+export function describeLatex(src: string, display = true): NativeNode {
+	return node("math", { text: src, display });
 }
 
 /**

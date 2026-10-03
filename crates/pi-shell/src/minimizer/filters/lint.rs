@@ -125,8 +125,8 @@ fn is_lint_noise(program: &str, line: &str, exit_code: i32) -> bool {
 	if program == "eslint" && line.contains("potentially fixable") {
 		return true;
 	}
-	// Code-frame / underline / box-drawing / progress chatter is stripped even at
-	// exit!=0: these rows carry no diagnostic of their own, and oxlint's
+	// Code-frame / underline / box-drawing / progress chatter is stripped even
+	// at exit!=0: these rows carry no diagnostic of their own, and oxlint's
 	// `Found N warning…` / biome's `Fixed N file…` summaries match the
 	// diagnostic-signal guard below only incidentally (the word "warning"). The
 	// `× message` diagnostic rows are never matched here, so they survive.
@@ -134,10 +134,11 @@ fn is_lint_noise(program: &str, line: &str, exit_code: i32) -> bool {
 		return true;
 	}
 	// pyright/basedpyright emit a version banner plus source-discovery progress
-	// before the diagnostics. None of these rows carry a diagnostic, so strip them
-	// even at exit!=0. Scoped to pyright/basedpyright so the other linters'
-	// equivalent-looking lines (e.g. an oxlint `Found N warnings` summary) are not
-	// caught here. (Ported from rtk/src/filters/basedpyright.toml strip patterns.)
+	// before the diagnostics. None of these rows carry a diagnostic, so strip
+	// them even at exit!=0. Scoped to pyright/basedpyright so the other
+	// linters' equivalent-looking lines (e.g. an oxlint `Found N warnings`
+	// summary) are not caught here. (Ported from
+	// rtk/src/filters/basedpyright.toml strip patterns.)
 	if matches!(program, "pyright" | "basedpyright") && is_pyright_banner_noise(line) {
 		return true;
 	}
@@ -171,9 +172,10 @@ fn is_pyright_banner_noise(line: &str) -> bool {
 	if line.starts_with("Searching for source files") {
 		return true;
 	}
-	// `Pyright 1.1.0` / `basedpyright 1.22.0`: program token then a `MAJOR.MINOR`
-	// version. Matched by a literal prefix plus a dotted-digit check on the rest so
-	// a stray diagnostic message beginning with the word is not swept up.
+	// `Pyright 1.1.0` / `basedpyright 1.22.0`: program token then a
+	// `MAJOR.MINOR` version. Matched by a literal prefix plus a dotted-digit
+	// check on the rest so a stray diagnostic message beginning with the word
+	// is not swept up.
 	if let Some(rest) = line
 		.strip_prefix("Pyright ")
 		.or_else(|| line.strip_prefix("basedpyright "))
@@ -337,13 +339,14 @@ fn parse_eslint_row(row: &str) -> Option<(&str, &str, &str, Option<&str>)> {
 	if body.is_empty() {
 		return None;
 	}
-	// eslint stylish separates the message from the trailing rule-id with a run of
-	// >=2 spaces (`message␣␣rule-id`). Recognize the rule-id by that STRUCTURAL
-	// position — the token after the last >=2-space gap — not by requiring a
-	// hyphen, so hyphenless core rules (`semi`, `eqeqeq`, `camelcase`, `curly`,
-	// `radix`, `complexity`) are counted and not glued onto the message text.
-	// Rows with no >=2-space gap (`Parsing error: Unexpected token`) yield no
-	// rule-id and keep their whole body as the message.
+	// eslint stylish separates the message from the trailing rule-id with a run
+	// of >=2 spaces (`message␣␣rule-id`). Recognize the rule-id by that
+	// STRUCTURAL position — the token after the last >=2-space gap — not by
+	// requiring a hyphen, so hyphenless core rules (`semi`, `eqeqeq`,
+	// `camelcase`, `curly`, `radix`, `complexity`) are counted and not glued
+	// onto the message text. Rows with no >=2-space gap (`Parsing error:
+	// Unexpected token`) yield no rule-id and keep their whole body as the
+	// message.
 	if let Some((message, candidate)) = split_message_and_rule(body)
 		&& is_eslint_rule_id(candidate)
 	{
@@ -359,8 +362,8 @@ fn parse_eslint_row(row: &str) -> Option<(&str, &str, &str, Option<&str>)> {
 fn split_message_and_rule(body: &str) -> Option<(&str, &str)> {
 	let bytes = body.as_bytes();
 	let mut idx = bytes.len();
-	// Walk back to the last `"  "` (>=2 spaces) boundary; the tail after it is the
-	// rule-candidate, which itself contains no internal space.
+	// Walk back to the last `"  "` (>=2 spaces) boundary; the tail after it is
+	// the rule-candidate, which itself contains no internal space.
 	while idx >= 2 {
 		if bytes[idx - 1] == b' ' && bytes[idx - 2] == b' ' {
 			let candidate = body[idx..].trim_start();
@@ -422,14 +425,15 @@ fn is_js_frame_noise(program: &str, trimmed: &str) -> bool {
 	// Code-frame body line: a leading line-number gutter followed by source.
 	// biome/oxlint emit `3 │ interface Props {`; tsc pretty emits `3 foo = 1;`.
 	//
-	// The biome/oxlint `│`-bar gutter is unambiguous (no real summary line carries
-	// a leading number then a box-drawing bar), so strip it unconditionally. The
-	// tsc-pretty BARE form (`N source`, no bar) collides with genuine summary /
-	// content lines that legitimately begin with a number — `7 errors and 2
-	// warnings found`, `5 warnings`, `2 problems (2 errors)`, `3 files checked` —
-	// so only strip the bare form when the line carries NO diagnostic signal. This
-	// guards the exact information the exit!=0 diagnostic-signal gate was written
-	// to protect (is_js_frame_noise runs ahead of that gate in is_lint_noise).
+	// The biome/oxlint `│`-bar gutter is unambiguous (no real summary line
+	// carries a leading number then a box-drawing bar), so strip it
+	// unconditionally. The tsc-pretty BARE form (`N source`, no bar) collides
+	// with genuine summary / content lines that legitimately begin with a
+	// number — `7 errors and 2 warnings found`, `5 warnings`, `2 problems (2
+	// errors)`, `3 files checked` — so only strip the bare form when the line
+	// carries NO diagnostic signal. This guards the exact information the
+	// exit!=0 diagnostic-signal gate was written to protect (is_js_frame_noise
+	// runs ahead of that gate in is_lint_noise).
 	if is_gutter_bar_line(trimmed) {
 		return true;
 	}
@@ -747,14 +751,15 @@ mod tests {
 	#[test]
 	fn pyright_banner_strips_are_scoped_off_other_linters() {
 		// The pyright banner/progress strips must not touch other linters: an
-		// oxlint diagnostic that legitimately mentions `Found`/`source files`-style
-		// text, or a version-like token, stays put.
+		// oxlint diagnostic that legitimately mentions `Found`/`source
+		// files`-style text, or a version-like token, stays put.
 		assert!(is_pyright_banner_noise("Found 3 source files")); // sanity: helper itself
 		// Helper is scoped at the call site to pyright/basedpyright; confirm a
 		// non-pyright program never reaches it via is_lint_noise.
 		assert!(!is_lint_noise("oxlint", "Found 3 source files referenced", 1));
 		assert!(!is_lint_noise("tsc", "Pyright 1.1 is mentioned here", 2));
-		// And confirm the helper fires for pyright/basedpyright through is_lint_noise.
+		// And confirm the helper fires for pyright/basedpyright through
+		// is_lint_noise.
 		assert!(is_lint_noise("pyright", "Searching for source files", 1));
 		assert!(is_lint_noise("basedpyright", "Found 42 source files", 1));
 		assert!(is_lint_noise("basedpyright", "basedpyright 1.22.0", 1));
@@ -965,10 +970,11 @@ mod tests {
 
 	#[test]
 	fn js_lint_numeric_summary_line_is_not_gutter_stripped() {
-		// BLOCKING 1 regression: a JS-lint summary/content line that BEGINS with a
-		// number (`7 errors and 2 warnings found`) must survive — the bare-gutter
-		// strip only applies to code-frame body rows that carry no diagnostic
-		// signal, so this line (it contains "error"/"warning") is preserved.
+		// BLOCKING 1 regression: a JS-lint summary/content line that BEGINS with
+		// a number (`7 errors and 2 warnings found`) must survive — the
+		// bare-gutter strip only applies to code-frame body rows that carry no
+		// diagnostic signal, so this line (it contains "error"/"warning") is
+		// preserved.
 		let input = "/app/x.js\n  1:1  error  bad  no-var\n\n7 errors and 2 warnings \
 		             found\n\u{2716} 9 problems (9 errors, 0 warnings)\n";
 		let out = condense_lint_output("eslint", input, 1);
@@ -978,8 +984,8 @@ mod tests {
 		);
 		assert!(out.contains("\u{2716} 9 problems (9 errors, 0 warnings)"), "got: {out}");
 
-		// Helper-level pins: the BARE tsc form only strips when no diagnostic signal
-		// is present, while the biome/oxlint `│`-bar form always strips.
+		// Helper-level pins: the BARE tsc form only strips when no diagnostic
+		// signal is present, while the biome/oxlint `│`-bar form always strips.
 		assert!(is_bare_gutter_numbered_line("3 foo = 1;"));
 		assert!(contains_diagnostic_signal("7 errors and 2 warnings found"));
 		assert!(contains_diagnostic_signal("5 warnings"));
