@@ -20,10 +20,17 @@
 // the schema is silent about is left at the openai-completions default.
 //
 // The roster names each model family in base, `-fast`, `-ultra` and
-// `-ultra-chat` tiers (13 ids over three families as of 2026-10-03). The
-// vendor prices base/fast/ultra as the same weights served at different
-// speeds, and nothing published defines what `-chat` changes, so no rule here
-// names a tier.
+// `-ultra-chat` tiers (13 ids over three families as of 2026-10-03). Base,
+// `-fast` and `-ultra` are the same weights at different serving speeds and
+// are priced in step; `-chat` ids are tuned for short-context chat, not
+// coding agents, which is the vendor's own wording on the console card.
+//
+// The tiers are priced on the vendor's console Models page, which is the only
+// place the numbers exist — the `/v1/models` rows carry none. The exact-id
+// `models` blocks below transcribe that page as seen 2026-10-03. Every tier
+// carries the same `chat`/`vision`/`tools`/`json_mode`/`reasoning` tags, so
+// capability metadata is left at the discovery defaults and only cost is
+// patched; the `-chat` distinction is a serving variant the tags do not show.
 provider "lithosai" {
 	default-model "moonshotai/Kimi-K3"
 	env "LITHOSAI_API_KEY"
@@ -38,4 +45,111 @@ provider "lithosai" {
 	reasoning-content-field "reasoning_content"
 	supports-developer-role #true
 	supports-store #false
+
+	// residue: the console tariff table, which no selector can isolate — the
+	// roster ids are namespaced by upstream org (`deepseek-ai/`, `zai-org/`,
+	// `moonshotai/`) and the tiers are serving variants, not taxonomy
+	// families. `-chat` rows are priced by the vendor at the same rate as
+	// their non-chat sibling and carry the same card, so each pair shares one
+	// block. Context is 1,048,576 on every row; the endpoint reports no
+	// limits, so `limits-patch` states the documented window.
+	models "deepseek-ai/DeepSeek-V4.1-Flash" {
+		cost-patch {
+			input 0.15
+			output 0.60
+			cache-read 0.003
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "deepseek-ai/DeepSeek-V4.1-Flash-fast" {
+		cost-patch {
+			input 0.25
+			output 1.00
+			cache-read 0.005
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "deepseek-ai/DeepSeek-V4.1-Flash-ultra" "deepseek-ai/DeepSeek-V4.1-Flash-ultra-chat" {
+		cost-patch {
+			input 0.35
+			output 1.40
+			cache-read 0.007
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "zai-org/GLM-5.3" {
+		cost-patch {
+			input 1.05
+			output 3.30
+			cache-read 0.195
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "zai-org/GLM-5.3-Flash" "zai-org/GLM-5.3-Flash-ultra" "zai-org/GLM-5.3-Flash-ultra-chat" {
+		cost-patch {
+			input 0.30
+			output 1.00
+			cache-read 0.06
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "zai-org/GLM-5.3-ultra-chat" {
+		cost-patch {
+			input 2.10
+			output 6.60
+			cache-read 0.39
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "moonshotai/Kimi-K3" {
+		cost-patch {
+			input 2.40
+			output 12.00
+			cache-read 0.24
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "moonshotai/Kimi-K3-fast" {
+		cost-patch {
+			input 4.00
+			output 20.00
+			cache-read 0.40
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
+	models "moonshotai/Kimi-K3-ultra" "moonshotai/Kimi-K3-ultra-chat" {
+		cost-patch {
+			input 5.60
+			output 28.00
+			cache-read 0.56
+			cache-write 0
+		}
+		limits-patch {
+			context-window 1048576
+		}
+	}
 }

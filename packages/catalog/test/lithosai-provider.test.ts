@@ -88,20 +88,48 @@ describe("LithosAI provider support", () => {
 	});
 
 	test("keeps roster rows on the deployment wire shape", () => {
-		// The vendor publishes no limits, tariffs, capability flags, or effort
-		// vocabulary per row — only ids — so every row keeps the discovery
-		// defaults and inherits the provider-wide request shape instead of the
-		// openai-completions default (`max_completion_tokens`).
+		// The endpoint publishes no capability flags or effort vocabulary per
+		// row — only ids — so every row keeps the discovery defaults for those
+		// axes and inherits the provider-wide request shape instead of the
+		// openai-completions default (`max_completion_tokens`). Cost and context
+		// window are rule-owned and asserted separately.
 		for (const id of LITHOSAI_ROSTER) {
 			const model = buildModel(lithosSpec(id));
 			expect(model.reasoning).toBe(false);
 			expect(model.thinking).toBeUndefined();
-			expect(model.contextWindow).toBeNull();
 			expect(model.maxTokens).toBeNull();
 			expect(model.compat.maxTokensField).toBe("max_tokens");
 			expect(model.compat.reasoningContentField).toBe("reasoning_content");
 			expect(model.compat.supportsDeveloperRole).toBe(true);
 			expect(model.compat.supportsStore).toBe(false);
+		}
+	});
+
+	test("prices every roster row from the console tariff table", () => {
+		// A discovered row arrives with zeroed cost (the endpoint publishes
+		// none), so without the KDL rules every lithosai model bills at $0.
+		// These are the console's live discounted rates per million tokens;
+		// the `-chat` ids share their sibling's tariff.
+		const EXPECTED: Record<(typeof LITHOSAI_ROSTER)[number], [number, number, number]> = {
+			"deepseek-ai/DeepSeek-V4.1-Flash": [0.15, 0.003, 0.6],
+			"deepseek-ai/DeepSeek-V4.1-Flash-fast": [0.25, 0.005, 1],
+			"deepseek-ai/DeepSeek-V4.1-Flash-ultra": [0.35, 0.007, 1.4],
+			"deepseek-ai/DeepSeek-V4.1-Flash-ultra-chat": [0.35, 0.007, 1.4],
+			"zai-org/GLM-5.3": [1.05, 0.195, 3.3],
+			"zai-org/GLM-5.3-Flash": [0.3, 0.06, 1],
+			"zai-org/GLM-5.3-Flash-ultra": [0.3, 0.06, 1],
+			"zai-org/GLM-5.3-Flash-ultra-chat": [0.3, 0.06, 1],
+			"zai-org/GLM-5.3-ultra-chat": [2.1, 0.39, 6.6],
+			"moonshotai/Kimi-K3": [2.4, 0.24, 12],
+			"moonshotai/Kimi-K3-fast": [4, 0.4, 20],
+			"moonshotai/Kimi-K3-ultra": [5.6, 0.56, 28],
+			"moonshotai/Kimi-K3-ultra-chat": [5.6, 0.56, 28],
+		};
+		for (const id of LITHOSAI_ROSTER) {
+			const [input, cacheRead, output] = EXPECTED[id];
+			const model = buildModel(lithosSpec(id));
+			expect(model.cost).toMatchObject({ input, output, cacheRead, cacheWrite: 0 });
+			expect(model.contextWindow).toBe(1048576);
 		}
 	});
 

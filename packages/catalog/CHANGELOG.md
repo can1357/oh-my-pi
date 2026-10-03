@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `lithosai` provider for LithosAI's hosted inference engine (`https://api.lithosai.cloud/v1`). The organization-scoped `/v1/models` roster is discovered at runtime and keyed on both the credential and the endpoint, so no rows are frozen into the catalog ([#14206](https://github.com/can1357/oh-my-pi/pull/14206) by [@iacore](https://github.com/iacore))
+- Added LithosAI per-tier pricing and context windows for all 13 roster models. Discovery publishes no tariffs, so rows previously reported a zeroed cost; the rates now come from the vendor's console ([#14206](https://github.com/can1357/oh-my-pi/pull/14206) by [@iacore](https://github.com/iacore))
 
 ### Fixed
 
