@@ -138,6 +138,16 @@ describe("native interactive primitives", () => {
 		}
 	});
 
+	it("keeps plain editors and inputs unsendable even with keyboard submit handlers", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.onSubmit = vi.fn();
+		expect(editorNode(editor).p).toMatchObject({ sendable: false });
+
+		const input = new Input();
+		input.onSubmit = vi.fn();
+		expect(input.describe(cx).p).toMatchObject({ sendable: false });
+	});
+
 	it("changes only text and cursor when typing and only the cursor when moving", () => {
 		const editor = new Editor(getEditorTheme());
 		editor.focused = true;

@@ -5,6 +5,7 @@ import { Legend, ShareBar, TimeChart } from "../charts";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatMessageCost,
@@ -133,7 +134,7 @@ export function OverviewRoute({ active, range, onRequestClick }: OverviewRoutePr
 							/>
 							<Stat
 								label="Error rate"
-								value={formatPercent(overall.errorRate)}
+								value={formatErrorRate(overall.errorRate)}
 								hint={`${formatInteger(overall.successfulRequests)} succeeded`}
 								spark={series.errors}
 								sparkColor="var(--bad)"

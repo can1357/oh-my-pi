@@ -6,7 +6,15 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getPluginsDir, getPluginsLockfile, hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import {
+	getPluginsDir,
+	getPluginsLockfile,
+	hasFsCode,
+	isEacces,
+	isEnoent,
+	logger,
+	normalizePathForComparison,
+} from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
@@ -254,7 +262,7 @@ async function loadEnabledPlugins(cwd: string, home?: string): Promise<ScopedIns
 	const projectRegistryPath = await resolveActiveProjectRegistryPath(cwd);
 	if (projectRegistryPath) {
 		const projectRoot = path.dirname(projectRegistryPath);
-		if (projectRoot !== userRoot) {
+		if (normalizePathForComparison(projectRoot) !== normalizePathForComparison(userRoot)) {
 			projectPlugins = await collectPluginsAtRoot(projectRoot, projectOverrides, "project");
 		}
 	}

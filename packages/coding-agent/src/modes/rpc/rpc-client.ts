@@ -34,6 +34,7 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcLiveFrame,
 	RpcOpenSessionResult,
 	RpcPromptResultFrame,
 	RpcResponse,
@@ -107,6 +108,7 @@ export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
 export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
+export type RpcLiveListener = (frame: RpcLiveFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -229,6 +231,17 @@ function isRpcSessionSettledFrame(value: unknown): value is RpcSessionSettledFra
 	return isRecord(value) && value.type === "session_settled";
 }
 
+const LIVE_FRAME_TYPES: Record<string, true> = {
+	live_phase: true,
+	live_levels: true,
+	live_transcript: true,
+	live_end: true,
+};
+
+function isRpcLiveFrame(value: unknown): value is RpcLiveFrame {
+	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(LIVE_FRAME_TYPES, value.type);
+}
+
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
@@ -299,6 +312,7 @@ export class RpcClient {
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
+	#liveListeners = new Set<RpcLiveListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
 	/** Same-id failures that arrive after the success ack removed the pending request. */
@@ -613,6 +627,14 @@ export class RpcClient {
 		};
 	}
 
+	/** Subscribe to live voice frames: `live_phase`, `live_levels`, `live_transcript`, `live_end`. */
+	onLive(listener: RpcLiveListener): () => void {
+		this.#liveListeners.add(listener);
+		return () => {
+			this.#liveListeners.delete(listener);
+		};
+	}
+
 	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
@@ -753,6 +775,32 @@ export class RpcClient {
 			objective: options?.objective,
 			token_budget: options?.tokenBudget,
 		});
+		return this.#getData(response);
+	}
+
+	/**
+	 * Start a GPT live voice session bound to this session; resolves once it is connected
+	 * and recording. `instructions` replaces the bundled live prompt (Handlebars:
+	 * `{{username}}`, `{{firstName}}`). Frames arrive through {@link onLive}.
+	 */
+	async liveStart(options?: { voice?: string; instructions?: string }): Promise<{ voice: string }> {
+		const response = await this.#send({
+			type: "live_start",
+			voice: options?.voice,
+			instructions: options?.instructions,
+		});
+		return this.#getData(response);
+	}
+
+	/** Stop the live voice session, if any; resolves once it has stopped. */
+	async liveStop(): Promise<void> {
+		const response = await this.#send({ type: "live_stop" });
+		this.#getData(response);
+	}
+
+	/** Set microphone mute, or toggle it when `muted` is omitted. Fails without an active session. */
+	async liveMute(muted?: boolean): Promise<{ muted: boolean }> {
+		const response = await this.#send({ type: "live_mute", muted });
 		return this.#getData(response);
 	}
 
@@ -1340,6 +1388,13 @@ export class RpcClient {
 		if (isRpcSubagentEventFrame(data)) {
 			for (const listener of this.#subagentEventListeners) {
 				listener(data.payload);
+			}
+			return;
+		}
+
+		if (isRpcLiveFrame(data)) {
+			for (const listener of this.#liveListeners) {
+				listener(data);
 			}
 			return;
 		}
