@@ -1,3 +1,4 @@
+import { cfgCommandsHidden } from "../extensibility/settings";
 import { clearSubmittedText } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
@@ -76,6 +77,25 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 	}),
 );
 
+/**
+ * Drop builtins named in `commands.hidden` from listings. A primary name hides the command
+ * with its aliases; an alias hides only that alias. Dispatch still resolves hidden names.
+ */
+export function filterBuiltinSlashCommands<T extends { name: string; aliases?: string[] }>(
+	commands: readonly T[],
+	hidden: readonly string[],
+): readonly T[] {
+	if (hidden.length === 0) return commands;
+	const names = new Set(hidden);
+	return commands
+		.filter(command => !names.has(command.name))
+		.map(command =>
+			command.aliases?.some(alias => names.has(alias))
+				? { ...command, aliases: command.aliases.filter(alias => !names.has(alias)) }
+				: command,
+		);
+}
+
 function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
@@ -119,7 +139,9 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<TuiBuiltinSlashCommand> = BUI
 );
 
 export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): ReadonlyArray<TuiBuiltinSlashCommand> {
-	return BUILTIN_SLASH_COMMAND_DEFS.map(cmd => materializeTuiBuiltinSlashCommand(cmd, runtime));
+	return filterBuiltinSlashCommands(BUILTIN_SLASH_COMMAND_DEFS, cfgCommandsHidden.get(runtime.ctx)).map(cmd =>
+		materializeTuiBuiltinSlashCommand(cmd, runtime),
+	);
 }
 
 /**

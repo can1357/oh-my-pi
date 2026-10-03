@@ -1184,6 +1184,21 @@ describe("trySyncSlashCompletion", () => {
 		expect(result!.items[0]?.value).toBe("q");
 	});
 
+	it("keeps an exact hidden command as typed instead of completing to a fuzzy match", async () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "autoresearch", description: "Toggle autoresearch, or a goal message" },
+				{ name: "goal", hidden: true },
+			],
+			"/tmp",
+		);
+		// Enter applies items[0]; completing `/goal` to `/autoresearch` would run the wrong command.
+		expect(provider.trySyncSlashCompletion("/goal")).toBeNull();
+		expect(await provider.getSuggestions(["/goal"], 0, 5)).toBeNull();
+		const listed = await provider.getSuggestions(["/"], 0, 1);
+		expect(listed?.items.map(i => i.value)).toEqual(["autoresearch"]);
+	});
+
 	it("uses aliases when completing slash command arguments", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[

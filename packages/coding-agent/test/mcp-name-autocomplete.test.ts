@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { collectMcpServerNames } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -48,7 +49,7 @@ function createFakeCtx(discoveredNames: string[]) {
 		getSource: vi.fn((): SourceMeta | undefined => undefined),
 		getConnectionStatus: vi.fn(() => "connected" as const),
 	};
-	const ctx = { mcpManager } as never as InteractiveModeContext;
+	const ctx = { mcpManager, settings: Settings.isolated() } as never as InteractiveModeContext;
 	return { ctx, mcpManager };
 }
 

@@ -100,6 +100,19 @@ export const cfgSkills = combine({
 export type SkillsSettings = Partial<SettingValueOf<typeof cfgSkills>>;
 
 // Commands
+export const cfgCommandsHidden = register({
+	id: "commands.hidden",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Hidden Built-in Commands",
+		description:
+			"Built-in slash command names to hide from the palette and autocomplete. Hidden commands still run when typed.",
+	},
+});
+
 export const cfgCommandsEnableClaudeUser = register({
 	id: "commands.enableClaudeUser",
 	type: "boolean",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SlashCommand.hidden`: the command is left out of name suggestions, and typing its exact name submits it as typed instead of completing to a fuzzy match.
+
 ## [18.5.0] - 2026-10-03
 
 ### Added

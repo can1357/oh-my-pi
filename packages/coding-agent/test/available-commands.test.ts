@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCommandsHidden } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
+import {
+	buildTuiBuiltinSlashCommands,
+	executeBuiltinSlashCommand,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
 describe("buildAvailableSlashCommands", () => {
 	test("returns RPC-safe command metadata with stable sources", async () => {
@@ -11,6 +20,7 @@ describe("buildAvailableSlashCommands", () => {
 			command: { name: "server:prompt", description: "MCP prompt" },
 		};
 		const session = {
+			settings: Settings.isolated(),
 			extensionRunner: {
 				getRegisteredCommands: () => [{ name: "ext:hello", description: "Extension hello" }],
 			},
@@ -68,6 +78,7 @@ describe("buildAvailableSlashCommands", () => {
 
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
@@ -96,6 +107,7 @@ describe("buildAvailableSlashCommands", () => {
 
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
@@ -112,6 +124,7 @@ describe("buildAvailableSlashCommands", () => {
 	test("classifies MCP prompts by path and bundled custom commands as custom", async () => {
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [
 					{
 						path: "mcp:server/prompt",
@@ -141,6 +154,7 @@ describe("buildAvailableSlashCommands", () => {
 	test("keeps legacy custom command fixtures without a path classified as custom", async () => {
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [{ command: { name: "legacy", description: "Legacy fixture" } }],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
@@ -159,6 +173,7 @@ describe("buildAvailableSlashCommands", () => {
 		const fileCommands = [{ name: "models", description: "My models note", content: "body", source: "test" }];
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [{ command: { name: "plugin", description: "My plugin helper" } }],
 				skills: [],
 				sessionManager: { getCwd: () => "/tmp" },
@@ -172,5 +187,68 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName.models).toBeUndefined();
 		expect(byName.plugins.source).toBe("builtin");
 		expect(byName.plugins.aliases).toEqual(["plugin"]);
+	});
+
+	test("hides commands.hidden builtins while keeping their names reserved", async () => {
+		const commands = await buildAvailableSlashCommands(
+			{
+				settings: Settings.isolated({ "commands.hidden": ["security", "plugins", "models", "ext:hello"] }),
+				extensionRunner: { getRegisteredCommands: () => [{ name: "ext:hello" }] },
+				customCommands: [{ command: { name: "security" } }, { command: { name: "plugin" } }],
+				skills: [],
+				sessionManager: { getCwd: () => process.cwd() },
+				setSlashCommands() {},
+			} as never,
+			async () => [{ name: "models", description: "Shadowed alias", content: "body", source: "test" }],
+		);
+		const byName = Object.fromEntries(commands.map(command => [command.name, command]));
+
+		// Typed `/security`, `/plugin`, `/models` still resolve to the builtin, so no shadow may appear.
+		expect(byName.security).toBeUndefined();
+		expect(byName.plugins).toBeUndefined();
+		expect(byName.plugin).toBeUndefined();
+		expect(byName.models).toBeUndefined();
+		expect(byName.model.aliases).toEqual([]);
+		// Only builtins are hideable.
+		expect(byName["ext:hello"].source).toBe("extension");
+	});
+});
+
+describe("buildTuiBuiltinSlashCommands", () => {
+	test("re-reads commands.hidden on every build", () => {
+		const settings = Settings.isolated();
+		const ctx = { settings } as InteractiveModeContext;
+		const names = () => buildTuiBuiltinSlashCommands({ ctx }).flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])]);
+
+		expect(names()).toEqual(expect.arrayContaining(["security", "goal", "models"]));
+		cfgCommandsHidden.set(settings, ["security", "goal", "models", "not-a-command"]);
+		const hidden = names();
+		expect(hidden).not.toContain("security");
+		expect(hidden).not.toContain("goal");
+		expect(hidden).not.toContain("models");
+		expect(hidden).toContain("model");
+		cfgCommandsHidden.set(settings, []);
+		expect(names()).toContain("security");
+	});
+
+	test("typed hidden commands still dispatch in TUI and ACP", async () => {
+		const settings = Settings.isolated({ "commands.hidden": ["security"], "security.enabled": false });
+		const output: string[] = [];
+		const ctx = {
+			settings,
+			sessionManager: { getCwd: () => process.cwd() },
+			showStatus: (text: string) => output.push(text),
+			editor: { setText() {} },
+		} as unknown as InteractiveModeContext;
+
+		expect(await executeBuiltinSlashCommand("/security", { ctx })).toBe(true);
+		expect(
+			await executeAcpBuiltinSlashCommand("/security", {
+				settings,
+				output: (text: string) => output.push(text),
+			} as unknown as SlashCommandRuntime),
+		).toEqual({ consumed: true });
+		expect(output).toHaveLength(2);
+		expect(output.every(text => text.includes("Security is disabled"))).toBe(true);
 	});
 });

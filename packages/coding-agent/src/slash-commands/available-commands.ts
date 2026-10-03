@@ -1,12 +1,13 @@
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import type { SkillsSettings } from "../extensibility/settings";
+import type { Settings } from "../config/settings";
+import { cfgCommandsHidden, type SkillsSettings } from "../extensibility/settings";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
-import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
+import { BUILTIN_SLASH_COMMANDS_INTERNAL, filterBuiltinSlashCommands } from "./builtin-registry";
 
 export type AvailableSlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
 
@@ -20,6 +21,7 @@ export interface InternalAvailableSlashCommand {
 }
 
 export interface AvailableCommandsSession {
+	readonly settings: Settings;
 	readonly extensionRunner?: ExtensionRunner;
 	readonly customCommands: ReadonlyArray<LoadedCustomCommand>;
 	readonly mcpPromptCommands?: ReadonlyArray<LoadedCustomCommand>;
@@ -43,7 +45,7 @@ export async function buildAvailableSlashCommands(
 		commands.push(command);
 	};
 
-	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
+	for (const command of filterBuiltinSlashCommands(BUILTIN_SLASH_COMMANDS_INTERNAL, cfgCommandsHidden.get(session))) {
 		if (!command.handle) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
@@ -54,12 +56,11 @@ export async function buildAvailableSlashCommands(
 			subcommands: command.subcommands,
 			source: "builtin",
 		});
-		// ACP dispatch resolves builtin aliases before `session.prompt()` sees the
-		// input, so a custom/file command sharing an alias would be advertised but
-		// never run. Reserve aliases here too; TUI-only builtins are skipped above,
-		// so their aliases stay available.
-		for (const alias of command.aliases ?? []) seenNames.add(alias);
 	}
+	// ACP dispatch resolves every builtin name and alias, hidden or not, before
+	// `session.prompt()` sees the input, so a custom/file command sharing one would be
+	// advertised but never run. TUI-only builtins have no `handle` and stay available.
+	for (const name of ACP_BUILTIN_RESERVED_NAMES) seenNames.add(name);
 
 	if (session.skillsSettings?.enableSkillCommands) {
 		for (const skill of session.skills) {

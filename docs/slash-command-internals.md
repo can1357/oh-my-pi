@@ -164,7 +164,7 @@ Interactive mode combines multiple command sources for autocomplete and command 
 
 At construction time it builds a pending command list from:
 
-- built-ins (`buildTuiBuiltinSlashCommands(...)`, materialized from `BUILTIN_SLASH_COMMAND_DEFS` with live argument completion and inline hints)
+- built-ins (`buildTuiBuiltinSlashCommands(...)`, materialized from `BUILTIN_SLASH_COMMAND_DEFS` with live argument completion and inline hints, minus names/aliases listed in `commands.hidden`; those names are added back as `hidden` entries, so typing one exactly submits it instead of fuzzy-completing to another command)
 - extension-registered slash commands (`extensionRunner.getRegisteredCommands(...)`)
 - TypeScript custom commands (`session.customCommands`), mapped to slash command labels
 - optional skill commands (`/skill:<name>`) when `skills.enableSkillCommands` is enabled
@@ -173,7 +173,7 @@ Then `init()` calls `refreshSlashCommandState(...)`, reusing the session's start
 
 - pending commands above
 - discovered file-based commands
-- discovered prompt-template commands whose names aren't already taken by a built-in/hook/custom/skill/file command
+- discovered prompt-template commands whose names aren't already taken by a built-in (including hidden ones)/hook/custom/skill/file command
 
 `refreshSlashCommandState(...)` also updates `session.setSlashCommands(...)` so prompt expansion uses the same discovered file command set.
 Extension-registered autocomplete factories wrap this base provider in registration order; malformed or throwing factories are skipped.
@@ -257,7 +257,7 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 
 ## ACP/RPC availability
 
-`buildAvailableSlashCommands(...)` publishes commands first-wins in this order: text-capable built-ins, optional skill commands, extension commands, TypeScript/MCP custom commands, then discovered file commands. Built-in primary names and aliases are reserved; extension names such as `model:foo`, whose prefix parses as a built-in, are filtered from ACP availability. The same file-command load updates the session expansion set.
+`buildAvailableSlashCommands(...)` publishes commands first-wins in this order: text-capable built-ins (minus `commands.hidden` entries), optional skill commands, extension commands, TypeScript/MCP custom commands, then discovered file commands. Built-in primary names and aliases are reserved, including hidden ones, because dispatch still resolves them; extension names such as `model:foo`, whose prefix parses as a built-in, are filtered from ACP availability. The same file-command load updates the session expansion set.
 
 ## 8) Streaming-time differences vs idle
 
