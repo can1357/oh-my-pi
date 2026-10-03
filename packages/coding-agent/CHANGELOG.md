@@ -5,6 +5,7 @@
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
+- Added the `wait.maxMs` setting for the `wait` safety cap (default 30 minutes); set it to `0` so a wait on long background work returns only on a result, a message, or a steering interrupt instead of a still-running snapshot every 30 minutes
 
 ### Changed
 
