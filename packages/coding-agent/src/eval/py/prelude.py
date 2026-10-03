@@ -96,6 +96,11 @@ if "__omp_prelude_loaded__" not in globals():
         through unchanged; any other `scheme://` is rejected."""
         if not isinstance(path, str):
             return Path(path)
+        # Recover the one-character typo `scheme:/x` (but never single-letter
+        # schemes: Windows drive spellings like `C:/x` stay filesystem paths).
+        single = re.match(r"^([a-z][a-z0-9+.-]*):/(?!/)(.*)$", path, re.IGNORECASE)
+        if single and len(single.group(1)) > 1:
+            path = f"{single.group(1)}://{single.group(2)}"
         match = _OMP_INTERNAL_URL_RE.match(path)
         if not match:
             return Path(path)
