@@ -32,9 +32,27 @@ import { footnoteText, resultText } from "./native-view";
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
-/** LLM-facing footer appended when a tool call becomes a background job. */
-export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+/**
+ * LLM-facing footer appended when a tool call becomes a background job. It states the job's kill
+ * deadline (`timeoutSec`, `undefined` when disabled) so the model knows the job will die at it before
+ * it waits on the result. The deadline counts the job's whole run time, not time left from now: an
+ * auto-backgrounded call has already spent its foreground wait.
+ */
+export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined): string {
+	const deadline =
+		timeoutSec === undefined
+			? " (no deadline)"
+			: ` (killed once it has run ${timeoutSec}s in total; \`timeout: 0\` disables the deadline)`;
+	return `Backgrounded as job ${jobId}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+}
+
+/**
+ * Whether `line` is `formatBackgroundNotice(jobId, …)` for any deadline, including the deadline-less
+ * `Backgrounded as job <id>; …` form persisted in older transcripts.
+ */
+function isBackgroundNotice(line: string, jobId: string): boolean {
+	const prefix = `Backgrounded as job ${jobId}`;
+	return line.startsWith(prefix) && (line[prefix.length] === ";" || line[prefix.length] === " ");
 }
 
 /** Shell execution metadata used by transcript rendering. */
@@ -289,9 +307,10 @@ function stripBashNotices(
 	rawOutput: string,
 	details: BashToolDetails | undefined,
 ): { text: string; artifactId?: string } {
+	const job = details?.async;
 	const withoutBackground =
-		details?.async?.state === "running"
-			? stripTrailingNotice(rawOutput, formatBackgroundNotice(details.async.jobId))
+		job?.state === "running"
+			? stripTrailingNotice(rawOutput, line => isBackgroundNotice(line, job.jobId))
 			: rawOutput;
 	const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
 	const withoutExit =

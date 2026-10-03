@@ -34,6 +34,35 @@ const LOW_TO_MAX: ThinkingConfig = {
 	requiresEffort: false,
 };
 
+const MINIMAL_TO_XHIGH: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+	defaultLevel: Effort.Medium,
+	requiresEffort: false,
+};
+
+const DEEPSEEK_V41_FLASH_FREE: ClinePassModelMetadata = {
+	name: "DeepSeek V4.1 Flash (free)",
+	contextWindow: 1_048_576,
+	maxTokens: 384_000,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	reasoning: true,
+	thinking: LOW_HIGH_MAX,
+	tier: "free",
+};
+
+const MUSE_SPARK_13_CONTRIBUTOR_FREE: ClinePassModelMetadata = {
+	name: "Muse Spark 1.3 (C) (free)",
+	contextWindow: 1_048_576,
+	maxTokens: 131_072,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	reasoning: true,
+	thinking: MINIMAL_TO_XHIGH,
+	tier: "free",
+};
+
 const QWEN_38_EFFORTS: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
@@ -219,6 +248,10 @@ export const CLINE_PASS_MODEL_METADATA: Readonly<Record<string, ClinePassModelMe
 		reasoning: true,
 		tier: "free",
 	},
+	"cline-free/deepseek-v4.1-flash": DEEPSEEK_V41_FLASH_FREE,
+	"deepseek/deepseek-v4.1-flash": DEEPSEEK_V41_FLASH_FREE,
+	"cline-free/muse-spark-1.3-contributor": MUSE_SPARK_13_CONTRIBUTOR_FREE,
+	"meta/muse-spark-1.3-contributor": MUSE_SPARK_13_CONTRIBUTOR_FREE,
 };
 
 export function getClinePassModelMetadata(id: string): ClinePassModelMetadata | undefined {

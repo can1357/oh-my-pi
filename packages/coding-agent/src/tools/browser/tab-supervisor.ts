@@ -19,7 +19,14 @@ import { CmuxTab } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { runInProcessTab } from "./in-process-run";
 import { DEFAULT_VIEWPORT } from "./launch";
-import { closeCdpTarget, forgetSharedTarget, recordSharedTarget, type SharedTargetScope } from "./orphan-registry";
+import {
+	closeCdpTarget,
+	forgetSharedTarget,
+	forgetSharedTargets,
+	recordSharedTarget,
+	type SharedTargetScope,
+} from "./orphan-registry";
+import { stopSharedBrowserIfUnreachable } from "./shared-daemon";
 import {
 	type BrowserHandle,
 	type BrowserKindTag,
@@ -986,6 +993,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	let cleanupError: unknown;
 	let forced = false;
+	let targetCloseFailed = false;
 	if (wasAlive) {
 		try {
 			tab.worker.send({ type: "close" });
@@ -997,13 +1005,17 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	await tab.worker.terminate().catch(() => undefined);
 	if (forced && tab.kindTag === "headless") {
 		try {
-			await waitForTabCleanup(
+			// `false` is "not confirmed closed" (the CDP session could not be
+			// created, or `Target.getTargets` failed) — the same unconfirmed
+			// state the timeout reports as an error, so both mark the tab.
+			targetCloseFailed = !(await waitForTabCleanup(
 				tab,
 				timeoutMs,
 				`orphan CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
 				closeOrphanTarget(tab),
-			);
+			));
 		} catch (error) {
+			targetCloseFailed = true;
 			cleanupError = error;
 		}
 	}
@@ -1018,7 +1030,20 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	} finally {
 		tabs.delete(name);
 		const scope = sharedScopeOf(tab.browser);
-		if (scope) void forgetSharedTarget(scope, tab.targetId);
+		if (scope) {
+			if (targetCloseFailed) {
+				// The target outlived its close, so it is still open in the
+				// shared Chromium. Keep its durable ownership record — the only
+				// handle a later reap has on it — instead of forgetting a target
+				// that was never closed, and re-check the browser itself: a
+				// Chromium that stopped answering its CDP endpoint holds every
+				// unclosable target and must be replaced, not left to grow until
+				// the last omp client in the project exits.
+				recheckSharedBrowser(scope);
+			} else {
+				void forgetSharedTarget(scope, tab.targetId);
+			}
+		}
 	}
 	if (cleanupError) throw cleanupError;
 	return true;
@@ -1406,6 +1431,8 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	const page = await pickElectronTarget(browser.browser, {
 		matcher: opts.target,
 		preferVisible: !activateForScreenshot,
+		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
+		signal: opts.signal,
 	});
 	const targetId = await targetIdForPage(page);
 	return {
@@ -1555,24 +1582,70 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 async function forceKillTab(name: string, reason: string): Promise<void> {
 	const tab = tabs.get(name);
 	if (!tab) return;
+	// A release already owns this tab's teardown. Joining it keeps one worker
+	// termination, one browser-hold release, and one ownership decision — the
+	// racing pair otherwise released the shared browser's hold twice and let the
+	// second path forget a target this one is retaining.
+	const ongoing = releaseInflight.get(tab);
+	if (ongoing) {
+		await ongoing.promise.catch(() => undefined);
+		return;
+	}
 	killedTabs.set(name, reason);
 	tab.state = "dead";
 	const error = postmortem.markExpectedCleanupError(new ToolError(reason));
 	for (const pending of tab.pending.values()) pending.reject(error);
 	tab.pending.clear();
-	if (tab.backend === "cmux" || tab.backend === "tern") {
-		if (tab.backend === "tern")
-			await tab.ternTab.close({ timeoutMs: DEFAULT_TAB_CLOSE_TIMEOUT_MS }).catch(() => undefined);
-		await releaseBrowser(tab.browser, { kill: false });
-		tabs.delete(name);
-		return;
+	// Published before the first await so a release landing during the close
+	// below joins instead of tearing the same tab down a second time. The
+	// published result is the release contract — the tab is gone either way; a
+	// target that could not be closed stays in the ownership registry instead.
+	const teardown = tab.backend === "worker" ? forceKillTabTeardown(tab) : forceKillSurfaceTab(tab, name);
+	const entry = { promise: teardown.then(() => true), opts: { kill: false } };
+	releaseInflight.set(tab, entry);
+	try {
+		await entry.promise;
+	} finally {
+		if (releaseInflight.get(tab) === entry) releaseInflight.delete(tab);
 	}
-	await tab.worker.terminate().catch(() => undefined);
-	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
+}
+
+/** Teardown half of {@link forceKillTab} for a cmux or Tern surface, published through the release single-flight. */
+async function forceKillSurfaceTab(tab: CmuxTabSession | TernTabSession, name: string): Promise<void> {
+	if (tab.backend === "tern")
+		await tab.ternTab.close({ timeoutMs: DEFAULT_TAB_CLOSE_TIMEOUT_MS }).catch(() => undefined);
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
+}
+
+/**
+ * Teardown half of {@link forceKillTab} for a worker tab, published through the
+ * release single-flight. Same rule as `releaseTabInner`: a target whose close is
+ * unconfirmed (fast failure, or a close that outran its budget) keeps its
+ * ownership record and re-checks the shared browser, so a wedged Chromium cannot
+ * hold the page past every later reap. The close is bounded exactly as
+ * `releaseTabInner` bounds it — a release joining this teardown must not inherit
+ * an unbounded CDP wait (Puppeteer's protocol timeout is 60 s). Teardown must
+ * still finish: the tab is already dead to its callers.
+ */
+async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
+	await tab.worker.terminate().catch(() => undefined);
+	let targetClosed = true;
+	if (tab.kindTag === "headless") {
+		targetClosed = await waitForTabCleanup(
+			tab,
+			DEFAULT_TAB_CLOSE_TIMEOUT_MS,
+			`orphan CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
+			closeOrphanTarget(tab),
+		).catch(() => false);
+	}
+	await releaseBrowser(tab.browser, { kill: false });
+	tabs.delete(tab.name);
 	const scope = sharedScopeOf(tab.browser);
-	if (scope) void forgetSharedTarget(scope, tab.targetId);
+	if (scope) {
+		if (targetClosed) void forgetSharedTarget(scope, tab.targetId);
+		else recheckSharedBrowser(scope);
+	}
 }
 
 /**
@@ -1581,8 +1654,8 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
  * wedged during initialization can make Puppeteer's page close wait for the
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
-async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string): Promise<void> {
-	await closeCdpTarget(browser.browser, targetId);
+async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string): Promise<boolean> {
+	return await closeCdpTarget(browser.browser, targetId);
 }
 
 /**
@@ -1597,13 +1670,30 @@ function sharedScopeOf(browser: BrowserHandle): SharedTargetScope | undefined {
 }
 
 /**
+ * Re-check the shared browser after a close it could not confirm, and forget
+ * only what the outcome proves. A browser that answers is left alone: the
+ * retained record is not retried by this process (`collectOrphanTargets` skips
+ * a live pid) but is reaped after it exits, which is the same guarantee the
+ * registry gave before. When — and only when — the broker confirms the daemon
+ * ended (`stopSharedBrowserIfUnreachable` resolves true on a terminal stop
+ * snapshot), every target this process still claims in it went with the
+ * browser, so those records go too instead of being rewritten on every later
+ * flush. An unconfirmed stop forgets nothing.
+ */
+function recheckSharedBrowser(scope: SharedTargetScope): void {
+	void stopSharedBrowserIfUnreachable(scope).then(stopped => {
+		if (stopped) void forgetSharedTargets(scope);
+	});
+}
+
+/**
  * Best-effort cleanup for a forced-kill path: close the page the tab's worker
  * reported as created. A run caller is never a browser ref holder, so the
  * browser is still in the registry; the tab's browser is the only place that
  * page can be, so no targetId guesswork across multiple sessions.
  */
-async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {
-	await closeTargetById(tab.browser, tab.targetId);
+async function closeOrphanTarget(tab: WorkerTabSession): Promise<boolean> {
+	return await closeTargetById(tab.browser, tab.targetId);
 }
 
 /**

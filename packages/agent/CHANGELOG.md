@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added provider-reported usage cost, the unnormalized provider ID, and the requested model ID to CostEstimatorContext, allowing cost estimators to use the cost already recorded for a request instead of recomputing it from token counts.
+
+### Changed
+
+- Improved tool-result supersession so path reads with selectors are tracked independently from bare-path reads, while failed results supersede only earlier failed results for the same key.
+
+### Fixed
+
+- Fixed parallel tool calls with reused or empty IDs executing with another call’s arguments or merging results; each call now executes and reports its own payload.
+- Fixed completed tool calls being retried after a transient provider-stream read error; incomplete calls from the affected turn are now discarded.
+- Fixed previously read code being removed from context when a subsequent read returned a summary, truncated content, or an error.
+- Fixed intent tracing for tools that define i as a real argument, preserving the argument and its declared schema order.
+
 ## [18.4.11] - 2026-10-02
 
 ### Fixed

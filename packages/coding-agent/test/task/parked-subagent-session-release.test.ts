@@ -24,10 +24,12 @@ import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
-// createAgentSession races its workspace scan against an uncancelled 5 s
-// startup deadline timer whose reaction keeps the new session reachable until
-// it fires; collection is polled past that window.
-const COLLECT_DEADLINE_MS = 8_000;
+// After earlier files warm the session code, JSC's optimizing-JIT worklist can
+// keep an object referenced by an in-flight compile reachable for a few seconds
+// (observed ~4 s locally, >8 s on loaded CI runners); collection is polled past
+// that window. A healthy release returns on the first poll that sees it collected,
+// so the deadline only bounds how long a real leak takes to fail.
+const COLLECT_DEADLINE_MS = 15_000;
 
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 let savedEnv: Record<string, string | undefined> = {};
@@ -168,7 +170,7 @@ it("releases a parked keep-alive subagent's session while the agent stays reviva
 	} finally {
 		run.close();
 	}
-}, 20_000);
+}, 30_000);
 
 it("parks without retaining the run's settings overlay and revives with the settings it wrote", async () => {
 	const run = await runKeptAliveSubagent();
@@ -187,4 +189,4 @@ it("parks without retaining the run's settings overlay and revives with the sett
 	} finally {
 		run.close();
 	}
-}, 20_000);
+}, 30_000);

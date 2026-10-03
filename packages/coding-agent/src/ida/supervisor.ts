@@ -239,8 +239,9 @@ export class IdaWorker {
 	 * Send one request to the worker, serialized behind earlier requests. `timeoutMs` covers the
 	 * queue wait too: a request still queued at its deadline fails with a {@link ToolError} naming
 	 * the running request, without interrupting it (it belongs to another caller). A timeout or
-	 * abort while executing sends SIGINT and waits {@link INTERRUPT_GRACE_MS} for the answer; a
-	 * worker that does not answer is killed. Worker-side failures surface as {@link ToolError}.
+	 * abort while executing interrupts it (SIGINT; on Windows an `interrupt` frame on stdin) and
+	 * waits {@link INTERRUPT_GRACE_MS} for the answer; a worker that does not answer is killed.
+	 * Worker-side failures surface as {@link ToolError}.
 	 */
 	async request<T>(method: IdaMethod, params: object, options: IdaRequestOptions = {}): Promise<T> {
 		if (this.#exitCode !== null) throw this.#exitError();
@@ -376,7 +377,13 @@ export class IdaWorker {
 			}
 
 			try {
-				this.#proc.kill("SIGINT");
+				if (process.platform === "win32") {
+					// Windows has no per-process SIGINT (kill terminates); worker.py reads this frame on its stdin thread.
+					this.#proc.stdin.write(`${JSON.stringify({ interrupt: id })}\n`);
+					await this.#proc.stdin.flush();
+				} else {
+					this.#proc.kill("SIGINT");
+				}
 			} catch {
 				// Already gone: the exit handler rejects the pending response.
 			}

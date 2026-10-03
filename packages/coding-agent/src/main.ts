@@ -9,6 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -71,7 +72,6 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
-import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -84,7 +84,6 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-c
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
-	setStartupComposerLspServers,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
@@ -112,7 +111,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
+import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -175,7 +174,6 @@ import {
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
-import { cfgLspEnabled } from "./lsp/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -672,7 +670,6 @@ async function runInteractiveMode(
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				recentSessions: startupLease?.recentSessions,
 			}),
 		);
 		startDeferredStartupWork?.();
@@ -889,7 +886,17 @@ async function moveMissingCwdSessionIfNeeded(
 	// move target equals the current project dir. moveTo never chdirs, so the
 	// stale cwd is only a relocation source, not a directory we enter.
 	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
-	await manager.moveTo(cwd, sessionDir);
+	try {
+		await manager.moveTo(cwd, sessionDir);
+	} catch (err) {
+		if (!(err instanceof SessionMoveRefusedError)) throw err;
+		await manager.close();
+		// Its directory is gone, so it cannot be resumed in place either.
+		throw new SessionResolutionError(
+			err.message,
+			"Close the session in the other omp process, then resume it again.",
+		);
+	}
 	return { status: "moved", manager };
 }
 
@@ -1860,6 +1867,15 @@ export async function runRootCommand(
 			"modelRegistry:init",
 			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
 		);
+		// Credential-scoped catalogs (e.g. GitHub Copilot) load from their cache
+		// rows only after credentials resolve. `--model` and `enabledModels` below
+		// resolve against the registry before `createAgentSession` hydrates it, so
+		// without this a cached-only model is absent and its selector fuzzy-matches
+		// a bundled sibling (issue #14075). Local-only and never rejects; awaited
+		// right before the first catalog read so its I/O overlaps theme setup.
+		const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
+			modelRegistry.hydrateCredentialScopedModelCaches(),
+		);
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
 		}
@@ -1935,10 +1951,8 @@ export async function runRootCommand(
 				lightTheme: cfgThemeLight.get(settingsInstance),
 			},
 		});
-		setStartupComposerLspServers(
-			!parsedArgs.noLsp && cfgLspEnabled.get(settingsInstance) ? discoverStartupLspServers(cwd, "connecting") : null,
-		);
 
+		await credentialScopedCacheHydration;
 		let scopedModels = await logger.time(
 			"resolveModelScope",
 			resolveScopedModels,
@@ -2185,7 +2199,12 @@ export async function runRootCommand(
 			cfgTelemetryOtlpExportEnabled.get(settingsInstance),
 		);
 		if (isTelemetryExportEnabled()) {
-			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
+			// Chat telemetry reports each request's provider-computed cost. A model
+			// without a known rate card reports an unavailable reason instead of $0.
+			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry, (providerId, modelId) => {
+				const model = modelRegistry.find(providerId, modelId);
+				return model !== undefined && getModelPricingStatus(model) !== "unknown";
+			});
 		}
 		await daemonPresencePromise;
 

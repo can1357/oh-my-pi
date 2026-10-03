@@ -4,7 +4,7 @@
  * Primary provider for OMP native configs. Supports all capabilities.
  */
 import * as path from "node:path";
-import { getAgentDir, logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
@@ -58,10 +58,11 @@ async function ifNonEmptyDir(...seg: string[]): Promise<string | null> {
 async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; level: "user" | "project" }>> {
 	const result: Array<{ dir: string; level: "user" | "project" }> = [];
 
-	const projectDir = await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
-	if (projectDir) {
-		result.push({ dir: projectDir, level: "project" });
-	}
+	const projectDir =
+		normalizePathForComparison(ctx.cwd) === normalizePathForComparison(ctx.home)
+			? null
+			: await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
+	if (projectDir) result.push({ dir: projectDir, level: "project" });
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
 	// A load that carries its own agentDir (an SDK session created with one) reads that dir.
@@ -73,13 +74,15 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
+/** Ancestor directories (cwd spelling) through the optional inclusive stop directory, compared canonically. */
 export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
-	let current = cwd;
+	let current = path.resolve(cwd);
+	const stop = stopAt ? normalizePathForComparison(stopAt) : null;
 	let depth = 0;
 	while (true) {
 		ancestors.push({ dir: current, depth });
-		if (stopAt && current === stopAt) break;
+		if (stop && normalizePathForComparison(current) === stop) break;
 		const parent = path.dirname(current);
 		if (parent === current) break;
 		current = parent;
@@ -95,8 +98,9 @@ export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ di
  * project config — that also bypasses an overridden agent dir or profile.
  */
 async function findNearestProjectConfigDir(ctx: LoadContext): Promise<{ dir: string; depth: number } | null> {
+	const home = normalizePathForComparison(ctx.home);
 	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home)) {
-		if (ancestor.dir === ctx.home) continue;
+		if (normalizePathForComparison(ancestor.dir) === home) continue;
 		const configDir = await ifNonEmptyDir(ancestor.dir, PATHS.projectDir);
 		if (configDir) return { dir: configDir, depth: ancestor.depth };
 	}
@@ -291,7 +295,10 @@ registerProvider<SystemPrompt>(systemPromptCapability.id, {
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	// Walk up from cwd finding .omp/skills/ in ancestors (closest first). Home is
 	// the user config root, never a project (see findNearestProjectConfigDir).
-	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).filter(({ dir }) => dir !== ctx.home);
+	const home = normalizePathForComparison(ctx.home);
+	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home).filter(
+		({ dir }) => normalizePathForComparison(dir) !== home,
+	);
 	const projectScans = ancestors.map(({ dir }) =>
 		scanSkillsFromDir(ctx, {
 			dir: path.join(dir, PATHS.projectDir, "skills"),

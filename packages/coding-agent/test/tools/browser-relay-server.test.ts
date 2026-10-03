@@ -10,6 +10,7 @@ const EXTENSION_HELLO = {
 	t: "hello",
 	userAgent: "test",
 	browserVersion: "Chrome/151.0.0.0",
+	discardedTabsProtocol: 1,
 	tabs: [],
 	attachedTabIds: [],
 } as const;

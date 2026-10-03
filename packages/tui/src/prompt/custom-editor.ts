@@ -197,8 +197,14 @@ function normalizePastedPath(path: string): string {
 		try {
 			return url.fileURLToPath(unquoted);
 		} catch {
-			// Malformed file URL: drop through to the shell-unescape branch
-			// so the caller can still reject it as a non-explicit path.
+			// Windows rejects drive-less URLs (`file:///Users/…`, forwarded from a
+			// macOS pasteboard or a remote session); decode them as POSIX paths.
+			try {
+				return url.fileURLToPath(unquoted, { windows: false });
+			} catch {
+				// Malformed file URL: drop through to the shell-unescape branch
+				// so the caller can still reject it as a non-explicit path.
+			}
 		}
 	}
 	return unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
@@ -1246,9 +1252,23 @@ export class CustomEditor extends Editor {
 	 * Clicks on the composer's controls take the same paths as their keys: ⇧⇥,
 	 * ⏎ and Esc; the viewing header's links (`focus:<id>`) go to the host,
 	 * the status facts' clicks (`status.*`) to their source. Selection edits
-	 * go to the buffer.
+	 * go to the buffer; `send` submits its own prompt after saving the old draft
+	 * for recall and waiting for in-flight clipboard work.
 	 */
 	override handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "send") {
+			// A send is its own prompt: never submit a stale draft for blank input,
+			// and retain a displaced draft (including its attachments) for recall.
+			if (!event.text.trim() || this.disableSubmit || !this.onSubmit) return;
+			if (this.#pasteInFlight > 0) {
+				this.#pendingInput.push(event);
+				return;
+			}
+			this.clearDraftForRecall();
+			this.setCollapsedText(event.text);
+			this.submit();
+			return;
+		}
 		if (event.type !== "action") {
 			super.handleNativeEvent(event);
 			return;
@@ -1319,9 +1339,9 @@ export class CustomEditor extends Editor {
 	 *  dispatching them so a trailing `Enter` after `Cmd+V` can't submit before the image lands on
 	 *  `pendingImages` (Codex PR #3602 review). */
 	#pasteInFlight = 0;
-	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
-	 *  count returns to zero. */
-	#pendingInput: string[] = [];
+	/** Input chunks and explicit prompts deferred behind an in-flight paste,
+	 *  drained in FIFO order once the paste count returns to zero. */
+	#pendingInput: (string | Extract<NativeUiEvent, { type: "send" }>)[] = [];
 	#actionKeys = new Map<ConfigurableEditorAction, KeyId[]>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [action as ConfigurableEditorAction, [...keys]]),
 	);
@@ -1393,9 +1413,16 @@ export class CustomEditor extends Editor {
 	#onPasteSettled = (): void => {
 		this.#pasteInFlight--;
 		if (this.#pasteInFlight > 0) return;
-		const drained = this.#pendingInput.splice(0);
-		for (const chunk of drained) this.handleInput(chunk);
+		this.#drainPendingInput();
 	};
+
+	#drainPendingInput(): void {
+		const drained = this.#pendingInput.splice(0);
+		for (const input of drained) {
+			if (typeof input === "string") this.handleInput(input);
+			else this.handleNativeEvent(input);
+		}
+	}
 
 	/** Track `promise` as an in-flight paste so subsequent `handleInput` calls queue behind it,
 	 *  then drain the queue once it settles. Codex PR #3602 review: without this, a trailing
@@ -1466,8 +1493,7 @@ export class CustomEditor extends Editor {
 			this.#collapseSkillTokens();
 			this.#collapseModelMentions();
 			// No async paste was started; drain the queued trailing bytes ourselves.
-			const drained = this.#pendingInput.splice(0);
-			for (const chunk of drained) this.handleInput(chunk);
+			this.#drainPendingInput();
 			return;
 		}
 
@@ -1497,9 +1523,10 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
-			// Intercept configured image paste (async - fires and handles result)
+			// Serialize configured clipboard paste just like bracketed image paste:
+			// explicit sends and subsequent keys must wait for its attachments.
 			if (this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
-				void this.onPasteImage();
+				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
 

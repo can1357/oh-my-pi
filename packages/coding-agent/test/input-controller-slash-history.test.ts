@@ -231,6 +231,32 @@ describe("input controller — slash command history (#3148)", () => {
 		expect(editor.pendingImageLinks).toEqual([]);
 	});
 
+	// #13925: queue shorthand must not write to a guest's local session/history.
+	it.each([
+		{ input: "-> /new", readOnly: false, compacting: false },
+		{ input: "=>\n1. /new\n2. inspect the result", readOnly: true, compacting: false },
+		{ input: "-> inspect the result", readOnly: false, compacting: true },
+	])("refuses guest queue shorthand ($input, readOnly=$readOnly)", async ({ input, readOnly, compacting }) => {
+		const { ctx, editor, addToHistory, followUp, prompt, onInputCallback, showStatus } = makeCtx(true);
+		const sendPrompt = vi.fn();
+		Object.assign(ctx, { collabGuest: { readOnly, sendPrompt } });
+		Object.assign(ctx.session, { isCompacting: compacting });
+		controllerFor(ctx);
+		// The real editor clears its text before invoking the submit callback.
+		editor.setText("");
+
+		await editor.onSubmit?.(input);
+
+		expect(showStatus).toHaveBeenCalledWith("/queue is host-only during a collab session");
+		expect(editor.getText()).toBe(input);
+		expect(addToHistory).not.toHaveBeenCalled();
+		expect(followUp).not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+		expect(onInputCallback).not.toHaveBeenCalled();
+		expect(sendPrompt).not.toHaveBeenCalled();
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+	});
+
 	it("routes /queue through the yield-only follow-up queue while streaming", async () => {
 		const { ctx, editor, addToHistory, followUp, showStatus } = makeCtx(true);
 		controllerFor(ctx);

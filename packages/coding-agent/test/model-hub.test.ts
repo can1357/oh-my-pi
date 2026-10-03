@@ -180,6 +180,26 @@ describe("ModelHub", () => {
 		}
 	});
 
+	describe("responsive layout", () => {
+		test("keeps model scopes and names visible at phone-sized widths", () => {
+			const { hub } = createHub({ models: [makeModel("test", "phone-model")] });
+			const lines = hub.render(36).map(line => stripVTControlCharacters(line));
+
+			expect(lines.some(line => line.includes("Models"))).toBe(true);
+			expect(lines.some(line => line.includes("All models"))).toBe(true);
+			expect(lines.some(line => line.includes("test/ph"))).toBe(true);
+		});
+
+		test("shrinks a wide provider sidebar so model rows stay readable", () => {
+			const { hub } = createHub({ models: [makeModel("github-copilot-enterprise", "phone-model")] });
+			const lines = hub.render(36).map(line => stripVTControlCharacters(line));
+
+			expect(lines[0]).toStartWith("╭─ Models ───────────┬");
+			// Body row (not the sidebar's "● github-…" entry) keeps the provider-qualified name.
+			expect(lines.some(line => /│ {2,}github-/.test(line))).toBe(true);
+		});
+	});
+
 	describe("role chips and roles view", () => {
 		test("separates chat and kind roles and filters role tabs", () => {
 			const chat = makeModel("test", "chat-model");

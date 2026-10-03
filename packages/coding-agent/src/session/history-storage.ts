@@ -122,6 +122,8 @@ export class HistoryStorage {
 	static #instance?: HistoryStorage;
 	#sessionResolver?: () => string | undefined;
 	#addListener?: () => void;
+	#errorListener?: (error: unknown) => void;
+	#writeFailureReported = false;
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
@@ -140,7 +142,9 @@ export class HistoryStorage {
 	private constructor(db: Database) {
 		this.#db = db;
 
-		const hadFts = this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
+		// One-shot statements go through the query cache, which close() finalizes; a
+		// stray prepare() would turn close() into a zombie that keeps the files open.
+		const hadFts = this.#db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
 		this.#db.run(`
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -246,12 +250,18 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#addListener = listener;
 	}
 
+	/** Register a callback for the first failed write in each outage, reset by a successful write. */
+	setErrorListener(listener: (error: unknown) => void): void {
+		this.#errorListener = listener;
+	}
+
 	/**
 	 * Stores a prompt, replaces its provenance with the latest submission, and
 	 * bumps its use count on resubmission.
 	 * The write is synchronous: prompt submission is human-paced, not a hot
-	 * path, so the row is durable the moment `add()` returns and can never be
-	 * lost to an exit racing a deferred flush. Failures are logged, not thrown.
+	 * path. On success the row is durable the moment `add()` returns and cannot
+	 * be lost to an exit racing a deferred flush. Failures are logged, not thrown;
+	 * the error listener is notified once per outage until a write succeeds.
 	 */
 	add(prompt: string, cwd?: string, sessionId?: string): Promise<void> {
 		const trimmed = normalizePrompt(prompt);
@@ -261,8 +271,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#insertBatch([{ prompt: trimmed, cwd: cwd ?? undefined, sessionId: session || undefined }]);
 		} catch (error) {
 			logger.error("HistoryStorage add failed", { error: String(error) });
+			if (!this.#writeFailureReported) {
+				this.#writeFailureReported = true;
+				this.#errorListener?.(error);
+			}
 			return Promise.resolve();
 		}
+		this.#writeFailureReported = false;
 		this.#addListener?.();
 		return Promise.resolve();
 	}
@@ -364,7 +379,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#historySchemaHasColumn(column: string): boolean {
-		const columns = this.#db.prepare("PRAGMA table_info(history)").all() as Array<{ name: string }>;
+		const columns = this.#db.query("PRAGMA table_info(history)").all() as Array<{ name: string }>;
 		return columns.some(col => col.name === column);
 	}
 
@@ -386,13 +401,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * caller can rebuild the FTS index.
 	 */
 	#rebuildHistory(): boolean {
-		const versionRow = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
+		const versionRow = this.#db.query("PRAGMA user_version").get() as { user_version: number };
 		if (versionRow.user_version >= HISTORY_DATA_VERSION) return false;
 		let rows: HistoryRow[];
 		try {
 			const sessionIdSelection = this.#historySchemaHasColumn("session_id") ? "session_id" : "NULL AS session_id";
 			rows = this.#db
-				.prepare(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
+				.query(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
 				.all() as HistoryRow[];
 		} catch (error) {
 			logger.error("HistoryStorage rebuild dump failed", { error: String(error) });
@@ -420,7 +435,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#db.run("DROP TABLE IF EXISTS history_fts");
 			this.#db.run("DROP TABLE history");
 			this.#db.run(HISTORY_TABLE_DDL);
-			const insert = this.#db.prepare(
+			const insert = this.#db.query(
 				"INSERT INTO history (id, prompt, created_at, cwd, session_id, use_count) VALUES (?, ?, ?, ?, ?, ?)",
 			);
 			for (const row of winners.values()) {

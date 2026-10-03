@@ -23,6 +23,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as fsp from "node:fs/promises";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 interface Harness {
@@ -184,6 +185,7 @@ afterEach(() => {
 describe("collab guest extension lifecycle mirror", () => {
 	it("mirrors agent_start and a terminal agent_end to the extension runner", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		const harness = await makeHarness("lifecycle-mirror-room-1");
 		try {
 			harness.hostSocket.send({ t: "event", event: { type: "agent_start" } } as CollabFrame);
@@ -200,12 +202,14 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(ends[0].willContinue).toBeUndefined();
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("maps a non-terminal agent_end settle to willContinue: true", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		const harness = await makeHarness("lifecycle-mirror-room-2");
 		try {
 			// `isTerminal: false` is the session-layer marker for "a continuation
@@ -222,12 +226,14 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(ends[0].willContinue).toBe(true);
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("resets turn numbering on each agent_start like a local session", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		const harness = await makeHarness("lifecycle-mirror-room-4");
 		try {
 			const assistantMessage: AgentMessage = {
@@ -276,12 +282,14 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(starts.map(event => event.turnIndex)).toEqual([0, 1, 0, 1]);
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("detaches message_end payloads from the transcript's live reference", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		const harness = await makeHarness("lifecycle-mirror-room-5");
 		try {
 			const message: AgentMessage = {
@@ -318,12 +326,14 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(liveAssistant.content[0].text).toBe("live");
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("delivers mirrored events to handlers in emission order", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		// The mock runner resolves agent_start on an externally-gated promise;
 		// unordered fire-and-forget would let the agent_end handler complete
 		// first and relatch the pane to working after the host settled.
@@ -356,12 +366,14 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(deliveryOrder).toEqual(["agent_start", "agent_end"]);
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("synthesizes agent_start when joining while the host is mid-run", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		// The host's agent_start predates the join, so no event frame carries
 		// it — the welcome's `isStreaming` is the only signal the mirror gets.
 		const harness = await makeHarness("lifecycle-mirror-room-7", { isStreaming: true });
@@ -369,12 +381,14 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(harness.emitted.filter(event => event.type === "agent_start").length).toBe(1);
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("synthesizes a terminal agent_end when leaving mid-run", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		const harness = await makeHarness("lifecycle-mirror-room-8");
 		try {
 			harness.hostSocket.send({ t: "event", event: { type: "agent_start" } } as CollabFrame);
@@ -389,6 +403,7 @@ describe("collab guest extension lifecycle mirror", () => {
 			expect(ends[0].willContinue).toBeUndefined();
 		} finally {
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await harness.cleanup();
 		}
 	});
