@@ -17,7 +17,6 @@ import { extractSessionInit, hasConversationalHistory, SessionManager } from "..
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
-	compactionThresholdSettings,
 	createMCPProxyTools,
 	createSubagentSettings,
 	subagentRetryFallbackRole,
@@ -123,18 +122,22 @@ export function createPersistedSubagentReviverFactory(
 			// advisor-role model, anything else = the explicit pattern stamped onto
 			// this session's `modelRoles.advisor`. Absent = unadvised (the
 			// createSubagentSettings default).
-			const subagentSettings = createSubagentSettings(ctx.settings, {
-				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-				...(init.advisor
-					? {
-							"advisor.enabled": true,
-							...(init.advisor !== "on"
-								? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
-								: undefined),
-						}
-					: undefined),
-				...compactionThresholdSettings(init.compactionThreshold),
-			});
+			const subagentSettings = createSubagentSettings(
+				ctx.settings,
+				{
+					...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+					...(init.advisor
+						? {
+								"advisor.enabled": true,
+								...(init.advisor !== "on"
+									? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+									: undefined),
+							}
+						: undefined),
+				},
+				undefined,
+				init.compactionThreshold,
+			);
 			// Restore the `subagent:<id>` fallback chain the spawn installed; the
 			// transcript alone cannot rebuild it (multi-model agent patterns and
 			// inherited role chains are resolved only at spawn).

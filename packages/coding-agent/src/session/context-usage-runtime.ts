@@ -7,7 +7,7 @@ import {
 	type ContextBreakdown,
 	type ContextSavingsEstimate,
 } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import type { ScopeLike } from "../config/registry";
+import type { Settings } from "../config/settings";
 import type { AgentSession } from "./agent-session";
 import { resolveSpeculationMethod } from "./compaction-methods";
 import { estimateInlineSavings } from "./snapcompact-inline";
@@ -15,7 +15,7 @@ import { resolveSpeculationLeadTokens } from "./speculation-lead";
 
 import { cfgSkillful } from "./settings";
 import {
-	cfgCompaction,
+	compactionSettingsForModel,
 	cfgSnapcompactShape,
 	cfgSnapcompactSystemPrompt,
 	cfgSnapcompactToolResults,
@@ -23,12 +23,12 @@ import {
 
 /** Resolve session policy before handing pure boundary arithmetic to the UI. */
 export function getSessionCompactionBoundaries(
-	settings: ScopeLike,
+	settings: Settings,
 	contextWindow: number,
 	model?: Model | null,
 ): CompactionBoundaries | null {
 	if (!(contextWindow > 0)) return null;
-	const configured = cfgCompaction.get(settings);
+	const configured = compactionSettingsForModel(settings, model);
 	const compaction: CompactionSettings = configured;
 	if (!compaction.enabled || compaction.strategy === "off") return null;
 	const threshold = resolveThresholdTokens(contextWindow, compaction);
@@ -60,7 +60,7 @@ export function computeSessionContextBreakdown(
 		}
 	}
 	return computeContextBreakdown(session, {
-		compaction: cfgCompaction.get(session.settings),
+		compaction: compactionSettingsForModel(session.settings, session.model),
 		sourceRevision: session.settings.revision,
 		skillful: cfgSkillful.get(session.settings),
 		snapcompact,

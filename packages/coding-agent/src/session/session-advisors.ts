@@ -125,7 +125,7 @@ import {
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
-import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
+import { cfgCompaction, cfgContextPromotionEnabled, compactionSettingsForModel } from "./context-settings";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -2301,12 +2301,12 @@ export class SessionAdvisors {
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
-		const compactionSettings = resolveMethodSettings(
-			configuredCompaction,
-			methods.includes("remote") ? "remote" : "soft",
-		);
-
+		const settingsMethod = methods.includes("remote") ? "remote" : "soft";
 		let advisorModel = agent.state.model;
+		let compactionSettings = resolveMethodSettings(
+			compactionSettingsForModel(this.#host.settings, advisorModel),
+			settingsMethod,
+		);
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
@@ -2333,6 +2333,10 @@ export class SessionAdvisors {
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
 			// Promotion succeeded, check if new model has enough space
 			const newModel = agent.state.model;
+			compactionSettings = resolveMethodSettings(
+				compactionSettingsForModel(this.#host.settings, newModel),
+				settingsMethod,
+			);
 			const newWindow = newModel.contextWindow ?? 0;
 			if (newWindow > 0) {
 				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
