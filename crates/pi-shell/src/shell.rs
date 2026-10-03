@@ -920,7 +920,8 @@ async fn source_snapshot(
 	}
 
 	let escaped = snapshot_path.replace('\'', "'\\''");
-	let command = format!("source '{escaped}'");
+	let mut command = format!("source '{escaped}'");
+	ensure_trailing_newline(&mut command);
 	shell
 		.run_string(command, &source_info, &params)
 		.await
@@ -1381,7 +1382,7 @@ async fn run_shell_command_once(
 			reader_cancel.cancel();
 		}
 	});
-	ensure_trailing_newline_for_heredoc(&mut command);
+	ensure_trailing_newline(&mut command);
 	let source_info = SourceInfo::from("pi-natives:command");
 	let mut result = session
 		.shell
@@ -1529,7 +1530,7 @@ async fn run_shell_command_streams_in_filesystem(
 		}
 	});
 	let mut command = options.command.clone();
-	ensure_trailing_newline_for_heredoc(&mut command);
+	ensure_trailing_newline(&mut command);
 	let source_info = SourceInfo::from("pi-shell:streams");
 	let mut result = session
 		.shell
@@ -1899,11 +1900,17 @@ fn should_skip_env_var(key: &str) -> bool {
 	)
 }
 
-fn ensure_trailing_newline_for_heredoc(command: &mut String) {
-	if command.ends_with('\n') || !command.as_bytes().windows(2).any(|window| window == b"<<") {
-		return;
+/// brush's parser rejects some otherwise-valid commands when the input ends at
+/// EOF without a trailing newline — a trailing `\` continuation reports
+/// "unterminated escape sequence (detected near line N col M)", and here-doc
+/// shapes have reported "unterminated here document sequence" — while bash
+/// accepts them all. Append the newline at the execution boundary so every
+/// command entry point and every shape benefits, not just here-doc-bearing
+/// strings at selected call sites.
+fn ensure_trailing_newline(command: &mut String) {
+	if !command.ends_with('\n') {
+		command.push('\n');
 	}
-	command.push('\n');
 }
 
 const fn session_keepalive(result: &ExecutionResult) -> bool {
@@ -6209,6 +6216,52 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_eq!(minimized.text, format!("{}{}", "HI\n".repeat(200), world));
 		assert_eq!(minimized.input_bytes, (hello.len() + world.len()) as u32);
 		assert_eq!(minimized.output_bytes, ("HI\n".repeat(200).len() + world.len()) as u32);
+	}
+
+	/// Regression: a comment at the head of a chain segment must not disable
+	/// output minimization for that segment. Verbatim segments keep their
+	/// comments (the old AST re-render dropped them), and a `#`-leading token
+	/// used to be detected as the program, so comment-bearing segments lost
+	/// their filters silently (`minimized` stayed absent).
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn comment_bearing_chain_segments_still_minimize() {
+		let root = unique_temp_dir("comment-chain");
+		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
+		let command = format!("# setup\nprintf '{}' && printf 'after\\n'", "hello\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
+		let _ = std::fs::remove_dir_all(&root);
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output, format!("{}after\n", "hello\n".repeat(200)));
+		let minimized = result
+			.minimized
+			.expect("comment-bearing segment should still minimize");
+		assert_eq!(minimized.text, format!("{}after\n", "HI\n".repeat(200)));
+	}
+
+	/// Regression: valid multi-line commands that end at EOF without a
+	/// trailing newline must execute like bash. `brush-parser` rejects some of
+	/// those inputs (a trailing `\` continuation reports "syntax error at end
+	/// of input"; a quoted here-doc delimiter at EOF reports "unterminated here
+	/// document sequence"), and the old workaround only protected strings
+	/// containing `<<`, so continuation-bearing payloads still failed with
+	/// `pi-natives:command: syntax error …`. Normalization now covers every
+	/// command string at the execution boundary.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn trailing_continuation_without_trailing_newline_runs() {
+		let (result, output) = run_command_capture(
+			"printf 'line %s\\n' one && \\\nprintf 'value=%s\\n' \"$(printf 'inner')\" \\",
+			None,
+			None,
+			CancelToken::default(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0));
+		// bash treats a trailing `\` at EOF as a completed continuation; the
+		// quoted command substitution still expands.
+		assert_eq!(output, "line one\nvalue=inner\n");
 	}
 
 	/// Regression: a quoted here-doc followed by another command must execute
