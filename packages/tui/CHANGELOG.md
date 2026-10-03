@@ -11,6 +11,9 @@
 - `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
 - `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
 - `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
+- Added a shared spinner clock (`spinnerInterval` / `setSpinnerInterval` / `sharedSpinnerFrame`) so the Loader, live tool cards, and the status-line brand spinner all follow one configurable cadence; `0` pins every glyph static with no spinner timers ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+- Added a frame-rate ceiling (`maxFps` / `setMaxFps` / `minFrameIntervalMs`) that the render scheduler and the animation timers honour; renders a keystroke is waiting on keep the fixed 30 fps cadence ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+- Added a decorative-motion switch (`setMotionEffects`) that gates the status-line speculation blink and brand fade ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
 
 ### Changed
 
