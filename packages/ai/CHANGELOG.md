@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can now act as an allow-list: `"*": false` hides every provider not listed, OAuth and API keys alike, and a provider entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` to hide its API keys. Existing files behave as before ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Antigravity chat and image requests sending an outdated client version when the model list came from cache, which could make newer models such as Claude Opus 5.5 unavailable.

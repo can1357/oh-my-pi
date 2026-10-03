@@ -245,9 +245,9 @@ Freshness is anchored to `snapshot.generatedAt`, not local write time. Default T
 
 If the broker is down at boot and a fresh cache exists, startup succeeds from the cache. If the cache is missing, expired, corrupt, incompatible, written for another URL, or encrypted with another token, startup requires a live snapshot and fails when that fetch fails; it never silently opens the local credential store instead.
 
-## Client account pools (routing, not authorization)
+## Client account pools
 
-Broker clients can restrict their visible OAuth accounts by setting `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` to a JSON file. The file maps provider IDs to exact `identityKey` values from the broker snapshot protocol:
+Broker clients can restrict which broker credentials they see by setting `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` to a JSON file. Each key is a provider ID (or `"*"`, see below); each value is a rule for that provider's credentials:
 
 ```json
 {
@@ -256,18 +256,35 @@ Broker clients can restrict their visible OAuth accounts by setting `OMP_AUTH_BR
 }
 ```
 
-`identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope.
+An array lists exact `identityKey` values from the broker snapshot protocol. `identityKey` is the token-free identity field already carried by each authenticated `/v1/snapshot` credential entry. Operator tooling should project only `provider` and `identityKey`; it must not retain or print the accompanying credential payload. A dedicated account-listing CLI is intentionally outside this routing feature's scope.
 
-SDK hosts can supply the same provider-to-identity mapping as `accountPool` in `discoverAuthStorage()` or `RemoteAuthCredentialStore`. An explicit programmatic pool takes precedence over the environment file.
+| Value | OAuth accounts visible | API keys visible |
+| --- | --- | --- |
+| `["id", …]` | only exact identity matches, including organization/workspace qualifiers; `[]` hides all | yes |
+| `true` | all | yes |
+| `false` | none | no |
+| `{ "accounts"?: ["id", …], "apiKeys"?: boolean }` | `accounts` as with the array form; omitted means all | `apiKeys`; omitted means yes |
 
-- A missing provider is unrestricted.
-- An empty array hides every OAuth credential for that provider.
-- A non-empty array exposes only exact identity matches, including organization/workspace qualifiers.
-- API-key credentials remain visible; the pool applies only to OAuth accounts.
+Providers without their own key follow the `"*"` rule, and with no `"*"` key they are unrestricted. `"*": false` turns the file into an allow-list: only listed providers are visible, OAuth and API keys alike. For example, this exposes one Codex account and OpenRouter API keys, and nothing else:
 
-The file is parsed once when broker-backed auth storage starts. An unreadable file, malformed JSON, or invalid provider entry aborts initialization rather than silently broadening the pool. Full snapshots, SSE updates, refresh responses, and aggregate usage are filtered consistently. For a provider named in the pool, aggregate reports are returned only when they can be attributed to a visible OAuth identity; reports attributable only to an API key or lacking matching identity metadata fail closed. The encrypted snapshot cache remains a raw broker snapshot so trusted processes sharing that cache can apply different pools.
+```json
+{
+  "*": false,
+  "openai-codex": { "accounts": ["account:acct-123"], "apiKeys": false },
+  "openrouter": true
+}
+```
 
-This is a **trusted-client routing policy, not an authorization boundary**. The client still holds a broker bearer token, receives raw broker responses before applying its local view, and can call broker endpoints directly. Use server-side authorization—not account pools—when clients must be prevented from retrieving other credentials.
+SDK hosts can supply the same rules as `accountPool` in `discoverAuthStorage()` or `RemoteAuthCredentialStore` (a `Set` of identities, or `{ accounts?: Set, apiKeys?: boolean }`, keyed by provider or `"*"`). An explicit programmatic pool takes precedence over the environment file.
+
+The file is parsed once when broker-backed auth storage starts. An unreadable file, malformed JSON, or invalid entry aborts initialization rather than silently broadening the pool. Full snapshots, SSE updates, refresh responses, and aggregate usage are filtered consistently. For a provider whose OAuth accounts or API keys are restricted, aggregate reports are returned only when they can be attributed to a visible OAuth identity; reports attributable only to an API key or lacking matching identity metadata fail closed. The encrypted snapshot cache remains a raw broker snapshot so trusted processes sharing that cache can apply different pools.
+
+Where the pool applies decides what it protects:
+
+- **Direct broker clients:** a **trusted-client routing policy, not an authorization boundary**. The client holds the broker bearer token, receives raw broker responses before applying its local view, and can call broker endpoints directly.
+- **Clients of `omp auth-gateway serve`:** the pool runs inside the gateway process, and the gateway's clients hold only the gateway token. Credentials the pool hides are not in the gateway's credential view, so its routes cannot list, use, or report them. For those clients the pool is the effective boundary, provided they cannot read the gateway host's environment, the pool file, or the broker token.
+
+Use server-side broker authorization, not account pools, when a process holding the broker token must be prevented from retrieving other credentials.
 
 ## Operator opt-in
 
@@ -281,7 +298,7 @@ Broker-backed credential storage is **off** unless `OMP_AUTH_BROKER_URL` (or `au
 | `OMP_AUTH_BROKER_TOKEN`             | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                                      | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
 | `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                 | Optional in broker mode.                                                                                                  |
 | `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                       | Optional in broker mode.                                                                                                  |
-| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file mapping provider IDs to OAuth `identityKey` values visible to this trusted client. Parsed once; invalid files abort initialization. API keys are unaffected. | Optional in broker mode.                                                                                                  |
+| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file of per-provider visibility rules for broker credentials (OAuth `identityKey` lists, API-key toggle, `"*"` default for unlisted providers). Parsed once; invalid files abort initialization. | Optional in broker mode.                                                                                                  |
 
 Resolution order in `resolveAuthBrokerConfig()`:
 
