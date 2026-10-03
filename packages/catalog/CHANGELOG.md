@@ -5,6 +5,8 @@
 ### Fixed
 
 - Scoped generic resource-exhaustion capacity backoff to Google Antigravity, preserving quota handling on other Google deployments ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
+- Fixed DeepSeek V4 model IDs and the V4.1 Flash alias lacking version information in model identity and dashboards ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
+- Fixed Antigravity models such as Claude Opus 5.5 and Sonnet 5.5 disappearing after `omp models refresh`. When the update check failed, omp reported an outdated Antigravity client version (2.8.0), so the server left the newer models out of the list. The fallback version is now 2.19.1.
 
 ## [18.5.1] - 2026-10-03
 

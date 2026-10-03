@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed generic Google Antigravity 429 responses imposing a 30-minute quota cooldown; they now use a 45–75-second capacity backoff while preserving explicit quota errors and credential rotation ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
+- Fixed Antigravity chat and image requests sending an outdated client version when the model list came from cache, which could make newer models such as Claude Opus 5.5 unavailable.
 
 ## [18.5.1] - 2026-10-03
 
