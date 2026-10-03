@@ -16,7 +16,7 @@ import { fileHyperlink } from "../render/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
-import { formatBillingSummary } from "./metrics";
+import { formatBillingSummary, formatQuotaWindow, formatUsageReset, pickUsageColor } from "./metrics";
 import { sanitizeStatusText } from "../chrome/shared";
 import {
 	formatContextUsage,
@@ -807,6 +807,7 @@ function costSummary(ctx: SegmentContext): string | undefined {
 			premiumRequests,
 			fractionDigits: 2,
 			pricingPeriod,
+			advisorUsage: ctx.advisorUsage ?? undefined,
 			advisor: advisorCost
 				? { cost: advisorCost, usingSubscription: ctx.session.isAdvisorUsingSubscription?.() ?? false }
 				: undefined,
@@ -1131,32 +1132,6 @@ const vimSegment: StatusLineSegment = {
 	},
 };
 
-function pickUsageColor(percent: number): "muted" | "warning" | "error" {
-	if (percent >= 80) return "error";
-	if (percent >= 50) return "warning";
-	return "muted";
-}
-
-/**
- * One quota window (`5h`, `1d`, `7d`, `mo`). The integer policy (round vs
- * floor) and the reset unit (minutes vs hours) stay explicit at each call site:
- * monthly floors like the Cursor/OpenCode dashboards, the rest round, and
- * short windows reset in minutes while long windows reset in hours.
- */
-function formatQuotaWindow(
-	ctx: SegmentContext,
-	label: string,
-	percent: number,
-	reset: number | undefined,
-	resetUnit: "m" | "h",
-	integer: "round" | "floor",
-): string {
-	const whole = integer === "floor" ? Math.floor(percent) : Math.round(percent);
-	const pctText = theme.fg(pickUsageColor(percent), `${whole}%`);
-	const resetText = reset !== undefined ? theme.fg("muted", ` (${formatUsageReset(reset, resetUnit)})`) : "";
-	return `${label} ${pctText}${resetText}`;
-}
-
 /** Native twin of {@link formatQuotaWindow}. */
 function describeQuotaWindow(
 	label: string,
@@ -1169,21 +1144,6 @@ function describeQuotaWindow(
 	const spans = [span(`${label} `), span(`${whole}%`, pickUsageColor(percent))];
 	if (reset !== undefined) spans.push(span(` (${formatUsageReset(reset, resetUnit)})`, "muted"));
 	return spans;
-}
-
-function formatUsageReset(value: number, unit: "m" | "h"): string {
-	if (unit === "m") {
-		// Short-window reset timers retain minute precision.
-		if (value < 60) return `${value}m`;
-		const hours = Math.floor(value / 60);
-		const mins = value % 60;
-		return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
-	}
-	// total hours (7d window: max 168)
-	if (value < 24) return `${value}h`;
-	const days = Math.floor(value / 24);
-	const hours = value % 24;
-	return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
 const usageSegment: StatusLineSegment = {
@@ -1199,19 +1159,52 @@ const usageSegment: StatusLineSegment = {
 			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
 		if (u.fiveHour) {
-			parts.push(formatQuotaWindow(ctx, "5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"));
+			parts.push(
+				formatQuotaWindow({
+					label: "5h",
+					percent: u.fiveHour.percent,
+					reset: u.fiveHour.resetMinutes,
+					resetUnit: "m",
+					integer: "round",
+				}),
+			);
 		}
 		if (u.daily) {
-			parts.push(formatQuotaWindow(ctx, "1d", u.daily.percent, u.daily.resetMinutes, "m", "round"));
+			parts.push(
+				formatQuotaWindow({
+					label: "1d",
+					percent: u.daily.percent,
+					reset: u.daily.resetMinutes,
+					resetUnit: "m",
+					integer: "round",
+				}),
+			);
 		}
 		if (u.sevenDay) {
-			parts.push(formatQuotaWindow(ctx, "7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"));
+			parts.push(
+				formatQuotaWindow({
+					label: "7d",
+					percent: u.sevenDay.percent,
+					reset: u.sevenDay.resetHours,
+					resetUnit: "h",
+					integer: "round",
+				}),
+			);
 		}
 		if (u.monthly) {
 			// Monthly-subscription providers only (the normalizer gates the class).
-			// Cursor and QwenCloud floor used percents upstream (Cursor's dashboard
-			// shows 1.88 → "1% used"; OpenCode's endpoint emits floored integers).
-			parts.push(formatQuotaWindow(ctx, "mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"));
+			// Cursor, QwenCloud, and OpenCode Go floor used percents upstream
+			// (Cursor's dashboard shows 1.88 → "1% used"; OpenCode's endpoint
+			// already emits floored integers).
+			parts.push(
+				formatQuotaWindow({
+					label: "mo",
+					percent: u.monthly.percent,
+					reset: u.monthly.resetHours,
+					resetUnit: "h",
+					integer: "floor",
+				}),
+			);
 		}
 		if (u.resetCredits) {
 			const resets = u.resetCredits;
