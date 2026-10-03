@@ -455,3 +455,9 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 ## 13) Built-in command note: `/plan-review`
 
 `/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.
+
+## 14) Built-in command note: `/scratch`
+
+`/scratch [<path>|off|status]` persists the home-launch directory globally in `startup.scratchDir` (or in the active profile). Bare `/scratch` saves the current session cwd; `/scratch <path>` saves an existing directory, resolving relative paths against the session cwd. `/scratch off` clears the setting, and `/scratch status` shows it. This changes future launches from `~`, not the current session cwd.
+
+Available in the TUI and ACP/RPC through its `handle` implementation. Directory argument completion is provided; missing paths and non-directories are rejected without a create prompt.

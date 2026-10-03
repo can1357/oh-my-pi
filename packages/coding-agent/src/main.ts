@@ -1707,8 +1707,9 @@ export async function runRootCommand(
 		await logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
+		let startupCwdWarning: string | undefined;
 		try {
-			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
+			startupCwdWarning = await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);
 			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
@@ -1796,6 +1797,14 @@ export async function runRootCommand(
 		const autoPrint =
 			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
 		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		if (startupCwdWarning) {
+			logger.warn(startupCwdWarning);
+			if (isInteractive) {
+				notifs.push({ kind: "warn", message: startupCwdWarning });
+			} else {
+				process.stderr.write(`${chalk.yellow(`Warning: ${startupCwdWarning}`)}\n`);
+			}
+		}
 		// Before session resolution: resume, fork, and import act on these same
 		// startup-parse flags, so rejecting later would leave forked or imported
 		// transcripts (or an opened picker) behind a usage error.

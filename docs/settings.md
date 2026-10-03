@@ -870,6 +870,9 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `startup.showSplash` | boolean | `false` | Show the full setup animation on ordinary interactive startup without rerunning setup. |
 | `startup.changelogMode` | enum | `summary` | `summary`, `expanded`, `hidden`: choose startup release-note presentation. |
 | `startup.setupWizard` | boolean | `true` | Show newly added onboarding steps once per setup version. |
+| `startup.scratchDir` | string | unset | Directory to start in when launched from exactly `~`; ignored for other launch directories. Run `/scratch ~` (or write `"~"` quoted; bare YAML `~` is null) to stay home. |
+
+Set `startup.scratchDir` via `/scratch`, `omp config set startup.scratchDir <dir>`, or the settings panel under Interaction → Startup & Updates. It is read only from the global/profile config before the project directory is chosen; project config is ignored. Precedence: `--cwd` > `--allow-home` > `startup.scratchDir` > the default temp-directory fallback. An unset value keeps the existing fallback (`~/tmp` when available, otherwise a temp directory); a missing or non-directory path logs a warning and uses that fallback.
 
 ### Providers and services
 

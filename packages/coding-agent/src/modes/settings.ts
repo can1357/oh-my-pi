@@ -1037,6 +1037,18 @@ export const cfgStartupCheckUpdate = register({
 	},
 });
 
+export const cfgStartupScratchDir = register({
+	id: "startup.scratchDir",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Scratch Directory",
+		description: "Directory omp starts in when launched from your home directory, instead of a temp directory",
+	},
+});
+
 export const cfgUpdateChannel = register({
 	id: "update.channel",
 	type: "enum",
