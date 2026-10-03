@@ -61,17 +61,13 @@ interface ResolvedProviderPool {
 	apiKeys: boolean;
 }
 
-function isIdentitySet(value: ReadonlySet<string> | AuthBrokerProviderPool): value is ReadonlySet<string> {
-	return typeof (value as ReadonlySet<string>).has === "function";
-}
-
 /** Copies `pool` so later caller mutation cannot widen it, normalizing both value forms. */
 function resolveAccountPool(pool: AuthBrokerAccountPool): ReadonlyMap<string, ResolvedProviderPool> {
 	const resolved = new Map<string, ResolvedProviderPool>();
 	for (const [provider, value] of pool) {
 		resolved.set(
 			provider,
-			isIdentitySet(value)
+			"has" in value
 				? { accounts: new Set(value), apiKeys: true }
 				: { accounts: value.accounts && new Set(value.accounts), apiKeys: value.apiKeys ?? true },
 		);

@@ -5,6 +5,7 @@
 ### Added
 
 - Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
+- `omp auth-gateway` can serve an allow-list from its account-pool file (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`): `"*": false` hides every unlisted provider, and `{ "accounts": [...], "apiKeys": false }` hides a provider's API keys from gateway clients ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
