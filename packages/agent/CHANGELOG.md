@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed aborted context transformations ending the run without emitting the assistant message boundary that subscribers need to persist and recover the interrupted turn.
+
 ## [18.4.11] - 2026-10-02
 
 ### Fixed

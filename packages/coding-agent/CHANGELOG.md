@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/retry` reporting "Nothing to retry" after a process exit interrupted a reopened `ask` picker when an extension registered a `context` handler.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes
