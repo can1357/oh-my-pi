@@ -3285,7 +3285,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				box: theme.boxRound,
 				topBorder: this.getStandaloneTopBorder(width),
 			});
-			if (rule !== undefined) lines.push(rule);
+			if (rule !== undefined) lines.push(...(typeof rule === "string" ? [rule] : rule));
 		}
 		if (bottomBar !== "none") {
 			const main = this.renderBottomBar(width, bottomBar);

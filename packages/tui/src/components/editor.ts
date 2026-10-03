@@ -1385,7 +1385,18 @@ export class Editor implements Component, Focusable {
 		};
 
 		const topRow = style.renderTop(chromeCtx);
-		if (topRow !== undefined) result.push(topRow);
+		if (topRow !== undefined) {
+			if (typeof topRow === "string") {
+				result.push(topRow);
+			} else {
+				// Keep the input and the host's terminal-height reserve when a
+				// multi-row header cannot fit. Drop outer metadata rows first,
+				// preserving the separator nearest the input whenever possible.
+				const hiddenRows =
+					this.#maxHeight === undefined ? 0 : Math.max(0, style.verticalChrome + 1 - this.#maxHeight);
+				result.push(...topRow.slice(hiddenRows));
+			}
+		}
 
 		// Render each layout line
 		// Keep the hardware cursor at the text insertion point while autocomplete

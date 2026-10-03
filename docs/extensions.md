@@ -977,7 +977,7 @@ Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `ba
 
 - `filledSurface`: whether the style paints its own row foreground through `surfaceColor`. Omitted values retain filled behavior for extension-owned ids; set `false` to receive the host's themed text color.
 - `sideBorders`: whether content rows own side chrome. This controls cursor reserve, IME layout, and scrollbar behavior; it is not merely descriptive.
-- `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, or `2`) used for editor height budgeting.
+- `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, `2`, or `3`) used for editor height budgeting.
 - `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-band"` uses the flush soft-capped status band above the input, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
 - `bottomBar`: standalone status content below the editor: `"none"`, `"left"`, or `"full"`.
 - `bottomBarGap`: whether a blank row separates the editor from a standalone bottom status bar.
@@ -985,7 +985,7 @@ Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `ba
 - `defaultPaddingX(themePaddingX)`: horizontal padding selected for this style.
 - `sideChromeWidth(paddingX)`: visible cells consumed on **each** side of a content row, including padding and border/rail glyphs.
 
-`renderTop` and `renderBottom` return one styled terminal row or `undefined`. `renderRow` returns one or more styled rows. Every normal rendered row must occupy exactly `ctx.width` visible cells; ANSI escape sequences have zero width. Preserve the supplied `gutter`, `text`, and `pad` instead of reflowing or truncating them.
+`renderTop` returns one styled terminal row, an array of rows in display order, or `undefined`. Arrays allow a dedicated metadata/header row above a separate full-width separator; do not embed newlines in a row. The style chooses which top row includes `ctx.topBorder` status content. When the editor height cap cannot fit the full header and one input row, it omits leading array rows first; put optional metadata before the separator so the boundary closest to the input survives on short terminals. `renderBottom` returns one styled terminal row or `undefined`. `renderRow` returns one or more styled rows. A two-row header plus a bottom row must declare `verticalChrome: 3`; two top rows without a bottom row declare `verticalChrome: 2`. Every normal rendered row must occupy exactly `ctx.width` visible cells; ANSI escape sequences have zero width. Preserve the supplied `gutter`, `text`, and `pad` instead of reflowing or truncating them.
 
 ### Renderer context
 

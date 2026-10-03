@@ -109,6 +109,8 @@
 
 ### Added
 
+- Extension composer styles can render a metadata header above a separate separator row ([#13976](https://github.com/can1357/oh-my-pi/pull/13976) by [@Dante-dan](https://github.com/Dante-dan))
+
 - Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose eligibility rules used by ghost-text word completion.
 - Added a full-featured Background jobs view with selectable jobs, live status and elapsed time, working directory, process IDs, exit code, command, tailing output, and cancellation for running jobs.
 
