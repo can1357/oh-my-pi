@@ -515,6 +515,7 @@ export class ExtensionRunner {
 	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
+	#resolvePlanReviewFn: NonNullable<ExtensionContextActions["resolvePlanReview"]> = () => false;
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
@@ -804,6 +805,7 @@ export class ExtensionRunner {
 		this.#abortFn = contextActions.abort;
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
+		if (contextActions.resolvePlanReview) this.#resolvePlanReviewFn = contextActions.resolvePlanReview;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
@@ -1384,6 +1386,7 @@ export class ExtensionRunner {
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
+			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			runEphemeralTurn: runEphemeralTurn
 				? async options => {

@@ -55,6 +55,7 @@
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
+- Extensions can observe and answer the interactive plan review, including refinement feedback and save-and-quit.
 
 ### Changed
 

@@ -285,6 +285,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
+- `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, and `refine` requires non-empty `input.feedback`
 - `getSystemPrompt()`
 - `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
 - `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
@@ -476,6 +477,11 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
+
+### Plan review lifecycle
+
+- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)`. `save` uses the default file name without opening the path prompt.
+- `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed) and `by: "local" | "extension"`.
 
 ### Subagent lifecycle
 
