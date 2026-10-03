@@ -14,7 +14,8 @@ import {
 	type ComposerStyle,
 	claudeComposerStyle,
 	padding,
-	SPINNER_ADVANCE_MS,
+	spinnerAnimated,
+	spinnerClockTick,
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
@@ -2646,7 +2647,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const rightSegments = effectiveSettings.rightSegments;
 		const meter = this.#meter();
 		if (meter.activeStartedAt !== null || this.#brandFade !== null) {
-			return Math.floor(nowMs / SPINNER_ADVANCE_MS);
+			// The brand spinner follows the shared clock (a constant tick when spinners are static); a
+			// brand fade still repaints on its own frame cadence.
+			return !spinnerAnimated() && this.#brandFade !== null
+				? Math.floor(nowMs / BRAND_FADE_FRAME_MS)
+				: spinnerClockTick(nowMs);
 		}
 		const includesTime = leftSegments.includes("time") || rightSegments.includes("time");
 		if (

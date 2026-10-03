@@ -839,6 +839,7 @@ tui:
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
+| `tui.spinnerInterval`    | number  | `80`             | Milliseconds between frames of every spinner — the working row, live tool cards, the status-line brand spinner, and the terminal title; `0` shows static glyphs. Each frame is a repaint the terminal (and each tmux control-mode client) must process, so slower saves CPU and battery. Also `--spinner-interval` (per run) and `PI_SPINNER_INTERVAL` (takes precedence over both). |
 | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
 | `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row. |

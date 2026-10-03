@@ -18,6 +18,7 @@ import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { DEFAULT_SPINNER_INTERVAL_MS, parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -483,6 +484,35 @@ export const cfgTuiTitleSpinner = register({
 		],
 	},
 });
+
+export const cfgTuiSpinnerInterval = register({
+	id: "tui.spinnerInterval",
+	type: "number",
+	default: DEFAULT_SPINNER_INTERVAL_MS,
+	env: "PI_SPINNER_INTERVAL",
+	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured.
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseSpinnerInterval(raw);
+	},
+	normalize: parseSpinnerInterval,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Spinner Interval (ms)",
+		description:
+			"Milliseconds between frames of every spinner: the working row, live tool cards, the status-line brand spinner, and the terminal title. Each frame is a repaint the terminal must process (and under tmux control mode, every attached client), so a slower spinner saves CPU and battery. 0 shows static glyphs",
+		options: [
+			{ value: "0", label: "Static", description: "No animation: fixed glyphs, ':' in the title" },
+			{ value: "80", label: "80 ms", description: "12.5 frames/s (default)" },
+			{ value: "250", label: "250 ms", description: "4 frames/s" },
+			{ value: "500", label: "500 ms", description: "2 frames/s" },
+			{ value: "1000", label: "1 s", description: "1 frame/s" },
+		],
+	},
+});
+// The TUI's shared spinner clock (Loader rows, tool cards, status-line brand) follows the setting
+// live; the terminal-title spinner reads it in interactive mode beside the other title settings.
+effect(cfgTuiSpinnerInterval, setSpinnerInterval);
 
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",

@@ -18,6 +18,7 @@ export * from "./components/layout/row";
 export * from "./components/layout/split-pane";
 export * from "./components/layout/stack";
 export * from "./components/loader";
+export * from "./spinner-clock";
 export * from "./components/markdown";
 export * from "./components/menu-selection";
 export * from "./components/metric";
