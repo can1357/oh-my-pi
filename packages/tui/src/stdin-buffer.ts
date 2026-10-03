@@ -20,8 +20,10 @@ import { EventEmitter } from "events";
 import { isKittyProtocolActive } from "./keys";
 
 const ESC = "\x1b";
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
+/** Terminal bracketed-paste open marker wrapping pasted input. */
+export const BRACKETED_PASTE_START = "\x1b[200~";
+/** Terminal bracketed-paste close marker wrapping pasted input. */
+export const BRACKETED_PASTE_END = "\x1b[201~";
 // Paste-mode recovery bounds: a lost/corrupted end marker (ssh/tmux
 // truncation) must not hang input forever or grow memory unboundedly.
 const PASTE_INACTIVITY_TIMEOUT_MS = 1000;
@@ -375,9 +377,27 @@ export type StdinBufferOptions = {
 	pasteByteLimit?: number;
 };
 
+const KITTY_ENTER = /^\x1b\[13(?:;1)?u/u;
+
+/**
+ * The Enter keypress that immediately follows a bracketed-paste end marker in
+ * the same stdin read: legacy CR/LF, or the kitty CSI-u encoding with no
+ * modifier. Nothing else qualifies — any other trailing byte takes the normal
+ * data route.
+ */
+function leadingEnter(input: string): string | undefined {
+	if (input.startsWith("\r") || input.startsWith("\n")) return input[0];
+	return KITTY_ENTER.exec(input)?.[0];
+}
+
 export type StdinBufferEventMap = {
 	data: [string];
-	paste: [string];
+	/**
+	 * A completed bracketed paste. `enter` carries an Enter keypress that shared
+	 * the paste's stdin read, so the terminal can dispatch paste and submit to
+	 * the same focused component before a paste-triggered overlay can take focus.
+	 */
+	paste: [content: string, enter?: string];
 };
 
 /**
@@ -403,6 +423,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#escapeSearchOffset = 0;
 	#rawPasteCandidate = "";
 	#rawPasteTimer?: NodeJS.Timeout;
+	// Unbracketed raw-paste classification is a fallback for terminals that do
+	// not wrap pastes in DECSET 2004 markers. Once the terminal confirms mode
+	// 2004, Terminal installs this probe: an unmarked multiline burst is then
+	// an input-method commit (#13344) unless an event-loop stall batched the
+	// keystrokes into one read (#12540). See `setRawPasteStallProbe`.
+	#rawPasteStallProbe?: () => boolean;
 	#stringDiscardActive = false;
 	#stringDiscardBytes = 0;
 	#stringDiscardEscHeld = false;
@@ -465,7 +491,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			} else {
 				this.#rawPasteCandidate += str;
 				if (isRawMultilineBurst(this.#rawPasteCandidate)) {
-					this.#emitRawPasteCandidate();
+					this.#classifyRawPasteCandidate();
 				}
 				return;
 			}
@@ -481,7 +507,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			// Enter is replayed unchanged when the fixed window expires.
 			this.#rawPasteCandidate = str;
 			if (isRawMultilineBurst(str)) {
-				this.#emitRawPasteCandidate();
+				this.#classifyRawPasteCandidate();
 			} else {
 				this.#armRawPasteTimer();
 			}
@@ -577,10 +603,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#pasteBytes = 0;
 		this.#pendingKittyPrintableCodepoint = undefined;
 
-		this.emit("paste", pastedContent);
+		// A paste-and-Enter burst (automation, terminals that batch reads) must
+		// not split into two dispatches: the paste may open an overlay that
+		// would then swallow the Enter meant to submit it.
+		const enter = leadingEnter(remaining);
+		this.emit("paste", pastedContent, enter);
 
-		if (remaining.length > 0) {
-			this.process(remaining);
+		const rest = enter === undefined ? remaining : remaining.slice(enter.length);
+		if (rest.length > 0) {
+			this.process(rest);
 		}
 	}
 
@@ -616,6 +647,21 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.emit("paste", content);
 	}
 
+	/**
+	 * Gate unbracketed raw-paste classification on event-loop responsiveness.
+	 * Terminal installs a probe once DECRQM confirms bracketed-paste (mode
+	 * 2004) support: a genuine paste then always arrives wrapped, so an
+	 * unmarked multiline burst is either an input-method commit — IME,
+	 * dictation, and emoji commits are typed input, never bracketed (#13344) —
+	 * or keystrokes an event-loop stall batched into one read (#12540). A burst
+	 * classified while `stalled()` reports a stall is replayed as the original
+	 * keys so every Enter submits; otherwise it is delivered as one paste.
+	 * `undefined` restores unconditional classification.
+	 */
+	setRawPasteStallProbe(stalled: (() => boolean) | undefined): void {
+		this.#rawPasteStallProbe = stalled;
+	}
+
 	/** Start one fixed window from the first break-bearing raw read. */
 	#armRawPasteTimer(): void {
 		if (this.#rawPasteTimer) return;
@@ -639,8 +685,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		return content;
 	}
 
-	/** Emit a classified raw multiline burst through the paste channel. */
-	#emitRawPasteCandidate(): void {
+	/**
+	 * Deliver a classified raw multiline burst: one paste, or the original
+	 * keys when the stall probe says a blocked loop batched typed input.
+	 */
+	#classifyRawPasteCandidate(): void {
+		if (this.#rawPasteStallProbe?.()) {
+			this.#flushRawPasteCandidate();
+			return;
+		}
 		const content = this.#takeRawPasteCandidate();
 		this.#pendingKittyPrintableCodepoint = undefined;
 		this.emit("paste", content);

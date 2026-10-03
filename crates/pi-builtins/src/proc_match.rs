@@ -13,10 +13,8 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	fs,
 	future::Future,
 	io::{self, BufRead, Write},
-	path::{Path, PathBuf},
 	time::Duration,
 };
 
@@ -25,7 +23,7 @@ use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult};
 use brush_core::openfiles::OpenFiles;
 use tokio_util::sync::CancellationToken;
 
-use crate::{kill::signal_number, proc_snapshot};
+use crate::{host::ShellPaths, kill::signal_number, proc_snapshot};
 
 /// What a process-matching command does with the processes it selects.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,7 +81,7 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 ) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
 	{
 		let command_name = context.command_name.clone();
-		let cwd = context.shell.working_dir().to_path_buf();
+		let paths = ShellPaths::new(&context);
 		async move {
 			#[cfg(unix)]
 			let stdin_watcher = context.try_fd(OpenFiles::STDIN_FD).and_then(|stdin| {
@@ -91,7 +89,13 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 				tokio::io::unix::AsyncFd::new(fd).ok()
 			});
 			let mut stdin = io::BufReader::new(context.stdin());
-			let mut options = match parse_proc_match_args(mode, &argv, &cwd, &mut stdin) {
+			let (parsed, mut stdin) = tokio::task::spawn_blocking(move || {
+				let parsed = parse_proc_match_args(mode, &argv, &paths, &mut stdin);
+				(parsed, stdin)
+			})
+			.await
+			.map_err(|error| io::Error::other(format!("process argument reader failed: {error}")))?;
+			let mut options = match parsed {
 				Ok(ParseProcResult::Options(options)) => *options,
 				Ok(ParseProcResult::Help) => {
 					write_proc_match_help(context.stdout(), &command_name, mode)?;
@@ -319,7 +323,7 @@ enum ParseProcResult {
 fn parse_proc_match_args(
 	mode: ProcMatchMode,
 	argv: &[String],
-	cwd: &Path,
+	paths: &ShellPaths,
 	stdin: &mut impl BufRead,
 ) -> std::result::Result<ParseProcResult, (u8, String)> {
 	let mut options =
@@ -393,7 +397,7 @@ fn parse_proc_match_args(
 				"--euid" => parse_user_list(value.unwrap_or_default(), &mut options.effective_users)?,
 				"--uid" => parse_user_list(value.unwrap_or_default(), &mut options.real_users)?,
 				"--group" => parse_group_list(value.unwrap_or_default(), &mut options.real_groups)?,
-				"--terminal" => parse_terminal_list(value.unwrap_or_default(), &mut options.terminals)?,
+				"--terminal" => parse_terminal_list(value.unwrap_or_default(), &mut options.terminals, paths)?,
 				"--pidfile" => options
 					.pid_files
 					.push(value.unwrap_or_default().to_string()),
@@ -480,7 +484,7 @@ fn parse_proc_match_args(
 					'u' => parse_user_list(value, &mut options.effective_users)?,
 					'U' => parse_user_list(value, &mut options.real_users)?,
 					'G' => parse_group_list(value, &mut options.real_groups)?,
-					't' => parse_terminal_list(value, &mut options.terminals)?,
+					't' => parse_terminal_list(value, &mut options.terminals, paths)?,
 					'F' => options.pid_files.push(value.to_string()),
 					'L' => options.require_lock = true,
 					'p' => {
@@ -567,18 +571,17 @@ fn parse_proc_match_args(
 				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?;
 			contents
 		} else {
-			let path = resolve_shell_path(cwd, file);
-			let mut pidfile = fs::File::open(&path)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
+			let mut pidfile = paths.fs().open(paths.resolve(file))
+				.map_err(|err| (3, format!("cannot read pidfile '{file}': {err}")))?;
 			if options.require_lock
-				&& !pidfile_is_locked(&pidfile)
-					.map_err(|err| (3, format!("cannot inspect pidfile '{}': {err}", path.display())))?
+				&& !pidfile.is_locked()
+					.map_err(|err| (3, format!("cannot inspect pidfile '{file}': {err}")))?
 			{
-				return Err((3, format!("pidfile '{}' is not locked", path.display())));
+				return Err((3, format!("pidfile '{file}' is not locked")));
 			}
 			let mut contents = String::new();
 			io::Read::read_to_string(&mut pidfile, &mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile '{}': {err}", path.display())))?;
+				.map_err(|err| (3, format!("cannot read pidfile '{file}': {err}")))?;
 			contents
 		};
 		let pid = contents
@@ -842,11 +845,12 @@ fn resolve_group(value: &str) -> Option<u32> {
 fn parse_terminal_list(
 	value: &str,
 	target: &mut Vec<Option<u64>>,
+	paths: &ShellPaths,
 ) -> std::result::Result<(), (u8, String)> {
 	for item in value.split(',') {
 		if matches!(item, "?" | "-") {
 			target.push(None);
-		} else if let Some(id) = resolve_terminal(item) {
+		} else if let Some(id) = resolve_terminal(item, paths) {
 			target.push(Some(id));
 		} else if let Ok(id) = item.parse() {
 			target.push(Some(id));
@@ -858,21 +862,25 @@ fn parse_terminal_list(
 }
 
 #[cfg(unix)]
-fn resolve_terminal(value: &str) -> Option<u64> {
-	use std::os::unix::fs::MetadataExt;
-	let primary = if value.starts_with('/') {
+fn resolve_terminal(value: &str, paths: &ShellPaths) -> Option<u64> {
+	use std::path::{Path, PathBuf};
+	let virtual_path = pi_vfs::is_virtual_path(Path::new(value));
+	let primary = if value.starts_with('/') || virtual_path {
 		PathBuf::from(value)
 	} else {
 		Path::new("/dev").join(value)
 	};
-	fs::metadata(&primary)
-		.or_else(|_| fs::metadata(Path::new("/dev").join(format!("tty{value}"))))
-		.ok()
-		.map(|metadata| metadata.rdev())
+	let metadata = paths.fs().metadata(&primary);
+	let metadata = if virtual_path {
+		metadata
+	} else {
+		metadata.or_else(|_| paths.fs().metadata(Path::new("/dev").join(format!("tty{value}"))))
+	};
+	metadata.ok().and_then(|metadata| metadata.rdev())
 }
 
 #[cfg(not(unix))]
-fn resolve_terminal(_value: &str) -> Option<u64> {
+fn resolve_terminal(_value: &str, _paths: &ShellPaths) -> Option<u64> {
 	None
 }
 
@@ -884,40 +892,6 @@ fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<
 		target.insert(state.to_ascii_uppercase());
 	}
 	Ok(())
-}
-
-fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	let normalized = brush_core::sys::fs::normalize_shell_path(Path::new(value));
-	if normalized.is_absolute() {
-		normalized.into_owned()
-	} else {
-		cwd.join(normalized)
-	}
-}
-
-#[cfg(unix)]
-fn pidfile_is_locked(file: &fs::File) -> io::Result<bool> {
-	use std::os::fd::AsRawFd;
-	let mut lock = libc::flock {
-		l_type:   libc::F_WRLCK as libc::c_short,
-		l_whence: libc::SEEK_SET as libc::c_short,
-		l_start:  0,
-		l_len:    0,
-		l_pid:    0,
-	};
-	// SAFETY: `file` owns a valid fd and `lock` is writable for F_GETLK.
-	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut lock) } == -1 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(lock.l_type != libc::F_UNLCK as libc::c_short)
-}
-
-#[cfg(not(unix))]
-fn pidfile_is_locked(_file: &fs::File) -> io::Result<bool> {
-	Err(io::Error::new(
-		io::ErrorKind::Unsupported,
-		"pidfile lock validation is unavailable on this platform",
-	))
 }
 
 fn write_proc_match_help(
@@ -958,12 +932,14 @@ fn write_proc_match_help(
 
 #[cfg(all(test, windows))]
 mod tests {
+	use std::path::PathBuf;
+
 	use super::*;
 
 	#[test]
 	fn resolves_msys_drive_alias_pidfiles() {
 		assert_eq!(
-			resolve_shell_path(Path::new(r"C:\workspace"), "/c/Users/Adam/app.pid"),
+			ShellPaths::with_cwd(r"C:\workspace").resolve("/c/Users/Adam/app.pid"),
 			PathBuf::from(r"C:\Users\Adam\app.pid"),
 		);
 	}

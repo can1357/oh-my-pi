@@ -108,19 +108,22 @@ export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
 /**
  * Maps a normalized thinking effort to Anthropic adaptive effort values via
  * the model's baked `thinking.effortMap` (identity for unmapped efforts).
+ *
+ * The Anthropic adaptive wire vocabulary has no `minimal` tier (valid values:
+ * `low`, `medium`, `high`, `xhigh`, `max`); a model ladder that exposes
+ * `minimal` — custom `anthropic-messages` providers do, unlike the built-in
+ * Claude ladders — would otherwise serialize `output_config.effort: "minimal"`
+ * and 400 (`level "minimal" not supported`). Clamp it to the lowest real tier,
+ * mirroring {@link mapEffortToGoogleThinkingLevel}'s `minimal` handling.
  */
 export function mapEffortToAnthropicAdaptiveEffort<TApi extends Api>(
 	model: ApiModel<TApi>,
 	effort: Effort,
 ): "low" | "medium" | "high" | "xhigh" | "max" | "adaptive" {
 	const supported = requireSupportedEffort(model, effort);
-	return (model.thinking?.effortMap?.[supported] ?? supported) as
-		| "low"
-		| "medium"
-		| "high"
-		| "xhigh"
-		| "max"
-		| "adaptive";
+	const mapped = model.thinking?.effortMap?.[supported] ?? supported;
+	if (mapped === Effort.Minimal) return "low";
+	return mapped as "low" | "medium" | "high" | "xhigh" | "max" | "adaptive";
 }
 
 /**

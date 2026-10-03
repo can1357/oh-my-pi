@@ -4,12 +4,13 @@
  * Handles /ssh subcommands for managing SSH host configurations.
  */
 import { getProjectDir, getSSHConfigPath } from "@oh-my-pi/pi-utils";
+import { Text } from "@oh-my-pi/pi-tui";
 import { reset as resetCapabilities } from "../../capability";
 import { type SSHHost, sshCapability } from "../../capability/ssh";
 import { loadCapability } from "../../discovery";
 import { addSSHHost, readSSHConfigFile, removeSSHHost, type SSHHostConfig } from "../../ssh/config-writer";
-import { parseCommandArgs } from "../shared";
-import { theme } from "../theme/theme";
+import { parseCommandArgs } from "../../utils/command-args";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
 import {
 	groupBySource,
@@ -55,9 +56,6 @@ export class SSHCommandController {
 	 */
 	#showHelp(): void {
 		const helpText = [
-			"",
-			theme.bold("SSH Host Management"),
-			"",
 			"Manage SSH host configurations for remote command execution.",
 			"",
 			theme.fg("accent", "Commands:"),
@@ -68,7 +66,7 @@ export class SSHCommandController {
 			"",
 		].join("\n");
 
-		this.#showMessage(helpText);
+		this.#showReport("SSH Host Management", helpText);
 	}
 
 	/**
@@ -266,19 +264,18 @@ export class SSHCommandController {
 			}
 
 			if (userHosts.length === 0 && projectHosts.length === 0 && discoveredHosts.length === 0) {
-				this.#showMessage(
+				this.#showReport(
+					"SSH Hosts",
 					[
-						"",
 						theme.fg("muted", "No SSH hosts configured."),
 						"",
 						`Use ${theme.fg("accent", "/ssh add")} to add a host.`,
-						"",
 					].join("\n"),
 				);
 				return;
 			}
 
-			const lines: string[] = ["", theme.bold("Configured SSH Hosts"), ""];
+			const lines: string[] = [];
 
 			// Show user-level hosts
 			if (userHosts.length > 0) {
@@ -322,7 +319,7 @@ export class SSHCommandController {
 				}
 			}
 
-			this.#showMessage(lines.join("\n"));
+			this.#showReport("Configured SSH Hosts", lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`Failed to list hosts: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -381,5 +378,10 @@ export class SSHCommandController {
 	 */
 	#showMessage(text: string): void {
 		showCommandMessage(this.ctx, text);
+	}
+
+	/** A read-only listing shown outside the transcript (see `InteractiveModeContext.showCommandReport`). */
+	#showReport(title: string, text: string): void {
+		this.ctx.showCommandReport({ title, body: new Text(text.trim(), 0, 0) });
 	}
 }

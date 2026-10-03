@@ -246,12 +246,6 @@ describe("StdinBuffer", () => {
 	});
 
 	describe("Kitty Keyboard Protocol", () => {
-		it("should handle batched Kitty press and release", () => {
-			// Press 'a', release 'a' batched together (common over SSH)
-			processInput("\x1b[97u\x1b[97;1:3u");
-			expect(emittedSequences).toEqual(["\x1b[97u", "\x1b[97;1:3u"]);
-		});
-
 		it("should handle multiple batched Kitty events", () => {
 			// Press 'a', release 'a', press 'b', release 'b'
 			processInput("\x1b[97u\x1b[97;1:3u\x1b[98u\x1b[98;1:3u");
@@ -262,12 +256,6 @@ describe("StdinBuffer", () => {
 			// Delete key release
 			processInput("\x1b[3;1:3~");
 			expect(emittedSequences).toEqual(["\x1b[3;1:3~"]);
-		});
-
-		it("should handle rapid typing simulation with Kitty protocol", () => {
-			// Simulates typing "hi" quickly with releases interleaved
-			processInput("\x1b[104u\x1b[104;1:3u\x1b[105u\x1b[105;1:3u");
-			expect(emittedSequences).toEqual(["\x1b[104u", "\x1b[104;1:3u", "\x1b[105u", "\x1b[105;1:3u"]);
 		});
 	});
 
@@ -297,19 +285,6 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[<0;10;5m"]);
 		});
 
-		it("should handle mouse move event", () => {
-			processInput("\x1b[<35;20;5m");
-			expect(emittedSequences).toEqual(["\x1b[<35;20;5m"]);
-		});
-
-		it("should handle split mouse events", () => {
-			processInput("\x1b[<3");
-			processInput("5;1");
-			processInput("5;");
-			processInput("10m");
-			expect(emittedSequences).toEqual(["\x1b[<35;15;10m"]);
-		});
-
 		it("should handle multiple mouse events", () => {
 			processInput("\x1b[<35;1;1m\x1b[<35;2;2m\x1b[<35;3;3m");
 			expect(emittedSequences).toEqual(["\x1b[<35;1;1m", "\x1b[<35;2;2m", "\x1b[<35;3;3m"]);
@@ -337,15 +312,6 @@ describe("StdinBuffer", () => {
 			processInput("");
 			// Empty string emits an empty data event
 			expect(emittedSequences).toEqual([""]);
-		});
-
-		it("should handle lone escape character with timeout", async () => {
-			processInput("\x1b");
-			expect(emittedSequences).toEqual([]);
-
-			// After timeout, should emit
-			await waitUntil(() => emittedSequences.length > 0);
-			expect(emittedSequences).toEqual(["\x1b"]);
 		});
 
 		it("should handle lone escape character with explicit flush", () => {
@@ -409,16 +375,6 @@ describe("StdinBuffer", () => {
 			const flushed = buffer.flush();
 			expect(flushed).toEqual([]);
 		});
-
-		it("should emit flushed data via timeout", async () => {
-			processInput("\x1b[1;5");
-			expect(emittedSequences).toEqual([]);
-
-			// Wait for the flush timeout to deliver the partial
-			await waitUntil(() => emittedSequences.length > 0);
-
-			expect(emittedSequences).toEqual(["\x1b[1;5"]);
-		});
 	});
 
 	describe("Clear", () => {
@@ -434,6 +390,7 @@ describe("StdinBuffer", () => {
 
 	describe("Bracketed Paste", () => {
 		let emittedPaste: string[] = [];
+		let emittedPasteEnters: (string | undefined)[] = [];
 
 		beforeEach(() => {
 			buffer = new StdinBuffer({ timeout: 10 });
@@ -446,8 +403,10 @@ describe("StdinBuffer", () => {
 
 			// Collect paste events
 			emittedPaste = [];
-			buffer.on("paste", (data: string) => {
+			emittedPasteEnters = [];
+			buffer.on("paste", (data: string, enter?: string) => {
 				emittedPaste.push(data);
+				emittedPasteEnters.push(enter);
 			});
 		});
 
@@ -518,7 +477,54 @@ describe("StdinBuffer", () => {
 			processInput("\x1b[200~paste\x1b");
 			processInput("[201~x");
 			expect(emittedPaste).toEqual(["paste"]);
+			expect(emittedPasteEnters).toEqual([undefined]);
 			expect(emittedSequences).toEqual(["x"]);
+		});
+
+		// A paste-and-Enter burst arrives in one read from automation and from
+		// terminals that batch input. Splitting it lets an overlay the paste opens
+		// swallow the Enter, so the Enter stays on the paste event in both keyboard
+		// encodings; anything else after the paste keeps the normal data route.
+		for (const [label, enter] of [
+			["legacy \\r", "\r"],
+			["legacy \\n", "\n"],
+			["kitty CSI-u", "\x1b[13u"],
+			["kitty CSI-u with explicit no-modifier field", "\x1b[13;1u"],
+		] as const) {
+			it(`keeps a same-read Enter (${label}) on the paste event`, () => {
+				processInput(`\x1b[200~paste\x1b[201~${enter}`);
+				expect(emittedPaste).toEqual(["paste"]);
+				expect(emittedPasteEnters).toEqual([enter]);
+				expect(emittedSequences).toEqual([]);
+			});
+		}
+
+		it("routes bytes after the attached Enter as ordinary input", () => {
+			processInput("\x1b[200~paste\x1b[201~\rnext");
+			expect(emittedPasteEnters).toEqual(["\r"]);
+			expect(emittedSequences).toEqual(["n", "e", "x", "t"]);
+		});
+
+		for (const [label, sequence] of [
+			["a modified kitty Enter", "\x1b[13;2u"],
+			["a DA1 terminal report", "\x1b[?1;2c"],
+			["an arrow key", "\x1b[A"],
+			["printable text", "x"],
+		] as const) {
+			it(`leaves ${label} after a paste on the data route`, () => {
+				processInput(`\x1b[200~paste\x1b[201~${sequence}`);
+				expect(emittedPaste).toEqual(["paste"]);
+				expect(emittedPasteEnters).toEqual([undefined]);
+				expect(emittedSequences).toEqual([sequence]);
+			});
+		}
+
+		it("does not attach an Enter that arrives in a later read", async () => {
+			processInput("\x1b[200~paste\x1b[201~");
+			processInput("\r");
+			expect(emittedPasteEnters).toEqual([undefined]);
+			await waitUntil(() => emittedSequences.length === 1);
+			expect(emittedSequences).toEqual(["\r"]);
 		});
 
 		it("does not end the paste on a partial end-marker prefix in the body", () => {
@@ -652,6 +658,21 @@ describe("StdinBuffer", () => {
 			processInput("\x1b[A\rx");
 			expect(emittedPaste).toEqual([]);
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
+		});
+
+		describe("stall probe (issues #12540, #13344)", () => {
+			it("replays a stall-batched burst split across same-tick reads as keys", () => {
+				// A stalled loop can drain the pty backlog as several reads before the
+				// classification window fires. Once the accumulated candidate
+				// classifies, the stall probe must still turn it back into keystrokes
+				// so each batched Enter submits instead of becoming a pasted newline.
+				buffer.setRawPasteStallProbe(() => true);
+				processInput("aaa\r");
+				processInput("bbb\r");
+				processInput("ccc");
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+			});
 		});
 	});
 

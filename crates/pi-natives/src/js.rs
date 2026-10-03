@@ -277,8 +277,8 @@ pub fn utf16_append(value: JsString<'_>, out: &mut Vec<u16>) -> Result<Range<usi
 	let start = out.len();
 
 	let mut len = 0;
-	// SAFETY: `raw` is a JS string owned by the live callback; a null buffer asks
-	// Node-API for the code-unit length only.
+	// SAFETY: `raw` is a JS string owned by the live callback; a null buffer
+	// asks Node-API for the code-unit length only.
 	let status =
 		unsafe { sys::napi_get_value_string_utf16(raw.env, raw.value, ptr::null_mut(), 0, &mut len) };
 	napi::check_status!(status, "Failed to measure JavaScript string")?;
@@ -388,8 +388,8 @@ impl<const N: usize> FromNapiValue for InlineStr<N> {
 		buf.resize_default(N)
 			.map_err(|_| too_long(len, Self::CAPACITY))?;
 		let mut written = 0;
-		// SAFETY: same string, and `buf` is filled to `N`, which holds the measured
-		// length plus the NUL terminator Node-API writes.
+		// SAFETY: same string, and `buf` is filled to `N`, which holds the
+		// measured length plus the NUL terminator Node-API writes.
 		let status = unsafe {
 			sys::napi_get_value_string_utf8(env, napi_val, buf.as_mut_ptr().cast(), N, &mut written)
 		};

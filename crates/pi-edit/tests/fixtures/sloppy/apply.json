@@ -1,0 +1,1588 @@
+{
+ "cases": [
+  {
+   "name": "applies a Find/Replace pair",
+   "files": {
+    "a.ts": "const timeout = 1000;\nstart();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const timeout = 5000;\nstart();\n"
+    }
+   }
+  },
+  {
+   "name": "an empty Replace body deletes the match",
+   "files": {
+    "a.ts": "keep();\ndebugLog(request);\nfinish();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\ndebugLog(request);\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "keep();\nfinish();\n"
+    },
+    "textContains": [
+     "deleted 1 line(s)"
+    ]
+   }
+  },
+  {
+   "name": "the all attribute rewrites every match",
+   "files": {
+    "a.ts": "logger.debug(a);\nlogger.debug(b);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts all\n*** Find\nlogger.debug(\n*** Replace\nlogger.trace(\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "logger.trace(a);\nlogger.trace(b);\n"
+    }
+   }
+  },
+  {
+   "name": "multiple pairs in one Edit File block apply together",
+   "files": {
+    "a.ts": "const a = 1;\nconst b = 2;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst a = 1;\n*** Replace\nconst a = 10;\n*** Find\nconst b = 2;\n*** Replace\nconst b = 20;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const a = 10;\nconst b = 20;\n"
+    }
+   }
+  },
+  {
+   "name": "content between headers is raw, never entity-decoded",
+   "files": {
+    "a.ts": "if (a < b && c) { run(); }\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (a < b && c) { run(); }\n*** Replace\nif (a < b && c) { stop(); }\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (a < b && c) { stop(); }\n"
+    }
+   }
+  },
+  {
+   "name": "accepts marker-free verbatim replacement",
+   "files": {
+    "a.ts": "const timeout = 1000;\nrun(timeout);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst timeout = 1000;\n*** Replace\nconst timeout = 5000;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const timeout = 5000;\nrun(timeout);\n"
+    }
+   }
+  },
+  {
+   "name": "rejects punctuation-only patterns but accepts short identifiers",
+   "files": {
+    "a.ts": "if (ready) { run(); }\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n⟪};⟫\n*** Replace\n}\n"
+   },
+   "expect": {
+    "error": "pattern is too generic"
+   }
+  },
+  {
+   "name": "reports unmatched literals without guessing",
+   "files": {
+    "a.ts": "const value = oldValue;\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nmissingCall();\n*** Replace\nnewCall();\n"
+   },
+   "expect": {
+    "error": "Operation 1 did not match a.ts"
+   }
+  },
+  {
+   "name": "uses an empty rewrite as a blank line only for an insertion operation",
+   "files": {
+    "a.ts": "before();\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nbefore();\n⟪⟫after();\n*** Replace\n\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\n\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "applies an inline all-match replacement",
+   "files": {
+    "a.ts": "logger.debug(first);\nlogger.debug(second);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts all\n*** Find\nlogger.⟪debug│trace⟫(\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "logger.trace(first);\nlogger.trace(second);\n"
+    }
+   }
+  },
+  {
+   "name": "applies sections to multiple files in one call",
+   "files": {
+    "a.ts": "const a = 1;\n",
+    "b.ts": "const b = 2;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst a = 1;\n*** Replace\nconst a = 10;\n*** Edit File: b.ts\n*** Find\nconst b = 2;\n*** Replace\nconst b = 20;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const a = 10;\n",
+     "b.ts": "const b = 20;\n"
+    },
+    "writes": 2
+   }
+  },
+  {
+   "name": "writes nothing when a later section fails",
+   "files": {
+    "a.ts": "const a = 1;\n",
+    "b.ts": "const b = 2;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst a = 1;\n*** Replace\nconst a = 10;\n*** Edit File: b.ts\n*** Find\nmissing\n*** Replace\nnew\n"
+   },
+   "expect": {
+    "error": "No files were modified — sections apply atomically.",
+    "files": {
+     "a.ts": "const a = 1;\n",
+     "b.ts": "const b = 2;\n"
+    },
+    "writes": 0
+   }
+  },
+  {
+   "name": "replaces only the selected token and preserves outside gaps",
+   "files": {
+    "a.ts": "const timeout = readConfig().timeout ?? 1000;\nrun(timeout);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\ntimeout = …⟪1000│5000⟫…\nrun(timeout)\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const timeout = readConfig().timeout ?? 5000;\nrun(timeout);\n"
+    }
+   }
+  },
+  {
+   "name": "applies inline replacements to each named selection",
+   "files": {
+    "a.ts": "const timeout = 1000;\nconst retries = 3;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst timeout = ⟪1000│5000⟫;\nconst retries = ⟪3│5⟫;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const timeout = 5000;\nconst retries = 5;\n"
+    }
+   }
+  },
+  {
+   "name": "re-emits selected gaps from an inline replacement",
+   "files": {
+    "a.ts": "const value = oldCall(options);\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldCall(…)│newCall(…) ?? fallback⟫;\nreport(value)\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const value = newCall(options) ?? fallback;\nreport(value);\n"
+    }
+   }
+  },
+  {
+   "name": "inserts an add line after its anchor",
+   "files": {
+    "a.ts": "anyhow = { workspace = true }\nitertools = { workspace = true }\ntokio = { workspace = true }\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nitertools = { workspace = true }\n＋jiff = { workspace = true }\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "anyhow = { workspace = true }\nitertools = { workspace = true }\njiff = { workspace = true }\ntokio = { workspace = true }\n"
+    }
+   }
+  },
+  {
+   "name": "keeps a run of add lines in authored order",
+   "files": {
+    "a.ts": "first();\nlast();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfirst();\n＋second();\n＋third();\nlast();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "first();\nsecond();\nthird();\nlast();\n"
+    }
+   }
+  },
+  {
+   "name": "deletes a run of －-marked lines silently",
+   "files": {
+    "a.ts": "first();\nold();\nolder();\nlast();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfirst();\n－old();\n－older();\nlast();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "first();\nlast();\n"
+    }
+   }
+  },
+  {
+   "name": "replaces a － run with the ＋ run directly below it",
+   "files": {
+    "a.ts": "start();\nold();\nend();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nstart();\n－old();\n＋fresh();\nend();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "start();\nfresh();\nend();\n"
+    }
+   }
+  },
+  {
+   "name": "deletes an indented －-marked line byte-for-byte",
+   "files": {
+    "a.ts": "fn main() {\n\tsetup();\n\trun();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n\tsetup();\n－\trun();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "fn main() {\n\tsetup();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "mixes add lines with inline replacements in one operation",
+   "files": {
+    "a.ts": "const retries = 3;\nrun();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst retries = ⟪3│5⟫;\n＋const backoff = 250;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const retries = 5;\nconst backoff = 250;\nrun();\n"
+    }
+   }
+  },
+  {
+   "name": "replaces a contained region through one multi-line selection",
+   "files": {
+    "a.ts": "function displayName(user) {\n  if (!user) {\n    return fallback;\n  }\n  return user.name;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  ⟪if (!user) {\n    return fallback;\n  }\n  return user.name;│return user?.name ?? fallback;⟫\n}\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function displayName(user) {\n  return user?.name ?? fallback;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "allows zero rewrite gaps to replace a selection containing gaps",
+   "files": {
+    "a.ts": "function choose() {\n  if (legacy) {\n    return oldValue;\n  }\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nchoose() …\n⟪if (legacy) {…\nreturn oldValue;…\n}⟫\n…}\n*** Replace\nreturn newValue;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function choose() {\n  return newValue;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "keeps a same-line insertion inline",
+   "files": {
+    "a.ts": "const value = compute(input);\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = …⟪⟫compute(input)…\nreport(value)\n*** Replace\nawait \n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const value = await compute(input);\nreport(value);\n"
+    }
+   }
+  },
+  {
+   "name": "deletes a selected whole line including indentation and newline",
+   "files": {
+    "a.ts": "function runTask() {\n  prepare();\n  debugLog(request);\n  return result;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nrunTask(…\n⟪debugLog(request);⟫…\nreturn result\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function runTask() {\n  prepare();\n  return result;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "applies the all-match opener to every match with one identical rewrite",
+   "files": {
+    "a.ts": "const first = avlue;\nconst second = avlue;\nconst third = avlue;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts all\n*** Find\n= ⟪avlue⟫;\n*** Replace\nvalue\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const first = value;\nconst second = value;\nconst third = value;\n"
+    }
+   }
+  },
+  {
+   "name": "reports zero matches for the all-match opener without guessing",
+   "files": {
+    "a.ts": "const value = presentValue;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts all\n*** Find\n= ⟪missingValue⟫;\n*** Replace\nnextValue\n"
+   },
+   "expect": {
+    "error": "(all) found 0 matches"
+   }
+  },
+  {
+   "name": "accepts a unique single-fragment sparse selection",
+   "files": {
+    "a.ts": "const value = oldValue;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n⟪oldValue⟫\n*** Replace\nnextValue\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const value = nextValue;\n"
+    }
+   }
+  },
+  {
+   "name": "accepts the Unicode ellipsis gap",
+   "files": {
+    "a.ts": "const timeout = readConfig() ?? 1000;\nrun(timeout);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst timeout …⟪1000⟫…\nrun(timeout)\n*** Replace\n5000\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const timeout = readConfig() ?? 5000;\nrun(timeout);\n"
+    }
+   }
+  },
+  {
+   "name": "accepts sparse whole-region replacement without selection markers",
+   "files": {
+    "a.ts": "function read() {\n  prepare();\n  return oldValue;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction read() {…\n  return oldValue;\n}\n*** Replace\nfunction read() {\n  return newValue;\n}\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function read() {\n  return newValue;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "applies a de-indented multiline rewrite verbatim",
+   "files": {
+    "a.ts": "function outer() {\n  if (ready) {\n    oldCall();\n    keep();\n  }\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  if (ready) {\n    oldCall();\n    keep();\n  }\n*** Replace\nif (ready) {\n  newCall();\n  keep();\n}\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function outer() {\nif (ready) {\n  newCall();\n  keep();\n}\n}\n"
+    }
+   }
+  },
+  {
+   "name": "applies an authored indentation-only replacement verbatim",
+   "files": {
+    "a.ts": "function run() {\n    const getContrastVsWhite = () => value;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n    const getContrastVsWhite = () => value;\n*** Replace\n\tconst getContrastVsWhite = () => value;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function run() {\n\tconst getContrastVsWhite = () => value;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "never fuzzy-matches different operator sequences",
+   "files": {
+    "a.ts": "const shouldRun = left || right;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nleft && right\n*** Replace\nleft ?? right\n"
+   },
+   "expect": {
+    "error": "did not match a.ts"
+   }
+  },
+  {
+   "name": "treats a blank-only replacement as deletion and collapses its seam",
+   "files": {
+    "a.ts": "before();\n\nconst removed = true;\n\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst removed = true;\n*** Replace\n   \n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\n\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "substitutes multiple selections positionally when REWRITE has one line per selection",
+   "files": {
+    "a.ts": "if (enwlineIndex === -1) {\n  use(enwlineIndex);\n  next(enwlineIndex);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (⟪enwlineIndex⟫ === -1) {\n  use(⟪enwlineIndex⟫);\n  next(⟪enwlineIndex⟫);\n*** Replace\nnewlineIndex\nnewlineIndex\nnewlineIndex\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (newlineIndex === -1) {\n  use(newlineIndex);\n  next(newlineIndex);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "uses whole-line ellipses as positional separators when the pattern has no gaps",
+   "files": {
+    "a.ts": "if (avlue === first) use(avlue);\nconst second = avlue;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (⟪avlue⟫ === first) use(⟪avlue⟫);\nconst second = ⟪avlue⟫;\n*** Replace\nvalue\n…\nvalue\n…\nvalue\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (value === first) use(value);\nconst second = value;\n"
+    }
+   }
+  },
+  {
+   "name": "supports multi-line positional groups separated by whole-line ellipses",
+   "files": {
+    "a.ts": "const first = oldA;\nconst second = oldB;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst first = ⟪oldA⟫;\nconst second = ⟪oldB⟫;\n*** Replace\ncomputeA(\n  input,\n)\n…\ncomputeB(\n  input,\n)\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const first = computeA(\n  input,\n);\nconst second = computeB(\n  input,\n);\n"
+    }
+   }
+  },
+  {
+   "name": "fails closed on whole-line rewrite ellipses when a multi-selection pattern has gaps",
+   "files": {
+    "a.ts": "first oldA extra\nsecond oldB\nthird oldC\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfirst ⟪oldA⟫…\nsecond ⟪oldB⟫\nthird ⟪oldC⟫\n*** Replace\nnewA\n…\nnewC\n"
+   },
+   "expect": {
+    "error": "has 3 selections, but *** Replace proves neither positional substitution nor whole-span replacement"
+   }
+  },
+  {
+   "name": "fails closed when a multi-selection rewrite proves neither interpretation",
+   "files": {
+    "a.ts": "const pair = oldA + oldB;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst pair = ⟪oldA⟫ + ⟪oldB⟫;\n*** Replace\nnewValue\n"
+   },
+   "expect": {
+    "error": "Copy-ready per-selection interpretation:"
+   }
+  },
+  {
+   "name": "drops an echoed literal before an inline selection",
+   "files": {
+    "a.ts": "const newlineIndex = stdinBuffer.indexOf('n');\nif (enwlineIndex === -1) return;\nconst line = stdinBuffer.slice(0, enwlineIndex).trim();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts all\n*** Find\nenwlineIndex⟪enwlineIndex│newlineIndex⟫\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const newlineIndex = stdinBuffer.indexOf('n');\nif (newlineIndex === -1) return;\nconst line = stdinBuffer.slice(0, newlineIndex).trim();\n"
+    }
+   }
+  },
+  {
+   "name": "drops an echoed anchor line above an embedded selection",
+   "files": {
+    "a.ts": "    if (entryRow)\n      throw invalidSession(entryId);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n    if (entryRow)\n    if (⟪entryRow│!entryRow⟫)\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "    if (!entryRow)\n      throw invalidSession(entryId);\n"
+    }
+   }
+  },
+  {
+   "name": "throws error on unclosed opening selection marker",
+   "files": {
+    "a.ts": "const value = oldValue;\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldValue;\nreport(value);\n*** Replace\nnextValue\n"
+   },
+   "expect": {
+    "error": "unclosed selection marker ⟪; add closing ⟫"
+   }
+  },
+  {
+   "name": "throws error on unmatched closing selection marker",
+   "files": {
+    "a.ts": "const value = oldValue;\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = oldValue⟫;\nreport(value);\n*** Replace\nnextValue\n"
+   },
+   "expect": {
+    "error": "unmatched closing selection marker ⟫; add opening ⟪"
+   }
+  },
+  {
+   "name": "keeps the unmatched-close error when a stray ⟫ follows a proper selection",
+   "files": {
+    "a.ts": "const value = oldValue;\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldValue│newValue⟫;⟫\nreport(value)\n"
+   },
+   "expect": {
+    "error": "unmatched closing selection marker ⟫; add opening ⟪"
+   }
+  },
+  {
+   "name": "supports an empty directional selection at the exact line boundary",
+   "files": {
+    "a.ts": "function run() {\n  finish();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction run() {\n⟪⟫  finish();\n}\n*** Replace\n  start();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function run() {\n  start();\n  finish();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "still rejects overlapping edits that disagree",
+   "files": {
+    "a.ts": "const b = avlue.models;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts all\n*** Find\navlue\n*** Replace\nvalue\n*** Find\nconst b = avlue.models;\n*** Replace\nconst b = other.models;\n"
+   },
+   "expect": {
+    "error": "target overlapping original spans"
+   }
+  },
+  {
+   "name": "entity-escaped content is not decoded and fails to match",
+   "files": {
+    "a.ts": "if (a < b) { run(); }\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (a &lt; b) { run(); }\n*** Replace\nif (a > b) { run(); }\n"
+   },
+   "expect": {
+    "error": "did not match"
+   }
+  },
+  {
+   "name": "gaps in Find re-emit through … in Replace",
+   "files": {
+    "a.ts": "function legacy(a) {\n  stage(a);\n  commit(a);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction legacy(a) {\n…\n}\n*** Replace\nfunction modern(a) {\n…\n}\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function modern(a) {\n  stage(a);\n  commit(a);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "keeps a genuine empty inline insertion anchored to a neighbor line as a no-op error",
+   "files": {
+    "a.ts": "before();\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nbefore();\n⟪│⟫after();\n"
+   },
+   "expect": {
+    "error": "makes no change"
+   }
+  },
+  {
+   "name": "still deletes one of two adjacent duplicate lines without echo dedup",
+   "files": {
+    "a.ts": "reportStatus();\nreportStatus();\nfinish();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nreportStatus();\n⟪reportStatus();\n│⟫\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "reportStatus();\nfinish();\n"
+    }
+   }
+  },
+  {
+   "name": "fails closed on a whole-line rewrite gap when the pattern captured none",
+   "files": {
+    "a.ts": "use std::time::Duration;\n\nfn combined() {}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nuse std::time::Duration;\n*** Replace\nuse std::{sync::Arc, time::Duration};\n…\nfn combined() {}\n"
+   },
+   "expect": {
+    "error": "whole-line … with no *** Find gap to re-emit"
+   }
+  },
+  {
+   "name": "lands a trailing insert-only selection line on its own line",
+   "files": {
+    "a.ts": "im = { workspace = true }\nitertools = { workspace = true }\nnext = { workspace = true }\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nitertools = { workspace = true }\n⟪│jiff = { workspace = true }⟫\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "im = { workspace = true }\nitertools = { workspace = true }\njiff = { workspace = true }\nnext = { workspace = true }\n"
+    }
+   }
+  },
+  {
+   "name": "lands a multi-line insert selection before a blank line on its own line",
+   "files": {
+    "a.ts": "Copyright (c) 2025 First Author\nCopyright (c) 2026 Second Author\n\nPermission is granted\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nCopyright (c) 2026 Second Author\n⟪│Copyright (c) 2026 Third Author\n⟫\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "Copyright (c) 2025 First Author\nCopyright (c) 2026 Second Author\nCopyright (c) 2026 Third Author\n\nPermission is granted\n"
+    }
+   }
+  },
+  {
+   "name": "opens a new line for an insert after the last line of a file without a trailing newline",
+   "files": {
+    "a.ts": "alpha = 1\nomega = 2"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nomega = 2\n⟪│zeta = 3⟫\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "alpha = 1\nomega = 2\nzeta = 3"
+    }
+   }
+  },
+  {
+   "name": "applies inline insertion and deletion as independent operations",
+   "files": {
+    "a.ts": "const timeout = 5000;\nconst debug = true;\nrun();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst timeout = 5000;\n⟪│\nconst retries = 3;⟫\n*** Find\n⟪const debug = true;│⟫\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const timeout = 5000;\nconst retries = 3;\nrun();\n"
+    }
+   }
+  },
+  {
+   "name": "reuses an inline deletion register in a later inline insertion",
+   "files": {
+    "a.ts": "const moved = createMoved();\nbefore();\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n⟪const moved = createMoved();│⟫\n*** Find\nbefore();\n⟪│\n»1\n⟫\nafter();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nconst moved = createMoved();\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "anchors an add run above a gap to its preceding line",
+   "files": {
+    "a.ts": "use std::{\n\tfs,\n\titer,\n};\n\nfn main() {\n\trun();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n\tfs,\n＋\tio,\n…\nfn main() {\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "use std::{\n\tfs,\n\tio,\n\titer,\n};\n\nfn main() {\n\trun();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "applies add lines containing literal selection markers verbatim",
+   "files": {
+    "a.ts": "run();\ndone();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nrun();\n＋const sel = '⟪a│b⟫';\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "run();\nconst sel = '⟪a│b⟫';\ndone();\n"
+    }
+   }
+  },
+  {
+   "name": "keeps typed depth for an indented add-line run before a following anchor",
+   "files": {
+    "a.ts": "export interface RetryPolicy {\n\tlimit: number;\n\tjitter: boolean;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n\tlimit: number;\n＋\t/** Delay between attempts in ms */\n＋\tdelayMs: number;\n\tjitter: boolean;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "export interface RetryPolicy {\n\tlimit: number;\n\t/** Delay between attempts in ms */\n\tdelayMs: number;\n\tjitter: boolean;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "normalizes whitespace-only MATCH rows around add lines",
+   "files": {
+    "a.ts": "function run() {\n  start();\n\n  end();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  start();\n\n＋  inserted();\n \n  end();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function run() {\n  start();\n  inserted();\n\n  end();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "inserts an all-＋ REWRITE without writing literal markers",
+   "files": {
+    "a.ts": "start();\nmiddle();\nend();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nmiddle();\n*** Replace\n＋replacement();\n＋more();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "start();\nmiddle();\nreplacement();\nmore();\nend();\n"
+    }
+   }
+  },
+  {
+   "name": "drops －-marked old lines from a REWRITE paired with ＋ lines",
+   "files": {
+    "a.ts": "alpha();\nbeta();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nbeta();\n*** Replace\n－beta();\n＋gamma();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "alpha();\ngamma();\n"
+    }
+   }
+  },
+  {
+   "name": "inserts add lines at their authored tab depth",
+   "files": {
+    "a.ts": "function dispatch(request: Request) {\n\treturn send(request);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction dispatch(request: Request) {\n＋\tvalidate(request);\n\treturn send(request);\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function dispatch(request: Request) {\n\tvalidate(request);\n\treturn send(request);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "collapses a blank seam only when both sides of a deleted block are blank",
+   "files": {
+    "a.ts": "before();\n\nconst removed = true;\n\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst removed = true;\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\n\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "treats empty double selection markers as an insertion point",
+   "files": {
+    "a.ts": "before();\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nbefore();\n⟪⟫after();\n*** Replace\ninserted();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\ninserted();\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "rejects overlapping original target spans atomically",
+   "files": {
+    "a.ts": "const value = oldValue;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldValue⟫;\n*** Replace\nnewValue\n*** Find\n⟪oldValue⟫\n*** Replace\nnewerValue\n"
+   },
+   "expect": {
+    "error": "Operations 1 and 2 target overlapping original spans"
+   }
+  },
+  {
+   "name": "resolves every batch anchor against the original content",
+   "files": {
+    "a.ts": "start();\nconst removed = true;\nmiddle();\nconst target = oldValue;\nend();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst removed = true;\n*** Replace\n*** Find\nmiddle();\n*** Replace\nmiddleChanged();\n*** Find\nstart();…\nconst removed = true;…\n⟪const target = oldValue;⟫…\nend();\n*** Replace\nconst target = newValue;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "start();\nmiddleChanged();\nconst target = newValue;\nend();\n"
+    }
+   }
+  },
+  {
+   "name": "allows one punctuation insertion typo for a unique changing candidate",
+   "files": {
+    "a.ts": "for (let i = 0; i < 100; i--) {\n  run();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfor (let i = 0; i < ⟪100⟫; i--;) {\n*** Replace\n10\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "for (let i = 0; i < 10; i--) {\n  run();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "accepts a small fragment typo only when the fuzzy tuple is unique",
+   "files": {
+    "a.ts": "const result = calculateValue(input);\nreport(result);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst result = …⟪calculateVale(input)⟫…\nreport(result)\n*** Replace\ncalculateFast(input)\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const result = calculateFast(input);\nreport(result);\n"
+    }
+   }
+  },
+  {
+   "name": "normalizes Unicode punctuation in sparse literals",
+   "files": {
+    "a.ts": "throw new Error(\"not-ready\");\nhandleFailure(error);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nthrow new Error(⟪“not—ready”⟫);…\nhandleFailure(\n*** Replace\n\"ready\"\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "throw new Error(\"ready\");\nhandleFailure(error);\n"
+    }
+   }
+  },
+  {
+   "name": "treats rewrite ellipses beyond the capture count as literal",
+   "files": {
+    "a.ts": "const value = oldCall(options);\nreport(value);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldCall(…);⟫…\nreport(value)\n*** Replace\nnewCall(…) ?? […fallback]\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const value = newCall(options) ?? […fallback]\nreport(value);\n"
+    }
+   }
+  },
+  {
+   "name": "collapses back-to-back duplicates when desired text matches both copies",
+   "files": {
+    "a.ts": "fn() {\n  run(a);\n\n  run(a);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n  run(a);"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "fn() {\n  run(a);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "treats candidates with whitespace-equivalent outcomes as unambiguous",
+   "files": {
+    "a.ts": "open() {\n  work(unit);\n\n  work(unit);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n⟪  work(unit);\n│⟫"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "open() {\n  work(unit);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "applies marker-less desired text over its closest near-match block",
+   "files": {
+    "a.ts": "    if (!entryRow)\n      throw invalid();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n    if (entryRow)\n      throw invalid();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "    if (entryRow)\n      throw invalid();\n"
+    }
+   }
+  },
+  {
+   "name": "applies a marker-less desired import line over its near-match",
+   "files": {
+    "a.ts": "import { parseMCPToolName } from \"../mcp\";\nimport type { ToolRenderer } from \"./renderers\";\n\nrun();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\nimport type { ToolActivitySummary, ToolRenderer } from \"./renderers\";"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "import { parseMCPToolName } from \"../mcp\";\nimport type { ToolActivitySummary, ToolRenderer } from \"./renderers\";\n\nrun();\n"
+    }
+   }
+  },
+  {
+   "name": "keeps the fail-closed error when no block resembles the stated text",
+   "files": {
+    "a.ts": "const a = 1;\nkeep();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\nawait fetchRemoteConfig(session);"
+   },
+   "expect": {
+    "error": "has *** Find but no *** Replace"
+   }
+  },
+  {
+   "name": "collapses a duplicated block stated once as mono desired text",
+   "files": {
+    "a.ts": "run(alpha);\nrun(alpha);\ndone();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\nrun(alpha);\ndone();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "run(alpha);\ndone();\n"
+    }
+   }
+  },
+  {
+   "name": "recovers a unified-diff-shaped rewrite-less op as inline changes",
+   "files": {
+    "a.ts": "function greet(name) {\n  console.log(\"hi \" + name);\n  return name;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n function greet(name) {\n-  console.log(\"hi \" + name);\n+  console.log(\"hello \" + name);\n+  audit(name);"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function greet(name) {\n  console.log(\"hello \" + name);\n  audit(name);\n  return name;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "binds a diff added-run to its context line and hunk markers to gaps",
+   "files": {
+    "a.ts": "alpha();\nbeta();\ngamma();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n alpha();\n+inserted();\n@@\n-gamma();\n+delta();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "alpha();\ninserted();\nbeta();\ndelta();\n"
+    }
+   }
+  },
+  {
+   "name": "treats several OLD selections as one whole sparse region",
+   "files": {
+    "a.ts": "if (ready) {\n  value = first;\n} else {\n  value = second;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (ready) {\n  value = ⟪first⟫;\n} else {\n  value = ⟪second⟫;\n}\n*** Replace\nif (ready) {\n  value = second;\n} else {\n  value = first;\n}\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (ready) {\n  value = second;\n} else {\n  value = first;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "keeps ambiguous verbatim regions fail-closed",
+   "files": {
+    "a.ts": "function first() {\n  return value;\n}\nfunction second() {\n  return value;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nreturn value;\n*** Replace\nreturn next;\n"
+   },
+   "expect": {
+    "error": "ambiguous: 2 ordered tuples match"
+   }
+  },
+  {
+   "name": "bounds same-line gaps and aligns a full-line rewrite around the selection",
+   "files": {
+    "a.ts": "class Terminal {\n  private _kittyProtocolActive = true;\n  private one = 1;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nprivate _kittyProtocolActive = …⟪true⟫…;\n*** Replace\nprivate _kittyProtocolActive = false;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "class Terminal {\n  private _kittyProtocolActive = false;\n  private one = 1;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "strips full-statement envelope echoes around an inner selection",
+   "files": {
+    "a.ts": "if (enwlineIndex === -1) {\n  return;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (…⟪enwlineIndex⟫… === -1) {\n*** Replace\nif (newlineIndex === -1) {\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (newlineIndex === -1) {\n  return;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "drops transport-only trailing blank rows at EOF",
+   "files": {
+    "a.ts": "const value = oldValue;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = oldValue;\n*** Replace\nconst value = newValue;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const value = newValue;\n"
+    }
+   }
+  },
+  {
+   "name": "strips harmless leading and trailing sparse gaps",
+   "files": {
+    "a.ts": "before();\nobsolete();\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n…\n⟪obsolete();⟫\n…\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "keeps a mid-line ellipsis in REWRITE literal when the capture is multi-line",
+   "files": {
+    "a.ts": "function f() {\n  a();\n  b();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction f() {\n…\n}\n*** Replace\nfunction f() {\n  return `${x}[… ]${y}`;\n}\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  return `${x}[… ]${y}`;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "replaces the whole line when a bare selection's REWRITE restates it",
+   "files": {
+    "a.ts": "  screen = [y -> Blank],  \\* viewport\nnext();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  screen = [y -> ⟪Blank⟫],  \\* viewport\n*** Replace\n  screen = [y -> IF y = 1 THEN SRow ELSE Blank],  \\* row 1 is shell\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "  screen = [y -> IF y = 1 THEN SRow ELSE Blank],  \\* row 1 is shell\nnext();\n"
+    }
+   }
+  },
+  {
+   "name": "reports deletions in apply notes",
+   "files": {
+    "a.ts": "keep();\ndebugLog(request);\nfinish();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\ndebugLog(request);\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "keep();\nfinish();\n"
+    },
+    "textContains": [
+     "deleted 1 line(s)"
+    ]
+   }
+  },
+  {
+   "name": "grounds no-change errors at the matched region instead of file head",
+   "files": {
+    "a.ts": "first();\nsecond();\nconst value = current;\nlast();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = current;\n*** Replace\nconst value = current;\n"
+   },
+   "expect": {
+    "error": "Current file content near the closest match"
+   }
+  },
+  {
+   "name": "matches ＋ insertion anchors leniently when only whitespace drifted",
+   "files": {
+    "a.ts": "over\ntime.\n\n\n### Builtins\n#### Bash\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\ntime.\n\n\n＋#### Intent injection\n\n\n### Builtins\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "over\ntime.\n#### Intent injection\n\n\n### Builtins\n#### Bash\n"
+    }
+   }
+  },
+  {
+   "name": "keeps the next anchor's indentation when a lenient ＋ insert lands above it",
+   "files": {
+    "a.ts": "fn main() {\n\tsetup();\n\trun();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nsetup();\n＋probe();\nrun();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "fn main() {\n\tsetup();\nprobe();\n\trun();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "names unmarked MATCH lines that exist nowhere and suggests ＋",
+   "files": {
+    "a.ts": "alpha();\nbeta();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nalpha();\n#### Intent injection\n＋one();\nbeta();\n"
+   },
+   "expect": {
+    "error": "Unmarked MATCH lines must already exist in the file; \"#### Intent injection\" does not."
+   }
+  },
+  {
+   "name": "treats an all-＋ REWRITE as insertion after the kept MATCH",
+   "files": {
+    "a.ts": "over\ntime.\n\n### Builtins\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nover\ntime.\n*** Replace\n＋#### Intent injection\n\n＋body text\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "over\ntime.\n#### Intent injection\n\nbody text\n\n### Builtins\n"
+    }
+   }
+  },
+  {
+   "name": "keeps an add line's indentation from either marker style",
+   "files": {
+    "a.ts": "fn main() {\n    setup();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n    setup();\n    ＋run();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "fn main() {\n    setup();\n    run();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "a multi-line empty Replace body also deletes",
+   "files": {
+    "a.ts": "keep();\ndebugLog(request);\nfinish();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\ndebugLog(request);\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "keep();\nfinish();\n"
+    }
+   }
+  },
+  {
+   "name": "checks ordered-tuple uniqueness before choosing a match",
+   "files": {
+    "a.ts": "function first() {\n  return value;\n  audit();\n}\nfunction second() {\n  return value;\n  audit();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction …\n⟪return value;⟫…\naudit();\n*** Replace\nreturn nextValue;\n"
+   },
+   "expect": {
+    "error": "ambiguous: 2 ordered tuples match"
+   }
+  },
+  {
+   "name": "allows proven whole-span replacement for multiple selections",
+   "files": {
+    "a.ts": "if (oldA) {\n  keep();\n  return oldB;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (⟪oldA⟫) {\n  keep();\n  return ⟪oldB⟫;\n*** Replace\nif (newA) {\n  keep();\n  return newB;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (newA) {\n  keep();\n  return newB;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "does not use punctuation tolerance when more than one candidate aligns",
+   "files": {
+    "a.ts": "for (let i = 0; i < 100; i--) runFirst();\nfor (let i = 0; i < 100; i--) runSecond();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfor (let i = 0; i < ⟪100⟫; i--;)\n*** Replace\n10\n"
+   },
+   "expect": {
+    "error": "did not match"
+   }
+  },
+  {
+   "name": "never rewrites part of a longer punctuation run",
+   "files": {
+    "a.ts": "for (i = 0; i < 9; i++) {\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfor (i = 0; i < 9; i⟪+│-⟫) {\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "for (i = 0; i < 9; i--) {\n"
+    }
+   }
+  },
+  {
+   "name": "applies a bare selection beside inline pairs as desired text",
+   "files": {
+    "a.ts": "const value = oldValue;\nconst other = oldOther;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldValue│newValue⟫;\nconst other = ⟪newOther⟫;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const value = newValue;\nconst other = newOther;\n"
+    }
+   }
+  },
+  {
+   "name": "applies a non-overlapping batch and accepts an EOF transport newline",
+   "files": {
+    "a.ts": "const status = oldStatus;\nreport(status);\ndebugLog(status);\nfinish(status);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst status …⟪oldStatus⟫…\nreport(status)\n*** Replace\nnewStatus\n*** Find\nreport(status)…\n⟪debugLog(status);⟫…\nfinish(status)\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const status = newStatus;\nreport(status);\nfinish(status);\n"
+    }
+   }
+  },
+  {
+   "name": "preserves a large region outside a tiny selection",
+   "files": {
+    "a.ts": "class ReportBuilder {\n  step0();\n  step1();\n  step2();\n  step3();\n  step4();\n  step5();\n  step6();\n  step7();\n  step8();\n  step9();\n  step10();\n  step11();\n  step12();\n  step13();\n  step14();\n  step15();\n  step16();\n  step17();\n  step18();\n  step19();\n  step20();\n  step21();\n  step22();\n  step23();\n  step24();\n  step25();\n  step26();\n  step27();\n  step28();\n  step29();\n  render(legacyFormatter);\n  finalize(report);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nclass ReportBuilder …\nrender(…⟪legacyFormatter⟫…\nfinalize(\n*** Replace\nstreamingFormatter\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "class ReportBuilder {\n  step0();\n  step1();\n  step2();\n  step3();\n  step4();\n  step5();\n  step6();\n  step7();\n  step8();\n  step9();\n  step10();\n  step11();\n  step12();\n  step13();\n  step14();\n  step15();\n  step16();\n  step17();\n  step18();\n  step19();\n  step20();\n  step21();\n  step22();\n  step23();\n  step24();\n  step25();\n  step26();\n  step27();\n  step28();\n  step29();\n  render(streamingFormatter);\n  finalize(report);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "maps provided rewrite gaps positionally and drops omitted later gaps",
+   "files": {
+    "a.ts": "function load() {\n  const a = first();\n  const b = legacy(id);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nload() …\n  ⟪const a = …\n  const b = legacy(…);⟫\n…}\n*** Replace\nconst a = …\n  const b = modern(id);\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function load() {\n  const a = first();\n  const b = modern(id);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "re-emits selected gaps positionally without retyping their spans",
+   "files": {
+    "a.ts": "function loadUser(id: string) {\n  const cached = cache.get(id);\n  if (cached) return cached;\n  const user = legacyStore.read(id);\n  return user;\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nloadUser(…\n  ⟪const cached = …\n  const user = legacyStore.read(…);\n  return user;⟫\n…}\n*** Replace\nconst cached = …\n  const user = await database.users.read(…);\n  return user;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function loadUser(id: string) {\n  const cached = cache.get(id);\n  if (cached) return cached;\n  const user = await database.users.read(id);\n  return user;\n}\n"
+    }
+   }
+  },
+  {
+   "name": "re-emits an open trailing line-end gap as nothing",
+   "files": {
+    "a.ts": "  const x = 1;\n  return `<button class=\"file-row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  return `<button class=\"file-row…\n*** Replace\n  return `<button class=\"row…\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "  const x = 1;\n  return `<button class=\"row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
+    }
+   }
+  },
+  {
+   "name": "reports no change when Find and Replace differ only by an open trailing gap",
+   "files": {
+    "a.ts": "  const x = 1;\n  return `<button class=\"file-row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  return `<button class=\"file-row…\n*** Replace\n  return `<button class=\"file-row…\n"
+   },
+   "expect": {
+    "error": "Operation 1 makes no change to a.ts.",
+    "writes": 0
+   }
+  },
+  {
+   "name": "re-emits open whole-line edge gaps as nothing around an inner capture",
+   "files": {
+    "a.ts": "before();\nfunction legacy(a) {\n  stage(a);\n}\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n…\nfunction legacy(a) {\n…\n}\n…\n*** Replace\n…\nfunction modern(a) {\n…\n}\n…\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nfunction modern(a) {\n  stage(a);\n}\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "leaves the newline joining a whole-line edge gap to its anchor in the file",
+   "files": {
+    "a.ts": "before();\nconst value = old;\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst value = old;\n…\n*** Replace\nconst value = new;\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nconst value = new;\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "keeps CRLF intact when whole-line edge gaps are re-emitted",
+   "files": {
+    "a.ts": "a\r\nconst value = old;\r\nb\r\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n…\r\nconst value = old;\r\n…\n*** Replace\n…\r\nconst value = new;\r\n…\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a\r\nconst value = new;\r\nb\r\n"
+    }
+   }
+  },
+  {
+   "name": "rejects a Replace made only of edge ellipses",
+   "files": {
+    "a.ts": "before();\nconst value = old;\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n…\nconst value = old;\n…\n*** Replace\n…\n…\n"
+   },
+   "expect": {
+    "error": "whole-line … with no *** Find gap to re-emit",
+    "writes": 0
+   }
+  },
+  {
+   "name": "optional Begin Patch is ignored while applying the edit",
+   "files": {
+    "a.ts": "old();\n"
+   },
+   "args": {
+    "input": "*** Begin Patch\n*** Edit File: a.ts\n*** Find\nold();\n*** Replace\nnew();\n*** End Patch"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "new();\n"
+    }
+   }
+  },
+  {
+   "name": "a bare edit header continues the file and can select all matches",
+   "files": {
+    "a.ts": "const mode = \"old\";\nitem();\nitem();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nconst mode = \"old\";\n*** Replace\nconst mode = \"new\";\n*** Edit File: all\n*** Find\nitem();\n*** Replace\ndone();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const mode = \"new\";\ndone();\ndone();\n"
+    }
+   }
+  },
+  {
+   "name": "empty PUT deletes before the next FIND and at EOF",
+   "files": {
+    "a.ts": "first();\nsecond();\nthird();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfirst();\n*** Replace\n*** Find\nsecond();\n*** Replace\nchanged();\n*** Find\nthird();\n*** Replace"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "changed();\n"
+    }
+   }
+  },
+  {
+   "name": "empty PUT deletes before the next file edit",
+   "files": {
+    "a.ts": "remove();\n",
+    "b.ts": "old();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nremove();\n*** Replace\n*** Edit File: b.ts\n*** Find\nold();\n*** Replace\nnew();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "",
+     "b.ts": "new();\n"
+    },
+    "writes": 2
+   }
+  },
+  {
+   "name": "old XML-looking lines remain literal edit content",
+   "files": {
+    "a.ts": "before();\n<Replace>\n</Find>\nafter();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n<Replace>\n</Find>\n*** Replace\nliteral();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nliteral();\nafter();\n"
+    }
+   }
+  }
+ ]
+}

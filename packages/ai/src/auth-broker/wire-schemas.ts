@@ -27,6 +27,7 @@ import type {
 	ClientUsageReportRequest,
 	ClientUsageReportResponse,
 	ClientUsageSummaryResponse,
+	CredentialBlockDeleteRequest,
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlockSnapshot,
@@ -220,6 +221,7 @@ const usageScopeSchema = type({
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",
+	"sharedGroup?": "string",
 });
 
 const usageLimitSchema = type({
@@ -234,7 +236,21 @@ const usageLimitSchema = type({
 
 const usageResetCreditsSchema = type({
 	availableCount: "number",
+	"redeemableCount?": "number",
+	"nextCreditId?": "string",
+	"eligible?": "boolean",
+	"reason?": "string",
+	"cooldownUntil?": "string",
 	"credits?": type({
+		"id?": "string",
+		"title?": "string",
+		"program?": "string",
+		"remainingCount?": "number",
+		"usable?": "boolean",
+		"requiresLimit?": "boolean",
+		"clears?": "string[]",
+		"blocking?": "string[]",
+		"usedFractions?": { "[string]": "number" },
 		"grantedAt?": "string",
 		"expiresAt?": "string",
 		"status?": "string",
@@ -377,6 +393,12 @@ export const disabledCredentialsResponseSchema: FluentType<DisabledCredentialsRe
 // ─── Credential blocks ───────────────────────────────────────────────────────
 
 export const credentialBlockRequestSchema: FluentType<CredentialBlockRequest> = credentialBlockSnapshotSchema;
+
+export const credentialBlockDeleteRequestSchema: FluentType<CredentialBlockDeleteRequest> = type({
+	"+": "reject",
+	providerKey: type("string").atLeastLength(1),
+	blockScope: "string",
+});
 
 export const credentialBlockResponseSchema: FluentType<CredentialBlockResponse> = type({
 	"+": "reject",

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { getAgentDir, getPluginsDir, removeSyncWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const currentPiCodingAgentPath = Bun.resolveSync("@oh-my-pi/pi-coding-agent", import.meta.dir);
@@ -81,6 +82,9 @@ describe("plugin extension discovery", () => {
 		}
 		originalXdg.clear();
 		setAgentDir(originalAgentDir);
+		// The legacy Pi parse cache db lives under the temp home's `.omp/cache`;
+		// release it so Windows can delete the directory.
+		__closeExtensionParseCacheForTests();
 		removeSyncWithRetries(tempHome);
 	});
 
@@ -91,6 +95,25 @@ describe("plugin extension discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(extension).toBeDefined();
 		expect(extension?.commands.has("plugin-ext")).toBe(true);
+	});
+
+	it("loads installed plugin extensions that detach API methods", async () => {
+		const extensionPath = path.join(getPluginsDir(), "node_modules", "@demo", "plugin", "dist", "extension.ts");
+		fs.writeFileSync(
+			extensionPath,
+			`
+				export default function(pi) {
+					const onAny = pi.on;
+					onAny("auto_compaction_start", () => {});
+				}
+			`,
+		);
+
+		const result = await discoverAndLoadExtensions([], projectDir.path());
+		const extension = result.extensions.find(ext => ext.path === extensionPath);
+
+		expect(result.errors).toHaveLength(0);
+		expect(extension?.handlers.get("auto_compaction_start")).toHaveLength(1);
 	});
 
 	it("loads installed legacy Pi plugin extensions from Windows drive-letter paths", async () => {

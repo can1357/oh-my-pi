@@ -5,29 +5,49 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import textwrap
 import threading
 import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from omp_rpc import (
     AgentEndEvent,
+    OpenSessionResult,
+    PromptResultEvent,
+    QueueUpdateEvent,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
     host_tool,
 )
-from omp_rpc.client import _RpcFrameDecoder
+
+from omp_rpc.client import (
+    _RpcFrameDecoder,
+    _process_group_id,
+    _terminate_process_group,
+)
 
 
 FAKE_SERVER = textwrap.dedent(
     """
+    import builtins
     import json
     import sys
+    import threading
     import time
+
+    # Background-job completions print from a timer thread; keep frames whole.
+    print_lock = threading.Lock()
+
+    def print(*args, **kwargs):
+        with print_lock:
+            builtins.print(*args, **kwargs)
 
     def usage():
         return {
@@ -79,6 +99,49 @@ FAKE_SERVER = textwrap.dedent(
     registered_host_tools = []
     host_event_tool_call_id = "toolu_host_1"
     host_event_tool_name = "echo_host"
+    pending_prompt_id = None
+    event_filter = None
+    message_counter = 0
+    pending_async_work = False
+
+    def emit_event(payload):
+        if event_filter is None or payload["type"] in event_filter:
+            print(json.dumps(payload), flush=True)
+
+    def emit_prompt_result(request_id, status="completed", agent_invoked=True, session_settled=True):
+        print(
+            json.dumps(
+                {
+                    "type": "prompt_result",
+                    "id": request_id,
+                    "agentInvoked": agent_invoked,
+                    "status": status,
+                    "sessionSettled": session_settled,
+                }
+            ),
+            flush=True,
+        )
+
+    def finish_background_job():
+        # The async job result wakes the session for a follow-up run, then it settles.
+        global pending_async_work
+        print(json.dumps({"type": "agent_start"}), flush=True)
+        print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+        pending_async_work = False
+        print(json.dumps({"type": "session_settled"}), flush=True)
+
+    def settle_pending_prompt(background_job=False):
+        global pending_prompt_id, pending_async_work
+        if pending_prompt_id is None:
+            return
+        if background_job:
+            pending_async_work = True
+            emit_prompt_result(pending_prompt_id, session_settled=False)
+            threading.Timer(0.4, finish_background_job).start()
+        else:
+            emit_prompt_result(pending_prompt_id)
+            print(json.dumps({"type": "session_settled"}), flush=True)
+        pending_prompt_id = None
 
     def current_state():
         return {
@@ -86,6 +149,8 @@ FAKE_SERVER = textwrap.dedent(
             "thinkingLevel": thinking_level,
             "isStreaming": False,
             "isCompacting": False,
+            "hasPendingAsyncWork": pending_async_work,
+            "isSettled": not pending_async_work,
             "steeringMode": steering_mode,
             "followUpMode": follow_up_mode,
             "interruptMode": interrupt_mode,
@@ -96,7 +161,8 @@ FAKE_SERVER = textwrap.dedent(
             "tokensPerSecond": 7.25,
             "autoCompactionEnabled": auto_compaction_enabled,
             "messageCount": len(messages),
-            "queuedMessageCount": 0,
+            "queuedMessageCount": sum(len(items) for items in queued_messages.values()),
+            "queuedMessages": {"steering": queued_messages["steering"], "followUp": queued_messages["followUp"]},
             "todoPhases": todo_phases,
             "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}] + registered_host_tools,
         }
@@ -107,25 +173,25 @@ FAKE_SERVER = textwrap.dedent(
         include_extra_events: bool = False,
         compact_terminal: bool = False,
     ):
-        global last_assistant_text, messages
-        print(json.dumps({"type": "agent_start"}), flush=True)
-        print(json.dumps({"type": "turn_start"}), flush=True)
+        global last_assistant_text, messages, message_counter
+        message_counter += 1
+        message_id = f"msg-{message_counter}"
+        emit_event({"type": "agent_start"})
+        emit_event({"type": "turn_start"})
         partial = assistant_message("")
-        print(json.dumps({"type": "message_start", "message": partial}), flush=True)
-        print(
-            json.dumps(
-                {
-                    "type": "message_update",
-                    "message": partial,
-                    "assistantMessageEvent": {
-                        "type": "text_delta",
-                        "contentIndex": 0,
-                        "delta": text,
-                        "partial": partial,
-                    },
-                }
-            ),
-            flush=True,
+        emit_event({"type": "message_start", "message": partial, "messageId": message_id})
+        emit_event(
+            {
+                "type": "message_update",
+                "message": partial,
+                "messageId": message_id,
+                "assistantMessageEvent": {
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": text,
+                    "partial": partial,
+                },
+            }
         )
 
         if delay:
@@ -216,8 +282,8 @@ FAKE_SERVER = textwrap.dedent(
             print(json.dumps({"type": "todo_auto_clear"}), flush=True)
 
         assistant = assistant_message(text)
-        print(json.dumps({"type": "message_end", "message": assistant}), flush=True)
-        print(json.dumps({"type": "turn_end", "message": assistant, "toolResults": []}), flush=True)
+        emit_event({"type": "message_end", "message": assistant, "messageId": message_id})
+        emit_event({"type": "turn_end", "message": assistant, "toolResults": []})
         if compact_terminal:
             terminal = assistant_message("terminal")
             print(
@@ -233,7 +299,7 @@ FAKE_SERVER = textwrap.dedent(
             last_assistant_text = "terminal"
             messages = [assistant, terminal]
         else:
-            print(json.dumps({"type": "agent_end", "messages": [assistant]}), flush=True)
+            emit_event({"type": "agent_end", "messages": [assistant]})
             last_assistant_text = text
             messages = [assistant]
 
@@ -248,6 +314,7 @@ FAKE_SERVER = textwrap.dedent(
     print(json.dumps({"type": "ready"}), flush=True)
     todo_phases = []
     messages = []
+    queued_messages = {"steering": [], "followUp": []}
     branch_messages = [{"entryId": "entry-1", "text": "branch message"}]
     model_provider = "anthropic"
     model_id = "claude-sonnet-4-5"
@@ -271,6 +338,7 @@ FAKE_SERVER = textwrap.dedent(
 
         if command_type == "extension_ui_response":
             emit_prompt_turn("ui acknowledged")
+            settle_pending_prompt()
             continue
 
         if command_type == "get_state":
@@ -350,6 +418,10 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "set_auto_retry":
             auto_retry_enabled = command["enabled"]
             respond(request_id, "set_auto_retry", {})
+        elif command_type == "set_cache_warming":
+            # "streaming" answers with a mode outside the protocol to exercise response validation.
+            effective = "always" if command["mode"] == "streaming" else command["mode"]
+            respond(request_id, "set_cache_warming", {"mode": effective})
         elif command_type == "abort_retry":
             respond(request_id, "abort_retry", {})
         elif command_type == "bash":
@@ -392,9 +464,27 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, "new_session", {"cancelled": False})
         elif command_type == "switch_session":
             respond(request_id, "switch_session", {"cancelled": False})
+        elif command_type == "open_session":
+            session_dir = command["sessionDir"]
+            respond(
+                request_id,
+                "open_session",
+                {
+                    "cancelled": False,
+                    "resumed": True,
+                    "sessionId": "resumed-session",
+                    "sessionFile": f"{session_dir}/resumed.jsonl",
+                },
+            )
+        elif command_type == "set_event_filter":
+            event_filter = command["events"]
+            respond(request_id, "set_event_filter", {"events": event_filter})
         elif command_type == "branch":
             branch_messages = [{"entryId": command["entryId"], "text": "branch message"}]
             respond(request_id, "branch", {"text": "branch created", "cancelled": False})
+        elif command_type == "fork":
+            # Report whether entryId reached the wire; a whole-session fork must omit it.
+            respond(request_id, "fork", {"cancelled": "entryId" not in command})
         elif command_type == "get_branch_messages":
             respond(request_id, "get_branch_messages", {"messages": branch_messages})
         elif command_type == "get_last_assistant_text":
@@ -402,11 +492,46 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "set_session_name":
             session_name = command["name"]
             respond(request_id, "set_session_name", {})
-        elif command_type in {"steer", "follow_up", "abort"}:
+        elif command_type in {"steer", "follow_up"}:
+            queue_name = "steering" if command_type == "steer" else "followUp"
+            queued_messages[queue_name].append(command["message"])
+            respond(request_id, command_type, {})
+            print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "remove_queued_message":
+            items = queued_messages.get(command.get("queue"))
+            if items is None:
+                respond(request_id, command_type, success=False, error="invalid queue")
+                continue
+            removed = command["message"] in items
+            if removed:
+                items.remove(command["message"])
+            respond(request_id, command_type, {"removed": removed})
+            if removed:
+                print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "promote_queued_message":
+            promoted = command["message"] in queued_messages["followUp"]
+            if promoted:
+                queued_messages["followUp"].remove(command["message"])
+                queued_messages["steering"].append(command["message"])
+            respond(request_id, command_type, {"promoted": promoted})
+            if promoted:
+                print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "abort":
             respond(request_id, command_type, {})
         elif command_type in {"prompt", "abort_and_prompt"}:
-            respond(request_id, command_type, {})
             message = command["message"]
+            if message == "/local":
+                respond(request_id, command_type, {"agentInvoked": False})
+                continue
+            respond(request_id, command_type, {})
+            pending_prompt_id = request_id
+            if message == "after stale run":
+                # A terminal agent_end and prompt_result left over from an
+                # earlier prompt arrive after this prompt was accepted.
+                stale = assistant_message("stale")
+                print(json.dumps({"type": "agent_end", "messages": [stale]}), flush=True)
+                emit_prompt_result("req_earlier")
+                time.sleep(0.1)
             if message == "needs ui":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-1", "method": "input", "title": "Need input", "placeholder": "value"}), flush=True)
                 continue
@@ -470,6 +595,7 @@ FAKE_SERVER = textwrap.dedent(
                 include_extra_events=message == "all events",
                 compact_terminal=message == "compacted turn",
             )
+            settle_pending_prompt(background_job=message == "background job")
         elif command_type == "host_tool_update":
             print(
                 json.dumps(
@@ -497,6 +623,7 @@ FAKE_SERVER = textwrap.dedent(
                 flush=True,
             )
             print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+            settle_pending_prompt()
         else:
             respond(request_id, command_type, success=False, error=f"unsupported: {command_type}")
     """
@@ -746,6 +873,19 @@ LATE_PROMPT_FAILURE_SERVER = textwrap.dedent(
                 ),
                 flush=True,
             )
+            print(
+                json.dumps(
+                    {
+                        "type": "prompt_result",
+                        "id": request_id,
+                        "agentInvoked": False,
+                        "sessionSettled": True,
+                        "status": "error",
+                        "error": {"message": "late failure", "retryable": False},
+                    }
+                ),
+                flush=True,
+            )
         else:
             print(
                 json.dumps(
@@ -847,6 +987,18 @@ FORWARD_COMPAT_SERVER = textwrap.dedent(
                 flush=True,
             )
             time.sleep(2)
+            print(
+                json.dumps(
+                    {
+                        "type": "prompt_result",
+                        "id": command.get("id"),
+                        "agentInvoked": True,
+                        "sessionSettled": True,
+                        "status": "completed",
+                    }
+                ),
+                flush=True,
+            )
             continue
         print(
             json.dumps(
@@ -871,6 +1023,18 @@ FORWARD_COMPAT_SERVER = textwrap.dedent(
             ),
             flush=True,
         )
+        print(
+            json.dumps(
+                {
+                    "type": "prompt_result",
+                    "id": command.get("id"),
+                    "agentInvoked": True,
+                    "sessionSettled": True,
+                    "status": "completed",
+                }
+            ),
+            flush=True,
+        )
     """
 )
 
@@ -883,6 +1047,102 @@ class RpcClientTests(unittest.TestCase):
             request_timeout=2.0,
             **kwargs,
         )
+
+    def test_remove_queued_message_preserves_queue_and_duplicate_identity(self) -> None:
+        with self.make_client() as client:
+            client.steer("same")
+            client.steer("same")
+            client.follow_up("same")
+            client.follow_up("keep")
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertEqual(client.get_state().queued_message_count, 3)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, False)
+            self.assertEqual(client.get_state().queued_message_count, 2)
+            self.assertIs(client.remove_queued_message("same", "followUp").removed, True)
+            self.assertIs(client.remove_queued_message("missing", "followUp").removed, False)
+            self.assertEqual(client.get_state().queued_message_count, 1)
+            self.assertIs(client.remove_queued_message("keep", "followUp").removed, True)
+
+    def test_queue_update_event_matches_get_state_and_removal_invariant(self) -> None:
+        updates: list[QueueUpdateEvent] = []
+        with self.make_client() as client:
+            client.on_queue_update(lambda event: updates.append(event))
+
+            client.follow_up("first")
+            client.follow_up("second")
+            # The server writes each queue_update after the command's response, and
+            # the reader thread dispatches frames in order: the get_state round trip
+            # guarantees both updates have reached the listener before asserting.
+            state = client.get_state()
+            self.assertEqual([event.follow_up for event in updates], [("first",), ("first", "second")])
+            self.assertEqual(updates[-1].steering, ())
+            self.assertEqual(state.queued_messages.follow_up, updates[-1].follow_up)
+            self.assertEqual(state.queued_messages.steering, updates[-1].steering)
+
+            # Snapshot-string-removal invariant: every chip string in a snapshot,
+            # passed back verbatim to remove_queued_message with its queue,
+            # removes that message.
+            for text in state.queued_messages.follow_up:
+                self.assertIs(client.remove_queued_message(text, "followUp").removed, True)
+
+            self.assertEqual(client.get_state().queued_messages.follow_up, ())
+            self.assertEqual(updates[-1].follow_up, ())
+
+    def test_remove_queued_message_propagates_unsupported_command(self) -> None:
+        server = FAKE_SERVER.replace(
+            'elif command_type == "remove_queued_message":',
+            'elif command_type == "unavailable_remove_queued_message":',
+        )
+        with self.make_client(server) as client:
+            client.steer("keep")
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.remove_queued_message("keep", "steering")
+            self.assertEqual(ctx.exception.command, "remove_queued_message")
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_remove_queued_message_rejects_missing_result(self) -> None:
+        server = FAKE_SERVER.replace('{"removed": removed}', '{}')
+        with self.make_client(server) as client:
+            with self.assertRaises(ValueError):
+                client.remove_queued_message("missing", "steering")
+
+    def test_remove_queued_message_rejects_nonboolean_result(self) -> None:
+        server = FAKE_SERVER.replace('{"removed": removed}', '{"removed": "false"}')
+        with self.make_client(server) as client:
+            with self.assertRaises(ValueError):
+                client.remove_queued_message("missing", "steering")
+
+    def test_promote_queued_message_moves_one_follow_up_into_steering(self) -> None:
+        with self.make_client() as client:
+            client.follow_up("same")
+            client.follow_up("same")
+            self.assertIs(client.promote_queued_message("same").promoted, True)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertIs(client.promote_queued_message("same").promoted, True)
+            self.assertIs(client.promote_queued_message("same").promoted, False)
+            self.assertIs(client.promote_queued_message("missing").promoted, False)
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_promote_queued_message_propagates_unsupported_command(self) -> None:
+        server = FAKE_SERVER.replace(
+            'elif command_type == "promote_queued_message":',
+            'elif command_type == "unavailable_promote_queued_message":',
+        )
+        with self.make_client(server) as client:
+            client.follow_up("keep")
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.promote_queued_message("keep")
+            self.assertEqual(ctx.exception.command, "promote_queued_message")
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_promote_queued_message_rejects_missing_or_nonboolean_result(self) -> None:
+        for payload in ("{}", '{"promoted": "false"}'):
+            with self.subTest(payload=payload):
+                server = FAKE_SERVER.replace('{"promoted": promoted}', payload)
+                with self.make_client(server) as client:
+                    with self.assertRaises(ValueError):
+                        client.promote_queued_message("missing")
 
     def test_protocol_v2_decoder_accepts_exact_logical_boundary(self) -> None:
         frame = {
@@ -928,6 +1188,7 @@ class RpcClientTests(unittest.TestCase):
             no_session=True,
             no_skills=True,
             no_rules=True,
+            no_ui=True,
             extra_args=("--foo", "bar"),
         )
 
@@ -951,6 +1212,7 @@ class RpcClientTests(unittest.TestCase):
                 "--no-skills",
                 "--no-rules",
                 "--no-title",
+                "--no-ui",
                 "--foo",
                 "bar",
             ),
@@ -983,6 +1245,88 @@ class RpcClientTests(unittest.TestCase):
             turn = client.prompt_and_wait("say hello", timeout=2.0)
             self.assertEqual(turn.require_assistant_text(), "pong")
             self.assertGreaterEqual(len(turn.events), 3)
+
+    def test_prompt_and_wait_ignores_stale_run_until_own_prompt_result(self) -> None:
+        results: list[PromptResultEvent] = []
+
+        with self.make_client() as client:
+            client.on_prompt_result(results.append)
+            turn = client.prompt_and_wait("after stale run", timeout=2.0)
+
+        self.assertEqual(turn.require_assistant_text(), "pong")
+        assert turn.result is not None
+        self.assertEqual(turn.result.status, "completed")
+        self.assertTrue(turn.result.agent_invoked)
+        self.assertNotEqual(turn.result.id, "req_earlier")
+        self.assertEqual([result.id for result in results], ["req_earlier", turn.result.id])
+
+    def test_prompt_and_wait_returns_immediately_for_local_prompt(self) -> None:
+        with self.make_client() as client:
+            turn = client.prompt_and_wait("/local", timeout=2.0)
+            client.wait_for_idle(timeout=0.5)
+
+        self.assertIsNone(turn.result)
+        self.assertEqual(turn.events, ())
+
+    def test_wait_for_idle_returns_after_prompt_result_with_prompt_id(self) -> None:
+        results: list[PromptResultEvent] = []
+
+        with self.make_client() as client:
+            client.on_prompt_result(results.append)
+            request_id = client.prompt("slow")
+            client.wait_for_idle(timeout=2.0)
+
+            self.assertEqual([result.id for result in results], [request_id])
+
+    def test_event_filter_does_not_block_prompt_completion(self) -> None:
+        with self.make_client() as client:
+            self.assertEqual(client.set_event_filter(["message_end"]), ("message_end",))
+            turn = client.prompt_and_wait("say hello", timeout=2.0)
+            self.assertIsNone(client.set_event_filter(None))
+
+        self.assertEqual([event.type for event in turn.events], ["message_end"])
+        self.assertEqual(turn.require_assistant_text(), "pong")
+
+    def test_open_session_returns_typed_result(self) -> None:
+        with self.make_client() as client:
+            result = client.open_session(Path("/tmp/host-key"))
+
+        self.assertEqual(
+            result,
+            OpenSessionResult(
+                cancelled=False,
+                resumed=True,
+                session_id="resumed-session",
+                session_file="/tmp/host-key/resumed.jsonl",
+            ),
+        )
+
+    def test_wait_for_settled_outlasts_prompt_yield_until_background_work_drains(
+        self,
+    ) -> None:
+        settled = threading.Event()
+
+        with self.make_client() as client:
+            client.on_session_settled(lambda _event: settled.set())
+            turn = client.prompt_and_wait("background job", timeout=2.0)
+
+            assert turn.result is not None
+            self.assertFalse(turn.result.session_settled)
+            state = client.get_state()
+            self.assertTrue(state.has_pending_async_work)
+            self.assertFalse(state.is_settled)
+
+            client.wait_for_settled(timeout=2.0)
+
+            self.assertTrue(client.get_state().is_settled)
+            self.assertTrue(settled.wait(1.0))
+
+    def test_wait_for_settled_returns_at_once_when_state_is_settled(self) -> None:
+        with self.make_client() as client:
+            started = time.monotonic()
+            client.wait_for_settled(timeout=1.0)
+
+        self.assertLess(time.monotonic() - started, 0.5)
 
     def test_prompt_and_wait_reconstructs_compacted_terminal_messages(self) -> None:
         with self.make_client() as client:
@@ -1176,6 +1520,9 @@ class RpcClientTests(unittest.TestCase):
             client.set_interrupt_mode("wait")
             client.set_auto_compaction(False)
             client.set_auto_retry(False)
+            self.assertEqual(client.set_cache_warming("off"), "off")
+            with self.assertRaisesRegex(ValueError, "set_cache_warming.mode"):
+                client.set_cache_warming("streaming")
             client.set_session_name("Renamed")
 
             state = client.get_state()
@@ -1204,6 +1551,10 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(branch.text, "branch created")
             branch_messages = client.get_branch_messages()
             self.assertEqual(branch_messages[0].entry_id, "entry-9")
+
+            # The fake reports cancelled exactly when no entryId was sent.
+            self.assertFalse(client.fork("entry-9").cancelled)
+            self.assertTrue(client.fork().cancelled)
 
     def test_message_and_control_commands(self) -> None:
         with self.make_client() as client:
@@ -1513,9 +1864,9 @@ HANGING_SERVER = textwrap.dedent(
     import sys
 
     print(json.dumps({"type": "ready"}), flush=True)
-    # Read one line (the prompt) and acknowledge it, then never emit agent_end.
-    # The client's prompt_and_wait should sit in _wait_for_agent_end forever
-    # unless stop() unblocks it.
+    # Read one line (the prompt) and acknowledge it, then never emit its
+    # prompt_result. The client's prompt_and_wait should wait forever unless
+    # stop() unblocks it.
     line = sys.stdin.readline()
     if line:
         command = json.loads(line)
@@ -1538,11 +1889,11 @@ HANGING_SERVER = textwrap.dedent(
 
 
 class StopUnblocksPromptAndWaitTests(unittest.TestCase):
-    """Regression: stop() must wake `_wait_for_agent_end` immediately.
+    """Regression: stop() must wake a blocked `prompt_and_wait` immediately.
 
     Previously, the stdout reader's "if not self._stopping:" guard caused
     `_mark_closed` to be skipped after stop(), so `_closed_error` stayed
-    `None` and `_wait_for_agent_end` blocked on its condition variable until
+    `None` and the waiter blocked on its condition variable until
     the prompt timeout. The fix sets `_closed_error` from `stop()` itself.
     """
 
@@ -1685,6 +2036,201 @@ class TerminatesProcessGroupTests(unittest.TestCase):
             first,
             "grandchild kept running after stop() — process group leaked",
         )
+
+
+class _Survivor:
+    """A child that cannot be reaped until it is told to `exit()`.
+
+    Models a process whose pending SIGKILL only lands after it leaves
+    uninterruptible sleep: `poll()`/`wait()` report it alive until `exit()`
+    flips the state, and `terminate()`/`kill()` never change it on their own.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.stdin = None
+        self.stdout = None
+        self.stderr = None
+        self._code: int | None = None
+
+    def exit(self) -> None:
+        self._code = 0
+
+    def poll(self) -> int | None:
+        return self._code
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._code is None:
+            raise subprocess.TimeoutExpired(cmd="omp", timeout=timeout)
+        return self._code
+
+    def terminate(self) -> None:  # survivor ignores signals
+        pass
+
+    def kill(self) -> None:  # survivor ignores signals
+        pass
+
+
+class RetainsSurvivorTests(unittest.TestCase):
+    """Regression (#12767): teardown that cannot confirm death must report it,
+    retain the survivor, and stay re-reapable — never drop the only handle.
+
+    Before the fix `_terminate_process_group` swallowed both `wait()` timeouts
+    and returned nothing, and `stop()` nulled `_process`/`_pgid` unconditionally,
+    so a child stuck in uninterruptible sleep became unobservable and the second
+    `stop()` was a guaranteed no-op.
+    """
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_survivor_is_reported_retained_and_reaped_later(self) -> None:
+        survivor = _Survivor(pid=424242)
+        signals: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            signals.append((pgid, sig))
+            # Signal 0 probes group liveness; the group empties only once the
+            # survivor has actually exited.
+            if sig == 0 and survivor.poll() is not None:
+                raise ProcessLookupError()
+
+        client = RpcClient(command=[sys.executable, "-c", "pass"])
+        client._process = survivor  # type: ignore[assignment]
+        client._pgid = survivor.pid
+
+        with mock.patch("os.killpg", side_effect=fake_killpg):
+            # First stop(): survivor cannot be killed -> teardown reports failure,
+            # drops the live handle but keeps it observable as a survivor.
+            self.assertIs(client.stop(), False)
+            self.assertIsNone(client._process)
+            self.assertEqual(client.survivor_pids, (survivor.pid,))
+
+            # The second stop() (the one the `with` exit / cancel hook fires) must
+            # re-signal the group, not no-op.
+            signals.clear()
+            self.assertFalse(client.stop())
+            self.assertIn((survivor.pid, signal.SIGKILL), signals)
+            self.assertEqual(client.survivor_pids, (survivor.pid,))
+
+            # Once the child leaves uninterruptible sleep, reap() confirms it and
+            # clears the survivor — probing the group (signal 0) without sending
+            # TERM/KILL to a pgid that may already have been reused.
+            survivor.exit()
+            signals.clear()
+            self.assertTrue(client.reap())
+            self.assertEqual(signals, [(survivor.pid, 0)])
+            self.assertEqual(client.survivor_pids, ())
+
+    def test_restart_and_stop_keep_every_unreaped_survivor(self) -> None:
+        # `pgid=None` takes the leader-only teardown path, so the stuck fakes
+        # need no `os.killpg` mock and the test runs on every platform.
+        first = _Survivor(pid=424243)
+        second = _Survivor(pid=424244)
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", FAKE_SERVER],
+            startup_timeout=2.0,
+            request_timeout=2.0,
+        )
+        client._process = first  # type: ignore[assignment]
+        client._pgid = None
+        self.assertIs(client.stop(), False)
+        self.assertEqual(client.survivor_pids, (first.pid,))
+
+        # Restart with a healthy child: its own teardown succeeds, but the
+        # earlier child is still alive, so stop() must not report success or
+        # forget it.
+        client.start()
+        healthy = client._process
+        assert healthy is not None
+        self.assertIs(client.stop(), False)
+        self.assertIsNotNone(healthy.poll(), "healthy child survived stop()")
+        self.assertEqual(client.survivor_pids, (first.pid,))
+
+        # A second stuck child joins the first instead of overwriting it.
+        client._process = second  # type: ignore[assignment]
+        client._pgid = None
+        self.assertIs(client.stop(), False)
+        self.assertEqual(client.survivor_pids, (first.pid, second.pid))
+
+        first.exit()
+        self.assertIs(client.reap(), False)
+        self.assertEqual(client.survivor_pids, (second.pid,))
+        second.exit()
+        self.assertIs(client.reap(), True)
+        self.assertEqual(client.survivor_pids, ())
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_terminate_confirms_and_reaps_a_real_child(self) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        pgid = _process_group_id(proc)
+        self.assertIsNotNone(pgid)
+
+        self.assertTrue(_terminate_process_group(proc, pgid))
+        self.assertIsNotNone(proc.poll(), "child survived a confirmed teardown")
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_terminate_waits_for_killed_term_ignoring_grandchild(self) -> None:
+        # A grandchild that ignores SIGTERM outlives the first escalation step
+        # and dies only to SIGKILL, after the leader is already reaped. Killed
+        # members stay visible to `killpg(pgid, 0)` until init reaps them, so
+        # an immediate post-SIGKILL probe misreports a dying group as a
+        # survivor.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        pid_file = os.path.join(work, "gc.pid")
+        grandchild = """trap '' TERM; echo $$ > "$1"; sleep 30 & wait"""
+        leader = textwrap.dedent(
+            f"""
+            import subprocess, time
+            subprocess.Popen(["sh", "-c", {grandchild!r}, "sh", {pid_file!r}])
+            time.sleep(30)
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", leader],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        pgid = _process_group_id(proc)
+        self.assertIsNotNone(pgid)
+        assert pgid is not None
+
+        def _kill_leaked_group() -> None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+        self.addCleanup(_kill_leaked_group)
+
+        # The pid file is written after the trap is installed, so SIGTERM is
+        # guaranteed to be ignored once it holds a pid.
+        grandchild_pid: int | None = None
+        deadline = time.monotonic() + 5.0
+        while grandchild_pid is None and time.monotonic() < deadline:
+            try:
+                with open(pid_file, encoding="utf-8") as f:
+                    grandchild_pid = int(f.read())
+            except (OSError, ValueError):
+                time.sleep(0.02)
+        self.assertIsNotNone(grandchild_pid, "grandchild never installed its trap")
+        assert grandchild_pid is not None
+
+        self.assertIs(_terminate_process_group(proc, pgid), True)
+        self.assertIsNotNone(proc.poll(), "leader survived a confirmed teardown")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(grandchild_pid, 0)
 
 
 if __name__ == "__main__":

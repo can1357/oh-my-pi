@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readImageMetadata, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { InvalidImageDataError, loadImageInput } from "../src/utils/image-loading";
+import { loadImageInput } from "../src/utils/image-loading";
+import { InvalidImageDataError } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 describe("readImageMetadata", () => {
 	let testDir: string;

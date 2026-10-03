@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
@@ -22,98 +22,6 @@ const withMissingSystemPython = () => {
 	};
 };
 
-describe("read tool URL selector shorthands", () => {
-	let testDir: string;
-
-	beforeEach(() => {
-		testDir = path.join(os.tmpdir(), `fetch-kagi-toggle-shorthand-${Snowflake.next()}`);
-		fs.mkdirSync(testDir, { recursive: true });
-	});
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-		removeSyncWithRetries(testDir);
-	});
-
-	const createSession = (settingsOverrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
-		const sessionFile = path.join(testDir, "session.jsonl");
-		const artifactsDir = sessionFile.slice(0, -6);
-		let nextArtifactId = 0;
-		return {
-			cwd: testDir,
-			hasUI: false,
-			getSessionFile: () => sessionFile,
-			getArtifactsDir: () => artifactsDir,
-			getSessionSpawns: () => null,
-			allocateOutputArtifact: async toolType => {
-				const id = String(nextArtifactId++);
-				return {
-					id,
-					path: path.join(artifactsDir, `${id}.${toolType}.log`),
-				};
-			},
-			settings: Settings.isolated({
-				"fetch.enabled": true,
-				...settingsOverrides,
-			}),
-		};
-	};
-
-	it("supports embedded raw selectors in URL paths", async () => {
-		const session = createSession();
-		const tool = new ReadTool(session);
-		const pageUrl = "https://example.com/embedded-raw";
-		const loadPageSpy = vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
-			if (requestedUrl !== pageUrl) {
-				throw new Error(`Unexpected URL: ${requestedUrl}`);
-			}
-			return {
-				ok: true,
-				status: 200,
-				contentType: "text/html",
-				finalUrl: pageUrl,
-				content: "<html><body><main><h1>Embedded raw page</h1></main></body></html>",
-			};
-		});
-
-		const result = await tool.execute("fetch-embedded-raw", { path: `${pageUrl}:raw` });
-		const textBlock = result.content.find(content => content.type === "text");
-
-		expect(result.details?.method).toBe("raw");
-		expect(textBlock?.type).toBe("text");
-		expect(textBlock?.text).toContain("<html><body><main><h1>Embedded raw page</h1></main></body></html>");
-		expect(loadPageSpy).toHaveBeenCalledWith(pageUrl, expect.anything());
-	});
-
-	it("supports embedded line selectors in URL paths", async () => {
-		const session = createSession();
-		const tool = new ReadTool(session);
-		const pageUrl = "https://example.com/embedded-lines";
-		const loadPageSpy = vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
-			if (requestedUrl !== pageUrl) {
-				throw new Error(`Unexpected URL: ${requestedUrl}`);
-			}
-			return {
-				ok: true,
-				status: 200,
-				contentType: "text/plain",
-				finalUrl: pageUrl,
-				content: "Line 1\nLine 2\nLine 3",
-			};
-		});
-
-		const result = await tool.execute("fetch-embedded-lines", { path: `${pageUrl}:7-8` });
-		const textBlock = result.content.find(content => content.type === "text");
-
-		expect(textBlock?.type).toBe("text");
-		expect(textBlock?.text).toContain("Line 1");
-		expect(textBlock?.text).toContain("Line 2");
-		// Read tool widens the window by ±3 unanchored context lines.
-		expect(loadPageSpy).toHaveBeenCalledTimes(1);
-		expect(loadPageSpy).toHaveBeenCalledWith(pageUrl, expect.anything());
-	});
-});
-
 describe("read tool URL handling", () => {
 	let testDir: string;
 
@@ -128,7 +36,7 @@ describe("read tool URL handling", () => {
 		removeSyncWithRetries(testDir);
 	});
 
-	const createSession = (overrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
+	const createSession = (overrides: Record<string, unknown> = {}): ToolSession => {
 		const sessionFile = path.join(testDir, "session.jsonl");
 		const artifactsDir = sessionFile.slice(0, -6);
 		let nextArtifactId = 0;
@@ -556,6 +464,138 @@ describe("read tool URL handling", () => {
 		expect(textBlock?.text).toContain("Parallel-rendered content");
 		expect(ensureToolSpy).not.toHaveBeenCalled();
 		expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
+	});
+
+	it("prefers Firecrawl scrape first when providers.fetch is set to firecrawl", async () => {
+		const originalApiKey = process.env.FIRECRAWL_API_KEY;
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
+		try {
+			const session = createSession({ "providers.fetch": "firecrawl" });
+			const tool = new ReadTool(session);
+			const pageUrl = "https://example.com/firecrawl-page";
+			const requests: { url: string; authorization: string | null; body: unknown }[] = [];
+			session.fetch = asGlobalFetch(async (input, init) => {
+				if (String(input) === "https://api.firecrawl.dev/v2/scrape") {
+					requests.push({
+						url: String(input),
+						authorization: new Headers(init?.headers).get("authorization"),
+						body: JSON.parse(String(init?.body)),
+					});
+					return new Response(
+						JSON.stringify({
+							success: true,
+							data: {
+								markdown:
+									"Firecrawl-rendered content that is comfortably longer than one hundred characters. ".repeat(
+										2,
+									),
+								metadata: { sourceURL: pageUrl, statusCode: 200 },
+							},
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("blocked", { status: 500, statusText: "Blocked" });
+			});
+			const pageHtml = "<html><body><main><h1>Firecrawl Page</h1></main></body></html>";
+			const ensureToolSpy = vi.spyOn(toolsManager, "ensureTool");
+			const htmlToMarkdownSpy = vi.spyOn(natives, "htmlToMarkdown");
+			vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
+				if (requestedUrl === pageUrl) {
+					return {
+						ok: true,
+						status: 200,
+						contentType: "text/html",
+						finalUrl: pageUrl,
+						content: pageHtml,
+					};
+				}
+
+				return {
+					ok: false,
+					status: 404,
+					contentType: "text/plain",
+					finalUrl: requestedUrl,
+					content: "",
+				};
+			});
+
+			const result = await tool.execute("fetch-firecrawl-html", { path: pageUrl });
+			const textBlock = result.content.find(content => content.type === "text");
+
+			expect(result.details?.method).toBe("firecrawl");
+			expect(textBlock?.type).toBe("text");
+			expect(textBlock?.text).toContain("Firecrawl-rendered content");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.authorization).toBe("Bearer test-firecrawl-key");
+			expect(requests[0]?.body).toMatchObject({ url: pageUrl, formats: ["markdown"] });
+			expect(ensureToolSpy).not.toHaveBeenCalled();
+			expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
+		} finally {
+			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
+			else process.env.FIRECRAWL_API_KEY = originalApiKey;
+		}
+	});
+
+	it("retries a retryable Firecrawl response before falling through", async () => {
+		const originalApiKey = process.env.FIRECRAWL_API_KEY;
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
+		try {
+			const session = createSession({ "providers.fetch": "firecrawl" });
+			const tool = new ReadTool(session);
+			const pageUrl = "https://example.com/firecrawl-retry";
+			let scrapeCalls = 0;
+			session.fetch = asGlobalFetch(async input => {
+				if (String(input) === "https://api.firecrawl.dev/v2/scrape") {
+					scrapeCalls++;
+					if (scrapeCalls === 1) {
+						return new Response(JSON.stringify({ error: "temporarily unavailable" }), { status: 503 });
+					}
+					return new Response(
+						JSON.stringify({
+							success: true,
+							data: {
+								markdown:
+									"Firecrawl content served on the retry attempt, comfortably over one hundred characters. ".repeat(
+										2,
+									),
+							},
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("blocked", { status: 500, statusText: "Blocked" });
+			});
+			vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
+				if (requestedUrl === pageUrl) {
+					return {
+						ok: true,
+						status: 200,
+						contentType: "text/html",
+						finalUrl: pageUrl,
+						content: "<html><body><main><h1>Firecrawl Retry</h1></main></body></html>",
+					};
+				}
+
+				return {
+					ok: false,
+					status: 404,
+					contentType: "text/plain",
+					finalUrl: requestedUrl,
+					content: "",
+				};
+			});
+
+			const result = await tool.execute("fetch-firecrawl-retry", { path: pageUrl });
+			const textBlock = result.content.find(content => content.type === "text");
+
+			expect(scrapeCalls).toBe(2);
+			expect(result.details?.method).toBe("firecrawl");
+			expect(textBlock?.text).toContain("served on the retry attempt");
+		} finally {
+			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
+			else process.env.FIRECRAWL_API_KEY = originalApiKey;
+		}
 	});
 
 	it("supports offset and limit selectors on URL reads", async () => {

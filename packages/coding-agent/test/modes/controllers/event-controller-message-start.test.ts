@@ -1,12 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { TextContent, UserMessage } from "@oh-my-pi/pi-ai";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import type { ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(() => {
 	initTheme();
@@ -25,6 +24,7 @@ function createContext(options: {
 	editorText: string;
 	optimisticSignature?: string;
 	locallySubmittedSignatures?: string[];
+	pendingImages?: ImageContent[];
 }) {
 	let currentEditorText = options.editorText;
 	const setText = vi.fn((text: string) => {
@@ -33,44 +33,27 @@ function createContext(options: {
 	const editor = {
 		setText,
 		getText: () => currentEditorText,
+		pendingImages: [...(options.pendingImages ?? [])],
 	};
-	const addMessageToChat = vi.fn();
-	const updatePendingMessagesDisplay = vi.fn();
+	const ctx = createInteractiveModeContext({
+		editor,
+		optimisticUserMessageSignature: options.optimisticSignature,
+		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
+	});
 	const clearOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
 	const replaceOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
-	const ctx = {
-		isInitialized: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn() },
-		editor,
-		addMessageToChat,
-		updatePendingMessagesDisplay,
-		getUserMessageText: (message: UserMessage) =>
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.filter((c): c is TextContent => c.type === "text")
-						.map(c => c.text)
-						.join(""),
-		optimisticUserMessageSignature: options.optimisticSignature,
-		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
-		clearOptimisticUserMessage,
-		replaceOptimisticUserMessage,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		viewSession: { isStreaming: false },
-	} as unknown as InteractiveModeContext;
+	ctx.clearOptimisticUserMessage = clearOptimisticUserMessage;
+	ctx.replaceOptimisticUserMessage = replaceOptimisticUserMessage;
 	return {
 		ctx,
 		editor,
 		setText,
-		addMessageToChat,
-		updatePendingMessagesDisplay,
+		addMessageToChat: ctx.addMessageToChat,
+		updatePendingMessagesDisplay: ctx.updatePendingMessagesDisplay,
 		clearOptimisticUserMessage,
 		replaceOptimisticUserMessage,
 	};
@@ -101,23 +84,34 @@ describe("EventController message_start (user role)", () => {
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
 		// Pending list always refreshes so the dequeued entry disappears.
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		// Signature is consumed so a future external message with the same shape still clears.
+		// Signature is consumed so a future external message with the same shape is
+		// not matched to this local submission again. The composer is never cleared
+		// on message_start, so consumption no longer affects the draft.
 		expect(ctx.locallySubmittedUserSignatures.has(signature)).toBe(false);
 	});
 
-	it("clears the editor for user messages that did not originate from this session", async () => {
-		// Counter-case: an external/programmatic user message must still trigger the
-		// defensive editor reset so the next prompt starts clean.
-		const message = createUserMessage("external prompt");
-		const { ctx, setText, addMessageToChat } = createContext({
-			editorText: "stale text",
+	it("preserves the in-progress draft for a user message from an extension", async () => {
+		// Regression: a user message this session never submitted locally is a real,
+		// non-synthetic prompt (an extension delivering `sendUserMessage`, e.g. HCOM).
+		// "Not local" must not mean "reset the editor": the draft being typed — text
+		// and pasted images — has to survive the delivery.
+		const message = createUserMessage("inbound from an extension");
+		const draftImage: ImageContent = { type: "image", data: "AAAA", mimeType: "image/png" };
+		const { ctx, editor, setText, addMessageToChat, updatePendingMessagesDisplay } = createContext({
+			editorText: "hello",
+			pendingImages: [draftImage],
 		});
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "message_start", message });
 
-		expect(setText).toHaveBeenCalledWith("");
+		expect(setText).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("hello");
+		expect(editor.pendingImages).toEqual([draftImage]);
+		// The inbound message still reaches the transcript.
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
+		// The pending list still refreshes.
+		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("preserves the editor for an optimistic submission and skips the duplicate chat add", async () => {
@@ -181,7 +175,8 @@ function createIrcMessage(timestamp: number): CustomMessage<{ from: string; mess
 }
 
 function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
-	const chatContainer = new TranscriptContainer();
+	const ctx = createInteractiveModeContext();
+	const { chatContainer } = ctx;
 	if (options.liveBlockAbove) {
 		// A still-running tool above the cards: they sit in the live region,
 		// where their rows cannot have committed to native scrollback.
@@ -191,21 +186,14 @@ function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
 			isTranscriptBlockFinalized: () => false,
 		} as Component);
 	}
-	const requestRender = vi.fn();
-	const ctx = {
-		isInitialized: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender },
-		chatContainer,
-		session: {},
-	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
-	const addMessageToChat: InteractiveModeContext["addMessageToChat"] = vi.fn((message, options) =>
-		helpers.addMessageToChat(message, options),
-	);
-	ctx.addMessageToChat = addMessageToChat;
-	return { ctx, chatContainer, requestRender, addMessageToChat };
+	ctx.addMessageToChat = vi.fn((message, options) => helpers.addMessageToChat(message, options));
+	return {
+		ctx,
+		chatContainer,
+		requestRender: ctx.ui.requestRender,
+		addMessageToChat: ctx.addMessageToChat,
+	};
 }
 
 describe("EventController IRC expiry", () => {

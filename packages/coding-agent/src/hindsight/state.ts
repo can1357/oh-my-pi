@@ -1,11 +1,11 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, ensureBankExists } from "./bank";
 import type { HindsightApi, MemoryItemInput } from "./client";
 import type { HindsightConfig } from "./config";
 import {
 	composeRecallQuery,
-	formatCurrentTime,
 	formatMemories,
 	type HindsightMessage,
 	prepareRetentionTranscript,
@@ -14,14 +14,15 @@ import {
 } from "./content";
 import {
 	ensureMentalModels,
-	loadMentalModelsBlock,
 	MENTAL_MODEL_FIRST_TURN_DEADLINE_MS,
 	resolveSeedsForScope,
+	tryLoadMentalModelsBlock,
 } from "./mental-models";
 import { extractMessages } from "./transcript";
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
+const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
 
 interface PendingRetainItem {
 	content: string;
@@ -226,23 +227,19 @@ export class HindsightSessionState {
 	#lastRetainedPrefixKey: string = "";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
+	#recallGeneration = 0;
 	/** Cached `<mental_models>` block injected into developer instructions. */
 	mentalModelsSnippet?: string;
-	/** When the cached snippet was last refreshed; gates the agent_end re-list. */
+	/** When the current bootstrap/boundary load settled; gates the first-turn race. */
 	mentalModelsLoadedAt?: number;
 	/**
-	 * In-flight ensure+load promise. `beforeAgentStartPrompt` awaits this on
-	 * the first turn so the MM block lands in the system prompt before the
-	 * LLM generates, even though `start()` returns before the load completes.
+	 * In-flight bootstrap or transcript-boundary load. `beforeAgentStartPrompt`
+	 * awaits it on the first turn so a timely snapshot lands before generation,
+	 * even though startup and transcript transitions remain non-blocking.
 	 */
 	mentalModelsLoadPromise?: Promise<void>;
+	#mentalModelsLoadGeneration = 0;
 	unsubscribe?: () => void;
-	/**
-	 * Releases the `onHindsightScopeChanged` subscription that drives live
-	 * rebuilds when `hindsight.bankId` / `bankIdPrefix` / `scoping` change.
-	 * Only set on primary states; aliases inherit the parent's subscription.
-	 */
-	unsubscribeScope?: () => void;
 	/** Alias states delegate persistence config to a primary parent state. */
 	aliasOf?: HindsightSessionState;
 	readonly retainQueue: HindsightRetainQueue;
@@ -267,6 +264,7 @@ export class HindsightSessionState {
 	}
 
 	setSessionId(sessionId: string): void {
+		if (this.sessionId !== sessionId) this.#recallGeneration++;
 		this.sessionId = sessionId;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
@@ -274,6 +272,7 @@ export class HindsightSessionState {
 	}
 
 	resetConversationTracking(): void {
+		this.#recallGeneration++;
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
@@ -298,12 +297,13 @@ export class HindsightSessionState {
 				types: this.config.recallTypes.length > 0 ? this.config.recallTypes : undefined,
 				tags: this.recallTags,
 				tagsMatch: this.recallTagsMatch,
+				signal,
 			});
 			if (signal?.aborted) return { context: null, ok: false };
 			const results = response.results ?? [];
 			if (results.length === 0) return { context: null, ok: true };
 			const formatted = formatMemories(results);
-			const block = `<memories>\n${this.config.recallPromptPreamble}\nCurrent time: ${formatCurrentTime()} UTC\n\n${formatted}\n</memories>`;
+			const block = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
 			return { context: block, ok: true };
 		} catch (err) {
 			if (this.config.debug) {
@@ -422,7 +422,10 @@ export class HindsightSessionState {
 		}
 	}
 
-	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
+	async beforeAgentStartPrompt(
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined> {
 		if (this.config.mentalModelsEnabled && this.mentalModelsLoadPromise && this.mentalModelsLoadedAt === undefined) {
 			await Promise.race([this.mentalModelsLoadPromise, Bun.sleep(MENTAL_MODEL_FIRST_TURN_DEADLINE_MS)]);
 		}
@@ -431,19 +434,24 @@ export class HindsightSessionState {
 
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
+		const generation = ++this.#recallGeneration;
 
 		const history = extractMessages(this.session.sessionManager);
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const { context, ok } = await this.recallForContext(truncated);
+		const { context, ok } = await this.recallForContext(truncated, signal);
 		if (!ok) return undefined;
 
-		this.hasRecalledForFirstTurn = true;
-		if (!context) return undefined;
-
-		this.lastRecallSnippet = context;
-		return context;
+		return {
+			context: context ?? undefined,
+			commit: () => {
+				if (this.#recallGeneration !== generation) return false;
+				this.hasRecalledForFirstTurn = true;
+				if (context) this.lastRecallSnippet = context;
+				return true;
+			},
+		};
 	}
 
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
@@ -458,45 +466,110 @@ export class HindsightSessionState {
 
 	async runMentalModelLoad(scope: BankScope): Promise<void> {
 		if (!this.config.mentalModelsEnabled) return;
+		const generation = ++this.#mentalModelsLoadGeneration;
+		const previousSnippet = this.mentalModelsSnippet;
+		this.mentalModelsLoadedAt = undefined;
 
-		// Create/ensure the bank BEFORE the first mental-model POST so we don't
-		// land `createMentalModel` against a bank the server has never seen —
-		// that surfaces as a FK / 404 on Hindsight's side. `ensureBankExists`
-		// is idempotent (PUT) and skips after the first call via `banksSet`.
-		await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
+		const bootstrap = (async () => {
+			// Create/ensure the bank BEFORE the first mental-model POST so we don't
+			// land `createMentalModel` against a bank the server has never seen —
+			// that surfaces as a FK / 404 on Hindsight's side. `ensureBankExists`
+			// is idempotent (PUT) and skips after the first call via `banksSet`.
+			await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
 
-		// Seeding is opt-in (`hindsight.mentalModelAutoSeed`). Default behaviour is
-		// read-only: we surface whatever models the operator has curated on the
-		// bank, but we do NOT POST to create new ones unless they explicitly
-		// asked. `/memory mm seed` remains the explicit-write entry point.
-		if (this.config.mentalModelAutoSeed) {
-			const seeds = resolveSeedsForScope(scope, this.config.scoping);
-			if (seeds.length > 0) {
-				await ensureMentalModels(this.client, this.bankId, seeds, this.config.debug);
+			// Seeding is opt-in (`hindsight.mentalModelAutoSeed`). Default behaviour is
+			// read-only: we surface whatever models the operator has curated on the
+			// bank, but we do NOT POST to create new ones unless they explicitly
+			// asked. `/memory mm seed` remains the explicit-write entry point.
+			if (this.config.mentalModelAutoSeed) {
+				const seeds = resolveSeedsForScope(scope, this.config.scoping);
+				if (seeds.length > 0) {
+					await ensureMentalModels(this.client, this.bankId, seeds, this.config.debug);
+				}
 			}
-		}
 
-		await this.refreshMentalModelsSnippet();
-		await this.#refreshBaseSystemPromptAfter("MM load");
+			await this.#loadAndPublishMentalModels(generation, previousSnippet, "MM load");
+		})();
+		await this.#settleMentalModelsLoadWithinDeadline(bootstrap, generation, previousSnippet);
 	}
 
-	async refreshMentalModelsSnippet(): Promise<void> {
-		const snippet = await loadMentalModelsBlock(
+	/**
+	 * Starts a bounded reload for a new transcript without blocking the session
+	 * transition. A result that misses the first-turn deadline is discarded so
+	 * the previous snapshot stays frozen for the whole transcript.
+	 */
+	beginMentalModelsTranscriptReload(): void {
+		if (!this.config.mentalModelsEnabled) return;
+		const generation = ++this.#mentalModelsLoadGeneration;
+		const previousSnippet = this.mentalModelsSnippet;
+		this.mentalModelsLoadedAt = undefined;
+		const reload = this.#settleMentalModelsLoadWithinDeadline(
+			this.#loadAndPublishMentalModels(generation, previousSnippet, "MM transcript reload"),
+			generation,
+			previousSnippet,
+		).catch(error => {
+			if (generation === this.#mentalModelsLoadGeneration) {
+				this.mentalModelsSnippet = previousSnippet;
+				this.mentalModelsLoadedAt = Date.now();
+			}
+			logger.debug("Hindsight: mental-model transcript reload failed", { error: String(error) });
+		});
+		this.mentalModelsLoadPromise = reload;
+	}
+
+	async #settleMentalModelsLoadWithinDeadline(
+		load: Promise<void>,
+		generation: number,
+		previousSnippet: string | undefined,
+	): Promise<void> {
+		const outcome = await Promise.race([
+			load,
+			Bun.sleep(MENTAL_MODEL_FIRST_TURN_DEADLINE_MS).then(() => MENTAL_MODEL_LOAD_TIMED_OUT),
+		]);
+		if (outcome !== MENTAL_MODEL_LOAD_TIMED_OUT || generation !== this.#mentalModelsLoadGeneration) return;
+
+		// Invalidate the still-running load before restoring the stable snapshot.
+		// SessionTools checks the same generation before committing a prompt build,
+		// so a queued publication cannot rewrite the prefix after this deadline.
+		this.#mentalModelsLoadGeneration++;
+		this.mentalModelsSnippet = previousSnippet;
+		this.mentalModelsLoadedAt = Date.now();
+	}
+
+	async #loadAndPublishMentalModels(
+		generation: number,
+		previousSnippet: string | undefined,
+		reason: "MM load" | "MM reload" | "MM transcript reload",
+	): Promise<void> {
+		const result = await tryLoadMentalModelsBlock(
 			this.client,
 			this.bankId,
 			this.config.mentalModelMaxRenderChars,
 			this.recallTags,
 		);
-		this.mentalModelsSnippet = snippet;
+		if (generation !== this.#mentalModelsLoadGeneration) return;
+		if (!result.ok) {
+			this.mentalModelsLoadedAt = Date.now();
+			return;
+		}
+
+		this.mentalModelsSnippet = result.block;
+		const published = await this.#refreshBaseSystemPromptAfter(
+			reason,
+			() => generation === this.#mentalModelsLoadGeneration,
+		);
+		if (generation !== this.#mentalModelsLoadGeneration) return;
+		if (!published) this.mentalModelsSnippet = previousSnippet;
 		this.mentalModelsLoadedAt = Date.now();
 	}
 
 	async reloadMentalModels(): Promise<boolean> {
 		if (this.aliasOf) return false;
 		if (!this.config.mentalModelsEnabled) return false;
-		await this.refreshMentalModelsSnippet();
-		await this.#refreshBaseSystemPromptAfter("MM reload");
-		return true;
+		const generation = ++this.#mentalModelsLoadGeneration;
+		const previousSnippet = this.mentalModelsSnippet;
+		await this.#loadAndPublishMentalModels(generation, previousSnippet, "MM reload");
+		return generation === this.#mentalModelsLoadGeneration;
 	}
 
 	attachSessionListeners(): void {
@@ -508,34 +581,35 @@ export class HindsightSessionState {
 				// is settled. The queue is also debounced/size-bounded, but
 				// flushing here keeps the bank fresh between turns.
 				void this.flushRetainQueue();
-				// MM TTL refresh: re-list once we're past the cache deadline. List
-				// is cheap (no reflect call); the LLM doesn't see this happen.
-				if (
-					this.config.mentalModelsEnabled &&
-					this.mentalModelsLoadedAt !== undefined &&
-					Date.now() - this.mentalModelsLoadedAt >= this.config.mentalModelRefreshIntervalMs
-				) {
-					void this.refreshMentalModelsSnippet().then(async () => {
-						await this.#refreshBaseSystemPromptAfter("MM TTL reload");
-					});
-				}
+				// Mental models are deliberately NOT re-listed here. Rewriting the
+				// cached <mental_models> block mid-session changes the base system
+				// prompt bytes and busts the provider prompt-cache prefix (#11961).
+				// The block is frozen for the current transcript — like local-memory
+				// guidance after #3745 — so a background reflect applies when the
+				// next transcript/session boundary reloads it. `/memory mm reload`
+				// stays the explicit in-session invalidation.
 			}
 		});
 	}
 
 	dispose(): void {
+		this.#recallGeneration++;
+		this.#mentalModelsLoadGeneration++;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		this.unsubscribeScope?.();
-		this.unsubscribeScope = undefined;
 		this.retainQueue.dispose();
 	}
 
-	async #refreshBaseSystemPromptAfter(reason: "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
+	async #refreshBaseSystemPromptAfter(
+		reason: "MM load" | "MM reload" | "MM transcript reload",
+		commitIf?: () => boolean,
+	): Promise<boolean> {
 		try {
-			await this.session.refreshBaseSystemPrompt();
+			await this.session.refreshBaseSystemPrompt(commitIf);
+			return !commitIf || commitIf();
 		} catch (err) {
 			logger.debug(`Hindsight: refreshBaseSystemPrompt after ${reason} failed`, { error: String(err) });
+			return false;
 		}
 	}
 }

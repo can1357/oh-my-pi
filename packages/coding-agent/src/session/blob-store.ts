@@ -1,12 +1,33 @@
+import { blobExtensionForImageMimeType, normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEexist, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { LazyFrameData } from "@oh-my-pi/snapcompact";
 
 const BLOB_PREFIX = "blob:sha256:";
 
 /** Canonical blob hash shape: exactly 64 lowercase hex chars (a SHA-256 digest). */
 export const BLOB_HASH_RE = /^[a-f0-9]{64}$/;
+
+/**
+ * A reused blob older than this gets its mtime refreshed (metadata only, never
+ * its bytes) so `omp gc`'s write-grace window still covers a blob whose new
+ * reference has not reached a session file yet. Younger blobs are left alone.
+ */
+const BLOB_REUSE_TOUCH_MS = 60_000;
+
+/**
+ * Staging file an atomic blob or sidecar write renames into place:
+ * `.<hash>[.<ext>].<snowflake>.tmp`. Only a killed or crashed writer leaves one
+ * behind, so `omp gc` removes the ones older than its write grace.
+ */
+export const BLOB_STAGING_RE = /^\.[a-f0-9]{64}(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?\.[0-9a-f]{16}\.tmp$/;
+
+/** Staging path beside `target` matching {@link BLOB_STAGING_RE}. */
+export function blobStagingPath(target: string): string {
+	return path.join(path.dirname(target), `.${path.basename(target)}.${Snowflake.next()}.tmp`);
+}
 
 export interface BlobPutOptions {
 	/** Optional file extension for a sidecar hardlink/copy that OS openers can type-detect. */
@@ -30,66 +51,119 @@ export interface BlobPutResult {
  * image viewers; blob refs and reads still address the extensionless hash path.
  * The SHA-256 hash is computed over the raw binary data (not base64).
  * Content-addressing makes writes idempotent and provides automatic deduplication
- * across sessions.
+ * across sessions. New blobs and copied sidecars are staged to a temp file and
+ * renamed into place, so a hash-named file is never observed partially written.
  */
 
-const IMAGE_EXTENSION_BY_MIME: Record<string, string> = {
-	"image/png": "png",
-	"image/jpeg": "jpg",
-	"image/jpg": "jpg",
-	"image/gif": "gif",
-	"image/webp": "webp",
-	"image/svg+xml": "svg",
-};
+/** Whether `file` already holds `size` bytes; a shorter file is a torn write. */
+async function hasCompleteFile(file: string, size: number): Promise<boolean> {
+	try {
+		return (await fsp.stat(file)).size === size;
+	} catch {
+		return false;
+	}
+}
 
-function normalizeBlobExtension(extension: string | undefined): string | undefined {
-	if (!extension) return undefined;
-	const normalized = extension.startsWith(".") ? extension.slice(1) : extension;
-	if (normalized.length === 0 || normalized.length > 32) return undefined;
-	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(normalized)) return undefined;
-	return normalized.toLowerCase();
+/**
+ * Refresh a long-lived reused blob's mtime for gc's write grace. Returns false
+ * when the blob was collected before the touch, so the caller writes it again.
+ */
+function touchReusedBlobSync(blobPath: string, mtimeMs: number): boolean {
+	const now = new Date();
+	if (now.getTime() - mtimeMs < BLOB_REUSE_TOUCH_MS) return true;
+	try {
+		fs.utimesSync(blobPath, now, now);
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		logger.debug("Failed to refresh reused blob mtime", { blobPath, error: String(err) });
+	}
+	return true;
+}
+
+async function touchReusedBlob(blobPath: string, mtimeMs: number): Promise<boolean> {
+	const now = new Date();
+	if (now.getTime() - mtimeMs < BLOB_REUSE_TOUCH_MS) return true;
+	try {
+		await fsp.utimes(blobPath, now, now);
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		logger.debug("Failed to refresh reused blob mtime", { blobPath, error: String(err) });
+	}
+	return true;
+}
+
+/**
+ * Publish `data` at `target` via temp file + rename. When the rename fails
+ * because a racing writer already published the same content (Windows refuses
+ * to replace a file a reader holds open), the existing complete file wins.
+ */
+function writeFileAtomicSync(target: string, data: Buffer): void {
+	const tempPath = blobStagingPath(target);
+	try {
+		fs.writeFileSync(tempPath, data);
+		fs.renameSync(tempPath, target);
+	} catch (err) {
+		try {
+			fs.unlinkSync(tempPath);
+		} catch {
+			// Never staged, or already renamed away.
+		}
+		if (fs.statSync(target, { throwIfNoEntry: false })?.size === data.length) return;
+		throw err;
+	}
+}
+
+async function writeFileAtomic(target: string, data: Buffer): Promise<void> {
+	const tempPath = blobStagingPath(target);
+	try {
+		await Bun.write(tempPath, data);
+		await fsp.rename(tempPath, target);
+	} catch (err) {
+		try {
+			await fsp.unlink(tempPath);
+		} catch {
+			// Never staged, or already renamed away.
+		}
+		if (await hasCompleteFile(target, data.length)) return;
+		throw err;
+	}
 }
 
 async function ensureDisplayPath(blobPath: string, displayPath: string, data: Buffer): Promise<void> {
 	if (displayPath === blobPath) return;
+	if (await hasCompleteFile(displayPath, data.length)) return;
 	try {
 		await fsp.link(blobPath, displayPath);
 		return;
 	} catch (err) {
-		if (typeof err === "object" && err !== null && "code" in err && err.code === "EEXIST") return;
-		logger.debug("Blob display hardlink failed; falling back to copy", {
-			blobPath,
-			displayPath,
-			error: err instanceof Error ? err.message : String(err),
-		});
+		// EEXIST here is a torn sidecar or a racing writer: replace it.
+		if (!isEexist(err)) {
+			logger.debug("Blob display hardlink failed; falling back to copy", {
+				blobPath,
+				displayPath,
+				error: String(err),
+			});
+		}
 	}
-	await Bun.write(displayPath, data);
+	await writeFileAtomic(displayPath, data);
 }
 
 function ensureDisplayPathSync(blobPath: string, displayPath: string, data: Buffer): void {
 	if (displayPath === blobPath) return;
+	if (fs.statSync(displayPath, { throwIfNoEntry: false })?.size === data.length) return;
 	try {
 		fs.linkSync(blobPath, displayPath);
 		return;
 	} catch (err) {
-		if (typeof err === "object" && err !== null && "code" in err && err.code === "EEXIST") return;
-		logger.debug("Blob display hardlink failed; falling back to copy", {
-			blobPath,
-			displayPath,
-			error: err instanceof Error ? err.message : String(err),
-		});
+		if (!isEexist(err)) {
+			logger.debug("Blob display hardlink failed; falling back to copy", {
+				blobPath,
+				displayPath,
+				error: String(err),
+			});
+		}
 	}
-	fs.writeFileSync(displayPath, data);
-}
-
-export function blobExtensionForImageMimeType(mimeType: string | undefined): string | undefined {
-	if (!mimeType) return undefined;
-	const lower = mimeType.toLowerCase();
-	const known = IMAGE_EXTENSION_BY_MIME[lower];
-	if (known) return known;
-	if (!lower.startsWith("image/")) return undefined;
-	const subtype = lower.slice("image/".length).split(";")[0]?.split("+")[0];
-	return normalizeBlobExtension(subtype);
+	writeFileAtomicSync(displayPath, data);
 }
 
 export class BlobStore {
@@ -113,7 +187,17 @@ export class BlobStore {
 			},
 		};
 
-		await Bun.write(blobPath, data);
+		// Content-addressed: a same-length file already holds these bytes. A
+		// shorter one is a torn write and is rewritten.
+		let stored: fs.Stats | undefined;
+		try {
+			stored = await fsp.stat(blobPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+		if (!stored || stored.size !== data.length || !(await touchReusedBlob(blobPath, stored.mtimeMs))) {
+			await writeFileAtomic(blobPath, data);
+		}
 		await ensureDisplayPath(blobPath, displayPath, data);
 		return result;
 	}
@@ -136,8 +220,16 @@ export class BlobStore {
 				return `${BLOB_PREFIX}${hash}`;
 			},
 		};
-		fs.mkdirSync(this.dir, { recursive: true });
-		fs.writeFileSync(blobPath, data);
+		const stored = fs.statSync(blobPath, { throwIfNoEntry: false });
+		if (!stored || stored.size !== data.length || !touchReusedBlobSync(blobPath, stored.mtimeMs)) {
+			try {
+				writeFileAtomicSync(blobPath, data);
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+				fs.mkdirSync(this.dir, { recursive: true });
+				writeFileAtomicSync(blobPath, data);
+			}
+		}
 		ensureDisplayPathSync(blobPath, displayPath, data);
 		return result;
 	}
@@ -160,6 +252,16 @@ export class BlobStore {
 		const blobPath = path.join(this.dir, hash);
 		try {
 			return fs.readFileSync(blobPath);
+		} catch (err) {
+			if (isEnoent(err)) return null;
+			throw err;
+		}
+	}
+
+	/** Stored byte length without reading the blob; null when it is absent. */
+	sizeSync(hash: string): number | null {
+		try {
+			return fs.statSync(path.join(this.dir, hash)).size;
 		} catch (err) {
 			if (isEnoent(err)) return null;
 			throw err;
@@ -264,6 +366,19 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
 	return buffer.toString("utf8");
 }
 
+/** Synchronous variant of {@link resolveImageDataUrl}. */
+export function resolveImageDataUrlSync(blobStore: BlobStore, data: string): string {
+	const hash = parseBlobRef(data);
+	if (!hash) return data;
+
+	const buffer = blobStore.getSync(hash);
+	if (!buffer) {
+		logger.warn("Blob not found for persisted image data URL", { hash });
+		return data;
+	}
+	return buffer.toString("utf8");
+}
+
 /**
  * Resolve a blob reference back to base64 data.
  * If the data is not a blob reference, returns it unchanged.
@@ -292,4 +407,20 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
 		return data;
 	}
 	return buffer.toString("base64");
+}
+
+/**
+ * Price a persisted frame payload without reading it, then read it only if the
+ * snapcompact frame budget keeps it. Missing blobs are dropped instead of sent
+ * to a provider as storage references.
+ */
+export function lazyImageDataSync(blobStore: BlobStore, data: string): LazyFrameData | undefined {
+	const hash = parseBlobRef(data);
+	if (!hash) return isBlobRef(data) ? undefined : { bytes: data.length, read: () => data };
+	const size = blobStore.sizeSync(hash);
+	if (size === null) {
+		logger.warn("Blob not found for image reference", { hash });
+		return undefined;
+	}
+	return { bytes: Math.ceil(size / 3) * 4, read: () => resolveImageDataSync(blobStore, data) };
 }

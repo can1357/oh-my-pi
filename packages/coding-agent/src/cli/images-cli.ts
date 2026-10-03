@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog";
-import { $which, type FetchImpl, getAgentDbPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { $which, type FetchImpl, formatBytes, getAgentDbPath, isEnoent } from "@oh-my-pi/pi-utils";
 import {
 	queryBlobBrokerDoctor,
 	queryBlobBrokerProbe,
@@ -44,6 +44,8 @@ import {
 import { providerFileCachePath, resolveBlobBrokerConfigs } from "../blob-broker/service";
 import { createConfiguredUploader } from "../blob-broker/uploaders";
 import { Settings } from "../config/settings";
+
+import { cfgImagesUrlsBackends, cfgImagesUrlsEnabled } from "../blob-broker/settings";
 
 export const IMAGES_ACTIONS = ["status", "doctor", "probe", "purge"] as const;
 export type ImagesAction = (typeof IMAGES_ACTIONS)[number];
@@ -206,8 +208,8 @@ const BINARY_BY_DESTINATION: Readonly<Partial<Record<BlobDestinationId, string>>
 
 function defaultResolveConfig(settings: Settings, projectDir: string): ImagesResolvedConfig {
 	return {
-		enabled: settings.get("images.urls.enabled"),
-		orderedBackends: settings.get("images.urls.backends"),
+		enabled: cfgImagesUrlsEnabled.get(settings),
+		orderedBackends: cfgImagesUrlsBackends.get(settings),
 		configs: resolveBlobBrokerConfigs(settings, projectDir),
 		providerFileCachePath: providerFileCachePath(settings, projectDir),
 		savingsJournalPath: blobBrokerSavingsJournalPath(settings, projectDir),
@@ -234,7 +236,7 @@ function defaultCreateProviderFileClient(
 async function defaultOpenAuthStorage(): Promise<AuthStorage> {
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
+	await storage.credentials.reload();
 	return storage;
 }
 
@@ -332,13 +334,6 @@ function safeBaseUrl(value: string): string | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }
 
 function publicStatus(status: BlobBrokerStatus | null): SafeDaemonStatus {
@@ -514,8 +509,8 @@ async function collectDoctor(
 		let storage: AuthStorage | undefined;
 		try {
 			storage = await deps.openAuthStorage();
-			const authenticated = (["openai", "anthropic", "google"] as const).filter(provider =>
-				storage?.hasAuth(provider),
+			const authenticated = (["openai", "anthropic", "google"] as const).filter(
+				provider => storage?.keys.source(provider) !== undefined,
 			);
 			checks.push({
 				name: "config:provider-files",
@@ -594,7 +589,7 @@ async function collectProbe(
 
 function credentialValues(storage: AuthStorage, provider: ProviderFileProvider): string[] {
 	const values: string[] = [];
-	for (const row of storage.listStoredCredentials(provider)) {
+	for (const row of storage.credentials.list(provider)) {
 		const credential = row.credential;
 		if (credential.type === "api_key") values.push(credential.key);
 		else if (credential.access) values.push(credential.access);
@@ -605,7 +600,7 @@ function credentialValues(storage: AuthStorage, provider: ProviderFileProvider):
 async function credentialForEntry(storage: AuthStorage, entry: ProviderFileCacheEntry): Promise<string | undefined> {
 	const values = credentialValues(storage, entry.provider);
 	try {
-		const resolved = await storage.getApiKey(entry.provider);
+		const resolved = await storage.keys.get(entry.provider);
 		if (resolved) values.push(resolved);
 	} catch {
 		// A failed refresh is reported as skipped authentication, never with credential detail.

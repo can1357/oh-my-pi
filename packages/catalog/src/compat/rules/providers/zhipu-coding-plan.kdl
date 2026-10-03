@@ -1,6 +1,11 @@
 // Provider-wire compat for "zhipu-coding-plan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "zhipu-coding-plan" {
+	default-model "glm-5.1"
+	env "ZHIPU_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Zhipu Coding Plan"
+
 	// Replaces the Zhipu provider thinking-format branch.
 	thinking-format "zai"
 	class "glm" {

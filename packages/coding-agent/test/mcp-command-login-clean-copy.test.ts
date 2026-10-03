@@ -10,11 +10,11 @@ import * as smitheryAuth from "@oh-my-pi/pi-coding-agent/mcp/smithery-auth";
 import * as smitheryRegistry from "@oh-my-pi/pi-coding-agent/mcp/smithery-registry";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { loginUrlCopyCommand, loginUrlWritesSettled } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import * as openModule from "@oh-my-pi/pi-coding-agent/utils/open";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { loginUrlCopyCommand, loginUrlWritesSettled } from "@oh-my-pi/pi-tui/login-url";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 const AUTH_ERROR = new Error(
@@ -38,6 +38,7 @@ function createController(authStorage: AuthStorage) {
 		showStatus,
 		oauthManualInput: new OAuthManualInputManager(),
 		settings: { get: vi.fn((_key: string): unknown => undefined) },
+		keybindings: { getKeys: () => [] },
 		session: {
 			refreshMCPTools: vi.fn(),
 			setMCPPromptCommands: vi.fn(),

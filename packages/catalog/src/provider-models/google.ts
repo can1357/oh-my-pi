@@ -34,6 +34,8 @@ export interface GoogleGeminiCliModelManagerConfig {
 }
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+/** Rows whose cached effort ladder predates the native `minimal` drop (#10543). */
+const GEMINI_FLASH_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash", "gemini-3.8-flash"] as const;
 
 function toDiscoveryFetch(fetchImpl: FetchImpl | undefined): typeof fetch | undefined {
 	if (!fetchImpl) {
@@ -51,6 +53,7 @@ export function googleModelManagerOptions(
 	const apiKey = config?.apiKey;
 	return {
 		providerId: "google",
+		dropCachedModelIdsOnStaticMismatch: GEMINI_FLASH_CACHE_MIGRATION_MODEL_IDS,
 		...(apiKey
 			? { fetchDynamicModels: () => fetchGeminiModels({ apiKey, fetch: toDiscoveryFetch(config?.fetch) }) }
 			: undefined),
@@ -58,7 +61,10 @@ export function googleModelManagerOptions(
 }
 
 export function googleVertexModelManagerOptions(_config?: GoogleVertexModelManagerConfig): ModelManagerOptions {
-	return { providerId: "google-vertex" };
+	return {
+		providerId: "google-vertex",
+		dropCachedModelIdsOnStaticMismatch: GEMINI_FLASH_CACHE_MIGRATION_MODEL_IDS,
+	};
 }
 
 export function googleAntigravityModelManagerOptions(

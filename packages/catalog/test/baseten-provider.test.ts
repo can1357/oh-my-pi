@@ -64,6 +64,29 @@ describe("Baseten provider discovery", () => {
 							},
 						},
 						{
+							id: "deepseek-ai/DeepSeek-V4-Flash-0731",
+							object: "model",
+							name: "DeepSeek V4 Flash 0731",
+							context_length: 1048576,
+							max_completion_tokens: 393216,
+							supported_features: ["tools", "json_mode", "structured_outputs", "reasoning"],
+							input_modalities: ["text"],
+							pricing: {
+								prompt: "0.00000015",
+								completion: "0.0000006",
+								input_cache_read: "0.00000002",
+							},
+						},
+						{
+							id: "deepseek-ai/DeepSeek-V4.1-Flash",
+							object: "model",
+							name: "DeepSeek V4.1 Flash",
+							context_length: 1048576,
+							max_completion_tokens: 393216,
+							supported_features: ["tools", "json_mode", "structured_outputs", "reasoning"],
+							input_modalities: ["text"],
+						},
+						{
 							id: "zai-org/GLM-4.7",
 							object: "model",
 							name: "GLM 4.7",
@@ -165,6 +188,18 @@ describe("Baseten provider discovery", () => {
 				cacheWrite: 0,
 			},
 		});
+
+		// V4-generation Flash SKUs advertise `reasoning` on discovery and must keep
+		// the effort ladder like Pro (#11907 follow-up class of bug).
+		for (const flashId of ["deepseek-ai/DeepSeek-V4-Flash-0731", "deepseek-ai/DeepSeek-V4.1-Flash"]) {
+			const flash = models?.find(model => model.id === flashId);
+			if (!flash) throw new Error(`Baseten ${flashId} was not discovered`);
+			expect(flash.reasoning).toBe(true);
+			expect(buildModel(flash).thinking).toMatchObject({
+				mode: "effort",
+				efforts: ["low", "high", "max"],
+			});
+		}
 
 		const glmFast = models?.find(model => model.id === "zai-org/GLM-5.2-Fast");
 		const glm47 = models?.find(model => model.id === "zai-org/GLM-4.7");

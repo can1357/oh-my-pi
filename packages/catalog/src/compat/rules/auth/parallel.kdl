@@ -1,0 +1,9 @@
+auth "parallel" {
+	name "Parallel"
+	env "PARALLEL_API_KEY"
+	login "api-key" {
+		auth-url "https://platform.parallel.ai/settings?tab=api-keys"
+		instructions "Copy your Parallel API key from the Parallel settings page."
+		prompt "Paste your Parallel API key" placeholder="sk_..."
+	}
+}

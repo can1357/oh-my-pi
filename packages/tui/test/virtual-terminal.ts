@@ -1,5 +1,5 @@
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
-import { CELL_U32, CellFlags, KittyTerminal, loadModuleSync } from "kitty-vt-wasm";
+import { CELL_U32, CellFlags, type GraphicsPlacement, KittyTerminal, loadModuleSync } from "kitty-vt-wasm";
 
 // ---------------------------------------------------------------------------
 // Shared kitty VT engine
@@ -308,6 +308,20 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Raw background color words of a viewport row, for tests that assert a
+	 * repaint recolored a row rather than reworded it (e.g. a hover band over
+	 * an already-tinted row, where column coverage alone cannot observe the
+	 * change). Compare snapshots opaquely; values are engine cell words.
+	 */
+	getViewportRowBackgroundValues(row: number): number[] {
+		const words = this.#presentedRowCells(row);
+		if (!words) return [];
+		const values: number[] = [];
+		for (let col = 0; col * CELL_U32 < words.length; col++) values.push(words[col * CELL_U32 + CELL_BG] ?? 0);
+		return values;
+	}
+
+	/**
 	 * Columns in a viewport row whose cells carry a non-default foreground color.
 	 * Used with unreset-SGR regressions to ensure per-line resets confine
 	 * foreground attributes to the row that emitted them.
@@ -344,6 +358,17 @@ export class VirtualTerminal implements Terminal {
 	getCursor(): { row: number; col: number } {
 		const cursor = this.#term.cursor;
 		return { row: cursor.y, col: cursor.x };
+	}
+
+	/**
+	 * Kitty-graphics placements the engine currently tracks on the active
+	 * screen (positions only; pixels are host-side). The engine keeps main and
+	 * alternate screen image stores apart exactly as kitty does, so a
+	 * placement that only ever reached the alternate buffer is absent here
+	 * once the normal screen is back.
+	 */
+	graphicsPlacements(): GraphicsPlacement[] {
+		return this.#term.graphicsPlacements();
 	}
 
 	/** Clear the buffer to a blank slate (fresh engine terminal). */

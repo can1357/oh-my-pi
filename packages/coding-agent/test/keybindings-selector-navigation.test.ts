@@ -1,14 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionList } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-list";
-import type { Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
-import { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
-import { RewindSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/rewind-selector";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ExtensionList } from "@oh-my-pi/pi-tui/overlays/extensions/extension-list";
+import type { Extension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
+import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
+import { RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
+import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import type { SessionMessageEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -343,6 +343,19 @@ describe("selector navigation keybindings", () => {
 		list.handleInput(CTRL_N);
 
 		expect(list.getSelectedExtension()?.id).toBe("tool-a");
+	});
+
+	it("appends bare j/k to the extension search filter instead of navigating", () => {
+		setKeybindings(TEST_KEYBINDINGS);
+		const list = new ExtensionList([
+			createExtension("jira", "Jira"),
+			createExtension("json", "JSON"),
+			createExtension("apple", "Apple"),
+		]);
+
+		for (const ch of "jira") list.handleInput(ch);
+
+		expect(list.getSearchQuery()).toBe("jira");
 	});
 
 	it("uses tui.select.down in history search", async () => {

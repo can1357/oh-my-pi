@@ -8,7 +8,7 @@ import type { Settings } from "../../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../../extensibility/custom-tools/types";
 import type { AuthStorage } from "../../../session/auth-storage";
 import { TaskTool } from "../../../task";
-import type { TaskParams } from "../../../task/types";
+import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../../../tools";
 import { getFilePriority } from "./git-file-diff";
 

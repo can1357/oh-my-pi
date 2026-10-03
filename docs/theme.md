@@ -13,16 +13,16 @@ The theme system drives:
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
 
-Primary implementation: `src/modes/theme/theme.ts`.
+Primary implementation: `packages/tui/src/theme/theme.ts`.
 
 ## Theme JSON shape
 
-Theme files are JSON objects validated against the runtime schema in `theme.ts` (`themeJsonSchema`) and mirrored by `src/modes/theme/theme-schema.json`.
+Custom theme files are JSON objects validated by `validateThemeJson()` in `packages/tui/src/theme/schema-validation.ts` (using `@oh-my-pi/omptype`). Types live in `schema.ts`; the editor-facing JSON schema is `packages/tui/src/theme/theme-schema.json`. Embedded built-in themes bypass runtime validation.
 
 Top-level fields:
 
 - `name` (required)
-- `colors` (required; all color tokens required)
+- `colors` (required; all tokens except `thinkingMax` required)
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
@@ -32,7 +32,7 @@ Top-level fields:
 Color values accept:
 
 - hex string (`"#RRGGBB"`)
-- 256-color index (`0..255`)
+- numeric 256-color index (use `0..255`; runtime schema accepts numbers without enforcing this range)
 - variable reference string (resolved through `vars`)
 - empty string (`""`) meaning terminal default (`\x1b[39m` fg, `\x1b[49m` bg)
 
@@ -93,6 +93,8 @@ Runtime precedence:
 2. theme JSON `symbols.preset`
 3. fallback `"unicode"`
 
+In interactive mode, a successful Glyph Protocol handshake upgrades a Unicode preset whose setting provenance is `default` to Nerd Font icons without changing the saved setting. An explicitly configured preset, including `unicode`, is not upgraded. A live Tern native surface forces the Nerd preset process-locally and restores the user's preset when it closes.
+
 Invalid override keys are ignored and logged (`logger.debug`).
 
 #### Box-drawing borders
@@ -115,7 +117,8 @@ Theme lookup order (`loadThemeJson`):
 Custom themes directory comes from `getCustomThemesDir()`:
 
 - default: `~/.omp/agent/themes`
-- overridden by `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
+- default-profile override: `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
+- named profile: `~/.omp/profiles/<name>/agent/themes` (under the configured root); named profiles derive their own agent directory
 
 `getAvailableThemes()` returns merged built-in + custom names, sorted, with built-ins taking precedence on name collision.
 
@@ -125,14 +128,14 @@ For custom theme files:
 
 1. read JSON
 2. parse JSON
-3. validate against `themeJsonSchema`
+3. validate with `validateThemeJson()` (required fields and string/number types; spinner frame arrays must be non-empty)
 4. resolve `vars` references recursively
 5. convert resolved values to ANSI by terminal capability mode
 
 Validation behavior:
 
 - missing required color tokens: explicit grouped error message
-- bad token types/values: validation errors with JSON path
+- bad token types: runtime schema errors; string color values and variable references are checked during resolution/conversion
 - unknown theme file: `Theme not found: <name>`
 
 Var reference behavior:
@@ -143,12 +146,10 @@ Var reference behavior:
 
 ## Terminal color mode behavior
 
-Color mode detection (`detectColorMode`):
+Color mode detection (`detectColorMode` in `theme/color.ts`):
 
-- `COLORTERM=truecolor|24bit` => truecolor
 - `WT_SESSION` => truecolor
-- `TERM` in `dumb`, `linux`, or empty => 256color
-- otherwise => truecolor
+- otherwise uses `detectTerminalId()` and `getTerminalInfo()` from the shared terminal capability model, selecting truecolor only when `TerminalInfo.trueColor` is true
 
 Conversion behavior:
 
@@ -158,9 +159,17 @@ Conversion behavior:
 
 ## Runtime switching behavior
 
-### Initial theme (`initTheme`)
+The `theme` export is a live binding, including in bundled extensions. Read it inside rendering callbacks rather than retaining a theme instance across switches. Extension renderer callbacks may also use their supplied theme argument.
 
-`main.ts` initializes theme with settings:
+```ts
+import { theme } from "@oh-my-pi/pi-coding-agent";
+
+const renderStatus = () => theme.fg("accent", "Ready");
+```
+
+### Initial theme (`initThemeSync` / `initTheme`)
+
+The startup composer initializes its cached theme synchronously before the first paint. `main.ts` later initializes the authoritative theme with settings:
 
 - `symbolPreset`
 - `colorBlindMode`
@@ -174,7 +183,7 @@ Auto theme slot selection uses terminal appearance in this order:
 3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
 4. dark slot fallback
 
-Current defaults from settings schema:
+Current defaults (definitions in `packages/coding-agent/src/modes/settings.ts`):
 
 - `theme.dark = "titanium"`
 - `theme.light = "light"`
@@ -184,7 +193,7 @@ Current defaults from settings schema:
 ### Explicit switching (`setTheme`)
 
 - loads selected theme
-- updates global `theme` singleton
+- updates the live `theme` export
 - optionally starts watcher
 - triggers `onThemeChange` callback
 
@@ -195,7 +204,7 @@ On failure:
 
 ### Preview switching (`previewTheme`)
 
-- applies temporary preview theme to global `theme`
+- applies the preview to the live `theme` export
 - does **not** change persisted settings by itself
 - returns success/error without fallback replacement
 
@@ -236,7 +245,7 @@ Persisted keys:
 - `symbolPreset`
 - `colorBlindMode`
 
-Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection.
+Legacy migration exists: a flat custom `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection. Flat `"dark"`/`"light"` values are removed so current defaults apply.
 
 ## Creating a custom theme (practical)
 
@@ -353,6 +362,6 @@ Use this workflow:
 
 - All `colors` tokens are required for custom themes except optional `thinkingMax`, which falls back to `thinkingXhigh`.
 - `export` and `symbols` are optional.
-- `$schema` in theme JSON is informational; runtime validation is enforced by the ArkType-compatible schema in code (`themeJsonSchema` in `src/modes/theme/schema.ts`).
+- `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
 - File watcher reload errors or temporary missing files keep the current loaded theme until a successful reload or explicit theme switch.

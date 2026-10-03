@@ -57,6 +57,14 @@ export interface VmonConfig {
 	arch: GuestArch;
 }
 
+/** Per-run omp configuration installed into every guest. */
+export interface AgentConfig {
+	/** Tool allowlist passed to omp as `--tools`. */
+	tools: string[];
+	/** Extra environment for the omp process only; never reaches the verifier. */
+	env: Record<string, string>;
+}
+
 /** Token/cost accounting for one trial's agent run. */
 export interface TrialUsage {
 	input: number;

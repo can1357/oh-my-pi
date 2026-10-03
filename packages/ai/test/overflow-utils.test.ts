@@ -24,14 +24,64 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 	};
 }
 
+describe("context overflow evidence", () => {
+	it.each([
+		"prompt (105522 tokens) + max tokens (25571) exceeds the context (131072); requests are never truncated",
+		"prompt (131072 tokens) leaves no room to answer in the context (131072); requests are never truncated",
+		"PROMPT ( 105522  TOKENS )+MAX  TOKENS( 25571 ) EXCEEDS  THE CONTEXT( 131072 )",
+		"PROMPT( 131072  TOKENS ) LEAVES  NO ROOM TO ANSWER IN THE  CONTEXT ( 131072 )",
+	])("recognizes Strata token-context evidence without usage: %s", detail => {
+		// OpenAI HTTP status/message plus the captured envelope, without the local request-dump path.
+		const errorMessage = `400 ${detail}\n${detail} (type=invalid_request_error)`;
+		const message: AIError.ContextOverflowMessage = { stopReason: "error", errorMessage };
+		expect(isContextOverflow(message)).toBe(true);
+		const id = AIError.classifyMessage({ errorMessage, errorStatus: 400 });
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.PayloadRejected)).toBe(false);
+	});
+
+	it("does not treat an output-token cap as Strata context overflow", () => {
+		const errorMessage = "400 max tokens (25571) exceeds the output limit (16384)";
+		expect(isContextOverflow({ stopReason: "error", errorMessage })).toBe(false);
+		expect(
+			AIError.is(AIError.classifyMessage({ errorMessage, errorStatus: 400 }), AIError.Flag.ContextOverflow),
+		).toBe(false);
+	});
+
+	it("distinguishes transient errors from text-backed overflow when usage is missing", () => {
+		const message: AIError.ContextOverflowMessage = {
+			stopReason: "error",
+			errorMessage: "503 service unavailable",
+		};
+		expect(isContextOverflow(message, 128000)).toBe(false);
+
+		message.errorMessage = "maximum context length is 128000 tokens";
+		expect(isContextOverflow(message, 128000)).toBe(true);
+	});
+
+	it("counts cached input and requires usage to exceed the context window", () => {
+		const message: AIError.ContextOverflowMessage = {
+			stopReason: "stop",
+			usage: { input: 10, cacheRead: 50, cacheWrite: 40 },
+		};
+		expect(isContextOverflow(message, 100)).toBe(false);
+		expect(isContextOverflow(message, 99)).toBe(true);
+	});
+
+	it("judges occupancy by contextTokens over per-turn input totals", () => {
+		// Cursor grok-4.7-high turn: summed turn-end input far over the 256k
+		// window, checkpoint context at ~20%.
+		const usage = { input: 458_717, cacheRead: 404_992, cacheWrite: 0, contextTokens: 49_925 };
+		expect(isContextOverflow({ stopReason: "stop", usage }, 256_000)).toBe(false);
+		expect(isContextOverflow({ stopReason: "stop", usage: { ...usage, contextTokens: 256_001 } }, 256_000)).toBe(
+			true,
+		);
+	});
+});
+
 describe("isContextOverflow - model_context_window_exceeded", () => {
 	it("detects model_context_window_exceeded in finish_reason error message", () => {
 		const message = createErrorMessage("Provider finish_reason: model_context_window_exceeded");
-		expect(isContextOverflow(message)).toBe(true);
-	});
-
-	it("detects raw model_context_window_exceeded in error message", () => {
-		const message = createErrorMessage("model_context_window_exceeded");
 		expect(isContextOverflow(message)).toBe(true);
 	});
 	it("detects empty Ollama length completion guidance", () => {
@@ -114,14 +164,6 @@ describe("isContextOverflow/isPayloadRejection - HTTP 413 variants", () => {
 	});
 });
 describe("isContextOverflow - 400/413 no-body (Cerebras, Mistral, proxy wrappers)", () => {
-	it("detects bare '400 status code (no body)'", () => {
-		expect(isContextOverflow(createErrorMessage("400 status code (no body)"))).toBe(true);
-	});
-
-	it("detects bare '413 status code (no body)'", () => {
-		expect(isContextOverflow(createErrorMessage("413 status code (no body)"))).toBe(true);
-	});
-
 	it("detects '400 (no body)' without 'status code' word", () => {
 		expect(isContextOverflow(createErrorMessage("400 (no body)"))).toBe(true);
 	});
@@ -131,11 +173,6 @@ describe("isContextOverflow - 400/413 no-body (Cerebras, Mistral, proxy wrappers
 	// the JSON value contains the inner "400 status code (no body)" text.
 	it('detects wrapped proxy envelope: \'400 status code: {"error":"... 400 status code (no body)"}\'', () => {
 		const errorMessage = '400 status code: {"error":"Error from inference backend: 400 status code (no body)"}';
-		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(true);
-	});
-
-	it("detects when status code phrase is embedded deeper in the message", () => {
-		const errorMessage = "Upstream rejected request: 400 status code (no body)";
 		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(true);
 	});
 

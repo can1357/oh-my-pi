@@ -1,6 +1,10 @@
 // Provider-wire compat for "qianfan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "qianfan" {
+	default-model "deepseek-v3.2"
+	env "QIANFAN_API_KEY"
+	discovery label="Qianfan"
+
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-v3.2" {
 		thinking-mode "effort"

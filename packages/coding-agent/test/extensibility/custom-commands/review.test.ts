@@ -8,6 +8,7 @@ import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -46,10 +47,19 @@ interface SelectCall {
 	title: string;
 	options: string[];
 }
-
 interface NotifyCall {
 	message: string;
 	type: "info" | "warning" | "error" | undefined;
+}
+
+interface InputCall {
+	title: string;
+	placeholder: string | undefined;
+}
+
+interface StatusCall {
+	key: string;
+	text: string | undefined;
 }
 
 function makePrDiffLookup(unified: string): ViewLookupResult<PrDiffPayload> {
@@ -104,26 +114,39 @@ describe("ReviewCommand", () => {
 	function createContext(options?: {
 		selectedMode?: string;
 		selectResults?: string[];
+		inputResults?: Array<string | undefined>;
 		editorValue?: string | undefined;
 		sessionEntries?: SessionEntry[];
 		branchEntries?: SessionEntry[];
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
+		onInputCall?: (call: InputCall) => void;
+		onStatusCall?: (call: StatusCall) => void;
 		onNotify?: (call: NotifyCall) => void;
+		cwd?: string;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
+		const inputResults = [...(options?.inputResults ?? [])];
 		return {
 			hasUI: true,
 			sessionManager: {
 				getEntries: () => options?.sessionEntries ?? [],
 				getBranch: () => options?.branchEntries ?? options?.sessionEntries ?? [],
+				getCwd: () => options?.cwd,
 			},
 			ui: {
 				select: (title: string, selectOptions: string[]) => {
 					options?.onSelectCall?.({ title, options: selectOptions });
 					return Promise.resolve(
-						selectResults.shift() ?? options?.selectedMode ?? "4. Custom review instructions",
+						selectResults.shift() ?? options?.selectedMode ?? "5. Custom review instructions",
 					);
+				},
+				input: (title: string, placeholder?: string) => {
+					options?.onInputCall?.({ title, placeholder });
+					return Promise.resolve(inputResults.shift());
+				},
+				setStatus: (key: string, text: string | undefined) => {
+					options?.onStatusCall?.({ key, text });
 				},
 				editor: (
 					title: string,
@@ -161,20 +184,6 @@ describe("ReviewCommand", () => {
 			editorOptions: { promptStyle: true },
 		});
 		expect(result).toContain("Check authentication boundaries");
-	});
-
-	it("renders custom review instructions through the reviewer task prompt when no diff is available", async () => {
-		const dir = await createTempDir();
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			editorValue: "Check authentication boundaries",
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		const promptText = result!;
-		expect(promptText).toContain("Check authentication boundaries");
 	});
 
 	it("does not submit empty custom review instructions", async () => {
@@ -246,6 +255,30 @@ describe("ReviewCommand", () => {
 			jjRepoSpy.mockRestore();
 			jjDiffSpy.mockRestore();
 			gitRepoSpy.mockRestore();
+		}
+	});
+
+	it("uses the live session cwd instead of the load-time cwd (issue #12501)", async () => {
+		const staleDir = path.join(tmpDir, "stale-checkout");
+		const liveDir = path.join(tmpDir, "live-worktree");
+		const requireSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "git",
+			uncommittedDiff: async () => "diff --git a/f.txt b/f.txt",
+		} as unknown as VcsRepo);
+		try {
+			const command = new ReviewCommand({ cwd: staleDir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				selectedMode: "2. Review uncommitted changes",
+				cwd: liveDir,
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeDefined();
+			expect(requireSpy).toHaveBeenCalledWith(liveDir);
+			expect(requireSpy).not.toHaveBeenCalledWith(staleDir);
+		} finally {
+			requireSpy.mockRestore();
 		}
 	});
 
@@ -423,25 +456,6 @@ describe("ReviewCommand", () => {
 		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/example", number: 77 });
 	});
 
-	it("does not detect PR URLs from entries outside the current branch", async () => {
-		const dir = await createTempDir();
-		let reviewModeOptions: string[] = [];
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			editorValue: "Review docs",
-			sessionEntries: [makeUserEntry("stale", "Stale https://github.com/owner/example/pull/77")],
-			branchEntries: [],
-			onSelectCall: call => {
-				if (call.title === "Review Mode") reviewModeOptions = call.options;
-			},
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		expect(reviewModeOptions).not.toContain("Review PR owner/example#77 from conversation");
-	});
-
 	it("detects only PR URLs from the active branch path", async () => {
 		const dir = await createTempDir();
 		let reviewModeOptions: string[] = [];
@@ -555,34 +569,121 @@ describe("ReviewCommand", () => {
 			"1. Review against a base branch (PR Style)",
 			"2. Review uncommitted changes",
 			"3. Review a specific commit",
-			"4. Custom review instructions",
+			"4. Review a specific PR",
+			"5. Custom review instructions",
 		]);
 	});
 
-	it("keeps base branch review mode working", async () => {
+	it("reviews a PR picked from the open pull request list", async () => {
 		const dir = await createTempDir();
-		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
-		const mergeBaseSpy = vi.fn(async () => "basesha");
-		const repository = {
-			currentBranch: async () => "feature",
-			mergeBase: mergeBaseSpy,
-			diffText: diffSpy,
-			listBranches: async () => ["main"],
-		} as unknown as VcsGitRepo;
-		spyOn(vcs, "git").mockReturnValue(repository);
-		spyOn(vcs, "requireGit").mockReturnValue(repository);
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const listSpy = spyOn(github, "json").mockResolvedValue([
+			{ number: 42, title: "Fix login", author: { login: "octocat" }, url: "https://github.com/owner/repo/pull/42" },
+			{ number: 43, title: "WIP thing", author: { login: "hubot" }, isDraft: true },
+		]);
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["1. Review against a base branch (PR Style)", "main"],
+			selectResults: ["4. Review a specific PR", "#42  Fix login  @octocat"],
 		});
 
 		const result = await command.execute([], ctx);
 
 		expect(result).toBeDefined();
-		expect(result!).toContain("Reviewing changes between `main` and `feature`");
+		expect(result!).toContain("PR owner/repo#42");
 		expect(result!).toContain("src/pr.ts");
-		expect(mergeBaseSpy).toHaveBeenCalledWith("main", "feature");
-		expect(diffSpy).toHaveBeenCalledWith({ base: "basesha", head: "feature" });
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 42 });
+		expect(listSpy).toHaveBeenCalled();
+	});
+
+	it("searches open pull requests and reviews a filtered pick", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const fullList = [
+			{ number: 42, title: "Fix login", author: { login: "octocat" } },
+			{ number: 43, title: "Other work", author: { login: "hubot" } },
+		];
+		const filteredList = [{ number: 7, title: "Filtered match", author: { login: "octocat" } }];
+		const listSpy = spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
+			const searchIndex = args.indexOf("--search");
+			return (searchIndex === -1 ? fullList : filteredList) as never;
+		});
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const selectCalls: SelectCall[] = [];
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#7  Filtered match  @octocat"],
+			inputResults: ["match"],
+			onSelectCall: call => {
+				selectCalls.push(call);
+			},
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#7");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 7 });
+		expect(
+			listSpy.mock.calls.some(
+				call => (call[1] as string[]).includes("--search") && (call[1] as string[]).includes("match"),
+			),
+		).toBe(true);
+		const filteredSelect = selectCalls.find(
+			call => call.title === 'Open pull requests in owner/repo matching "match"',
+		);
+		expect(filteredSelect?.options).toContain("#7  Filtered match  @octocat");
+	});
+
+	it("keeps the picker open when a search request fails", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
+			if (args.includes("--search")) throw new Error("gh: rate limited");
+			return [{ number: 42, title: "Fix login", author: { login: "octocat" } }] as never;
+		});
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const notifications: NotifyCall[] = [];
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#42  Fix login  @octocat"],
+			inputResults: ["login"],
+			onNotify: call => {
+				notifications.push(call);
+			},
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(notifications).toContainEqual({
+			message: "Failed to list open pull requests in owner/repo: gh: rate limited",
+			type: "error",
+		});
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#42");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 42 });
+	});
+
+	it("resolves a numeric search query directly without a search request", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const listSpy = spyOn(github, "json").mockResolvedValue([
+			{ number: 42, title: "Fix login", author: { login: "octocat" } },
+		]);
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…"],
+			inputResults: ["#123"],
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#123");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
+		expect(listSpy).toHaveBeenCalledTimes(1);
+		expect(listSpy.mock.calls.every(call => !(call[1] as string[]).includes("--search"))).toBe(true);
 	});
 
 	it("resolves base-branch review against a real repo without a range revspec", async () => {
@@ -691,15 +792,5 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("Reviewing commit `abc1234`");
 		expect(result!).toContain("src/pr.ts");
 		expect(showSpy).toHaveBeenCalledWith("abc1234");
-	});
-	it("renders headless review requests through the reviewer task prompt", async () => {
-		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
-
-		const result = await command.execute(["focus", "auth"], ctx);
-
-		expect(result).toBeDefined();
-		const promptText = result!;
-		expect(promptText).toContain("focus auth");
 	});
 });

@@ -21,7 +21,7 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  * (e.g. called `todo` or `edit`) between the prior reminder and the next stop.
  */
 const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {

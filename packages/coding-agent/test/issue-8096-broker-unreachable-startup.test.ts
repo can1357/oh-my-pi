@@ -69,6 +69,9 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		const previous = setInteractiveHost(false);
 		const parsed = parseArgs([]);
 		parsed.noExtensions = true;
+		// An interactive launch needs a terminal on stdin; without one it exits 2.
+		const originalIsTTY = process.stdin.isTTY;
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 		const exitCodes: number[] = [];
 		let stderr = "";
@@ -92,6 +95,7 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 			thrown = err;
 		} finally {
 			vi.restoreAllMocks();
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			setInteractiveHost(previous);
 		}
 
