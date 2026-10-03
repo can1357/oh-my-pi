@@ -102,9 +102,19 @@ export function formatTurnUsage(summary: TurnUsageSummary): { text: string; titl
 	return { text: `${text} this turn`, title: `This turn: ${title}` };
 }
 
-/** Output tokens per second over the whole request; undefined when the duration is too short to mean anything. */
-function usageThroughput(usage: Usage, durationMs: number | undefined): number | undefined {
+/**
+ * Output tokens per second over the generation window; undefined when that
+ * window is too short to mean anything. With TTFT known, prefill and decode are
+ * rated apart: TTFT covers prompt ingestion (cache walk, queueing), the
+ * remainder is generation, so a long prefill no longer reads as slow
+ * generation. A window TTFT swallows has no honest rate at all.
+ */
+function usageThroughput(usage: Usage, durationMs: number | undefined, ttftMs?: number): number | undefined {
 	if (!durationMs || durationMs <= MIN_DURATION_MS || usage.output <= 0) return undefined;
+	if (ttftMs !== undefined && ttftMs > 0) {
+		const decodeMs = durationMs - ttftMs;
+		return decodeMs <= MIN_DURATION_MS ? undefined : (usage.output / decodeMs) * 1000;
+	}
 	// TPS over the total request duration — the post-TTFT window undercounts
 	// generation time when reasoning tokens are hidden before the first
 	// visible byte, inflating the rate.
@@ -146,9 +156,12 @@ function usageRowSpecs(
 	turnElapsedMs?: number,
 ): MetricSpec[] {
 	const specs = usageRowBaseSpecs(usage, ttftMs, timestamp, turnElapsedMs);
-	const tokPerSec = usageThroughput(usage, durationMs);
+	const tokPerSec = usageThroughput(usage, durationMs, ttftMs);
 	if (tokPerSec !== undefined) {
-		specs.push({ leading: theme.icon.throughput, value: `${tokPerSec.toFixed(1)}/s` });
+		// The split figure says so, so a decode rate is never read as a
+		// duration-wide one.
+		const suffix = ttftMs !== undefined && ttftMs > 0 ? " (decode)" : "";
+		specs.push({ leading: theme.icon.throughput, value: `${tokPerSec.toFixed(1)}/s${suffix}` });
 	}
 	return specs;
 }
@@ -200,7 +213,7 @@ class UsageRowBlock extends Container {
 		if (usage.cacheRead > 0) parts.push(`cache ${formatNumber(usage.cacheRead)}`);
 		if (this.#ttftMs && this.#ttftMs > 0) parts.push(`ttft ${(this.#ttftMs / 1000).toFixed(1)}s`);
 		const children: NativeChild[] = [text([span(parts.join(" · "), "dim")])];
-		const tokPerSec = usageThroughput(usage, this.#durationMs);
+		const tokPerSec = usageThroughput(usage, this.#durationMs, this.#ttftMs);
 		if (tokPerSec !== undefined) {
 			children.push(
 				text([span(" · ", "dim")]),
