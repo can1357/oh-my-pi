@@ -36,6 +36,7 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import type { ContextBreakdown } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type {
 	Api,
@@ -384,7 +385,7 @@ export interface ExtensionUIContext {
 // Extension Context
 // ============================================================================
 
-export type { ContextUsage };
+export type { ContextBreakdown, ContextUsage };
 
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
@@ -489,6 +490,8 @@ export interface ExtensionContext {
 	mode: ExtensionMode;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
+	/** Get the `/context` breakdown by category, plus free space and auto-compaction buffer. */
+	getContextBreakdown(): ContextBreakdown | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
 	/** Compact the session context (interactive mode shows UI). */
@@ -1894,6 +1897,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
+	getContextBreakdown?: () => ContextBreakdown | undefined;
 	runEphemeralTurn?: (options: EphemeralTurnOptions) => Promise<EphemeralTurnResult>;
 }
 
