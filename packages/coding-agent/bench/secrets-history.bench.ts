@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Synthetic inputs only; no credentials, network or session files.
- * Run: bun packages/coding-agent/bench/secrets-history.ts
+ * Run: bun packages/coding-agent/bench/secrets-history.bench.ts
  */
 import assert from "node:assert/strict";
 import type { Message } from "@oh-my-pi/pi-ai";

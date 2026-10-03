@@ -3034,6 +3034,92 @@ describe("advisor", () => {
 			}
 		});
 
+		it.each([
+			["user text block", { role: "user", content: [{ type: "text", text: "tok_abc123" }] }],
+			["developer content", { role: "developer", content: "tok_abc123" }],
+			["assistant text", { role: "assistant", content: [{ type: "text", text: "tok_abc123" }] }],
+			[
+				"assistant thinking",
+				{
+					role: "assistant",
+					content: [{ type: "thinking", thinking: "tok_abc123", thinkingSignature: "signed-original" }],
+				},
+			],
+			[
+				"assistant nested arguments",
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "c1", name: "read", arguments: { paths: ["tok_abc123"] } }],
+				},
+			],
+			["tool result content", { role: "toolResult", content: [{ type: "text", text: "tok_abc123" }] }],
+			["tool result diff", { role: "toolResult", content: "public", details: { diff: "tok_abc123" } }],
+			["custom content", { role: "custom", customType: "status", content: "tok_abc123", display: true }],
+			[
+				"custom nested details",
+				{
+					role: "custom",
+					customType: "async-result",
+					content: "",
+					details: { jobs: [{ label: "tok_abc123" }] },
+					display: true,
+				},
+			],
+			["hook content", { role: "hookMessage", customType: "status", content: "tok_abc123", display: true }],
+			[
+				"hidden primary context",
+				{ role: "custom", customType: "plan-mode-context", content: "tok_abc123", display: false },
+			],
+			[
+				"hidden image description",
+				{
+					role: "custom",
+					customType: "image-attachment-description",
+					content: [{ type: "text", text: "tok_abc123" }],
+					display: false,
+				},
+			],
+			["bash source preview", { role: "bashExecution", command: "echo tok_abc123" }],
+			["python source preview", { role: "pythonExecution", code: 'print("tok_abc123")' }],
+			["branch summary", { role: "branchSummary", summary: "tok_abc123" }],
+			["compaction summary", { role: "compactionSummary", summary: "tok_abc123" }],
+			["file mention path", { role: "fileMention", files: [{ path: "tok_abc123", content: "public" }] }],
+		] as unknown as [string, AgentMessage][])(
+			"collects retained %s before redaction so earlier collision labels cannot reach advisor history",
+			async (_field, collision) => {
+				const obfuscator = new SecretObfuscator([
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[masked]" },
+				]);
+				const stale = obfuscator.obfuscate("OTHERSECRET");
+				const original = structuredClone(collision);
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const agent = makeAgent(promptInputs);
+				agent.state.messages.push({ role: "user", content: stale, timestamp: 0 }, collision);
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => [{ role: "user", content: "public update", timestamp: 2 }],
+					obfuscator,
+				});
+				try {
+					runtime.onTurnEnd();
+					expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+					const history = JSON.stringify(agent.state.messages);
+					expect(history).not.toContain("TOKABC123_");
+					expect(history).not.toContain("tok_abc123");
+					expect(obfuscator.deobfuscate(history)).toContain("OTHERSECRET");
+					expect(history).toContain("[masked]");
+					expect(collision).toEqual(original);
+					if (collision.role === "assistant" && collision.content[0]?.type === "thinking") {
+						const redacted = agent.state.messages[1] as AssistantMessage;
+						expect(redacted.content[0]).not.toHaveProperty("thinkingSignature", "signed-original");
+						expect(collision.content[0].thinkingSignature).toBe("signed-original");
+					}
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
 		it("does not collect ordinary retained fields excluded from advisor redaction", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
@@ -3064,6 +3150,22 @@ describe("advisor", () => {
 					role: "custom",
 					customType: "extension-payload",
 					content: "tok_abc123",
+					details: { ignored: "tok_abc123" },
+					display: false,
+					timestamp: 4,
+				},
+				{
+					role: "hookMessage",
+					customType: "hidden-hook",
+					content: "tok_abc123",
+					details: { ignored: "tok_abc123" },
+					display: false,
+					timestamp: 4,
+				},
+				{
+					role: "custom",
+					customType: "plan-mode-context",
+					content: " \n\t ",
 					details: { ignored: "tok_abc123" },
 					display: false,
 					timestamp: 4,

@@ -292,6 +292,63 @@ describe("incremental secret scans", () => {
 		expect(obfuscator.obfuscate(raw)).toBe(output);
 	});
 
+	it("keeps warm results when another field registers an unchanged replacement chunk", () => {
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "FRIENDLY" },
+				{ type: "regex", content: SOURCE },
+				{ type: "regex", content: "first_secret", mode: "replace" },
+			],
+			KEY,
+		);
+		const replacement = obfuscator.obfuscate("first_secret");
+		const retained = obfuscator.obfuscate("retained history OTHERSECRET");
+		const collisions = new Set<string>();
+		obfuscator.obfuscate("retained history OTHERSECRET");
+		obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(retained, collisions);
+		// Collection and redaction both generate this already-registered chunk.
+		expect(obfuscator.obfuscate("new field first_secret")).toBe(`new field ${replacement}`);
+		withScanCounts(counts => {
+			expect(obfuscator.obfuscate("retained history OTHERSECRET")).toBe(retained);
+			expect(obfuscator.collectRegexSecretValuesForObfuscation("retained history OTHERSECRET").size).toBe(0);
+			expect(obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(retained, collisions)).toBe(retained);
+			expect(counts.size).toBe(0);
+		});
+	});
+
+	it("redacts oversized collision batches without evicting reusable redaction or prefix results", () => {
+		const oversizedBatches = [
+			new Set(["x".repeat(512 * 1024 + 1), "tok_abc123"]),
+			new Set([...Array.from({ length: 4096 }, (_, index) => `unrelated-${index}`), "tok_abc123"]),
+		];
+		for (const oversized of oversizedBatches) {
+			const obfuscator = new SecretObfuscator(
+				[
+					{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+					{ type: "regex", content: SOURCE },
+				],
+				KEY,
+			);
+			const placeholder = obfuscator.obfuscate("OTHERSECRET");
+			const ordinary = new Set(["tok_unrelated"]);
+			expect(obfuscator.obfuscate(placeholder, ordinary)).toBe(placeholder);
+			expect(obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(placeholder, ordinary)).toBe(placeholder);
+			// One-shot collision IDs must not displace the four reusable result variants.
+			for (let pass = 0; pass < 5; pass++) {
+				const redacted = obfuscator.obfuscate(placeholder, oversized);
+				const stripped = obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(placeholder, oversized);
+				expect(redacted).not.toContain("TOKABC123_");
+				expect(stripped).toBe(redacted);
+				expect(obfuscator.deobfuscate(redacted)).toBe("OTHERSECRET");
+			}
+			withScanCounts(counts => {
+				expect(obfuscator.obfuscate(placeholder, ordinary)).toBe(placeholder);
+				expect(obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(placeholder, ordinary)).toBe(placeholder);
+				expect(counts.size).toBe(0);
+			});
+		}
+	});
+
 	it("keeps mode toggles outside caches and clears active collisions after exceptions", () => {
 		const obfuscator = new SecretObfuscator(
 			[
@@ -356,6 +413,7 @@ describe("secret cache memory bounds", () => {
 	it("interns membership rather than identity and bounds snapshots without mutable exposure", () => {
 		const snapshots = new SecretCollisionSnapshots(12, 2);
 		const first = snapshots.prepare(new Set(["abc"]));
+		expect(first.cacheable).toBe(true);
 		expect(snapshots.prepare(new Set(["abc"]))).toBe(first);
 		expect((first as unknown as Set<string>).add).toBeUndefined();
 		expect(Object.isFrozen(first)).toBe(true);
@@ -367,5 +425,28 @@ describe("secret cache memory bounds", () => {
 		expect(snapshots.prepare(new Set(["abc"])).id).not.toBe(first.id);
 		const oversized = new Set(["x".repeat(13)]);
 		expect(snapshots.prepare(oversized).id).not.toBe(snapshots.prepare(oversized).id);
+		expect(snapshots.prepare(oversized).cacheable).toBe(false);
+	});
+
+	it("bypasses collision retention at member and disabled-cache limits without losing membership", () => {
+		const snapshots = new SecretCollisionSnapshots(12, 2, 2);
+		const boundary = snapshots.prepare(new Set(["", "a"]));
+		expect(boundary.cacheable).toBe(true);
+		expect(snapshots.prepare(new Set(["a", ""]))).toBe(boundary);
+		const oversized = new Set(["", "a", "b"]);
+		const first = snapshots.prepare(oversized);
+		expect(first.cacheable).toBe(false);
+		expect([...first]).toEqual(["", "a", "b"]);
+		oversized.delete("b");
+		expect(first.has("b")).toBe(true);
+		expect(snapshots.prepare(first)).toBe(first);
+		expect(snapshots.prepare(new Set(["", "a", "b"])).id).not.toBe(first.id);
+		// Oversized snapshots must not evict a retained boundary snapshot.
+		expect(snapshots.prepare(new Set(["a", ""]))).toBe(boundary);
+		const disabled = new SecretCollisionSnapshots(12, 0, 2);
+		const unretained = disabled.prepare(new Set(["a"]));
+		expect(unretained.cacheable).toBe(false);
+		expect(unretained.has("a")).toBe(true);
+		expect(disabled.prepare(new Set(["a"])).id).not.toBe(unretained.id);
 	});
 });

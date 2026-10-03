@@ -821,9 +821,10 @@ export class AdvisorRuntime {
 	 * both render paths so the byte-equivalence contract lives in one place.
 	 */
 	#obfuscatePrimaryContextMessages(obfuscator: SecretObfuscator, delta: AgentMessage[]): AgentMessage[] {
+		const redactor = createAdvisorMessageRedactor(obfuscator, this.#advisorRegexSecretValues);
 		return delta.map(message =>
 			message.role === "custom" && PRIMARY_CONTEXT_CUSTOM_TYPES.has(message.customType)
-				? obfuscateAdvisorMessage(obfuscator, message, this.#advisorRegexSecretValues)
+				? visitAdvisorMessage(message, redactor)
 				: message,
 		);
 	}
@@ -1677,78 +1678,69 @@ function getAdvisorTurnError(messages: readonly AgentMessage[]): Error | undefin
 
 type TextualContent = string | readonly (TextContent | ImageContent)[];
 
-function obfuscateTextualContent(
-	obfuscator: SecretObfuscator,
-	content: TextualContent,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): TextualContent {
-	if (typeof content === "string") return obfuscator.obfuscate(content, sharedRegexSecretValues);
-	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
-		if (block.type !== "text") return block;
-		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
-		if (text === block.text) return block;
-		changed = true;
-		return { ...block, text };
-	});
-	return changed ? result : content;
+interface AdvisorMessageVisitor {
+	text(value: string): string;
+	json(value: Record<string, unknown>): Record<string, unknown>;
+	executionSource(value: string): string;
+	isVisible(message: AgentMessage): boolean;
 }
 
-function obfuscateAssistantMessage(
-	obfuscator: SecretObfuscator,
-	message: AssistantMessage,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): AssistantMessage {
-	let changed = false;
-	const content = message.content.map((block): AssistantMessage["content"][number] => {
+function mapAdvisorFields<T>(values: T[], visit: (value: T) => T): T[];
+function mapAdvisorFields<T>(values: readonly T[], visit: (value: T) => T): readonly T[];
+function mapAdvisorFields<T>(values: readonly T[], visit: (value: T) => T): readonly T[] {
+	let result: T[] | undefined;
+	for (let index = 0; index < values.length; index++) {
+		const value = values[index]!;
+		const next = visit(value);
+		if (next !== value) {
+			result ??= values.slice();
+			result[index] = next;
+		}
+	}
+	return result ?? values;
+}
+
+function visitTextualContent(content: TextualContent, visitor: AdvisorMessageVisitor): TextualContent {
+	if (typeof content === "string") return visitor.text(content);
+	return mapAdvisorFields(content, block => {
+		if (block.type !== "text") return block;
+		const text = visitor.text(block.text);
+		return text === block.text ? block : { ...block, text };
+	});
+}
+
+function visitAssistantMessage(message: AssistantMessage, visitor: AdvisorMessageVisitor): AssistantMessage {
+	const content = mapAdvisorFields(message.content, block => {
 		if (block.type === "text") {
-			const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
+			const text = visitor.text(block.text);
 			if (text === block.text) return block;
-			changed = true;
 			return { ...block, text };
 		}
 		if (block.type === "thinking") {
-			const thinking = obfuscator.obfuscate(block.thinking, sharedRegexSecretValues);
+			const thinking = visitor.text(block.thinking);
 			if (thinking === block.thinking) return block;
-			changed = true;
 			return { ...block, thinking, thinkingSignature: undefined };
 		}
 		if (block.type === "toolCall") {
-			const args = obfuscateToolArguments(obfuscator, block.arguments, sharedRegexSecretValues);
+			const args = visitor.json(block.arguments);
 			if (args === block.arguments) return block;
-			changed = true;
 			return { ...block, arguments: args };
 		}
 		return block;
 	});
-	return changed ? { ...message, content } : message;
+	return content === message.content ? message : { ...message, content };
 }
 
-function obfuscateDetails(
-	obfuscator: SecretObfuscator,
-	details: Record<string, unknown> | undefined,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): Record<string, unknown> | undefined {
-	if (!details) return details;
-	// Walk strings at every depth: `customOneLiner` renders nested fields
-	// (e.g. `async-result` reads `details.jobs[].label`/`jobId`), so a shallow
-	// pass leaks any secret a background job's label happens to contain.
-	return obfuscateToolArguments(obfuscator, details, sharedRegexSecretValues);
+function isAdvisorMessageVisible(message: AgentMessage): boolean {
+	return Boolean(formatSessionHistoryMarkdown([message], { expandPrimaryContext: true }).trim());
 }
 
-function obfuscateAdvisorMessage(
-	obfuscator: SecretObfuscator,
-	message: AgentMessage,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): AgentMessage {
+/** Collection returns each field unchanged; redaction uses the same role/field traversal. */
+function visitAdvisorMessage(message: AgentMessage, visitor: AdvisorMessageVisitor): AgentMessage {
 	switch (message.role) {
 		case "user":
 		case "developer": {
-			const content = obfuscateTextualContent(
-				obfuscator,
-				message.content as TextualContent,
-				sharedRegexSecretValues,
-			);
+			const content = visitTextualContent(message.content as TextualContent, visitor);
 			return content === message.content ? message : ({ ...(message as object), content } as AgentMessage);
 		}
 		case "toolResult": {
@@ -1757,132 +1749,72 @@ function obfuscateAdvisorMessage(
 				details?: Record<string, unknown>;
 				isError?: boolean;
 			};
-			const content = obfuscateTextualContent(obfuscator, msg.content, sharedRegexSecretValues);
+			const content = visitTextualContent(msg.content, visitor);
 			let details = msg.details;
 			if (typeof details?.diff === "string") {
-				const diff = obfuscator.obfuscate(details.diff, sharedRegexSecretValues);
+				const diff = visitor.text(details.diff);
 				if (diff !== details.diff) details = { ...details, diff };
 			}
 			if (content === msg.content && details === msg.details) return message;
 			return { ...(message as object), content, details } as AgentMessage;
 		}
 		case "assistant":
-			return obfuscateAssistantMessage(
-				obfuscator,
-				message as AssistantMessage,
-				sharedRegexSecretValues,
-			) as AgentMessage;
+			return visitAssistantMessage(message as AssistantMessage, visitor) as AgentMessage;
 		case "custom":
 		case "hookMessage": {
-			if (!formatSessionHistoryMarkdown([message], { expandPrimaryContext: true }).trim()) return message;
+			if (!visitor.isVisible(message)) return message;
 			const msg = message as AgentMessage & {
 				content: TextualContent;
 				details?: Record<string, unknown>;
 			};
-			const content = obfuscateTextualContent(obfuscator, msg.content, sharedRegexSecretValues);
-			const details = obfuscateDetails(obfuscator, msg.details, sharedRegexSecretValues);
+			const content = visitTextualContent(msg.content, visitor);
+			// Nested details are rendered by customOneLiner, including async job labels.
+			const details = msg.details ? visitor.json(msg.details) : msg.details;
 			if (content === msg.content && details === msg.details) return message;
 			return { ...(message as object), content, details } as AgentMessage;
 		}
 		case "bashExecution": {
 			const msg = message as AgentMessage & { command: string };
-			const command = obfuscator.obfuscate(formatExecutionSourcePreview(msg.command), sharedRegexSecretValues);
+			const command = visitor.executionSource(msg.command);
 			return command === msg.command ? message : ({ ...(message as object), command } as AgentMessage);
 		}
 		case "pythonExecution": {
 			const msg = message as AgentMessage & { code: string };
-			const code = obfuscator.obfuscate(formatExecutionSourcePreview(msg.code), sharedRegexSecretValues);
+			const code = visitor.executionSource(msg.code);
 			return code === msg.code ? message : ({ ...(message as object), code } as AgentMessage);
 		}
-		case "branchSummary": {
-			const msg = message as AgentMessage & { summary: string };
-			const summary = obfuscator.obfuscate(msg.summary, sharedRegexSecretValues);
-			return summary === msg.summary ? message : ({ ...(message as object), summary } as AgentMessage);
-		}
+		case "branchSummary":
 		case "compactionSummary": {
 			const msg = message as AgentMessage & { summary: string };
-			const summary = obfuscator.obfuscate(msg.summary, sharedRegexSecretValues);
+			const summary = visitor.text(msg.summary);
 			return summary === msg.summary ? message : ({ ...(message as object), summary } as AgentMessage);
 		}
 		case "fileMention": {
 			const msg = message as AgentMessage & {
 				files: Array<{ path: string; content: string; image?: unknown }>;
 			};
-			let changed = false;
-			const files = msg.files.map(file => {
-				const path = obfuscator.obfuscate(file.path, sharedRegexSecretValues);
-				if (path === file.path) return file;
-				changed = true;
-				return { ...file, path };
+			const files = mapAdvisorFields(msg.files, file => {
+				const path = visitor.text(file.path);
+				return path === file.path ? file : { ...file, path };
 			});
-			return changed ? ({ ...(message as object), files } as AgentMessage) : message;
+			return files === msg.files ? message : ({ ...(message as object), files } as AgentMessage);
 		}
 		default:
 			return message;
 	}
 }
 
-/** Collect exactly the ordinary fields transformed by obfuscateAdvisorMessage. */
-function collectAdvisorMessageRegexSecretValues(
+function createAdvisorMessageRedactor(
 	obfuscator: SecretObfuscator,
-	message: AgentMessage,
-	values: Set<string>,
-): void {
-	const addText = (text: string): void => {
-		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
+	sharedRegexSecretValues: ReadonlySet<string>,
+	isVisible = isAdvisorMessageVisible,
+): AdvisorMessageVisitor {
+	return {
+		text: value => obfuscator.obfuscate(value, sharedRegexSecretValues),
+		json: value => obfuscateToolArguments(obfuscator, value, sharedRegexSecretValues),
+		executionSource: value => obfuscator.obfuscate(formatExecutionSourcePreview(value), sharedRegexSecretValues),
+		isVisible,
 	};
-	const addContent = (content: TextualContent): void => {
-		if (typeof content === "string") {
-			addText(content);
-			return;
-		}
-		for (const block of content) {
-			if (block.type === "text") addText(block.text);
-		}
-	};
-	const addJson = (value: Record<string, unknown>): void => {
-		for (const secret of collectJsonRegexSecretValues(obfuscator, value as JsonValue)) values.add(secret);
-	};
-	switch (message.role) {
-		case "user":
-		case "developer":
-			addContent(message.content as TextualContent);
-			break;
-		case "toolResult": {
-			const msg = message as AgentMessage & { content: TextualContent; details?: Record<string, unknown> };
-			addContent(msg.content);
-			if (typeof msg.details?.diff === "string") addText(msg.details.diff);
-			break;
-		}
-		case "assistant":
-			for (const block of (message as AssistantMessage).content) {
-				if (block.type === "text") addText(block.text);
-				else if (block.type === "thinking") addText(block.thinking);
-				else if (block.type === "toolCall") addJson(block.arguments);
-			}
-			break;
-		case "custom":
-		case "hookMessage": {
-			if (!formatSessionHistoryMarkdown([message], { expandPrimaryContext: true }).trim()) break;
-			const msg = message as AgentMessage & { content: TextualContent; details?: Record<string, unknown> };
-			addContent(msg.content);
-			if (msg.details) addJson(msg.details);
-			break;
-		}
-		case "bashExecution":
-			addText(formatExecutionSourcePreview((message as AgentMessage & { command: string }).command));
-			break;
-		case "pythonExecution":
-			addText(formatExecutionSourcePreview((message as AgentMessage & { code: string }).code));
-			break;
-		case "branchSummary":
-		case "compactionSummary":
-			addText((message as AgentMessage & { summary: string }).summary);
-			break;
-		case "fileMention":
-			for (const file of (message as AgentMessage & { files: Array<{ path: string }> }).files) addText(file.path);
-			break;
-	}
 }
 
 function scrubAdvisorHistory(
@@ -1892,6 +1824,36 @@ function scrubAdvisorHistory(
 	collectAdditionalRegexSecretValues?: () => void,
 ): boolean {
 	const previousSize = sharedRegexSecretValues.size;
+	// Keep the renderer's visibility decision across collection retries and redaction.
+	// Hidden primary context and image descriptions can still render; display alone is insufficient.
+	let visibility: WeakMap<AgentMessage, boolean> | undefined;
+	const isVisible = (message: AgentMessage): boolean => {
+		const cached = visibility?.get(message);
+		if (cached !== undefined) return cached;
+		const visible = isAdvisorMessageVisible(message);
+		(visibility ??= new WeakMap()).set(message, visible);
+		return visible;
+	};
+	const collectText = (value: string): string => {
+		for (const secret of obfuscator.collectRegexSecretValuesForObfuscation(value)) {
+			sharedRegexSecretValues.add(secret);
+		}
+		return value;
+	};
+	const collector: AdvisorMessageVisitor = {
+		text: collectText,
+		json: value => {
+			for (const secret of collectJsonRegexSecretValues(obfuscator, value as JsonValue)) {
+				sharedRegexSecretValues.add(secret);
+			}
+			return value;
+		},
+		executionSource: value => {
+			collectText(formatExecutionSourcePreview(value));
+			return value;
+		},
+		isVisible,
+	};
 	// Retry collection, not redaction: lazy key self-replacement can reveal a
 	// collision in a field scanned before the field that first registers the key.
 	const regexSecretValues = obfuscator.collectRegexSecretValuesBatch(() => {
@@ -1906,10 +1868,11 @@ function scrubAdvisorHistory(
 			) {
 				collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
 			}
-			collectAdvisorMessageRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+			visitAdvisorMessage(message, collector);
 		}
 		return sharedRegexSecretValues;
 	});
+	const redactor = createAdvisorMessageRedactor(obfuscator, regexSecretValues, isVisible);
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
 		const replay =
@@ -1919,7 +1882,7 @@ function scrubAdvisorHistory(
 			message.role === "compactionSummary"
 				? obfuscateNativeReplay(obfuscator, message, regexSecretValues)
 				: message;
-		const next = obfuscateAdvisorMessage(obfuscator, replay, regexSecretValues);
+		const next = visitAdvisorMessage(replay, redactor);
 		if (next !== message) messages[index] = next;
 	}
 	return sharedRegexSecretValues.size !== previousSize;

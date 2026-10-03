@@ -71,6 +71,8 @@ export class SecretTextResultCache {
 class CollisionSnapshot implements ReadonlySet<string> {
 	#values: Set<string>;
 	readonly characters: number;
+	/** False for one-shot snapshots whose results must not displace reusable cache entries. */
+	readonly cacheable: boolean;
 	readonly [Symbol.toStringTag] = "Set";
 
 	constructor(
@@ -82,6 +84,7 @@ class CollisionSnapshot implements ReadonlySet<string> {
 		let characters = 0;
 		for (const value of values) characters += value.length;
 		this.characters = characters;
+		this.cacheable = this.characters <= owner.maxCharacters && this.size <= owner.maxMembers && owner.maxEntries > 0;
 		Object.freeze(this);
 	}
 
@@ -130,6 +133,7 @@ export class SecretCollisionSnapshots {
 	constructor(
 		readonly maxCharacters = 512 * 1024,
 		readonly maxEntries = 16,
+		readonly maxMembers = 4096,
 	) {}
 
 	prepare(values: ReadonlySet<string> = this.#empty): CollisionSnapshot {
@@ -142,7 +146,7 @@ export class SecretCollisionSnapshots {
 		}
 		const snapshot = new CollisionSnapshot(this, this.#nextId++, values);
 		// Even zero-length values consume entries; cap both characters and members.
-		if (snapshot.characters > this.maxCharacters || snapshot.size > 4096 || this.maxEntries === 0) return snapshot;
+		if (!snapshot.cacheable) return snapshot;
 		while (this.#snapshots.length >= this.maxEntries || this.#characters + snapshot.characters > this.maxCharacters) {
 			this.#characters -= this.#snapshots.shift()!.characters;
 		}
