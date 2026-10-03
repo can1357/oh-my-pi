@@ -16,7 +16,8 @@ import {
 	type ViewportSize,
 } from "../tui";
 import { sliceWithWidth, visibleWidth } from "../utils";
-import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeSurfaceProvider } from "../native/node";
+import { col } from "../native/describe";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
@@ -122,18 +123,27 @@ export interface ComposerStartOptions {
 
 /**
  * Mount slot below the editor: the startup status line, then the session-aware
- * one. ANSI only: a TSP terminal has no status strip, the composer carries the
- * status line's facts ({@link StatusLineComponent.describeComposerFacts}).
+ * one. On a TSP terminal there is no status strip — the composer carries the
+ * status line's facts in its bar ({@link StatusLineComponent.describeComposerFacts}), and
+ * an extension renderer's own rows mount here as a dock block, so the surface
+ * a renderer replaced is the surface it gets back.
  */
-class StatusHost implements Component {
-	#component: Component | undefined;
+/** A mounted, invisible status block, for a status line with no renderer on it. */
+const EMPTY_DOCK_BLOCK: NativeNode = col([]);
 
-	setComponent(component: Component): void {
+class StatusHost implements Component {
+	#component: StatusLineComponent | undefined;
+
+	setComponent(component: StatusLineComponent): void {
 		this.#component = component;
 	}
 
 	render(width: number): readonly string[] {
 		return this.#component?.render(width) ?? [];
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		return this.#component?.describeNativeBlock(cx) ?? EMPTY_DOCK_BLOCK;
 	}
 }
 
@@ -486,7 +496,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const dock: NativeChild[] = [];
 		if (!this.#runtimeMounted) {
 			// The bootstrap gap is row spacing; the terminal owns the dock layout.
-			dock.push(this.editor);
+			dock.push(this.editor, this.#statusHost);
 		} else {
 			const roots = this.#runtimeChildren;
 			const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
@@ -495,7 +505,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			} else {
 				const transcript = roots[transcriptIndex] as TranscriptContainer;
 				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks());
-				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1)));
+				// Last, as it trails the ANSI roots too: below the composer and the
+				// hook widgets, where the box surface draws it.
+				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1)), this.#statusHost);
 			}
 		}
 		const previous = this.#nativeSurface;

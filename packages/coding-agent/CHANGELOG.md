@@ -22,6 +22,7 @@
 
 ### Added
 
+- Added `pi.registerStatusLineRenderer(definition)`, letting an extension draw the status surface itself — including several rows, and following the focused subagent window, which the built-in segments could not do. A renderer registered from a `session_start` handler now reaches the status line, a renderer that throws is reported to its author like any other extension error, and the renderer now stays installed on a Tern (TSP) surface too, where it describes the composer's bar or a dock block instead of being declined ([#13582](https://github.com/can1357/oh-my-pi/pull/13582) by [@Zireael](https://github.com/Zireael))
 - Added RPC support for GPT live voice sessions bound to the RPC session, including live start, stop, mute, phase, level, transcript, and end events; closing stdin also stops an active live session.
 - Published a machine-readable RPC wire schema and added generated-client support for Python, Rust, and Go RPC clients, including protocol v2 negotiation, prompt-result handling, host tools, and host URIs. The Python client is now distributed from the SDK package location.
 - Added the read-only `archive` eval global for browsing projects and past sessions, viewing idle recaps and recap journals, opening session prompts, and searching prompt history. It is enabled by default with `archive.enabled`.

@@ -3,6 +3,7 @@ import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { StatusLineRenderer } from "@oh-my-pi/pi-tui/status-line";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -90,6 +91,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
 	#composerShapeDisposers: Array<() => void> = [];
+	#statusLineRendererUnsubscribe: (() => void) | undefined;
 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
@@ -110,7 +112,63 @@ export class ExtensionUiController {
 		for (const definition of this.ctx.session.extensionRunner?.getComposerShapes() ?? []) {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
+		// Routed through the same gate as the registration listener: a shape
+		// re-sync is the other way the override gets reinstalled, and it must not
+		// be a way around the native-surface check.
+		this.#applyStatusLineRenderer(this.ctx.session.extensionRunner?.getStatusLineRenderer(), false);
 		this.ctx.syncComposerShape();
+	}
+
+	/**
+	 * Keep the status line pointed at the active renderer as extensions register
+	 * one. A renderer registered from a `session_start` handler lands after
+	 * `initialize()` returned, long after the initial sync, so the push has to
+	 * follow the registration rather than only bracket initialization.
+	 *
+	 * The subscription is torn down only by {@link disposeStatusLineRenderer},
+	 * which the shutdown path calls. It deliberately does not share a lifetime
+	 * with {@link disposeComposerShapes}: a shape re-sync must never silently
+	 * drop the watcher and leave the status line on a stale renderer.
+	 */
+	#watchStatusLineRenderer(): void {
+		const extensionRunner = this.ctx.session.extensionRunner;
+		if (!extensionRunner) return;
+		this.#statusLineRendererUnsubscribe?.();
+		// A renderer that throws is reported through the same channel as every
+		// other extension error, so its author finds out it was dropped instead
+		// of only discovering a log line.
+		this.ctx.statusLine.setRendererErrorSink((error, renderer) => {
+			extensionRunner.emitError({
+				extensionPath: extensionRunner.getStatusLineRendererExtensionPath(renderer.id) ?? renderer.id,
+				event: "statusLineRenderer",
+				error: String(error),
+			});
+		});
+		this.#statusLineRendererUnsubscribe = extensionRunner.onStatusLineRendererChanged((renderer, registered) => {
+			this.#applyStatusLineRenderer(renderer, registered);
+			this.ctx.ui.requestRender();
+		});
+		// A Tern Surface Protocol terminal is not a reason to decline: the status
+		// line describes a dock block there (a renderer's rows, or the node its
+		// `describeNative` returns), so the override reaches whichever surface is
+		// live. Installing it unconditionally is what lets a session gain and lose
+		// a surface without a re-sync.
+	}
+
+	/**
+	 * Hand the renderer to the status line, which paints it on whichever surface
+	 * is live. `registered` marks a genuine re-registration rather than a sync, so
+	 * a renderer that was dropped for throwing gets one more attempt.
+	 */
+	#applyStatusLineRenderer(renderer: StatusLineRenderer | undefined, registered: boolean): void {
+		this.ctx.statusLine.setRendererOverride(renderer, { retry: registered });
+	}
+
+	/** Drop the status-line renderer subscriptions. Shutdown only. */
+	disposeStatusLineRenderer(): void {
+		this.#statusLineRendererUnsubscribe?.();
+		this.#statusLineRendererUnsubscribe = undefined;
+		this.ctx.statusLine.setRendererErrorSink(undefined);
 	}
 
 	/** Remove extension-owned composer styles from the process registries. */
@@ -312,6 +370,13 @@ export class ExtensionUiController {
 		};
 
 		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
+
+		// Watch for renderers registered from the `session_start` emit below.
+		// The one-shot sync at the top of this method runs before
+		// `initialize()`, so it cannot see them; without this subscription a
+		// renderer registered by a lifecycle handler never reaches the status
+		// line and the built-in bar keeps the surface.
+		this.#watchStatusLineRenderer();
 
 		// Subscribe to extension errors
 		extensionRunner.onError((error: ExtensionError) => {
@@ -530,6 +595,7 @@ export class ExtensionUiController {
 		};
 
 		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
+		this.#watchStatusLineRenderer();
 		this.#syncExtensionComposerShapes();
 	}
 

@@ -48,6 +48,7 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
 		composerShapes: new Map(),
+		statusLineRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),

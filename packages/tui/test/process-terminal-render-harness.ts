@@ -2,6 +2,7 @@ import { vi } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
 import { ProcessTerminal, type ProcessTerminalOptions } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { captureTerminalExit, type TerminalExitCapture } from "./terminal-exit-capture";
 
 // Pristine descriptors, captured once at module load. Every dispose() restores
 // to these so the harness is full-suite safe across repeated create/dispose
@@ -43,8 +44,8 @@ export interface ProcessTerminalRenderHarness {
 	readonly probe: WidthProbe;
 	/** Raw bytes the TUI wrote to stdout, in order. */
 	readonly writes: string[];
-	/** Signals the terminal requested from the host process, in order. */
-	readonly signals: Array<{ pid: number; signal: string | number | undefined }>;
+	/** How the terminal asked the host process to exit, on either platform. */
+	readonly exits: TerminalExitCapture;
 	/** Wait for the render scheduler to flush any pending paint. */
 	settle(): Promise<void>;
 	/** Simulate an OS resize (SIGWINCH / ConPTY): refresh stdout dims, fire `resize`. */
@@ -89,12 +90,11 @@ export function createProcessTerminalRenderHarness(
 	Object.defineProperty(process.stdout, "rows", { value: initialRows, configurable: true });
 
 	const writes: string[] = [];
-	const signals: Array<{ pid: number; signal: string | number | undefined }> = [];
+	// Both exit routes, not just the POSIX one: on win32 the terminal calls
+	// postmortem.quit(129), which is process.exit(129), and a harness that only
+	// spied process.kill would take the whole runner down with it.
+	const exits = captureTerminalExit();
 	const spies = [
-		vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
-			signals.push({ pid, signal });
-			return true;
-		}),
 		vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin),
 		vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin),
 		vi.spyOn(process.stdin, "setEncoding").mockImplementation(() => process.stdin),
@@ -126,7 +126,7 @@ export function createProcessTerminalRenderHarness(
 		tui,
 		probe,
 		writes,
-		signals,
+		exits,
 		settle,
 		async osResize(columns, rows) {
 			Object.defineProperty(process.stdout, "columns", { value: columns, configurable: true });
@@ -152,6 +152,7 @@ export function createProcessTerminalRenderHarness(
 		},
 		dispose() {
 			tui.stop();
+			exits.restore();
 			setTerminalHeadless(previousHeadless);
 			for (const spy of spies) spy.mockRestore();
 			for (const [target, key, descriptor] of PRISTINE) {

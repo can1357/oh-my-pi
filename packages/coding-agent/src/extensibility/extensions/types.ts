@@ -70,7 +70,9 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import type { StatusLineRenderer } from "@oh-my-pi/pi-tui/status-line/types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+export type { StatusLineRenderer } from "@oh-my-pi/pi-tui/status-line/types";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
@@ -1569,6 +1571,15 @@ export interface ExtensionAPI {
 	 */
 	registerComposerShape(definition: ComposerShapeDefinition): void;
 
+	/**
+	 * Register a custom status-line renderer that replaces the built-in
+	 * single-row status bar. The renderer receives a live segment context
+	 * and the extension-status map (statuses other extensions set via
+	 * `ctx.ui.setStatus`) and returns the status rows to paint, top to
+	 * bottom. Only the most recently registered renderer is active.
+	 */
+	registerStatusLineRenderer(definition: StatusLineRenderer): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -1916,6 +1927,13 @@ export interface ExtensionCommandContextActions {
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
+	/**
+	 * Announce a status-line renderer registration to whoever owns the status
+	 * surface. Internal plumbing, not part of the extension-facing API: the TUI
+	 * controller subscribes through `ExtensionRunner.onStatusLineRendererChanged`
+	 * and pushes the active renderer into the status line.
+	 */
+	notifyStatusLineRendererRegistered(): void;
 }
 
 /** Loaded extension with all registered items. */
@@ -1931,6 +1949,7 @@ export interface Extension {
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
+	statusLineRenderers: Map<string, StatusLineRenderer>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
