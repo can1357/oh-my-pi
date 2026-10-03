@@ -230,6 +230,13 @@ const napiArgs = [
 	cargoProfile,
 ];
 
+// Local-only opt-in: pass extra cargo features through to napi build, e.g.
+// OMP_NATIVE_FEATURES=wayland-pipewire bun --cwd=packages/natives run build
+const extraFeatures = Bun.env.OMP_NATIVE_FEATURES?.trim();
+if (extraFeatures) {
+	napiArgs.push("--features", extraFeatures);
+}
+
 // napi-rs / cargo route much failure detail to stdout (e.g. `cargo metadata`
 // errors), so a stderr-only error collapses real failures to a bare message.
 const BUILD_LOG_TAIL_LINES = 40;
