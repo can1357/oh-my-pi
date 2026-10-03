@@ -12,6 +12,12 @@ import { chromiumAvailable } from "./chromium-probe";
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_NAME = `interactions-${crypto.randomUUID()}`;
 const STARVED_TAB_NAME = `starved-${crypto.randomUUID()}`;
+const COMBO_TAB_NAME = `combos-${crypto.randomUUID()}`;
+// The platform's editing modifier. On macOS its shortcuts are app-menu commands a
+// CDP key event never reaches, so they only edit when the key-down names the command.
+const SHORTCUT = process.platform === "darwin" ? "Meta" : "Control";
+const comboHtml = `<!doctype html><textarea id="area">hello world</textarea><input id="field"><input id="paste">
+<iframe id="inner" srcdoc='<!doctype html><textarea id="deep">nested text</textarea>'></iframe>`;
 let tempDir = "";
 let uploadPath = "";
 
@@ -147,6 +153,85 @@ return { during, after };`,
 			await invoke({ action: "close", name: TAB_NAME, kill: true }).catch(() => undefined);
 		}
 	}, 30_000);
+
+	test("presses key combos on the tab, an element and a frame", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-combos" };
+		await prelude.invoke(
+			{ action: "open", name: COMBO_TAB_NAME, url: `data:text/html,${encodeURIComponent(comboHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: COMBO_TAB_NAME,
+					code: `await tab.press("${SHORTCUT}+a", { selector: "#area" });
+const page = await tab.evaluate(() => { const t = document.querySelector("#area"); return [t.selectionStart, t.selectionEnd]; });
+await tab.evaluate(() => document.querySelector("#area").setSelectionRange(0, 0));
+await tab.press("${SHORTCUT}Left+KeyA", { selector: "#area" });
+const spelled = await tab.evaluate(() => { const t = document.querySelector("#area"); return [t.selectionStart, t.selectionEnd]; });
+const field = await tab.waitFor("#field");
+await field.type("abc");
+await field.press("Shift+ArrowLeft");
+const shifted = await tab.evaluate(() => { const t = document.querySelector("#field"); return [t.selectionStart, t.selectionEnd]; });
+await field.press("${SHORTCUT}+a");
+await field.type("x");
+await (await tab.waitFor("#paste")).press("a", { text: "é" });
+const inner = await tab.frame("#inner");
+await inner.press("${SHORTCUT}+a", { selector: "#deep" });
+const frame = await inner.evaluate(() => { const t = document.querySelector("#deep"); return [t.selectionStart, t.selectionEnd]; });
+return { page, spelled, shifted, replaced: await tab.value("#field"), frame, optioned: await tab.value("#paste") };`,
+					timeout: 20,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				page: [0, 11],
+				spelled: [0, 11],
+				shifted: [2, 3],
+				replaced: "x",
+				frame: [0, 11],
+				optioned: "é",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: COMBO_TAB_NAME, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
+	// CI runs Linux, where Control+C/V already edit; this is the macOS contract.
+	test.skipIf(process.platform !== "darwin")(
+		"copies and pastes the selection with the clipboard helpers on macOS",
+		async () => {
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-clipboard-keys" };
+			await prelude.invoke(
+				{ action: "open", name: COMBO_TAB_NAME, url: `data:text/html,${encodeURIComponent(comboHtml)}` },
+				context,
+			);
+			try {
+				const result = await prelude.invoke(
+					{
+						action: "run",
+						name: COMBO_TAB_NAME,
+						code: `await tab.evaluate(() => { const t = document.querySelector("#area"); t.focus(); t.select(); });
+await tab.clipboardCopy();
+await tab.focus("#paste");
+await tab.clipboardPaste();
+return await tab.value("#paste");`,
+						timeout: 20,
+					},
+					context,
+				);
+				expect(valueFrom<string>(result)).toBe("hello world");
+			} finally {
+				await prelude.invoke({ action: "close", name: COMBO_TAB_NAME, kill: true }, context).catch(() => undefined);
+			}
+		},
+		30_000,
+	);
 
 	// Backgrounded headless tabs deliver no animation frames, which stalls every
 	// Puppeteer `Locator` precondition (viewport/stability/enabled) forever.

@@ -3,12 +3,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
-import type { ElementHandle, ElementScreenshotOptions, Frame, KeyInput, Page } from "puppeteer-core";
+import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppeteer-core";
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
-import { clickElement, fillViaHandle } from "./interactions";
+import { clickElement, fillViaHandle, pressKey } from "./interactions";
 import { RunOutput } from "./run-output";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
@@ -51,7 +51,7 @@ export interface BrowserFrameApi {
 	/** Type text into a matching element. */
 	type(selector: string, text: string): Promise<void>;
 	/** Press a keyboard key, optionally after focusing an element. */
-	press(key: KeyInput, options?: FramePressOptions): Promise<void>;
+	press(key: string, options?: FramePressOptions): Promise<void>;
 	/** Return a matching element's text content. */
 	text(selector: string): Promise<string>;
 	/** Return a matching element's inner HTML. */
@@ -270,7 +270,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			hooks.op(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
 				if (options?.selector)
 					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
-				await untilAborted(signal, () => frame.page().keyboard.press(key));
+				await untilAborted(signal, () => pressKey(frame.page(), key));
 			}),
 		text: selector =>
 			hooks.op(
