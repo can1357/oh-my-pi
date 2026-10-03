@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `web/serper` search engine model and Serper API-key login (`/login serper` or `SERPER_API_KEY`).
+
 ## [18.5.0] - 2026-10-03
 
 ### Added

@@ -97,6 +97,13 @@ provider "web" {
 			limits
 			supports-tools #false
 		}
+		model "serper" name="Serper" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "ollama" name="Ollama" {
 			reasoning #false
 			input "text"

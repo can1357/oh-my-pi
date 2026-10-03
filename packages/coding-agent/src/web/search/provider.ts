@@ -28,6 +28,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	kimi: () => import("./providers/kimi").then(m => new m.KimiProvider()),
 	parallel: () => import("./providers/parallel").then(m => new m.ParallelProvider()),
 	synthetic: () => import("./providers/synthetic").then(m => new m.SyntheticProvider()),
+	serper: () => import("./providers/serper").then(m => new m.SerperProvider()),
 	ollama: () => import("./providers/ollama").then(m => new m.OllamaProvider()),
 	searxng: () => import("./providers/searxng").then(m => new m.SearXNGProvider()),
 	duckduckgo: () => import("./providers/duckduckgo").then(m => new m.DuckDuckGoProvider()),

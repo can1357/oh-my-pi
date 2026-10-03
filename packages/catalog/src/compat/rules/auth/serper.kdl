@@ -1,0 +1,9 @@
+auth "serper" {
+	name "Serper"
+	env "SERPER_API_KEY"
+	login "api-key" {
+		auth-url "https://serper.dev/playground"
+		instructions "Copy your API key from the Serper playground."
+		prompt "Paste your Serper API key" placeholder="API key"
+	}
+}

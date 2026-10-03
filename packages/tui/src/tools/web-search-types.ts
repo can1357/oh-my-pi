@@ -28,6 +28,7 @@ export const SEARCH_PROVIDER_LABELS = {
 	brave: "Brave",
 	kimi: "Kimi",
 	synthetic: "Synthetic",
+	serper: "Serper",
 	ollama: "Ollama",
 	searxng: "SearXNG",
 	startpage: "Startpage",

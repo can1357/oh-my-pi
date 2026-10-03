@@ -359,6 +359,7 @@ therefore completes through the paste-code path.
 | --------------------------------------------------- | ------------------------------------------------------------------------- |
 | `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                            |
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                       |
+| `SERPER_API_KEY`                                    | Serper Google Search provider; alternatively use `/login serper`          |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                     |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
