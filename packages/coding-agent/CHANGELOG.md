@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- Fixed remote compaction re-sending an input already refused as too large for the context window to another model from the same provider with an equal or smaller window (e.g. gpt-6-astra after gpt-6.1-sol on Codex); a same-provider model with a larger window is still tried ([#14246](https://github.com/can1357/oh-my-pi/pull/14246) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.5.1] - 2026-10-03
 
