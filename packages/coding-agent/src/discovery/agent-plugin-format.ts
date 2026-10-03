@@ -249,7 +249,7 @@ function expandAgentPluginPlaceholders(value: string, pluginRoot: string, plugin
 /** A validated `mcp.json` server entry, resolved to launch-ready values. */
 interface AgentPluginMcpServer {
 	name: string;
-	transport: "stdio" | "http" | "sse";
+	transport: "stdio" | "http" | "streamable-http" | "sse";
 	/** Absolute path for `./`-relative commands; bare executable token otherwise. */
 	command?: string;
 	args?: string[];
@@ -400,7 +400,11 @@ async function parseStdioServer(
 	};
 }
 
-function parseRemoteServer(name: string, cfg: Record<string, unknown>, transport: "http" | "sse"): ServerEntryResult {
+function parseRemoteServer(
+	name: string,
+	cfg: Record<string, unknown>,
+	transport: "http" | "streamable-http" | "sse",
+): ServerEntryResult {
 	for (const key in cfg) {
 		if (!REMOTE_FIELDS[key]) return { error: `unknown field "${key}"` };
 	}
@@ -463,7 +467,7 @@ export async function parseAgentPluginMcp(raw: string, options: AgentPluginMcpOp
 		} else if (cfg.type === "stdio") {
 			result = await parseStdioServer(name, cfg, options);
 		} else if (cfg.type === "streamable-http") {
-			result = parseRemoteServer(name, cfg, "http");
+			result = parseRemoteServer(name, cfg, "streamable-http");
 		} else if (cfg.type === "sse") {
 			result = parseRemoteServer(name, cfg, "sse");
 		} else {

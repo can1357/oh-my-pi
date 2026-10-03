@@ -4,7 +4,8 @@
 
 ### Added
 
-- Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
+- Added a `streamable-http` MCP transport for the stateless 2026-07-28 protocol revision: `streamable-http` servers negotiate `server/discover` before the handshake, send the protocol revision in a per-request `_meta` envelope with `Mcp-Method`/`Mcp-Name` headers, and silently fall back to the existing 2025 handshake when the endpoint refuses the modern era ([#14172](https://github.com/can1357/oh-my-pi/pull/14172) by [@spgsroot](https://github.com/spgsroot))
+- Added a `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - `web_search` results now list in `details.failures` each provider that failed before another answered, or every provider when all failed, with its reason and status code, so session transcripts show how often each one fails or refuses ([#18124](https://github.com/can1357/oh-my-pi/pull/18124) by [@will-bogusz](https://github.com/will-bogusz))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.

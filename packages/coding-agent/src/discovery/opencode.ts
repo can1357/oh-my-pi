@@ -314,7 +314,7 @@ function mergeConfigRecords(base: Record<string, unknown>, override: Record<stri
 /** Translate one merged OpenCode MCP entry into the canonical MCPServer shape. */
 function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: OpenCodeConfigSource): MCPServer {
 	// Determine transport from OpenCode's "type" field
-	let transport: "stdio" | "sse" | "http" | undefined;
+	let transport: "stdio" | "sse" | "http" | "streamable-http" | undefined;
 	if (serverConfig.type === "local") {
 		transport = "stdio";
 	} else if (serverConfig.type === "remote") {

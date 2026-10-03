@@ -41,7 +41,7 @@ interface MCPConfigFile {
 				clientId?: string;
 				clientSecret?: string;
 			};
-			type?: "stdio" | "sse" | "http";
+			type?: "stdio" | "sse" | "http" | "streamable-http";
 			oauth?: {
 				clientId?: string;
 				clientSecret?: string;
