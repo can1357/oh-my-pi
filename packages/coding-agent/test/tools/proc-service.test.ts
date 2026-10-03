@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
+import { procmgr, setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ProcProtocolHandler } from "../../src/internal-urls/proc-protocol";
@@ -33,6 +33,24 @@ function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	return broker;
 }
 
+// Services really spawn the configured shell with POSIX command lines. Windows
+// has no `/bin/sh`, so use the product's own Git Bash discovery there.
+const SERVICE_SHELL = process.platform === "win32" ? procmgr.resolveWindowsShell() : "/bin/sh";
+
+/**
+ * Settles a broker-backed call with a plain `await`. On Windows, Bun's
+ * `expect(promise).rejects` waits on the promise without servicing the
+ * in-process broker's named-pipe I/O, so the request stalls until its timeout.
+ */
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+	try {
+		await promise;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error("Expected the promise to reject");
+}
+
 function toolSession(cwd: string, manager?: AsyncJobManager, options: { launch?: boolean } = {}): ToolSession {
 	return {
 		cwd,
@@ -48,7 +66,7 @@ function toolSession(cwd: string, manager?: AsyncJobManager, options: { launch?:
 			"bash.autoBackground.thresholdMs": 60_000,
 			"bashInterceptor.enabled": false,
 			"worktree.clone": false,
-			shellPath: "/bin/sh",
+			shellPath: SERVICE_SHELL,
 		}),
 	} as unknown as ToolSession;
 }
@@ -348,12 +366,12 @@ describe("bash services via proc://", () => {
 				{ id: "echo-service", ownerId: "Main" },
 			);
 			expect(collisionId).toBe("echo-service");
-			await expect(proc.resolve(parseInternalUrl("proc://echo-service"), { session })).rejects.toThrow(
+			expect(await rejectionMessage(proc.resolve(parseInternalUrl("proc://echo-service"), { session }))).toContain(
 				"both job echo-service and service echo-service",
 			);
-			await expect(proc.write(parseInternalUrl("proc://echo-service/kill"), "", { session })).rejects.toThrow(
-				"both job echo-service and service echo-service",
-			);
+			expect(
+				await rejectionMessage(proc.write(parseInternalUrl("proc://echo-service/kill"), "", { session })),
+			).toContain("both job echo-service and service echo-service");
 			manager.cancel(collisionId, { ownerId: "Main" });
 			await manager.getJob(collisionId)?.promise;
 			await manager.dispose({ timeoutMs: 1_000 });
@@ -427,9 +445,11 @@ describe("bash services via proc://", () => {
 				path.join(runtimeDir, "daemons", "detach-candidate", "spec.json"),
 			).json();
 			expect(detachedSpec).toMatchObject({ detached: true, persist: true, pty: false });
-			await expect(
-				proc.write(parseInternalUrl("proc://detach-candidate/mode"), "session", { session }),
-			).rejects.toThrow("must remain persistent");
+			expect(
+				await rejectionMessage(
+					proc.write(parseInternalUrl("proc://detach-candidate/mode"), "session", { session }),
+				),
+			).toContain("must remain persistent");
 			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
 			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
 				"does not accept async or timeout",

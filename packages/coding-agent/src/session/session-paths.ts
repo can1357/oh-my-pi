@@ -68,9 +68,16 @@ function encodeHashedSessionDirName(canonicalCwd: string, scope: "home" | "tmp" 
 	return `${scope}-${readable || "project"}-${digest}`;
 }
 
+/** Whether `relative` (from `path.relative(root, target)`) stays at or inside `root`. */
+function isRelativeWithin(relative: string): boolean {
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function getDefaultSessionDirName(cwd: string): {
 	encodedDirName: string;
 	hashedDirName: string;
+	/** Home-relative name a temp-root cwd got while home was checked first; migrated forward. */
+	shadowedHomeDirName?: string;
 	resolvedCwd: string;
 } {
 	const resolvedCwd = path.resolve(cwd);
@@ -81,19 +88,29 @@ function getDefaultSessionDirName(cwd: string): {
 	const canonicalTempRoot = resolveEquivalentPath(tempRoot);
 	const homeRelative = path.relative(canonicalHome, canonicalCwd);
 	const tempRelative = path.relative(canonicalTempRoot, canonicalCwd);
+	const inHome = isRelativeWithin(homeRelative);
 	let encodedDirName: string;
+	let shadowedHomeDirName: string | undefined;
 	let scope: "home" | "tmp" | "abs";
-	if (homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))) {
+	// The temp root is checked first: it is the more specific root wherever it
+	// nests inside home (Windows' `%USERPROFILE%\AppData\Local\Temp`).
+	if (isRelativeWithin(tempRelative)) {
+		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
+		if (inHome) shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+		scope = "tmp";
+	} else if (inHome) {
 		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
 		scope = "home";
-	} else if (tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))) {
-		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
-		scope = "tmp";
 	} else {
 		encodedDirName = encodeLegacyAbsoluteSessionDirName(canonicalCwd);
 		scope = "abs";
 	}
-	return { encodedDirName, hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope), resolvedCwd };
+	return {
+		encodedDirName,
+		hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope),
+		shadowedHomeDirName,
+		resolvedCwd,
+	};
 }
 
 /**
@@ -142,8 +159,9 @@ function migrateHomeSessionDirs(sessionsRoot: string): void {
 	}
 }
 
-function migrateLegacyAbsoluteSessionDir(cwd: string, sessionDir: string, sessionsRoot: string): void {
-	const legacyDir = path.join(sessionsRoot, encodeLegacyAbsoluteSessionDirName(cwd));
+/** Move the session dir `legacyDirName` under `sessionsRoot` into `sessionDir`. Best-effort. */
+function migrateNamedSessionDir(legacyDirName: string, sessionDir: string, sessionsRoot: string): void {
+	const legacyDir = path.join(sessionsRoot, legacyDirName);
 	if (legacyDir === sessionDir || !fs.existsSync(legacyDir)) return;
 
 	try {
@@ -196,10 +214,11 @@ export function computeDefaultSessionDir(
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, hashedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const { encodedDirName, hashedDirName, shadowedHomeDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
 	migrateHomeSessionDirs(sessionsRoot);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
-	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
+	migrateNamedSessionDir(encodeLegacyAbsoluteSessionDirName(resolvedCwd), sessionDir, sessionsRoot);
+	if (shadowedHomeDirName) migrateNamedSessionDir(shadowedHomeDirName, sessionDir, sessionsRoot);
 	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;

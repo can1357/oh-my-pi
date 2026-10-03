@@ -181,7 +181,8 @@ describe("task async preflight", () => {
 			} as TaskParams);
 
 			const text = textOf(result);
-			expect(text).toContain(`Searched: ${path.join("~", "project", ".omp", "agents")}`);
+			// shortenPath renders home paths as portable `~/…` on every platform.
+			expect(text).toContain("Searched: ~/project/.omp/agents");
 			expect(text).not.toContain(home);
 		} finally {
 			await fs.rm(home, { recursive: true, force: true });

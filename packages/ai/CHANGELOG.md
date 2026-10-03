@@ -5,6 +5,11 @@
 ### Added
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+## [18.5.0] - 2026-10-03
+
+### Fixed
+
+- Fixed AWS `credential_process` on Windows stripping backslashes from unquoted paths such as `C:\Users\me\helper.exe`; commands are now split with Windows command-line rules there, matching the AWS CLI.
 
 ## [18.4.12] - 2026-10-02
 

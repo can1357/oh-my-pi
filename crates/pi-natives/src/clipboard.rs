@@ -234,10 +234,7 @@ enum ImageRead {
 	Image(ImageData<'static>),
 	/// arboard found no image, but a bitmap format is advertised; carries the
 	/// raw `CF_DIB` when it could be read.
-	#[cfg_attr(
-		not(windows),
-		allow(dead_code, reason = "only the Windows bitmap probe produces it")
-	)]
+	#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows bitmap probe produces it"))]
 	Bitmap(Option<Vec<u8>>),
 	Missing,
 	/// arboard failed; carries the raw `CF_DIB` fallback when it could be read.

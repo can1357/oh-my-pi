@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } fro
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
@@ -31,7 +32,10 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
+import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
@@ -48,7 +52,6 @@ import {
 	cfgStartupShowSplash,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
-const noRecentSessions = async () => [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalPiProfile = process.env.PI_PROFILE;
 const originalOmpProfile = process.env.OMP_PROFILE;
@@ -243,6 +246,12 @@ afterEach(async () => {
 	restoreEnv("PI_PROFILE", originalPiProfile);
 	restoreEnv("OMP_PROFILE", originalOmpProfile);
 	utils.__resetDirsFromEnvForTests();
+	// InteractiveMode and the CLI open process-wide agent.db, history.db (prompt history and
+	// session index), and models.db under tmp/agent; Windows cannot delete open files.
+	AgentStorage.close();
+	HistoryStorage.close();
+	resetSessionIndexForTests();
+	closeModelCache();
 	await fs.rm(tmp, { recursive: true, force: true });
 });
 
@@ -380,7 +389,6 @@ describe("interactive collaboration startup", () => {
 			terminal: new VirtualTerminal(),
 			version: "test",
 			cache: false,
-			recentSessions: noRecentSessions,
 		});
 		spyOn(InteractiveMode.prototype, "getUserInput").mockImplementation(async function (this: InteractiveMode) {
 			mode = this;
@@ -722,7 +730,6 @@ describe("interactive collaboration startup", () => {
 				terminal: new StartupTerminal(),
 				version: "test",
 				cache: false,
-				recentSessions: noRecentSessions,
 			});
 			spyOn(InteractiveMode.prototype, "initHooksAndCustomTools").mockImplementation(
 				async function (this: InteractiveMode) {
