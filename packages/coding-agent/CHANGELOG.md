@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a `streamable-http` MCP server type speaking the stateless `2026-07-28` revision (`_meta` envelopes, `Mcp-Method`/`Mcp-Name` headers, `server/discover` in place of `initialize`); endpoints that refuse the modern envelope downgrade to the existing 2025 handshake automatically
+- Added a `streamable-http` MCP server type speaking the stateless `2026-07-28` revision (`_meta` envelopes, `Mcp-Method`/`Mcp-Name` headers, `server/discover` in place of `initialize`); endpoints that refuse the modern envelope downgrade to the existing 2025 handshake automatically ([#14172](https://github.com/can1357/oh-my-pi/pull/14172) by [@spgsroot](https://github.com/spgsroot))
 
 ## [18.5.0] - 2026-10-03
 
