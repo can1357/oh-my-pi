@@ -61,6 +61,46 @@ describe("waitForRelayExtension", () => {
 		expect(performance.now() - started).toBeLessThan(2_000);
 	});
 
+	it("fails fast when the extension has been gone longer than the redial window, as after Chrome quits", async () => {
+		const info: RelayUnavailableInfo = {
+			error: "relay extension is not connected",
+			extensionSeen: true,
+			uptimeMs: 600_000,
+			disconnectedMs: 120_000,
+		};
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => Response.json(info, { status: 503 }),
+		});
+		const started = performance.now();
+		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("extension-gone");
+		expect(performance.now() - started).toBeLessThan(2_000);
+	});
+
+	it("waits out only the rest of the redial window after a recent disconnect", async () => {
+		const goneAt = Date.now() - 34_000;
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				Response.json(
+					{
+						error: "relay extension is not connected",
+						extensionSeen: true,
+						uptimeMs: 600_000,
+						disconnectedMs: Date.now() - goneAt,
+					} satisfies RelayUnavailableInfo,
+					{ status: 503 },
+				),
+		});
+		const started = performance.now();
+		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("extension-gone");
+		const waited = performance.now() - started;
+		expect(waited).toBeGreaterThan(700);
+		expect(waited).toBeLessThan(5_000);
+	});
+
 	it("rejects an already-running relay without discarded-tab metadata", async () => {
 		fake = Bun.serve({
 			hostname: "127.0.0.1",
