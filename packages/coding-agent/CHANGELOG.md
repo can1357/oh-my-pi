@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added copy and rewind actions to both transcript selectors ([#13436](https://github.com/can1357/oh-my-pi/pull/13436) by [@Dante-dan](https://github.com/Dante-dan)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
