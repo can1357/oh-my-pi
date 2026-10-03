@@ -21,6 +21,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -364,6 +365,48 @@ class MockWebSocket {
 }
 
 describe("openai-codex streaming", () => {
+	it.each(["arguments.done", "output_item.done", "terminal"])(
+		"refuses truncated final JSON via %s",
+		async finalizer => {
+			const raw = '{"path":"repaired.txt","content":"hello';
+			const item = { type: "function_call", id: "fc_1", call_id: "call_1", name: "write", arguments: "" };
+			const events: unknown[] = [
+				{ type: "response.output_item.added", output_index: 0, item },
+				{ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_1", delta: raw },
+			];
+			if (finalizer === "arguments.done") {
+				events.push({
+					type: "response.function_call_arguments.done",
+					output_index: 0,
+					item_id: "fc_1",
+					arguments: raw,
+				});
+			}
+			if (finalizer !== "terminal") {
+				events.push({ type: "response.output_item.done", output_index: 0, item: { ...item, arguments: raw } });
+			}
+			events.push({ type: "response.completed", response: { id: "resp_1", status: "completed" } });
+			const output = await streamOpenAICodexResponses(
+				{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+				createCodexTestContext(),
+				{
+					apiKey: createCodexTestToken(),
+					fetch: async () =>
+						new Response(events.map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), {
+							headers: { "content-type": "text/event-stream" },
+						}),
+				},
+			).result();
+			expect(output.stopReason).toBe("toolUse");
+			const call = output.content.find(block => block.type === "toolCall");
+			if (!call) throw new Error("Expected tool call");
+			expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+			expect(() =>
+				validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, call),
+			).toThrow("Tool call arguments are not valid JSON");
+		},
+	);
+
 	it("normalizes Codex response endpoint base URLs", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
@@ -1159,6 +1202,35 @@ describe("openai-codex streaming", () => {
 		expect(toolCall.arguments).toEqual({ path: "README.md" });
 		expect((toolCall as unknown as Record<string, unknown>).partialJson).toBeUndefined();
 		expect((toolCall as unknown as Record<string, unknown>).lastParseLen).toBeUndefined();
+	});
+
+	it("persists lenient-repaired tool-call args on the native history item (#14155)", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const brokenArgs = '{"command": "pwd", "name": , "ready": null}';
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "bash", arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "bash", arguments: brokenArgs } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			fetch: fetchMock as FetchImpl,
+		}).result();
+
+		const toolCall = result.content.find(c => c.type === "toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected a finalized toolCall block");
+		const payload = result.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("expected native Responses history");
+		const nativeCall = payload.items.find(item => item.type === "function_call");
+		expect(JSON.parse(String(nativeCall?.arguments))).toEqual(toolCall.arguments);
 	});
 
 	it("routes interleaved function-call argument deltas to the matching open item", async () => {

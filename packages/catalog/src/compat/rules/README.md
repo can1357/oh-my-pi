@@ -152,7 +152,7 @@ discovery {
 
 ## Cascade grammar
 
-A cascade document starts with `class`, `provider`, or `on-api`. Root `on-api` declares a transport contract independent of model identity and provider name. Every selector adds a conjunct to the current rule. `on` scopes by deployment provider; `on-api` scopes by request adapter, including custom provider names. Axis directives may appear directly in any permitted scope, and nested selector blocks may appear alongside them.
+A cascade document starts with `class`, `provider`, or `on-api`. Root `on-api` declares a transport contract independent of model identity and provider name. Every selector adds a conjunct to the current rule. `on` scopes by deployment provider; `on-api` scopes by request adapter, including custom provider names; `on-upstream` scopes by the actual upstream selected behind that deployment. An upstream never changes the deployment provider or imports that upstream's direct-host rules. Axis directives may appear directly in any permitted scope, and nested selector blocks may appear alongside them.
 
 ```kdl
 class "gemini" {
@@ -182,20 +182,25 @@ provider "openrouter" {
 | Selector   | Form                                     | Matching semantics                                                                                                                                                             |
 | ---------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `class`    | `class "id" { ... }`                     | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`.        |
-| `provider` | `provider "id" { ... }`                  | Exact provider ID. It is root-only and may contain `class` and `models`.                                                                                                       |
-| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                                         |
-| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. At document root it may contain `class` and `models`; under a root `class` it may contain `family`, `revision`, and `models`. |
+| `provider` | `provider "id" { ... }`                  | Exact provider ID. It is root-only and may contain `class`, `on-api`, and `models`.                                                                                           |
+| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed under a root `class`, and may contain `on-api` to conjoin an API scope plus `family`, `revision`, and `models`. |
+| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. At document root it may contain `class` and `models`; under a root `class` (directly or nested inside `on`) or `provider` it may contain `family`, `revision`, and `models`. |
 | `family`   | `family "id" { ... }`                    | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match.                                                                    |
 | `revision` | `revision ">=2.5 <4" { ... }`            | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match.                                               |
-| `models`   | `models "id" "vendor/*" { ... }`         | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics.             |
+| `models`   | `models "id" "vendor/*" { ... }`         | One or more alternatives, combined as OR. It may contain only `on-upstream`. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics.                 |
+| `on-upstream` | `on-upstream "a" "b" { ... }`        | Exact selected upstream IDs, combined as OR. Allowed inside any selector scope once; preserves the containing scope's other permitted children. Absent upstream never matches. |
 
-Class, provider/`on`, `on-api`, and family selector values are compared exactly and case-sensitively to the structured resolve target. Revision operators are `>=`, `>`, `<=`, `<`, and `=`; operands have one to three dot-separated unsigned 8-bit components, omitted components zero.
+Every selector scope may additionally contain `on-upstream`; it cannot replace an already constrained upstream. Class, provider/`on`, `on-api`, `on-upstream`, and family values are compared exactly and case-sensitively to the structured resolve target. Revision operators are `>=`, `>`, `<=`, `<`, and `=`; operands have one to three dot-separated unsigned 8-bit components, omitted components zero.
+
+An `on-api` nested inside `on` under a class requires both the selected provider and request adapter; values within each selector remain alternatives.
 
 A `models` string without `*` is an exact, case-sensitive match against the provider-relative model identifier. A string containing `*` is an anchored, ASCII-case-insensitive wildcard match. Prefer taxonomy ranks; retain exact/glob lists only when they isolate the census member set exactly, and keep a `// residue:` comment explaining why ranks do not.
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
 
 `buildDiscoveredModel(spec, providerType)` resolves the catalog `discovery-api` axis before materializing compatibility. It preserves the credential-bearing provider ID and records `providerType` as the backend used for provider selectors on subsequent rebuilds. Ordinary `buildModel` preserves its input API. This lets custom-named llama.cpp deployments reuse the same rules without model-specific discovery code.
+
+`resolveModelPolicy(spec, { upstream })` resolves the selected route without mutating the model identity. Call it again when retry routing selects another upstream. Its typed `request` record carries request-shaping axes (reasoning history, disabled-effort semantics, Anthropic thinking mode, Responses options, and Google thinking dialect); shared transport fields remain in `compat`. Both records use the same per-axis cascade, precedence, ambiguity checks, and upstream-aware cache key. Request fields have the `request` applicability record in `axes.ts`, so they do not leak into shared transport compat objects. See [`providers/factory-droid.kdl`](providers/factory-droid.kdl) for the upstream-scoped consumer.
 
 ### Axis vocabulary and value shapes
 
@@ -204,11 +209,15 @@ The directive vocabulary is closed and lives in **`src/compat/axes.ts`** — one
 The three value shapes are:
 
 - **Scalar**: exactly one KDL boolean, integer, float, or string argument and no children. `#null` is rejected.
-- **Array**: one or more scalar arguments and no children; it resolves to a JSON array.
+- **Array**: one or more scalar arguments and no children; it resolves to a JSON array. Axes marked `emptyArray` in `axes.ts` also accept a bare directive, which assigns an explicit empty list (`region-upstreams-eu` with no arguments: the region never serves the model). Bare `thinking-efforts` keeps a reasoning-capable deployment without selectable effort tiers off the effort dial.
 - **Object**: no arguments and a child block, including an empty block. Child names are kebab-case: an axis-directive spelling compiles to its resolved axis key (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else converts mechanically (`input-threshold` → `inputThreshold`); camelCase names are a compile error. `extra-body` payloads (top-level or nested) are the exception — their child names are literal wire JSON keys copied verbatim (`enable_thinking`). Each child is either one scalar or another object; arrays are not representable inside an object payload.
 
 A rule cannot assign the same resolved axis twice in one block.
 One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
+
+`context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
+
+The routed-subscription registry axes (`upstream-rotation`, `region-upstreams-global|us|eu`, `region-limits-eu`, `credit-rates`, `list-price-from`, `routing-family`, `policy-aliases`, `entitlement`, `default-reasoning-off`) describe a gateway whose proxy fans one model out to several upstreams. They are read through `src/compat/factory-droid.ts` by Factory Droid discovery and its request provider, not materialized by `buildModel`. A provider-wide `region-upstreams-*` rule is the upstream serving table and a model rule replaces it for that region. `list-price-from "<provider>" ["<id>"]` shows a bundled row's list price beside the subscription's own billing; unlike seed values it is resolved at runtime and degrades to the seed's zero cost when the row is gone. See [`providers/factory-droid.kdl`](providers/factory-droid.kdl), whose wire and billing pool per model are `api-routes` and `quota-tiers` rules in `runtime/behavior.kdl`.
 
 ### Time-based pricing
 
@@ -258,7 +267,7 @@ Rules resolve independently per axis. A matching rule is ranked by:
 The tuple is compared lexicographically, greatest first:
 
 - model exactness is `2` when any matching `models` selector is exact, `1` when the best matching selector is a glob or token, and `0` when the rule has no `models` selector;
-- dimension count is the number of present dimensions among class, provider/`on`, API/`on-api`, family, revision, and models;
+- dimension count is the number of present dimensions among class, provider/`on`, API/`on-api`, upstream/`on-upstream`, family, revision, and models;
 - priority is the local block's `priority`, defaulting to `0`.
 
 The highest-ranked matching assignment wins for that axis. Two distinct rules that tie on all three components and assign the same axis are an ambiguity error even if their values are equal. File and declaration order never resolve the tie; add an explicit priority only after confirming the overlap is intentional.
@@ -417,6 +426,7 @@ A `seed` _defines_ bundled rows for providers whose catalog cannot be discovered
 | `always`   | Every regeneration. Same-id upstream/discovery rows win dedup.            |
 | `fallback` | Only when the provider's authoritative catalog discovery did not succeed. |
 | `empty`    | Only when no other source produced a row for the provider.                |
+| `never`    | Never; the provider's runtime model manager is the only consumer.         |
 
 `precedence="seed"` prepends the rows after the previous-snapshot merge and cross-provider reference fills, so the authored row wins dedup and same-id rows on other hosts never overwrite its name or capabilities (QwenCloud Token Plan, Meta). The default `upstream` precedence appends before the snapshot merge, so the current seed — not a stale snapshot copy — is the fallback row.
 

@@ -89,5 +89,15 @@
 		"pageBg": "#121419",
 		"cardBg": "#1a1e25",
 		"infoBg": "#2a2317"
+	},
+	"terminal": {
+		"background": "coal",
+		"foreground": "ash",
+		"chrome": "#0f1114",
+		"widget": "coalLighter",
+		"ansi": [
+			"steel", "error", "success", "#e3c25e", "#7ba8d4", "#b88cc8", "#67b8a8", "#b4bac8",
+			"soot", "#ef7a72", "#9cc98a", "#f0d88a", "#9cc2e8", "#d0aade", "#8cd0c2", "#eef0f6"
+		]
 	}
 }

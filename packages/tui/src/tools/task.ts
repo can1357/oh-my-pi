@@ -731,6 +731,7 @@ function renderAgentProgress(
 					? ` ${theme.fg("muted", previewLine(sanitizeText(progress.assignment ?? progress.task), 40))}`
 					: undefined,
 			stats: progress.status === "running" || progress.status === "completed" ? progress : undefined,
+			completionPercent: progress.completionPercent,
 		},
 		theme,
 	);
@@ -1366,7 +1367,7 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
-	const isError = aborted || failed;
+	const isError = result.isError === true || aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
 	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
@@ -1853,6 +1854,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				requests: progress.requests || undefined,
 				tokens: progress.tokens || undefined,
 				...contextStats(progress.contextTokens, progress.contextWindow),
+				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
 				cost: progress.cost > 0 ? progress.cost : undefined,
 				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
 			},
@@ -2167,6 +2169,8 @@ export interface TaskItem {
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
+	/** Per-spawn model selector or ordered selector array; overrides agent and settings preferences. */
+	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -2194,6 +2198,8 @@ export interface TaskParams {
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: "lo" | "med" | "hi";
+	/** Per-spawn model selector or ordered selector array; overrides agent and settings preferences. */
+	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -2328,6 +2334,8 @@ export interface AgentProgress {
 	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
+	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
+	completionPercent?: number;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

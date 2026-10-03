@@ -28,10 +28,10 @@
  * into `layer`; their anchor keypaths are rewritten to wire ids.
  */
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp } from "@oh-my-pi/pi-wire";
+import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
 import { normalizeIconProps } from "./icons";
-import type { DescribeContext, NativeChild, NativeNode } from "./node";
+import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
 
 /** The regions a frame fills. */
@@ -58,6 +58,8 @@ const REGION_IDS = ["main", "dock", "layer"] as const;
 type RegionId = (typeof REGION_IDS)[number];
 const RESERVED_IDS: ReadonlySet<string> = new Set(REGION_IDS);
 const TEXT_KINDS: ReadonlySet<string> = new Set(TSP_TEXT_KINDS);
+/** Most `scroll` ops one node's coalesced key presses send in a frame. */
+const MAX_SCROLL_REPEAT = 32;
 let nextComponentId = 0;
 
 /** Stable base-36 wire id of a component instance (its root node's id). */
@@ -211,8 +213,13 @@ export class Reconciler {
 	#ops: TspOp[] = [];
 	#dels: Entry[] = [];
 	#settles: string[] = [];
-	/** Selected list items sent this frame, revealed once the frame's adds have landed. */
-	#reveals: string[] = [];
+	/**
+	 * Selected list items, added `reveal` nodes and nodes whose reveal `n` moved this frame,
+	 * revealed once the frame's adds have landed.
+	 */
+	#reveals: [id: string, at: NativeRevealAt][] = [];
+	/** `scroll` requests whose `n` moved this frame, sent after the reveals. */
+	#scrolls: [id: string, by: TspScrollBy][] = [];
 	/** Wire ids `list.selected` keys resolved to (an unresolved key names no node to reveal). */
 	#selectedIds = new Set<string>();
 	#moves: PendingMove[] = [];
@@ -250,6 +257,7 @@ export class Reconciler {
 		this.#dels = [];
 		this.#settles = [];
 		this.#reveals = [];
+		this.#scrolls = [];
 		this.#selectedIds.clear();
 		this.#framePortals = [];
 		this.#rows = 0;
@@ -292,7 +300,8 @@ export class Reconciler {
 		}
 		this.#parked = [];
 		for (const id of this.#settles) this.#ops.push(["settle", id]);
-		for (const id of this.#reveals) this.#ops.push(["reveal", id, "nearest"]);
+		for (const [id, at] of this.#reveals) this.#ops.push(["reveal", id, at]);
+		if (cx.feature("scroll")) for (const [id, by] of this.#scrolls) this.#ops.push(["scroll", id, by]);
 		const ops = this.#ops;
 		this.#ops = [];
 		return this.#gone.size === 0 ? ops : ops.filter(op => !this.#touchesGone(op));
@@ -337,6 +346,19 @@ export class Reconciler {
 						.map(unescapeKey)
 						.join("/");
 		return { component: state.comp, keypath };
+	}
+
+	/**
+	 * The component that described wire node `id`, then each component whose
+	 * node contains it, innermost first (empty for an unknown id).
+	 */
+	owners(id: string): Component[] {
+		const dot = id.indexOf(".");
+		const out: Component[] = [];
+		for (let state = this.#byId.get(dot === -1 ? id : id.slice(0, dot)) ?? null; state; state = state.container) {
+			out.push(state.comp);
+		}
+		return out;
 	}
 
 	/** The key a list item node was described with (its key, else its child index). */
@@ -576,12 +598,25 @@ export class Reconciler {
 			this.#revisitNode(next, inner);
 			return;
 		}
+		const reveal = next.node.reveal;
+		if (typeof reveal === "object") {
+			const was = old.node.reveal;
+			if (reveal.n !== (typeof was === "object" ? was.n : undefined)) this.#reveals.push([next.id, reveal.at]);
+		}
 		if (old.node.k !== next.node.k) {
 			this.#dropSubtree(old);
 			this.#ops.push(["del", next.id]);
 			this.#ops.push(["add", next.id, parent, before, this.#materialize(next, inner)]);
 			this.#flushMoves();
 			return;
+		}
+		const scroll = next.node.scroll;
+		if (scroll && scroll.n !== old.node.scroll?.n) {
+			// Presses described in one frame coalesce: repeat the latest step once per
+			// press (an end once), so key repeat keeps its distance.
+			const jump = scroll.by === "start" || scroll.by === "end";
+			const presses = jump ? 1 : Math.min(Math.max(scroll.n - (old.node.scroll?.n ?? 0), 1), MAX_SCROLL_REPEAT);
+			for (let i = 0; i < presses; i++) this.#scrolls.push([next.id, scroll.by]);
 		}
 		const oldEntries = this.#entries(old.node.c, old.keypath, old.owner, old.hoist, null);
 		const newEntries = this.#entries(next.node.c, next.keypath, next.owner, next.hoist, inner);
@@ -716,6 +751,7 @@ export class Reconciler {
 
 	/** A full wire subtree for an entry; nested components get states (or pending moves when mounted elsewhere). */
 	#materialize(entry: NodeEntry, walk: Walk): TspNode {
+		if (typeof entry.node.reveal === "string") this.#reveals.push([entry.id, entry.node.reveal]);
 		const entries = this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, walk);
 		const children: TspNode[] = [];
 		for (let i = 0; i < entries.length; i++) {
@@ -779,7 +815,7 @@ export class Reconciler {
 
 	/** A list's selection went out (on add or change): scroll it into view at frame end. */
 	#noteSelected(selected: unknown): void {
-		if (typeof selected === "string" && this.#selectedIds.has(selected)) this.#reveals.push(selected);
+		if (typeof selected === "string" && this.#selectedIds.has(selected)) this.#reveals.push([selected, "nearest"]);
 	}
 
 	/** Move components an `add` left out into their new parent, last first so every `before` exists. */

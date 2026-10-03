@@ -9,7 +9,7 @@
  * server-side owner, every containerized / robomp turn re-pays the rejected
  * upstream round-trip that already taught the lesson.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,6 +26,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import type { Api, Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
+import { captureFetch, type CapturedRequest, completionsChunks, kimiK3 } from "./helpers/factory-droid";
 
 function makeAnthropicModel(baseUrl: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -202,6 +203,134 @@ async function priorityTurn(
 	});
 	return { status: response.status, body: await response.json() };
 }
+
+it.each(["/v1/pi/stream", "/v1/chat/completions"])(
+	"keeps the selected Factory identity after a concurrent token replacement through %s",
+	async route => {
+		const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
+		const model = kimiK3();
+		const captured: CapturedRequest[] = [];
+		const credential = {
+			type: "oauth" as const,
+			access: "global-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 3_600_000,
+			orgId: "org-global",
+			region: "global" as const,
+			inferenceRegion: "us" as const,
+		};
+		await storage.credentials.set("factory-droid", credential);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			fetch: captureFetch(captured, completionsChunks("ok", model.id)),
+			version: "test",
+		});
+		const get = storage.keys.get.bind(storage.keys);
+		let replaceToken = false;
+		const bearerSpy = spyOn(storage.keys, "get").mockImplementation(async (...args) => {
+			const selected = await get(...args);
+			if (replaceToken) {
+				await storage.credentials.set("factory-droid", {
+					...credential,
+					access: "eu-refreshed-token",
+					orgId: "org-eu",
+					region: "eu",
+					inferenceRegion: "global",
+				});
+			}
+			return selected;
+		});
+		const turn = async () => {
+			const response = await fetch(`${gateway.url}${route}`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify(
+					route === "/v1/pi/stream"
+						? { modelId: model.id, context: CONTEXT, options: { sessionId: "factory-race" }, stream: false }
+						: { model: model.id, messages: [{ role: "user", content: "Hi" }], stream: false },
+				),
+			});
+			const body = await response.json();
+			expect(response.status).toBe(200);
+			expect(JSON.stringify(body)).toContain("ok");
+		};
+		try {
+			// Seed the provider's fallback cache with a different account/host.
+			await turn();
+			await storage.credentials.set("factory-droid", {
+				...credential,
+				access: "eu-selected-token",
+				orgId: "org-eu",
+				region: "eu",
+				inferenceRegion: "global",
+			});
+			replaceToken = true;
+			await turn();
+			expect(storage.credentials.get("factory-droid")).toMatchObject({ access: "eu-refreshed-token" });
+			expect(
+				captured.map(request => [request.url, request.headers["x-factory-org-id"], request.headers.authorization]),
+			).toEqual([
+				["https://api.factory.ai/api/llm/o/v1/chat/completions", "org-global", "Bearer global-token"],
+				["https://api.eu.factory.ai/api/llm/o/v1/chat/completions", "org-eu", "Bearer eu-selected-token"],
+			]);
+		} finally {
+			bearerSpy.mockRestore();
+			await gateway.close();
+			storage.close();
+		}
+	},
+);
+
+it.each(["/v1/pi/stream", "/v1/chat/completions"])(
+	"does not borrow cached Factory organization or EU routing for an unscoped OAuth row through %s",
+	async route => {
+		const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
+		const model = kimiK3();
+		model.baseUrl = "https://api.eu.factory.ai/api/llm/o/v1";
+		model.factoryDroidOrgId = "stale-org";
+		const captured: CapturedRequest[] = [];
+		await storage.credentials.set("factory-droid", {
+			type: "oauth",
+			access: "unscoped-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 3_600_000,
+		});
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			fetch: captureFetch(captured, completionsChunks("ok", model.id)),
+			version: "test",
+		});
+		try {
+			const response = await fetch(`${gateway.url}${route}`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify(
+					route === "/v1/pi/stream"
+						? { modelId: model.id, context: CONTEXT, options: { sessionId: "factory-unscoped" }, stream: false }
+						: { model: model.id, messages: [{ role: "user", content: "Hi" }], stream: false },
+				),
+			});
+			const body = await response.json();
+			expect(response.status).toBe(200);
+			expect(JSON.stringify(body)).toContain("ok");
+			expect(captured).toHaveLength(1);
+			expect(captured[0]).toMatchObject({
+				url: "https://api.factory.ai/api/llm/o/v1/chat/completions",
+				headers: { authorization: "Bearer unscoped-token" },
+			});
+			expect(captured[0].headers).not.toHaveProperty("x-factory-org-id");
+		} finally {
+			await gateway.close();
+			storage.close();
+		}
+	},
+);
 
 /**
  * One priority-tier turn through a foreign-wire route, carrying the history the

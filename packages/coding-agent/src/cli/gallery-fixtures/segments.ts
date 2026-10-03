@@ -182,6 +182,11 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					session: { usingSubscription: true, cost: 0, premiumRequests: 0, advisorCost: 0 },
 				},
 				{
+					label: "subscription + subagents",
+					session: { usingSubscription: true, cost: 0.38, premiumRequests: 0, advisorCost: 0 },
+					context: { subagentTreeCost: 1.27 },
+				},
+				{
 					label: "premium requests",
 					session: { cost: 0, premiumRequests: 2, advisorCost: 0 },
 				},

@@ -14,7 +14,7 @@ describe("mapH2TransportError", () => {
 		expect(err.kind).toBe("runtime");
 		expect(err.message).toContain(BASE_URL);
 		expect(err.message).toContain("ALPN");
-		expect(err.message).toContain("providers.cursor.baseUrl");
+		expect(err.message).toContain("RunSSE/BidiAppend");
 		expect(err.cause).toBe(raw);
 	});
 

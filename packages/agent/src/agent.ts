@@ -1252,6 +1252,20 @@ export class Agent {
 		this.#emitQueueChanged();
 	}
 
+	/**
+	 * Install `followUp` as the pending follow-up queue (same claim handling as
+	 * {@link replaceQueue}) and append `promoted` to the steering queue, then notify
+	 * queue listeners once. A live steering claim is left alone. Listeners never
+	 * observe the moved messages in both queues or in neither.
+	 */
+	moveFollowUpsToSteering(followUp: readonly AgentMessage[], promoted: readonly AgentMessage[]): void {
+		this.#followUpQueue = followUp.slice();
+		this.#cancelQueuedMessagePreparation("followUp");
+		this.#steeringQueue.push(...promoted);
+		this.#notifySteeringWaiters();
+		this.#emitQueueChanged();
+	}
+
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);

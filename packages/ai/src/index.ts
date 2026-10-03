@@ -1,7 +1,7 @@
 export { type Type, type } from "@oh-my-pi/omptype";
 export * from "./api-registry";
 export type * from "./auth-broker";
-export type { AuthGatewayBootOptions, ModelResolver } from "./auth-gateway/dispatch";
+export type { AuthGatewayBootOptions, AuthGatewayRouteOptions, ModelResolver } from "./auth-gateway/dispatch";
 export * from "./auth-gateway/types";
 export * from "./auth-retry";
 export * from "./auth-storage";
@@ -46,6 +46,7 @@ export * from "./usage";
 export * from "./usage/claude";
 export * from "./usage/claude-reset";
 export * from "./usage/cursor";
+export * from "./usage/factory-droid";
 export * from "./usage/gemini";
 export * from "./usage/github-copilot";
 export * from "./usage/google-antigravity";

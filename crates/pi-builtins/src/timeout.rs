@@ -672,11 +672,11 @@ mod tests {
 	async fn external_child_receives_the_configured_signal() {
 		// Failure mode: the timed-out external child only ever seeing SIGKILL
 		// (the cancel-token path) instead of the configured signal.
-		let result = run_with_deadline("timeout -s TERM 0.050 /bin/sleep 5").await;
+		let result = run_with_deadline("timeout -s TERM 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 124);
 
 		let result =
-			run_with_deadline("timeout --preserve-status 0.050 /bin/sleep 5").await;
+			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
 	}
 }

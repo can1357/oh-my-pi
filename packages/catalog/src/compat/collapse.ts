@@ -491,6 +491,17 @@ export function reviewedCollapseTable(provider: string): VariantCollapseTable | 
 }
 
 /**
+ * Logical id of the reviewed `provider` family claiming `memberId` as a member
+ * or extra alias, or `undefined` when no reviewed family owns it. Cursor's rich
+ * discovery names lanes with it so they keep the id the legacy-slug collapse
+ * (and the bundled catalog) assigns.
+ */
+export function reviewedVariantFamilyId(provider: string, memberId: string): string | undefined {
+	const table = reviewedCollapseTable(provider);
+	return table ? getAliasIndex(table).resolve(memberId.trim()) : undefined;
+}
+
+/**
  * The global automatic rule: derive an `X` + `X-thinking` family for every
  * pair where both ids are live in `specs` (trailing or infix token). Gates:
  * - both members share the same `api`,
@@ -937,6 +948,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
 			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
 		};
+		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
+			collapsed.isProviderDefault = true;
+		}
 		// The default wire id is the family's declared `defaultMember` when live,
 		// else the highest-priority live member. Omitted when it equals the
 		// logical id (bare/thinking pairs) — `resolveWireModelId` falls back.

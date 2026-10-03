@@ -689,9 +689,9 @@ interface EvalCellSection {
 }
 
 /**
- * One cell as a borderless section: its highlighted code (no line numbers),
- * then its output. Only multi-cell calls caption the section (`2/3 title ·
- * 1.2s`); a single cell's title is the tool head, never repeated.
+ * A notebook cell: a gutter mark beside the input (←, muted until the cell
+ * runs, omp's thinking starburst while it does) and beside its output (→).
+ * Only multi-cell calls repeat titles; marks never invent execution counts.
  */
 function evalCellSection(cell: EvalCellSection, index: number, total: number): NativeNode {
 	let head: TspSpan[] | undefined;
@@ -702,13 +702,44 @@ function evalCellSection(cell: EvalCellSection, index: number, total: number): N
 		if (cell.status === "error") head.push(span(" · failed", "error"));
 		if (cell.durationMs !== undefined) head.push(span(` · ${(cell.durationMs / 1000).toFixed(2)}s`, "muted"));
 	}
+	const inputMark =
+		cell.status === "running"
+			? node("spinner", { style: "starburst", role: "omp.tool.eval.prompt", aria: "Running" })
+			: node("icon", {
+					name: "arrow-left",
+					role: "omp.tool.eval.prompt",
+					aria: "Input",
+					tone: !cell.status || cell.status === "pending" ? "muted" : undefined,
+				});
 	return node(
-		"section",
-		{ head, role: "omp.tool.eval.cell", tone: cell.status === "error" ? "error" : undefined },
-		[
-			keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
-			...(cell.output ?? []),
-		],
+		"col",
+		{
+			role: "omp.tool.eval.cell",
+			tone: cell.status === "error" ? "error" : cell.status === "running" ? "pending" : undefined,
+		},
+		compact<NativeChild>([
+			head ? text(head, { role: "omp.tool.eval.caption" }) : undefined,
+			node(
+				"row",
+				{ role: "omp.tool.eval.input", align: "start" },
+				[
+					inputMark,
+					keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
+				],
+				"input",
+			),
+			cell.output?.length
+				? node(
+						"row",
+						{ role: "omp.tool.eval.result", align: "start" },
+						[
+							node("icon", { name: "arrow-right", role: "omp.tool.eval.prompt", aria: "Output" }),
+							node("col", { role: "omp.tool.eval.outputs" }, cell.output),
+						],
+						"output",
+					)
+				: undefined,
+		]),
 		`cell-${index}`,
 	);
 }
@@ -1061,6 +1092,7 @@ export const evalToolRenderer = {
 								cell.status === "error",
 							),
 							...(cell.statusEvents ?? []).map(describeStatusEvent),
+							...(i === cellResults.length - 1 ? jsonNodes : []),
 						],
 					},
 					i,
@@ -1086,17 +1118,26 @@ export const evalToolRenderer = {
 					result.isError === true,
 				),
 				...(details?.statusEvents ?? []).map(describeStatusEvent),
+				...jsonNodes,
 			];
 			cells =
 				argCells.length > 0
 					? argCells.map((cell, i) =>
-							evalCellSection(i === argCells.length - 1 ? { ...cell, output } : cell, i, argCells.length),
+							evalCellSection(
+								{
+									...cell,
+									status: isPartial ? "running" : result.isError ? "error" : "complete",
+									output: i === argCells.length - 1 ? output : undefined,
+								},
+								i,
+								argCells.length,
+							),
 						)
 					: output;
 		}
 		return {
 			tool: head,
-			body: compact<NativeChild>([...cells, ...jsonNodes, footer]),
+			body: compact<NativeChild>([...cells, footer]),
 			preview: { lines: previewLines },
 		};
 	},

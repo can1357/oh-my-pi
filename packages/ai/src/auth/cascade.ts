@@ -8,7 +8,15 @@ import { getEnvApiKey, getEnvApiKeyName } from "../stream";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { CredentialSelector } from "./select";
-import type { AuthApiKeyOptions, AuthCredential, AuthSource, AuthSourceOptions, KeysApi, LimitsApi } from "./types";
+import type {
+	AuthApiKeyOptions,
+	AuthCredential,
+	AuthSource,
+	AuthSourceOptions,
+	KeysApi,
+	LimitsApi,
+	OAuthRequestIdentity,
+} from "./types";
 
 /**
  * Default config value resolver that checks env vars and treats as literal.
@@ -296,10 +304,12 @@ export class KeyCascade implements KeysApi {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		let credentialId: number | undefined;
-		const apiKey = await this.get(provider, sessionId, options, id => {
+		let oauthIdentity: OAuthRequestIdentity | undefined;
+		const apiKey = await this.get(provider, sessionId, options, (id, identity) => {
 			credentialId = id;
+			oauthIdentity = identity;
 		});
-		return apiKey === undefined ? undefined : { apiKey, credentialId };
+		return apiKey === undefined ? undefined : { apiKey, credentialId, ...(oauthIdentity ? { oauthIdentity } : {}) };
 	}
 
 	/**
@@ -311,7 +321,7 @@ export class KeyCascade implements KeysApi {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
-		onCredentialId?: (id: number) => void,
+		onCredentialId?: (id: number, identity?: OAuthRequestIdentity) => void,
 	): Promise<string | undefined> {
 		// Runtime override takes highest priority
 		const runtimeKey = this.#deps.overrides.runtimeKey(provider);
@@ -333,7 +343,10 @@ export class KeyCascade implements KeysApi {
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
 		const oauthResolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
 		if (oauthResolved) {
-			if (oauthResolved.credentialId !== undefined) onCredentialId?.(oauthResolved.credentialId);
+			if (onCredentialId && oauthResolved.credentialId !== undefined) {
+				const { orgId, region, inferenceRegion } = oauthResolved.credential;
+				onCredentialId(oauthResolved.credentialId, { orgId, region, inferenceRegion });
+			}
 			return oauthResolved.apiKey;
 		}
 		const loginApiKeySelection = await this.#deps.selector.selectApiKey(

@@ -8,12 +8,13 @@
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
-- Code Mode transport (Codex `code_mode_only` sessions demote non-essential tools into an eval bridge): `packages/coding-agent/src/tools/eval-format/code-mode-declarations.ts`, prompt `packages/coding-agent/src/prompts/tools/eval-code-mode.md`
+- Code Mode transport (enabled Codex Code Mode sessions demote non-essential tools into an eval bridge): `packages/tui/src/tools/eval-format/code-mode-declarations.ts`, prompt `packages/coding-agent/src/prompts/tools/eval-code-mode.md`
 - Shared contracts: `packages/coding-agent/src/eval/backend.ts`, `types.ts`, `executor-base.ts`, `kernel-base.ts`
-- Host bridges: `packages/coding-agent/src/eval/agent-bridge.ts`, `completion-bridge.ts`, `concurrency-bridge.ts`, `budget-bridge.ts`
+- Host bridges: `packages/coding-agent/src/eval/agent-bridge.ts`, `completion-bridge.ts`, `handle-bridge.ts`, `workpool-bridge.ts`, `judgment-bridge.ts`, `judgment-batch-bridge.ts`, `budget-bridge.ts`
+- File/percent-command preparation: `packages/coding-agent/src/eval/input.ts`; extension preludes: `packages/coding-agent/src/eval/preludes.ts`
 - JavaScript: `packages/coding-agent/src/eval/js/`
 - Python: `packages/coding-agent/src/eval/py/`
-- Output/truncation: `packages/coding-agent/src/session/streaming-output.ts`
+- Output/truncation: `packages/tui/src/tools/streaming-output.ts`
 - Python internals: `docs/python-repl.md`
 
 ## Inputs
@@ -25,7 +26,7 @@ The params object is one cell. There is no `cells` array, header parser, languag
 | `language` | `"py" \| "js"` | Yes | Explicit backend token. Normally the live schema includes only enabled runtimes. |
 | `code` | `string` | Yes | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command. |
 | `title` | `string` | No | Short transcript label. |
-| `timeout` | `number` | No | Runtime-work timeout in seconds. Default 30; `0` disables the cell timeout. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. |
+| `timeout` | `number` | No | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. Paused host waits resume with a fresh window, not the unused remainder. |
 | `reset` | `boolean` | No | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`. |
 
 Example across three calls:
@@ -58,6 +59,8 @@ JavaScript dependencies install with `%bun add csv-parse` into an OMP-managed pa
 
 Percent commands are standalone cells, not extra tool arguments; quote requirements containing spaces.
 
+`%load` requires a local script or an internal URL with a local backing file; remote HTTP scripts must be downloaded and inspected first. Virtual URL documents cannot be executed directly.
+
 Compaction receives a bounded live-kernel snapshot with environment and successfully loaded paths, not variable values. Resuming in a fresh process does not restore historical kernel state.
 
 ## Backend availability
@@ -75,7 +78,7 @@ When at least one runtime is enabled, disabled runtimes are removed from the ses
 
 ## Outputs
 
-`execute()` returns one text content block plus any image blocks. `onUpdate` streams the active cell's output and details while it runs.
+`execute()` returns one text content block plus any image blocks. `onUpdate` streams the active cell's output and details while it runs, coalesced at 50 ms intervals.
 
 - Text is stdout/stderr plus model-visible JSON `display()` values and image dimension notes.
 - Image-only success reports `(displayed N image(s); no text output)`; a cell with no visible output reports `(no output)`.
@@ -86,7 +89,7 @@ When at least one runtime is enabled, disabled runtimes are removed from the ses
 
 - `cells`: a one-element `EvalCellResult[]` with `index`, `title?`, `code`, backend `language`, `output`, `status`, `durationMs?`, `exitCode?`, `statusEvents?`, and `hasMarkdown?`. File-backed cells retain the original `%load` command for display rather than duplicating the script source.
 - `language`: the backend used; `languages`: the distinct backend list. These retain the historical multi-cell-compatible shape, but a current call has one backend.
-- `jsonOutputs`: values captured through structured display.
+- `jsonOutputs`: structured display values. Oversized values normally become `{ preview, truncated: true, totalBytes }` while their full JSON is written to the output artifact; without confirmed artifact persistence, the full value is retained here.
 - `images`: present on live updates when images have arrived; final images are content blocks.
 - `statusEvents`: deduplicated helper/tool status events.
 - `notice`: optional backend notice.
@@ -99,10 +102,10 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 ## Execution flow
 
 1. `EvalTool` builds a session-specific schema from enabled languages. It is essential, strict, `approval="exec"`, and `concurrency="exclusive"` within one agent session.
-2. `execute()` maps `py/js` to `python/js`, resolves availability, reads JS file-backed source once, and wraps the input in the renderer-compatible cell list. The JS backend installs requested packages inside the cancellation/background lifecycle.
+2. `execute()` maps `py/js` to `python/js`, resolves availability, reads file-backed source once, and wraps the input in the renderer-compatible cell list. Runtime probing is bounded by the requested timeout and abort signal. The JS backend installs requested packages inside the cancellation/background lifecycle.
 3. It obtains the retained executor id from `session.getEvalSessionId?.()` or `defaultEvalSessionId(session)`, allocates the output sink/artifact, and registers the run through `trackEvalExecution?.(...)`.
 4. The timeout defaults to 30 seconds. `0` creates no watchdog. Otherwise `IdleTimeout` is combined with tool and session abort signals.
-5. Waiting on `agent()` and `completion()` handles emits pause/resume status operations: time spent in those host bridges does not consume the cell's runtime-work budget. Compute, output, status helpers, and ordinary `tool.*` calls do consume it.
+5. Waiting on agent/completion handles, `judge()`, judgment-batch drains, and package installation pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls count against it.
 6. The selected backend receives cwd, retained session id, session file, kernel owner, reset flag, callbacks, and cancellation signal.
 7. Output chunks stream into an artifact-aware `OutputSink` and live tail. Rich displays are separated into JSON, image, markdown, and status channels.
 8. Success, nonzero exit, and cancellation are assembled into the result shapes above. The output sink is finalized even when execution fails.
@@ -112,7 +115,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn:
 
 - The tool foreground-waits for `resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs)`: the threshold, clamped down to the cell's own clamped timeout minus a 1 s buffer so a deadline expiry resolves inline rather than backgrounding moments before it fires. Raising `timeout` therefore does not extend foreground execution beyond the threshold. A threshold of `0` backgrounds immediately.
-- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id>; result will be delivered automatically.`, with `details.async = { state: "running", jobId, type: "eval" }`. The job's completion is delivered later like a backgrounded bash command.
+- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait) and paused across `agent()`/tool bridge calls, so it is not a wall-clock time left. The job's completion is delivered later like a backgrounded bash command.
 - A queued user/peer message (steer) arriving mid-wait backgrounds the cell immediately ("Backgrounded early to handle an incoming message; the cell keeps running.").
 - At the async-job manager's running-job capacity the tool falls through to ordinary foreground execution instead of failing.
 - A failed, cancelled, or timed-out cell is reported as a failed background job (an errored execution is re-entered into the job manager's failure path), never as a silent success.
@@ -143,12 +146,25 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
 - `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
-- `completion(...)`, `agent(...)`, `wait(...)`, `workpool(...)`
+- `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
+- `wait(...)` for agent/completion handles
+- `agent(...)`, `workpool(...)` when spawning is allowed
 - `log(message)`, `phase(title)`, `budget`
 
 JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
 `display()` captures JSON-compatible structures, images, markdown, or text according to the backend.
+
+Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
+
+### `judge()` and judgment batches
+
+`await judge(state, questions)` returns answers keyed by question id. State is a nonempty string, JSON object, or JSON array. Questions have `type: "choice"`, `"bool"`, or `"score"` plus nonempty `instructions`: choice needs at least two label/rubric entries; score needs at least two ordered level descriptions; bool returns a probability in `.bool`, not a boolean. The session's `judge` role resolves the backend.
+
+For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
+
+The full helper reference is `xd://eval/judge`.
+
 
 ### MCP structured results
 
@@ -183,28 +199,46 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 - JS: `completion(prompt, { model?, system?, schema? })`; Python: keyword form with `model`, `system`, and `schema`.
 - `model`: `"smol"`, `"default"`, or `"slow"` tier; default is the active/default tier.
 - `schema`: JSON Schema for a synthetic `respond` tool; `.wait()` then returns parsed data.
-- Unresolved tier and invalid arguments fail the call itself; missing credentials, error/abort stops, empty output, and invalid structured output surface from `.wait()`.
+- Unresolved tier and invalid arguments fail handle allocation; JS's immediate pending-handle wrapper exposes that rejection when awaited/used. Missing credentials, error/abort stops, empty output, and invalid structured output surface from `.wait()`.
 - Handles are process-local, owned by the calling agent, and evicted 30 minutes after settling (or when the owner session ends).
 
 ### `agent()`
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
-- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails the call synchronously; execution failures surface from `.wait()`.
-- `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, model? })`; Python uses keyword arguments (`schema_mode`).
+- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
+- `agent` defaults from the current spawn policy. `model` overrides the selected agent's model for this call only (`provider/model[:level]` or a role alias); it outranks `task.agentModelOverrides` and the agent frontmatter, rejects the ambiguous literals `default`/`inherit` (use `@default`), and fails the call when it matches no available model. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
 - The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and get their own eval executors, like every subagent.
 
+#### Per-call model selection
+
+Both `agent()` and `workpool()` accept a model selector or an ordered, non-empty array. Examples:
+
+```js
+const review = await agent("Review the change", { model: ["@slow", "@default"] });
+const pool = await workpool("scout", { name: "research", model: ["@smol", "@default"] });
+```
+
+```python
+review = agent("Review the change", model=["@slow", "@default"])
+pool = workpool("scout", name="research", model=["@smol", "@default"])
+```
+
+The shared resolver retains role identity and tries the requested candidates in order for working credentials. If none has them, the call fails instead of running on the parent's model, unless the selection includes `@default`. Empty arrays, blank elements, comma-only selectors and invalid thinking suffixes fail preflight. Literal model IDs with colon suffixes retain their identity. These selectors are ordered preferences, not a closed model allowlist: configured runtime fallbacks still apply.
+
+A workpool applies its raw selector to each worker's **first turn**. Follow-up turns reuse that worker's existing session and do not receive a new selector. With `eval.workpool.freshAgents=true`, every new worker receives the pool selector. Different pools keep independent selections.
+
 ### `wait()`
 
-`wait(handles, timeout=None, raise_errors=True)` (JS: `wait(handles, { timeout, raiseErrors })`) blocks until every listed agent/completion handle settles and returns their values in input order. A handle still running after `timeout` raises `TimeoutError`; a failed or cancelled handle raises its error, or — with `raise_errors=False` — is returned in its slot as the error object. Waiting pauses the cell watchdog and defers an external abort until the wait unwinds; an abort cancels the waited handles.
+`wait(handles, timeout=None, raise_errors=True)` (JS: `wait(handles, { timeout, raiseErrors })`) blocks until every listed agent/completion handle settles and returns their values in input order. A handle still running after `timeout` raises `TimeoutError`; a failed or cancelled handle raises its error, or — with `raise_errors=False` — is returned in its slot as the error object. Waiting pauses the cell watchdog; waits involving agents defer destructive runtime abort until the host wait unwinds. An abort cancels the waited handles and waits for them to settle.
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, tools=None, model=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
 
 - `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
@@ -228,15 +262,15 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
 - Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
-- Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles, and closes the owner's work pools.
+- Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles/judgment batches, and closes the owner's work pools.
 
 ## Limits and errors
 
 - Default timeout: 30 seconds; `0` disables. Nonzero timeouts are clamped through `clampTimeout("eval", ..., tools.maxTimeout)`.
 - Output sink default window: 50 KiB (`DEFAULT_MAX_BYTES`); live tail: 100 KiB; truncation helpers cap at 3000 lines.
-- Each JSON display value included in model-visible text is capped at 8000 characters; the full structured value remains in `jsonOutputs`.
+- Each model-visible JSON display preview is capped at 8000 UTF-8 bytes. Larger values spill in full to the output artifact and retain bounded preview metadata in `jsonOutputs`; if persistence is unavailable or fails, `jsonOutputs` retains the full value.
 - Transcript preview defaults to 10 lines.
-- Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Helper fan-out uses `task.maxConcurrency` (default 32, `0` unbounded).
+- Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Subagent/workpool fan-out uses `task.maxConcurrency` (default 32, `0` unbounded); completion/judgment requests have their separate fixed 32-request cap.
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.

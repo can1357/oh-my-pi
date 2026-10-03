@@ -106,9 +106,21 @@ export function encodeTspJson(verb: TspVerb, value: unknown, params?: TspParams,
 	return encodeTspMessage(verb, JSON.stringify(value), params, limit);
 }
 
-/** The `hello` query; callers follow it with a DA1 sentinel. */
+/**
+ * The `hello` query; callers follow it with a DA1 sentinel. `features: ["edit"]`
+ * tells the terminal that omp applies its `edit` events (TSP §8.5), so it may keep a
+ * native selection in omp's editors; without it, every key stays omp's. `"undo"`
+ * says omp applies `undo` events, so the terminal may turn ⌃Z in a field into one.
+ * `"send"` accepts an explicit prompt for a live composer without simulating keys.
+ */
 export function encodeTspHelloQuery(version?: string): string {
-	return encodeTspJson("q", { q: "hello", v: [TSP_VERSION], app: "omp", ver: version });
+	return encodeTspJson("q", {
+		q: "hello",
+		v: [TSP_VERSION],
+		app: "omp",
+		features: ["edit", "undo", "send"],
+		ver: version,
+	});
 }
 
 /** One decoded APC message: verb, parameters and raw body. */
@@ -165,12 +177,22 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
+	// `value` varies by control (boolean, number, string, string[], null): the handler checks it.
+	change: { id: "string", item: "string" },
+	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
+	undo: { id: "string" },
+	focus: { id: "string" },
 	error: { msg: "string" },
 	gone: { ids: "array" },
 };
 
 function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 	if (typeof value.ev !== "string") return null;
+	if (value.ev === "send") {
+		const { sf, id, text } = value;
+		if (typeof sf !== "string" || !sf || typeof id !== "string" || !id || typeof text !== "string") return null;
+		return { ev: "send", sf, id, text };
+	}
 	const required = EVENT_REQUIRED[value.ev];
 	if (!required) return null;
 	for (const key in required) {

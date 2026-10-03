@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import {
@@ -117,6 +118,7 @@ afterEach(() => {
 describe("collab guest running-subagents badge", () => {
 	it("uses the guest mirror registry and refreshes on join, resnapshot, and leave", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		const roomId = "badge-room-1";
 		const roomKey = generateRoomKey();
 		const cryptoKey = await importRoomKey(roomKey);
@@ -166,6 +168,7 @@ describe("collab guest running-subagents badge", () => {
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();
+			renameSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});

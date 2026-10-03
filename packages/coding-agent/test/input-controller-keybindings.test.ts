@@ -338,6 +338,25 @@ describe("InputController keybinding setup", () => {
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
+	it("enters Python mode only once whitespace follows a typed sigil", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		for (const draft of ["$", "$H", "$$", "$$a"]) {
+			editor.onChange?.(draft);
+			expect(ctx.isPythonMode).toBe(false);
+		}
+		expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
+
+		editor.onChange?.("$$ ");
+		expect(ctx.isPythonMode).toBe(true);
+		editor.onChange?.("$$ a");
+		expect(ctx.isPythonMode).toBe(true);
+		expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
 		const { InputController, ctx, editor } = await createContext();
 		const controller = new InputController(ctx);
