@@ -407,26 +407,6 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
  * the bundled catalog at the documented/provider-safe caps so request builders
  * that always send `max_tokens` do not over-allocate.
  */
-/**
- * Same-id reference fills can restore output caps borrowed from hosts that
- * serve larger windows than Infron does (e.g. gemma-3-27b-it: a 131072 cap
- * against a 128000 window). An output cap above the context ceiling is
- * meaningless, so clamp it into the served window.
- */
-function applyInfronMaxTokensWindowClamp(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.map(model => {
-		if (
-			model.provider === "infron" &&
-			model.maxTokens !== null &&
-			model.contextWindow !== null &&
-			model.maxTokens > model.contextWindow
-		) {
-			return { ...model, maxTokens: model.contextWindow };
-		}
-		return model;
-	});
-}
-
 function applyKimiMaxTokensCap(models: readonly ModelSpec[]): ModelSpec[] {
 	const FIREWORKS_KIMI_PROVIDERS = new Set(["fireworks", "firepass"]);
 	return models.map(model => {
@@ -446,6 +426,27 @@ function applyKimiMaxTokensCap(models: readonly ModelSpec[]): ModelSpec[] {
 		}
 		return model;
 	});
+}
+
+/**
+ * Same-id reference fills refill the `null` output cap that `mapInfronModel`
+ * chose on purpose when a cap reaches the served window (a cap at or above the
+ * context ceiling restates the window, e.g. gemma-3-27b-it borrowing a 131072
+ * cap against a 128000 window). Drop those again so the bundled rows match
+ * what live discovery reports. The fills are kept for `reasoning`, which the
+ * Infron roster does not report natively.
+ */
+function dropInfronOutputCapsAtContextWindow(models: ModelSpec[]): void {
+	for (const model of models) {
+		if (
+			model.provider === "infron" &&
+			model.maxTokens !== null &&
+			model.contextWindow !== null &&
+			model.maxTokens >= model.contextWindow
+		) {
+			model.maxTokens = null;
+		}
+	}
 }
 
 /**
@@ -695,7 +696,6 @@ async function generateModels() {
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyPricingPeerFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
-	allModels = applyInfronMaxTokensWindowClamp(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
 	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
@@ -722,6 +722,10 @@ async function generateModels() {
 	// Pin every Ollama Cloud model's max-output to the enforced ceiling; runs
 	// after canonical fallback so finalized context windows drive the cap.
 	applyOllamaCloudOutputCap(allModels);
+	// Same-id fills and the canonical fallback refill output caps that reach
+	// the served window; drop those last so the bundled rows match what live
+	// discovery reports.
+	dropInfronOutputCapsAtContextWindow(allModels);
 
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);

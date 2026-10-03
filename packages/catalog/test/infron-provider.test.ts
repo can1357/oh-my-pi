@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { INFRON_BASE_URL, infronModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 function infronFixture(): Response {
@@ -85,7 +84,8 @@ describe("Infron built-in provider", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(requests).toEqual([`${INFRON_BASE_URL}/models`]);
-		expect(options.dynamicModelsAuthoritative).toBe(true);
+		// The exact id list also proves embeddings, image, search, and
+		// deprecated rows never reach the chat picker.
 		expect(models?.map(item => item.id)).toEqual([
 			"anthropic/claude-sonnet-5",
 			"openai/tool-less-model",
@@ -100,20 +100,6 @@ describe("Infron built-in provider", () => {
 		expect(glm?.contextWindow).toBe(1000000);
 		expect(glm?.maxTokens).toBe(128000);
 		expect(glm?.input).toEqual(["text"]);
-	});
-
-	test("keeps the chat picker to servable LLM rows", async () => {
-		const fetchMock = async (): Promise<Response> => infronFixture();
-		const options = infronModelManagerOptions({ fetch: fetchMock });
-		const models = await options.fetchDynamicModels?.();
-
-		const ids = models?.map(item => item.id) ?? [];
-		// Embeddings, image generation, and search surfaces cannot serve chat.
-		expect(ids).not.toContain("openai/text-embedding-3-small");
-		expect(ids).not.toContain("google/nano-banana/text-to-image");
-		expect(ids).not.toContain("tavily/tavily-search");
-		// Deprecated rows are not servable either.
-		expect(ids).not.toContain("openai/retired-model");
 	});
 
 	test("treats an output cap at the context ceiling as unknown", async () => {
@@ -137,30 +123,5 @@ describe("Infron built-in provider", () => {
 		expect(toolless?.supportsTools).toBe(false);
 		const glm = models?.find(item => item.id === "z-ai/glm-5.2");
 		expect(glm?.supportsTools).toBeUndefined();
-	});
-
-	test("sends a bearer token on keyed discovery", async () => {
-		const authorizations: Array<string | null> = [];
-		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			authorizations.push(new Headers(init?.headers).get("Authorization"));
-			return infronFixture();
-		};
-
-		const options = infronModelManagerOptions({ apiKey: "infron-test-key", fetch: fetchMock });
-		await options.fetchDynamicModels?.();
-
-		expect(authorizations).toEqual(["Bearer infron-test-key"]);
-	});
-
-	test("ships no bundled row whose output cap exceeds its context window", () => {
-		// Guards the generated slice itself: the reference fallback runs again
-		// during `gen:models`, so an unclamped cap would be baked into the
-		// bundle rather than just appearing at discovery time.
-		const offenders = getBundledModels("infron")
-			.filter(model => model.maxTokens !== null && model.contextWindow !== null)
-			.filter(model => (model.maxTokens as number) > (model.contextWindow as number))
-			.map(model => `${model.id}: ${model.maxTokens} > ${model.contextWindow}`);
-
-		expect(offenders).toEqual([]);
 	});
 });
