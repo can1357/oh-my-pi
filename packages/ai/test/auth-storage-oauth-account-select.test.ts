@@ -123,6 +123,27 @@ describe("AuthStorage OAuth account selection", () => {
 			}),
 		).toBe("a@example.com");
 	});
+	test("strict pins survive inheritance and stop instead of rotating at the usage limit", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const accountB = storage.oauth.accounts(PROVIDER)[1];
+		if (!accountB) throw new Error("expected second OAuth account");
+		expect(storage.sessions.pin(PROVIDER, "strict-parent", accountB.credentialId, { strict: true })).toBe(true);
+		expect(storage.sessions.inherit("strict-parent", "strict-child")).toBe(1);
+		expect(storage.sessions.mode(PROVIDER, "strict-child")).toBe("strict");
+		expect(await storage.keys.get(PROVIDER, "strict-child")).toBe("access-b");
+		expect(await storage.keys.get(PROVIDER, "strict-child", { modelId: "second-model" })).toBe("access-b");
+
+		const outcome = await storage.limits.markReached(PROVIDER, "strict-child", { retryAfterMs: 60_000 });
+		expect(outcome.switched).toBe(false);
+		expect(await storage.keys.get(PROVIDER, "strict-child")).toBeUndefined();
+		expect(storage.oauth.identity(PROVIDER, "strict-child")?.email).toBe("b@example.com");
+	});
 
 	test("resolves the account at the requested position by ID and touches only that one", async () => {
 		const storage = authStorage;

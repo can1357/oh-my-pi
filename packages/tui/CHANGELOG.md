@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added synchronous assistant text display projections for native Markdown nodes and classic terminal Markdown, with pending-state retirement guards and terminal failure settlement.
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

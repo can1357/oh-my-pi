@@ -66,11 +66,16 @@ export function recordCredentialPin(
 	sessionId: string,
 	provider: string,
 ): void {
+	const current = sessionManager.getCredentialPins().get(provider);
+	if (current?.mode === "automatic") return;
 	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
-	sessionManager.appendCredentialPin(provider, hash);
+	if (!hash || current?.hash === hash) return;
+	// Preserve the live strict mode so a subagent's journal entry restores as
+	// strict rather than as a legacy warm-affinity pin.
+	const liveMode = authStorage.sessions.mode(provider, sessionId);
+	sessionManager.appendCredentialPin(provider, hash, liveMode === "strict" ? "strict" : undefined);
 }
 
 /**
@@ -85,6 +90,10 @@ export function recordCredentialPin(
  */
 export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
+		if (pin.mode === "automatic") {
+			authStorage.sessions.automatic(provider, sessionId);
+			continue;
+		}
 		const accounts = authStorage.oauth.accounts(provider, sessionId);
 		if (accounts.length === 0) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
@@ -93,6 +102,7 @@ export function seedCredentialPins(authStorage: AuthStorage, sessionManager: Ses
 		if (active && (active !== match || (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt)) continue;
 		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
 			restoredAtMs: pin.lastUsedAt,
+			strict: pin.mode === "strict",
 		});
 	}
 }

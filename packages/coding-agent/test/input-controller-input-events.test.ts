@@ -4,7 +4,11 @@ import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionFactory, InputEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -134,7 +138,10 @@ async function createHarness(factory: ExtensionFactory) {
 	return { ctx, editor, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+});
 
 describe("interactive native input ingress", () => {
 	it("Ctrl+Enter chains partial text/image transforms and restores materialized images after rejection", async () => {
@@ -542,6 +549,153 @@ describe("interactive native input ingress", () => {
 		["Enter", ENTER],
 		["Ctrl+Enter", FOLLOW_UP],
 	] as const) {
+		for (const failure of ["reject", "throw", "timeout"] as const) {
+			it(`${label} restores original Chinese and attachments when a transformed input hook ${failure}s`, async () => {
+				const downstream = vi.fn();
+				let handlerSignal: AbortSignal | undefined;
+				const h = await createHarness(pi => {
+					pi.on("input", () => ({ text: "English intermediate", images: [transformedImage] }));
+					pi.on("input", async (_event, ctx) => {
+						handlerSignal = ctx.abortSignal;
+						if (failure === "throw") throw new Error("翻译失败");
+						if (failure === "timeout") {
+							const signal = ctx.abortSignal;
+							if (!signal) throw new Error("Missing handler cancellation signal");
+							await new Promise<void>(resolve => {
+								signal.addEventListener("abort", () => resolve(), { once: true });
+							});
+							return { text: "late English" };
+						}
+						return { reject: "翻译失败", handled: true, text: "/clear", images: [] };
+					});
+					pi.on("input", downstream);
+				});
+				if (failure === "timeout") testSetExtensionHandlerTimeoutMs(10);
+				h.session.isCompacting = true;
+				h.draftWithImage("请解释这张图片 [Image #1]");
+
+				await h.pressSubmit(key);
+
+				expect(h.prompt).not.toHaveBeenCalled();
+				expect(h.session.followUp).not.toHaveBeenCalled();
+				expect(h.ctx.compactionQueuedMessages).toEqual([]);
+				expect(h.ctx.handleClearCommand).not.toHaveBeenCalled();
+				expect(downstream).not.toHaveBeenCalled();
+				expect(h.editor.getExpandedText()).toBe("请解释这张图片 [Image #1]");
+				expect(h.editor.pendingImages).toEqual([originalImage]);
+				expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
+				expect(h.editor.imageLinks).toEqual(["local://original.png"]);
+				expect(h.blobs.size).toBe(0);
+				expect(h.ctx.showError).toHaveBeenCalledWith(
+					failure === "timeout" ? "handler timed out after 10ms" : "翻译失败",
+				);
+				if (failure === "timeout") expect(handlerSignal?.aborted).toBe(true);
+			});
+		}
+
+		it(`${label} merges rejection with newer typing and images without duplicating live attachments`, async () => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const h = await createHarness(pi => {
+				pi.on("input", async () => {
+					entered.resolve();
+					await release.promise;
+					return { reject: "翻译失败" };
+				});
+			});
+			h.draftWithImage("原文 [Image #1]");
+			const submitting = h.pressSubmit(key);
+			await entered.promise;
+			h.editor.pendingImages.push(newerImage);
+			h.editor.pendingImageLinks.push("local://newer.jpg");
+			h.editor.imageLinks = h.editor.pendingImageLinks;
+			h.editor.setText(`新草稿 [Image #${key === ENTER ? 2 : 1}]`);
+			release.resolve();
+			await submitting;
+
+			expect(h.prompt).not.toHaveBeenCalled();
+			expect(h.editor.getExpandedText()).toBe(
+				key === ENTER ? "原文 [Image #1]\n\n新草稿 [Image #2]" : "原文 [Image #2]\n\n新草稿 [Image #1]",
+			);
+			expect(h.editor.pendingImages).toEqual(
+				key === ENTER ? [originalImage, newerImage] : [newerImage, originalImage],
+			);
+			expect(h.editor.pendingImageLinks).toEqual(
+				key === ENTER
+					? ["local://original.png", "local://newer.jpg"]
+					: ["local://newer.jpg", "local://original.png"],
+			);
+		});
+
+		for (const outcome of ["reject", "transform"] as const) {
+			it(`${label} discards a pending hook ${outcome} after switching sessions`, async () => {
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const h = await createHarness(pi => {
+					pi.on("input", async () => {
+						entered.resolve();
+						await release.promise;
+						return outcome === "reject" ? { reject: "翻译失败" } : { text: "English result" };
+					});
+				});
+				h.draftWithImage("旧会话 [Image #1]");
+				const submitting = h.pressSubmit(key);
+				await entered.promise;
+				vi.spyOn(h.ctx.sessionManager, "getSessionId").mockReturnValue("another-session");
+				h.draftWithImage("新会话 [Image #1]", newerImage, "local://newer.jpg");
+				release.resolve();
+				await submitting;
+
+				expect(h.prompt).not.toHaveBeenCalled();
+				expect(h.session.followUp).not.toHaveBeenCalled();
+				expect(h.editor.getExpandedText()).toBe("新会话 [Image #1]");
+				expect(h.editor.pendingImages).toEqual([newerImage]);
+				expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
+				expect(h.ctx.showError).not.toHaveBeenCalled();
+			});
+		}
+
+		it(`${label} restores a rejected submission beside a replacement draft and attachment`, async () => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const h = await createHarness(pi => {
+				pi.on("input", async () => {
+					entered.resolve();
+					await release.promise;
+					throw new Error("翻译失败");
+				});
+			});
+			h.draftWithImage("原文 [Image #1]");
+			const submitting = h.pressSubmit(key);
+			await entered.promise;
+			h.draftWithImage("新草稿 [Image #1]", newerImage, "local://newer.jpg");
+			release.resolve();
+			await submitting;
+
+			expect(h.prompt).not.toHaveBeenCalled();
+			expect(h.editor.getExpandedText()).toBe("原文 [Image #2]\n\n新草稿 [Image #1]");
+			expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
+			expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg", "local://original.png"]);
+			expect(h.editor.imageLinks).toEqual(["local://newer.jpg", "local://original.png"]);
+			expect(h.ctx.showError).toHaveBeenCalledWith("翻译失败");
+		});
+
+		it(`${label} dispatches only the English transform with its original attachment`, async () => {
+			const h = await createHarness(pi => {
+				pi.on("input", () => ({ text: "Explain this picture [Image #1]" }));
+			});
+			h.draftWithImage("请解释这张图片 [Image #1]");
+
+			await h.pressSubmit(key);
+
+			expect(h.prompt.mock.calls).toEqual([
+				[
+					"Explain this picture [Image #1]",
+					{ streamingBehavior: key === ENTER ? "steer" : "followUp", images: [originalImage] },
+				],
+			]);
+		});
+
 		it(`${label} stops handlers and built-in commands when native input is handled`, async () => {
 			const downstream = vi.fn();
 			const h = await createHarness(pi => {

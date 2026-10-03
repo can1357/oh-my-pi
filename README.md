@@ -328,6 +328,7 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+- `/account status|<number|email|email local-part>` — inspect or strictly lock the current provider's OAuth account for this session. Strict locks persist across resume and subagents and never fall back to a sibling account.
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 

@@ -119,6 +119,20 @@ describe("credential pins", () => {
 		const active = storage.oauth.accounts("anthropic", sessionId).find(account => account.active);
 		expect(active?.accountId).toBe("account-b");
 	});
+	test("restores a persisted strict account lock", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
+		if (!hash) throw new Error("expected a pin hash");
+		manager.appendCredentialPin("anthropic", hash, "strict");
+
+		seedCredentialPins(storage, manager, sessionId);
+
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+		expect(storage.oauth.accounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe(
+			"account-b",
+		);
+	});
 
 	test("pins are org-scoped: the same account in two orgs re-pins the matching org credential", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
@@ -218,5 +232,48 @@ describe("credential pins", () => {
 		expect(entries).toHaveLength(1);
 		const identity = storage.oauth.identity("anthropic", sessionId);
 		expect(manager.getCredentialPins().get("anthropic")?.hash).toBe(credentialPinHash("anthropic", identity!));
+	});
+
+	test("auth.defaultAccounts seeds a strict pin on session adoption", () => {
+		// Simulate what #seedDefaultCredentialPins does: find the account matching
+		// the configured selector, pin it strictly, and journal the entry.
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const selector = "b";
+
+		const accounts = storage.oauth.accounts("anthropic", sessionId);
+		expect(accounts).toHaveLength(2);
+		expect(accounts.some(a => a.active)).toBe(false);
+
+		const matches = accounts.filter(account => {
+			const email = account.email?.trim().toLowerCase();
+			return (
+				email === selector ||
+				email?.split("@", 1)[0]?.startsWith(selector) === true ||
+				account.accountId?.trim().toLowerCase() === selector
+			);
+		});
+		expect(matches).toHaveLength(1);
+		const account = matches[0]!;
+		expect(storage.sessions.pin("anthropic", sessionId, account.credentialId, { strict: true })).toBe(true);
+		const hash = credentialPinHash("anthropic", account);
+		if (hash) manager.appendCredentialPin("anthropic", hash, "strict");
+
+		// Verify: the session is strict-pinned to account-b, and a journal entry
+		// with mode "strict" was written.
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+		expect(storage.oauth.accounts("anthropic", sessionId).find(a => a.active)?.accountId).toBe("account-b");
+		const pins = manager.getCredentialPins();
+		expect(pins.get("anthropic")?.mode).toBe("strict");
+
+		// Verify the pin survives a fresh-provider-ID restore (the /fresh path):
+		// strict entries must be carried forward.
+		const freshSid = `fresh-${sessionId}`;
+		const strictPins = [...pins.entries()].filter(([, p]) => p.mode === "strict");
+		expect(strictPins).toHaveLength(1);
+		const freshMatch = storage.oauth
+			.accounts("anthropic", freshSid)
+			.find(a => credentialPinHash("anthropic", a) === strictPins[0]![1].hash);
+		expect(freshMatch?.accountId).toBe("account-b");
 	});
 });
