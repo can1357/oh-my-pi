@@ -1790,8 +1790,8 @@ export interface InstrumentedChatSpanOptions {
 	/**
 	 * Tag stamped onto `omp.gen_ai.oneshot.kind`. Values used by the agent:
 	 * `compaction_summary`, `compaction_short_summary`, `compaction_turn_prefix`,
-	 * `handoff`, `branch_summary`, `image_question`. Free-form to allow callers
-	 * outside this package to add new kinds without bumping the helper.
+	 * `handoff`, `branch_summary`, `image_question`, `skill_description`. Free-form
+	 * to allow callers outside this package to add new kinds without bumping the helper.
 	 */
 	readonly oneshotKind?: string;
 	/** Extra span attributes applied verbatim. */
