@@ -5,12 +5,12 @@ import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "..
 import { isNativeRendering } from "../native/state";
 import { describeShimmer, type ShimmerPalette, shimmerEnabled } from "../theme/shimmer";
 import { minFrameIntervalMs } from "../frame-rate";
-import { spinnerAnimated, spinnerInterval } from "../spinner-clock";
+import { onSpinnerIntervalChange, spinnerAnimated, spinnerInterval, STATIC_SPINNER_GLYPH } from "../spinner-clock";
 import type { TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
 
-const DEFAULT_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const DEFAULT_SPINNER_FRAMES = [STATIC_SPINNER_GLYPH, "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const RENDER_INTERVAL_MS = 1000 / 30;
 /** Repaint cadence of a static-spinner row, so a dynamic label (countdown, elapsed) still moves. */
 const STATIC_REFRESH_MS = 1000;
@@ -108,6 +108,7 @@ export class Loader extends Text {
 	#frames = DEFAULT_SPINNER_FRAMES;
 	#currentFrame = 0;
 	#intervalId?: NodeJS.Timeout;
+	#unsubscribeSpinnerInterval?: () => void;
 	#ui: TUI | null = null;
 	#lastSpinnerTick = 0;
 	#layoutSource?: readonly string[];
@@ -311,9 +312,26 @@ export class Loader extends Text {
 			this.#startNativeCountdown();
 			return;
 		}
+		this.#unsubscribeSpinnerInterval ??= onSpinnerIntervalChange(this.#onSpinnerIntervalChange);
 		const intervalMs = this.#tickIntervalMs();
 		this.#scheduleTick(intervalMs, intervalMs);
 	}
+
+	/**
+	 * A live `tui.spinnerInterval` change takes effect at once: a spinner going static pins frame 0,
+	 * and the cadence restarts from now, so a static → animated switch does not wait out the old
+	 * one-second refresh and an animated → static one does not keep ticking at the old rate.
+	 */
+	#onSpinnerIntervalChange = (): void => {
+		if (!this.#intervalId || isNativeRendering()) return;
+		clearTimeout(this.#intervalId);
+		if (!spinnerAnimated()) this.#currentFrame = 0;
+		this.#lastSpinnerTick = performance.now();
+		this.#syncText();
+		this.#requestPaint();
+		const intervalMs = this.#tickIntervalMs();
+		this.#scheduleTick(intervalMs, intervalMs);
+	};
 
 	/**
 	 * Tick cadence: shimmer drives a 30 Hz repaint; otherwise the row changes when the glyph advances
@@ -332,6 +350,8 @@ export class Loader extends Text {
 	}
 
 	stop() {
+		this.#unsubscribeSpinnerInterval?.();
+		this.#unsubscribeSpinnerInterval = undefined;
 		if (this.#intervalId) {
 			clearTimeout(this.#intervalId);
 			this.#intervalId = undefined;
@@ -382,7 +402,8 @@ export class Loader extends Text {
 				this.#lastSpinnerTick += steps * advanceMs;
 				this.#syncText();
 			} else if (!animated) {
-				// Static glyph: only a dynamic message can change, and it is re-read here.
+				// Static glyph (frame 0): only a dynamic message can change, and it is re-read here.
+				this.#currentFrame = 0;
 				this.#syncText();
 			}
 			if (shouldAdvanceSpinner || !animated || this.#ui?.synchronizedOutput === true) {
