@@ -439,6 +439,31 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
 	target.costByCurrency = addCostByCurrency(target.costByCurrency, usage.costByCurrency);
+	target.costByCurrencyCoverage = addCostByCurrencyCoverage(
+		target.costByCurrencyCoverage,
+		usage.costByCurrency,
+		usage.cost.total,
+	);
+}
+
+/**
+ * Track how much of the base-currency ledger each alternate card covers: a
+ * record that carried a card in code C contributes its base-currency total to
+ * C's coverage. Shared by the display layer to tell a fully CNY-priced session
+ * from a mixed one, where relabelling the total would hide the base spend.
+ */
+function addCostByCurrencyCoverage(
+	target: Partial<Record<CurrencyCode, number>> | undefined,
+	source: Usage["costByCurrency"],
+	baseTotal: number,
+): Partial<Record<CurrencyCode, number>> | undefined {
+	if (source === undefined) return target;
+	const next = target ?? {};
+	for (const code of Object.keys(source) as CurrencyCode[]) {
+		if (source[code] === undefined) continue;
+		next[code] = (next[code] ?? 0) + baseTotal;
+	}
+	return next;
 }
 
 /**

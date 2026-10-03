@@ -306,5 +306,64 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.cost).toBeCloseTo(3, 8);
 		expect(usage.costByCurrency?.USD).toBeCloseTo(3, 8);
 		expect(usage.costByCurrency?.CNY).toBeCloseTo(20, 8);
+		// Every record carried both cards, so each code covers the whole ledger.
+		expect(usage.costByCurrencyCoverage?.USD).toBeCloseTo(3, 8);
+		expect(usage.costByCurrencyCoverage?.CNY).toBeCloseTo(3, 8);
+	});
+
+	it("marks alternate-currency coverage partial when only some records carry the card", () => {
+		// A Claude turn (no alternate card) followed by a DeepSeek turn: `cost`
+		// folds both, while `costByCurrency.CNY` covers only the DeepSeek share.
+		// The coverage accumulator records that gap so the status line can refuse
+		// to relabel the full total with the CNY symbol.
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "claude" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 1_000_000,
+				output: 1_000_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2_000_000,
+				cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0, total: 18 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "deepseek" }],
+			api: "openai-completions",
+			provider: "deepseek",
+			model: "deepseek-v4-flash",
+			usage: {
+				input: 1_000_000,
+				output: 1_000_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2_000_000,
+				cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0, total: 1.5 },
+				costByCurrency: {
+					USD: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0, total: 1.5 },
+					CNY: { input: 2, output: 8, cacheRead: 0, cacheWrite: 0, total: 10 },
+				},
+			},
+			stopReason: "stop",
+			timestamp: 3,
+		});
+
+		const usage = session.getUsageStatistics();
+		expect(usage.cost).toBeCloseTo(19.5, 8);
+		expect(usage.costByCurrency?.USD).toBeCloseTo(1.5, 8);
+		expect(usage.costByCurrency?.CNY).toBeCloseTo(10, 8);
+		// Only the $1.50 DeepSeek turn was priced through a card, so coverage
+		// stops short of the $19.50 ledger.
+		expect(usage.costByCurrencyCoverage?.CNY).toBeCloseTo(1.5, 8);
+		expect(usage.costByCurrencyCoverage?.CNY).toBeLessThan(usage.cost);
 	});
 });

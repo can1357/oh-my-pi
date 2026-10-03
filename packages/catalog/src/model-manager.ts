@@ -4,11 +4,12 @@ import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
-import { isTimeBasedCost } from "./pricing";
+import { isCurrencyCards, isTimeBasedCost } from "./pricing";
 import {
 	type Api,
 	type Model,
 	type ModelCost,
+	isCurrencyCode,
 	modelKind,
 	type ModelSpec,
 	type Provider,
@@ -828,8 +829,17 @@ function isTokenCost(value: unknown): value is TokenCost {
 
 function isModelCost(value: unknown): value is ModelCost {
 	if (!isTokenCost(value)) return false;
-	const cost = value as TokenCost & { longContext?: unknown; timeBased?: unknown };
+	const cost = value as TokenCost & {
+		longContext?: unknown;
+		timeBased?: unknown;
+		currency?: unknown;
+		currencyCards?: unknown;
+	};
 	if (cost.timeBased !== undefined && !isTimeBasedCost(cost.timeBased)) return false;
+	// Alternate-currency cards flow into `priceUsage` at request time; a malformed
+	// cached card would otherwise put `NaN` into `costByCurrency`.
+	if (cost.currency !== undefined && !isCurrencyCode(cost.currency)) return false;
+	if (cost.currencyCards !== undefined && !isCurrencyCards(cost.currencyCards)) return false;
 	const longContext = cost.longContext;
 	if (longContext === undefined) return true;
 	if (!isTokenCost(longContext) || !isRecord(longContext)) return false;

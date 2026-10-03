@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `cost.displayCurrency` setting (`USD` or `CNY`) for the status-line `cost` segment: it shows session spend in the active model's own published card for that currency (keeping the peak/off-peak arrow), and keeps the model's base card and symbol when it publishes no card there or when only part of the session was priced through it, so the chip never labels base-currency spend with a foreign symbol.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

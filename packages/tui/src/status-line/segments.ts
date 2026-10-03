@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { getTimeBasedPricingPeriod, modelCurrency } from "@oh-my-pi/pi-catalog/models";
+import { currencyCard, getTimeBasedPricingPeriod, modelCurrency } from "@oh-my-pi/pi-catalog/models";
 import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
 import {
 	formatDuration,
@@ -781,7 +781,7 @@ const tokenRateSegment: StatusLineSegment = {
 
 /** Billing summary for the `cost` segment, or undefined when there is nothing to bill. */
 function costSummary(ctx: SegmentContext): string | undefined {
-	const { cost, premiumRequests, costByCurrency } = ctx.usageStats;
+	const { cost, premiumRequests, costByCurrency, costByCurrencyCoverage } = ctx.usageStats;
 	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 	const state = ctx.session.state;
 	const pricingPeriod = state.model?.cost
@@ -790,9 +790,17 @@ function costSummary(ctx: SegmentContext): string | undefined {
 	// The model's base card is the source of truth for the numbers in `cost`.
 	const baseCurrency = state.model?.cost ? modelCurrency(state.model.cost) : "USD";
 	const preferred = ctx.costCurrency ?? baseCurrency;
-	const preferredCost = preferred === baseCurrency ? cost : costByCurrency?.[preferred];
-	// A model that publishes no card in the preferred currency keeps its base
-	// card, so a symbol is never applied to amounts from a different card.
+	// A preference only relabels the chip when the active model publishes a card
+	// in that currency AND the whole ledger was priced through it. `costByCurrency`
+	// folds only the records that carried the card while `cost` folds every record,
+	// so a partial map would drop base-currency spend behind a foreign symbol.
+	const preferredCard = state.model?.cost !== undefined ? currencyCard(state.model.cost, preferred) : undefined;
+	const coveredBase = costByCurrencyCoverage?.[preferred];
+	const fullyCovered = coveredBase !== undefined && coveredBase >= cost - Math.max(1e-9, Math.abs(cost) * 1e-9);
+	const preferredCost =
+		preferred !== baseCurrency && preferredCard !== undefined && fullyCovered
+			? costByCurrency?.[preferred]
+			: undefined;
 	const currency = preferredCost === undefined ? baseCurrency : preferred;
 	// `cost` folds in completed task results; show the session's own spend and
 	// the subagent tree separately. The hub-projected tree total also covers

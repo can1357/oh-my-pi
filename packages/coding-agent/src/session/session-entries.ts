@@ -353,6 +353,13 @@ export interface UsageStatistics {
 	 */
 	costByCurrency?: Partial<Record<CurrencyCode, number>>;
 	/**
+	 * Base-currency total of the records that carried a card in each ISO 4217
+	 * code, keyed the same as {@link costByCurrency}. It equals {@link cost} only
+	 * when every record was priced in that code, so a display layer can refuse
+	 * to relabel the session total with a currency it only partially covers.
+	 */
+	costByCurrencyCoverage?: Partial<Record<CurrencyCode, number>>;
+	/**
 	 * Portion of {@link costByCurrency} carried by completed `task` results, in
 	 * the same per-currency map, so the subagent split stays exact in an
 	 * alternate-currency readout without converting between currencies.

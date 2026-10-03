@@ -22,6 +22,8 @@ interface CostCtxOptions {
 	premiumRequests?: number;
 	costCurrency?: CurrencyCode;
 	costByCurrency?: Partial<Record<CurrencyCode, number>>;
+	/** Base-currency spend of the records that carried a card in each code. */
+	costByCurrencyCoverage?: Partial<Record<CurrencyCode, number>>;
 	/** Task-result portion of `costByCurrency`, per code. */
 	subagentCostByCurrency?: Partial<Record<CurrencyCode, number>>;
 	onAdvisorSubscriptionProbe: () => void;
@@ -41,6 +43,7 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 			subagentCost: options.subagentCost,
 			subagentCostByCurrency: options.subagentCostByCurrency,
 			costByCurrency: options.costByCurrency,
+			costByCurrencyCoverage: options.costByCurrencyCoverage,
 			tokensPerSecond: null,
 		},
 		subagentTreeCost: options.subagentTreeCost,
@@ -177,6 +180,7 @@ describe("cost status-line segment", () => {
 		const ctx = costCtx({
 			cost: 1.506,
 			costByCurrency: { USD: 1.506, CNY: 10.04 },
+			costByCurrencyCoverage: { USD: 1.506, CNY: 1.506 },
 			costCurrency: "CNY",
 			model,
 			now: new Date("2026-09-16T02:00:00Z"),
@@ -196,6 +200,7 @@ describe("cost status-line segment", () => {
 		const ctx = costCtx({
 			cost: 1.506,
 			costByCurrency: { USD: 1.506, CNY: 10.04 },
+			costByCurrencyCoverage: { USD: 1.506, CNY: 1.506 },
 			subagentCost: 0.15,
 			subagentCostByCurrency: { CNY: 1.0 },
 			costCurrency: "CNY",
@@ -217,5 +222,46 @@ describe("cost status-line segment", () => {
 			onAdvisorSubscriptionProbe: () => {},
 		});
 		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("$1.25 ↓");
+	});
+
+	it("keeps the base symbol when the active model publishes no card in the preferred currency", () => {
+		// A non-CNY model is active while the session still holds CNY-priced spend
+		// from earlier turns: the chip must never label that model's totals as `¥`.
+		const ctx = costCtx({
+			cost: 19.5,
+			costByCurrency: { USD: 1.5, CNY: 10 },
+			costByCurrencyCoverage: { USD: 19.5, CNY: 19.5 },
+			costCurrency: "CNY",
+			model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			now: new Date("2026-09-16T02:00:00Z"),
+			onAdvisorSubscriptionProbe: () => {},
+		});
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("$19.50");
+	});
+
+	it("keeps the base currency when only part of a mixed session was priced through the preferred card", () => {
+		// One Claude turn ($18.00 base) plus one DeepSeek turn ($1.50 base / ¥10.00).
+		// `costByCurrency.CNY` covers only the DeepSeek share, so showing `¥10.00`
+		// would drop the Claude spend; the complete base total must win.
+		const base = getBundledModel("deepseek", "deepseek-v4-flash");
+		const model: Model = {
+			...base,
+			cost: { ...base.cost, currencyCards: { CNY: { input: 2, output: 8, cacheRead: 0.04, cacheWrite: 0 } } },
+		};
+		const mixed = {
+			cost: 19.5,
+			costByCurrency: { USD: 1.5, CNY: 10 },
+			costByCurrencyCoverage: { USD: 1.5, CNY: 1.5 },
+			costCurrency: "CNY" as const,
+			model,
+			now: new Date("2026-09-16T02:00:00Z"),
+			onAdvisorSubscriptionProbe: () => {},
+		};
+		expect(stripVTControlCharacters(renderSegment("cost", costCtx({ ...mixed })).content)).toBe("$19.50 ↑");
+
+		// The same session with a non-CNY subagent keeps the split, still in base:
+		// the $18.00 task result is unpaid by the CNY card, so it must stay visible.
+		const withSubagent = costCtx({ ...mixed, subagentCost: 18, subagentTreeCost: 18 });
+		expect(stripVTControlCharacters(renderSegment("cost", withSubagent).content)).toBe("$1.50 (+18.00) ↑");
 	});
 });

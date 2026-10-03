@@ -148,6 +148,8 @@ export interface SegmentContext {
 		subagentCost?: number;
 		/** Session spend per ISO 4217 code, when the model publishes alternate cards. */
 		costByCurrency?: Partial<Record<CurrencyCode, number>>;
+		/** Base-currency spend of the records that carried a card in each code. */
+		costByCurrencyCoverage?: Partial<Record<CurrencyCode, number>>;
 		/** Portion of `costByCurrency` carried by completed subagent task results. */
 		subagentCostByCurrency?: Partial<Record<CurrencyCode, number>>;
 		tokensPerSecond: number | null;

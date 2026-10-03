@@ -48,6 +48,8 @@ export interface StatusLineSession {
 			/** Portion of `cost` carried by completed subagent task results. */
 			subagentCost?: number;
 			costByCurrency?: Partial<Record<CurrencyCode, number>>;
+			/** Base-currency spend of the records that carried a card in each code. */
+			costByCurrencyCoverage?: Partial<Record<CurrencyCode, number>>;
 			/** Portion of `costByCurrency` carried by completed subagent task results. */
 			subagentCostByCurrency?: Partial<Record<CurrencyCode, number>>;
 		};

@@ -35,7 +35,7 @@ function isLongContext(value: unknown): value is LongContextTokenCost {
 }
 
 /** Validate a serialized alternate-currency map before admitting a cached model row. */
-function isCurrencyCards(value: unknown): value is Partial<Record<CurrencyCode, TokenCost>> {
+export function isCurrencyCards(value: unknown): value is Partial<Record<CurrencyCode, TokenCost>> {
 	return (
 		isRecord(value) &&
 		Object.entries(value).every(([code, card]) => isCurrencyCode(code) && isRecord(card) && isRates(card))
