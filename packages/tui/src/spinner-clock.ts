@@ -13,6 +13,8 @@ export const DEFAULT_SPINNER_INTERVAL_MS = 80;
 export const SPINNER_INTERVAL_MIN_MS = 50;
 /** Interval value for a static spinner: frame 0 is drawn once and no spinner timer runs. */
 export const SPINNER_INTERVAL_STATIC = 0;
+/** Frame 0 of the default braille spinner: the glyph every static spinner shows, native ones included. */
+export const STATIC_SPINNER_GLYPH = "⠋";
 
 let intervalMs = DEFAULT_SPINNER_INTERVAL_MS;
 const listeners = new Set<(intervalMs: number) => void>();
