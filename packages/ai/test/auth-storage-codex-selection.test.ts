@@ -480,6 +480,52 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(health.state).toBe("healthy");
 	});
 
+	test("a reset-aware taper releases a preferred account's reserve before its weekly reset", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { email: "protected@example.com" },
+					priority: 100,
+					reservePct: 50,
+					taperHours: 24,
+				},
+				{
+					provider: "openai-codex",
+					account: { email: "drain@example.com" },
+					priority: 10,
+					reservePct: 10,
+				},
+			],
+		});
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-protected", "protected@example.com") },
+			{ type: "oauth", ...createCredential("acct-drain", "drain@example.com") },
+		]);
+		// 40% weekly quota left, 6 h to reset: the 50% reserve has tapered to 50% × 6/24 = 12.5%.
+		for (const accountId of ["acct-protected", "acct-drain"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.6, resetInMs: 6 * HOUR_MS },
+				}),
+			);
+		}
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "tapered-reserve");
+		const health = await authStorage.health.model("openai-codex", {
+			reserveFraction: 0.1,
+		});
+
+		expectExclusivePreference(counts, "api-acct-protected", "api-acct-drain");
+		expect(health.accounts.map(account => account.state)).toEqual(["healthy", "healthy"]);
+	});
+
 	test("applies the global reserve fallback to unconfigured siblings", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
@@ -3799,6 +3845,116 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-plan");
 	});
+
+	test("reports a credit-funded account as credits, neither allowance nor reserve", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+
+		const allowanceRung = await authStorage.health.model("openai-codex", { reserveFraction: 0.1 });
+		expect(allowanceRung.accounts.map(account => account.state)).toEqual(["credits", "depleted"]);
+		expect(allowanceRung.state).toBe("credits");
+
+		const creditsRung = await authStorage.health.model("openai-codex", {
+			reserveFraction: 0.1,
+			usageFunding: "credits",
+		});
+		expect(creditsRung.state).toBe("healthy");
+	});
+
+	test("reports the credits rung depleted while no account is credit-funded", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		usageByAccount.set(
+			"acct-plan",
+			createCodexUsageReport({
+				accountId: "acct-plan",
+				primary: { usedFraction: 0.3, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: 5 * 24 * HOUR_MS },
+				metadata: { allowed: true, limitReached: false },
+			}),
+		);
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-plan", "plan@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+
+		expect((await authStorage.health.model("openai-codex", { reserveFraction: 0.1 })).state).toBe("healthy");
+		expect(
+			(await authStorage.health.model("openai-codex", { reserveFraction: 0.1, usageFunding: "credits" })).state,
+		).toBe("depleted");
+	});
+
+	test("serves the credits rung only from credit-funded accounts; default keeps allowance first", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		usageByAccount.set(
+			"acct-plan",
+			createCodexUsageReport({
+				accountId: "acct-plan",
+				primary: { usedFraction: 0.3, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: 5 * 24 * HOUR_MS },
+				metadata: { allowed: true, limitReached: false },
+			}),
+		);
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-plan", "plan@example.com") },
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+
+		const defaultCounts = await countApiKeySelections(authStorage, "openai-codex", "allowance-rung", 30);
+		expectExclusivePreference(defaultCounts, "api-acct-plan", "api-acct-credits");
+		expect(countFor(defaultCounts, "api-acct-dry")).toBe(0);
+
+		for (let index = 0; index < 30; index += 1) {
+			expect(await authStorage.keys.get("openai-codex", `credits-rung-${index}`, { usageFunding: "credits" })).toBe(
+				"api-acct-credits",
+			);
+		}
+		// A session pinned on the allowance rung still moves to credits there.
+		expect(await authStorage.keys.get("openai-codex", "allowance-rung-0", { usageFunding: "credits" })).toBe(
+			"api-acct-credits",
+		);
+	});
+
+	test.each([
+		["both are credit-funded", CODEX_CREDIT_BALANCE, "api-acct-team"],
+		["only the negative-priority account is credit-funded", CODEX_NO_BALANCE, "api-acct-personal"],
+	] as const)(
+		"credits rung pays from a negative-priority account last when %s",
+		async (_case, teamCredits, expected) => {
+			if (!store) throw new Error("test setup failed");
+			authStorage = new AuthStorage(store, {
+				usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+				accountPolicies: [{ provider: "openai-codex", account: { accountId: "acct-personal" }, priority: -1 }],
+			});
+			await authStorage.credentials.reload();
+			usageByAccount.set(
+				"acct-personal",
+				await fetchCodexPlanExhaustedReport("acct-personal", CODEX_CREDIT_BALANCE),
+			);
+			usageByAccount.set("acct-team", await fetchCodexPlanExhaustedReport("acct-team", teamCredits));
+			await authStorage.credentials.set("openai-codex", [
+				{ type: "oauth", ...createCredential("acct-personal", "personal@example.com") },
+				{ type: "oauth", ...createCredential("acct-team", "team@example.com") },
+			]);
+
+			for (let index = 0; index < 20; index += 1) {
+				expect(
+					await authStorage.keys.get("openai-codex", `credits-priority-${index}`, { usageFunding: "credits" }),
+				).toBe(expected);
+			}
+		},
+	);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

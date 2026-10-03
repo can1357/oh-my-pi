@@ -6,9 +6,11 @@ export function describeUsageFallback(health: ModelUsageHealth, reservePercent: 
 	const condition =
 		health.state === "reserve"
 			? `available quota is at or below the ${reservePercent}% reserve`
-			: health.accounts.length === 0
-				? "no account is eligible for this model's plan requirements"
-				: "all eligible accounts are quota-exhausted or temporarily blocked";
+			: health.state === "credits"
+				? "plan allowance is spent; accounts would only serve from paid credits"
+				: health.accounts.length === 0
+					? "no account is eligible for this model's plan requirements"
+					: "all eligible accounts are quota-exhausted or temporarily blocked";
 	const now = Date.now();
 	let earliestReset = Infinity;
 	for (const account of health.accounts) {

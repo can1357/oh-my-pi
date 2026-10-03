@@ -227,6 +227,19 @@ export function reserveUsageLimits(
 	});
 }
 
+/** Reserve-evaluation limits whose window has not reset since the report was fetched. */
+export function currentReserveUsageLimits(
+	strategy: CredentialRankingStrategy | undefined,
+	report: UsageReport,
+	rankingContext: CredentialRankingContext,
+	nowMs: number,
+): UsageLimit[] {
+	return reserveUsageLimits(strategy, report, rankingContext).filter(limit => {
+		const resetsAt = limit.window?.resetsAt;
+		return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
+	});
+}
+
 /** Measure currently available quota outside expired windows. */
 export function remainingUsageFraction(
 	strategy: CredentialRankingStrategy | undefined,
@@ -235,14 +248,21 @@ export function remainingUsageFraction(
 	nowMs: number,
 ): number | undefined {
 	if (!report) return undefined;
-	const usedFractions = reserveUsageLimits(strategy, report, rankingContext)
-		.filter(limit => {
-			const resetsAt = limit.window?.resetsAt;
-			return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
-		})
+	const usedFractions = currentReserveUsageLimits(strategy, report, rankingContext, nowMs)
 		.map(resolveUsedFraction)
 		.filter((fraction): fraction is number => fraction !== undefined);
 	return usedFractions.length === 0 ? undefined : Math.max(0, 1 - Math.max(...usedFractions));
+}
+
+/**
+ * Whether an account serves past its spent plan allowance on a paid credit
+ * balance (Codex flexible credits): the provider reported credit-funded
+ * overage and the current allowance windows have nothing left. Callers rule
+ * out exhausted/blocked accounts first; this only separates paid overage from
+ * renewable allowance.
+ */
+export function isCreditBackedUsage(report: UsageReport | null, remainingFraction: number | undefined): boolean {
+	return report?.metadata?.creditOverage === true && remainingFraction === 0;
 }
 
 /**
