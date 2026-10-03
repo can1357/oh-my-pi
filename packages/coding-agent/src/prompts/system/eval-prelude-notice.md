@@ -1,9 +1,9 @@
 <system-notice id="prelude-extension">
 `eval` prelude globals changed. This lists only what changed; any prelude not named here is unaffected.
 {{#if added.length}}
-Now available in JS/Python `eval`{{#if canRead}}; `read` the linked docs before first use{{/if}}:
+Now available in JS/Python `eval`{{#if canRead}}; `read` the linked docs before first use{{#if deliveredDocs}}, except where a line says its doc arrives unasked{{/if}}{{/if}}:
 {{#each added}}
-- `{{name}}`{{#if summary}}: {{summary}}{{/if}}{{#if ../canRead}} → `xd://eval/{{name}}`{{/if}}
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}}{{#if ../canRead}} → `xd://eval/{{name}}`{{#if delivery}}; {{delivery}}{{/if}}{{/if}}
 {{/each}}
 {{/if}}
 {{#if removed.length}}

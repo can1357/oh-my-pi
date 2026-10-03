@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -29,7 +30,9 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
 function terminalMethod(chain: unknown): string {
@@ -114,6 +117,7 @@ class FakeNativeSession implements NativeDesktopSession {
 		sourceWidth: number;
 		sourceHeight: number;
 		target: string;
+		displays?: DesktopDisplay[];
 	}> {
 		return {
 			data: Uint8Array.of(137, 80, 78, 71),
@@ -230,6 +234,26 @@ async function runWorker(
 	return message;
 }
 
+/** A controller that runs each call through a real worker core over `native`, failing as the supervisor does. */
+function workerController(native: NativeDesktopSession): ComputerController {
+	const transport = new MemoryTransport();
+	new ComputerWorkerCore(transport, () => native);
+	let runs = 0;
+	return {
+		async run(code) {
+			const result = await runWorker(transport, `kernel-${++runs}`, code);
+			if (result.ok) return result.payload;
+			const error = result.error.isToolError ? new ToolError(result.error.message) : new Error(result.error.message);
+			error.name = result.error.name;
+			throw error;
+		},
+		async capabilities() {
+			return undefined;
+		},
+		async close() {},
+	};
+}
+
 function toolSession(): ToolSession {
 	return {
 		cwd: import.meta.dir,
@@ -242,6 +266,7 @@ function toolSession(): ToolSession {
 
 afterAll(async () => {
 	await disposeAllKernelSessions();
+	await disposeAllVmContexts();
 });
 
 describe("computer prelude", () => {
@@ -738,6 +763,135 @@ describe("computer prelude", () => {
 		expect(calls).toEqual([{ action: "capabilities" }]);
 	});
 
+	it("appends the guide once per conversation to the cell of its first window lookup, hit or miss", async () => {
+		let conversation = "session-a";
+		let readActive = true;
+		const session: ToolSession = {
+			...toolSession(),
+			getSessionId: () => conversation,
+			isToolActive: (name: string) => name !== "read" || readActive,
+		};
+		let value: unknown = { id: "42", app: "Code", title: "main.ts", focused: true };
+		let failure: Error | undefined;
+		// The turn a cell belongs to, aborted while that cell's report settles.
+		let abortedWhileSettling: AbortController | undefined;
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				if (failure) throw failure;
+				return { displays: [], returnValue: value, screenshots: [] };
+			},
+			async settle() {
+				abortedWhileSettling?.abort();
+				return undefined;
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		/** Run one cell of direct calls (each `[method, …]` a chain), then settle it unless cancelled. */
+		const cell = async (chains: string[][], end: "settle" | "cancel" | "abort" = "settle") => {
+			const turn = new AbortController();
+			const current = { signal: turn.signal };
+			for (const methods of chains) {
+				const chain = methods.map(method => ({ method, args: method === "window" ? [{ app: "Reminders" }] : [] }));
+				await prelude
+					.invoke({ action: "call", chain }, { session, toolCallId: methods[0]!, cell: current })
+					.catch(() => undefined);
+			}
+			if (end === "cancel") return undefined;
+			abortedWhileSettling = end === "abort" ? turn : undefined;
+			return (await prelude.settleCell?.(current, { failed: failure !== undefined, output: "" }))?.text;
+		};
+		const guide = `Computer guide (sent once per conversation; also at xd://eval/computer):\n${prelude.documentation}`;
+
+		// Other calls, and window methods on a handle, never bring it.
+		expect(await cell([["windows"], ["window", "ax"]])).toBeUndefined();
+		// A miss brings it, caught or not; later lookups do not.
+		failure = new ToolError('no window matches {"app":"Reminders"}');
+		expect(await cell([["window"]])).toBe(guide);
+		expect(await cell([["window"]])).toBeUndefined();
+		failure = undefined;
+		expect(await cell([["focusedWindow"]])).toBeUndefined();
+		// A cancelled cell is never settled, and a turn aborted while settling is not answered, so the next
+		// lookup still brings it; so does a null focusedWindow().
+		conversation = "session-b";
+		value = null;
+		expect(await cell([["focusedWindow"]], "cancel")).toBeUndefined();
+		expect(await cell([["focusedWindow"]], "abort")).toBeUndefined();
+		expect(await cell([["focusedWindow"]])).toBe(guide);
+		conversation = "session-a";
+		expect(await cell([["window"]])).toBeUndefined();
+		// A session without `read` has the guide inline in the eval description.
+		conversation = "session-c";
+		readActive = false;
+		expect(await cell([["window"]])).toBeUndefined();
+	});
+
+	it("puts the guide ahead of the post-input report of the first lookup's cell", async () => {
+		const session: ToolSession = { ...toolSession(), getSessionId: () => "session" };
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: { id: "42", app: "Code", title: "main.ts" }, screenshots: [] };
+			},
+			async settle() {
+				return 'window "42" after press e3 — current tree:';
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		const current = { signal: new AbortController().signal };
+		await prelude.invoke(
+			{ action: "call", chain: [{ method: "window", args: [{ app: "Code" }] }] },
+			{ session, toolCallId: "window", cell: current },
+		);
+
+		expect(await prelude.settleCell?.(current, { failed: false, output: "" })).toEqual({
+			text: `Computer guide (sent once per conversation; also at xd://eval/computer):\n${prelude.documentation}\n\nwindow "42" after press e3 — current tree:`,
+		});
+	});
+
+	it("appends the guide after the first lookup's cell through the eval tool in JavaScript and Python", async () => {
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [
+			windowFixture,
+			{ ...windowFixture, id: "67", app: "Reminders", title: "Reminders", pid: 11, focused: false },
+		];
+		let conversation = "js";
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = {
+			...toolSession(),
+			settings: Settings.isolated({ "computer.enabled": true, "async.enabled": false }),
+			getSessionId: () => conversation,
+			getEvalSessionId: () => `computer-guide-${conversation}`,
+			getEvalPreludes: () => definitions,
+		};
+		const prelude = createComputerPrelude(session, () => workerController(native));
+		definitions = [prelude];
+		const tool = new EvalTool(session);
+		const output = async (language: "js" | "py", code: string): Promise<string> =>
+			(await tool.execute(`guide-${language}-${crypto.randomUUID()}`, { language, code })).content
+				.map(block => (block.type === "text" ? block.text : ""))
+				.join("");
+		const guide = `Computer guide (sent once per conversation; also at xd://eval/computer):\n${prelude.documentation}`;
+
+		// A miss the cell swallows still brings it, after the cell's own output.
+		const swallowed = await output(
+			"js",
+			'try { await computer.window({ app: "Contacts" }); } catch {} print("after");',
+		);
+		expect(swallowed).toBe(`after\n\n${guide}`);
+		expect(await output("js", 'print((await computer.window({ app: "Reminders" })).title);')).toBe("Reminders");
+
+		conversation = "py";
+		const failed = await output("py", 'await computer.window({"app": "Contacts"})');
+		expect(failed).toContain('no window matches {"app":"Contacts"}');
+		expect(failed).toContain(guide);
+		expect(await output("py", 'print((await computer.window({"app": "Reminders"})).title)')).toBe("Reminders");
+	});
+
 	it("reflects the live enabled setting", () => {
 		const session = toolSession();
 		const prelude = createComputerPrelude(session, () => ({
@@ -1185,5 +1339,309 @@ describe("computer supervisor recovery", () => {
 		const direct = await supervisor.capabilities(snapshot(true));
 		expect(direct).toEqual(capabilities);
 		await supervisor.close();
+	});
+});
+
+/**
+ * A window whose tree answers inputs the way an app does: pressing "Edit"
+ * turns it into "Done" and reveals a field. Every snapshot mints fresh refs;
+ * like the native registry, the current and the previous snapshot's refs
+ * resolve and older ones throw `StaleRef`.
+ */
+class EditableWindowSession extends FakeNativeSession {
+	editing = false;
+	snapshots = 0;
+	/** Value of the window's text row, to vary it between reads. */
+	status = "Ready";
+	windows: DesktopWindow[] = [windowFixture];
+	#nextRef = 1;
+	#live = new Set<string>();
+	#previous = new Set<string>();
+
+	#resolves(ref: string): boolean {
+		return this.#live.has(ref) || this.#previous.has(ref);
+	}
+	override async listWindows(): Promise<DesktopWindow[]> {
+		return this.windows;
+	}
+	override async axSnapshot(): Promise<{ text: string }> {
+		this.snapshots += 1;
+		this.#previous = this.#live;
+		this.#live = new Set();
+		const ref = (): string => {
+			const minted = `e${this.#nextRef++}`;
+			this.#live.add(minted);
+			return minted;
+		};
+		const rows = [
+			`- window "Editor" [ref=${ref()}] app=Code (focused)`,
+			`  - toolbar [ref=${ref()}]`,
+			`    - button "${this.editing ? "Done" : "Edit"}" [ref=${ref()}]`,
+			...(this.editing ? [`    - textfield "Phone" [ref=${ref()}]: "555"`] : []),
+			`    - button "Share" [ref=${ref()}]`,
+			`  - statictext [ref=${ref()}]: "${this.status}"`,
+		];
+		return { text: rows.join("\n") };
+	}
+	override async axNode(ref: string): Promise<AxNode> {
+		if (!this.#resolves(ref)) throw new Error(`StaleRef: ${ref} expired; re-run ax()/find()`);
+		return { ...axNode, ref };
+	}
+	override async axPerform(ref: string, _action: string): Promise<void> {
+		if (!this.#resolves(ref)) throw new Error(`StaleRef: ${ref} expired; re-run ax()/find()`);
+		this.editing = !this.editing;
+	}
+}
+
+/** Settle the cell that just ended; `output` is what that cell printed. */
+async function settleWorker(transport: MemoryTransport, id: string, output = ""): Promise<unknown> {
+	transport.inbound({ type: "settle", id, timeoutMs: 5_000, session: snapshot(true), output });
+	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+	if (message.type !== "result" || !message.ok) throw new Error(`settle ${id} failed`);
+	return message.payload.returnValue;
+}
+
+/** A cell that prints the window's tree, settled: the model has now seen that tree. */
+async function readCell(transport: MemoryTransport, id: string): Promise<string> {
+	const read = await runWorker(transport, id, 'return await (await desktop.window("42")).ax()');
+	if (!read.ok) throw new Error(`read ${id} failed`);
+	const tree = String(read.payload.returnValue);
+	expect(await settleWorker(transport, `${id}-settle`, tree)).toBeUndefined();
+	return tree;
+}
+
+describe("computer cell settlement", () => {
+	it("reports a touched window's tree marked against the model's last read, with live refs", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		expect(await readCell(transport, "read")).toContain('- button "Edit" [ref=e3]');
+		const press = await runWorker(transport, "press", 'await (await desktop.ref("e3")).press()');
+		expect(press.ok).toBe(true);
+
+		const report = await settleWorker(transport, "settle-press");
+		expect(report).toBe(
+			[
+				'window "42" Code "Editor" after press e3 — 1 changed, 1 added, 0 removed (rows marked ~ changed, + added):',
+				'- window "Editor" [ref=e6] app=Code (focused)',
+				"  - toolbar [ref=e7]",
+				'    ~ button "Done" [ref=e8] (was: button "Edit")',
+				'    + textfield "Phone" [ref=e9]: "555"',
+				'    - button "Share" [ref=e10]',
+				'  - statictext [ref=e11]: "Ready"',
+			].join("\n"),
+		);
+		// The printed refs are live: the next cell acts on them directly.
+		const next = await runWorker(transport, "press-done", 'await (await desktop.ref("e8")).press()');
+		expect(next.ok).toBe(true);
+		expect(native.editing).toBe(false);
+		expect(await settleWorker(transport, "settle-done")).toContain("after press e8 — 1 changed, 0 added, 1 removed");
+		// Nothing new since that read: a further settle has nothing to say.
+		expect(await settleWorker(transport, "settle-idle")).toBeUndefined();
+	});
+
+	it("reads an unchanged window once, so refs held before the cell still resolve", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		await runWorker(transport, "key", 'await (await desktop.window("42")).press("shift")');
+		const before = native.snapshots;
+		const report = String(await settleWorker(transport, "settle-key"));
+		expect(native.snapshots).toBe(before + 1);
+		expect(report.split("\n")[0]).toMatch(
+			/after press shift — no accessibility change visible \d\.\d s after the input/,
+		);
+		const held = await runWorker(transport, "held", 'return (await desktop.ref("e3")).ref');
+		expect(held.ok && held.payload.returnValue).toBe("e3");
+	});
+
+	it("does not count a changed native object address as a change", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		native.status = "<AXUIElement 0x600003b2c0f0> {pid=123}";
+		await readCell(transport, "read");
+		native.status = "<AXUIElement 0x600003b2d9a0> {pid=123}";
+		await runWorker(transport, "key", 'await (await desktop.window("42")).press("shift")');
+		expect(String(await settleWorker(transport, "settle-key")).split("\n")[0]).toContain("no accessibility change");
+	});
+
+	it("skips the read-back when the cell printed the window's tree after its last input", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		const printed = await runWorker(
+			transport,
+			"press-then-read",
+			'const win = await desktop.window("42"); await (await desktop.ref("e3")).press(); return await win.ax()',
+		);
+		const before = native.snapshots;
+		expect(
+			await settleWorker(transport, "settle", String(printed.ok && printed.payload.returnValue)),
+		).toBeUndefined();
+		expect(native.snapshots).toBe(before);
+	});
+
+	it("reports a window whose tree the cell read after its input but did not print", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		await runWorker(
+			transport,
+			"press-then-discard",
+			'const win = await desktop.window("42"); await (await desktop.ref("e3")).press(); await win.ax(); return "done"',
+		);
+		// Marked against the tree the model saw, not the one the cell's code discarded.
+		expect(String(await settleWorker(transport, "settle", "done")).split("\n")[0]).toBe(
+			'window "42" Code "Editor" after press e3 — 1 changed, 1 added, 0 removed (rows marked ~ changed, + added):',
+		);
+	});
+
+	it("carries the current tree after a call fails on an expired ref, without a separate read", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		for (const id of ["read-1", "read-2", "read-3"])
+			await runWorker(transport, id, 'return await (await desktop.window("42")).ax()');
+		const stale = await runWorker(transport, "stale", 'await (await desktop.ref("e3")).press()');
+		expect(stale.ok).toBe(false);
+		expect(native.editing).toBe(false);
+
+		const report = await settleWorker(transport, "settle-stale");
+		expect(report).toBe(
+			[
+				'window "42" Code "Editor" after ref e3 failed: StaleRef: e3 expired; re-run ax()/find() — current tree:',
+				'- window "Editor" [ref=e16] app=Code (focused)',
+				"  - toolbar [ref=e17]",
+				'    - button "Edit" [ref=e18]',
+				'    - button "Share" [ref=e19]',
+				'  - statictext [ref=e20]: "Ready"',
+			].join("\n"),
+		);
+	});
+
+	it("reports desktop key input on the window focused when it was sent", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		const other: DesktopWindow = { ...windowFixture, id: "43", title: "Other", focused: false };
+		native.windows = [windowFixture, other];
+		// The key reaches the focused window and then moves focus away from it.
+		native.keyChord = async () => {
+			native.editing = true;
+			native.windows = [
+				{ ...windowFixture, focused: false },
+				{ ...other, focused: true },
+			];
+		};
+		await runWorker(transport, "root", 'await desktop.press("cmd+e")');
+		const report = String(await settleWorker(transport, "settle-root"));
+		expect(report.split("\n")[0]).toBe(
+			'window "42" Code "Editor" after desktop press cmd+e — 1 changed, 1 added, 0 removed (rows marked ~ changed, + added):',
+		);
+		expect(report).not.toContain('window "43" Code "Other" after');
+	});
+
+	it("reports desktop pointer input on the window under the pointer, not the focused one", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+		// A 128×64 px desktop screenshot of a 64×32 display: pointer pixels are halved.
+		native.capture = async target => ({
+			data: Uint8Array.of(137, 80, 78, 71),
+			width: 128,
+			height: 64,
+			sourceWidth: 128,
+			sourceHeight: 64,
+			target,
+			displays: [{ ...display, pixelWidth: 128, pixelHeight: 64 }],
+		});
+		const behind: DesktopWindow = { ...windowFixture, id: "43", title: "Behind", x: 44, y: 0, width: 20, height: 30 };
+		// Listed above app windows and covering the display, like the macOS Dock's overlay: not where input went.
+		const overlay: DesktopWindow = {
+			...windowFixture,
+			id: "6",
+			app: "Dock",
+			title: "Dock",
+			pid: 9,
+			x: 0,
+			y: 0,
+			width: 64,
+			height: 32,
+			focused: false,
+		};
+		native.windows = [overlay, windowFixture, behind];
+
+		await runWorker(transport, "shot", "await desktop.screenshot({ silent: true })");
+		await runWorker(transport, "scroll", "await desktop.scroll(110, 20, { dy: 100 })");
+		const report = String(await settleWorker(transport, "settle-scroll"));
+		expect(report.split("\n")[0]).toBe('window "43" Code "Behind" after desktop scroll 110,20 — current tree:');
+		expect(report).not.toContain('window "42"');
+		expect(report).not.toContain('window "6"');
+	});
+
+	it("names windows the cell's input opened and focused", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		await runWorker(transport, "read", 'return await (await desktop.window("42")).ax()');
+		const dialog: DesktopWindow = { ...windowFixture, id: "43", title: "Save", width: 30, height: 12, focused: true };
+		native.axPerform = async () => {
+			native.windows = [{ ...windowFixture, focused: false }, dialog];
+		};
+		await runWorker(transport, "open", 'await (await desktop.ref("e2")).press()');
+		const report = await settleWorker(transport, "settle-open");
+		expect(report).toMatch(/\n\nnew window "43" Code "Save" 30×12 \(focused\)$/);
+	});
+
+	it("settles only cells whose code reached the desktop, and says when a settle fails", async () => {
+		let fail = false;
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async settle() {
+				if (fail) throw new Error("computer worker restarted; captures and ax refs were reset");
+				return 'window "42" after press e3 — current tree:';
+			},
+			async close() {},
+		}));
+		const press = {
+			action: "call",
+			chain: [
+				{ method: "ref", args: ["e3"] },
+				{ method: "press", args: [] },
+			],
+		};
+		const acting = { signal: new AbortController().signal };
+		const idle = { signal: new AbortController().signal };
+		await prelude.invoke(press, { session: toolSession(), toolCallId: "press", cell: acting });
+		expect(await prelude.settleCell?.(idle, { failed: false, output: "" })).toBeUndefined();
+		expect(await prelude.settleCell?.(acting, { failed: false, output: "" })).toEqual({
+			text: 'window "42" after press e3 — current tree:',
+		});
+		expect(await prelude.settleCell?.(acting, { failed: false, output: "" })).toBeUndefined();
+
+		fail = true;
+		const broken = { signal: new AbortController().signal };
+		await prelude.invoke(press, { session: toolSession(), toolCallId: "press-2", cell: broken });
+		expect((await prelude.settleCell?.(broken, { failed: false, output: "" }))?.text).toContain(
+			"No post-input report for this cell (computer worker restarted",
+		);
 	});
 });
