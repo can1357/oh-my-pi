@@ -136,4 +136,23 @@ describe("waitForRelayExtension", () => {
 		extension.addEventListener("open", () => extension?.send(JSON.stringify(EXTENSION_HELLO)), { once: true });
 		expect(await wait).toBe("ready");
 	});
+
+	it("still waits for an extension that disconnected and comes back inside the redial window", async () => {
+		const port = await findFreeCdpPort();
+		relay = startRelayServer({ port });
+		const first = new WebSocket(`ws://127.0.0.1:${port}/ext`);
+		first.addEventListener("open", () => first.send(JSON.stringify(EXTENSION_HELLO)), { once: true });
+		expect(await waitForRelayExtension(`http://127.0.0.1:${port}`)).toBe("ready");
+		const closed = Promise.withResolvers<void>();
+		first.addEventListener("close", () => closed.resolve(), { once: true });
+		first.close();
+		await closed.promise;
+		// A reaped service worker redials: the wait must hold on and succeed, not fail fast.
+		const wait = waitForRelayExtension(`http://127.0.0.1:${port}`);
+		const gone = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()) as RelayUnavailableInfo;
+		expect(gone.extensionSeen).toBeTrue();
+		extension = new WebSocket(`ws://127.0.0.1:${port}/ext`);
+		extension.addEventListener("open", () => extension?.send(JSON.stringify(EXTENSION_HELLO)), { once: true });
+		expect(await wait).toBe("ready");
+	});
 });
