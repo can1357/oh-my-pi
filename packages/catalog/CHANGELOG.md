@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Declared the OpenAI in-memory prompt-cache lifetime (`prompt-cache { short 300 }`, 30 minutes for the Daybreak aliases with explicit 30m breakpoints) so cache-aware session maintenance can use it ([#13965](https://github.com/can1357/oh-my-pi/pull/13965) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+
 ## [18.5.0] - 2026-10-03
 
 ### Added

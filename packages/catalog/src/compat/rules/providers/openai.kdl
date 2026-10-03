@@ -9,6 +9,16 @@ provider "openai" {
 		stt "openai-transcriptions"
 	}
 
+	// Prompt-cache entry lifetime in seconds for the default (in-memory)
+	// retention tier: OpenAI documents prefixes as typically cleared after
+	// 5-10 minutes of inactivity. Feeds the coding agent's cache warmer and
+	// cache-expired shake. The 24h extended-retention tier is not declared
+	// because the request builder only sends it where discovery reports
+	// `supportsLongPromptCacheRetention`.
+	prompt-cache {
+		short 300
+	}
+
 	// Daybreak models are approval-gated first-party Responses models that are
 	// not yet present in stencil.so. Seed the documented aliases and current
 	// Cyber snapshot so fresh installs expose them without credentialed
@@ -181,6 +191,10 @@ provider "openai" {
 	// wire restrictions without carrying the gpt- prefix identity.
 	models "daybreak-blue-latest" "daybreak-red-latest" {
 		prompt-cache-breakpoint-ttl "30m"
+		// Explicit 30m breakpoints keep the entry alive for the breakpoint TTL.
+		prompt-cache {
+			short 1800
+		}
 		supports-prompt-cache-breakpoints #true
 		supports-sampling-params #false
 	}
