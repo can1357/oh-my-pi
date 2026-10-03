@@ -294,6 +294,34 @@ async fn no_op_recovery_respects_utf8_boundaries_in_source_and_replacement() {
 }
 
 #[tokio::test]
+async fn no_op_recovery_respects_utf8_boundaries_in_suffix_overlap() {
+	// `duplicate_collapse_span`'s suffix loop slides a byte-width window over
+	// the normalized text after the match. With normalized `AAAAAAAAAA`
+	// followed by 3-byte CJK chars and a 10-byte rewrite, the first window
+	// end (byte 20) lands inside the fourth CJK char (bytes 19..22): the
+	// pre-fix slice panicked at apply.rs:2111 instead of reporting the
+	// no-op. One case per CJK script: Chinese `文`, Korean `한`, Japanese
+	// `あ`.
+	for before in [
+		"AAAAAAAAAA\n文文文文文文文文\n",
+		"AAAAAAAAAA\n한한한한한한한한\n",
+		"AAAAAAAAAA\nああああああああ\n",
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", before);
+		let writer = DiskWriter::default();
+		let input = "*** SM:EDIT a.txt\n*** SM:FIND\nAAAAAAAAAA\n*** SM:PUT\nAAAAAAAAAA\n";
+		let error = workspace
+			.apply_raw(input, &writer)
+			.await
+			.expect_err("an unchanged edit reports a no-op instead of panicking");
+		assert!(matches!(error, EditError::Match(_)));
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("a.txt").unwrap(), before);
+	}
+}
+
+#[tokio::test]
 async fn overlapping_desired_matches_are_rejected_without_collapsing_source() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	let before = "abcabcabc\n";
