@@ -15,6 +15,7 @@ import {
 	shouldUseProviderNativeCompaction,
 	withAnthropicCompactionPreserveData,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
@@ -209,7 +210,8 @@ describe("compact() Anthropic native lane", () => {
 		expect(ctx.systemPrompt).toEqual(["You are the live agent."]);
 		expect(ctx.tools).toBe(tools);
 		expect(ctx.messages.map(message => message.content)).toEqual(["long history"]);
-		expect(options.anthropicCompaction).toEqual({ instructions: expect.any(String) });
+		// The first retained message's time bounds replayed file metadata.
+		expect(options.anthropicCompaction).toEqual({ instructions: expect.any(String), retainedFrom: 2 });
 		const instructions = options.anthropicCompaction?.instructions ?? "";
 		expect(instructions).toContain("<additional-context>\n- Branch: main\n</additional-context>");
 		expect(instructions).toContain("## Goal");
@@ -235,6 +237,7 @@ describe("compact() Anthropic native lane", () => {
 				filesText: "<files>\n# /repo/src/\nhandlers.ts (Read)\n</files>",
 				model: "claude-fable-5",
 				usedTokens: 79_064,
+				exactTail: true,
 			},
 		});
 		expect(getAnthropicCompactionPayload(result.preserveData)).toEqual({
@@ -243,6 +246,7 @@ describe("compact() Anthropic native lane", () => {
 			content: NATIVE_SUMMARY,
 			signature: "sig_state_1",
 			filesText: "<files>\n# /repo/src/\nhandlers.ts (Read)\n</files>",
+			exactTail: true,
 		});
 	});
 
@@ -327,6 +331,8 @@ describe("compact() Anthropic native lane", () => {
 		);
 		const preparation = makePreparation({
 			previousSummary: "first summary",
+			// The previous summary committed after the retained message (t=2).
+			previousSummaryTimestamp: new Date(1_500).toISOString(),
 			previousPreserveData: {
 				anthropicCompaction: {
 					provider: "anthropic",
@@ -360,10 +366,128 @@ describe("compact() Anthropic native lane", () => {
 				provider: "anthropic",
 				content: result.summary,
 				signature: "sig_2",
+				// The previous summary predates `exactTail`: its metadata replayed
+				// after the first retained turn, so it is not carried by position.
+				exactTail: true,
 				model: "claude-fable-5",
 				usedTokens: 0,
 			},
 		});
+	});
+
+	test("carries earlier metadata whose replay point lies inside the new retained tail", async () => {
+		const model = makeAnthropicModel();
+		const { completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, {
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "second",
+					signature: "sig_2",
+				},
+				stopDetails: { type: "compaction" },
+			}),
+		);
+		const result = await compact(
+			makePreparation({
+				previousSummary: "first summary",
+				// Committed after the retained message (t=2).
+				previousSummaryTimestamp: new Date(1_500).toISOString(),
+				previousPreserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "first summary",
+						signature: "sig_1",
+						filesText: "<files>old.ts (Read)</files>",
+						exactTail: true,
+					},
+				},
+			}),
+			model,
+			"sk-ant-test",
+			undefined,
+			undefined,
+			{ completeImpl },
+		);
+		expect(result.preserveData?.anthropicCompaction).toMatchObject({
+			exactTail: true,
+			retainedFiles: [{ text: "<files>old.ts (Read)</files>", after: 1_500 }],
+		});
+	});
+
+	test("builds the request from the host's live provider context of the whole history", async () => {
+		const model = makeAnthropicModel();
+		const { calls, completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, {
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "summary",
+					signature: "sig",
+				},
+				stopDetails: { type: "compaction" },
+			}),
+		);
+		const liveContext: Context = {
+			systemPrompt: ["live prompt"],
+			messages: [{ role: "user", content: "live bytes", timestamp: 1 }],
+			tools: [],
+		};
+		const built: unknown[][] = [];
+		const text = (messages: AgentMessage[]) =>
+			messages.map(message =>
+				"content" in message && typeof message.content === "string" ? message.content : message.role,
+			);
+		await compact(makePreparation(), model, "sk-ant-test", undefined, undefined, {
+			completeImpl,
+			remoteSystemPrompt: ["stale prompt"],
+			buildProviderContext: async (summarized, retained) => {
+				built.push(text(summarized), text(retained));
+				return liveContext;
+			},
+		});
+		// The host sees the summarized range and the retained tail, and its
+		// result is sent as built.
+		expect(built).toEqual([["long history"], ["assistant"]]);
+		expect(calls[0]?.ctx).toBe(liveContext);
+	});
+
+	test("drops earlier file metadata whose replay point precedes the retained tail", async () => {
+		const model = makeAnthropicModel();
+		const { completeImpl } = recordingCompleteImpl(() =>
+			assistantMessage(model, {
+				providerPayload: {
+					type: "anthropicCompaction",
+					provider: "anthropic",
+					content: "second",
+					signature: "sig_2",
+				},
+				stopDetails: { type: "compaction" },
+			}),
+		);
+		const result = await compact(
+			makePreparation({
+				previousSummary: "first summary",
+				// Committed before the retained message (t=2): the old metadata
+				// sits inside the summarized range and is summarized with it.
+				previousSummaryTimestamp: new Date(1).toISOString(),
+				previousPreserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "first summary",
+						signature: "sig_1",
+						filesText: "<files>old.ts (Read)</files>",
+						retainedFiles: [{ text: "<files>older.ts (Read)</files>", after: 0 }],
+					},
+				},
+			}),
+			model,
+			"sk-ant-test",
+			undefined,
+			undefined,
+			{ completeImpl },
+		);
+		expect(result.preserveData?.anthropicCompaction).not.toHaveProperty("retainedFiles");
 	});
 
 	test("derives the rewrite marker from the oldest replayed message, not the previous commit", async () => {
@@ -423,7 +547,7 @@ describe("compact() Anthropic native lane", () => {
 			},
 		);
 		expect(calls[0]?.ctx.systemPrompt).toEqual([]);
-		expect(calls[0]?.options.anthropicCompaction).toEqual({ instructions: expect.any(String) });
+		expect(calls[0]?.options.anthropicCompaction).toEqual({ instructions: expect.any(String), retainedFrom: 2 });
 		expect(result.preserveData?.anthropicCompaction).toMatchObject({ signature: "sig", content: "small summary" });
 	});
 
@@ -562,6 +686,7 @@ describe("compact() Anthropic native lane", () => {
 				provider: "anthropic",
 				content: result.summary,
 				signature: "sig_archive",
+				exactTail: true,
 				model: "claude-fable-5",
 				usedTokens: 0,
 			},

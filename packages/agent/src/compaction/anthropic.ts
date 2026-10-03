@@ -1,19 +1,20 @@
 /**
  * Anthropic on-demand compaction (`compact-2026-09-04` beta).
  *
- * The request sends only the prefix to summarize, with the live conversation's
- * system prompt, tools and thinking settings. The returned signed block
- * replaces that prefix; the retained tail is replayed from session entries.
+ * The request sends only the prefix to summarize, as the live conversation
+ * sent it: same system prompt, tools, history bytes and thinking settings.
+ * The returned signed block replaces that prefix; the retained tail is
+ * replayed from session entries.
  */
 
 import type {
+	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
 	ApiKey,
+	Context,
 	Effort,
-	Message,
 	Model,
 	SimpleStreamOptions,
-	Tool,
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -33,8 +34,12 @@ export interface AnthropicCompactionPreserveData {
 	signature?: string;
 	/** Legacy threshold block state; replay-only. */
 	encryptedContent?: string;
-	/** Harness file metadata (`<files>` section) replayed after the native block. */
+	/** Harness file metadata (`<files>` section) replayed after the retained tail. */
 	filesText?: string;
+	/** Earlier summaries' file metadata replayed inside the retained tail. */
+	retainedFiles?: AnthropicCompactionFiles[];
+	/** The retained tail replays unchanged (see `AnthropicCompactionPayload.exactTail`). */
+	exactTail?: true;
 	/** Model that wrote the summary. */
 	model?: string;
 	/** Prompt tokens the compaction request processed, for display. */
@@ -76,6 +81,15 @@ export function getPreservedAnthropicCompactionData(
 		...(typeof candidate.filesText === "string" && candidate.filesText.length > 0
 			? { filesText: candidate.filesText }
 			: {}),
+		...(Array.isArray(candidate.retainedFiles) && candidate.retainedFiles.length > 0
+			? {
+					retainedFiles: candidate.retainedFiles.filter(
+						(files): files is AnthropicCompactionFiles =>
+							isRecord(files) && typeof files.text === "string" && typeof files.after === "number",
+					),
+				}
+			: {}),
+		...(candidate.exactTail === true ? { exactTail: true as const } : {}),
 		...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
 		...(typeof candidate.usedTokens === "number" ? { usedTokens: candidate.usedTokens } : {}),
 	};
@@ -109,6 +123,8 @@ export function getAnthropicCompactionPayload(
 		...(preserved.signature ? { signature: preserved.signature } : {}),
 		...(preserved.encryptedContent ? { encryptedContent: preserved.encryptedContent } : {}),
 		...(preserved.filesText ? { filesText: preserved.filesText } : {}),
+		...(preserved.retainedFiles?.length ? { retainedFiles: preserved.retainedFiles } : {}),
+		...(preserved.exactTail ? { exactTail: true as const } : {}),
 	};
 }
 
@@ -167,10 +183,11 @@ export function buildAnthropicCompactionInstructions(
 }
 
 export interface AnthropicNativeCompactionRequest {
-	systemPrompt: string[];
-	messages: Message[];
-	tools?: Tool[];
+	/** The summarized prefix as the live turn would send it. */
+	context: Context;
 	instructions: string;
+	/** Timestamp of the first message kept after the summary, when any is. */
+	retainedFrom?: number;
 	maxTokens: number;
 	reasoning?: Effort;
 }
@@ -214,7 +231,7 @@ export async function requestAnthropicNativeCompaction(
 ): Promise<AnthropicNativeCompactionResponse> {
 	const response = await instrumentedCompleteSimple(
 		model,
-		{ systemPrompt: request.systemPrompt, messages: request.messages, tools: request.tools },
+		request.context,
 		{
 			apiKey,
 			signal,
@@ -227,7 +244,7 @@ export async function requestAnthropicNativeCompaction(
 			promptCacheKey: options.promptCacheKey,
 			providerSessionState: options.providerSessionState,
 			maxInFlightRequests: options.maxInFlightRequests,
-			anthropicCompaction: { instructions: request.instructions },
+			anthropicCompaction: { instructions: request.instructions, retainedFrom: request.retainedFrom },
 		},
 		{
 			telemetry: options.telemetry,

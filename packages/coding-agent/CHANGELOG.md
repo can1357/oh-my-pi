@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the first kept assistant turn losing its thinking after Anthropic native compaction ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.6.0] - 2026-10-03
 
 ### Added

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -72,6 +72,7 @@ describe("async speculative compaction", () => {
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
 			obfuscatePreparationForProvider?: <T>(preparation: T) => T;
 			convertToLlmForSideRequest?: (messages: AgentMessage[]) => never;
+			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			generateHandoffDocument?: (
 				focus: string,
 				options?: { autoTriggered?: boolean; signal?: AbortSignal },
@@ -131,6 +132,8 @@ describe("async speculative compaction", () => {
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
+			buildLiveProviderContext:
+				options.buildLiveProviderContext ?? (async (): Promise<Context> => ({ messages: [] })),
 			obfuscateTextForProvider: options.obfuscateTextForProvider ?? ((text: string | undefined) => text),
 			obfuscatePreparationForProvider:
 				options.obfuscatePreparationForProvider ?? (<T>(preparation: T) => preparation),
@@ -649,6 +652,35 @@ describe("async speculative compaction", () => {
 		for (const call of compactSpy.mock.calls) {
 			expect(call[5]?.remoteSystemPrompt).toEqual(["per-turn override"]);
 		}
+	});
+
+	it("builds native compaction requests through the live provider pipeline on every compaction path", async () => {
+		// Signed thinking kept after an on-demand summary stays valid only when
+		// the compaction request's prefix matches the live request byte for byte.
+		const liveContext: Context = { systemPrompt: ["live"], messages: [], tools: [] };
+		const built: AgentMessage[][] = [];
+		maintenance = createMaintenance({
+			buildLiveProviderContext: async (summarized, retained) => {
+				built.push(summarized, retained);
+				return liveContext;
+			},
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		await maintenance.compact();
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		const prefix: AgentMessage[] = [{ role: "user", content: "prefix", timestamp: 1 }];
+		const tail: AgentMessage[] = [{ role: "user", content: "tail", timestamp: 2 }];
+		for (const call of compactSpy.mock.calls) {
+			expect(await call[5]?.buildProviderContext?.(prefix, tail)).toBe(liveContext);
+		}
+		expect(built).toEqual([prefix, tail, prefix, tail]);
 	});
 
 	it("defers a threshold pass that jumped past the band, then commits the armed result for free", async () => {

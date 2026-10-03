@@ -2145,6 +2145,18 @@ export class AgentSession implements SettingsScope {
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			buildLiveProviderContext: async (summarized, retained, signal) => {
+				// Transform the whole history as the live turn does, then cut it:
+				// provider transforms (inline imaging, image budgets) decide per
+				// request, so a separately transformed prefix can differ. Every
+				// transform after conversion keeps the message count.
+				const prefix = await this.convertMessagesToLlm(summarized, signal);
+				if (retained.length === 0) return await this.agent.buildSideRequestContext(prefix);
+				const live = await this.agent.buildSideRequestContext(
+					await this.convertMessagesToLlm([...summarized, ...retained], signal),
+				);
+				return { ...live, messages: live.messages.slice(0, prefix.length) };
+			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),

@@ -32,14 +32,41 @@ const context: Context = {
 };
 
 function summaryMessage(
-	state: { signature?: string; encryptedContent?: string; filesText?: string },
+	state: {
+		signature?: string;
+		encryptedContent?: string;
+		filesText?: string;
+		retainedFiles?: Array<{ text: string; after: number }>;
+		exactTail?: true;
+	},
 	provider = "anthropic",
+	timestamp = 1,
 ): UserMessage {
 	return {
 		role: "user",
 		content: `<summary>${SUMMARY}</summary>`,
-		providerPayload: { type: "anthropicCompaction", provider, content: SUMMARY, ...state },
-		timestamp: 1,
+		providerPayload: { type: "anthropicCompaction", provider, content: SUMMARY, exactTail: true, ...state },
+		timestamp,
+	};
+}
+
+function assistantTurn(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		timestamp,
+		provider: "anthropic",
+		model: model.id,
+		api: "anthropic-messages",
+		stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
 	};
 }
 
@@ -384,25 +411,14 @@ describe("Anthropic on-demand compaction response", () => {
 });
 
 describe("Anthropic compaction replay", () => {
-	it("replays signed bytes first, folds retained assistant and flushes file metadata after that turn", async () => {
-		const summary = summaryMessage({ signature: SIGNATURE, filesText: "<files>handlers.ts (Read)</files>" });
-		const retained: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "Retained answer." }],
-			timestamp: 2,
-			provider: "anthropic",
-			model: model.id,
-			api: "anthropic-messages",
-			stopReason: "stop",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-		};
+	it("replays signed bytes first, folds retained assistant and flushes file metadata after the retained tail", async () => {
+		// Retained turns predate the summary's commit time; "next" follows it.
+		const summary = summaryMessage(
+			{ signature: SIGNATURE, filesText: "<files>handlers.ts (Read)</files>" },
+			"anthropic",
+			2,
+		);
+		const retained = assistantTurn([{ type: "text", text: "Retained answer." }], 1);
 		const messages: Context["messages"] = [summary, retained, { role: "user", content: "next", timestamp: 3 }];
 		const wire = convertAnthropicMessages(messages, model, false, { replayCompaction: true });
 		expect(wire[0]).toEqual({
@@ -413,6 +429,7 @@ describe("Anthropic compaction replay", () => {
 			],
 		});
 		expect(wire[1]).toEqual({ role: "user", content: "<files>handlers.ts (Read)</files>" });
+		expect(wire[2]).toMatchObject({ role: "user", content: "next" });
 		const request = await captureRequest(model, { thinkingEnabled: true }, messages);
 		expect(request.beta).toContain("compact-2026-09-04");
 		expect(request.payload.context_management).toEqual({ edits: [{ type: "clear_thinking_20251015", keep: "all" }] });
@@ -424,6 +441,133 @@ describe("Anthropic compaction replay", () => {
 			messages,
 		);
 		expect(budgetReplay.payload.output_config).toEqual({ task_budget: { type: "tokens", total: 4096 } });
+	});
+
+	// Signed thinking in retained turns stays valid only while every byte before
+	// it reaches the API as it was first sent; file metadata may only appear
+	// where later turns already saw it.
+	describe("retained tail stays byte-identical", () => {
+		const files = "<files>handlers.ts (Read)</files>";
+		const call = assistantTurn(
+			[
+				{ type: "thinking", thinking: "plan", thinkingSignature: "sig-plan" },
+				{ type: "toolCall", id: "t1", name: "read", arguments: {} },
+			],
+			10,
+		);
+		const result = (timestamp: number): Context["messages"][number] => ({
+			role: "toolResult",
+			toolCallId: "t1",
+			toolName: "read",
+			content: [{ type: "text", text: "file bytes" }],
+			isError: false,
+			timestamp,
+		});
+		const answer = assistantTurn(
+			[
+				{ type: "thinking", thinking: "check", thinkingSignature: "sig-check" },
+				{ type: "text", text: "done" },
+			],
+			12,
+		);
+		const roles = (wire: Array<{ role: string; content: unknown }>) =>
+			wire.map(param => (typeof param.content === "string" ? param.content : param.role));
+
+		it("emits file metadata before the first message created after the summary, never inside the tail", () => {
+			const summary = summaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 20);
+			const wire = convertAnthropicMessages(
+				[summary, call, result(11), answer, { role: "user", content: "next", timestamp: 21 }],
+				model,
+				false,
+				{ replayCompaction: true },
+			);
+			expect(roles(wire)).toEqual(["assistant", "user", "assistant", files, "next"]);
+			// The retained turns keep their signed thinking.
+			expect(JSON.stringify(wire)).toContain("sig-plan");
+			expect(JSON.stringify(wire)).toContain("sig-check");
+		});
+
+		it("defers file metadata past tool results that complete a retained tool_use turn", () => {
+			const summary = summaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 11);
+			const wire = convertAnthropicMessages([summary, call, result(12), answer], model, false, {
+				replayCompaction: true,
+			});
+			expect(roles(wire)).toEqual(["assistant", "user", files, "assistant", "Continue."]);
+		});
+
+		it("replays earlier summaries' metadata at their own points inside the tail", () => {
+			const summary = summaryMessage(
+				{
+					signature: SIGNATURE,
+					filesText: files,
+					retainedFiles: [{ text: "<files>old.ts (Read)</files>", after: 11 }],
+				},
+				"anthropic",
+				20,
+			);
+			const wire = convertAnthropicMessages(
+				[summary, call, result(11), answer, { role: "user", content: "next", timestamp: 21 }],
+				model,
+				false,
+				{ replayCompaction: true },
+			);
+			expect(roles(wire)).toEqual(["assistant", "user", "<files>old.ts (Read)</files>", "assistant", files, "next"]);
+		});
+
+		it("ends a compaction request where the summarized range ends", () => {
+			const summary = summaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 20);
+			const prefix: Context["messages"] = [summary, call, result(11), answer];
+			// The retained tail starts before the metadata's replay point: it
+			// stays out, and a final assistant turn gets no `Continue.`.
+			const insideTail = convertAnthropicMessages(prefix, model, false, {
+				replayCompaction: true,
+				compactionRequest: { retainedFrom: 13 },
+			});
+			expect(roles(insideTail)).toEqual(["assistant", "user", "assistant"]);
+			// The retained tail starts after it: the metadata closes the range.
+			const beforeTail = convertAnthropicMessages(prefix, model, false, {
+				replayCompaction: true,
+				compactionRequest: { retainedFrom: 21 },
+			});
+			expect(roles(beforeTail)).toEqual(["assistant", "user", "assistant", files]);
+		});
+
+		it("keeps the original layout for summaries persisted without exactTail", () => {
+			// Thinking created after such a compaction was signed with the
+			// metadata right after the first retained turn; moving it would
+			// change the bytes before that thinking.
+			const persisted = JSON.parse(
+				JSON.stringify(summaryMessage({ signature: SIGNATURE, filesText: files }, "anthropic", 20)),
+			) as UserMessage;
+			if (persisted.providerPayload?.type !== "anthropicCompaction") throw new Error("expected payload");
+			delete persisted.providerPayload.exactTail;
+			const later = assistantTurn(
+				[
+					{ type: "thinking", thinking: "after", thinkingSignature: "sig-post-compaction" },
+					{ type: "text", text: "ok" },
+				],
+				22,
+			);
+			const messages: Context["messages"] = [
+				persisted,
+				call,
+				result(11),
+				answer,
+				{ role: "user", content: "next", timestamp: 21 },
+				later,
+				{ role: "user", content: "resume", timestamp: 23 },
+			];
+			const wire = convertAnthropicMessages(messages, model, false, { replayCompaction: true });
+			expect(roles(wire)).toEqual(["assistant", "user", files, "assistant", "next", "assistant", "resume"]);
+			expect(JSON.stringify(wire)).toContain("sig-post-compaction");
+			// A compaction request over it stops before that metadata when the
+			// retained tail starts at the first turn.
+			const request = convertAnthropicMessages([persisted], model, false, {
+				replayCompaction: true,
+				compactionRequest: { retainedFrom: 10 },
+			});
+			expect(roles(request)).toEqual(["assistant"]);
+		});
 	});
 
 	it("keeps legacy encrypted replay read-only with its beta and never-firing edit", async () => {

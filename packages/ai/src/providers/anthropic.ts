@@ -21,7 +21,9 @@ import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
+	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
+	AnthropicCompactionRequest,
 	AnthropicFallbackContent,
 	AnthropicMessagePayload,
 	AnthropicOutputEffort,
@@ -4794,6 +4796,7 @@ function buildParams(
 			dropAllThinking: dropAllThinking || stripThinkingHistory,
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
+			compactionRequest,
 		},
 	);
 	// Anchor the stable tools+system head so it stays cached across turns; the
@@ -5053,6 +5056,14 @@ export function convertAnthropicMessages(
 		dropAllThinking?: boolean;
 		droppedThinkingBlocks?: ReadonlySet<string>;
 		credentialId?: number;
+		/**
+		 * This request asks for an on-demand compaction. Its messages end inside
+		 * the conversation, so nothing live requests do not send at that point
+		 * may be appended: no `Continue.` after a final assistant turn (the API
+		 * summarizes such a list as it is), and queued file metadata only when
+		 * live requests place it before the first retained message.
+		 */
+		compactionRequest?: AnthropicCompactionRequest;
 	},
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from `developer` messages. After the main pass,
@@ -5064,21 +5075,34 @@ export function convertAnthropicMessages(
 	// and the developer upgrade below look through them: they were inserted
 	// by this provider, not authored in the conversation.
 	const controlParams = new Set<AnthropicMessageParam>();
-	// Harness file metadata queued behind a replayed compaction block. Flushed
-	// after the next param boundary that keeps it clear of both the block (the
-	// fold below must still join the block with a following assistant turn, or
-	// that turn's thinking prefix changes) and any open tool_use turn (its
-	// results must follow it contiguously).
-	const pendingCompactionFiles: string[] = [];
-	const flushCompactionFiles = (): void => {
-		while (pendingCompactionFiles.length > 0) {
-			const filesText = pendingCompactionFiles.shift();
-			if (filesText === undefined || filesText.trim().length === 0) continue;
-			// The payload bypassed the `transformMessages` redaction pass, so
-			// the metadata takes the same credential redaction here that the
-			// dropped message text received there.
-			params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
+	// Harness file metadata queued behind a replayed compaction block, oldest
+	// replay point first. Messages kept after a summary must reach the API
+	// exactly as they were sent before, or their signed thinking no longer
+	// matches its prefix; each entry therefore waits for the first message
+	// created after its replay point (past any tool results that close an open
+	// tool_use turn), or the end of the list.
+	let pendingCompactionFiles: AnthropicCompactionFiles[] = [];
+	const pushCompactionFiles = (filesText: string): void => {
+		if (filesText.trim().length === 0) return;
+		// The payload bypassed the `transformMessages` redaction pass, so
+		// the metadata takes the same credential redaction here that the
+		// dropped message text received there.
+		params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
+	};
+	const flushCompactionFiles = (before: number): void => {
+		while (pendingCompactionFiles.length > 0 && pendingCompactionFiles[0].after < before) {
+			pushCompactionFiles(pendingCompactionFiles.shift()!.text);
 		}
+	};
+	// Summaries persisted before `exactTail` replayed their metadata after the
+	// first param boundary past the block (clear of the fold and of an open
+	// tool_use turn). Later thinking was signed against that layout, so it is
+	// kept for them.
+	let legacyCompactionFiles: string | undefined;
+	const flushLegacyCompactionFiles = (): void => {
+		if (legacyCompactionFiles === undefined) return;
+		pushCompactionFiles(legacyCompactionFiles);
+		legacyCompactionFiles = undefined;
 	};
 
 	const transformedMessages = transformMessages(
@@ -5118,17 +5142,23 @@ export function convertAnthropicMessages(
 			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
-			// Queue the file metadata for after the block: it sits past the
-			// compaction boundary the API enforces, unlike anything before it.
-			// The flush waits past a following assistant turn (see above).
-			if (msg.providerPayload.filesText !== undefined) {
-				pendingCompactionFiles.push(msg.providerPayload.filesText);
+			// Queue the file metadata past the retained tail (see above); the
+			// summary message carries the compaction's commit time.
+			const { filesText, retainedFiles, exactTail } = msg.providerPayload;
+			if (exactTail) {
+				pendingCompactionFiles = [
+					...(retainedFiles ?? []),
+					...(filesText !== undefined ? [{ text: filesText, after: msg.timestamp }] : []),
+				].sort((a, b) => a.after - b.after);
+			} else {
+				pendingCompactionFiles = [];
+				legacyCompactionFiles = filesText;
 			}
 			continue;
 		}
+		if (msg.role !== "toolResult") flushCompactionFiles(msg.timestamp);
 		if (msg.role === "user" || msg.role === "developer") {
-			// Queued file metadata predates this message, so it emits first.
-			flushCompactionFiles();
+			flushLegacyCompactionFiles();
 			const payload =
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
@@ -5328,12 +5358,7 @@ export function convertAnthropicMessages(
 			};
 			copyPerCallContextMessage(assistantParam, msg);
 			params.push(assistantParam);
-			// Flush queued file metadata unless this turn left tool calls open:
-			// their results must follow the turn contiguously, so the metadata
-			// waits for the merged result message (or the end of the list).
-			if (!blocks.some(block => block.type === "tool_use")) {
-				flushCompactionFiles();
-			}
+			if (!blocks.some(block => block.type === "tool_use")) flushLegacyCompactionFiles();
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
@@ -5369,9 +5394,7 @@ export function convertAnthropicMessages(
 
 			// Add a single user message with all tool results
 			params.push(toolResultParam);
-			// An open tool_use turn's results are whole again; queued file
-			// metadata can follow without splitting the pairing.
-			flushCompactionFiles();
+			flushLegacyCompactionFiles();
 		}
 	}
 
@@ -5468,9 +5491,18 @@ export function convertAnthropicMessages(
 		params.splice(previous + 1, 0, { role: "user", content: "Continue." });
 		i = previous + 1;
 	}
+	if (opts?.compactionRequest) {
+		// Metadata whose replay point precedes the first retained message ends
+		// the summarized range; the rest lies inside the retained tail and is
+		// carried by the new summary instead. Legacy metadata still pending
+		// here belongs after the first retained turn, outside this request.
+		flushCompactionFiles(opts.compactionRequest.retainedFrom ?? Number.POSITIVE_INFINITY);
+		return params;
+	}
 	// A trailing compaction summary leaves its file metadata queued; emit it
 	// before the prefill check so the list ends the request as a user turn.
-	flushCompactionFiles();
+	flushCompactionFiles(Number.POSITIVE_INFINITY);
+	flushLegacyCompactionFiles();
 	const last = skipControls(params.length, -1);
 	if (params[last]?.role === "assistant") {
 		params.splice(last + 1, 0, { role: "user", content: "Continue." });

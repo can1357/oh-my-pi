@@ -6,6 +6,7 @@
  */
 
 import {
+	type AnthropicCompactionFiles,
 	type Api,
 	type ApiKey,
 	type AssistantMessage,
@@ -676,6 +677,21 @@ export interface SummaryOptions {
 	initiatorOverride?: MessageAttribution;
 	metadata?: Record<string, unknown>;
 	convertToLlm?: ConvertToLlm;
+	/**
+	 * Builds the provider context a live turn sends for `summarized` followed
+	 * by `retained` (live system prompt, wire tools, transformed history) and
+	 * returns it cut to the `summarized` range. The whole history is
+	 * transformed first because some transforms (inline imaging, image
+	 * budgets) decide per request. Anthropic on-demand compaction sends it so
+	 * the retained tail's signed thinking stays bound to an unchanged prefix;
+	 * without it the request is assembled from `remoteSystemPrompt`, `tools`
+	 * and `convertToLlm`.
+	 */
+	buildProviderContext?: (
+		summarized: AgentMessage[],
+		retained: AgentMessage[],
+		signal?: AbortSignal,
+	) => Promise<Context>;
 	/**
 	 * Optional telemetry handle. When provided, every LLM call emitted during
 	 * compaction is wrapped in an OTEL chat span tagged with
@@ -1612,6 +1628,7 @@ export async function compact(
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,
 		convertToLlm: options?.convertToLlm,
+		buildProviderContext: options?.buildProviderContext,
 		telemetry: options?.telemetry,
 		// Honor /model thinking selection on every fan-out summarizer.
 		// Without this propagation, generateSummary / generateTurnPrefixSummary
@@ -1848,32 +1865,40 @@ export async function compact(
 	let nativeSignature: string | undefined;
 	let nativeFirstKeptEntryId = firstKeptEntryId;
 	let nativeUsedTokens: number | undefined;
+	let nativeRetainedFiles: AnthropicCompactionFiles[] | undefined;
 	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)) {
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
 		// natively when this provider wrote it, as text otherwise.
 		// A prior snapcompact archive is already merged into that summary
-		// text. Predate the rewrite marker before all replayed messages so
+		// text. Like the live context, the summary keeps its commit time and
+		// predates its rewrite marker before all replayed messages, so
 		// retained thinking stays bound to the original prefix.
 		const firstReplayed = messagesToSummarize[0] ?? turnPrefixMessages[0] ?? recentMessages[0];
-		const previousSummaryAt =
-			firstReplayed !== undefined ? new Date(firstReplayed.timestamp - 1).toISOString() : new Date().toISOString();
 		const previousSummaryMessage = previousSummaryForCompaction
-			? createCompactionSummaryMessage(previousSummaryForCompaction, tokensBefore, previousSummaryAt, {
-					providerPayload:
-						previousNative?.provider === model.provider
-							? {
-									type: "anthropicCompaction",
-									provider: previousNative.provider,
-									content: previousNative.content,
-									...(previousNative.signature ? { signature: previousNative.signature } : {}),
-									...(previousNative.encryptedContent
-										? { encryptedContent: previousNative.encryptedContent }
-										: {}),
-									...(previousNative.filesText ? { filesText: previousNative.filesText } : {}),
-								}
-							: undefined,
-				})
+			? createCompactionSummaryMessage(
+					previousSummaryForCompaction,
+					tokensBefore,
+					preparation.previousSummaryTimestamp ?? new Date().toISOString(),
+					{
+						historyRewriteAt: firstReplayed !== undefined ? firstReplayed.timestamp - 1 : undefined,
+						providerPayload:
+							previousNative?.provider === model.provider
+								? {
+										type: "anthropicCompaction",
+										provider: previousNative.provider,
+										content: previousNative.content,
+										...(previousNative.signature ? { signature: previousNative.signature } : {}),
+										...(previousNative.encryptedContent
+											? { encryptedContent: previousNative.encryptedContent }
+											: {}),
+										...(previousNative.filesText ? { filesText: previousNative.filesText } : {}),
+										...(previousNative.retainedFiles ? { retainedFiles: previousNative.retainedFiles } : {}),
+										...(previousNative.exactTail ? { exactTail: true as const } : {}),
+									}
+								: undefined,
+					},
+				)
 			: undefined;
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
 		const originalCut = messagesToSummarize.length + turnPrefixMessages.length;
@@ -1891,20 +1916,46 @@ export async function compact(
 					? firstKeptEntryId
 					: (recentEntryIds?.[safeCut - originalCut] ?? "");
 		for (let i = originalCut; i < safeCut; i++) extractFileOpsFromMessage(allMessages[i], fileOps);
-		const messages = (summaryOptions.convertToLlm ?? defaultConvertToLlm)([
+		const summarizedMessages = [
 			...(previousSummaryMessage ? [previousSummaryMessage] : []),
 			...allMessages.slice(0, safeCut),
-		]);
+		];
+		// Earlier file metadata replays before the first message created after
+		// its summary. When that point lies inside the new retained tail, the
+		// request stops short of it and the new summary must keep replaying it.
+		const retainedFrom = allMessages[safeCut]?.timestamp;
+		const previousPayload = previousSummaryMessage?.providerPayload;
+		if (
+			retainedFrom !== undefined &&
+			previousSummaryMessage !== undefined &&
+			previousPayload?.type === "anthropicCompaction" &&
+			previousPayload.exactTail
+		) {
+			const carried = [
+				...(previousPayload.retainedFiles ?? []),
+				...(previousPayload.filesText
+					? [{ text: previousPayload.filesText, after: previousSummaryMessage.timestamp }]
+					: []),
+			].filter(files => files.after >= retainedFrom);
+			if (carried.length > 0) nativeRetainedFiles = carried;
+		}
 		try {
+			// The live turn's own system prompt, wire tools and transformed
+			// history when the host can build them: kept thinking remains valid
+			// only when the summarized prefix matches what was sent byte for byte.
+			const context = summaryOptions.buildProviderContext
+				? await summaryOptions.buildProviderContext(summarizedMessages, allMessages.slice(safeCut), signal)
+				: {
+						systemPrompt: summaryOptions.remoteSystemPrompt ?? [],
+						messages: (summaryOptions.convertToLlm ?? defaultConvertToLlm)(summarizedMessages),
+						tools: summaryOptions.tools,
+					};
 			const remote = await requestAnthropicNativeCompaction(
 				model,
 				apiKey,
 				{
-					// The live prompt, not the local summarizer's synthetic system
-					// prompt: kept thinking remains valid only under identical controls.
-					systemPrompt: summaryOptions.remoteSystemPrompt ?? [],
-					messages,
-					tools: summaryOptions.tools,
+					context,
+					retainedFrom,
 					instructions: buildAnthropicCompactionInstructions(
 						summaryOptions.promptOverride ?? SUMMARIZATION_PROMPT,
 						customInstructions,
@@ -2026,6 +2077,8 @@ export async function compact(
 			content: nativeSummary,
 			...(nativeSignature ? { signature: nativeSignature } : {}),
 			...(filesText ? { filesText } : {}),
+			...(nativeRetainedFiles ? { retainedFiles: nativeRetainedFiles } : {}),
+			exactTail: true,
 			model: model.id,
 			usedTokens: nativeUsedTokens,
 		});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic native compaction being rejected with `Invalid signature in thinking block` (or silently dropping the summarized thinking) on models with preserved thinking ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
