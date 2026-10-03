@@ -34,6 +34,7 @@ import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
+import textChannelToolCallRetryTemplate from "../prompts/system/text-channel-tool-call-retry.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -75,6 +76,7 @@ import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
+import { detectTextChannelToolCalls, textChannelToolCallNames } from "./text-channel-tool-call";
 
 import {
 	cfgFeaturesUnexpectedStopDetection,
@@ -92,6 +94,8 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
+const TEXT_CHANNEL_TOOL_CALL_MAX_RETRIES = 3;
+const TEXT_CHANNEL_TOOL_CALL_MAX_REPORTED_NAMES = 8;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
@@ -311,6 +315,7 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#streamStallContinueCount = 0;
+	#textChannelToolCallRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -448,6 +453,7 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#streamStallContinueCount = 0;
+		this.#textChannelToolCallRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}
@@ -606,6 +612,88 @@ export class TurnRecovery {
 		});
 		this.#host.scheduleAgentContinue({
 			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
+	}
+
+	/**
+	 * Continue past a terminal stop whose text transcribes tool calls as literal
+	 * text (a `function=NAME` envelope with `parameter=NAME` pairs) instead of
+	 * emitting structured `toolCall` blocks. The transcription is rendered to
+	 * the user but nothing dispatches it, so the session stalls at the announced
+	 * call. Nothing ran and nothing needs replaying: keep the turn in context so
+	 * the model sees its own output, append a corrective developer message
+	 * naming the unexecuted tools, and resume. Tool-carrying messages are
+	 * excluded — a prose twin stays inert beside real calls. Names only, never
+	 * parameter values (values are not opaque in this markup). Bounded per
+	 * prompt; respects `features.unexpectedStopDetection: "none"`.
+	 */
+	handleTextChannelToolCallStop(message: AssistantMessage): boolean {
+		if (cfgFeaturesUnexpectedStopDetection.get(this.#host.settings) === "none") return false;
+		if (message.stopReason !== "stop") return false;
+		for (const block of message.content) {
+			if (block.type === "toolCall") {
+				this.#textChannelToolCallRetryCount = 0;
+				return false;
+			}
+		}
+		const text = message.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map(content => content.text)
+			.join("\n");
+		const detection = detectTextChannelToolCalls(text);
+		if (detection === undefined) {
+			this.#textChannelToolCallRetryCount = 0;
+			return false;
+		}
+		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+
+		this.#textChannelToolCallRetryCount++;
+		if (this.#textChannelToolCallRetryCount > TEXT_CHANNEL_TOOL_CALL_MAX_RETRIES) {
+			logger.warn("Assistant kept writing tool calls as text after retry cap", {
+				attempts: this.#textChannelToolCallRetryCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#textChannelToolCallRetryCount = 0;
+			return false;
+		}
+
+		const names = textChannelToolCallNames(detection);
+		const reportedNames = names.slice(0, TEXT_CHANNEL_TOOL_CALL_MAX_REPORTED_NAMES);
+		logger.info("Tool call written as text; continuing with corrective reminder", {
+			attempt: this.#textChannelToolCallRetryCount,
+			model: message.model,
+			provider: message.provider,
+			callCount: detection.complete.length,
+			incomplete: detection.incomplete,
+			toolNames: reportedNames,
+		});
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: prompt.render(textChannelToolCallRetryTemplate, {
+						retryCount: this.#textChannelToolCallRetryCount,
+						maxRetries: TEXT_CHANNEL_TOOL_CALL_MAX_RETRIES,
+						toolNames: reportedNames,
+						omittedCount: names.length - reportedNames.length,
+						incomplete: detection.incomplete,
+					}),
+				},
+			],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		// The delay keeps this continuation from coalescing onto the very
+		// agent-continue run whose turn produced the reminder: the handler is
+		// synchronous, so without it the scheduled task lands while that run is
+		// still active and gets folded into it instead of starting a turn.
+		this.#host.scheduleAgentContinue({
+			source: "text-channel-tool-call-retry",
+			delayMs: 100,
 			generation: this.#host.promptGeneration(),
 		});
 		return true;

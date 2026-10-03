@@ -270,6 +270,9 @@
 ### Removed
 
 - Removed the bash tool's `env` parameter; services inherit the configured shell environment
+### Fixed
+
+- Fixed sessions stopping where the assistant wrote a tool call as literal text in its reply instead of emitting it — nothing ran and the session idled; the reply now gets a corrective note naming the unexecuted tools and the turn continues so the call can be re-emitted properly
 
 ## [18.4.3] - 2026-09-28
 
