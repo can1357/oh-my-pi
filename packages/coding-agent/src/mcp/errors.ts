@@ -97,6 +97,52 @@ function sanitizeDiagnosticText(value: string, maxChars: number): string {
 		.trim();
 }
 
+/**
+ * Characters of a child's stderr quoted below a classified failure message.
+ *
+ * Kept under `MAX_MESSAGE_CHARS` so the classified sentence, the label, and the
+ * whole quoted tail survive the message bound instead of the tail being cut.
+ */
+const MAX_STDERR_CHARS = 800;
+
+/** Separates the classified failure from the child's own output below it. */
+const STDERR_DETAIL_LABEL = "Server stderr (tail):";
+
+function sanitizeStderrText(value: string): string | undefined {
+	const redacted = sanitizeDiagnosticText(value, MAX_STDERR_CHARS);
+	return redacted.length > 0 ? redacted : undefined;
+}
+
+/**
+ * Bound and redact a subprocess's captured stderr for a failure message.
+ *
+ * The tail is the child's own account of why it died, so it is quoted verbatim
+ * after secret redaction — never filtered by log prefix, because subprocesses
+ * share no log convention and a filter tuned to one format hides exactly the
+ * line that explains the failure. Only the end of the stream is kept: that is
+ * where a crash explains itself, and the tail is what makes a chatty or
+ * careless child unable to flood the error surface.
+ */
+export function sanitizeStderrDetail(raw: string | undefined): string | undefined {
+	if (!raw) return undefined;
+	const normalized = raw.replace(/\r\n?/gu, "\n").trimEnd();
+	if (normalized.length === 0) return undefined;
+	if (normalized.length <= MAX_STDERR_CHARS) return sanitizeStderrText(normalized);
+	const bounded = normalized.slice(-MAX_STDERR_CHARS);
+	// Drop the partial first line the cut produced, so the quoted tail never
+	// opens mid-line.
+	const firstBreak = bounded.indexOf("\n");
+	return sanitizeStderrText(firstBreak === -1 ? bounded : bounded.slice(firstBreak + 1));
+}
+
+/**
+ * Attach a child's captured stderr to its classified failure message as
+ * context below (never as a replacement for) the classified summary.
+ */
+export function appendStderrDetail(message: string, stderr: string | undefined): string {
+	return stderr === undefined ? message : `${message}\n${STDERR_DETAIL_LABEL}\n${stderr}`;
+}
+
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {
 	if (depth > MAX_DATA_DEPTH) return "[truncated]";
 	if (typeof value === "string") return sanitizeDiagnosticText(value, MAX_DATA_STRING_CHARS);
