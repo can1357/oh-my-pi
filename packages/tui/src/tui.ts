@@ -45,6 +45,7 @@ import {
 	TERMINAL,
 } from "./terminal-capabilities";
 import { classifyTerminalMultiplexer } from "./terminal-multiplexer";
+import { minFrameIntervalMs } from "./frame-rate";
 import {
 	Ellipsis,
 	extractSegments,
@@ -891,12 +892,22 @@ export class TUI extends Container {
 	 * `#scheduleRender` to inflate the next render delay proportionally so a
 	 * spike of slow frames (large transcript diffs, huge assistant text wrap,
 	 * component-tree walks) does not busy-loop the CPU: the throttle would
-	 * otherwise collapse to zero once `elapsed >= MIN_RENDER_INTERVAL_MS` and
+	 * otherwise collapse to zero once `elapsed` passes the frame interval and
 	 * fire the next frame immediately (see #4145).
 	 */
 	#lastFrameCostMs = 0;
-	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
-	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
+	/**
+	 * Cadence of frames a keystroke is waiting on. Pinned at the historical 30 fps regardless of
+	 * the `tui.maxFps` ceiling (see {@link minFrameIntervalMs}): the ceiling exists to quiet panes
+	 * nobody is typing in, and the one being typed in must echo within a frame.
+	 */
+	static readonly #INPUT_FRAME_INTERVAL_MS = 1000 / 30;
+	static readonly #INPUT_RENDER_GRACE_MS = TUI.#INPUT_FRAME_INTERVAL_MS;
+	/**
+	 * Set when the pending render was requested by terminal input, so `#scheduleRender` paces it
+	 * at `#INPUT_FRAME_INTERVAL_MS` instead of the ceiling; cleared when that frame paints.
+	 */
+	#inputRenderPending = false;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
 	 * responsiveness at ~5 fps under sustained heavy renders — anything slower
@@ -2541,6 +2552,16 @@ export class TUI extends Container {
 			});
 			return;
 		}
+		// A render while a keystroke's latch is set rides the fixed input cadence: an animation frame
+		// parked further out under the `tui.maxFps` ceiling is replaced by one the keystroke can ride.
+		// Input listeners (scroll wheel, toggles) and focused components alike request through here.
+		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive) {
+			this.#renderTimer.cancel();
+			this.#renderTimer = undefined;
+			this.#renderRequested = true;
+			this.#scheduleRender();
+			return;
+		}
 		this.#requestOrdinaryRender();
 	}
 
@@ -2638,7 +2659,12 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// Animation and content frames land no closer than the `tui.maxFps` ceiling allows; a frame
+		// a keystroke is waiting on keeps the fixed input cadence.
+		const frameIntervalMs = this.#inputRenderPending
+			? Math.min(TUI.#INPUT_FRAME_INTERVAL_MS, minFrameIntervalMs())
+			: minFrameIntervalMs();
+		const cadenceDelay = Math.max(0, frameIntervalMs - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -2661,6 +2687,7 @@ export class TUI extends Container {
 	 */
 	#executeRender(): void {
 		if (this.#deferRenderForOutputBacklog()) return;
+		this.#inputRenderPending = false;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
 		this.#doRender();
@@ -2731,6 +2758,11 @@ export class TUI extends Container {
 			data = data.slice(0, searchFrom + match.index) + data.slice(searchFrom + match.index + match[0].length);
 		}
 		if (data.length === 0) return;
+		// Every keystroke arms the input latch before any consumer runs, so whichever consumer
+		// requests the paint — an input listener or the focused component — it is paced at the input
+		// cadence, not the ceiling. Input that triggers no render leaves the latch for the next frame
+		// to consume at the 30 fps floor once; harmless.
+		this.#inputRenderPending = true;
 
 		// If focused component is an overlay, verify it's still visible (visibility can change due to
 		// terminal resize or visible() callback). Runs before the capture preflight below, which must
@@ -2746,7 +2778,6 @@ export class TUI extends Container {
 				this.setFocus(focusedOverlay.preFocus);
 			}
 		}
-
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
 		// key would make idle navigation pay a full frame of latency.

@@ -18,6 +18,7 @@ import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { DEFAULT_MAX_FPS, parseMaxFps, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
 import { DEFAULT_SPINNER_INTERVAL_MS, parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
@@ -526,6 +527,33 @@ export const cfgTuiSpinnerInterval = register({
 // The TUI's shared spinner clock (Loader rows, tool cards, status-line brand) follows the setting
 // live; the terminal-title spinner reads it in interactive mode beside the other title settings.
 effect(cfgTuiSpinnerInterval, setSpinnerInterval);
+
+export const cfgTuiMaxFps = register({
+	id: "tui.maxFps",
+	type: "number",
+	default: DEFAULT_MAX_FPS,
+	env: "PI_MAX_FPS",
+	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured.
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseMaxFps(raw);
+	},
+	normalize: parseMaxFps,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Max Frames Per Second",
+		description:
+			"Ceiling on how often the TUI repaints: animations and streaming text coalesce into frames no closer than this. Keystroke echo keeps the full rate, so the pane you type in stays crisp while background sessions go quiet. Each frame costs the terminal (and under tmux control mode, every attached client) a repaint",
+		options: [
+			{ value: "30", label: "30 fps", description: "Full rate (default)" },
+			{ value: "15", label: "15 fps", description: "Half rate" },
+			{ value: "4", label: "4 fps", description: "Quiet: for many panes or a shared screen" },
+			{ value: "1", label: "1 fps", description: "Minimum: content still updates once a second" },
+		],
+	},
+});
+// The TUI render scheduler and its animation timers follow the ceiling live.
+effect(cfgTuiMaxFps, setMaxFps);
 
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
