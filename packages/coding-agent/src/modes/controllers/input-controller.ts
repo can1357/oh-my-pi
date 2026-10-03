@@ -491,6 +491,9 @@ export class InputController {
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
 				return;
 			}
+			if (this.ctx.dismissCommandReport()) {
+				return;
+			}
 
 			if (!this.ctx.focusedAgentId) {
 				const viewSession = this.ctx.viewSession;
@@ -2391,7 +2394,7 @@ export class InputController {
 			// No usable image-file URL (pure bitmap pasteboard: screenshots,
 			// browser copies, or a non-image Finder selection). Fall to the
 			// image representation. The text bridge starts alongside the image
-			// bridge: on Windows each is a cold powershell.exe spawn (~100ms+),
+			// bridge: either can shell out (WSL's powershell.exe, wl-paste, xclip),
 			// so serial awaits stall an empty clipboard by their sum before
 			// "Clipboard is empty" can surface. Image precedence is preserved —
 			// a resolved text payload is discarded unused when an image is present.

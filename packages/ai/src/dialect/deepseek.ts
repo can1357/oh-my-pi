@@ -1,5 +1,6 @@
 import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./deepseek.md" with { type: "text" };
 import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";
@@ -477,11 +478,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#parseArgs(rawArgs: string): Record<string, unknown> {
 		const trimmed = rawArgs.trim();
 		if (trimmed.length === 0) return {};
-		try {
-			return asRecord(parseJsonWithRepair<unknown>(trimmed));
-		} catch {
-			return {};
-		}
+		return asRecord(parseToolCallArguments(trimmed));
 	}
 
 	#skipWhitespace(): string {

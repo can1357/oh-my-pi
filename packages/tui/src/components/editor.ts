@@ -2862,9 +2862,10 @@ export class Editor implements Component, Focusable {
 		this.#insertTextAtCursor(text);
 	}
 
-	/** Terminal-side selection edits on the `editor` node (see {@link applyHostEdit}). */
+	/** Terminal-side selection edits and undo on the `editor` node (see {@link applyHostEdit}). */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "edit") this.applyHostEdit(event);
+		else if (event.type === "undo") this.#applyUndo();
 	}
 
 	/**

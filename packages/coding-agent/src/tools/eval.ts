@@ -45,7 +45,7 @@ import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -794,8 +794,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (spilledDisplays.length === 0) return;
 				// Artifact persistence confirmed: keep the bounded preview. Otherwise
 				// restore the full value so `details` never points at an artifact that
-				// was never (fully) written.
-				if (summary?.artifactId !== undefined) {
+				// was never (fully) written — including one the size cap cut, whose
+				// elided middle may have held the spilled value.
+				if (summary?.artifactId !== undefined && !summary.artifactElidedBytes) {
 					spilledDisplays.length = 0;
 					return;
 				}
@@ -873,6 +874,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				artifactPath,
 				artifactId,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),
+				artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
 				onChunk: chunk => {
 					appendTail(chunk);
@@ -1137,6 +1139,7 @@ async function summarizeFinal(
 		outputLines,
 		outputBytes,
 		artifactId: rawSummary.artifactId,
+		artifactElidedBytes: rawSummary.artifactElidedBytes,
 		artifactError: rawSummary.artifactError,
 		columnDroppedBytes: rawSummary.columnDroppedBytes,
 		columnTruncatedLines: rawSummary.columnTruncatedLines,

@@ -341,7 +341,8 @@ function emitWriteProgress(
  * Mirrors `chmod a+x` (adds user/group/other execute bits to existing mode).
  * Errors are swallowed: chmod failure (e.g. Windows ACL, read-only mount)
  * MUST NOT fail an otherwise successful write. Returns whether the mode
- * actually changed so the caller can surface a note.
+ * actually changed so the caller can surface a note — re-read after the chmod,
+ * since Windows (and some mounts) accept it while keeping no execute bits.
  */
 async function maybeMarkExecutableForShebang(absolutePath: string, content: string): Promise<boolean> {
 	if (!content.startsWith("#!")) return false;
@@ -351,7 +352,7 @@ async function maybeMarkExecutableForShebang(absolutePath: string, content: stri
 		const newMode = currentMode | 0o111;
 		if (newMode === currentMode) return false;
 		await fs.chmod(absolutePath, newMode);
-		return true;
+		return ((await fs.stat(absolutePath)).mode & 0o111) === 0o111;
 	} catch {
 		return false;
 	}

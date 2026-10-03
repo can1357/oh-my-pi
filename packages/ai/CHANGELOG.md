@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [18.5.0] - 2026-10-03
+
+### Fixed
+
+- Fixed AWS `credential_process` on Windows stripping backslashes from unquoted paths such as `C:\Users\me\helper.exe`; commands are now split with Windows command-line rules there, matching the AWS CLI.
+
+## [18.4.12] - 2026-10-02
+
+### Added
+
+- Added `createAuthGatewayRouter`, the auth-gateway's routes without the HTTP listener, and `serveAuthGatewayStdio`, which serves them as JSON lines (`{"id", "path", "body"}` in, `{"id", "status", "body"}` out) for a parent process.
+
+## [18.4.11] - 2026-10-02
+
+### Fixed
+
+- Fixed Cursor cached prompt token accounting to prevent duplicate input-token and cost reporting on cached turns.
+- Fixed auth-broker credential handling so late token-refresh responses cannot restore logged-out credentials or overwrite a newer login.
+
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- Factory Droid login now reports the account's organization error instead of accepting a credential that every request rejects ([#14032](https://github.com/can1357/oh-my-pi/issues/14032)).
+- Fixed Cursor turns being aborted with "Provider stream stalled while waiting for the next event" right after a long local tool finished; the provider now gets a full idle window once local tool work completes ([#13682](https://github.com/can1357/oh-my-pi/pull/13682) by [@eggpeat](https://github.com/eggpeat))
+- Tool calls whose final argument JSON is cut off or followed by trailing text are no longer executed from an auto-closed preview. OpenAI Completions, Anthropic, Bedrock, Responses, Codex, Devin, Ollama, Apple, Cursor, GitLab Duo, and the in-band JSON dialects now give such a call the existing parse-error arguments, so the tool is not run and the model receives the parse error and can resend the call ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
+- Fixed Cursor "prepaid balance is used up" (`USAGE_PRICING_REQUIRED`) failures repeating on the same account instead of rotating to a sibling Cursor credential ([#14053](https://github.com/can1357/oh-my-pi/issues/14053))
+- Sessions no longer get stuck on `400 string_above_max_length` after a model writes its whole tool invocation into the tool name. Tool calls with blank names, names longer than 128 characters, or names containing whitespace or control characters are dropped from replayed history, together with their tool results. This also applies when OpenAI Responses replays its stored native history ([#13985](https://github.com/can1357/oh-my-pi/pull/13985) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed Bedrock Converse requests failing with a "bound to a different conversation" 400 after the system prompt changed under signed thinking: the request is retried once without replayed reasoning ([#14019](https://github.com/can1357/oh-my-pi/pull/14019) by [@nick-maderight](https://github.com/nick-maderight))
+
+## [18.4.9] - 2026-10-01
+
+### Fixed
+
+- Fixed rejected HTTP 400 requests from consuming unbounded disk space by automatically cleaning up old request logs and enforcing a size limit.
+- Fixed unnecessary credential and session updates that could trigger needless authentication reloads in other running processes.
+- Fixed context-overflow recovery for Strata requests that exceed the model context limit but return no usage information.
+
 ## [18.4.6] - 2026-10-01
 
 ### Fixed
@@ -2287,33 +2325,4 @@
 - Fixed tool schema conversion for non-Cloud Code Assist Google Gemini models by normalizing parameters with `normalizeSchemaForGoogle` to prevent un-normalized schema properties (such as `additionalProperties: false` or type arrays) from causing Gemini API errors.
 - Fixed OpenAI-family request builders dropping forced named `tool_choice` directives when the named tool is absent from the serialized `tools` array, preventing spec-strict providers from rejecting self-inconsistent requests. ([#1701](https://github.com/can1357/oh-my-pi/issues/1701))
 
-## [15.12.4] - 2026-06-13
-
-### Added
-
-- Added `GITLAB_CLIENT_ID` and `GITLAB_REDIRECT_URI` env-var overrides for the GitLab Duo OAuth login flow so users running with their own GitLab OAuth application can replace the bundled credentials when GitLab rejects the bundled `client_id`'s redirect URI. Setting `GITLAB_REDIRECT_URI` also disables the random-port fallback (strict OAuth providers reject mismatched URIs anyway). ([#2424](https://github.com/can1357/oh-my-pi/issues/2424))
-- Added `AuthStorage.listStoredCredentials()` and `AuthStorage.removeCredential()` for per-account credential management.
-
-### Changed
-
-- Replaced the OpenAI SDK client usage in `openai-completions`, `openai-responses`, `azure-openai-responses`, and `openai-codex-responses` with the new internal `postOpenAIStream` OpenAI-wire JSON/SSE transport
-
-### Fixed
-
-- Fixed streaming providers to cancel upstream model requests when the client closes the response body, so interrupted SSE sessions stop instead of continuing in the background
-- Fixed: provider request builders treat unknown `model.maxTokens` (`null`) as "no model cap" instead of coercing to `0` via `Math.min`; Anthropic falls back to the 64k Claude-Code cap for its required `max_tokens`.
-- Fixed transient stream failures on OpenAI-compatible providers by retrying HTTP 408/429/5xx responses and transient network errors with Retry-After/quota-hint aware backoff
-- Fixed SSE stream handling for OpenAI-compatible responses by parsing wire-level JSON frames directly and honoring `[DONE]` termination
-- Fixed stream error handling for OpenAI-compatible providers by preserving structured HTTP status/headers and response body details from failed requests for retry and strict-tool fallback logic
-- Fixed OpenAI-compat streams ending with a bare `finish_reason: "error"` (gateways like OpenRouter reporting upstream failures, e.g. Gemini `MALFORMED_FUNCTION_CALL`) surfacing as a non-retryable `Provider finish_reason: error`. The reason is now mapped to `Provider returned error finish_reason`, which the session retry classifier recognizes as transient, so the turn auto-retries instead of stopping with a pinned error banner.
-- Fixed `SqliteAuthCredentialStore.open()` crashing with `SQLITE_BUSY_RECOVERY` (errno 261) when several `omp --session` panes restore concurrently after an unclean shutdown: `PRAGMA busy_timeout = 5000` now runs as a standalone statement BEFORE `PRAGMA journal_mode=WAL` (the first lock-taking statement during WAL recovery), and `open()` retries the BUSY family — `SQLITE_BUSY`, `SQLITE_BUSY_RECOVERY`, `SQLITE_BUSY_SNAPSHOT`, `SQLITE_BUSY_TIMEOUT` — with bounded exponential backoff. The exhausted-retry error message includes the DB path. Exported `isSqliteBusyError(err)` for callers that need the same classifier ([#2421](https://github.com/can1357/oh-my-pi/issues/2421)).
-- Fixed MiniMax-M3 OpenAI-compatible streams rendering reasoning twice when the same chunk carried both `<think>…</think>` content and structured `reasoning_content`; structured reasoning now wins and cumulative MiniMax reasoning snapshots are collapsed to deltas. ([#2433](https://github.com/can1357/oh-my-pi/issues/2433))
-- Fixed Gemini turns silently halting the agent when the model returned `finishReason: STOP` with only an empty (or whitespace-only) text part and no tool call — the well-known "empty response" failure. All Google surfaces (public Generative Language `streamGoogle`, Vertex `streamGoogleVertex`, and Cloud Code Assist `google-gemini-cli`/`google-antigravity`) now classify such a turn as empty via the shared `hasMeaningfulGoogleContent` check and retry it up to `MAX_EMPTY_STREAM_RETRIES` times before surfacing an error. The Cloud Code Assist path previously had an empty-stream retry that never fired for this case (its `hasContent` flag counted an empty-string text part as content), and the public/Vertex path had no retry at all; the retry now emits a single `start` event so no duplicate partial message leaks downstream.
-
-## [15.12.1] - 2026-06-12
-
-### Added
-
-- Added the optional `ToolResultMessage.useless` flag: tools can declare a finished result contextually useless (zero matches, elapsed wait) so compaction passes may elide it once consumed. Never serialized to provider wire formats and never set together with `isError`.
-
-Older entries are archived in [packages\ai\CHANGELOG.md@cd762117522c](https://github.com/can1357/oh-my-pi/blob/cd762117522cc4122cd45b8d2d14de5f7be5133b/packages\ai\CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@edb740cbad49](https://github.com/can1357/oh-my-pi/blob/edb740cbad499dbc96f8b5b46ebf78f70d6af4d0/packages/ai/CHANGELOG.md).

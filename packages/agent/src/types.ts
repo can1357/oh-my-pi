@@ -1143,7 +1143,7 @@ export interface AgentTool<
 	 * before ordinary dispatch commits its result.
 	 */
 	speculation?: ToolSpeculationPolicy;
-	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
+	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it

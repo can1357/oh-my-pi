@@ -21,6 +21,8 @@ export interface TspHarnessOptions {
 	rows?: number;
 	/** Kinds the terminal advertises (default: the whole vocabulary). */
 	kinds?: readonly string[];
+	/** Features the terminal advertises (default: blobs, settle, adopt, dock). */
+	features?: readonly string[];
 	credits?: number;
 	/** APC body limit before chunking. */
 	apc?: number;
@@ -195,7 +197,7 @@ export class TspTestTerminal implements Terminal {
 						v: 1,
 						term: "tern-test",
 						kinds: this.#options.kinds ?? TSP_KINDS,
-						features: ["blobs", "settle", "adopt", "dock"],
+						features: this.#options.features ?? ["blobs", "settle", "adopt", "dock"],
 						apc: this.#options.apc,
 						credits: this.#options.credits,
 						cols: this.#cols,

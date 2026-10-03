@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [18.5.0] - 2026-10-03
+
+### Fixed
+
+- Fixed Ctrl+V on Windows sometimes pasting text with a few characters replaced by unrelated glyphs (for example `https://` turning into `՞ttp缀難//`); clipboard reads and writes no longer run at the same time ([#14144](https://github.com/can1357/oh-my-pi/pull/14144) by [@H4vC](https://github.com/H4vC))
+
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- Fixed the embedded shell sometimes hanging on a pipeline with a stage that stopped (for example with `kill -STOP $$`) before the shell began waiting on it; the pipeline now becomes a stopped job ([#14023](https://github.com/can1357/oh-my-pi/pull/14023) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `readTextFromClipboard()` for reading plain text from the system clipboard without starting a subprocess.
+- Added `Shell.pids()` to retrieve the IDs of still-running processes spawned by an in-flight shell command.
+
 ## [18.4.7] - 2026-10-01
 
 ### Fixed

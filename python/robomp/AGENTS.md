@@ -27,7 +27,7 @@ Webhook → durable queue → async dispatcher → per-issue git worktree → om
 
 ## Development Commands
 
-Task runner is `bun` against the **monorepo root** `package.json`. roboomp itself no longer ships a `package.json`; every recipe lives at the root under the `robomp:*` namespace. Local venv (no docker): `bun run robomp:install` runs `pip install -e 'python/robomp[dev]'`. From there:
+Task runner is `bun` against the **monorepo root** `package.json`. roboomp itself no longer ships a `package.json`; every recipe lives at the root under the `robomp:*` namespace. Local venv (no docker): `bun run robomp:install` runs `pip install -e python/omp-rpc -e 'python/robomp[dev]'` (the local `omp-rpc` is not on the package index). From there:
 
 ```
 bun run test:py                   # pytest -x python/omp-rpc/tests python/robomp/tests
