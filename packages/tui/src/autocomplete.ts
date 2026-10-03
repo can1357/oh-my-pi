@@ -345,6 +345,11 @@ function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): bool
 	return getCommandAliases(cmd).includes(commandName);
 }
 
+/** An exact hidden name/alias runs as typed; a popup would let Enter swap in a fuzzy match. */
+function matchesHiddenCommand(commands: readonly CommandEntry[], commandName: string): boolean {
+	return commands.some(cmd => "hidden" in cmd && cmd.hidden && commandMatchesNameOrAlias(cmd, commandName));
+}
+
 export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix.length === 0) return 1;
 	if (lowerPrefix === lowerTarget) return 1000;
@@ -644,10 +649,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				// No space yet - complete command names
 				const prefix = commandText.slice(1); // Remove the "/"
 				const lowerPrefix = prefix.toLowerCase();
-				// An exact hidden name runs as typed; a popup would let Enter swap in a fuzzy match.
-				if (this.#commands.some(cmd => "hidden" in cmd && cmd.hidden && commandMatchesNameOrAlias(cmd, prefix))) {
-					return null;
-				}
+				if (matchesHiddenCommand(this.#commands, prefix)) return null;
 
 				const matches = isMidPromptSkillLookup
 					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
@@ -1311,9 +1313,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		const prefix = commandText.slice(1);
 		const lowerPrefix = prefix.toLowerCase();
-		if (this.#commands.some(cmd => "hidden" in cmd && cmd.hidden && commandMatchesNameOrAlias(cmd, prefix))) {
-			return null;
-		}
+		if (matchesHiddenCommand(this.#commands, prefix)) return null;
 
 		// The `/skill:` namespace row is excluded here: the sync path submits
 		// immediately after applying, and the bare namespace is not a command.

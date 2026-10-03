@@ -341,6 +341,7 @@ import {
 	cfgCommandsEnableClaudeUser,
 	cfgCommandsEnableOpencodeProject,
 	cfgCommandsEnableOpencodeUser,
+	cfgCommandsHidden,
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
@@ -381,6 +382,7 @@ const cfgSkillsAndCommandsDiscovery = combine({
 	commandsClaudeProject: cfgCommandsEnableClaudeProject,
 	commandsOpencodeUser: cfgCommandsEnableOpencodeUser,
 	commandsOpencodeProject: cfgCommandsEnableOpencodeProject,
+	commandsHidden: cfgCommandsHidden,
 	enabledProviders: cfgEnabledProviders,
 	disabledProviders: cfgDisabledProviders,
 });
