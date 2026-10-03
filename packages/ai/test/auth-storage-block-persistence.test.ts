@@ -204,6 +204,43 @@ describe("AuthStorage credential block persistence", () => {
 		}
 	});
 
+	it("does not resurrect a cleared block after a sibling instance reinserts a shorter one", async () => {
+		const options = { usageProviderResolver: () => undefined, rankingStrategyResolver: () => undefined };
+		const storeA = await SqliteAuthCredentialStore.open(dbPath);
+		await storeA.saveOAuth(PROVIDER, oauthCredential("1"));
+		const [row] = storeA.listAuthCredentials(PROVIDER);
+		if (!row) throw new Error("expected credential row");
+		const storeB = await SqliteAuthCredentialStore.open(dbPath);
+		const a = new AuthStorage(storeA, options);
+		const b = new AuthStorage(storeB, options);
+		await a.credentials.reload();
+		await b.credentials.reload();
+		const threeDays = 3 * 24 * 60 * 60_000;
+		try {
+			await a.limits.markReached(PROVIDER, "a", {
+				credentialId: row.id,
+				retryAfterMs: threeDays,
+				providerTimed: true,
+			});
+			// B redeems a reset, then hits a fresh short block before A reads the store again.
+			storeB.deleteCredentialBlock(row.id, PROVIDER_KEY, "");
+			await b.limits.markReached(PROVIDER, "b", { credentialId: row.id, retryAfterMs: 60_000, providerTimed: true });
+
+			const result = await a.limits.markReached(PROVIDER, "a", {
+				credentialId: row.id,
+				retryAfterMs: 60_000,
+				providerTimed: true,
+			});
+
+			const shortDeadline = Date.now() + 120_000;
+			expect(result.blockedUntilMs).toBeLessThan(shortDeadline);
+			expect(storeA.getCredentialBlock(row.id, PROVIDER_KEY, "")).toBeLessThan(shortDeadline);
+		} finally {
+			a.close();
+			b.close();
+		}
+	});
+
 	it("drops expired rows from reads and clears persisted blocks through the public delete wrapper", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		await store.saveOAuth(PROVIDER, oauthCredential("1"));

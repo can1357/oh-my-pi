@@ -80,6 +80,8 @@ describe("ModelRegistry default custom models config", () => {
 			// overrides too (model compat generation).
 			streamIdleTimeoutMs: 900000,
 			streamRevision: "possible",
+			// Opus 4.7+ rejects temperature/top_p on every host (class rule).
+			supportsSamplingParams: false,
 		});
 	});
 
@@ -431,6 +433,7 @@ interface ModelSnapshot {
 		supportsForcedToolChoice?: boolean;
 		streamIdleTimeoutMs?: number;
 		streamRevision?: "possible";
+		supportsSamplingParams?: boolean;
 	};
 }
 

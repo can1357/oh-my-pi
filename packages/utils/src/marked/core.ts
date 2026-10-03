@@ -820,8 +820,10 @@ function isBlockStart(lines: string[], index: number): boolean {
 	return false;
 }
 
+// `[^\n]`, not `.`: `.` stops at U+2028 and U+2029, which end no Markdown line,
+// and the match then skips the text in front of them.
 function lineArray(src: string): string[] {
-	return src.match(/.*(?:\n|$)/g)?.filter((line, index, all) => line !== "" || index < all.length - 1) ?? [];
+	return src.match(/[^\n]*(?:\n|$)/g)?.filter((line, index, all) => line !== "" || index < all.length - 1) ?? [];
 }
 function stripFinalNewline(value: string): string {
 	return value.endsWith("\n") ? value.slice(0, -1) : value;

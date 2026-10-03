@@ -334,6 +334,29 @@ describe("ModelBrowser perf display", () => {
 		expect(wideRow).toContain("0.9s 118t/s");
 	});
 
+	test("narrow rows drop cost, then context, before truncating the model name", () => {
+		const model = makeModel("openai", "gpt-5-codex-mini");
+		model.cost.input = 100;
+		model.contextWindow = 128_000;
+		model.cost.output = 0.001;
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		browser.setItems(buildBrowserItems([model]));
+
+		const wide = renderPlain(browser, 100)[2];
+		expect(wide).toContain("gpt-5-codex-mini");
+		expect(wide).toContain("128k");
+		expect(wide).toContain("$100/0.001");
+
+		const narrow = renderPlain(browser, 34)[2];
+		expect(narrow).toContain("gpt-5-codex-mini");
+		expect(narrow).toContain("128k");
+		expect(narrow).not.toContain("$100");
+
+		const tiny = renderPlain(browser, 16)[2];
+		expect(tiny).toContain("gpt-5");
+		expect(tiny).not.toContain("128k");
+	});
+
 	test("detail line shows measured perf regardless of width", () => {
 		const browser = makePerfBrowser();
 

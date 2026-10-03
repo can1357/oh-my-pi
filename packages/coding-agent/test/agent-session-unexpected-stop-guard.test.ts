@@ -181,6 +181,21 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
+	it("delivers retries scheduled by consecutive thinking-only stops before going idle", async () => {
+		const { session, mock } = await createHarness([
+			thinkingOnlyStop("first thought"),
+			thinkingOnlyStop("second thought"),
+			thinkingOnlyStop("third thought"),
+			{ content: ["finished after retries"], stopReason: "stop" },
+		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(assistantText(session.agent.state.messages)).toContain("finished after retries");
+	});
+
 	it("does not retry in mechanical mode when text message was delivered", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness([

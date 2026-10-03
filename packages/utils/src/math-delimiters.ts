@@ -8,6 +8,9 @@
 /** Opening delimiter. Each closer (`$`, `$$`, `\)`, `\]`) is as wide as its opener. */
 export type MathOpener = "$" | "$$" | "\\(" | "\\[";
 
+/** Opener of an own-line display block. */
+export type MathBlockOpener = "$$" | "\\[";
+
 /** A closed math span found in the source. */
 export interface MathSpan {
 	opener: MathOpener;
@@ -33,8 +36,8 @@ export interface MathBlock {
 // it. The own-line requirement leaves inline `$$…$$` inside prose to the span
 // grammar below. `\r?\n` at each line boundary keeps the grammar CRLF-safe for
 // direct callers; marked-fed renderers already normalize line endings first.
-const MATH_BLOCK_DOLLAR = /^ {0,3}\$\$[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\$\$[ \t]*(?:\r?\n|$)/;
-const MATH_BLOCK_BRACKET = /^ {0,3}\\\[[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\\\][ \t]*(?:\r?\n|$)/;
+const MATH_BLOCK_DOLLAR = / {0,3}\$\$[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\$\$[ \t]*(?:\r?\n|$)/y;
+const MATH_BLOCK_BRACKET = / {0,3}\\\[[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\\\][ \t]*(?:\r?\n|$)/y;
 
 /**
  * Leftmost offset at or after `from` where an opener could begin. A scan hint,
@@ -182,9 +185,110 @@ function spanOf(source: string, opener: MathOpener, bodyStart: number, closeAt: 
 
 /** The own-line display block starting at offset 0, or `undefined`. */
 export function mathBlockAt(source: string): MathBlock | undefined {
-	const match = MATH_BLOCK_DOLLAR.exec(source) ?? MATH_BLOCK_BRACKET.exec(source);
-	if (!match || match[1].trim() === "") return undefined;
-	return { raw: match[0], body: match[1] };
+	MATH_BLOCK_DOLLAR.lastIndex = 0;
+	MATH_BLOCK_BRACKET.lastIndex = 0;
+	return blockOf(MATH_BLOCK_DOLLAR.exec(source) ?? MATH_BLOCK_BRACKET.exec(source));
+}
+
+/** The block a match of the block grammar describes; a whitespace-only body is no block. */
+function blockOf(match: RegExpExecArray | null): MathBlock | undefined {
+	return match === null || match[1].trim() === "" ? undefined : { raw: match[0], body: match[1] };
+}
+
+// An own-line display opener line (`$$` or `\[` after up to 3 spaces), capturing
+// the opener and the line's end: "" when it is the source's unterminated last line.
+const MATH_BLOCK_OPENER_LINE_RE = / {0,3}(\$\$|\\\[)[ \t]*(\r?\n|$)/y;
+
+/**
+ * {@link mathBlockAt} for many offsets of one `source`. An own-line opener
+ * whose closer line is missing means every later opener of the same kind
+ * misses one too, since its search covers a suffix of that search. The scan
+ * keeps that answer, so asking at every block start takes linear time instead
+ * of a scan to the end of `source` per unclosed opener.
+ */
+export class MathBlockScan {
+	readonly #source: string;
+	// Offset of the first `$$` / `\[` opener line found with no closer line after it.
+	#unclosedDollarFrom = Number.POSITIVE_INFINITY;
+	#unclosedBracketFrom = Number.POSITIVE_INFINITY;
+
+	constructor(source: string) {
+		this.#source = source;
+	}
+
+	/** The own-line display block starting at `from`, or `undefined`. */
+	at(from: number): MathBlock | undefined {
+		MATH_BLOCK_OPENER_LINE_RE.lastIndex = from;
+		const line = MATH_BLOCK_OPENER_LINE_RE.exec(this.#source);
+		// An unterminated opener line opens no block.
+		if (line === null || line[2] === "") return undefined;
+		const dollar = line[1] === "$$";
+		if (from >= (dollar ? this.#unclosedDollarFrom : this.#unclosedBracketFrom)) return undefined;
+		const grammar = dollar ? MATH_BLOCK_DOLLAR : MATH_BLOCK_BRACKET;
+		grammar.lastIndex = from;
+		const match = grammar.exec(this.#source);
+		if (match === null) {
+			if (dollar) this.#unclosedDollarFrom = from;
+			else this.#unclosedBracketFrom = from;
+		}
+		return blockOf(match);
+	}
+}
+
+/**
+ * The display opener alone on the line at `from` (up to 3 leading spaces,
+ * trailing spaces or tabs; the source's last line may be unterminated), or
+ * `undefined`.
+ */
+export function mathBlockOpenerAt(source: string, from = 0): MathBlockOpener | undefined {
+	MATH_BLOCK_OPENER_LINE_RE.lastIndex = from;
+	const line = MATH_BLOCK_OPENER_LINE_RE.exec(source);
+	return line === null ? undefined : line[1] === "$$" ? "$$" : "\\[";
+}
+
+/**
+ * Whether the own-line display block opened at `from` in `source` is closed,
+ * or could still close once more text is appended: the text from `from`
+ * onward is a streaming prefix whose real closer may not have arrived. A
+ * closer on the unterminated last line has not arrived either, since the next
+ * append may extend it into text (`$$ E = mc^2 $$`). With no opener line at
+ * `from` it returns false before scanning, so a caller can ask at every block
+ * start.
+ */
+export function mathBlockMayCloseAt(source: string, from = 0): boolean {
+	MATH_BLOCK_OPENER_LINE_RE.lastIndex = from;
+	const line = MATH_BLOCK_OPENER_LINE_RE.exec(source);
+	if (line === null) return false;
+	// The opener's own line is still being written.
+	if (line[2] === "") return true;
+	const grammar = line[1] === "$$" ? MATH_BLOCK_DOLLAR : MATH_BLOCK_BRACKET;
+	grammar.lastIndex = from;
+	const match = grammar.exec(source);
+	// No closer line yet, or only on the last line, which is still being written.
+	if (match === null || (from + match[0].length === source.length && !match[0].endsWith("\n"))) return true;
+	return blockOf(match) !== undefined;
+}
+
+// A display closer alone on its line, captured; the last line counts unterminated.
+const MATH_BLOCK_CLOSER_LINE_RE = /(?<=^|\n) {0,3}(\$\$|\\\])[ \t]*(?=\r?\n|$)/g;
+
+/**
+ * Offset of the first line of `source`, from the line start `from` on, that
+ * holds the closer of `opener` alone (up to 3 leading spaces, trailing spaces
+ * or tabs), the unterminated last line included, or `undefined`: the first
+ * line at which a block `opener` opened before `from` could close.
+ */
+export function mathBlockCloserIndex(source: string, from: number, opener: MathBlockOpener): number | undefined {
+	const closer = opener === "$$" ? "$$" : "\\]";
+	MATH_BLOCK_CLOSER_LINE_RE.lastIndex = from;
+	for (
+		let line = MATH_BLOCK_CLOSER_LINE_RE.exec(source);
+		line !== null;
+		line = MATH_BLOCK_CLOSER_LINE_RE.exec(source)
+	) {
+		if (line[1] === closer) return line.index;
+	}
+	return undefined;
 }
 
 /**
