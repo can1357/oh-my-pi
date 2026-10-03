@@ -108,8 +108,7 @@ function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: str
 	const commonToolsRegex =
 		"^(ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname)$";
 
-	// Quote the snapshot path for the POSIX shell script.
-	const escapedPath = quotePosixArgument(snapshotPath);
+	const quotedPath = quotePosixArgument(snapshotPath);
 
 	// Function extraction differs between bash and zsh. Each form prints function
 	// bodies on stdout so we can both persist them AND scan their bodies for
@@ -142,7 +141,7 @@ echo "shopt -s expand_aliases" >> "$SNAPSHOT_FILE"
 `;
 
 	return `
-SNAPSHOT_FILE=${escapedPath}
+SNAPSHOT_FILE=${quotedPath}
 
 # Snapshot may inline env-var values referenced by captured functions (#3470).
 # Defence in depth: (a) JS caller pre-creates the file at 0600 so the shell's
