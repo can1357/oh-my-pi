@@ -29,6 +29,10 @@
 - Reduced memory and copying for generated images by sniffing their type from a few bytes and building data URLs only when read ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
 - Reduced GitLab Duo Workflow stream memory by de-duplicating message snapshots by content hash ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
 
+### Added
+
+- Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can now act as an allow-list: `"*": false` hides every provider not listed, OAuth and API keys alike, and a provider entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` to hide its API keys. Existing files behave as before ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.7.0] - 2026-10-06
 
 ### Added

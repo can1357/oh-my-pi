@@ -1825,6 +1825,58 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
+	test("allow-list pool drops usage for unlisted providers and keeps fully allowed ones", async () => {
+		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
+		const now = Date.now();
+		const reports: UsageReport[] = [
+			{ provider: "openai-codex", fetchedAt: now, limits: [], metadata: { accountId: "codex-account" } },
+			{ provider: "openrouter", fetchedAt: now, limits: [], metadata: {} },
+		];
+		vi.spyOn(brokerClient, "fetchUsage").mockResolvedValue({ generatedAt: now, reports });
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			streamSnapshots: false,
+			accountPool: new Map([
+				["*", { accounts: new Set<string>(), apiKeys: false }],
+				["openrouter", {}],
+			]),
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: now,
+				serverNowMs: now,
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [
+					{
+						id: 1,
+						provider: "openai-codex",
+						credential: {
+							type: "oauth",
+							access: "codex-access",
+							refresh: REMOTE_REFRESH_SENTINEL,
+							expires: now + 120_000,
+							accountId: "codex-account",
+						},
+						identityKey: "account:codex-account",
+						rotatesInMs: null,
+					},
+					{
+						id: 2,
+						provider: "openrouter",
+						credential: { type: "api_key", key: "visible-api-key" },
+						identityKey: null,
+						rotatesInMs: null,
+					},
+				],
+			},
+		});
+		try {
+			expect(remoteStore.listAuthCredentials().map(entry => entry.provider)).toEqual(["openrouter"]);
+			expect(await remoteStore.fetchUsageReports()).toEqual([reports[1]]);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
 	test("usage report filter memoizes per (reports, snapshot) and invalidates when the snapshot changes", async () => {
 		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
 		const now = Date.now();
