@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced rendering work while long Markdown lists stream, preserving nested items, numbering, and reference links ([#13701](https://github.com/can1357/oh-my-pi/pull/13701) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
