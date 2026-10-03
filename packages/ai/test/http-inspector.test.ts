@@ -1,6 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	buildHttp400DumpPayload,
+	pruneHttpRequestDumps,
 	type RawHttpRequestDump,
 	rewriteClinePassError,
 	shouldDumpRejectedRequest,
@@ -148,5 +152,47 @@ describe("rewriteClinePassError", () => {
 
 	it("leaves unrelated cline-pass errors untouched", () => {
 		expect(rewriteClinePassError("500 internal server error", "cline-pass")).toBe("500 internal server error");
+	});
+});
+
+describe("pruneHttpRequestDumps", () => {
+	const roots: string[] = [];
+	afterEach(async () => {
+		await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
+	});
+
+	const DAY_MS = 24 * 60 * 60 * 1000;
+	const now = Date.UTC(2026, 9, 1);
+
+	async function writeDump(dir: string, name: string, bytes: number, ageMs: number): Promise<void> {
+		const filePath = path.join(dir, name);
+		await Bun.write(filePath, "x".repeat(bytes));
+		const mtime = new Date(now - ageMs);
+		await fs.utimes(filePath, mtime, mtime);
+	}
+
+	it("deletes dumps past the age limit and the oldest dumps beyond the size cap", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-http-dumps-"));
+		roots.push(dir);
+		await writeDump(dir, "newest.json", 400, 1_000);
+		await writeDump(dir, "recent.json", 400, DAY_MS);
+		await writeDump(dir, "older.json", 400, 2 * DAY_MS);
+		await writeDump(dir, "expired.json", 10, 30 * DAY_MS);
+		await writeDump(dir, "notes.txt", 5_000, 30 * DAY_MS);
+
+		await pruneHttpRequestDumps(dir, { now, maxAgeMs: 7 * DAY_MS, maxTotalBytes: 1_000 });
+
+		expect((await fs.readdir(dir)).sort()).toEqual(["newest.json", "notes.txt", "recent.json"]);
+	});
+
+	it("never deletes the dump it was asked to keep, even past the caps", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-http-dumps-keep-"));
+		roots.push(dir);
+		await writeDump(dir, "just-written.json", 2_000, 0);
+		await writeDump(dir, "previous.json", 10, DAY_MS);
+
+		await pruneHttpRequestDumps(dir, { now, maxAgeMs: 7 * DAY_MS, maxTotalBytes: 1_000, keep: "just-written.json" });
+
+		expect(await fs.readdir(dir)).toEqual(["just-written.json"]);
 	});
 });

@@ -817,6 +817,21 @@ const DETAIL_ROWS = 3;
 const PERF_TPS_MIN_WIDTH = 76;
 /** Row width from which the perf column also includes TTFT. */
 const PERF_FULL_MIN_WIDTH = 96;
+/** Narrowest model-name cell retained before cost and context are dropped. */
+const MIN_NAME_WIDTH = 16;
+
+/** Total width of present metadata columns, joined by two-space gaps. */
+function metaColumnsWidth(widths: readonly number[]): number {
+	let total = 0;
+	let count = 0;
+	for (const width of widths) {
+		if (width <= 0) continue;
+		total += width;
+		count++;
+	}
+	return count > 0 ? total + 2 * (count - 1) : 0;
+}
+
 /** What the per-row perf column shows at the current width. */
 type PerfMode = "off" | "tps" | "full";
 
@@ -1299,25 +1314,19 @@ export class ModelBrowser implements Component {
 			: "";
 		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
 
-		// Metric columns collapse independently when no visible row has data.
-		const intelligenceCol =
-			intelligenceWidth > 0
-				? `${theme.fg("dim", padLeftVisible(formatIntelligence(item.model), intelligenceWidth))}  `
-				: "";
-		const perfCol =
-			perfWidth > 0 ? `${theme.fg("dim", padLeftVisible(this.#perfCell(item, perfMode), perfWidth))}  ` : "";
-		const meta = `${intelligenceCol}${perfCol}${theme.fg("dim", padLeftVisible(formatContext(item.model), ctxWidth))}  ${theme.fg("dim", padLeftVisible(formatCostPair(item.model), costWidth))}`;
-		const metaWidth =
-			ctxWidth +
-			costWidth +
-			2 +
-			(intelligenceWidth > 0 ? intelligenceWidth + 2 : 0) +
-			(perfWidth > 0 ? perfWidth + 2 : 0);
-		const available = Math.max(1, width - metaWidth - 1);
+		// Metric columns collapse when empty or when the row needs room for its name.
+		const cols: string[] = [];
+		if (intelligenceWidth > 0)
+			cols.push(theme.fg("dim", padLeftVisible(formatIntelligence(item.model), intelligenceWidth)));
+		if (perfWidth > 0) cols.push(theme.fg("dim", padLeftVisible(this.#perfCell(item, perfMode), perfWidth)));
+		if (ctxWidth > 0) cols.push(theme.fg("dim", padLeftVisible(formatContext(item.model), ctxWidth)));
+		if (costWidth > 0) cols.push(theme.fg("dim", padLeftVisible(formatCostPair(item.model), costWidth)));
+		const metaWidth = metaColumnsWidth([intelligenceWidth, perfWidth, ctxWidth, costWidth]);
+		const available = Math.max(1, width - metaWidth - (cols.length > 0 ? 1 : 0));
 		left = truncateToWidth(left, available);
 		const gap = Math.max(0, available - visibleWidth(left));
 
-		let line = `${left}${" ".repeat(gap)} ${meta}`;
+		let line = cols.length > 0 ? `${left}${" ".repeat(gap)} ${cols.join("  ")}` : `${left}${" ".repeat(gap)}`;
 		if (overContext) {
 			// Gray the whole row but keep the selection cursor visible: over-context
 			// models stay selectable (the host compacts before switching).
@@ -1427,6 +1436,11 @@ export class ModelBrowser implements Component {
 				}
 				perfWidth = Math.max(perfWidth, visibleWidth(this.#perfCell(item, perfMode)));
 			}
+			// Preserve at least a readable name by dropping cost, then context.
+			let nameRoom = width - 2 - metaColumnsWidth([intelligenceWidth, perfWidth, ctxWidth, costWidth]);
+			if (nameRoom < MIN_NAME_WIDTH) costWidth = 0;
+			nameRoom = width - 2 - metaColumnsWidth([intelligenceWidth, perfWidth, ctxWidth, costWidth]);
+			if (nameRoom < MIN_NAME_WIDTH) ctxWidth = 0;
 
 			const rows: string[] = [];
 			for (let i = startIndex; i < endIndex; i++) {

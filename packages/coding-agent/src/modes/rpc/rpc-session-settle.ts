@@ -14,16 +14,39 @@ export type RpcSettleSession = Pick<
 >;
 
 /**
- * True when no run is live or admitted, no steer/follow-up is queued, and no
- * background job or delivery can re-wake the session. Backs `session_settled`,
- * `prompt_result.sessionSettled`, and `get_state.isSettled`.
+ * Reports a turn the host side has decided to start but not yet admitted (for
+ * example a scheduled goal continuation). Such a session is not settled.
  */
-export function isRpcSessionSettled(session: RpcSettleSession): boolean {
+export type RpcScheduledTurnProbe = () => boolean;
+
+/**
+ * A scheduled-turn probe whose every "not settled" answer marks `watcher` active,
+ * so a stretch reported busy only because of a pending host-scheduled turn still
+ * ends with `session_settled` even if that turn is later abandoned.
+ */
+export function watchedScheduledTurnProbe(
+	pending: () => boolean,
+	watcher: () => Pick<RpcSessionSettleWatcher, "markActive"> | undefined,
+): RpcScheduledTurnProbe {
+	return () => {
+		const isPending = pending();
+		if (isPending) watcher()?.markActive();
+		return isPending;
+	};
+}
+
+/**
+ * True when no run is live, admitted or scheduled, no steer/follow-up is queued,
+ * and no background job or delivery can re-wake the session. Backs
+ * `session_settled`, `prompt_result.sessionSettled`, and `get_state.isSettled`.
+ */
+export function isRpcSessionSettled(session: RpcSettleSession, scheduledTurn?: RpcScheduledTurnProbe): boolean {
 	return (
 		!session.isStreaming &&
 		!session.hasAdmittedSubmission &&
 		session.queuedMessageCount === 0 &&
-		!session.hasPendingAsyncWork()
+		!session.hasPendingAsyncWork() &&
+		scheduledTurn?.() !== true
 	);
 }
 
@@ -45,18 +68,29 @@ export class RpcSessionSettleWatcher {
 	#recheck = false;
 	readonly #session: RpcSettleSession & Pick<AgentSession, "settleAsyncWork">;
 	readonly #output: (frame: RpcSessionSettledFrame) => void;
+	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
 
 	constructor(
 		session: RpcSettleSession & Pick<AgentSession, "settleAsyncWork">,
 		output: (frame: RpcSessionSettledFrame) => void,
+		scheduledTurn?: RpcScheduledTurnProbe,
 	) {
 		this.#session = session;
 		this.#output = output;
+		this.#scheduledTurn = scheduledTurn;
 	}
 
 	observe(event: AgentSessionEvent): void {
 		if (event.type === "agent_start") this.#active = true;
 		else if (event.type === "agent_end" && event.isTerminal !== false) void this.check();
+	}
+
+	/**
+	 * Record activity that no `agent_start` announces (for example a reported pending
+	 * goal turn), so the stretch it opens still ends with `session_settled`.
+	 */
+	markActive(): void {
+		this.#active = true;
 	}
 
 	/**
@@ -81,7 +115,7 @@ export class RpcSessionSettleWatcher {
 					await this.#session.settleAsyncWork();
 				}
 			} while (this.#recheck);
-			if (!this.#active || !isRpcSessionSettled(this.#session)) return;
+			if (!this.#active || !isRpcSessionSettled(this.#session, this.#scheduledTurn)) return;
 			this.#active = false;
 			this.#output({ type: "session_settled" });
 		} catch (error) {

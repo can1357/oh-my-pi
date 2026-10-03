@@ -140,13 +140,16 @@ export class CredentialBlocks implements BlocksApi {
 		if (!block) return undefined;
 		// Once mirrored successfully, the store is authoritative for cross-process
 		// deletion. A reset in a sibling must also retire this process's old map entry.
+		// Upserts are longest-wins, so a persisted row shorter than the deadline this
+		// process mirrored means the row was deleted and replaced: the old deadline
+		// was superseded and must not win the next longest-wins merge.
 		if (block.persisted && !this.#deps.health.damaged && this.#deps.store.getCredentialBlock) {
 			const separator = backoffKey.indexOf("\0");
 			const providerKey = separator < 0 ? backoffKey : backoffKey.slice(0, separator);
 			const scope = separator < 0 ? "" : backoffKey.slice(separator + 1);
 			try {
 				const persisted = this.#deps.store.getCredentialBlock(credentialId, providerKey, scope);
-				if (persisted === undefined) {
+				if (persisted === undefined || persisted < block.until) {
 					this.#deleteCredentialBackoff(backoffKey, credentialId);
 					return undefined;
 				}

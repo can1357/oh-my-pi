@@ -197,10 +197,7 @@ export class IrcBus {
 		filter: { from?: string },
 		timeoutMs: number,
 		signal?: AbortSignal,
-		options?: {
-			drainPending?: boolean;
-			liveness?: { registry: AgentRegistry; senderId: string };
-		},
+		options?: { drainPending?: boolean },
 	): Promise<IrcMessage | null> {
 		if (signal?.aborted) {
 			throw signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted");
@@ -215,12 +212,6 @@ export class IrcBus {
 		const { promise, resolve, reject } = Promise.withResolvers<IrcMessage | null>();
 		let timer: NodeJS.Timeout | undefined;
 		let onAbort: (() => void) | undefined;
-		let unsubscribeLiveness: (() => void) | undefined;
-
-		const liveness = options?.liveness;
-		const livenessReason = filter.from
-			? `IRC wait aborted: agent "${filter.from}" is not running`
-			: "IRC wait aborted: no running peers remain";
 
 		const settle = (
 			outcome: { kind: "message"; msg: IrcMessage } | { kind: "timeout" } | { kind: "abort"; error: Error },
@@ -239,7 +230,6 @@ export class IrcBus {
 			this.#removeWaiter(agentId, waiter);
 			clearTimeout(timer);
 			if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-			unsubscribeLiveness?.();
 		};
 
 		const waiter: IrcWaiter = {
@@ -267,21 +257,6 @@ export class IrcBus {
 			this.#waiters.set(agentId, waiters);
 		}
 		waiters.push(waiter);
-
-		if (liveness) {
-			const { registry, senderId } = liveness;
-			const hasRunningSender = (from?: string): boolean =>
-				registry.listVisibleTo(senderId).some(ref => registry.isRunning(ref) && (!from || ref.id === from));
-			const check = filter.from ? () => hasRunningSender(filter.from) : () => hasRunningSender();
-			unsubscribeLiveness = registry.onChange(() => {
-				if (!check()) {
-					settle({ kind: "abort", error: new Error(livenessReason) });
-				}
-			});
-			if (!check()) {
-				settle({ kind: "abort", error: new Error(livenessReason) });
-			}
-		}
 
 		return promise;
 	}

@@ -707,7 +707,7 @@ export class HookSelectorComponent extends OverlayPanel {
 		const checkbox = this.#selectionMarker === "checkbox";
 		const result = dockedPicker({
 			title: fixed.title,
-			...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join(" ")) } : {}),
+			...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join("\n")) } : {}),
 			noun: "options",
 			size: "md",
 			layout: "rows",

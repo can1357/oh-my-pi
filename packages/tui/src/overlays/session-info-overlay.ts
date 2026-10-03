@@ -4,9 +4,9 @@ import { matchesSelectCancel } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { formatKeyHints } from "../app-keybindings";
 import { editorKey } from "../chrome/keybinding-hints";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import { col, node, span, text } from "../native/describe";
+import { col, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainText, styledSpans } from "../native/spans";
@@ -50,6 +50,39 @@ function parseKvReport(report: string): KvReportSection[] {
 		else current.entries.push({ line: styledSpans(raw) });
 	}
 	return sections.filter(section => section.head !== undefined || section.entries.length > 0);
+}
+
+/** The plain text of `spans`. */
+function joined(spans: readonly TspSpan[]): string {
+	return spans.map(part => part.t).join("");
+}
+
+/**
+ * A value with a copy button after it: a click anywhere on the line copies its
+ * text (the terminal-local `copy` action takes the leaf text; the icon has none).
+ */
+function copyLine(
+	spans: TspSpan[],
+	title: string,
+	key: string,
+	props: Omit<TspProps<"text">, "text" | "spans"> = {},
+): NativeNode {
+	return node(
+		"row",
+		{
+			gap: "sm",
+			align: "center",
+			grow: 1,
+			role: "omp.info.copy",
+			actions: { click: "copy" },
+			title,
+		},
+		[
+			text(spans, { ...props, grow: 1, shrink: 1 }),
+			node("icon", { name: "copy", role: "omp.info.copy.ic", aria: title }),
+		],
+		key,
+	);
 }
 
 /** Terminal surface needed to size the session info viewport. */
@@ -155,16 +188,21 @@ export class SessionInfoOverlay implements Component {
 				} else if (section.head === undefined && entry.k === "ID") {
 					// The id leads the sheet, once, as a copyable mono line.
 					body.push(
-						node(
-							"text",
+						copyLine([span(joined(entry.v), "mono muted")], "Copy session ID", "id", { truncate: "middle" }),
+					);
+				} else if (section.head === undefined && entry.k === "File") {
+					flush();
+					children.push(
+						row(
+							[
+								text([span("File", "muted")], { wrap: "none", shrink: 0 }),
+								copyLine([span(joined(entry.v), "mono")], "Copy file path", "path", { wrap: "char" }),
+							],
 							{
-								spans: [span(entry.v.map(part => part.t).join(""), "mono muted")],
-								actions: { click: "copy" },
-								title: "Copy session ID",
-								truncate: "middle",
+								gap: "md",
+								align: "start",
+								role: "omp.info.file",
 							},
-							undefined,
-							"id",
 						),
 					);
 				} else {
@@ -195,7 +233,13 @@ export class SessionInfoOverlay implements Component {
 			[
 				text([span("Context", "muted")]),
 				meter
-					? node("meter", { value, style: "bar", size: "md", thresholds: { warn: 0.7, bad: 0.9 }, grow: 1 })
+					? node("meter", {
+							value,
+							style: "bar",
+							size: "md",
+							thresholds: { warn: 0.7, bad: 0.9 },
+							grow: 1,
+						})
 					: node("progress", { value, grow: 1 }),
 				text([span(figure, "mono")]),
 			],

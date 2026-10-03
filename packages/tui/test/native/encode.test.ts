@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { encodeTspMessage, parseTspMessage, splitTspMessage, TspReader } from "@oh-my-pi/pi-tui/native/encode";
+import {
+	encodeTspHelloQuery,
+	encodeTspMessage,
+	parseTspMessage,
+	splitTspMessage,
+	TspReader,
+} from "@oh-my-pi/pi-tui/native/encode";
+import type { TspEvent } from "@oh-my-pi/pi-wire";
 
 const encoder = new TextEncoder();
 
@@ -12,6 +19,56 @@ function messages(stream: string): string[] {
 }
 
 describe("TSP framing", () => {
+	it("advertises explicit prompt submission alongside native edit and undo", () => {
+		const raw = splitTspMessage(encodeTspHelloQuery("test"))!;
+		expect(JSON.parse(raw.body)).toEqual({
+			q: "hello",
+			v: [1],
+			app: "omp",
+			features: ["edit", "undo", "send"],
+			ver: "test",
+		});
+	});
+
+	it("reassembles a multiline send without altering its supplied text", () => {
+		const reader = new TspReader();
+		const event: Extract<TspEvent, { ev: "send" }> = {
+			ev: "send",
+			sf: "s:1",
+			id: "a.line/input",
+			text: "first\n€漢字🙂\nlast",
+		};
+		const decoded = messages(encodeTspMessage("e", JSON.stringify(event), undefined, 8)).map(message =>
+			reader.feed(message),
+		);
+		expect(decoded.slice(0, -1).every(message => message === null)).toBe(true);
+		expect(decoded.at(-1)).toEqual({ verb: "e", event });
+	});
+
+	it("rejects send events without a surface, target or string prompt", () => {
+		const valid: Extract<TspEvent, { ev: "send" }> = { ev: "send", sf: "s:1", id: "a.line/input", text: "prompt" };
+		for (const event of [
+			{ ...valid, sf: undefined },
+			{ ...valid, sf: null },
+			{ ...valid, sf: 1 },
+			{ ...valid, sf: "" },
+			{ ...valid, id: undefined },
+			{ ...valid, id: null },
+			{ ...valid, id: 1 },
+			{ ...valid, id: "" },
+			{ ...valid, text: undefined },
+			{ ...valid, text: null },
+			{ ...valid, text: 1 },
+			{ ...valid, text: ["prompt"] },
+		]) {
+			expect(parseTspMessage(encodeTspMessage("e", JSON.stringify(event)))).toBeNull();
+		}
+		expect(parseTspMessage(encodeTspMessage("e", JSON.stringify({ ...valid, text: "" })))).toEqual({
+			verb: "e",
+			event: { ...valid, text: "" },
+		});
+	});
+
 	it("chunks a body over the APC limit and reassembles it byte-exact, never splitting a code point", () => {
 		const body = JSON.stringify({ text: 'ab€漢字🙂🙃 é\u001b"quote" '.repeat(9) });
 		const limit = 23;
@@ -49,6 +106,15 @@ describe("TSP framing", () => {
 			verb: "e",
 			event: { ev: "toggle", sf: "s:1", id: "a.b", collapsed: false, future: { x: 1 } },
 		});
+	});
+
+	it("decodes prefs change events whatever their value", () => {
+		for (const value of [true, 50, "branch", ["c", "a"], null]) {
+			const event = { ev: "change", sf: "s:1", id: "pf", item: "task.isolation.merge", value };
+			const decoded: unknown = parseTspMessage(`\x1b_tsp;e;${JSON.stringify(event)}\x1b\\`);
+			expect(decoded).toEqual({ verb: "e", event });
+		}
+		expect(parseTspMessage('\x1b_tsp;e;{"ev":"change","sf":"s:1","id":"pf"}\x1b\\')).toBeNull();
 	});
 
 	it("rejects malformed replies and events", () => {
