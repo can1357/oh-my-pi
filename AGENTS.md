@@ -257,7 +257,8 @@ For the bash tool specifically:
 
 ## Commands
 
-- NEVER commit unless asked.
+- Autonomous local commits are an expected part of this repository's workflow when they preserve completed work.
+- NEVER push changes or create pull requests unless asked.
 - Never use `tsc`/`npx tsc` — always `bun check`.
 - Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs).
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
