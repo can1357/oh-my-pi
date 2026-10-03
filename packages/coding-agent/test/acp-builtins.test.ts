@@ -408,7 +408,7 @@ describe("ACP builtin slash commands", () => {
 				accountId: "account-1",
 				email: "user@example.com",
 				availableCount: 1,
-				credits: [],
+				credits: [{ id: "saved-reset", status: "available", expiresAt: "2099-01-01T00:00:00Z" }],
 				active: true,
 			},
 		];
@@ -425,6 +425,7 @@ describe("ACP builtin slash commands", () => {
 			credentialId: 42,
 			accountId: "account-1",
 			email: "user@example.com",
+			creditId: "saved-reset",
 		});
 	});
 

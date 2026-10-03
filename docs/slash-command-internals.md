@@ -220,6 +220,23 @@ After that boundary, `AgentSession.prompt(...)` processes slash input in this or
 
 This is why built-ins reserve their names before file commands are considered, slash command expansion sits before prompt-template expansion, and custom commands can transform away the leading slash before file-command matching.
 
+### Saved reset selection (`/usage reset`)
+
+The interactive selector keeps one row per account. Up/Down selects accounts;
+for Codex, Tab and Shift+Tab cycle that account's usable saved credits in expiry
+order, wrapping at either end. The default credit expires soonest. The row shows
+the selected position and relative expiry; details and confirmation include the
+credit title (when available) and absolute expiry.
+
+Spending requires two Enter presses. Changing the account or Codex credit cancels
+pending confirmation; Escape cancels confirmation first, then closes the picker.
+The confirmed target pins the exact credit ID. Redemption fetches the live offer
+again and refuses a missing, expired, spent, or already-started pinned Codex credit
+with `offer_changed`, without spending a replacement. Callers without an explicit
+Codex pin still select the soonest-expiring usable credit from the live offer.
+Claude retains provider-selected `nextCreditId` and eligibility semantics; Tab
+does not select arbitrary Claude grants.
+
 ## 6) Expansion semantics for file-based slash commands
 
 `expandSlashCommand(text, fileCommands)` behavior:

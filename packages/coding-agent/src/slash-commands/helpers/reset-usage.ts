@@ -3,6 +3,7 @@
  * live per-account reset-credit status into selector rows, and map a redeem
  * outcome code to a human message.
  */
+import { getUsableCodexResetCredits } from "@oh-my-pi/pi-ai/usage/openai-codex-reset";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "../../session/auth-storage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
@@ -18,22 +19,32 @@ export function formatResetProviderName(provider: string): string {
 }
 
 /**
- * Map live per-account reset status to selector rows. Sorted with the active
- * account first, then most-credits, then label.
+ * Normalize live per-account reset status to selector rows, owning Codex usable
+ * inventory, default pin and metadata. Sort active accounts first, then by balance.
  */
 export function toResetUsageAccounts(statuses: ResetCreditAccountStatus[]): ResetUsageAccount[] {
 	return statuses
 		.map(status => {
 			const provider = status.provider;
 			const providerLabel = formatResetProviderName(provider);
-			const credit = status.nextCreditId
-				? status.credits.find(candidate => candidate.id === status.nextCreditId)
-				: (status.credits.find(candidate => candidate.usable !== false) ?? status.credits[0]);
+			const credits = provider === CODEX_PROVIDER_ID ? getUsableCodexResetCredits(status.credits) : undefined;
+			const credit =
+				credits !== undefined
+					? credits[0]
+					: status.nextCreditId
+						? status.credits.find(candidate => candidate.id === status.nextCreditId)
+						: (status.credits.find(candidate => candidate.usable !== false) ?? status.credits[0]);
+			const creditId = provider === CODEX_PROVIDER_ID ? credit?.id : status.nextCreditId;
 			const advertisedRedeemable = status.redeemableCount ?? status.availableCount;
 			const summary = summarizeUsageResetCredits(status);
 			// Claude's listing endpoint chooses the one grant that may be spent.
 			// Never degrade a missing pin into "spend whichever grant is current".
-			const redeemableCount = provider === CLAUDE_PROVIDER_ID && !status.nextCreditId ? 0 : advertisedRedeemable;
+			const redeemableCount =
+				credits !== undefined
+					? Math.min(advertisedRedeemable, credits.length)
+					: provider === CLAUDE_PROVIDER_ID && !status.nextCreditId
+						? 0
+						: advertisedRedeemable;
 			const identity = status.email ?? status.accountId ?? "account";
 			const organization = status.orgName ?? status.orgId;
 			const label = organization ? `${identity} · ${organization}` : identity;
@@ -55,13 +66,14 @@ export function toResetUsageAccounts(statuses: ResetCreditAccountStatus[]): Rese
 					...(status.accountId ? { accountId: status.accountId } : {}),
 					...(status.email ? { email: status.email } : {}),
 					...(status.orgId ? { orgId: status.orgId } : {}),
-					...(status.nextCreditId ? { creditId: status.nextCreditId } : {}),
+					...(creditId ? { creditId } : {}),
 				} satisfies ResetCreditTarget,
 				active: status.active,
 				error: status.error,
 				unavailableReason,
-				expiresAt: summary?.soonestExpiry,
+				expiresAt: provider === CODEX_PROVIDER_ID ? credit?.expiresAt : summary?.soonestExpiry,
 				credit,
+				credits,
 			};
 		})
 		.sort((a, b) => {

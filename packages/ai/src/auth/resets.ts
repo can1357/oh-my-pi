@@ -2,7 +2,12 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { UsageReport } from "../usage";
 import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeResetCredits } from "../usage/claude-reset";
-import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "../usage/openai-codex-reset";
+import {
+	consumeCodexResetCredit,
+	getUsableCodexResetCredits,
+	isCodexResetCreditUsable,
+	listCodexResetCredits,
+} from "../usage/openai-codex-reset";
 import type { CredentialBlocks } from "./blocks";
 import { providerTypeKey } from "./blocks";
 import { raceSignal } from "./abort";
@@ -247,11 +252,17 @@ export class ResetCredits implements ResetsApi {
 				creditId,
 			};
 		} else {
-			if (!creditId) {
-				const list = await listCodexResetCredits(auth);
-				if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
-				const credit = pickSoonestExpiringCredit(list.credits);
-				if (!credit) return { ...identity, ok: false, code: "no_credit" };
+			const list = await listCodexResetCredits(auth);
+			if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
+			if (creditId) {
+				const selected = list.credits.find(credit => credit.id === creditId);
+				if (list.availableCount < 1 || !selected || !isCodexResetCreditUsable(selected)) {
+					return { ...identity, ok: false, code: "offer_changed", creditId };
+				}
+			} else {
+				const nowMs = Date.now();
+				const credit = getUsableCodexResetCredits(list.credits, nowMs)[0];
+				if (list.availableCount < 1 || !credit) return { ...identity, ok: false, code: "no_credit" };
 				creditId = credit.id;
 			}
 			const consumed = await consumeCodexResetCredit({ ...auth, creditId });
