@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed generic Google Antigravity 429 responses imposing a 30-minute quota cooldown; they now use a 45–75-second capacity backoff while preserving explicit quota errors and credential rotation ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
 - Fixed Antigravity chat and image requests sending an outdated client version when the model list came from cache, which could make newer models such as Claude Opus 5.5 unavailable.
 - When a DeepSeek model writes a broken DSML tool call (for example with the opening `<｜DSML｜tool_calls>` and `<｜DSML｜invoke>` tags missing), its closing tags are now kept in the streamed text instead of being dropped. This lets the agent remove exactly the broken call while keeping any text after it ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
 

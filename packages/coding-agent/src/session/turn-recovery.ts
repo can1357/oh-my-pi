@@ -748,7 +748,8 @@ export class TurnRecovery {
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
+			const retryAfterMs =
+				parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage, activeModel));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
 					activeModel.provider,
@@ -1740,10 +1741,15 @@ export class TurnRecovery {
 	}
 
 	/** Records the cooldown that should suppress a failing selector. */
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		currentModel: Model | undefined,
+	): void {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
-			const reason = parseRateLimitReason(errorMessage);
+			const reason = parseRateLimitReason(errorMessage, currentModel);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
 		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
@@ -2422,7 +2428,7 @@ export class TurnRecovery {
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
-		const rateLimitReason = parseRateLimitReason(errorMessage);
+		const rateLimitReason = parseRateLimitReason(errorMessage, this.#host.model());
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
@@ -2637,7 +2643,7 @@ export class TurnRecovery {
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
 				if (!classifierRefusal) {
-					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
+					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage, currentModel);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
