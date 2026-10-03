@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	getRetryFallbackRevertPolicy,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
@@ -31,6 +32,36 @@ function createContext(
 		},
 	};
 }
+
+describe("retry fallback revert policies", () => {
+	it("uses the global policy when the chain has no override or no owning key", () => {
+		const settings = Settings.isolated({ "retry.fallbackRevertPolicy": "never" });
+		expect(getRetryFallbackRevertPolicy(settings, "critical_worker")).toBe("never");
+		expect(getRetryFallbackRevertPolicy(settings)).toBe("never");
+	});
+
+	it("only applies a policy to an explicitly configured chain key", () => {
+		const settings = Settings.isolated({
+			"retry.fallbackRevertPolicy": "never",
+			"retry.fallbackRevertPolicies": { "openai/*": "cooldown-expiry" },
+		});
+		expect(getRetryFallbackRevertPolicy(settings, "openai/*")).toBe("cooldown-expiry");
+		expect(getRetryFallbackRevertPolicy(settings, "default")).toBe("never");
+		expect(getRetryFallbackRevertPolicy(settings, "toString")).toBe("never");
+	});
+
+	it("can keep a single chain on fallback under the default cooldown policy", () => {
+		const settings = Settings.isolated({ "retry.fallbackRevertPolicies": { advisor: "never" } });
+		expect(getRetryFallbackRevertPolicy(settings, "advisor")).toBe("never");
+		expect(getRetryFallbackRevertPolicy(settings, "default")).toBe("cooldown-expiry");
+	});
+
+	it("rejects misspelled per-chain policies rather than silently changing routing", () => {
+		expect(() => Settings.isolated({ "retry.fallbackRevertPolicies": { smol: "cooldown" } })).toThrow(
+			"expected cooldown-expiry or never",
+		);
+	});
+});
 
 describe("retry fallback selector resolution", () => {
 	it("resolves chain keys by exact model, longest wildcard, role, then default", () => {
