@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Google Cloud partner-model pricing for Claude Opus 5.5 and Sonnet 5.5 on Google Antigravity ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+
+### Changed
+
+- Google Antigravity now lists Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
