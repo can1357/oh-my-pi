@@ -1001,6 +1001,10 @@ export class CustomEditor extends Editor {
 		}, CustomEditor.SHIMMER_FRAME_MS);
 		this.#shimmerTimer.unref?.();
 	}
+	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled. */
+	override get nativeSendable(): boolean {
+		return this.onSubmit !== undefined && !this.disableSubmit;
+	}
 	/** Viewing a subagent, the draft goes to it: the placeholder names it. */
 	override describePlaceholder = (): string => {
 		const agent = this.composerState().viewing?.at(-1);
@@ -1259,7 +1263,7 @@ export class CustomEditor extends Editor {
 		if (event.type === "send") {
 			// A send is its own prompt: never submit a stale draft for blank input,
 			// and retain a displaced draft (including its attachments) for recall.
-			if (!event.text.trim() || this.disableSubmit || !this.onSubmit) return;
+			if (!event.text.trim() || !this.nativeSendable) return;
 			if (this.#pasteInFlight > 0) {
 				this.#pendingInput.push(event);
 				return;

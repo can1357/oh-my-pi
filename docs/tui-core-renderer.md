@@ -174,7 +174,21 @@ debug socket's `doc` op returns the reference document
 #### Explicit composer submission
 
 omp's `q: "hello"` advertises `features: ["edit", "undo", "send"]`.
-A terminal that sees `"send"` may submit a supplied prompt with an `e` message:
+The `editor`/`input` prop `sendable` is separate from text editability:
+`sendable: true` means the owner is ready to accept an atomic prompt submission.
+An absent or false value is not ready, even if the field is writable or focused.
+Base `Editor` and `Input` fields publish false because they do not handle `send`.
+The prompt `CustomEditor` publishes true only when its `onSubmit` handler exists
+and `disableSubmit` is false.
+
+During interactive bootstrap the composer stays writable with `sendable: false`.
+Once all handlers and subscriptions are ready, init lifts the submit gate and
+requests a render to publish `sendable: true`, without requiring user input.
+A terminal must retain a pending prompt until that readiness update arrives; it
+must not dispatch early, sleep, poll, or defer a simulated Enter.
+
+A terminal that sees `"send"` and a ready composer may submit a supplied prompt
+with an `e` message:
 
 ```json
 {"ev":"send","sf":"s:1","id":"k.line/input","text":"First line\nSecond line"}
@@ -185,7 +199,8 @@ A terminal that sees `"send"` may submit a supplied prompt with an `e` message:
 not the composer wrapper or its Send button. All three payload fields are
 required strings; surface and node ids must be nonempty. Malformed payloads,
 unknown or closed surfaces, and stale/noneditable node targets are ignored.
-The backend resolves the node's owner and delivers
+The terminal must also require `sendable === true` on the addressed node before
+dispatching the advertised `send` event. The backend resolves the node's owner and delivers
 `{ type: "send", key: "line/input", text }`, independent of keyboard focus.
 
 `CustomEditor` submits this text once through its ordinary `submit()` /

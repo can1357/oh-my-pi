@@ -357,6 +357,9 @@ export interface TspEditorProps {
 	/** The text is code in this language (`python`, `bash`): highlighted, in the mono face. */
 	lang?: string;
 	readonly?: boolean;
+	/** Ready to accept an atomic `send` when advertised in `hello.features`.
+	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
+	sendable?: boolean;
 	maxLines?: number;
 }
 export type TspInputProps = Omit<TspEditorProps, "maxLines">;
@@ -958,8 +961,10 @@ export type TspEvent =
 	 * Submit `text` as one prompt through the addressed composer's ordinary
 	 * submission path, without paste or keyboard simulation. Sent only when
 	 * the program's `hello.features` includes `"send"` and `sf`/`id` identify
-	 * a live editable composer. Blank text is a no-op; an existing draft is
-	 * retained for local recall, not appended to the supplied prompt.
+	 * a live editable composer whose `sendable` is exactly true. Writable text
+	 * or keyboard focus alone does not imply submission readiness. Blank text is
+	 * a no-op; an existing draft is retained for local recall, not appended to
+	 * the supplied prompt.
 	 */
 	| { ev: "send"; sf: string; id: string; text: string }
 	/**

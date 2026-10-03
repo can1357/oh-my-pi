@@ -26,7 +26,14 @@ import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
-import { acquireModelRoleMutation, modelPresetSavedMessage, saveModelPreset } from "../../config/model-presets";
+import {
+	acquireModelRoleMutation,
+	applyModelPreset,
+	formatModelPresetSwitch,
+	isCleanModelPresetSwitch,
+	modelPresetSavedMessage,
+	saveModelPreset,
+} from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -1009,6 +1016,22 @@ export class SelectorController {
 						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onSwitchPreset: async name => {
+					try {
+						const result = await applyModelPreset(this.ctx.settings, this.ctx.session, name);
+						const message = formatModelPresetSwitch(name, result);
+						if (result.kind === "switched") {
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+						}
+						if (isCleanModelPresetSwitch(result)) this.ctx.showStatus(message);
+						else this.ctx.showWarning(message);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						hub?.refreshAfterExternalMutation();
 					}
 				},
 				onCancel: () => done(),

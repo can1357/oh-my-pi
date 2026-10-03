@@ -6,6 +6,12 @@
 
 - Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Prompt history scope now follows the session, not just `/move`: `/wt` and resuming a session recorded in another directory re-point the workspace, so `cwd` — and `repo` across unrelated repositories — can read empty right after the switch. Nothing is lost, only out of scope ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- Picking a model for a role in `/models` now puts the cursor on the model list, so ↑/↓ choose a model and Enter assigns it right away instead of moving through the sidebar and dropping the role selection; ← still reaches the providers ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
+- Sped up secret redaction on long conversations: it no longer slows down as history grows ([#14213](https://github.com/can1357/oh-my-pi/pull/14213) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

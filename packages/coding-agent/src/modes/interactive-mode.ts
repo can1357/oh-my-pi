@@ -2503,6 +2503,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		// Publish native send readiness even when no user input triggers another frame.
+		this.ui.requestRender();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working

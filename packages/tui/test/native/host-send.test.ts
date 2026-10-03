@@ -45,12 +45,67 @@ describe("TSP send event", () => {
 		const h = harness;
 		const id = `${nativeComponentId(target)}.line/input`;
 		expect(h.byId(id)?.k).toBe("editor");
+		expect(h.byId(id)?.p).toMatchObject({ sendable: true });
 		expect(h.terminal.tspProbePending).toBe(true);
 		const text = "first line\n\n  indented €🙂\nlast line";
 		h.event({ ev: "send", sf: h.terminal.surface!, id, text });
 		expect(submitted).toEqual([text]);
 		expect(target.getText()).toBe("");
 		expect(other.getText()).toBe("");
+		expect(h.errors).toEqual([]);
+	});
+
+	it("publishes writable bootstrap readiness after wiring and lifting the submit gate, without user input", async () => {
+		const target = new CustomEditor(defaultEditorTheme);
+		const other = new CustomEditor(defaultEditorTheme);
+		target.disableSubmit = true;
+		target.setDraft("keep [Image #1]", [image]);
+		const draft = target.getText();
+		const submitted: string[] = [];
+		harness = await TspHarness.start(
+			tui => {
+				tui.addChild(target);
+				tui.addChild(other);
+				tui.setFocus(other);
+			},
+			{ expected: true, manualProbe: true, deferInput: true },
+		);
+		const h = harness;
+		const id = `${nativeComponentId(target)}.line/input`;
+		const bootstrap = h.byId(id);
+		expect(bootstrap?.k).toBe("editor");
+		expect(bootstrap?.p).toMatchObject({ text: draft, sendable: false });
+		expect(bootstrap?.p).not.toMatchObject({ readonly: true });
+		expect(bootstrap?.p).not.toMatchObject({ disabled: true });
+		h.event({ ev: "send", sf: h.terminal.surface!, id, text: "too early" });
+		expect(target.getText()).toBe(draft);
+		expect(target.pendingImages).toEqual([image]);
+
+		target.onSubmit = text => {
+			submitted.push(text);
+		};
+		await h.render();
+		expect(h.byId(id)?.p).toMatchObject({ text: draft, sendable: false });
+		h.event({ ev: "send", sf: h.terminal.surface!, id, text: "still disabled" });
+		expect(submitted).toEqual([]);
+		expect(target.getText()).toBe(draft);
+
+		target.disableSubmit = false;
+		const frames = h.frames.length;
+		h.tui.requestRender();
+		h.flush();
+		expect(h.frames.length).toBeGreaterThan(frames);
+		expect(h.byId(id)?.p).toMatchObject({ text: draft, sendable: true });
+		expect(h.terminal.tspProbePending).toBe(true);
+		const text = "initial prompt\nsecond line";
+		h.event({ ev: "send", sf: h.terminal.surface!, id, text });
+		await h.render();
+		expect(submitted).toEqual([text]);
+		expect(target.getText()).toBe("");
+		expect(other.getText()).toBe("");
+		target.handleInput("\x1b[A");
+		expect(target.getText()).toBe(draft);
+		expect(target.pendingImages).toEqual([image]);
 		expect(h.errors).toEqual([]);
 	});
 
