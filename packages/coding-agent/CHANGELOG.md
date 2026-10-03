@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `wait` being cut short by a queued background completion that had already been consumed elsewhere, such as by an eval cell awaiting its subagent, which left no message to follow. Such a consumed result also no longer counts as pending background work when the session decides whether it is idle ([#14257](https://github.com/can1357/oh-my-pi/pull/14257) by [@nick-maderight](https://github.com/nick-maderight))
+
 ## [18.6.0] - 2026-10-03
 
 ### Added

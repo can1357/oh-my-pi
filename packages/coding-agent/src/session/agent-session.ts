@@ -1809,9 +1809,12 @@ export class AgentSession implements SettingsScope {
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		// Completion notices (finished background jobs, exited supervised
 		// processes) queue here for the same boundary; peeking them lets a
-		// `wait` return early rather than miss a queued completion.
+		// `wait` return early rather than miss a queued completion. Entries
+		// consumed elsewhere since they queued (an eval cell awaiting the job)
+		// are dropped by the drain, so they must not cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
-			this.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE) || this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE);
+			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
 		this.agent.setAsideMessageProvider(() => {
 			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
@@ -2730,8 +2733,9 @@ export class AgentSession implements SettingsScope {
 			// async-result follow-up on the yield queue, and the manager no
 			// longer reports it. Without this leg a terminal yield in the
 			// (idle-flush delay / step-boundary) handoff window would read as
-			// quiescent and the run driver would drop the queued result.
-			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
+			// quiescent and the run driver would drop the queued result. An
+			// entry suppressed after it queued never injects, so it is no wake.
+			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE)
 		);
 	}
 
