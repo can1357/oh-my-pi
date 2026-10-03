@@ -272,7 +272,12 @@ export class CredentialSelector {
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
 				secondaryUsed: normalizeUsageFraction(secondary),
-				secondaryRequiredDrain: windowRequiredDrain(secondary, nowMs, strategy.windowDefaults.secondaryMs),
+				secondaryRequiredDrain: windowRequiredDrain(
+					secondary,
+					nowMs,
+					strategy.windowDefaults.secondaryMs,
+					args.provider === "anthropic",
+				),
 				primaryUsed: normalizeUsageFraction(primary),
 				primaryRequiredDrain: windowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
 				orderPos,
@@ -476,7 +481,14 @@ export class CredentialSelector {
 				planPriority: planPriority(args.planGate, usage),
 				secondaryUsed: strategy ? normalizeUsageFraction(secondary) : 0,
 				secondaryRequiredDrain:
-					strategy === undefined ? 0 : windowRequiredDrain(secondary, nowMs, strategy.windowDefaults.secondaryMs),
+					strategy === undefined
+						? 0
+						: windowRequiredDrain(
+								secondary,
+								nowMs,
+								strategy.windowDefaults.secondaryMs,
+								args.provider === "anthropic",
+							),
 				primaryUsed: strategy ? normalizeUsageFraction(primary) : 0,
 				primaryRequiredDrain:
 					strategy === undefined ? 0 : windowRequiredDrain(primary, nowMs, strategy.windowDefaults.primaryMs),
