@@ -13,6 +13,7 @@
 - Picking a model for a role in `/models` now puts the cursor on the model list, so ↑/↓ choose a model and Enter assigns it right away instead of moving through the sidebar and dropping the role selection; ← still reaches the providers ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
 - Sped up secret redaction on long conversations: it no longer slows down as history grows ([#14213](https://github.com/can1357/oh-my-pi/pull/14213) by [@H4vC](https://github.com/H4vC))
 - Startup is faster with plugins that bundle large dependency trees: the extension loader no longer re-reads and re-checks the same files while loading them (e.g. ~280 ms → ~185 ms with the IDA MCP plugin) ([#14219](https://github.com/can1357/oh-my-pi/pull/14219) by [@H4vC](https://github.com/H4vC))
+- Directory-scoped prompt recall no longer scans every stored prompt on each history keypress ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 ### Fixed
 
@@ -23,7 +24,7 @@
 - Fixed slash submissions counting twice in prompt history; intentional resubmissions still increment their usage ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Repository-scoped prompt recall now drops entries belonging to a newly nested repository without requiring another history write, while retaining canceled drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
-- Collab guests can no longer have a refused command land in `Up` history by queueing it during compaction, and `history.scope: cwd` no longer treats an empty project as every project
+- Collab guests can no longer have a refused command land in `Up` history by queueing it during compaction, and `history.scope: cwd` no longer treats an empty project as every project ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Answering `c` during a `/guided-goal` interview reaches the session even when a command is named `c`: with `input.bareSlashCommands` on, the answer used to wait for a second Enter, or run `/c` outright on a fresh session and be lost without a status line ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit))
 - Collab guests no longer run or recall host-only commands: a command the guest gates refuse is neither recorded in `Up` history nor executed on the Ctrl+Enter path (`/new`, `/model …`, `/skill:…`). Queuing one with `->` or `=>` still records the queued text ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 

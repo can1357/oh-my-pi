@@ -13,9 +13,8 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 // path. Before #3148 only a handful of commands recorded their text (each
 // added it inside its own handler); everything else returned `true` from
 // executeBuiltinSlashCommand and the controller returned before any
-// addToHistory call. The fix centralizes recording after dispatch, with a
+// addToHistory call. Recording now happens before dispatch, with a
 // secret filter (shouldSkipHistory) for credential-bearing commands.
-const DEFAULT_SESSION_ID = "session-1";
 
 function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	const addToHistory = vi.fn();

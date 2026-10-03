@@ -51,6 +51,12 @@ impl std::fmt::Debug for GitRepo {
 }
 
 impl GitRepo {
+	/// Initialize a non-bare checkout with a lazily opened repository handle.
+	pub fn init(dir: &Path) -> Result<Self> {
+		gix::init(dir).map_err(|err| Error::backend("git init", err))?;
+		Self::require(dir)
+	}
+
 	/// Discover the repository containing `dir` by walking toward the root.
 	///
 	/// A `.git` entry only counts when its resolved git dir contains `HEAD`;

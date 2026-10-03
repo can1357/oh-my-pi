@@ -731,9 +731,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			// No history write: the submit path already filed the text before dispatch, under the
-			// cwd the user typed it in. Writing here, after the move, would re-file it under the
-			// destination and bill the same submission twice in `use_count`.
+			// The submit path already filed the text under its source cwd before dispatch.
+			// Recording again here would count it twice; recording after handleMoveCommand
+			// would also replace the source provenance with the destination.
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},

@@ -240,9 +240,14 @@ describe("Editor component", () => {
 
 				key = "second";
 				failNextSeed = true;
-				editor.setText("");
 				editor.handleInput("\x1b[A");
 				expect(editor.getText()).toBe("");
+				const submitted: string[] = [];
+				editor.onSubmit = text => {
+					submitted.push(text);
+				};
+				editor.handleInput("\r");
+				expect(submitted).not.toContain("prompt from the first context");
 				editor.handleInput("\x1b[A");
 				expect(editor.getText()).toBe("prompt from the second context");
 			},
@@ -332,6 +337,22 @@ describe("Editor component", () => {
 			expect(editor.getExpandedText()).toBe(payload);
 			editor.handleInput("\x1b[A");
 			expect(editor.getText()).toBe("persisted from the second context");
+		});
+
+		it("snapshots a recalled paste before a scope refresh releases its live payload", () => {
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => [] }, () => key);
+			const payload = "canceled payload ".repeat(120).trim();
+			editor.handleInput("\x1b[200~" + payload + "\x1b[201~");
+			editor.rememberDraft();
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			key = "second";
+			editor.rememberDraft();
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getExpandedText()).toBe(payload);
 		});
 
 		it("re-seeds from storage when the host's source key changes", () => {

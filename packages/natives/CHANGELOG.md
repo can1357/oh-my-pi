@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `initGit` to initialize a checkout through the native VCS API without spawning Git from callers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Fixed

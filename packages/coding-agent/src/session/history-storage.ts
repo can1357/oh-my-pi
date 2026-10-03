@@ -132,12 +132,8 @@ export class HistoryStorage {
 	// not by user input. `#searchSubstring` builds one LIKE term per token, so it prepares its
 	// statement per call instead of growing a key per token count ever searched.
 	#stmts = new Map<string, Statement>();
-	// Directory scopes resolve every stored `cwd` spelling on every read and memoize nothing: a
-	// nested `git init`, a moved worktree or a retargeted symlink commits nothing to `history.db`,
-	// so neither our own writes nor another connection's commit can signal it, and a memo would
-	// keep serving the old topology — handing one project another project's prompts. The cost is
-	// linear in the number of distinct stored directories, never in the number of rows, and
-	// `global` and `session` never reach it.
+	// Cache only raw stored paths; normalization and Git topology stay live on every read.
+	#storedDirsCache?: { dataVersion: number; dirs: string[] };
 
 	private constructor(db: Database) {
 		this.#db = db;
@@ -229,6 +225,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
+		this.#storedDirsCache = undefined;
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
@@ -522,10 +519,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * spelling, since `setProjectDir` resolves lexically). Each read therefore filters the stored
 	 * set, comparing normalized spellings on both sides.
 	 *
-	 * `repo` also reaches out-of-tree linked worktrees, which share only a primary root with the
-	 * target, so it compares roots — one VCS resolution per stored directory, per read. That is
-	 * the price of never serving a topology that moved without a write, and it is linear in the
-	 * number of distinct stored directories, not in the number of rows.
+	 * Raw directory rows are cached between database writes. Filtering re-resolves each
+	 * distinct directory so nested repositories and symlink retargets stay visible.
 	 */
 	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
 		if (!target) return [];
@@ -541,11 +536,21 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#storedDirs(): string[] {
-		return (
-			this.#prepare("SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''").all() as Array<{
+		try {
+			// Own writes invalidate explicitly; data_version tracks other connections.
+			const version = (this.#prepare("PRAGMA data_version").get() as { data_version: number }).data_version;
+			if (this.#storedDirsCache?.dataVersion === version) return this.#storedDirsCache.dirs;
+			const rows = this.#prepare("SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''").all() as {
 				cwd: string;
-			}>
-		).map(row => row.cwd);
+			}[];
+			const dirs = rows.map(row => row.cwd);
+			// Stamp the version sampled before SELECT, never a later commit onto older rows.
+			this.#storedDirsCache = { dataVersion: version, dirs };
+			return dirs;
+		} catch (error) {
+			this.#storedDirsCache = undefined;
+			throw error;
+		}
 	}
 
 	#prepare(sql: string): Statement {

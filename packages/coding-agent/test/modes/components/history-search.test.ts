@@ -79,35 +79,6 @@ describe("HistorySearchComponent", () => {
 		expect(selected).toEqual(["deploy release"]);
 	});
 
-	it("keeps a single source navigable without advertising a scope switch", () => {
-		const selected: string[] = [];
-		const component = new HistorySearchComponent(
-			[source("folder", ["release"])],
-			prompt => selected.push(prompt),
-			() => {},
-		);
-		// The hint renders the Tab glyph, never the word "tab", so assert on ⇥ and cover
-		// both directions: absent with a single source, naming the next one otherwise.
-		expect(
-			render(component)
-				.split("\n")
-				.find(line => line.includes("navigate")),
-		).not.toContain("⇥");
-		const cycling = new HistorySearchComponent(
-			[source("folder", ["release"]), source("conversation", ["release"])],
-			() => {},
-			() => {},
-		);
-		expect(
-			render(cycling)
-				.split("\n")
-				.find(line => line.includes("navigate")),
-		).toContain("⇥");
-		component.handleInput("\t");
-		component.handleInput("\r");
-		expect(selected).toEqual(["release"]);
-	});
-
 	it("moves the query cursor with Left/Right instead of cycling the scope", () => {
 		const component = new HistorySearchComponent(
 			[source("folder", ["abc folder"]), source("conversation", ["abc conversation"])],

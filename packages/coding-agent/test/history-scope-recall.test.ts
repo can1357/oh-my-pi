@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -11,7 +11,7 @@ import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storag
 import type { HistoryScopeKind } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { Editor } from "@oh-my-pi/pi-tui";
 import { setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
-import { runGit } from "./helpers/git";
+import { initGitFixture } from "./helpers/git";
 
 let tempDir: TempDir | null = null;
 let originalCwd = "";
@@ -66,10 +66,10 @@ describe("scoped prompt recall", () => {
 		const dir = tempDir!;
 		const repoA = path.join(dir.path(), "repo-a");
 		const repoB = path.join(dir.path(), "repo-b");
-		fs.mkdirSync(repoA, { recursive: true });
-		fs.mkdirSync(repoB, { recursive: true });
-		runGit(repoA, "init", "--quiet");
-		runGit(repoB, "init", "--quiet");
+		await fs.mkdir(repoA, { recursive: true });
+		await fs.mkdir(repoB, { recursive: true });
+		await initGitFixture(repoA);
+		await initGitFixture(repoB);
 		const dbPath = dir.join("history.db");
 		const storage = HistoryStorage.open(dbPath);
 		let sessionId = "11111111-1111-4111-8111-111111111111";
@@ -131,12 +131,12 @@ describe("scoped prompt recall", () => {
 		const dir = tempDir!;
 		const outer = dir.join("outer");
 		const inner = path.join(outer, "inner");
-		await fs.promises.mkdir(inner, { recursive: true });
-		runGit(outer, "init", "--quiet");
+		await fs.mkdir(inner, { recursive: true });
+		await initGitFixture(outer);
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("INNER_PROMPT", inner, "s1");
 		const editor = bindEditor(storage, { setting: "repo", context: { sessionId: "s1", cwd: outer } });
-		runGit(inner, "init", "--quiet");
+		await initGitFixture(inner);
 		expect(storage.getRecent(10, { kind: "repo", value: outer })).toEqual([]);
 		expect(recall(editor)).toBe("");
 	});
@@ -146,9 +146,9 @@ describe("scoped prompt recall", () => {
 		const one = dir.join("one");
 		const two = dir.join("two");
 		const link = dir.join("link");
-		await fs.promises.mkdir(one);
-		await fs.promises.mkdir(two);
-		await fs.promises.symlink(one, link, "junction");
+		await fs.mkdir(one);
+		await fs.mkdir(two);
+		await fs.symlink(one, link, "junction");
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("VIA_LINK", link, "s1");
 		const from = bindEditor(storage, { setting: "cwd", context: { sessionId: "s1", cwd: one } });
@@ -156,8 +156,8 @@ describe("scoped prompt recall", () => {
 		expect(recall(from)).toBe("VIA_LINK");
 		expect(recall(to)).toBe("");
 
-		await fs.promises.unlink(link);
-		await fs.promises.symlink(two, link, "junction");
+		await fs.unlink(link);
+		await fs.symlink(two, link, "junction");
 		// Keep the active browse pointer: re-seeding must retire its text, not just its list.
 		from.handleInput("\x1b[A");
 		to.handleInput("\x1b[A");
@@ -169,8 +169,8 @@ describe("scoped prompt recall", () => {
 		const dir = tempDir!;
 		const outer = dir.join("outer");
 		const inner = path.join(outer, "inner");
-		await fs.promises.mkdir(inner, { recursive: true });
-		runGit(outer, "init", "--quiet");
+		await fs.mkdir(inner, { recursive: true });
+		await initGitFixture(outer);
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("RETIRED_PROMPT", inner, "s1");
 		const editor = bindEditor(storage, { setting: "repo", context: { sessionId: "s1", cwd: outer } });
@@ -181,7 +181,7 @@ describe("scoped prompt recall", () => {
 		expect(editor.getExpandedText()).toBe(payload);
 		editor.handleInput("\x1b[A");
 		expect(editor.getText()).toBe("RETIRED_PROMPT");
-		runGit(inner, "init", "--quiet");
+		await initGitFixture(inner);
 		editor.handleInput("\x1b[A");
 		expect(editor.getExpandedText()).toBe(payload);
 		editor.handleInput("\x1b[A");
@@ -195,8 +195,8 @@ describe("scoped prompt recall", () => {
 			const dir = tempDir!;
 			const outer = dir.join("outer");
 			const inner = path.join(outer, "inner");
-			await fs.promises.mkdir(inner, { recursive: true });
-			runGit(outer, "init", "--quiet");
+			await fs.mkdir(inner, { recursive: true });
+			await initGitFixture(outer);
 			const storage = HistoryStorage.open(dir.join("history.db"));
 			await storage.add("OLDER", setting === "repo" ? inner : outer, "s1");
 			await storage.add("NEWER", outer, "s1");
@@ -214,8 +214,8 @@ describe("scoped prompt recall", () => {
 	it("keeps prompts submitted through the bound editor readable in cwd and repo scopes", async () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
-		fs.mkdirSync(repo, { recursive: true });
-		runGit(repo, "init", "--quiet");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		storage.setSessionResolver(() => "session-1");
 		const state: { setting: HistoryScopeKind; context: HistoryScopeContext } = {

@@ -1,6 +1,7 @@
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	historyScopeKey,
 	historyScopeRing,
@@ -9,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import type { HistoryScopeKind } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { runGit } from "../helpers/git";
+import { initGitFixture } from "../helpers/git";
 
 let tempDir: TempDir | null = null;
 
@@ -25,11 +26,11 @@ afterEach(async () => {
 });
 
 describe("resolveHistoryScope", () => {
-	it("falls back to cwd — never to global — when the scope has no subject", () => {
+	it("falls back to cwd — never to global — when the scope has no subject", async () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
-		fs.mkdirSync(repo, { recursive: true });
-		runGit(repo, "init", "--quiet");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
 		const outsideRepo: HistoryScopeContext = { sessionId: "", cwd: dir.path() };
 
 		expect(resolveHistoryScope("session", outsideRepo)).toEqual({ kind: "cwd", value: dir.path() });
@@ -40,11 +41,11 @@ describe("resolveHistoryScope", () => {
 		});
 	});
 
-	it("resolves each scope to its own subject", () => {
+	it("resolves each scope to its own subject", async () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
-		fs.mkdirSync(repo, { recursive: true });
-		runGit(repo, "init", "--quiet");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
 		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
 
 		expect(resolveHistoryScope("session", context)).toEqual({ kind: "session", value: "session-1" });
@@ -55,11 +56,11 @@ describe("resolveHistoryScope", () => {
 });
 
 describe("historyScopeRing", () => {
-	it("rotates the narrow-to-wide ring around the resolved start scope", () => {
+	it("rotates the narrow-to-wide ring around the resolved start scope", async () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
-		fs.mkdirSync(repo, { recursive: true });
-		runGit(repo, "init", "--quiet");
+		await fs.mkdir(repo, { recursive: true });
+		await initGitFixture(repo);
 		const context: HistoryScopeContext = { sessionId: "session-1", cwd: repo };
 
 		const ring = historyScopeRing("session", context);
@@ -74,15 +75,15 @@ describe("historyScopeRing", () => {
 		expect(historyScopeRing("repo", context).map(scope => scope.kind)).toEqual(["repo", "global", "session", "cwd"]);
 	});
 
-	it("resolves repository scope from a subdirectory or a linked worktree", () => {
+	it("resolves repository scope from a subdirectory or a linked worktree", async () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
 		const sub = path.join(repo, "src", "deep");
 		const worktree = path.join(dir.path(), "repo-wt");
-		fs.mkdirSync(sub, { recursive: true });
-		runGit(repo, "init", "--quiet");
-		runGit(repo, "commit", "--allow-empty", "--quiet", "-m", "init");
-		runGit(repo, "worktree", "add", "--quiet", "--detach", worktree);
+		await fs.mkdir(sub, { recursive: true });
+		await initGitFixture(repo);
+		await vcs.requireGit(repo).commitCreate("init", { allowEmpty: true });
+		await vcs.requireGit(repo).worktreeAdd(worktree, "HEAD", { detach: true, clone: false });
 
 		// Without primary-root resolution the scope would carry the directory itself and
 		// `history.scope: repo` would stop matching the repository's other directories.
@@ -118,12 +119,12 @@ describe("historyScopeKey", () => {
 		);
 	});
 
-	it("treats two spellings of one directory as the same data set", () => {
+	it("treats two spellings of one directory as the same data set", async () => {
 		const dir = tempDir!;
 		const repo = path.join(dir.path(), "repo");
 		const link = dir.join("repo-link");
-		fs.mkdirSync(repo, { recursive: true });
-		fs.symlinkSync(repo, link, "dir");
+		await fs.mkdir(repo, { recursive: true });
+		await fs.symlink(repo, link, "dir");
 
 		// A different spelling must not look like a new scope: the editor would re-seed and
 		// drop recalled drafts even though the rows read back are identical.

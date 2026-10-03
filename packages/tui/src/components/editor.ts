@@ -1017,10 +1017,12 @@ export class Editor implements Component, Focusable {
 				this.#historySourceKeyValue = key;
 				return true;
 			}
+			this.#retireHistorySelection();
 			// A failed resolution or read leaves the key alone so the next browse retries,
 			// without exposing the list from the context it was replacing.
 			recent = storage.getRecent(HISTORY_LIMIT);
 		} catch (error) {
+			this.#retireHistorySelection();
 			logger.warn("History re-seed failed", { error: String(error) });
 			return false;
 		}
@@ -1031,19 +1033,18 @@ export class Editor implements Component, Focusable {
 		// over there is nothing left to restore, so the flag must not survive the re-seed.
 		if (drafts.length === 0) this.#historyDraftActive = false;
 		this.#history = [...drafts, ...recent.map(entry => ({ text: entry.prompt }))].slice(0, HISTORY_LIMIT);
-		// A live browse pointer is the editor's claim on the buffer: `#navigateHistory` put that
-		// entry's text there and only an edit releases the claim. Dropping the pointer alone would
-		// leave the retired context's prompt on screen with nothing recording where it came from:
-		// the Up/Down dispatcher routes on the pointer, so both arrows would degrade to plain
-		// cursor motion and the leftover could be submitted as a prompt of the context the user is
-		// in now. Retiring a selection hands the buffer back exactly what pressing Down past the
-		// newest entry shows it: empty. The drafts carried above stay in the list, so a Ctrl+C
-		// draft recalled before the switch comes back on the next press, payload included.
-		if (this.#historyIndex !== -1) {
-			this.#historyIndex = -1;
-			this.#setTextInternal("");
-		}
 		return true;
+	}
+
+	#retireHistorySelection(): void {
+		// Only a live browse pointer owns the buffer; edits make it the user's draft.
+		if (this.#historyIndex === -1) return;
+		this.#historyIndex = -1;
+		if (this.#historyDraftActive) {
+			this.clearPasteState();
+			this.restoreHistoryState();
+		}
+		this.#setTextInternal("");
 	}
 
 	/**
@@ -1083,24 +1084,21 @@ export class Editor implements Component, Focusable {
 	rememberDraft(restore?: () => void): void {
 		const text = this.getText();
 		if (!text.trim()) return;
-		// Apply any pending source change first: the draft belongs to the context the user is in
-		// now, and the next browse would otherwise re-seed over it and lose it for good.
-		this.#rehydrateHistory();
 		const pastes = new Map<number, string>();
 		for (const match of text.matchAll(/\[Paste #(\d+)(?:, (?:\+\d+ lines|\d+ chars))?\]/g)) {
 			const id = Number(match[1]);
 			const value = this.#pastes.get(id);
 			if (value !== undefined) pastes.set(id, value);
 		}
-		this.#pushHistory({
-			text,
-			draft: {
-				pastes,
-				atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
-				pasteCounter: this.#pasteCounter,
-				restore,
-			},
-		});
+		const draft = {
+			pastes,
+			atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
+			pasteCounter: this.#pasteCounter,
+			restore,
+		};
+		// Snapshot before a re-seed can release the selected draft's live payloads.
+		this.#rehydrateHistory();
+		this.#pushHistory({ text, draft });
 	}
 
 	/** Release the current draft's expansion payloads without touching history. */

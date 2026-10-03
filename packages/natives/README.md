@@ -17,6 +17,12 @@ lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
 crate only ships the SIXEL encoder because no built-in equivalent exists for
 that terminal protocol.
 
+## Git repository initialization
+
+Use `initGit(directory)` from `@oh-my-pi/pi-natives/vcs` to initialize a non-bare checkout through the in-process Git backend. It returns a lazy `VcsGitRepo` handle; configure local identity and hooks with `configSet` before its first ref/object/index access so those settings are used when the handle opens. Re-initializing an existing checkout is rejected without replacing HEAD or worktree files.
+
+The handle's `commitCreate` and `worktreeAdd` methods cover initial empty commits (`{ allowEmpty: true }`) and detached linked worktrees (`{ detach: true, clone: false }`) without a caller-side command wrapper.
+
 ## Usage
 
 ```typescript

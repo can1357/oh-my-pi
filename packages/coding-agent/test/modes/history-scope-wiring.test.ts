@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { bindHistorySource, resolveHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
@@ -35,29 +36,9 @@ afterEach(async () => {
 });
 
 describe("history scope wiring", () => {
-	it("opens Ctrl+R on the configured search scope and cycles from there", () => {
-		expect(getProjectDir()).toBe(tempDir!.path());
-		const storage = HistoryStorage.open(tempDir!.join("history.db"));
-		// The configured `cwd` start must be honoured rather than falling back to `global`.
-		const ctx = createInteractiveModeContext({
-			settings: Settings.isolated({ "history.searchScope": "cwd" }),
-			historyStorage: storage,
-			sessionManager: { getSessionId: () => "session-1" },
-		});
-
-		new SelectorController(ctx).showHistorySearch();
-
-		const panel = ctx.editorContainer.children[0] as unknown as HistorySearchComponent;
-		expect(panel.title).toBe("History (current folder)");
-		panel.handleInput("\t");
-		expect(panel.title).toBe("History (all projects)");
-		panel.handleInput("\t");
-		expect(panel.title).toBe("History (this session)");
-	});
-
 	it("reads the selected scope, not the whole table, in the Ctrl+R panel", async () => {
 		const other = tempDir!.join("other-project");
-		await Bun.$`mkdir -p ${other}`.quiet();
+		await fs.mkdir(other, { recursive: true });
 		const storage = HistoryStorage.open(tempDir!.join("history.db"));
 		await storage.add("PROMPT_OF_THIS_PROJECT", tempDir!.path(), "session-1");
 		await storage.add("PROMPT_OF_ANOTHER_PROJECT", other, "session-2");

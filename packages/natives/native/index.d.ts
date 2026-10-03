@@ -3342,6 +3342,9 @@ export declare function vcsGitClone(url: string, target: string, options: VcsClo
 /** Discover the Git checkout containing a directory. */
 export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
 
+/** Initialize a non-bare Git checkout. */
+export declare function vcsGitInit(dir: string): VcsGitRepo
+
 /** Discover Git metadata without opening the repository. */
 export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
 

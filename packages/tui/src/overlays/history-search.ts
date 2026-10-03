@@ -55,6 +55,7 @@ function nativeEntryKey(entry: HistorySearchEntry): string {
 
 interface HistoryNativeMemo {
 	picker: boolean;
+	title: string;
 	items: readonly HistorySearchEntry[];
 	selected: HistorySearchEntry | undefined;
 	query: string;
@@ -198,6 +199,7 @@ export class HistorySearchComponent extends OverlayPanel {
 	#nativeHints: NativeNode | undefined;
 	#nativeMemo: HistoryNativeMemo | undefined;
 	#pickerItems: { items: readonly HistorySearchEntry[]; rows: readonly TspPickerItem[] } | undefined;
+	#emptyMessage = "";
 
 	/** Sources are host-bound and ordered for Tab cycling, with the initial scope first. */
 	constructor(scopes: readonly HistorySearchScope[], onSelect: (prompt: string) => void, onCancel: () => void) {
@@ -243,6 +245,7 @@ export class HistorySearchComponent extends OverlayPanel {
 	}
 
 	#updateChrome(): void {
+		this.#nativeHints = undefined;
 		const label = this.#scopeAt(this.#scopeIndex).label;
 		this.title = `History (${label})`;
 		const dot = theme.fg("dim", theme.sep.dot);
@@ -254,6 +257,14 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#hint.setText(hints.join(dot));
 	}
 
+	#cycleScope(direction: 1 | -1): void {
+		if (this.#scopes.length < 2) return;
+		this.#scopeIndex =
+			(((this.#scopeIndex + direction) % this.#scopes.length) + this.#scopes.length) % this.#scopes.length;
+		this.#updateChrome();
+		this.#updateResults();
+	}
+
 	handleInput(keyData: string): void {
 		// Tab and Shift+Tab cycle the scope ring in opposite directions. The ring starts on
 		// the configured scope and wraps, so neither key is strictly "wider" than the other.
@@ -261,11 +272,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		// move the cursor inside the query field.
 		const forward = matchesKey(keyData, "tab");
 		if (forward || matchesKey(keyData, "shift+tab")) {
-			const direction = forward ? 1 : -1;
-			this.#scopeIndex =
-				(((this.#scopeIndex + direction) % this.#scopes.length) + this.#scopes.length) % this.#scopes.length;
-			this.#updateChrome();
-			this.#updateResults();
+			this.#cycleScope(forward ? 1 : -1);
 			return;
 		}
 
@@ -334,6 +341,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		if (
 			memo &&
 			memo.picker === usePicker &&
+			memo.title === this.title &&
 			memo.items === items &&
 			memo.selected === selected &&
 			memo.query === query &&
@@ -343,7 +351,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		}
 		if (usePicker) {
 			const root = col([keyed(this.#describePicker(items, selected, query), PICKER_KEY)]);
-			this.#nativeMemo = { picker: true, items, selected, query, cursor, node: root };
+			this.#nativeMemo = { picker: true, title: this.title, items, selected, query, cursor, node: root };
 			return root;
 		}
 
@@ -363,7 +371,7 @@ export class HistorySearchComponent extends OverlayPanel {
 			{
 				selected: selected ? nativeEntryKey(selected) : null,
 				filter: query || undefined,
-				empty: query ? "No matching history" : "No history yet",
+				empty: this.#emptyMessage,
 				max: { lines: MAX_VISIBLE },
 				virtual: true,
 			},
@@ -373,10 +381,16 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#nativeHints ??= hintsRow([
 			actionHint(["tui.select.up", "tui.select.down"], "navigate"),
 			{ keys: ENTER_KEYS, label: "select" },
+			...(this.#scopes.length > 1
+				? [
+						{ keys: ["tab" as const], label: this.#scopeAt(this.#scopeIndex + 1).label },
+						{ keys: ["shift+tab" as const], label: this.#scopeAt(this.#scopeIndex - 1).label },
+					]
+				: []),
 			actionHint("tui.select.cancel", "cancel"),
 		]);
 		const root = overlayCard(this.nativeRole, this.title, [this.#searchInput, list, this.#nativeHints]);
-		this.#nativeMemo = { picker: false, items, selected, query, cursor, node: root };
+		this.#nativeMemo = { picker: false, title: this.title, items, selected, query, cursor, node: root };
 		return root;
 	}
 
@@ -403,9 +417,15 @@ export class HistorySearchComponent extends OverlayPanel {
 			columns: [{ id: "when", format: "time" }],
 			items: rows.rows,
 			selected: selected ? nativeEntryKey(selected) : null,
-			empty: "No history yet",
+			empty: this.#emptyMessage,
 			actions: [
 				pickerAction("insert", "Insert", "enter", { primary: true }),
+				...(this.#scopes.length > 1
+					? [
+							pickerAction("scope", this.#scopeAt(this.#scopeIndex + 1).label, "tab"),
+							pickerAction("scope-back", this.#scopeAt(this.#scopeIndex - 1).label, "shift+tab"),
+						]
+					: []),
 				pickerAction("close", "Close", boundKeys("app.interrupt", ["escape"])[0] ?? "escape", { end: true }),
 			],
 		});
@@ -422,6 +442,8 @@ export class HistorySearchComponent extends OverlayPanel {
 			if (ev.kind === "action") {
 				if (ev.act === "close") this.#onCancel();
 				else if (ev.act === "insert") this.handleInput("\r");
+				else if (ev.act === "scope") this.#cycleScope(1);
+				else if (ev.act === "scope-back") this.#cycleScope(-1);
 				else if (ev.act === "clear") {
 					this.#searchInput.setValue("");
 					this.#updateResults();
@@ -443,6 +465,8 @@ export class HistorySearchComponent extends OverlayPanel {
 	}
 
 	#updateResults(): void {
+		this.#nativeMemo = undefined;
+		this.#pickerItems = undefined;
 		const query = this.#searchInput.getValue().trim();
 		const scope = this.#scopeAt(this.#scopeIndex);
 		// Source failures must not escape a keystroke handler; the next input retries.
@@ -456,9 +480,9 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#menu.moveToBoundary("first");
 		const nextScope = this.#scopeAt(this.#scopeIndex + 1).label;
 		const widen = this.#scopes.length > 1 ? ` Press Tab for ${nextScope}.` : "";
-		const emptyMessage = query
+		this.#emptyMessage = query
 			? `No matching history in ${scope.label}.${widen}`
 			: `No history in ${scope.label}.${widen}`;
-		this.#resultsList.setQuery(query ? queryTokens(query) : [], emptyMessage);
+		this.#resultsList.setQuery(query ? queryTokens(query) : [], this.#emptyMessage);
 	}
 }

@@ -1,11 +1,12 @@
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { historyScopeRing } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
 import { HistoryStorage, type HistoryScope } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { runGit } from "./helpers/git";
+import { initGitFixture } from "./helpers/git";
 
 interface Fixtures {
 	repoA: string;
@@ -17,17 +18,17 @@ interface Fixtures {
 let tempDir: TempDir | null = null;
 
 /** Repo A (plus a nested directory and an out-of-tree linked worktree) and an unrelated repo B. */
-function createFixtures(root: string): Fixtures {
+async function createFixtures(root: string): Promise<Fixtures> {
 	const repoA = path.join(root, "repo-a");
 	const repoB = path.join(root, "repo-b");
 	const repoASub = path.join(repoA, "src", "deep");
 	const repoAWorktree = path.join(root, "repo-a-wt");
-	fs.mkdirSync(repoASub, { recursive: true });
-	fs.mkdirSync(repoB, { recursive: true });
-	runGit(repoA, "init", "--quiet");
-	runGit(repoA, "commit", "--allow-empty", "--quiet", "-m", "init");
-	runGit(repoB, "init", "--quiet");
-	runGit(repoA, "worktree", "add", "--quiet", "--detach", repoAWorktree);
+	await fs.mkdir(repoASub, { recursive: true });
+	await fs.mkdir(repoB, { recursive: true });
+	await initGitFixture(repoA);
+	await vcs.requireGit(repoA).commitCreate("init", { allowEmpty: true });
+	await initGitFixture(repoB);
+	await vcs.requireGit(repoA).worktreeAdd(repoAWorktree, "HEAD", { detach: true, clone: false });
 	return { repoA, repoASub, repoAWorktree, repoB };
 }
 
@@ -65,7 +66,7 @@ afterEach(async () => {
 describe("HistoryStorage scope filtering", () => {
 	it("filters recent reads by session, keeping prompts without a session id out", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -84,7 +85,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("filters reads by exact cwd and exposes prompts with no cwd only outside cwd/repo scopes", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -99,7 +100,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("shares one repository scope across its root, subdirectories and out-of-tree worktrees", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -118,19 +119,19 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("returns nothing — not the whole history — for a repository scope with no matching directory", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 		const emptyRepo = path.join(dir.path(), "repo-c");
-		fs.mkdirSync(emptyRepo, { recursive: true });
-		runGit(emptyRepo, "init", "--quiet");
+		await fs.mkdir(emptyRepo, { recursive: true });
+		await initGitFixture(emptyRepo);
 
 		expect(storage.getRecent(100, { kind: "repo", value: emptyRepo })).toEqual([]);
 	});
 
 	it("reads nothing for a scope kind it does not recognize, never the whole history", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -143,7 +144,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("keeps a stored directory outside any repository readable and scoped to itself", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		const ghost = path.join(dir.path(), "ghost");
 		await seed(storage, fixtures, ghost);
@@ -155,7 +156,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("applies the scope before the limit instead of after it", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 		// The newest row overall belongs to another session, so scoping after the limit
@@ -170,7 +171,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("scopes the full-text path", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -184,7 +185,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("scopes the substring fallback path", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -200,11 +201,11 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("matches a repository reached through a symlink to its physical spelling", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 		const link = dir.join("repo-a-link");
-		fs.symlinkSync(fixtures.repoA, link, "dir");
+		await fs.symlink(fixtures.repoA, link, "dir");
 		// A row submitted while the symlinked spelling was current: stored `cwd` keeps it.
 		await storage.add("submitted through the link", link, "s1");
 
@@ -224,20 +225,60 @@ describe("HistoryStorage scope filtering", () => {
 		expect(promptsOf(storage, { kind: "cwd", value: link })).not.toContain("beta run tests");
 	});
 
+	it("removes old directory membership when a local resubmission moves or clears its last row", async () => {
+		const dir = tempDir!;
+		const a: HistoryScope = { kind: "cwd", value: dir.join("a") };
+		const b: HistoryScope = { kind: "cwd", value: dir.join("b") };
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("moving prompt", a.value, "first");
+		const keyA = storage.getDirectoryScopeKey("cwd", a.value);
+		await storage.add("moving prompt", b.value, "second");
+		expect(storage.getDirectoryScopeKey("cwd", a.value)).not.toBe(keyA);
+		expect(promptsOf(storage, a)).toEqual([]);
+		expect(promptsOf(storage, b)).toEqual(["moving prompt"]);
+		await storage.add("moving prompt", undefined, "third");
+		expect(storage.getDirectoryScopeKey("cwd", b.value)).toBe("[]");
+		expect(promptsOf(storage, b)).toEqual([]);
+		expect(storage.getRecent(1)[0]).toMatchObject({ prompt: "moving prompt", sessionId: "third", useCount: 3 });
+	});
+
+	it("refreshes foreign moves and deletions and never reuses a cache after table removal", async () => {
+		const dir = tempDir!;
+		const a: HistoryScope = { kind: "cwd", value: dir.join("a") };
+		const b: HistoryScope = { kind: "cwd", value: dir.join("b") };
+		const dbPath = dir.join("history.db");
+		const storage = HistoryStorage.open(dbPath);
+		await storage.add("foreign prompt", a.value, "first");
+		storage.getDirectoryScopeKey("cwd", a.value);
+		const other = new Database(dbPath);
+		try {
+			other.run("UPDATE history SET cwd = ? WHERE prompt = ?", [b.value!, "foreign prompt"]);
+			expect(promptsOf(storage, a)).toEqual([]);
+			expect(promptsOf(storage, b)).toEqual(["foreign prompt"]);
+			other.run("DELETE FROM history WHERE prompt = ?", ["foreign prompt"]);
+			expect(storage.getDirectoryScopeKey("cwd", b.value)).toBe("[]");
+			expect(promptsOf(storage, b)).toEqual([]);
+			other.run("DROP TABLE history");
+			expect(() => storage.getDirectoryScopeKey("cwd", a.value)).toThrow();
+			expect(() => storage.getDirectoryScopeKey("cwd", a.value)).toThrow();
+		} finally {
+			other.close();
+		}
+	});
+
 	it("re-resolves repository membership after a nested repository appears", async () => {
 		const dir = tempDir!;
 		const outer = dir.join("outer");
 		const inner = path.join(outer, "inner");
-		fs.mkdirSync(inner, { recursive: true });
-		runGit(outer, "init", "--quiet");
+		await fs.mkdir(inner, { recursive: true });
+		await initGitFixture(outer);
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("before nested init", inner, "s1");
 
 		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual(["before nested init"]);
 
-		// A repository created while the process runs must be picked up: the cache is dropped
-		// on the next write, so the rows below stop belonging to the outer repository.
-		runGit(inner, "init", "--quiet");
+		// Repository topology is resolved again on every read, independently of database writes.
+		await initGitFixture(inner);
 		await storage.add("after nested init", inner, "s1");
 
 		expect(new Set(promptsOf(storage, { kind: "repo", value: inner }))).toEqual(
@@ -250,8 +291,8 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const outer = dir.join("outer");
 		const inner = path.join(outer, "inner");
-		fs.mkdirSync(inner, { recursive: true });
-		runGit(outer, "init", "--quiet");
+		await fs.mkdir(inner, { recursive: true });
+		await initGitFixture(outer);
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("avant", inner, "s1");
 
@@ -264,7 +305,7 @@ describe("HistoryStorage scope filtering", () => {
 		// this process, and no other connection commits either. Prompts submitted from `inner`
 		// belong to `inner` now; serving them under `outer` would hand one project another
 		// project's prompts.
-		runGit(inner, "init", "--quiet");
+		await initGitFixture(inner);
 
 		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
 		expect(promptsOf(storage, { kind: "repo", value: inner })).toEqual(["avant"]);
@@ -276,18 +317,18 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const one = dir.join("one");
 		const two = dir.join("two");
-		fs.mkdirSync(one, { recursive: true });
-		fs.mkdirSync(two, { recursive: true });
+		await fs.mkdir(one, { recursive: true });
+		await fs.mkdir(two, { recursive: true });
 		const link = dir.join("link");
-		fs.symlinkSync(one, link, "dir");
+		await fs.symlink(one, link, "dir");
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("via_link", link, "s1");
 		expect(promptsOf(storage, { kind: "cwd", value: one })).toEqual(["via_link"]);
 
 		// The link now names another project: the row filed under the old spelling must follow
 		// the directory, not the string that was stored.
-		fs.unlinkSync(link);
-		fs.symlinkSync(two, link, "dir");
+		await fs.unlink(link);
+		await fs.symlink(two, link, "dir");
 
 		expect(promptsOf(storage, { kind: "cwd", value: one })).toEqual([]);
 		expect(promptsOf(storage, { kind: "cwd", value: two })).toEqual(["via_link"]);
@@ -295,17 +336,17 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("sees a row committed by another connection without a local write", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("alpha local", fixtures.repoA, "s1");
-		// Warm both memos for this repository and for this exact directory.
+		// Warm the raw-directory cache through repository and exact-directory reads.
 		expect(promptsOf(storage, { kind: "repo", value: fixtures.repoA })).toEqual(["alpha local"]);
 		expect(promptsOf(storage, { kind: "cwd", value: fixtures.repoA })).toEqual(["alpha local"]);
 
 		// Another OMP process commits rows under a directory this process never saw, and under a
 		// symlinked spelling of the known one. No local write follows.
 		const link = dir.join("repo-a-link");
-		fs.symlinkSync(fixtures.repoA, link, "dir");
+		await fs.symlink(fixtures.repoA, link, "dir");
 		const external = new Database(dir.join("history.db"));
 		const insert = external.prepare(
 			"INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, strftime('%s','now'), ?, ?)",
@@ -326,22 +367,22 @@ describe("HistoryStorage scope filtering", () => {
 		const dir = tempDir!;
 		const outer = dir.join("outer");
 		const inner = path.join(outer, "inner");
-		fs.mkdirSync(inner, { recursive: true });
-		runGit(outer, "init", "--quiet");
+		await fs.mkdir(inner, { recursive: true });
+		await initGitFixture(outer);
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await storage.add("alpha inner", inner, "s1");
-		// Warm the cached root of `inner`: inside outer's repository.
+		// Warm the raw-directory cache while inner still belongs to outer.
 		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual(["alpha inner"]);
 
 		// Another process makes `inner` its own repository and commits a row, with no local write.
-		runGit(inner, "init", "--quiet");
+		await initGitFixture(inner);
 		const external = new Database(dir.join("history.db"));
 		external
 			.prepare("INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, strftime('%s','now'), ?, ?)")
 			.run("beta inner", inner, "s2");
 		external.close();
 
-		// The cached root must not keep claiming outer: `inner` left that repository.
+		// The live root resolution must reflect that inner left outer.
 		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
 		expect(new Set(promptsOf(storage, { kind: "repo", value: inner }))).toEqual(
 			new Set(["beta inner", "alpha inner"]),
@@ -350,7 +391,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("reads with the scope the search ring hands to the panel", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
@@ -363,7 +404,7 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("treats an omitted scope as global and keeps matchingSessionIds cross-project", async () => {
 		const dir = tempDir!;
-		const fixtures = createFixtures(dir.path());
+		const fixtures = await createFixtures(dir.path());
 		const storage = HistoryStorage.open(dir.join("history.db"));
 		await seed(storage, fixtures, path.join(dir.path(), "ghost"));
 
