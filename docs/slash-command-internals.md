@@ -577,3 +577,9 @@ Apply the rubric from the loaded skill. Report only issues introduced by the pat
 
 - `autoloadSkills` names skills from the parent session. Each one is injected as a hidden message before the reviewer's first prompt, like `/skill:<name>`. A name the parent does not know is ignored.
 - `spawns` limits which agents the reviewer may start with `task`. `scout` allows only an agent named `scout`, `*` allows any agent, and omitting it (with no `task` in `tools`) gives no spawning. When `tools` is declared and `spawns` is set, `task` is added to the tool list. At the maximum recursion depth `task` is removed and spawning is off.
+
+## 16) Built-in command note: `/scratch`
+
+`/scratch [<path>|off|status]` persists the home-launch directory globally in `startup.scratchDir` (or in the active profile). Bare `/scratch` saves the current session cwd; `/scratch <path>` saves an existing directory, resolving relative paths against the session cwd. `/scratch off` clears the setting, and `/scratch status` shows it. This changes future launches from `~`, not the current session cwd.
+
+Available in the TUI and ACP/RPC through its `handle` implementation. Directory argument completion is provided; missing paths and non-directories are rejected without a create prompt.
