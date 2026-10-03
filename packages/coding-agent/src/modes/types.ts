@@ -19,7 +19,7 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
-import type { CompactOptions } from "../extensibility/extensions/types";
+import type { CompactOptions, PlanReviewChoice } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
@@ -590,6 +590,7 @@ export interface InteractiveModeContext {
 	disableGoalMode(message?: string): void;
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
+	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string }): boolean;
 	openPlanReview(): Promise<void>;
 
 	// Hook UI methods
