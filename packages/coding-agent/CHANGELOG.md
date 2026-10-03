@@ -7,6 +7,10 @@
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
+### Fixed
+
+- Fixed sessions stopping where the assistant wrote a tool call as literal text instead of emitting it; the reply now gets a corrective note and the turn continues so the call can be re-emitted ([#14169](https://github.com/can1357/oh-my-pi/pull/14169) by [@yingliang-zhang](https://github.com/yingliang-zhang))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
@@ -892,10 +896,6 @@
 ### Removed
 
 - Removed the built-in `rs-parking-lot` rule; Rust edits using `std::sync::{Mutex, RwLock}` with `.lock().unwrap()` are no longer steered to `parking_lot`
-- Removed the bash tool's `env` parameter; services inherit the configured shell environment
-### Fixed
-
-- Fixed sessions stopping where the assistant wrote a tool call as literal text in its reply instead of emitting it — nothing ran and the session idled; the reply now gets a corrective note naming the unexecuted tools and the turn continues so the call can be re-emitted properly ([#14169](https://github.com/can1357/oh-my-pi/pull/14169) by [@yingliang-zhang](https://github.com/yingliang-zhang))
 
 ## [18.11.2] - 2026-10-16
 
