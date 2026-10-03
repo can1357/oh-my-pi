@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `compat.warmNativeHistoryReplay` for `openai-responses` models: a resumed session replays native history (reasoning items, message ids) from its first request, so providers that keep prior-turn thinking in context (Anthropic behind OpenAI-compatible gateways) hit the prompt cache instead of rewriting the whole prefix on every process restart ([#11266](https://github.com/can1357/oh-my-pi/issues/11266), [#11269](https://github.com/can1357/oh-my-pi/pull/11269) by [@mttzzz](https://github.com/mttzzz))
+
 ## [18.5.1] - 2026-10-03
 
 ### Fixed
