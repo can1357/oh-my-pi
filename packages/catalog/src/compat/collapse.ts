@@ -13,7 +13,9 @@
  * Families come from two sources:
  * - Reviewed `variant-family` nodes in `compat/rules/taxonomy/_collapse.kdl`
  *   (compiled into `rules.json`) for providers whose routing needs curation
- *   (Antigravity tier triplets, single-member renames, recycled ids).
+ *   (Antigravity tier triplets, single-member renames, recycled ids). A
+ *   family whose ids carry `{rev}` is a template, instantiated for every
+ *   revision the input advertises (`gemini-{rev}-flash` → `gemini-3.8-flash`).
  * - `deriveThinkingPairFamilies`: the global automatic rule — any live
  *   `X` + `X-thinking` pair (trailing or infix token) collapses into `X`,
  *   routing thinking-enabled requests to `X-thinking`. Gated on identical
@@ -36,8 +38,9 @@ import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
+import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
-import type { CompiledVariantFamily } from "./types";
+import { type CompiledVariantFamily, REVISION_PLACEHOLDER } from "./types";
 
 const VARIANT_ROUTING_KEYS: readonly (Effort | "off")[] = ["off", ...THINKING_EFFORTS];
 const DEFAULT_PAIR_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
@@ -107,8 +110,28 @@ export interface EffortVariantFamily {
 	extraAliases?: readonly string[];
 }
 
+/**
+ * A reviewed family whose ids carry {@link REVISION_PLACEHOLDER}: one
+ * `gemini-{rev}-flash` entry stands for every Flash generation the provider
+ * serves with the same sibling layout. Concrete families with the same
+ * instantiated id take precedence.
+ */
+export interface VariantFamilyTemplate {
+	/** Family with placeholders still in every id and the display name. */
+	family: EffortVariantFamily;
+	/** Revisions the template applies to; unbounded when absent. */
+	revision?: readonly RevisionTerm[];
+	/**
+	 * Matches the logical id, any member, or any extra alias (case-insensitive);
+	 * one alternative per id, each capturing the revision.
+	 */
+	pattern: RegExp;
+}
+
 export interface VariantCollapseTable {
 	families: readonly EffortVariantFamily[];
+	/** Revision-templated families, instantiated against live ids. */
+	templates?: readonly VariantFamilyTemplate[];
 	/**
 	 * Provider-scoped selector aliases: short native-CLI names and dotted
 	 * upstream spellings → logical model id. Unlike family members and
@@ -209,13 +232,104 @@ function compiledFamily(compiled: CompiledVariantFamily): EffortVariantFamily {
 	return family;
 }
 
+const REVISION_CAPTURE = String.raw`(\d+(?:\.\d+){0,2})`;
+
+/** One compiled `{rev}` family → runtime template with its id matcher. */
+function compiledTemplate(compiled: CompiledVariantFamily): VariantFamilyTemplate {
+	const family = compiledFamily(compiled);
+	const alternatives = [family.id, ...family.members, ...(family.extraAliases ?? [])].map(id =>
+		id
+			.split(REVISION_PLACEHOLDER)
+			.map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+			.join(REVISION_CAPTURE),
+	);
+	const template: VariantFamilyTemplate = {
+		family,
+		pattern: new RegExp(`^(?:${alternatives.join("|")})$`, "i"),
+	};
+	if (compiled.revision !== undefined) {
+		const terms = parseRevisionConstraint(compiled.revision);
+		if (terms !== undefined) template.revision = terms;
+	}
+	return template;
+}
+
+/** Substitute the placeholder throughout one templated family. */
+function instantiateTemplate(template: VariantFamilyTemplate, rev: string): EffortVariantFamily | undefined {
+	if (template.revision !== undefined) {
+		const parsed = parseRevision(rev);
+		if (parsed === undefined || !revisionSatisfies(parsed, template.revision)) return undefined;
+	}
+	const fill = (id: string): string => id.replaceAll(REVISION_PLACEHOLDER, rev);
+	const source = template.family;
+	const routing: Partial<Record<Effort | "off", string>> = {};
+	for (const effort of VARIANT_ROUTING_KEYS) {
+		const target = source.routing[effort];
+		if (target !== undefined) routing[effort] = fill(target);
+	}
+	const family: EffortVariantFamily = {
+		...source,
+		id: fill(source.id),
+		name: fill(source.name),
+		members: source.members.map(fill),
+		routing,
+	};
+	if (source.defaultMember !== undefined) family.defaultMember = fill(source.defaultMember);
+	if (source.retiredMembers !== undefined) family.retiredMembers = source.retiredMembers.map(fill);
+	if (source.extraAliases !== undefined) family.extraAliases = source.extraAliases.map(fill);
+	return family;
+}
+
+/**
+ * The family a template yields for `id` (logical id, member, or alias), or
+ * undefined when no template matches or the revision is out of range.
+ */
+function templateFamilyFor(templates: readonly VariantFamilyTemplate[], id: string): EffortVariantFamily | undefined {
+	for (const template of templates) {
+		const match = template.pattern.exec(id);
+		if (match === null) continue;
+		let rev: string | undefined;
+		for (let group = 1; group < match.length && rev === undefined; group++) rev = match[group];
+		if (rev === undefined) continue;
+		const family = instantiateTemplate(template, rev);
+		if (family !== undefined) return family;
+	}
+	return undefined;
+}
+
+/**
+ * Concrete families for every revision present in `ids`, one per
+ * instantiated id, skipping ids a concrete family in `table` already owns.
+ */
+function instantiateTemplates(table: VariantCollapseTable, ids: Iterable<string>): EffortVariantFamily[] {
+	const templates = table.templates;
+	if (templates === undefined || templates.length === 0) return [];
+	const seen = new Set<string>();
+	for (const family of table.families) seen.add(family.id);
+	const out: EffortVariantFamily[] = [];
+	for (const id of ids) {
+		const family = templateFamilyFor(templates, id);
+		if (family === undefined || seen.has(family.id)) continue;
+		seen.add(family.id);
+		out.push(family);
+	}
+	return out;
+}
+
 /** Provider id → reviewed collapse table, built once from the compiled vocabulary. */
 function buildCompiledTables(): Readonly<Record<string, VariantCollapseTable>> {
 	const { variantFamilies, providerAliases } = collapseVocabulary();
-	const tables: Record<string, { families: EffortVariantFamily[]; providerAliases?: Record<string, string> }> = {};
+	const tables: Record<
+		string,
+		{ families: EffortVariantFamily[]; templates?: VariantFamilyTemplate[]; providerAliases?: Record<string, string> }
+	> = {};
 	for (const compiled of variantFamilies) {
-		tables[compiled.provider] ??= { families: [] };
-		tables[compiled.provider].families.push(compiledFamily(compiled));
+		const table = (tables[compiled.provider] ??= { families: [] });
+		if (compiled.id.includes(REVISION_PLACEHOLDER)) {
+			(table.templates ??= []).push(compiledTemplate(compiled));
+		} else {
+			table.families.push(compiledFamily(compiled));
+		}
 	}
 	for (const [provider, aliases] of Object.entries(providerAliases)) {
 		tables[provider] ??= { families: [] };
@@ -407,16 +521,14 @@ export function deriveThinkingPairFamilies<TSpec extends VariantSpecLike>(
 		if (baseId === undefined || baseId === spec.id) continue;
 		const base = byId.get(baseId);
 		if (!base) continue;
-		if (claimed) {
-			const forward = claimed.forward;
-			if (
-				forward.has(spec.id.toLowerCase()) ||
-				forward.has(baseId.toLowerCase()) ||
-				claimed.familyIds.has(spec.id) ||
-				claimed.familyIds.has(baseId)
-			) {
-				continue;
-			}
+		if (
+			claimed &&
+			(claimed.resolve(spec.id) !== undefined ||
+				claimed.resolve(baseId) !== undefined ||
+				claimed.isFamily(spec.id) ||
+				claimed.isFamily(baseId))
+		) {
+			continue;
 		}
 		if (spec.api !== base.api) continue;
 		const specPriced = spec.cost.input !== 0 || spec.cost.output !== 0;
@@ -483,7 +595,7 @@ export function isCollapsedVariantSpec(spec: VariantSpecLike): boolean {
 		return false;
 	}
 	const table = reviewedCollapseTable(spec.provider);
-	return table !== undefined && getAliasIndex(table).familyIds.has(spec.id);
+	return table !== undefined && getAliasIndex(table).isFamily(spec.id);
 }
 
 /**
@@ -623,6 +735,80 @@ function reconcileDefaultMember<TSpec extends VariantSpecLike>(
 }
 
 /**
+ * Whether a Cursor wire id names an extended tier that upstream serves only in
+ * max mode. The compiled taxonomy identifies `xhigh`/`extra-high`/`max`
+ * efforts and their optional service lanes. This is an inference, not an
+ * upstream marker: it is the only per-tier signal available for bundled rows
+ * and for routes live discovery never advertised.
+ */
+export function isCursorMaxModeWireId(wireModelId: string): boolean {
+	const effort = collapseVariantId("cursor", wireModelId).effort;
+	return effort === Effort.XHigh || effort === Effort.Max;
+}
+
+/**
+ * Recover Cursor's max-mode marker for a bundled collapsed row. The bundled
+ * snapshot may contain only the logical row, but its effort routing still
+ * records the wire ids, so {@link isCursorMaxModeWireId} preserves the
+ * transport invariant even when live discovery contributes no raw members.
+ */
+function reconcileCursorMaxModeFromRouting<TSpec extends VariantSpecLike>(spec: TSpec): TSpec {
+	if (spec.provider !== "cursor" || spec.cursorMaxMode === true) return spec;
+	const routing = spec.thinking?.effortRouting;
+	if (routing === undefined) return spec;
+	const hasMaxModeRoute = Object.values(routing).some(
+		(target): target is string => typeof target === "string" && isCursorMaxModeWireId(target),
+	);
+	return hasMaxModeRoute ? { ...spec, cursorMaxMode: true } : spec;
+}
+
+/**
+ * Index the discovered `max_mode` marker of every live Cursor member by its own
+ * wire id. The collapsed row's `cursorMaxMode` is an OR across members, so it
+ * says nothing per tier; the transport needs the marker addressable by the wire
+ * id it actually sends, because upstream marks tiers the slug cannot identify
+ * (the whole Opus `-fast` lane is max-mode, `-low-fast` included). Returns
+ * `undefined` when no member carries a marker, so unmarked rosters add no field.
+ */
+function cursorMaxModeRoutesOf<TSpec extends VariantSpecLike>(
+	provider: string,
+	memberSpecs: readonly TSpec[],
+): Record<string, boolean> | undefined {
+	if (provider !== "cursor") return undefined;
+	let routes: Record<string, boolean> | undefined;
+	for (const member of memberSpecs) {
+		if (member.cursorMaxMode === undefined) continue;
+		routes ??= {};
+		routes[member.id] = member.cursorMaxMode;
+	}
+	return routes;
+}
+
+/**
+ * Lift Cursor's max-mode markers from live member rows onto an already-collapsed
+ * snapshot. Bundled catalog and cache rows froze the flag from `memberSpecs[0]`
+ * — the `-none`/`-low` tier — so the committed `gpt-5.6-*` / `cursor-grok-*`
+ * rows carry `cursorMaxMode: false`. The existing-collapsed pass-through keeps
+ * the snapshot verbatim, so a live `GetUsableModels` roster that marks the
+ * `-xhigh`/`-max` tiers would be discarded and max-tier requests would keep
+ * sending `max_mode: false` on a max-mode-only wire id. The row-level flag
+ * mirrors the fresh-collapse aggregation: only the positive case is lifted, so
+ * a roster that marks nothing leaves the snapshot alone. The per-wire-id
+ * markers are merged on top of the snapshot's own so live rows win per route.
+ * Returns `spec` by reference when unchanged.
+ */
+function reconcileCursorMaxMode<TSpec extends VariantSpecLike>(spec: TSpec, memberSpecs: readonly TSpec[]): TSpec {
+	const routes = cursorMaxModeRoutesOf(spec.provider, memberSpecs);
+	const lifts = spec.cursorMaxMode !== true && memberSpecs.some(member => member.cursorMaxMode === true);
+	if (routes === undefined && !lifts) return spec;
+	return {
+		...spec,
+		...(lifts ? { cursorMaxMode: true } : {}),
+		...(routes === undefined ? {} : { cursorMaxModeRoutes: { ...spec.cursorMaxModeRoutes, ...routes } }),
+	};
+}
+
+/**
  * Collapse every family in `table` found in `specs`. Non-member specs pass
  * through verbatim (by reference), order preserved; the collapsed spec
  * replaces the first occurrence of its family.
@@ -641,7 +827,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 	/** spec ids that belong to a touched family (members + logical id). */
 	const familyIdBySpecId = new Map<string, string>();
 
-	for (const family of table.families) {
+	const instantiated = instantiateTemplates(table, byId.keys());
+	const families = instantiated.length === 0 ? table.families : [...table.families, ...instantiated];
+	for (const family of families) {
 		const retired =
 			family.retiredMembers !== undefined && family.retiredMembers.length > 0
 				? new Set(family.retiredMembers)
@@ -662,7 +850,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			// Recycled extraAliases rows are healed in a later pass.
 			const refreshed =
 				existing !== undefined && existingCollapsed
-					? reconcileDefaultMember(refreshCollapsedThinking(reconciled ?? existing, family, retired), family)
+					? reconcileCursorMaxModeFromRouting(
+							reconcileDefaultMember(refreshCollapsedThinking(reconciled ?? existing, family, retired), family),
+						)
 					: reconciled;
 			if (refreshed !== undefined && refreshed !== existing) {
 				familyIdBySpecId.set(family.id, family.id);
@@ -674,20 +864,26 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		for (const id of rawPresent) familyIdBySpecId.set(id, family.id);
 		if (existing) familyIdBySpecId.set(family.id, family.id);
 
-		if (existingCollapsed && reconciled !== undefined) {
-			// Mixed input: the collapsed entry wins; stale raw members are deduped
-			// away. Retired targets are re-pointed first, then the default wire id
-			// prefers the family's declared member when live and otherwise falls
-			// back to the first member the account actually advertised.
-			replacement.set(family.id, reconcileDefaultMember(reconciled, family, new Set(rawPresent)));
-			continue;
-		}
-
 		const memberSpecs: TSpec[] = [];
 		for (const id of rawPresent) {
 			const member = byId.get(id);
 			if (member !== undefined) memberSpecs.push(member);
 		}
+
+		if (existingCollapsed && reconciled !== undefined) {
+			// Mixed input: the collapsed entry wins; stale raw members are deduped
+			// away. Retired targets are re-pointed first, then the default wire id
+			// prefers the family's declared member when live and otherwise falls
+			// back to the first member the account actually advertised. The live
+			// members still own `cursorMaxMode`: the snapshot froze it from the
+			// lowest tier.
+			replacement.set(
+				family.id,
+				reconcileCursorMaxMode(reconcileDefaultMember(reconciled, family, new Set(rawPresent)), memberSpecs),
+			);
+			continue;
+		}
+
 		const firstMember = memberSpecs[0];
 		if (firstMember === undefined) continue;
 		const presentSet = new Set(rawPresent);
@@ -722,6 +918,14 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
 		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
 
+		// `cursorMaxMode` gates the `max_mode` request flag. The collapsed row
+		// otherwise inherits `memberSpecs[0]`, so a family whose max-mode member
+		// is not the first one would advertise `false` and send `max_mode: false`
+		// on a max-mode wire id. Only the positive case is aggregated — an
+		// unmarked family keeps whatever the first member carried. The OR loses
+		// which tier needed it, so the members' own markers are kept per wire id.
+		const cursorMaxMode = memberSpecs.some(spec => spec.cursorMaxMode === true) ? true : undefined;
+		const cursorMaxModeRoutes = cursorMaxModeRoutesOf(firstMember.provider, memberSpecs);
 		const collapsed: TSpec = {
 			...firstMember,
 			id: family.id,
@@ -730,7 +934,12 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			input,
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
+			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
+			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
 		};
+		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
+			collapsed.isProviderDefault = true;
+		}
 		// The default wire id is the family's declared `defaultMember` when live,
 		// else the highest-priority live member. Omitted when it equals the
 		// logical id (bare/thinking pairs) — `resolveWireModelId` falls back.
@@ -827,8 +1036,17 @@ function retargetCollapsedModelReferences<TSpec extends VariantSpecLike>(specs: 
 			liveIdsByProvider,
 		);
 		const compactionModel = resolveCollapsedModelReference(spec.compactionModel, spec.provider, liveIdsByProvider);
-		if (contextPromotionTarget === spec.contextPromotionTarget && compactionModel === spec.compactionModel) continue;
-		specs[index] = { ...spec, contextPromotionTarget, compactionModel };
+		const webSearchModel = resolveCollapsedModelReference(spec.webSearchModel, spec.provider, liveIdsByProvider);
+		const imageModel = resolveCollapsedModelReference(spec.imageModel, spec.provider, liveIdsByProvider);
+		if (
+			contextPromotionTarget === spec.contextPromotionTarget &&
+			compactionModel === spec.compactionModel &&
+			webSearchModel === spec.webSearchModel &&
+			imageModel === spec.imageModel
+		) {
+			continue;
+		}
+		specs[index] = { ...spec, contextPromotionTarget, compactionModel, webSearchModel, imageModel };
 	}
 }
 
@@ -917,38 +1135,83 @@ function projectModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi>
 	return { ...spec, compat: compatConfig };
 }
 
+/**
+ * Alias index over a collapse table (or the live families observed at
+ * runtime). Templated families are materialized on first lookup of any id
+ * they match, so a revision discovery has never advertised still resolves.
+ */
 class VariantAliasIndex {
 	/** lowercased retired id → replacement model id. */
-	readonly forward = new Map<string, string>();
+	readonly #forward = new Map<string, string>();
 	/**
 	 * lowercased provider-scoped alias → replacement model id. Kept apart from
-	 * `forward` so bare-id and reverse lookups never see it.
+	 * `#forward` so bare-id and reverse lookups never see it.
 	 */
 	readonly providerScoped = new Map<string, string>();
 	/** replacement model id → retired ids that resolve to it. */
-	readonly reverse = new Map<string, string[]>();
+	readonly #reverse = new Map<string, string[]>();
 	/** Collapsed logical ids declared by the table or observed at runtime. */
-	readonly familyIds = new Set<string>();
+	readonly #familyIds = new Set<string>();
+	readonly #templates: readonly VariantFamilyTemplate[];
+
+	constructor(templates: readonly VariantFamilyTemplate[] = []) {
+		this.#templates = templates;
+	}
+
+	/** Register `from` → `to`; false when `from` is already claimed. */
+	add(from: string, to: string): boolean {
+		if (from === to || this.#forward.has(from.toLowerCase())) return false;
+		this.#forward.set(from.toLowerCase(), to);
+		const sources = this.#reverse.get(to);
+		if (sources) {
+			sources.push(from);
+		} else {
+			this.#reverse.set(to, [from]);
+		}
+		return true;
+	}
+
+	/** Register a family: its logical id plus every member and extra alias. */
+	addFamily(family: EffortVariantFamily): void {
+		this.#familyIds.add(family.id);
+		for (const member of family.members) this.add(member, family.id);
+		for (const alias of family.extraAliases ?? []) this.add(alias, family.id);
+	}
+
+	markFamily(id: string): void {
+		this.#familyIds.add(id);
+	}
+
+	/** Replacement model id for a retired/member id (case-insensitive). */
+	resolve(id: string): string | undefined {
+		const lower = id.toLowerCase();
+		this.#learn(lower);
+		return this.#forward.get(lower);
+	}
+
+	/** Whether `id` is a collapsed logical id of this index. */
+	isFamily(id: string): boolean {
+		this.#learn(id);
+		return this.#familyIds.has(id);
+	}
+
+	/** Retired ids that resolve to logical `id`. */
+	sourcesOf(id: string): readonly string[] | undefined {
+		this.#learn(id);
+		return this.#reverse.get(id);
+	}
+
+	/** Materialize the template family that owns `id`, once. */
+	#learn(id: string): void {
+		if (this.#templates.length === 0) return;
+		const family = templateFamilyFor(this.#templates, id);
+		if (family === undefined || this.#familyIds.has(family.id)) return;
+		this.addFamily(family);
+	}
 }
 
 const dynamicAliasIndexes = new Map<string, VariantAliasIndex>();
 const kAliasIndex = Symbol("compat-collapse.aliasIndex");
-
-function createAliasIndex(): VariantAliasIndex {
-	return new VariantAliasIndex();
-}
-
-function addVariantAlias(index: VariantAliasIndex, from: string, to: string): boolean {
-	if (from === to || index.forward.has(from.toLowerCase())) return false;
-	index.forward.set(from.toLowerCase(), to);
-	const sources = index.reverse.get(to);
-	if (sources) {
-		sources.push(from);
-	} else {
-		index.reverse.set(to, [from]);
-	}
-	return true;
-}
 
 /**
  * Persist aliases embedded in collapsed routing so generated catalog rows and
@@ -964,14 +1227,14 @@ function registerCollapsedVariantAliases(provider: Provider, specs: readonly Var
 		for (const effort of VARIANT_ROUTING_KEYS) {
 			const source = routing[effort];
 			if (!source || source === spec.id) continue;
-			index ??= createAliasIndex();
-			registered = addVariantAlias(index, source, spec.id) || registered;
+			index ??= new VariantAliasIndex();
+			registered = index.add(source, spec.id) || registered;
 		}
 		if (spec.requestModelId && spec.requestModelId !== spec.id) {
-			index ??= createAliasIndex();
-			registered = addVariantAlias(index, spec.requestModelId, spec.id) || registered;
+			index ??= new VariantAliasIndex();
+			registered = index.add(spec.requestModelId, spec.id) || registered;
 		}
-		if (registered) index?.familyIds.add(spec.id);
+		if (registered) index?.markFamily(spec.id);
 	}
 	if (index) dynamicAliasIndexes.set(providerId, index);
 }
@@ -980,20 +1243,16 @@ function resolveRegisteredVariantAlias(provider: Provider, normalizedModelId: st
 	const providerId = provider.toLowerCase();
 	const table = reviewedCollapseTable(provider) ?? reviewedCollapseTable(providerId);
 	return (
-		(table ? getAliasIndex(table).forward.get(normalizedModelId) : undefined) ??
-		dynamicAliasIndexes.get(providerId)?.forward.get(normalizedModelId)
+		(table ? getAliasIndex(table).resolve(normalizedModelId) : undefined) ??
+		dynamicAliasIndexes.get(providerId)?.resolve(normalizedModelId)
 	);
 }
 
 function getAliasIndex(table: VariantCollapseTable): VariantAliasIndex {
 	const cached: unknown = Reflect.get(table, kAliasIndex);
 	if (cached instanceof VariantAliasIndex) return cached;
-	const index = createAliasIndex();
-	for (const family of table.families) {
-		index.familyIds.add(family.id);
-		for (const member of family.members) addVariantAlias(index, member, family.id);
-		for (const alias of family.extraAliases ?? []) addVariantAlias(index, alias, family.id);
-	}
+	const index = new VariantAliasIndex(table.templates);
+	for (const family of table.families) index.addFamily(family);
 	for (const alias in table.providerAliases) {
 		const target = table.providerAliases[alias];
 		if (target !== undefined && alias !== target) index.providerScoped.set(alias.toLowerCase(), target);
@@ -1057,8 +1316,8 @@ export function resolveBareVariantSelector(modelId: string): BareVariantAliasHit
 export function getVariantAliasSources(provider: Provider, modelId: string): readonly string[] {
 	const providerId = provider.toLowerCase();
 	const table = reviewedCollapseTable(provider) ?? reviewedCollapseTable(providerId);
-	const staticSources = table ? getAliasIndex(table).reverse.get(modelId) : undefined;
-	const dynamicSources = dynamicAliasIndexes.get(providerId)?.reverse.get(modelId);
+	const staticSources = table ? getAliasIndex(table).sourcesOf(modelId) : undefined;
+	const dynamicSources = dynamicAliasIndexes.get(providerId)?.sourcesOf(modelId);
 	if (!staticSources) return dynamicSources ?? [];
 	if (!dynamicSources) return staticSources;
 	return [...new Set([...staticSources, ...dynamicSources])];

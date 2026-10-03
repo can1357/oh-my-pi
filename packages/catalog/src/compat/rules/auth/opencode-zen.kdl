@@ -1,0 +1,9 @@
+auth "opencode-zen" {
+	name "OpenCode Zen"
+	login "api-key" {
+		// Both subscription services issue keys from the same Zen console.
+		auth-url "https://opencode.ai/auth"
+		instructions "Log in to the OpenCode Zen console and copy your OpenCode Zen API key"
+		prompt "Paste your OpenCode Zen API key" placeholder="sk-..."
+	}
+}

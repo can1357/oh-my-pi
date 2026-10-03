@@ -10,7 +10,12 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 
-import { isValidNameSegment, type MarketplaceCatalog, type MarketplaceSourceType } from "./types";
+import {
+	isValidNameSegment,
+	nameSegmentCollisionKey,
+	type MarketplaceCatalog,
+	type MarketplaceSourceType,
+} from "./types";
 
 const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -85,7 +90,7 @@ export function classifySource(source: string): MarketplaceSourceType {
 
 // ── parseMarketplaceCatalog ───────────────────────────────────────────
 
-function assertField(condition: boolean, field: string, filePath: string): void {
+function assertField(condition: boolean, field: string, filePath: string): asserts condition {
 	if (!condition) {
 		throw new Error(`Missing or invalid field "${field}" in catalog: ${filePath}`);
 	}
@@ -127,6 +132,7 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 
 	const plugins = obj.plugins as unknown[];
 	const validPlugins: unknown[] = [];
+	const pluginNameKeys = new Set<string>();
 	for (let i = 0; i < plugins.length; i++) {
 		try {
 			const entry = plugins[i];
@@ -173,6 +179,9 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 					assertField(false, `plugins[${i}].source.source (unknown variant: "${variant}")`, filePath);
 				}
 			}
+			const pluginNameKey = nameSegmentCollisionKey(p.name);
+			assertField(!pluginNameKeys.has(pluginNameKey), `plugins[${i}].name (case-equivalent duplicate)`, filePath);
+			pluginNameKeys.add(pluginNameKey);
 			validPlugins.push(entry);
 		} catch (err) {
 			// Warn and skip invalid plugin entries instead of failing the entire catalog.
@@ -237,20 +246,12 @@ function expandHome(p: string): string {
  * Fetch a marketplace catalog from a source.
  *
  * Dispatches on the source type: local filesystem paths are read directly;
- * GitHub/git sources are cloned with `git`; URL sources are fetched over HTTP
- * and their raw bytes persisted to `<cacheDir>/<name>/marketplace.json`.
+ * GitHub/git sources are cloned with `git`; URL sources are fetched over HTTP.
  *
  * @param source   Source identifier: path, GitHub shorthand, git URL, or HTTP URL.
  * @param cacheDir Cache directory root for non-local sources.
- * @param options  `persistCache: false` skips the URL cache write, for callers
- *                 that snapshot the old cached bytes before persisting themselves
- *                 (the manager's forced-repoint rollback).
  */
-export async function fetchMarketplace(
-	source: string,
-	cacheDir: string,
-	options: { persistCache?: boolean } = {},
-): Promise<FetchResult> {
+export async function fetchMarketplace(source: string, cacheDir: string): Promise<FetchResult> {
 	const type = classifySource(source);
 
 	if (type === "local") {
@@ -279,9 +280,6 @@ export async function fetchMarketplace(
 	const text = await response.text();
 	const catalog = parseMarketplaceCatalog(text, source);
 
-	if (options.persistCache !== false) {
-		await Bun.write(path.join(cacheDir, catalog.name, "marketplace.json"), text);
-	}
 	return { catalog };
 }
 

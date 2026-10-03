@@ -1,10 +1,10 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
-import type { VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
 import { CHANGELOG_CATEGORIES } from "../../commit/types";
+import { renderStat } from "../utils";
 import { detectChangelogBoundaries } from "./detect";
 import { generateChangelogEntries } from "./generate";
 import { parseUnreleasedSection } from "./parse";
@@ -12,22 +12,6 @@ import { parseUnreleasedSection } from "./parse";
 const CHANGELOG_SECTIONS = CHANGELOG_CATEGORIES;
 
 const DEFAULT_MAX_DIFF_CHARS = 120_000;
-function renderStat(entries: VcsNumstatEntry[]): string {
-	if (entries.length === 0) return "";
-	let insertions = 0;
-	let deletions = 0;
-	const lines = entries.map(entry => {
-		const added = entry.added ?? 0;
-		const removed = entry.removed ?? 0;
-		insertions += added;
-		deletions += removed;
-		return ` ${entry.path} | ${added + removed} ${"+".repeat(Math.min(added, 40))}${"-".repeat(Math.min(removed, 40))}`;
-	});
-	lines.push(
-		` ${entries.length} file${entries.length === 1 ? "" : "s"} changed, ${insertions} insertion${insertions === 1 ? "" : "s"}(+), ${deletions} deletion${deletions === 1 ? "" : "s"}(-)`,
-	);
-	return `${lines.join("\n")}\n`;
-}
 
 export interface ChangelogFlowInput {
 	cwd: string;
@@ -70,6 +54,7 @@ export async function runChangelogFlow({
 	const boundaries = await detectChangelogBoundaries(cwd, stagedFiles);
 	if (boundaries.length === 0) return [];
 
+	const sessionId = Bun.randomUUIDv7();
 	const updated: string[] = [];
 	for (const boundary of boundaries) {
 		onProgress?.(`Generating entries for ${boundary.changelogPath}…`);
@@ -90,6 +75,7 @@ export async function runChangelogFlow({
 		const generated = await generateChangelogEntries({
 			model,
 			apiKey,
+			sessionId,
 			thinkingLevel,
 			changelogPath: boundary.changelogPath,
 			isPackageChangelog,

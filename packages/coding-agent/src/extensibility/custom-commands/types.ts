@@ -8,11 +8,18 @@
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
+import type { ExtensionUIContext } from "../extensions/types";
 import type { ExecOptions, ExecResult, HookCommandContext } from "../../extensibility/hooks/types";
+import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import type * as PiCodingAgent from "../../index";
 
 // Re-export for custom commands to use
 export type { ExecOptions, ExecResult, HookCommandContext };
+
+/** Interactive capabilities available to user-invoked commands, not hooks. */
+export interface CustomCommandContext extends HookCommandContext {
+	ui: ExtensionUIContext;
+}
 
 /**
  * API passed to custom command factory.
@@ -81,12 +88,25 @@ export interface CustomCommand {
 	/** Description shown in command autocomplete */
 	description: string;
 	/**
+	 * Optional argument completions shown in the slash-command autocomplete UI.
+	 * @param cwd - Live session working directory (follows /move and /wt)
+	 */
+	getArgumentCompletions?(
+		argumentPrefix: string,
+		cwd: string,
+	): Promise<AutocompleteItem[] | null> | AutocompleteItem[] | null;
+	/**
 	 * Execute the command.
 	 * @param args - Parsed command arguments
 	 * @param ctx - Command context with UI and session control
+	 * @param rawArgs - Exact unparsed argument remainder after the command name, including whitespace, quotes, and newlines
 	 * @returns String to send as prompt, or void for fire-and-forget
 	 */
-	execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> | string | undefined;
+	execute(
+		args: string[],
+		ctx: CustomCommandContext,
+		rawArgs?: string,
+	): Promise<string | undefined> | string | undefined;
 }
 
 /**

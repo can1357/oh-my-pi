@@ -70,7 +70,38 @@ describe("cursor buildMcpToolDefinitions", () => {
 		expect(defs.map(def => def.name)).not.toContain("read");
 	});
 
-	it("advertises no composition keyword and never mutates the canonical wire schema", () => {
+	it("preserves nested combiners by default and when projection is disabled", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				where: {
+					oneOf: [
+						{ type: "object", properties: { element_token: { type: "string" } }, required: ["element_token"] },
+						{
+							type: "object",
+							properties: { x: { type: "number" }, y: { type: "number" } },
+							required: ["x", "y"],
+						},
+					],
+				},
+			},
+			required: ["where"],
+		};
+		const composedTool = tool("composed", schema);
+		const wireSchema = toolWireSchema(composedTool);
+
+		for (const definitions of [
+			buildMcpToolDefinitions([composedTool]),
+			buildMcpToolDefinitions([composedTool], false),
+		]) {
+			const advertised = decodeJsonValue(definitions[0].inputSchema);
+
+			expect(hasCompositionKeyword(advertised)).toBe(true);
+			expect(advertised).toEqual(wireSchema as typeof advertised);
+		}
+	});
+
+	it("projects nested combiners only when requested and leaves the canonical wire schema untouched", () => {
 		const schema = {
 			type: "object",
 			properties: {
@@ -91,14 +122,14 @@ describe("cursor buildMcpToolDefinitions", () => {
 		const wireSchema = toolWireSchema(composedTool);
 		const originalWireSchema = structuredClone(wireSchema);
 
-		const [definition] = buildMcpToolDefinitions([composedTool]);
+		const [definition] = buildMcpToolDefinitions([composedTool], true);
 		const advertised = decodeJsonValue(definition.inputSchema);
 
-		// The whole point of the projection: Cursor rejects the request outright
-		// if any composition keyword survives anywhere in an advertised schema.
+		// Cursor rejects the request outright if any composition keyword survives
+		// anywhere in an advertised schema for models that require projection.
 		expect(hasCompositionKeyword(advertised)).toBe(false);
 		// The canonical schema, which still validates arguments locally, is untouched.
-		expect(structuredClone(wireSchema)).toEqual(originalWireSchema);
+		expect(wireSchema).toEqual(originalWireSchema);
 	});
 });
 

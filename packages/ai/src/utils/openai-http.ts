@@ -14,7 +14,7 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
@@ -68,8 +68,16 @@ export interface OpenAIStreamRequestInit {
 	body: unknown;
 	signal: AbortSignal;
 	fetch?: FetchImpl;
-	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
+	/** Optional caller-specific gate composed with shared transport retry exclusions. */
+	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
+	/**
+	 * Raw wire-frame observer (`onSseEvent` debug pipeline). Leave it unset
+	 * when no diagnostic listener exists: any observer turns on per-line raw
+	 * capture for every frame.
+	 */
 	onSseEvent?: SseEventObserver;
+	/** Called when the stream ends on the OpenAI `[DONE]` sentinel; independent of {@link onSseEvent}. */
+	onDoneSentinel?: () => void;
 }
 
 export interface OpenAIStreamHandle<TEvent> {
@@ -98,7 +106,9 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).
-		shouldRetryResponse: (response, bodyText) => !isConcurrencyAdmissionRejection(response, bodyText),
+		shouldRetryResponse: async (response, bodyText) =>
+			!isConcurrencyAdmissionRejection(response, bodyText) &&
+			(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
@@ -113,10 +123,43 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		});
 	}
 	return {
-		events: readSseJson<TEvent>(response.body, init.signal, init.onSseEvent),
+		events: decodeStream<TEvent>(response.body, init.signal, init.onSseEvent, init.onDoneSentinel),
 		response,
 		requestId: response.headers.get("x-request-id"),
 	};
+}
+
+/**
+ * Consume `readSseJsonOrText` and turn a non-JSON `data:` frame into a
+ * classified in-band error. A reverse proxy that already committed to an HTTP
+ * 200 stream (so the status line can no longer carry the failure) answers with
+ * plain text — `data: 429 Too Many Requests`, an nginx throttle page — and
+ * that has to advance the fallback chain like a real 429 (body-error.ts).
+ * Frames that are not recognisable throttles rethrow the original parse error,
+ * preserving the pre-existing loud failure for genuinely malformed payloads.
+ * `readSseJsonOrText` also yields a frame that was a JSON-encoded *string* on the
+ * wire (a double-encoded proxy error page); it is not a usable event either, so
+ * it is classified the same way and then dropped — every consumer here already
+ * ignored a string chunk, the completions loop by its `typeof !== "object"` test.
+ */
+async function* decodeStream<TEvent>(
+	body: ReadableStream<Uint8Array>,
+	signal: AbortSignal | undefined,
+	onSseEvent: SseEventObserver | undefined,
+	onDoneSentinel: (() => void) | undefined,
+): AsyncGenerator<TEvent> {
+	for await (const frame of readSseJsonOrText<TEvent>(body, signal, onSseEvent, onDoneSentinel)) {
+		if (typeof frame === "string") {
+			const inBand = AIError.createInBandProviderErrorFromText(frame);
+			if (inBand) throw inBand;
+			// Not a recognisable throttle: reproduce the exact strict-parse failure the
+			// previous reader raised, so genuinely malformed payloads stay equally
+			// loud. A frame that parses again was a JSON string, not a malformed one.
+			JSON.parse(frame);
+			continue;
+		}
+		yield frame;
+	}
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */

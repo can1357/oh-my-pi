@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { relativeLuminance } from "@oh-my-pi/pi-utils";
-import { resolveVarRefs } from "../src/modes/theme/color";
-import { loadTheme, loadThemeJson } from "../src/modes/theme/loader";
+import { resolveVarRefs } from "@oh-my-pi/pi-tui/theme/color";
+import { loadTheme, loadThemeJson } from "@oh-my-pi/pi-tui/theme/loader";
 
 /**
  * Regression test for #6334: markdown code fence header lines (mdCodeBlockBorder)
@@ -9,7 +9,7 @@ import { loadTheme, loadThemeJson } from "../src/modes/theme/loader";
  * because the token was mapped to a near-background surface color.
  *
  * The fence border paints the whole ```lang / ```start:end:path info-string line
- * (see getMarkdownTheme() -> codeBlockBorder in modes/theme/tui-adapters.ts), so it carries
+ * (see getMarkdownTheme() -> codeBlockBorder in pi-tui theme/tui-adapters.ts), so it carries
  * real navigation info and must stay legible as secondary chrome. This test resolves
  * the token for each affected theme and asserts a minimum WCAG contrast ratio against
  * the theme's own page background, so a palette change can't silently regress it back

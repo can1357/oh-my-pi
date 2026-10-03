@@ -1,0 +1,933 @@
+/**
+ * ExtensionList - Inventory list with Master Switch and fuzzy search.
+ *
+ * When viewing a specific provider (not "ALL"), Row #0 is the Master Switch
+ * that toggles the entire provider. All items below are dimmed when the
+ * master switch is off.
+ */
+import type { TspPickerGroup, TspPickerItem, TspProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import type { Component } from "../../tui";
+import { formatKeyHint } from "../../app-keybindings";
+import { node, span, stableKey } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
+import { pickerFuzzyHits, pickerQuery } from "../../native/picker";
+import { matchesKey } from "../../keys";
+import { padding, truncateToWidth, visibleWidth } from "../../utils";
+import { theme } from "../../theme";
+import { matchesSelectDown, matchesSelectUp } from "../../keybinding-matchers";
+import { contentRowWidth, renderScrollableList } from "../../chrome/selector-helpers";
+import { Input } from "../../components/input";
+import { MenuSelection } from "../../components/menu-selection";
+import { scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
+import { sanitizeDisplayLine } from "./display-text";
+import {
+	formatExtensionListHint,
+	joinListHints,
+	liveToolsForExtension,
+	projectListHint,
+	type ToolRuntimeSource,
+} from "./inspector-model";
+import { snapshotToolRuntimeSource } from "./live-tool-session";
+import {
+	formatMcpListHint,
+	isDiscoveredMcpServer,
+	type MCPConnectionHealth,
+	type MCPRuntimeSnapshot,
+	type MCPRuntimeSource,
+	snapshotMcpRuntime,
+} from "./mcp-runtime";
+import { applyFilter } from "./state-manager";
+import {
+	type Extension,
+	type ExtensionKind,
+	type ExtensionProvider,
+	type ExtensionState,
+	isShadowedExtension,
+} from "./types";
+
+export interface ExtensionListCallbacks {
+	getProviders?: () => readonly ExtensionProvider[];
+	onSelectionChange?: (extension: Extension | null) => void;
+	onToggle?: (extensionId: string, enabled: boolean) => void;
+	onMasterToggle?: (providerId: string) => void;
+	onUserSourceToggle?: (providerId: string) => void;
+	masterSwitchProvider?: string | null;
+	mcpSource?: MCPRuntimeSource;
+	toolSource?: ToolRuntimeSource;
+}
+
+const DEFAULT_MAX_VISIBLE = 15;
+
+/** Stable identity for menu selection retention across rebuilds and filtering. */
+function getListItemKey(item: ListItem): string {
+	switch (item.type) {
+		case "master":
+			return `master:${item.providerId}`;
+		case "user-source":
+			return `user-source:${item.providerId}`;
+		case "kind-header":
+			return `kind:${item.kind}`;
+		case "extension":
+			// Shadowed same-name rows share the winner's id; the source path disambiguates them.
+			return `extension:${item.item.id}:${item.item.path}`;
+	}
+}
+
+/** Native item/scope id of a flattened row: its hashed {@link getListItemKey}, safe inside `/` keypaths. */
+function nativeItemId(item: ListItem): string {
+	return stableKey(getListItemKey(item));
+}
+
+/** Searchable text for a flattened row (the menu filter rebuilds via applyFilter; this covers headers/switches). */
+function getListItemSearchText(item: ListItem): string {
+	switch (item.type) {
+		case "master":
+			return `Enable ${item.providerName} Master Switch ${item.providerId}`;
+		case "user-source":
+			return `Load ${item.providerName} config user source ${item.providerId}`;
+		case "kind-header":
+			return `${item.label} ${item.kind}`;
+		case "extension":
+			return `${item.item.displayName} ${item.item.name} ${item.item.description ?? ""} ${item.item.trigger ?? ""}`;
+	}
+}
+
+/** The inventory as `picker` data: rows, display order with kind groups, the selection and search hits. */
+export interface ExtensionListPickerView {
+	readonly items: TspPickerItem[];
+	/** Item ids in display order; kind headers become group entries. */
+	readonly order: (string | TspPickerGroup)[];
+	/** Selected item id; null when nothing or a kind header is selected. */
+	readonly selected: string | null;
+	readonly hits: Record<string, [number, number][]>;
+	/** Whether kind headers group the rows (the unfiltered ALL view). */
+	readonly grouped: boolean;
+}
+
+/** The selected row's switch: its state, and why it cannot flip when it can't. */
+export interface ExtensionListSwitch {
+	readonly on: boolean;
+	readonly blocked?: string;
+}
+
+/** Flattened list item for rendering */
+type ListItem =
+	| { type: "master"; providerId: string; providerName: string; enabled: boolean }
+	| { type: "user-source"; providerId: string; providerName: string; enabled: boolean }
+	| { type: "kind-header"; kind: ExtensionKind; label: string; icon: string; count: number }
+	| { type: "extension"; item: Extension };
+
+/** Picker dot tone of each MCP connection health, matching the ANSI health glyph colours. */
+const MCP_HEALTH_TONE: Record<MCPConnectionHealth, TspTone> = {
+	connected: "success",
+	connecting: "pending",
+	disconnected: "muted",
+	inactive: "warning",
+};
+
+export class ExtensionList implements Component {
+	#menu: MenuSelection<ListItem>;
+	#scrollOffset = 0;
+	#focused = false;
+	#masterSwitchProvider: string | null = null;
+	#maxVisible: number;
+	#hoveredIndex: number | null = null;
+	/** Item rows rendered in the last frame, for mouse hit-testing. */
+	#visibleCount = 0;
+	#mcpSource: MCPRuntimeSource | undefined;
+	#toolSource: ToolRuntimeSource | undefined;
+	#toolFrame: ToolRuntimeSource | undefined;
+
+	#extensions: Extension[];
+	readonly #callbacks: ExtensionListCallbacks;
+	/** Search field; its value is pushed into the menu query whenever it changes. */
+	readonly #search = new Input();
+
+	constructor(extensions: Extension[], callbacks: ExtensionListCallbacks = {}, maxVisible?: number) {
+		this.#extensions = extensions;
+		this.#callbacks = callbacks;
+		this.#masterSwitchProvider = callbacks.masterSwitchProvider ?? null;
+		this.#mcpSource = callbacks.mcpSource;
+		this.#toolSource = callbacks.toolSource;
+		this.#maxVisible = maxVisible ?? DEFAULT_MAX_VISIBLE;
+		this.#search.prompt = "";
+		this.#menu = new MenuSelection<ListItem>(this.#buildListItems(""), {
+			getKey: getListItemKey,
+			getSearchText: getListItemSearchText,
+			filter: (_items, query) => this.#buildListItems(query),
+		});
+	}
+
+	setMaxVisible(maxVisible: number): void {
+		this.#maxVisible = maxVisible;
+		this.#syncScroll();
+	}
+
+	setExtensions(extensions: Extension[]): void {
+		this.#extensions = extensions;
+		const keepIndex = this.#menu.selectedIndex;
+		this.#menu.setItems(this.#buildListItems(""));
+		this.#menu.setSelectedIndex(keepIndex);
+		this.#syncScroll();
+	}
+
+	setFocused(focused: boolean): void {
+		this.#focused = focused;
+	}
+
+	setMasterSwitchProvider(providerId: string | null): void {
+		this.#masterSwitchProvider = providerId;
+		this.#menu.setItems(this.#buildListItems(""));
+		this.#syncScroll();
+	}
+
+	setMcpSource(source: MCPRuntimeSource | undefined): void {
+		this.#mcpSource = source;
+	}
+
+	setToolSource(source: ToolRuntimeSource | undefined): void {
+		this.#toolSource = source;
+	}
+
+	getSearchQuery(): string {
+		return this.#menu.query;
+	}
+
+	/** The search field's text and caret for a native `picker` head. */
+	nativeQuery(): Pick<TspProps<"picker">, "query" | "cursor"> {
+		return pickerQuery(this.#search);
+	}
+
+	resetSelection(): void {
+		this.#menu.moveToBoundary("first");
+		this.#scrollOffset = 0;
+		this.#notifySelectionChange();
+	}
+
+	getSelectedExtension(): Extension | null {
+		const item = this.#menu.selectedItem;
+		return item?.type === "extension" ? item.item : null;
+	}
+
+	/** Get the currently selected kind header (for preview purposes) */
+	getSelectedKind(): ExtensionKind | null {
+		const item = this.#menu.selectedItem;
+		return item?.type === "kind-header" ? item.kind : null;
+	}
+
+	/** Replace the search text (caret to end) and refilter. */
+	setSearchQuery(query: string): void {
+		if (this.#search.getValue() !== query) this.#search.setValue(query);
+		this.#menu.setQuery(query, false);
+		this.#scrollOffset = 0;
+		this.#notifySelectionChange();
+	}
+
+	clearSearch(): void {
+		this.setSearchQuery("");
+	}
+
+	invalidate(): void {}
+
+	render(width: number): readonly string[] {
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		const lines: string[] = [];
+		this.#visibleCount = 0;
+
+		// Search bar
+		const searchPrefix = theme.fg("muted", "Search: ");
+		const query = this.#search.getValue();
+		if (this.#focused) {
+			const fieldWidth = Math.max(1, width - visibleWidth(searchPrefix));
+			const [field = ""] = this.#search.render(Math.min(fieldWidth, visibleWidth(query) + 1));
+			lines.push(searchPrefix + field);
+		} else {
+			lines.push(searchPrefix + (query || theme.fg("dim", "type to filter")));
+		}
+		lines.push("");
+
+		const items = this.#menu.visibleItems;
+		if (items.length === 0) {
+			lines.push(theme.fg("muted", "  No extensions found for this provider."));
+			return lines;
+		}
+
+		// Determine if master switch is off (for dimming child items)
+		const masterDisabled =
+			this.#masterSwitchProvider !== null &&
+			this.#callbacks.getProviders?.().find(provider => provider.id === this.#masterSwitchProvider)?.enabled ===
+				false;
+
+		// Calculate visible range (one fixed row per item)
+		const { start: startIdx, end: endIdx } = viewportRange(items.length, this.#maxVisible, this.#scrollOffset);
+
+		// Reserve the rightmost column for the scrollbar when overflowing
+		const rowWidth = contentRowWidth(width, items.length, this.#maxVisible);
+
+		// Render visible items
+		const rows: string[] = [];
+		for (let i = startIdx; i < endIdx; i++) {
+			const listItem = items[i];
+			if (!listItem) continue;
+			const isSelected = this.#focused && i === this.#menu.selectedIndex;
+			const isHovered = this.#focused && i === this.#hoveredIndex && !isSelected;
+
+			let rowStr: string;
+			if (listItem.type === "master") {
+				rowStr = this.#renderMasterSwitch(listItem, isSelected, rowWidth);
+			} else if (listItem.type === "user-source") {
+				rowStr = this.#renderUserSourceSwitch(listItem, isSelected, masterDisabled, rowWidth);
+			} else if (listItem.type === "kind-header") {
+				rowStr = this.#renderKindHeader(listItem, isSelected, rowWidth);
+			} else {
+				rowStr = this.#renderExtensionRow(listItem.item, isSelected, rowWidth, masterDisabled);
+			}
+			if (isHovered) rowStr = theme.bg("selectedBg", rowStr);
+			rows.push(rowStr);
+		}
+		this.#visibleCount = rows.length;
+
+		lines.push(
+			...renderScrollableList(rows, {
+				width,
+				totalRows: items.length,
+				scrollOffset: this.#scrollOffset,
+			}),
+		);
+
+		return lines;
+	}
+
+	/** The visible rows as `picker` data, joined with live MCP health and tool runtime like {@link render}. */
+	pickerView(): ExtensionListPickerView {
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		const masterDisabled = this.#isMasterDisabled();
+		const query = this.#menu.query;
+		const items: TspPickerItem[] = [];
+		const order: (string | TspPickerGroup)[] = [];
+		const hits: Record<string, [number, number][]> = {};
+		let grouped = false;
+		for (const entry of this.#menu.visibleItems) {
+			if (entry.type === "kind-header") {
+				grouped = true;
+				order.push({ group: nativeItemId(entry), label: entry.label, count: entry.count });
+				continue;
+			}
+			const item = this.#pickerItem(entry, masterDisabled);
+			items.push(item);
+			order.push(item.id);
+			if (query && typeof item.label === "string") {
+				const marked = pickerFuzzyHits(item.label, query);
+				if (marked) hits[item.id] = marked;
+			}
+		}
+		const selected = this.#menu.selectedItem;
+		return {
+			items,
+			order,
+			selected: selected && selected.type !== "kind-header" ? nativeItemId(selected) : null,
+			hits,
+			grouped,
+		};
+	}
+
+	/**
+	 * The visible rows as a native `list` (kind headers included, so the
+	 * selection matches the keyboard's), for terminals without `picker`.
+	 */
+	describeList(key: string): NativeNode {
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
+		const masterDisabled = this.#isMasterDisabled();
+		const rows: NativeNode[] = [];
+		for (const entry of this.#menu.visibleItems) {
+			if (entry.type === "kind-header") {
+				rows.push(
+					node(
+						"item",
+						{
+							label: [span(entry.label, "muted strong")],
+							value: [span(String(entry.count), "dim")],
+						},
+						undefined,
+						nativeItemId(entry),
+					),
+				);
+				continue;
+			}
+			const item = this.#pickerItem(entry, masterDisabled);
+			const label: TspSpan[] = [
+				span(`${this.#nativeGlyph(item.dot)} `, item.dot ?? "dim"),
+				span(typeof item.label === "string" ? item.label : "", item.tone === "muted" ? "dim" : "strong"),
+			];
+			for (const badge of item.badges ?? []) label.push(span(`  ${badge.text}`, badge.tone ?? "muted"));
+			rows.push(
+				node(
+					"item",
+					{
+						label,
+						detail: typeof item.detail === "string" ? [span(item.detail, "dim")] : item.detail,
+						disabled: item.disabled !== undefined,
+					},
+					undefined,
+					item.id,
+				),
+			);
+		}
+		const selected = this.#menu.selectedItem;
+		return node(
+			"list",
+			{
+				selected: selected ? nativeItemId(selected) : null,
+				empty: "No extensions found for this provider.",
+				virtual: true,
+				grow: 1,
+				basis: 0,
+				actions: { click: "select", dblclick: "activate" },
+				aria: "Extensions",
+			},
+			rows,
+			key,
+		);
+	}
+
+	/**
+	 * A pointer pick of the row with native id `id`: select it, then toggle it
+	 * when `activate` (the click-on-selected / double-click path). Returns
+	 * whether the id named a visible row.
+	 */
+	pickNative(id: string, activate: boolean): boolean {
+		const index = this.#menu.visibleItems.findIndex(item => nativeItemId(item) === id);
+		if (index < 0) return false;
+		if (index !== this.#menu.selectedIndex) {
+			this.#menu.setSelectedIndex(index);
+			this.#syncScroll();
+			this.#notifySelectionChange();
+		}
+		if (activate) this.activateSelected();
+		return true;
+	}
+
+	/** The selected row's switch, or undefined on a kind header or an empty list. */
+	selectedSwitch(): ExtensionListSwitch | undefined {
+		const item = this.#menu.selectedItem;
+		if (!item || item.type === "kind-header") return undefined;
+		if (item.type === "master") return { on: item.enabled };
+		if (item.type === "user-source") {
+			const providerOff =
+				this.#callbacks.getProviders?.().find(provider => provider.id === item.providerId)?.enabled === false;
+			return providerOff ? { on: item.enabled, blocked: "Provider disabled" } : { on: item.enabled };
+		}
+		const on = item.item.state !== "disabled";
+		if (isShadowedExtension(item.item)) return { on, blocked: "Shadowed by another source" };
+		if (this.#isMasterDisabled()) return { on, blocked: "Provider disabled" };
+		return { on };
+	}
+
+	#isMasterDisabled(): boolean {
+		return (
+			this.#masterSwitchProvider !== null &&
+			this.#callbacks.getProviders?.().find(provider => provider.id === this.#masterSwitchProvider)?.enabled ===
+				false
+		);
+	}
+
+	/** A text status glyph for the `list` fallback, matching the ANSI row icons. */
+	#nativeGlyph(dot: TspTone | undefined): string {
+		switch (dot) {
+			case "success":
+				return theme.status.enabled;
+			case "warning":
+				return theme.status.shadowed;
+			case "pending":
+				return theme.status.running;
+			default:
+				return theme.status.disabled;
+		}
+	}
+
+	#pickerItem(entry: Exclude<ListItem, { type: "kind-header" }>, masterDisabled: boolean): TspPickerItem {
+		const id = nativeItemId(entry);
+		if (entry.type === "master") {
+			return {
+				id,
+				label: `Enable ${sanitizeDisplayLine(entry.providerName)}`,
+				icon: "power",
+				dot: entry.enabled ? "success" : "muted",
+				badges: [{ text: "Master Switch", tone: "warning" }],
+				tone: entry.enabled ? undefined : "muted",
+			};
+		}
+		if (entry.type === "user-source") {
+			const off = !entry.enabled || masterDisabled;
+			return {
+				id,
+				label: `Load ~/ ${sanitizeDisplayLine(entry.providerName)} config`,
+				icon: "folder",
+				detail: "opt-in; project config always loads",
+				dot: entry.enabled ? "success" : "muted",
+				tone: off ? "muted" : undefined,
+				disabled: masterDisabled ? "Provider disabled" : undefined,
+			};
+		}
+		const ext = entry.item;
+		const shadowed = isShadowedExtension(ext);
+		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
+		const mcpSnap = this.#mcpSnapshot(ext, shadowed, effectivelyDisabled);
+		const hint = this.#extensionHint(ext, mcpSnap);
+		const dot: TspTone = masterDisabled
+			? "muted"
+			: shadowed
+				? "warning"
+				: mcpSnap
+					? MCP_HEALTH_TONE[mcpSnap.health]
+					: ext.state === "active"
+						? "success"
+						: "muted";
+		return {
+			id,
+			label: sanitizeDisplayLine(ext.displayName),
+			detail: hint ? sanitizeDisplayLine(hint) : undefined,
+			dot,
+			tone: effectivelyDisabled ? "muted" : shadowed ? "warning" : undefined,
+			badges: shadowed
+				? [
+						{
+							text: "shadowed",
+							tone: "warning",
+							title: ext.shadowedBy ? `Shadowed by ${sanitizeDisplayLine(ext.shadowedBy)}` : undefined,
+						},
+					]
+				: undefined,
+			facts: { kind: this.#getKindLabel(ext.kind) },
+			disabled: effectivelyDisabled
+				? masterDisabled
+					? "Provider disabled"
+					: `Disabled · ${formatKeyHint("space")} to enable`
+				: undefined,
+		};
+	}
+
+	/** Live MCP health for an unshadowed discovered server row. */
+	#mcpSnapshot(ext: Extension, shadowed: boolean, effectivelyDisabled: boolean): MCPRuntimeSnapshot | undefined {
+		return ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && !shadowed
+			? snapshotMcpRuntime(ext.raw, this.#mcpSource, {
+					enabled: !effectivelyDisabled,
+					shadowed: false,
+				})
+			: undefined;
+	}
+
+	/** The trailing row hint: MCP health/project, or the kind's own list hint. */
+	#extensionHint(ext: Extension, mcpSnap: MCPRuntimeSnapshot | undefined): string | undefined {
+		return mcpSnap
+			? joinListHints(formatMcpListHint(mcpSnap), projectListHint(ext))
+			: formatExtensionListHint(ext, ext.kind === "tool" ? liveToolsForExtension(ext, this.#toolFrame) : []);
+	}
+
+	#renderUserSourceSwitch(
+		item: ListItem & { type: "user-source" },
+		isSelected: boolean,
+		masterDisabled: boolean,
+		width: number,
+	): string {
+		const checkbox = item.enabled
+			? theme.fg("success", theme.checkbox.checked)
+			: theme.fg("dim", theme.checkbox.unchecked);
+		const label = `Load ~/ ${item.providerName} config`;
+		const badge = theme.fg("muted", "(opt-in; project config always loads)");
+
+		let line = `${checkbox} ${theme.icon.folder} ${label}  ${badge}`;
+
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else if (!item.enabled || masterDisabled) {
+			line = theme.fg("dim", line);
+		}
+
+		return truncateToWidth(line, width);
+	}
+
+	#renderMasterSwitch(item: ListItem & { type: "master" }, isSelected: boolean, width: number): string {
+		const checkbox = item.enabled
+			? theme.fg("success", theme.checkbox.checked)
+			: theme.fg("dim", theme.checkbox.unchecked);
+		const icon = theme.icon.package;
+		const label = `Enable ${item.providerName}`;
+		const badge = theme.fg("warning", "(Master Switch)");
+
+		let line = `${checkbox} ${icon} ${label}  ${badge}`;
+
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else if (!item.enabled) {
+			line = theme.fg("dim", line);
+		}
+
+		return truncateToWidth(line, width);
+	}
+
+	#renderKindHeader(item: ListItem & { type: "kind-header" }, isSelected: boolean, width: number): string {
+		const countBadge = theme.fg("muted", `(${item.count})`);
+		let line = `${item.icon} ${item.label} ${countBadge}`;
+
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else {
+			line = theme.fg("muted", line);
+		}
+
+		return truncateToWidth(line, width);
+	}
+
+	#renderExtensionRow(ext: Extension, isSelected: boolean, width: number, masterDisabled: boolean): string {
+		const shadowed = isShadowedExtension(ext);
+		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
+		const mcpSnap = this.#mcpSnapshot(ext, shadowed, effectivelyDisabled);
+
+		const stateIcon = shadowed
+			? this.#getStateIcon("shadowed", masterDisabled)
+			: mcpSnap
+				? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
+				: this.#getStateIcon(ext.state, masterDisabled);
+		let name = sanitizeDisplayLine(ext.displayName);
+		const nameWidth = Math.min(24, width - 16);
+
+		// Build the line with indentation (visually "inside" the master switch)
+		let line = `   ${stateIcon} `;
+
+		if (isSelected && !masterDisabled) {
+			name = theme.bold(theme.fg("accent", name));
+		} else if (effectivelyDisabled) {
+			name = theme.fg("dim", name);
+		} else if (shadowed) {
+			name = theme.fg("warning", name);
+		}
+
+		// Pad name
+		const namePadded = this.#padText(name, nameWidth);
+		line += namePadded;
+
+		const hint = this.#extensionHint(ext, mcpSnap);
+		if (hint) {
+			const triggerStyle = effectivelyDisabled
+				? "dim"
+				: mcpSnap?.health === "disconnected" || mcpSnap?.health === "inactive"
+					? mcpSnap.health === "inactive"
+						? "warning"
+						: "dim"
+					: "muted";
+			const remainingWidth = width - visibleWidth(line) - 2;
+			if (remainingWidth > 5) {
+				line += `  ${truncateToWidth(theme.fg(triggerStyle, sanitizeDisplayLine(hint)), remainingWidth)}`;
+			}
+		}
+
+		// Apply selection background
+		if (isSelected) {
+			line = theme.bg("selectedBg", line);
+		}
+
+		return truncateToWidth(line, width);
+	}
+
+	#getKindIcon(kind: ExtensionKind): string {
+		switch (kind) {
+			case "extension-module":
+				return theme.icon.extensionTool;
+			case "skill":
+				return theme.icon.extensionSkill;
+			case "tool":
+				return theme.icon.extensionTool;
+			case "slash-command":
+				return theme.icon.extensionSlashCommand;
+			case "mcp":
+				return theme.icon.extensionMcp;
+			case "rule":
+				return theme.icon.extensionRule;
+			case "hook":
+				return theme.icon.extensionHook;
+			case "prompt":
+				return theme.icon.extensionPrompt;
+			case "context-file":
+				return theme.icon.extensionContextFile;
+			case "instruction":
+				return theme.icon.extensionInstruction;
+			default:
+				return theme.format.bullet;
+		}
+	}
+
+	#getStateIcon(state: ExtensionState, masterDisabled: boolean): string {
+		if (masterDisabled) {
+			return theme.fg("dim", theme.status.disabled);
+		}
+		switch (state) {
+			case "active":
+				return theme.fg("success", theme.status.enabled);
+			case "disabled":
+				return theme.fg("dim", theme.status.disabled);
+			case "shadowed":
+				return theme.fg("warning", theme.status.shadowed);
+		}
+	}
+
+	#getMcpHealthIcon(health: MCPConnectionHealth, masterDisabled: boolean): string {
+		if (masterDisabled) {
+			return theme.fg("dim", theme.status.disabled);
+		}
+		switch (health) {
+			case "connected":
+				return theme.fg("success", theme.status.enabled);
+			case "connecting":
+				return theme.fg("muted", theme.status.running);
+			case "disconnected":
+				return theme.fg("dim", theme.status.shadowed);
+			case "inactive":
+				return theme.fg("warning", theme.status.disabled);
+		}
+	}
+
+	#padText(text: string, targetWidth: number): string {
+		const width = visibleWidth(text);
+		if (width >= targetWidth) {
+			return truncateToWidth(text, targetWidth);
+		}
+		return text + padding(targetWidth - width);
+	}
+
+	/**
+	 * Rebuild the flattened list for `query`: a flat applyFilter hit list while
+	 * searching, otherwise the master-switch rows (provider scope) or the
+	 * kind-grouped ALL view with headers.
+	 */
+	#buildListItems(query: string): ListItem[] {
+		const items: ListItem[] = [];
+
+		// Apply search filter
+		const filtered = query.length > 0 ? applyFilter(this.#extensions, query) : this.#extensions;
+
+		// When searching, show flat list
+		if (query.length > 0) {
+			for (const ext of filtered) {
+				items.push({ type: "extension", item: ext });
+			}
+			return items;
+		}
+
+		// Provider-specific view: Master switch + flat list
+		if (this.#masterSwitchProvider) {
+			const providerName = filtered[0]?.source.providerName ?? this.#masterSwitchProvider;
+			const provider = this.#callbacks.getProviders?.().find(provider => provider.id === this.#masterSwitchProvider);
+			const enabled = provider?.enabled ?? true;
+
+			items.push({
+				type: "master",
+				providerId: this.#masterSwitchProvider,
+				providerName,
+				enabled,
+			});
+			if (provider?.foreignUserSource) {
+				items.push({
+					type: "user-source",
+					providerId: this.#masterSwitchProvider,
+					providerName,
+					enabled: provider.userSourceEnabled,
+				});
+			}
+
+			for (const ext of filtered) {
+				items.push({ type: "extension", item: ext });
+			}
+			return items;
+		}
+
+		// ALL view: Group by kind with headers
+		const byKind = new Map<ExtensionKind, Extension[]>();
+		for (const ext of filtered) {
+			const list = byKind.get(ext.kind) ?? [];
+			list.push(ext);
+			byKind.set(ext.kind, list);
+		}
+
+		const kindOrder: ExtensionKind[] = [
+			"extension-module",
+			"skill",
+			"tool",
+			"slash-command",
+			"rule",
+			"mcp",
+			"hook",
+			"prompt",
+			"context-file",
+			"instruction",
+		];
+
+		for (const kind of kindOrder) {
+			const kindItems = byKind.get(kind);
+			if (!kindItems || kindItems.length === 0) continue;
+
+			items.push({
+				type: "kind-header",
+				kind,
+				label: this.#getKindLabel(kind),
+				icon: this.#getKindIcon(kind),
+				count: kindItems.length,
+			});
+
+			for (const ext of kindItems) {
+				items.push({ type: "extension", item: ext });
+			}
+		}
+		return items;
+	}
+
+	#getKindLabel(kind: ExtensionKind): string {
+		switch (kind) {
+			case "extension-module":
+				return "Extension Modules";
+			case "skill":
+				return "Skills";
+			case "tool":
+				return "Tools";
+			case "slash-command":
+				return "Commands";
+			case "rule":
+				return "Rules";
+			case "mcp":
+				return "MCP Servers";
+			case "hook":
+				return "Hooks";
+			case "prompt":
+				return "Prompts";
+			case "context-file":
+				return "Context";
+			case "instruction":
+				return "Instructions";
+			default:
+				return kind;
+		}
+	}
+
+	/** Keep the selection inside the one-row fixed viewport. */
+	#syncScroll(): void {
+		this.#scrollOffset = scrollOffsetForRow(
+			this.#scrollOffset,
+			this.#menu.selectedIndex,
+			this.#menu.visibleItems.length,
+			this.#maxVisible,
+			"nearest",
+		);
+	}
+
+	/** Toggle the selected item, or flip the provider master switch when on it (Space/Enter). */
+	activateSelected(): void {
+		const item = this.#menu.selectedItem;
+		if (item?.type === "master") {
+			this.#callbacks.onMasterToggle?.(item.providerId);
+		} else if (item?.type === "user-source") {
+			if (this.#callbacks.getProviders?.().find(provider => provider.id === item.providerId)?.enabled !== false)
+				this.#callbacks.onUserSourceToggle?.(item.providerId);
+		} else if (item?.type === "extension") {
+			// Shadowed same-name rows share the winner's id (`mcp:github`).
+			// Toggling them would mutate whichever config `find(id)` hits first.
+			if (isShadowedExtension(item.item)) return;
+			const masterDisabled =
+				this.#masterSwitchProvider !== null &&
+				this.#callbacks.getProviders?.().find(provider => provider.id === this.#masterSwitchProvider)?.enabled ===
+					false;
+			if (!masterDisabled) {
+				const newEnabled = item.item.state === "disabled";
+				this.#callbacks.onToggle?.(item.item.id, newEnabled);
+			}
+		}
+	}
+
+	/** Highlight the row under the pointer (null clears). */
+	setHoverIndex(index: number | null): void {
+		this.#hoveredIndex = index;
+	}
+
+	/**
+	 * Map a 0-based line within this component's render to the absolute list-item
+	 * index, or null when the line is the search banner, a padding row, or outside
+	 * the visible window. The first two lines are the search banner and a blank
+	 * separator; item rows follow, windowed at the current scroll offset.
+	 */
+	hitTest(line: number): number | null {
+		const rowLine = line - 2;
+		if (rowLine < 0 || rowLine >= this.#visibleCount) return null;
+		const index = this.#scrollOffset + rowLine;
+		return index < this.#menu.visibleItems.length ? index : null;
+	}
+
+	/** Wheel notch: move the selection (and the inspector) one row. */
+	handleWheel(delta: -1 | 1): void {
+		if (delta < 0) this.#moveSelectionUp();
+		else this.#moveSelectionDown();
+	}
+
+	/** Click: select the row under the pointer, or activate it when already selected. */
+	handleClick(line: number): void {
+		const index = this.hitTest(line);
+		if (index === null) return;
+		if (index === this.#menu.selectedIndex) {
+			this.activateSelected();
+			return;
+		}
+		this.#menu.setSelectedIndex(index);
+		this.#notifySelectionChange();
+	}
+
+	handleInput(data: string): void {
+		// Navigation (arrow keys / configurable tui.select.up/down). Bare j/k are
+		// intentionally NOT navigation here: the search filter is always active, so
+		// those letters must reach the query (e.g. searching for "jira"/"json").
+		if (matchesSelectUp(data)) {
+			this.#moveSelectionUp();
+			return;
+		}
+
+		if (matchesSelectDown(data)) {
+			this.#moveSelectionDown();
+			return;
+		}
+
+		// Space or Enter: activate the selected row (toggle item / master switch)
+		if (data === " " || matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.activateSelected();
+			return;
+		}
+
+		// Everything else edits the search field; refilter only when the text changed.
+		const before = this.#search.getValue();
+		this.#search.handleInput(data);
+		const after = this.#search.getValue();
+		if (after !== before) {
+			this.#menu.setQuery(after, false);
+			this.#scrollOffset = 0;
+			this.#notifySelectionChange();
+		}
+	}
+
+	#moveSelectionUp(): void {
+		if (this.#menu.move(-1, false)) {
+			this.#syncScroll();
+			this.#notifySelectionChange();
+		}
+	}
+
+	#moveSelectionDown(): void {
+		if (this.#menu.move(1, false)) {
+			this.#syncScroll();
+			this.#notifySelectionChange();
+		}
+	}
+
+	#notifySelectionChange(): void {
+		const ext = this.getSelectedExtension();
+		this.#callbacks.onSelectionChange?.(ext);
+	}
+}

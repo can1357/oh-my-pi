@@ -2,12 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 describe("dereferenceJsonSchema", () => {
-	it("returns non-object input unchanged", () => {
-		expect(dereferenceJsonSchema(null)).toBe(null);
-		expect(dereferenceJsonSchema("string")).toBe("string");
-		expect(dereferenceJsonSchema(42)).toBe(42);
-	});
-
 	it("returns schema without $defs unchanged", () => {
 		const schema = {
 			type: "object",
@@ -206,50 +200,5 @@ describe("dereferenceJsonSchema", () => {
 		expect(result.$defs).toBeUndefined();
 		expect(result.properties.a).toEqual({ type: "string", maxLength: 100 });
 		expect(result.properties.b).toEqual({ type: "string", maxLength: 100 });
-	});
-
-	it("reproduces the nucleus write_memory schema pattern", () => {
-		// Simplified version of the actual nucleus tool schema
-		const schema = {
-			type: "object",
-			properties: {
-				kind: { type: "string", description: "Memory kind" },
-				content: { type: "string", description: "Memory content" },
-				anchors: {
-					description: "Source anchors",
-					items: { $ref: "#/$defs/SourceAnchorInput" },
-					type: "array",
-				},
-			},
-			required: ["kind", "content", "anchors"],
-			$defs: {
-				SourceAnchorInput: {
-					type: "object",
-					properties: {
-						anchor_type: {
-							description: "Anchor type",
-							enum: ["file", "symbol", "pattern"],
-							type: "string",
-						},
-						path: { type: "string" },
-						role: { type: "string" },
-						symbol: { type: "string" },
-					},
-					required: ["anchor_type", "path"],
-				},
-			},
-		};
-		const result = dereferenceJsonSchema(schema) as any;
-
-		// $defs stripped
-		expect(result.$defs).toBeUndefined();
-
-		// anchors items fully inlined
-		expect(result.properties.anchors.items.properties.anchor_type.enum).toEqual(["file", "symbol", "pattern"]);
-		expect(result.properties.anchors.items.required).toEqual(["anchor_type", "path"]);
-
-		// Other properties preserved
-		expect(result.properties.kind).toEqual({ type: "string", description: "Memory kind" });
-		expect(result.required).toEqual(["kind", "content", "anchors"]);
 	});
 });

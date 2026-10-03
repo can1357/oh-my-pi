@@ -32,6 +32,9 @@ export function resolveCrossBuild(value: string | undefined): CrossBuild | null 
 		case "win32-x64":
 		case "windows-x64":
 			return { id: value, platform: "win32", arch: "x64", target: "bun-windows-x64-baseline" };
+		case "win32-arm64":
+		case "windows-arm64":
+			return { id: value, platform: "win32", arch: "arm64", target: "bun-windows-arm64" };
 		default:
 			throw new Error(`Unsupported CROSS_TARGET: ${value}`);
 	}
@@ -72,7 +75,10 @@ async function runCommand(
 
 async function main(): Promise<void> {
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
-	const shouldAdhocSign = process.platform === "darwin" && !crossBuild && Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
+	const shouldAdhocSign =
+		process.platform === "darwin" &&
+		(!crossBuild || crossBuild.platform === "darwin") &&
+		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
 	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
 	const outputPath = path.join(packageDir, "dist", outName);
 	// Generate inside the try so the finally always restores the empty checked-in
@@ -100,7 +106,15 @@ async function main(): Promise<void> {
 			});
 
 			if (shouldAdhocSign) {
-				await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+				await runCommand([
+					"codesign",
+					"--force",
+					"--sign",
+					"-",
+					"--entitlements",
+					path.join(repoRoot, "scripts", "macos-entitlements.plist"),
+					outputPath,
+				]);
 			}
 		} finally {
 			await runCommand(["bun", "--cwd=../natives", "run", "gen:native:reset"]);

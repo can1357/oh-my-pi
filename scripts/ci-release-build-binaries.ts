@@ -78,6 +78,13 @@ const targets: BinaryTarget[] = [
 		target: "bun-windows-x64-baseline",
 		outfile: "packages/coding-agent/binaries/omp-windows-x64.exe",
 	},
+	{
+		id: "win32-arm64",
+		platform: "win32",
+		arch: "arm64",
+		target: "bun-windows-arm64",
+		outfile: "packages/coding-agent/binaries/omp-windows-arm64.exe",
+	},
 ];
 
 function parseRequestedTargets(): Set<string> | null {
@@ -150,7 +157,18 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 	});
 	// Bun 1.3.12 emits a truncated Mach-O signature on darwin builds.
 	if (shouldAdhocSignDarwinBinary(target)) {
-		await runCommand(["codesign", "--force", "--sign", "-", path.join(repoRoot, target.outfile)], repoRoot);
+		await runCommand(
+			[
+				"codesign",
+				"--force",
+				"--sign",
+				"-",
+				"--entitlements",
+				path.join(repoRoot, "scripts", "macos-entitlements.plist"),
+				path.join(repoRoot, target.outfile),
+			],
+			repoRoot,
+		);
 	}
 }
 

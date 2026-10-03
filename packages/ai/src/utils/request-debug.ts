@@ -1,15 +1,12 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
-import type { FetchImpl } from "../types";
 
 const REQUEST_DEBUG_ENV = "PI_REQ_DEBUG";
-const DEBUG_FETCH_MARKER = Symbol("omp.requestDebugFetch");
 const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 let nextSessionId = 1;
 
-type DebugFetch = FetchImpl & { [DEBUG_FETCH_MARKER]?: true };
 type RequestBodyInit = NonNullable<RequestInit["body"]>;
 
 type RequestDebugBody = { body: unknown } | { bodyText: string } | { bodyBase64: string } | { bodyUnavailable: string };
@@ -56,31 +53,6 @@ export function isRequestDebugEnabled(): boolean {
 	return isRequestDebugEnvEnabled();
 }
 
-export function wrapFetchForRequestDebug(fetchImpl: FetchImpl): FetchImpl {
-	if (!isRequestDebugEnabled()) return fetchImpl;
-	const maybeWrapped = fetchImpl as DebugFetch;
-	if (maybeWrapped[DEBUG_FETCH_MARKER]) return fetchImpl;
-
-	const wrapped = Object.assign(
-		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			if (!isRequestDebugEnabled()) return fetchImpl(input, init);
-			const session = await createFetchRequestDebugSession(input, init);
-			const response = await fetchImpl(input, init);
-			return session.wrapResponse(response);
-		},
-		fetchImpl.preconnect ? { preconnect: fetchImpl.preconnect } : {},
-		{ [DEBUG_FETCH_MARKER]: true as const },
-	);
-	return wrapped;
-}
-
-export function withRequestDebugFetch<T extends { fetch?: FetchImpl } | undefined>(options: T): T {
-	if (!isRequestDebugEnabled()) return options;
-	const fetchImpl = options?.fetch ?? (globalThis.fetch as FetchImpl);
-	const wrapped = wrapFetchForRequestDebug(fetchImpl);
-	return { ...options, fetch: wrapped } as T;
-}
-
 export async function createRequestDebugSession(payload: RequestDebugPayload): Promise<RequestDebugSession> {
 	const { id, requestPath, responsePath, handle, overwrite } = await reserveRequestDebugFile();
 	const requestDump: Record<string, unknown> = {
@@ -105,7 +77,12 @@ export async function createRequestDebugSession(payload: RequestDebugPayload): P
 	return new FileRequestDebugSession(id, requestPath, responsePath, overwrite);
 }
 
-async function createFetchRequestDebugSession(
+/**
+ * Dump a fetch-shaped request to `rr-session-N.json`; the returned session's
+ * `wrapResponse` streams the raw response into `rr-session-N.res.log`. Called
+ * per request by `transportFetch` while `PI_REQ_DEBUG=1`.
+ */
+export async function createFetchRequestDebugSession(
 	input: string | URL | Request,
 	init: RequestInit | undefined,
 ): Promise<RequestDebugSession> {

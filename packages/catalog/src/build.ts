@@ -7,10 +7,11 @@
  * compat per request.
  */
 
-import { resolveModelPolicy } from "./compat/resolve";
+import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
-import type { Api, Model, ModelSpec } from "./types";
+import { materializeTimeBasedCost } from "./pricing";
+import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -23,6 +24,41 @@ function objectPayload(value: unknown): object | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 
+/**
+ * Overwrite seeded fallback rates with the latest dated card whose
+ * `effectiveFrom` is already due. Leaves the seed unchanged when no card
+ * has started, and never attaches a `timeBased` tariff.
+ */
+function applyEffectiveFallbackRates(
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number },
+	effectiveRates: unknown,
+	now = Date.now(),
+): void {
+	const rates = objectPayload(effectiveRates);
+	if (rates === undefined) return;
+	let latestFrom = Number.NEGATIVE_INFINITY;
+	let latest: object | undefined;
+	for (const entry of Object.values(rates)) {
+		const payload = objectPayload(entry);
+		if (payload === undefined) continue;
+		const date = Reflect.get(payload, "effectiveFrom");
+		if (typeof date !== "string") continue;
+		const from = Date.parse(date);
+		if (!Number.isFinite(from) || from > now || from < latestFrom) continue;
+		latestFrom = from;
+		latest = payload;
+	}
+	if (latest === undefined) return;
+	const input = numberField(latest, "input");
+	if (input !== undefined) cost.input = input;
+	const output = numberField(latest, "output");
+	if (output !== undefined) cost.output = output;
+	const cacheRead = numberField(latest, "cacheRead");
+	if (cacheRead !== undefined) cost.cacheRead = cacheRead;
+	const cacheWrite = numberField(latest, "cacheWrite");
+	if (cacheWrite !== undefined) cost.cacheWrite = cacheWrite;
+}
+
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
 function isInputModalities(value: unknown): value is ("text" | "image")[] {
 	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
@@ -32,10 +68,35 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * Applies resolved catalog-data axes onto the model: reviewed metadata
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
- * (`priority`, `apply-patch-tool-type`, `service-tier-cost`) is rule-owned;
- * `context-promotion-target` fills only when the spec left it unset.
+ * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
+ * `requires-cursor-tool-schema-projection`, `requires-tool-result-image-hoisting`,
+ * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` fills
+ * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+	const kind = MODEL_KINDS.find(value => value === catalog.kind);
+	if (kind !== undefined) model.kind = kind;
+	if (catalog.contextWindowAuthoritative === true) {
+		model.contextWindowAuthoritative = true;
+	} else {
+		delete model.contextWindowAuthoritative;
+	}
+	const webSearch = catalog.webSearch;
+	if (
+		webSearch === "gemini" ||
+		webSearch === "anthropic" ||
+		webSearch === "codex" ||
+		webSearch === "xai" ||
+		webSearch === "openrouter" ||
+		webSearch === "openai"
+	) {
+		model.webSearch = webSearch;
+	}
+	if (typeof catalog.webSearchModel === "string") model.webSearchModel = catalog.webSearchModel;
+	if (catalog.hostedImage === true) model.hostedImage = true;
+	else if (catalog.hostedImage === false) delete model.hostedImage;
+	if (typeof catalog.imageModel === "string") model.imageModel = catalog.imageModel;
+	else if (catalog.imageModel === false) delete model.imageModel;
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
@@ -47,9 +108,53 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	}
 	const priority = catalog.priority;
 	if (typeof priority === "number") model.priority = priority;
+	const promptCache = objectPayload(catalog.promptCache);
+	if (promptCache !== undefined) {
+		const short = numberField(promptCache, "short");
+		const long = numberField(promptCache, "long");
+		model.promptCache = {
+			...(short !== undefined && { short }),
+			...(long !== undefined && { long }),
+		};
+	}
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
+	}
+	const editPromptVariant = catalog.editPromptVariant;
+	if (editPromptVariant === "full" || editPromptVariant === "compact") {
+		model.editPromptVariant = editPromptVariant;
+	}
+	const pricingStatus = catalog.pricingStatus;
+	if (
+		pricingStatus === "free" ||
+		pricingStatus === "included" ||
+		pricingStatus === "variable" ||
+		pricingStatus === "unknown"
+	) {
+		model.pricingStatus = pricingStatus;
+	}
+	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
+	if (requiresCursorToolSchemaProjection === true) {
+		model.requiresCursorToolSchemaProjection = true;
+	} else {
+		delete model.requiresCursorToolSchemaProjection;
+	}
+	const requiresToolResultImageHoisting = catalog.requiresToolResultImageHoisting;
+	if (requiresToolResultImageHoisting === true) {
+		model.requiresToolResultImageHoisting = true;
+	} else {
+		delete model.requiresToolResultImageHoisting;
+	}
+	if (catalog.supportsAssistantPrefill === true) {
+		model.supportsAssistantPrefill = true;
+	} else {
+		delete model.supportsAssistantPrefill;
+	}
+	// The same KDL output-cap contract gates host options and the Responses
+	// transport. Materialize it because the transport consumes the model field.
+	if (typeof catalog.omitMaxOutputTokens === "boolean" && model.omitMaxOutputTokens === undefined) {
+		model.omitMaxOutputTokens = catalog.omitMaxOutputTokens;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
@@ -59,8 +164,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
- * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `cache-read-at-input-rate`, `limits-patch`, `long-context-cost`,
+ * `context-window-floor`, `input-modalities`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
@@ -114,6 +219,41 @@ export function applyCatalogCorrections(
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+	}
+	const fallback = objectPayload(catalog.costFallback);
+	if (fallback !== undefined) {
+		const base = model.cost;
+		const hasTokenPrice = base.input !== 0 || base.output !== 0 || base.cacheRead !== 0 || base.cacheWrite !== 0;
+		if (!hasTokenPrice) {
+			// Upstream reported no token price (plan-included or promo-free
+			// rows): seed the reviewed list price instead of overwriting real
+			// discovery data the way `cost-patch` would.
+			model.cost = { ...model.cost };
+			const input = numberField(fallback, "input");
+			if (input !== undefined) model.cost.input = input;
+			const output = numberField(fallback, "output");
+			if (output !== undefined) model.cost.output = output;
+			const cacheRead = numberField(fallback, "cacheRead");
+			if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
+			const cacheWrite = numberField(fallback, "cacheWrite");
+			if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+			// Dated fallback rates overwrite the seeded numbers when they have
+			// already taken effect. They are not a recurring tariff: wrapping
+			// them in `timeBased` with empty peak windows would report
+			// permanent off-peak and never wake at the dated boundary.
+			applyEffectiveFallbackRates(model.cost, Reflect.get(fallback, "effectiveRates"));
+		}
+	}
+	if (catalog.cacheReadAtInputRate === true) {
+		const { longContext } = model.cost;
+		model.cost = {
+			...model.cost,
+			cacheRead: model.cost.input,
+			...(longContext && { longContext: { ...longContext, cacheRead: longContext.input } }),
+		};
+	}
+	if (catalog.timeBased !== undefined) {
+		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
@@ -188,6 +328,16 @@ function supportsOpenAIGAComputerUse(
 }
 
 /**
+ * Build a discovered model using the backend's catalog-selected request API.
+ * The credential-bearing provider id remains unchanged while `providerType`
+ * persists the backend policy identity across cache and config round trips.
+ */
+export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string): Model<Api> {
+	const api = resolveDiscoveryApi(spec, providerType);
+	return buildModel({ ...spec, api, providerType });
+}
+
+/**
  * Build one model from an authored spec. Bundled models.json rows are fully
  * materialized by the generator and consumed directly (see `models.ts`), so
  * this only runs for discovered/custom/override specs.
@@ -197,10 +347,14 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
+		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
+		// `reasoning: false` discovery default (see `resolveThinkingPolicy`);
+		// materialize the correction for transports and the picker.
+		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
-		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
+		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider),
 		thinking: policy.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
@@ -209,5 +363,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Configured lifetimes replace catalog lifetimes rather than merging with them.
+	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
 	return model;
 }

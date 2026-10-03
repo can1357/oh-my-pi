@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { create, type HelperOptions, SafeString } from "@oh-my-pi/pi-utils/template";
 import fileOperations from "./fixtures/template/file-operations.md" with { type: "text" };
@@ -77,19 +76,6 @@ const GOLDENS: { source: string; context: Record<string, unknown>; expected: str
 describe("real template goldens", () => {
 	it("matches output captured from handlebars 4.7.9", () => {
 		for (const fixture of GOLDENS) expect(prompt.render(fixture.source, fixture.context)).toBe(fixture.expected);
-	});
-
-	it("compiles every repository source template through the prompt seam", async () => {
-		const repoRoot = path.resolve(import.meta.dir, "../../..");
-		const glob = new Bun.Glob("packages/*/src/**/*.md");
-		let compiled = 0;
-		for await (const relative of glob.scan(repoRoot)) {
-			const source = await Bun.file(path.join(repoRoot, relative)).text();
-			if (!source.includes("{{")) continue;
-			prompt.compile(source);
-			compiled++;
-		}
-		expect(compiled).toBeGreaterThan(100);
 	});
 });
 

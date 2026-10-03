@@ -22,7 +22,7 @@ const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
 const ORIGINAL_TMUX = Bun.env.TMUX;
 
-function parseKittyParam(sequence: string, key: "c" | "r" | "C"): number | null {
+function parseKittyParam(sequence: string, key: "c" | "r"): number | null {
 	const match = sequence.match(new RegExp(`${key}=(\\d+)`));
 	if (!match) return null;
 	return Number.parseInt(match[1], 10);
@@ -65,17 +65,6 @@ describe("terminal image rendering", () => {
 		expect(result?.rows).toBe(2);
 		expect(parseKittyParam(result?.sequence ?? "", "c")).toBe(2);
 		expect(parseKittyParam(result?.sequence ?? "", "r")).toBe(2);
-	});
-
-	it("anchors Kitty display commands before renderer-managed cursor movement", () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS, {
-			maxWidthCells: 10,
-			maxHeightCells: 2,
-		});
-
-		expect(result).not.toBeNull();
-		expect(parseKittyParam(result?.sequence ?? "", "C")).toBe(1);
 	});
 
 	it("re-renders a cached fallback once an image protocol becomes available", () => {

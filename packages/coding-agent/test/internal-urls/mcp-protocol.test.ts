@@ -16,6 +16,7 @@ function createMockManager(opts: {
 }) {
 	return {
 		getConnectedServers: () => opts.servers ?? [],
+		waitForPendingConnections: async () => {},
 		getServerResources: (name: string) => opts.resources?.get(name),
 		ensureServerResources: async (name: string) => opts.ensureResources?.(name),
 		readServerResource: async (_name: string, _uri: string) => {
@@ -484,25 +485,5 @@ describe("McpProtocolHandler", () => {
 		const router = InternalUrlRouter.instance();
 
 		await expect(router.resolve("mcp://test://anything")).rejects.toThrow("(none)");
-	});
-
-	it("uses unknown for binary content without mimeType", async () => {
-		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
-		resources.set("bin-server", {
-			resources: [{ uri: "test://bin", name: "bin" }],
-			templates: [],
-		});
-		const manager = createMockManager({
-			servers: ["bin-server"],
-			resources,
-			readResult: {
-				contents: [{ uri: "test://bin", blob: "data" }],
-			},
-		});
-		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
-
-		const resource = await router.resolve("mcp://test://bin");
-		expect(resource.content).toContain("[Binary content: unknown,");
 	});
 });

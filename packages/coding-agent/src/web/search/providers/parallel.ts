@@ -1,5 +1,7 @@
-import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse } from "../../../web/search/types";
+import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
+import { isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { callMCP } from "../../../mcp/json-rpc";
+import type { SearchResponse } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
 	PARALLEL_BETA_HEADER,
@@ -14,13 +16,16 @@ import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, toSearchSources, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, siteHosts, toSearchSources, withHardTimeout } from "./utils";
 
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 40;
+const PARALLEL_MCP_URL = "https://search.parallel.ai/mcp";
 
 /** Query-string caps for Parallel: natural-language objective, no field operators. */
 const PARALLEL_QUERY_SYNTAX = { phrases: true, negation: true, or: true } as const;
+/** Public MCP accepts search operators in search_queries instead of REST source_policy. */
+const PARALLEL_MCP_QUERY_SYNTAX = { ...PARALLEL_QUERY_SYNTAX, site: true, dateRange: true } as const;
 
 /** Parallel `source_policy` (beta Search API): bare-host allow/deny lists + freshness floor. */
 interface ParallelSourcePolicy {
@@ -29,22 +34,29 @@ interface ParallelSourcePolicy {
 	after_date?: string;
 }
 
+interface ParallelMcpToolResult {
+	structuredContent?: unknown;
+	content?: Array<{ type: string; text?: string }>;
+	isError?: boolean;
+}
+
+/** Narrow an MCP `tools/call` result to the fields the keyless search path reads. */
+function toMcpToolResult(result: unknown): ParallelMcpToolResult | undefined {
+	if (!isRecord(result)) return undefined;
+	const content = Array.isArray(result.content)
+		? result.content.filter(
+				(item): item is { type: string; text?: string } => isRecord(item) && typeof item.type === "string",
+			)
+		: undefined;
+	return { structuredContent: result.structuredContent, content, isError: result.isError === true };
+}
+
 const RECENCY_DAYS: Record<NonNullable<SearchParams["recency"]>, number> = {
 	day: 1,
 	week: 7,
 	month: 30,
 	year: 365,
 };
-
-/** Site values may carry paths (`github.com/anthropics`); Parallel takes bare hosts. */
-function toHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
-}
 
 /**
  * Map parsed `site:`/`-site:`/`after:` directives and the relative recency
@@ -55,8 +67,8 @@ function toHosts(sites: readonly string[]): string[] {
  */
 function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency"]): ParallelSourcePolicy | undefined {
 	const policy: ParallelSourcePolicy = {};
-	const include = toHosts(parsed.sites);
-	const exclude = toHosts(parsed.excludedSites);
+	const include = siteHosts(parsed.sites);
+	const exclude = siteHosts(parsed.excludedSites);
 	if (include.length) policy.include_domains = include;
 	else if (exclude.length) policy.exclude_domains = exclude;
 	if (parsed.after) policy.after_date = parsed.after;
@@ -66,6 +78,82 @@ function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency
 	return policy.include_domains || policy.exclude_domains || policy.after_date ? policy : undefined;
 }
 
+async function searchWithPublicMcp(
+	objective: string,
+	queries: string[],
+	params: {
+		signal?: AbortSignal;
+		timeoutMs?: number;
+		fetch?: FetchImpl;
+		modelName?: string;
+	},
+	sessionId?: string,
+): Promise<ParallelSearchResult> {
+	const mcpResponse = await callMCP(
+		PARALLEL_MCP_URL,
+		"tools/call",
+		{
+			name: "web_search",
+			arguments: {
+				objective,
+				search_queries: queries,
+				...(sessionId && sessionId.length <= 100 && { session_id: sessionId }),
+				...(params.modelName && params.modelName.length <= 100 && { model_name: params.modelName }),
+			},
+		},
+		{
+			fetch: params.fetch,
+			headers: { "User-Agent": USER_AGENT },
+			signal: withHardTimeout(params.signal, params.timeoutMs),
+			onHttpError(response, errorText) {
+				const classified = classifyProviderHttpError("parallel", response.status, errorText);
+				if (classified) return classified;
+				if (response.status === 429) {
+					return new SearchProviderError(
+						"parallel",
+						"parallel: MCP rate limit reached (429); configure a Parallel API key for higher limits",
+						response.status,
+					);
+				}
+				return new SearchProviderError(
+					"parallel",
+					`Parallel MCP request failed (${response.status}): ${errorText}`,
+					response.status,
+				);
+			},
+			onParseError: () => new SearchProviderError("parallel", "Failed to parse Parallel MCP response"),
+		},
+	);
+
+	if (mcpResponse.error) {
+		throw new SearchProviderError("parallel", `Parallel MCP error: ${mcpResponse.error.message}`);
+	}
+	const result = toMcpToolResult(mcpResponse.result);
+	if (result?.isError) {
+		const message = result.content?.find(item => item.type === "text" && typeof item.text === "string")?.text?.trim();
+		throw new SearchProviderError("parallel", message || "Parallel MCP returned an error");
+	}
+	if (result?.structuredContent !== undefined) {
+		return parseParallelSearchPayload(result.structuredContent, { parseMetadata: false });
+	}
+	for (const item of result?.content ?? []) {
+		if (item.type !== "text" || typeof item.text !== "string") continue;
+		let payload: unknown;
+		try {
+			payload = JSON.parse(item.text);
+		} catch {
+			continue;
+		}
+		return parseParallelSearchPayload(payload, { parseMetadata: false });
+	}
+
+	if (result) {
+		return parseParallelSearchPayload({ results: [] }, { parseMetadata: false });
+	}
+
+	throw new SearchProviderError("parallel", "Parallel MCP search returned an unexpected response shape.");
+}
+
 async function searchWithAuthStorage(
 	objective: string,
 	queries: string[],
@@ -73,23 +161,30 @@ async function searchWithAuthStorage(
 		signal?: AbortSignal;
 		timeoutMs?: number;
 		fetch?: FetchImpl;
+		mcpQuery: string;
+		modelName?: string;
 	},
 	authStorage: AuthStorage,
 	sessionId?: string,
 	sourcePolicy?: ParallelSourcePolicy,
 ): Promise<ParallelSearchResult> {
-	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
+	const hasConfiguredAuth = authStorage.keys.source("parallel") !== undefined;
+	const apiKey = await authStorage.keys.get("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
-		throw new ParallelApiError(
-			"Parallel credentials not found. Set PARALLEL_API_KEY or login with 'omp /login parallel'.",
-		);
+		// A failed credential lookup must not admit anonymous search to the automatic chain.
+		if (hasConfiguredAuth) {
+			throw new ParallelApiError(
+				"Parallel credentials could not be resolved. Check your configured API key or credential helper.",
+			);
+		}
+		return searchWithPublicMcp(objective, [params.mcpQuery], params, sessionId);
 	}
 
 	// Drive the (already-present) credential through the central force-refresh /
 	// sibling-rotate retry policy. The `ParallelApiError` thrown below carries a
 	// `statusCode`, which `withAuth`'s default classifier reads to detect a
 	// retryable 401 / usage-limit.
-	const keyOrResolver: ApiKey = authStorage.resolver("parallel", { sessionId });
+	const keyOrResolver: ApiKey = authStorage.keys.resolver("parallel", { sessionId });
 	return withAuth(
 		keyOrResolver,
 		async key => {
@@ -133,6 +228,7 @@ export async function searchParallel(
 		timeoutMs?: number;
 		fetch?: FetchImpl;
 		parsedQuery?: StructuredQuery;
+		modelName?: string;
 	},
 	authStorage: AuthStorage,
 	sessionId?: string,
@@ -142,6 +238,9 @@ export async function searchParallel(
 	// Directives are removed only where Parallel has a native equivalent.
 	const query = parsed.hasDirectives ? formatQuery(parsed, PARALLEL_QUERY_SYNTAX) : params.query;
 	const sourcePolicy = toSourcePolicy(parsed, params.recency);
+	const rawMcpQuery = parsed.hasDirectives ? formatQuery(parsed, PARALLEL_MCP_QUERY_SYNTAX) : params.query;
+	const mcpQuery =
+		!parsed.after && sourcePolicy?.after_date ? `${rawMcpQuery} after:${sourcePolicy.after_date}` : rawMcpQuery;
 
 	try {
 		const result = await searchWithAuthStorage(
@@ -151,6 +250,8 @@ export async function searchParallel(
 				signal: params.signal,
 				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
+				mcpQuery,
+				modelName: params.modelName,
 			},
 			authStorage,
 			sessionId,
@@ -178,8 +279,9 @@ export class ParallelProvider extends SearchProvider {
 	readonly id = "parallel";
 	readonly label = "Parallel";
 
-	isAvailable(authStorage: AuthStorage) {
-		return !!getEnvApiKey("parallel") || authStorage.hasAuth("parallel");
+	/** Always available: without a credential, search runs through the keyless public MCP. */
+	isAvailable(_authStorage: AuthStorage): boolean {
+		return true;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
@@ -192,6 +294,7 @@ export class ParallelProvider extends SearchProvider {
 				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 				parsedQuery: params.parsedQuery,
+				modelName: params.model.id,
 			},
 			params.authStorage,
 			params.sessionId,

@@ -1,116 +1,158 @@
 # Adding a provider
 
-A provider is described in two halves:
+A built-in provider is described in two halves:
 
-- **Catalog half** (`packages/catalog`): one entry in the `CATALOG_PROVIDERS`
-  table (`packages/catalog/src/provider-models/descriptors.ts`) carrying the
-  `id`, `defaultModel`, runtime model-discovery factory, and catalog-generation
-  wiring. `KnownProvider`, `PROVIDER_DESCRIPTORS`, and
-  `DEFAULT_MODEL_PER_PROVIDER` are derived from this table.
-- **Auth half** (`packages/ai`): one declarative `ProviderDefinition` in the
-  registry carrying env-key fallbacks and login/refresh flows. The
-  `OAuthProvider` union, the env-key map, the `/login` provider list, the
-  `refreshOAuthToken` / `AuthStorage.login` dispatch, and the coding-agent
-  callback maps are derived from the registry.
+- **Catalog half** (`packages/catalog`): a `provider "<id>"` entry in
+  `src/compat/rules/providers/<id>.kdl` carrying the default model, environment
+  variables, catalog-discovery policy, seed models, and provider compat rules.
+  Runtime discovery factories live in
+  `src/provider-models/descriptors.ts`'s `MODEL_MANAGER_FACTORIES` table.
+  `KnownProvider`, `PROVIDER_DESCRIPTORS`, and `DEFAULT_MODEL_PER_PROVIDER`
+  derive from the compiled catalog entries and that factory table.
+- **Auth half** (`packages/catalog` + `packages/ai`): an
+  `auth "<id>"` entry in `packages/catalog/src/compat/rules/auth/<id>.kdl`.
+  `packages/ai/src/registry/build.ts` interprets the compiled policy into a
+  `ProviderDefinition`. The OAuth-provider union, environment-key map,
+  `/login` provider list, login/refresh dispatch, and coding-agent callback maps
+  derive from this registry. Provider-specific TypeScript hooks are only needed
+  when the declarative engines cannot express the behavior.
 
 **Scope.** This is for a provider that reuses an existing wire API
-(`openai-completions`, `anthropic-messages`, `google-generative-ai`, …) — the
-common case for gateways and API-key providers, since stream dispatch keys on
-`model.api`, not `model.provider`. Adding a _new wire protocol_ (a new
-`KnownApi`) is a separate task that also touches `stream.ts` dispatch,
-`api-registry.ts`, and the catalog `types.ts`.
+(`openai-completions`, `openai-responses`, `anthropic-messages`,
+`google-generative-ai`, …). Dispatch keys on `model.api`, not just
+`model.provider`. A new built-in wire protocol also needs its transport and
+registration in `packages/ai/src/providers/register-builtins.ts`, dispatch in
+`stream.ts`, reserved API registration in `api-registry.ts`, and catalog API
+and compat/compiler definitions. Extensions can instead register a custom API.
 
 ## Shape
 
-For the common case, a provider is **one catalog entry + one def file + one registry line**:
+For an API-key gateway, start with catalog and auth KDL files; add a discovery
+factory only if the provider supports model listing.
 
-1. **Add an entry to `CATALOG_PROVIDERS`** in
-   `packages/catalog/src/provider-models/descriptors.ts` with the `id`,
-   `defaultModel`, the plain API-key env var(s) as `envVars`, and (usually) a
-   `createModelManagerOptions` factory. For a
-   simple OpenAI-compatible gateway, build the factory in
-   `packages/catalog/src/provider-models/openai-compat.ts` or inline with the
-   exported `createSimpleOpenAICompletionsOptions(providerId, baseUrl, config)`.
-2. **Create `packages/ai/src/registry/<id>.ts`** exporting one
-   `export const <camelId>Provider = { … } as const satisfies ProviderDefinition;`
-   with the auth fields (`login`, …). Plain env-var names live in the catalog
-   entry's `envVars`; set `envKeys` only for computed resolvers (Foundry/ADC/
-   Bedrock-style probes).
-3. **Add it to the `ALL` array** in `packages/ai/src/registry/registry.ts`
-   (one import + one array entry). `ALL` order is the `/login` list order for
-   loginable providers.
+1. **Add `packages/catalog/src/compat/rules/providers/<id>.kdl`.**
+   `default-model` makes the entry a catalog provider; a provider rule without
+   it is wire-compat-only. Put ordinary API-key environment names in `env`, in
+   precedence order. Add reviewed seed rows when models must be bundled, and
+   provider/model compat directives when the endpoint differs from API defaults.
+2. **Add `packages/catalog/src/compat/rules/auth/<id>.kdl`.**
+   `name` is required. An env-only provider needs no `login` node. For a simple
+   API-key login, declare the dashboard URL, prompt, and an appropriate protected
+   validation endpoint. Public `/models` endpoints cannot validate a key.
+   Auth `env` overrides catalog `env`; use it for auth-specific aliases or an
+   `env hook="…"` computed resolver.
+3. **If login is visible, add its ID to `auth/_order.kdl`.**
+   The compiler requires every visible loginable provider in `login-order`.
+   There is no hand-maintained `ALL` array or per-provider definition file in
+   `packages/ai/src/registry/`.
+4. **If models are discoverable, add a factory to `MODEL_MANAGER_FACTORIES`**
+   in `packages/catalog/src/provider-models/descriptors.ts`. A simple
+   OpenAI-compatible gateway can call the exported
+   `createSimpleOpenAICompletionsOptions(providerId, baseUrl, config)` from
+   `provider-models/openai-compat.ts`. A KDL `discovery` node alone does not
+   create a runtime factory. The bespoke Google OAuth and Codex managers are
+   constructed by the coding-agent runtime instead.
+5. **Regenerate compiled rules and the bundled catalog.** From the repo root,
+   run `bun run gen:compat`, then `bun run gen:models` with the discovery
+   credentials needed by the provider. `gen:compat` writes `rules.json`,
+   `auth-ids.ts`, and `provider-ids.ts` under `packages/catalog/src/compat/`.
+   Do not edit these generated files by hand.
 
-That is the full change for:
+For example, a static OpenAI-compatible gateway can declare its catalog row as:
 
-- env-key-only providers,
-- providers with a simple inline API-key login flow,
-- most OpenAI-compatible gateways.
+```kdl
+provider "my-gateway" {
+    default-model "chat-model"
+    env "MY_GATEWAY_API_KEY"
+    seed api="openai-completions" base-url="https://gateway.example.com/v1" {
+        model "chat-model" name="Gateway Chat" {
+            reasoning #false
+            input "text"
+            cost input=1 output=2 cache-read=0 cache-write=0
+            limits context=128000 max-tokens=8192
+        }
+    }
+}
+```
 
-For a **non-trivial provider-local OAuth flow**, put the implementation in
-`packages/ai/src/registry/oauth/<vendor>.ts` and lazy-import it from the def
-file. The shared OAuth flow infrastructure it builds on lives in the same
-`registry/oauth/` directory.
+Its env-only auth policy is:
 
-Descriptors, the default-model map, env-key map, login list, and refresh
-dispatch all update automatically; the `KnownProvider` union gains the new id
-from the catalog table and `OAuthProvider` from the registry.
+```kdl
+auth "my-gateway" {
+    name "My Gateway"
+}
+```
+
+The endpoint, limits, modalities, and per-million-token prices above are example
+values; use the provider's verified deployment contract. Examples under
+`packages/catalog/src/compat/rules/auth/` include `deepinfra.kdl` for API-key
+login with inference validation, `anthropic.kdl` for a declarative
+authorization-code flow, and `github-copilot.kdl` for a custom flow.
 
 ## Field reference
 
-**Catalog table entry** (`ProviderCatalogEntry`, see
-`packages/catalog/src/provider-models/descriptor-types.ts` for JSDoc):
+**Catalog KDL** (compiled by
+`packages/catalog/scripts/compat-compiler/compile-providers.ts`):
 
-| Field                        | Effect                                                                                                                                                                                                                        |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                         | Required. Member of `KnownProvider`.                                                                                                                                                                                          |
-| `defaultModel`               | Required. Preferred model when no explicit selection is made.                                                                                                                                                                 |
-| `envVars`                    | Env var name(s), in order, for the runtime API-key fallback (`getEnvApiKey`).                                                                                                                                                 |
-| `createModelManagerOptions`  | Runtime model-discovery factory. Present (and not `specialModelManager`) ⇒ appears in `PROVIDER_DESCRIPTORS`.                                                                                                                 |
-| `allowUnauthenticated`       | Runtime creates a model manager even without a key.                                                                                                                                                                           |
-| `dynamicModelsAuthoritative` | Successful discovery replaces bundled models.                                                                                                                                                                                 |
-| `catalogDiscovery`           | `{ label, envVars?, oauthProvider?, allowUnauthenticated? }` for offline catalog generation (`generate-models.ts`). `envVars` here overrides the entry-level list when generation uses different credentials (e.g. `cursor`). |
-| `specialModelManager`        | Bespoke runtime factory (`google-antigravity` / `google-gemini-cli` / `openai-codex`); excluded from `PROVIDER_DESCRIPTORS`.                                                                                                  |
+| Node | Effect |
+| ---- | ------ |
+| `default-model "id"` | Required for a catalog entry. Supplies `DEFAULT_MODEL_PER_PROVIDER`. |
+| `env "VAR" …` | Ordered runtime API-key environment fallbacks, unless overridden by auth policy. |
+| `allow-unauthenticated #true` | Allows runtime discovery-manager creation without credentials. Does not by itself make hosted inference keyless. |
+| `dynamic-models-authoritative #true` | Successful discovery replaces bundled provider models rather than retaining fallback-only IDs. |
+| `skip-cross-provider-reference-fills #true` | Prevents generation from borrowing reasoning, modalities, and limits from same-ID rows on other providers. |
+| `discovery label="…"` | Enables catalog generation for an entry with a discovery factory. Optional `oauth-provider`, `allow-unauthenticated`, and child `env` select generation credentials/policy. |
+| `seed api="…" base-url="…"` | Defines reviewed model rows; individual rows may override API and base URL. Each row needs `name`, `reasoning`, `input`, `cost`, and `limits`. |
+| Seed `bundle` / `precedence` | `bundle="always"` is the default; `"fallback"` omits seeds after authoritative discovery, and `"empty"` emits them only if the provider has no rows. Default `precedence="upstream"` lets upstream rows win; `"seed"` pins the seed row. |
+| `kind-apis { … }` | Maps non-chat catalog kinds to their runner APIs. |
+| Compat/thinking/catalog directives | Deployment policy, optionally scoped to classes, revisions, families, or model IDs. See `src/compat/axes.ts` and existing provider rules. |
 
-**Registry definition** (`ProviderDefinition`, see
-`packages/ai/src/registry/types.ts`):
+**Auth KDL** (compiled by
+`packages/catalog/scripts/compat-compiler/compile-auth.ts`):
 
-| Field                   | Effect                                                                                                                                                                                                    |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`, `name`            | Required. `name` shows in the `/login` list when the definition has a visible login flow.                                                                                                                 |
-| `available`             | Optional login-list availability flag.                                                                                                                                                                    |
-| `showInLoginList`       | Set to `false` to keep a provider with a `login` flow out of the interactive list.                                                                                                                        |
-| `envKeys`               | Computed env fallback for `getEnvApiKey`, overriding the catalog entry's `envVars`: a var name string or a `() => string \| undefined` resolver. Omit when `envVars` covers it.                           |
-| `allowsMissingApiKey`   | The provider transport can authenticate without a resolved API-key string.                                                                                                                                |
-| `prepareRequest`        | Provider-owned request shaping before generic API dispatch. Returns the model and stream options to dispatch.                                                                                             |
-| `mapSimpleOptions`      | Projects the generic simple-stream option bag into provider-owned options.                                                                                                                                |
-| `prepareModelDiscovery` | Provider-owned authentication or endpoint setup for runtime model discovery.                                                                                                                              |
-| `login`                 | Interactive login. Present ⇒ member of `OAuthProvider`, dispatchable via `AuthStorage.login`, and shown in `/login` unless `showInLoginList` is false. Returns an API-key `string` or `OAuthCredentials`. |
-| `refreshToken`          | OAuth refresher; omit for static-token providers (the dispatch returns credentials unchanged).                                                                                                            |
-| `getApiKey`             | Converts stored OAuth credentials into the API-key/token string used by the transport.                                                                                                                    |
-| `storeCredentialsAs`    | Store credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`).                                                                                                            |
-| `callbackPort`          | Present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.                                                                                                                                                  |
-| `pasteCodeFlow`         | OAuth flow needs a pasted code/redirect URL ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.                                                                                                                     |
+| Node | Effect |
+| ---- | ------ |
+| `name "…"` | Required display name. |
+| `env "VAR" …` / `env hook="…"` | Overrides catalog environment fallbacks with an ordered list or computed resolver. |
+| `login "api-key" { … }` | Paste-a-key login with optional validation. |
+| `login "oauth-code" { … }` | Declarative authorization-code flow. Requires an explicit `refresh` policy. |
+| `login "device-code" { … }` | Declarative device-code flow. Requires an explicit `refresh` policy. |
+| `login "custom" hook="…"` | Lazy whole-flow hook when the declarative grammar is insufficient. |
+| `refresh { … }` / `refresh hook="…"` / `refresh "none"` | Token refresh policy, custom refresher, or explicit no-refresh policy. |
+| `available #false` | Marks the login entry unavailable. |
+| `show-in-login-list #false` | Hides a login flow from the interactive list. |
+| `store-as "id"` | Stores credentials under another provider ID. |
+| `callback-port N`, `paste-code #true` | Coding-agent/broker callback metadata; OAuth-code flows derive these from their callback policy unless overridden. |
+| `oauth-token-env "VAR" …` | Dedicated OAuth environment tokens; borrowed API-key aliases do not make this provider automatically available. |
+| `org-scoped-identity #true` | Distinguishes stored accounts by organization as well as identity. |
+| `api-key-format "structured"` | Declares a transport-specific credential encoding rather than a plain bearer. |
+| `allows-missing-api-key #true`, `native-auth-api "api" …` | Marks transport-owned authentication paths. |
+
+The compiled types in `packages/catalog/src/compat/types.ts` and the compiler
+are the complete grammar reference. The materialized runtime interface is
+`packages/ai/src/registry/types.ts`'s `ProviderDefinition`, not the authoring
+format for built-ins.
 
 ## Conventions
 
-- Use `... as const satisfies ProviderDefinition` so the literal `id` is preserved
-  for the union derivation.
-- `login` / `refreshToken` for simple API-key or validation-based flows can live
-  directly in the provider def file (export the named login function there so
-  tests can import it directly).
-- `login` / `refreshToken` for heavy provider-local OAuth flows MUST reach the
-  adjacent `registry/oauth/*` module via a dynamic-import
-  thunk (`const { loginX } = await import("./oauth/x"); return loginX(cb);`),
-  keeping those flows out of the eager startup graph.
-- All OAuth code lives under `registry/oauth/`: the shared flow infra
-  (`callback-server`, `pkce`, `google-oauth-shared`, `types`, the runtime API
-  `index`) plus every provider flow, including the `github-copilot` / `kimi` /
-  `openai-codex` helpers reused by the streaming and usage layers. The non-OAuth
-  API-key helpers (`api-key-login`, `api-key-validation`) sit beside the def
-  files in `registry/`, since they back simple paste-an-API-key logins.
-- For a simple OpenAI-compatible gateway, build the manager inline with the
-  exported `createSimpleOpenAICompletionsOptions(providerId, baseUrl, config)` —
-  no edits to `openai-compat.ts` required.
-- A `ProviderDefinition` may also be registered at runtime by an extension via
-  `registerOAuthProvider` (the `AuthStorage.login` dispatcher handles built-ins
-  and extensions through the same path).
+- Put pure provider/model policy in KDL rather than adding provider-name branches
+  to transports. `resolveModelPolicy` in `packages/catalog/src/compat/resolve.ts`
+  applies API defaults, endpoint detection, the KDL cascade, then sparse model
+  overrides/fixups; thinking metadata resolves afterward.
+- Prefer the shared engines in `packages/ai/src/registry/engine/` for API-key,
+  OAuth-code, device-code, and refresh flows. Register computed or custom pieces
+  in the appropriate domain table under `registry/hooks/`.
+- Heavy provider-local OAuth modules belong under `registry/oauth/` and must be
+  reached through lazy hook imports, not eager registry imports.
+- Request/model/discovery shaping that truly needs code belongs in a
+  `ProviderTransport` and an entry in `registry.ts`'s `TRANSPORTS` table. Hooks
+  include `prepareModel`, `prepareRequest`, `mapSimpleOptions`, and
+  `prepareModelDiscovery`.
+- Extensions register an `OAuthProviderInterface` through
+  `registerOAuthProvider`, not a built-in KDL policy or transport definition.
+  Built-in and extension logins use the same `AuthStorage.oauth.login`
+  dispatcher; extension model/API registration is handled separately.
+- Exercise login against its actual credential-protected surface, model
+  discovery, and inference with tools/reasoning where supported. Check the
+  [endpoint constraints](./provider-endpoint-constraints.md) before reusing a
+  protocol adapter or adding compat policy.

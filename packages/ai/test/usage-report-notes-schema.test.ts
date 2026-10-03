@@ -6,7 +6,7 @@
  * `usage.ts` schema and the `auth-broker/wire-schemas.ts` copy must declare
  * `notes?: string[]` at the report level, or the field is lost on
  * deserialization. `usageReportSchema` (the non-broker copy) must also accept
- * the field so local `AuthStorage.fetchUsageReports` results type-check.
+ * the field so local `AuthStorage.usage.reports` results type-check.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -80,5 +80,44 @@ describe("usage report notes wire schema", () => {
 
 		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
 		expect(brokered).not.toBeInstanceOf(type.errors);
+	});
+
+	it("both schema copies preserve normalized reset eligibility and credit metadata", () => {
+		const report = {
+			...reportWithNotes(),
+			resetCredits: {
+				availableCount: 2,
+				redeemableCount: 2,
+				nextCreditId: "grant_1",
+				eligible: true,
+				cooldownUntil: "2099-09-28T00:00:00.000Z",
+				credits: [
+					{
+						id: "grant_1",
+						title: "Anytime reset",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: true,
+						requiresLimit: false,
+						clears: ["anthropic:5h", "anthropic:7d:opus"],
+						blocking: ["anthropic:7d"],
+						usedFractions: { "anthropic:5h": 1, "anthropic:7d": 0.75 },
+						grantedAt: "2026-09-01T00:00:00.000Z",
+						expiresAt: "2099-10-01T00:00:00.000Z",
+						status: "available",
+					},
+				],
+			},
+		};
+
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+		if (local instanceof type.errors) throw new Error("expected valid local report");
+		expect(local.resetCredits).toEqual(report.resetCredits);
+
+		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
+		expect(brokered).not.toBeInstanceOf(type.errors);
+		if (brokered instanceof type.errors) throw new Error("expected valid broker response");
+		expect(brokered.reports[0]?.resetCredits).toEqual(report.resetCredits);
 	});
 });

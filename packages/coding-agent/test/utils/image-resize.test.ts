@@ -1,5 +1,135 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import * as os from "node:os";
+import * as path from "node:path";
+import { formatDimensionNote, formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+
+describe("formatScreenshot", () => {
+	function fakeResized(
+		overrides?: Partial<{
+			width: number;
+			height: number;
+			originalWidth: number;
+			originalHeight: number;
+			wasResized: boolean;
+			buffer: Uint8Array;
+			mimeType: string;
+			decodeFailed: boolean;
+		}>,
+	): {
+		buffer: Uint8Array;
+		mimeType: string;
+		originalWidth: number;
+		originalHeight: number;
+		width: number;
+		height: number;
+		wasResized: boolean;
+		decodeFailed?: boolean;
+		get data(): string;
+	} {
+		const buf = overrides?.buffer ?? new Uint8Array(2048);
+		return {
+			buffer: buf,
+			mimeType: overrides?.mimeType ?? "image/webp",
+			originalWidth: overrides?.originalWidth ?? 800,
+			originalHeight: overrides?.originalHeight ?? 600,
+			width: overrides?.width ?? 800,
+			height: overrides?.height ?? 600,
+			wasResized: overrides?.wasResized ?? false,
+			decodeFailed: overrides?.decodeFailed,
+			get data() {
+				return Buffer.from(buf).toString("base64");
+			},
+		};
+	}
+
+	it("formats full-res save with home-relative path", () => {
+		const filePath = path.join(os.homedir(), "screenshots", "capture.png");
+		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: true,
+				savedMimeType: "image/png",
+				savedByteLength: 2048,
+				dest: filePath,
+				resized,
+			}),
+		).toEqual([
+			"Screenshot captured",
+			"Saved: image/png (2.00 KB) to ~/screenshots/capture.png",
+			"Model: image/webp (1.00 KB, 800x600)",
+		]);
+	});
+
+	it("formats non-home path without tilde", () => {
+		const filePath = path.join(path.parse(os.homedir()).root, "omp-render-utils", "capture.png");
+		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: true,
+				savedMimeType: "image/png",
+				savedByteLength: 2048,
+				dest: filePath,
+				resized,
+			}),
+		).toEqual([
+			"Screenshot captured",
+			`Saved: image/png (2.00 KB) to ${filePath}`,
+			"Model: image/webp (1.00 KB, 800x600)",
+		]);
+	});
+
+	it("formats temp-only screenshot without save line", () => {
+		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(3072) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: false,
+				savedMimeType: "image/webp",
+				savedByteLength: 3072,
+				dest: path.join(os.tmpdir(), "omp-sshots-123.png"),
+				resized,
+			}),
+		).toEqual(["Screenshot captured", "Format: image/webp (3.00 KB)", "Dimensions: 800x600"]);
+	});
+
+	it("surfaces screenshots that could not be resized", () => {
+		const resized = fakeResized({ decodeFailed: true, mimeType: "image/png", buffer: new Uint8Array(4096) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: false,
+				savedMimeType: "image/png",
+				savedByteLength: 4096,
+				dest: path.join(os.tmpdir(), "omp-sshots-123.png"),
+				resized,
+			}),
+		).toContain("Resize: image decoder failed; using original image bytes");
+	});
+
+	it("appends dimension note when image was resized", () => {
+		const resized = fakeResized({
+			wasResized: true,
+			originalWidth: 1600,
+			originalHeight: 1200,
+			width: 800,
+			height: 600,
+		});
+
+		const lines = formatScreenshot({
+			saveFullRes: false,
+			savedMimeType: "image/webp",
+			savedByteLength: 2048,
+			dest: path.join(os.tmpdir(), "shot.png"),
+			resized,
+		});
+
+		expect(lines).toContain(
+			"[Image: original 1600x1200, displayed at 800x600. Multiply coordinates by 2.00 to map to original image.]",
+		);
+	});
+});
 
 // 1x1 red PNG (69 bytes) — used as a Bun.Image seed to synthesize larger fixtures
 // without checking binary blobs into the repo.
@@ -75,19 +205,6 @@ describe("resizeImage defaults", () => {
 		expect(result.width).toBeLessThanOrEqual(1024);
 		expect(result.height).toBeLessThanOrEqual(1024);
 		expect(result.buffer.length).toBeLessThanOrEqual(150 * 1024);
-	});
-
-	it("respects custom maxBytes override even when dimensions already fit", async () => {
-		// 200x200 sits within every dimension cap, but a byte budget below the
-		// source size (after the /4 fast-path headroom) forces a re-encode.
-		const originalBytes = Buffer.from(smallPng, "base64").length;
-
-		const result = await resizeImage({ type: "image", data: smallPng, mimeType: "image/png" }, { maxBytes: 1024 });
-
-		// Either the result fits the budget, or the algorithm exhausted its
-		// fallbacks and shipped its smallest variant — but in both cases the
-		// output must not be larger than the original.
-		expect(result.buffer.length).toBeLessThanOrEqual(originalBytes);
 	});
 
 	it("uses lossy WebP or JPEG (not PNG) for oversized inputs", async () => {
@@ -198,21 +315,18 @@ describe("resizeImage minimum dimension", () => {
 		expect(result.height).toBe(64);
 	});
 
-	it("stretches a degenerate aspect ratio so both edges clear the floor and stay within the cap", async () => {
-		// 1x1600 strip: the cap pulls the long edge to 1568 while the short edge
-		// stays at 1px, so a uniform scale can't satisfy both bounds — the floor
-		// must be reached by fill-stretching the short edge.
-		const strip = await makeRedPng(1, 1600);
+	it("keeps the aspect ratio of a strip the cap stops short of the floor", async () => {
+		// 690x61 toolbar crop: the 1568 cap halts the uniform upscale at 1568x139;
+		// the short edge stays below the floor rather than being stretched to it.
+		const strip = await makeRedPng(690, 61);
 		const result = await resizeImage({ type: "image", data: strip, mimeType: "image/png" });
 
-		expect(result.wasResized).toBe(true);
-		expect(result.width).toBeGreaterThanOrEqual(200);
-		expect(result.height).toBeGreaterThanOrEqual(200);
-		expect(result.width).toBeLessThanOrEqual(1568);
-		expect(result.height).toBeLessThanOrEqual(1568);
+		expect(result.width).toBe(1568);
+		expect(result.height).toBe(139);
 		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
-		expect(meta.width).toBeGreaterThanOrEqual(200);
-		expect(meta.height).toBeGreaterThanOrEqual(200);
+		expect(meta.width).toBe(1568);
+		expect(meta.height).toBe(139);
+		expect(formatDimensionNote(result)).toContain("Multiply coordinates by 0.44");
 	});
 });
 

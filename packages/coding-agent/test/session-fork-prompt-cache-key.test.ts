@@ -52,7 +52,7 @@ async function createMinimalSession(
 	options: CreateAgentSessionOptions,
 ): Promise<{ session: AgentSession; authStorage: AuthStorage }> {
 	const authStorage = await AuthStorage.create(tempDir.join("sdk-auth.db"));
-	authStorage.setRuntimeApiKey("openai", "test-key");
+	authStorage.keys.setRuntime("openai", "test-key");
 	const shouldSupplyModel = options.sessionManager?.getHeader()?.parentSession === undefined;
 	const result = await createAgentSession({
 		...options,
@@ -200,7 +200,7 @@ describe("provider prompt-cache key session affinity", () => {
 		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-scoped");
 		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
 		const authStorage = await AuthStorage.create(tempDir.join("scoped-auth.db"));
-		authStorage.setRuntimeApiKey(OPENAI_TEST_MODEL.provider, "test-key");
+		authStorage.keys.setRuntime(OPENAI_TEST_MODEL.provider, "test-key");
 		try {
 			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 			const parsed = parseArgs([

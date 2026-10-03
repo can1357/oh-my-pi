@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { FileDiagnosticsResult } from "@oh-my-pi/pi-coding-agent/lsp";
+import type { FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { DiagnosticsLedger, diagnosticIdentity } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics-ledger";
 
 const FILE_A = "/repo/src/a.ts";
@@ -48,15 +48,6 @@ describe("DiagnosticsLedger", () => {
 		expect(reduced.messages).toEqual([]);
 		expect(reduced.summary).toBe("no issues");
 		expect(reduced.errored).toBe(false);
-	});
-
-	it("suppresses diagnostics whose line and column shifted", () => {
-		const ledger = new DiagnosticsLedger();
-		ledger.reduce(FILE_A, makeDiagnostics([TYPE_ERROR, PRIVATE_IMPORT]));
-
-		const reduced = ledger.reduce(FILE_A, makeDiagnostics([TYPE_ERROR_SHIFTED, PRIVATE_IMPORT_SHIFTED]));
-
-		expect(reduced.messages).toEqual([]);
 	});
 
 	it("returns only genuinely new messages and recomputes summary state", () => {

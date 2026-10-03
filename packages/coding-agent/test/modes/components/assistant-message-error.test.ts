@@ -1,11 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	AssistantMessageComponent,
-	resetThinkingSpeedTracker,
-} from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent, resetThinkingSpeedTracker } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 const originalImageProtocol = TERMINAL.imageProtocol;
@@ -79,24 +76,24 @@ describe("AssistantMessageComponent error rendering", () => {
 		expect(lines.length).toBeLessThan(15);
 	});
 
-	it("clamps the line count of a runaway error body", () => {
+	it("clamps the row count of a runaway error body", () => {
 		const lines = renderLines(erroredMessage(proxy502));
 		const markerLines = lines.filter(line => line.includes("marker-"));
-		// MAX_TRANSCRIPT_ERROR_LINES is 8; the first preview line is the long line,
-		// so at most 7 markers survive — and the late ones are gone entirely.
-		expect(markerLines.length).toBeLessThanOrEqual(8);
+		// MAX_TRANSCRIPT_ERROR_ROWS is 8; the wrapped long line spends several of
+		// them, so only the first few markers survive — the late ones are gone.
+		expect(markerLines.length).toBeLessThanOrEqual(7);
 		expect(lines.some(line => line.includes("marker-0"))).toBe(true);
 		expect(lines.some(line => line.includes("marker-24"))).toBe(false);
 	});
 
-	it("width-truncates an overlong error line", () => {
+	it("wraps an overlong error line within the render width instead of cutting it", () => {
 		const lines = renderLines(erroredMessage(proxy502));
-		const head = lines.find(line => line.trim().startsWith("Error:"));
-		expect(head).toBeDefined();
-		// 300 'x' chars must not survive the render width; the line is truncated
-		// with an ellipsis well under the 120-col terminal width.
-		expect(head?.includes("…")).toBe(true);
-		expect(head?.length).toBeLessThan(RENDER_WIDTH);
+		// Every row fits the terminal, and the 300-char line is fully readable
+		// across rows rather than ending in an ellipsis at a fixed column.
+		for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(RENDER_WIDTH);
+		const body = lines.filter(line => !line.includes("more lines"));
+		expect((body.join("").match(/x/g) ?? []).length).toBe(300);
+		expect(body.some(line => line.includes("…"))).toBe(false);
 	});
 
 	it("renders a short single-line error unchanged", () => {

@@ -1,14 +1,20 @@
-import { type AsciiRenderOptions, renderMermaidASCII } from "./vendor/mermaid-ascii";
+import { type MermaidRenderOptions, renderMermaidAscii } from "@oh-my-pi/pi-natives";
 
-export type { AsciiRenderOptions as MermaidAsciiRenderOptions };
+/**
+ * Native Mermaid → ASCII/Unicode renderer (flowchart, state, sequence, class,
+ * ER, xychart). Synchronous because callers render inside the compositor;
+ * throws on empty input, an unknown flowchart header, or an invalid
+ * `direction`/`colorMode` value.
+ */
+export { renderMermaidAscii };
 
-export function renderMermaidAscii(source: string, options?: AsciiRenderOptions): string {
-	return renderMermaidASCII(source, options);
-}
+/** Options for {@link renderMermaidAscii}; every field optional. */
+export type MermaidAsciiRenderOptions = MermaidRenderOptions;
 
-export function renderMermaidAsciiSafe(source: string, options?: AsciiRenderOptions): string | null {
+/** {@link renderMermaidAscii}, returning `null` instead of throwing. */
+export function renderMermaidAsciiSafe(source: string, options?: MermaidAsciiRenderOptions): string | null {
 	try {
-		return renderMermaidASCII(source, options);
+		return renderMermaidAscii(source, options);
 	} catch {
 		return null;
 	}

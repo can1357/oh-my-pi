@@ -23,6 +23,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { refreshDirsFromEnv, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -30,7 +31,7 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memor
 /** Minimal host `InteractiveModeContext`: only the members `CollabHost` reads. */
 function makeHostContext(manager: SessionManager): InteractiveModeContext {
 	return {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		session: {
 			isStreaming: false,
@@ -77,7 +78,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 	const session = new AgentSession({ agent, sessionManager: manager, settings: Settings.isolated(), modelRegistry });
 
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		session,
 		statusContainer: { clear: () => {}, disposeChildren: () => {} },
@@ -106,7 +107,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		reloadTodos: () => Promise.resolve(),
 		showStatus: () => {},
 		showError: () => {},
-		eventController: { handleEvent: () => Promise.resolve() },
+		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
 		eventBus: undefined,
 		collabGuest: undefined,
 		handleResumeSession: () => Promise.resolve(),
@@ -153,7 +154,7 @@ beforeAll(() => {
 	refreshDirsFromEnv();
 	installInMemoryRelay();
 	authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	authStorage.keys.setRuntime("anthropic", "test-key");
 	modelRegistry = new ModelRegistry(authStorage);
 	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!bundled) throw new Error("expected bundled anthropic model");
@@ -213,5 +214,43 @@ describe("collab host compaction → guest sync (#9781)", () => {
 		const withFollowup = harness.session.messages;
 		expect(withFollowup[0]?.role).toBe("compactionSummary");
 		expect(withFollowup.at(-1)).toMatchObject({ role: "user", content: "after" });
+	});
+});
+
+describe("collab guest replica identity", () => {
+	it("gives the replica its own session id, kept across a resync, so a guest never contends for the host's lease", async () => {
+		const hostManager = SessionManager.inMemory();
+		hostManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+		hostManager.appendMessage(createAssistantMessage("reply"));
+		const keptId = hostManager.appendMessage({ role: "user", content: "keep", timestamp: Date.now() });
+		const host = new CollabHost(makeHostContext(hostManager));
+		await host.start("ws://localhost:8788");
+		cleanups.push(() => host.stop("test done"));
+		const harness = makeGuestHarness(model, modelRegistry);
+		cleanups.push(harness.dispose);
+
+		await harness.guest.join(host.link);
+		await settleFrames(() => harness.session.messages.length === 3);
+
+		// The lease is keyed by session id: sharing the host's id would make a
+		// guest on the host's machine displace the host (or be displaced).
+		const replica = harness.session.sessionManager;
+		const replicaId = replica.getSessionId();
+		expect(replicaId).not.toBe(hostManager.getSessionId());
+		expect(replica.getHeader()?.parentSession).toBe(hostManager.getSessionId());
+		// `omp gc` probes this lease: an idle joined guest's replica is live.
+		const leaseFree = () => {
+			const probe = tryAcquireSessionLease(replicaId);
+			probe?.release();
+			return probe !== null;
+		};
+		expect(leaseFree()).toBe(false);
+
+		// A host compaction resyncs the replica. A new id there would hand the
+		// lease off and leave the replica briefly unowned.
+		hostManager.appendCompaction("SUMMARY", undefined, keptId, 100);
+		await settleFrames(() => harness.session.messages[0]?.role === "compactionSummary");
+		expect(harness.session.sessionManager.getSessionId()).toBe(replicaId);
+		expect(leaseFree()).toBe(false);
 	});
 });

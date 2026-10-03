@@ -26,46 +26,26 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
-// Inline the parseClaudePluginsRegistry validation logic to avoid pulling
-// in discovery/helpers.ts which transitively imports @oh-my-pi/pi-natives.
-// Matches the exact checks in helpers.ts parseClaudePluginsRegistry().
-function validateClaudeRegistryFormat(content: string): Record<string, unknown> | null {
-	let data: Record<string, unknown>;
-	try {
-		data = JSON.parse(content);
-	} catch {
-		return null;
-	}
-	if (!data || typeof data !== "object") return null;
-	if (
-		typeof data.version !== "number" ||
-		!data.plugins ||
-		typeof data.plugins !== "object" ||
-		Array.isArray(data.plugins)
-	)
-		return null;
-	return data;
-}
-
 // ── ID helpers ───────────────────────────────────────────────────────
 
 describe("isValidNameSegment", () => {
-	it("accepts lowercase alphanumeric with hyphens", () => {
+	it("accepts alphanumeric with hyphens (any case)", () => {
 		expect(isValidNameSegment("hello")).toBe(true);
 		expect(isValidNameSegment("my-plugin")).toBe(true);
 		expect(isValidNameSegment("a1-b2-c3")).toBe(true);
 		expect(isValidNameSegment("x")).toBe(true);
+		expect(isValidNameSegment("Hello")).toBe(true);
+		expect(isValidNameSegment("HexRaysSA")).toBe(true);
+		expect(isValidNameSegment("UPPER")).toBe(true);
 	});
 
 	it("rejects invalid segments", () => {
 		expect(isValidNameSegment("")).toBe(false);
-		expect(isValidNameSegment("Hello")).toBe(false);
 		expect(isValidNameSegment("my plugin")).toBe(false);
 		expect(isValidNameSegment("my@plugin")).toBe(false);
 		expect(isValidNameSegment("my/plugin")).toBe(false);
 		expect(isValidNameSegment("-leading")).toBe(false);
 		expect(isValidNameSegment("trailing-")).toBe(false);
-		expect(isValidNameSegment("UPPER")).toBe(false);
 		expect(isValidNameSegment("a".repeat(65))).toBe(false);
 	});
 });
@@ -80,7 +60,7 @@ describe("buildPluginId / parsePluginId", () => {
 	});
 
 	it("buildPluginId rejects invalid names", () => {
-		expect(() => buildPluginId("Bad", "market")).toThrow(/Invalid plugin name/);
+		expect(() => buildPluginId("bad name", "market")).toThrow(/Invalid plugin name/);
 		expect(() => buildPluginId("ok", "Bad Market")).toThrow(/Invalid marketplace name/);
 	});
 
@@ -101,13 +81,8 @@ describe("buildPluginId / parsePluginId", () => {
 	});
 
 	it("parsePluginId returns null for invalid segments", () => {
-		expect(parsePluginId("BAD@market")).toBeNull();
-		expect(parsePluginId("plugin@BAD")).toBeNull();
-	});
-
-	it("parsePluginId splits on last @", () => {
-		// "a@b" is not a valid name segment (contains @), so this returns null
-		expect(parsePluginId("a@b@c")).toBeNull();
+		expect(parsePluginId("bad name@market")).toBeNull();
+		expect(parsePluginId("plugin@bad name")).toBeNull();
 	});
 });
 
@@ -287,28 +262,6 @@ describe("registry file I/O", () => {
 		await writeInstalledPluginsRegistry(installedPath, reg);
 		const read = await readInstalledPluginsRegistry(installedPath);
 		expect(read).toEqual(reg);
-	});
-
-	it("written installed registry passes Claude Code registry validation", async () => {
-		const entry: InstalledPluginEntry = {
-			scope: "user",
-			installPath: path.join(tmpDir, "cache", "plugins", "mkt--plug--1.0.0"),
-			version: "1.0.0",
-			installedAt: "2025-01-15T10:30:00.000Z",
-			lastUpdated: "2025-01-15T10:30:00.000Z",
-		};
-		const reg: InstalledPluginsRegistry = {
-			version: 2,
-			plugins: { "plug@mkt": [entry] },
-		};
-		await writeInstalledPluginsRegistry(installedPath, reg);
-
-		const content = await Bun.file(installedPath).text();
-		const parsed = validateClaudeRegistryFormat(content);
-		expect(parsed).not.toBeNull();
-		expect(parsed!.version).toBe(2);
-		const plugins = parsed!.plugins as Record<string, unknown>;
-		expect(plugins["plug@mkt"]).toBeDefined();
 	});
 
 	it("atomic write leaves no .tmp file after success", async () => {

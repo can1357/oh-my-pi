@@ -123,10 +123,8 @@ const base = `http://localhost:${server.port}`;
 process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${base}/v1/logs`;
 process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = `${base}/v1/metrics`;
 process.env.OTEL_SERVICE_NAME = "oh-my-pi-signals-probe";
-// Force a short metric export interval so the periodic reader flushes fast.
-process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
 
-await initTelemetryExport();
+await initTelemetryExport(true);
 if (!isTelemetryExportEnabled()) {
 	console.error("PROBE: providers did not register");
 	await server.stop(true);
@@ -146,6 +144,7 @@ logger.error("probe error", { code: "probe" });
 // Metric instruments via the agent telemetry hooks.
 const usage: ChatUsageEvent = {
 	span: undefined as never,
+	operation: "chat",
 	agent: { id: "main", name: "Main" },
 	conversationId: "probe-session",
 	stepNumber: 0,
@@ -195,12 +194,9 @@ const coverage: AgentRunCoverage = {
 config.onRunEnd?.(summary, coverage);
 
 await flushTelemetryExport();
-// The metric reader exports on its own interval; wait one cycle then flush.
-await Bun.sleep(700);
-await flushTelemetryExport();
-assertSingleMetricPoint("pi.omp.agent.chat.calls");
-assertSingleMetricPoint("pi.omp.agent.tool.calls");
-assertSingleMetricPoint("pi.omp.agent.tool.duration");
+assertSingleMetricPoint("omp.agent.chat.calls");
+assertSingleMetricPoint("omp.agent.tool.calls");
+assertSingleMetricPoint("omp.agent.tool.duration");
 await server.stop(true);
 
 const ok = seen.has("logs") && seen.has("metrics");

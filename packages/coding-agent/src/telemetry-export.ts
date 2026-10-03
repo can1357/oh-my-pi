@@ -1,7 +1,7 @@
 /**
  * OTLP telemetry export bootstrap.
  *
- * oh-my-pi's agent core (`@oh-my-pi/pi-agent-core`) emits OpenTelemetry GenAI
+ * omp's agent core (`@oh-my-pi/pi-agent-core`) emits OpenTelemetry GenAI
  * spans through the global `@opentelemetry/api` tracer, and exposes run-level
  * callbacks for metrics/log pipelines. This module resolves the standard
  * `OTEL_*` env contract (endpoint, exporter selection, protocol,
@@ -61,14 +61,17 @@ export function createTelemetryExportConfig(
 }
 
 /**
- * Register global trace/log/meter providers when OTLP endpoints are configured
- * through env. Idempotent, and a no-op when no signal has an endpoint (or when
- * the OTEL kill-switches are engaged), so startup can call it unconditionally.
+ * Register global trace/log/meter providers when enabled and OTLP endpoints are
+ * configured through env. Idempotent, and a no-op when disabled, no signal has
+ * an endpoint, or the OTEL kill-switch is engaged.
+ *
+ * @param exportEnabled `telemetry.otlpExportEnabled`; required so every caller
+ *   decides whether the user's opt-out applies.
  */
-export async function initTelemetryExport(): Promise<void> {
+export async function initTelemetryExport(exportEnabled: boolean): Promise<void> {
 	if (initPromise) return initPromise;
 
-	if (process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return;
+	if (!exportEnabled || process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return;
 
 	const signalConfig = resolveSignalConfig();
 	if (!signalConfig.trace && !signalConfig.log && !signalConfig.metric) return;
@@ -121,9 +124,16 @@ function signalEnabled(
 	protocolSelection: string | undefined,
 ): boolean {
 	if (exporterSelection) {
+		let hasSelection = false;
+		let hasOtlp = false;
 		for (const entry of exporterSelection.split(",")) {
-			if (entry.trim().toLowerCase() === "none") return false;
+			const selection = entry.trim().toLowerCase();
+			if (!selection) continue;
+			hasSelection = true;
+			if (selection === "none") return false;
+			if (selection === "otlp") hasOtlp = true;
 		}
+		if (hasSelection && !hasOtlp) return false;
 	}
 	if (!endpoint) return false;
 

@@ -1,0 +1,9 @@
+auth "siliconflow-cn" {
+	name "SiliconFlow (China)"
+	login "api-key" {
+		auth-url "https://cloud.siliconflow.cn/account/ak"
+		instructions "Create or copy your API key from the SiliconFlow console"
+		prompt "Paste your SiliconFlow API key" placeholder="sk-..."
+		validate "models-endpoint" label="siliconflow-cn" url="https://api.siliconflow.cn/v1/models"
+	}
+}

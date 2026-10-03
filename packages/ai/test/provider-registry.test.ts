@@ -8,7 +8,6 @@ import {
 	registerOAuthProvider,
 	unregisterOAuthProviders,
 } from "@oh-my-pi/pi-ai/registry/oauth";
-import * as anthropicOauth from "@oh-my-pi/pi-ai/registry/oauth/anthropic";
 import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 
@@ -83,6 +82,7 @@ describe("provider registry auth surface", () => {
 				"google-gemini-cli",
 				"openai-codex",
 				"openrouter",
+				"stencil",
 				"zai-coding-plan",
 			].sort(),
 		);
@@ -94,10 +94,21 @@ describe("provider registry auth surface", () => {
 		// zenmux has no refresher → returned as-is.
 		expect(await refreshOAuthToken("zenmux", creds)).toBe(creds);
 
-		const refreshed: OAuthCredentials = { refresh: "r2", access: "a2", expires: Date.now() + 120_000 };
-		const spy = vi.spyOn(anthropicOauth, "refreshAnthropicToken").mockResolvedValue(refreshed);
-		expect(await refreshOAuthToken("anthropic", creds)).toBe(refreshed);
-		expect(spy).toHaveBeenCalledWith("r");
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					access_token: "a2",
+					refresh_token: "r2",
+					expires_in: 120,
+					account: { uuid: "account", email_address: "user@example.com" },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		);
+		const refreshed = await refreshOAuthToken("anthropic", creds);
+		expect(refreshed.access).toBe("a2");
+		expect(refreshed.refresh).toBe("r2");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 
 		await expect(refreshOAuthToken("nonexistent-provider" as OAuthProvider, creds)).rejects.toThrow(
 			"Unknown OAuth provider",
@@ -107,7 +118,7 @@ describe("provider registry auth surface", () => {
 	test("login dispatcher handles runtime-registered extension providers", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 		registerOAuthProvider({
 			id: "fixture-x",
 			name: "Fixture X",
@@ -115,7 +126,7 @@ describe("provider registry auth surface", () => {
 			login: async () => "fixture-key",
 		});
 
-		await storage.login("fixture-x", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("fixture-x", { onAuth: () => {}, onPrompt: async () => "" });
 
 		expect(store.getApiKey("fixture-x")).toBe("fixture-key");
 	});
@@ -123,9 +134,9 @@ describe("provider registry auth surface", () => {
 	test("llama.cpp login stores a local no-auth token when no key is entered", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
-		await storage.login("llama.cpp", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("llama.cpp", { onAuth: () => {}, onPrompt: async () => "" });
 
 		expect(store.getApiKey("llama.cpp")).toBe("llama-cpp-local");
 	});

@@ -24,6 +24,9 @@ export function parseSecurityScanPlan(value: unknown): SecurityScanPlan {
 	const { securityScanPlanSchema } = getSecurityContractSchemas();
 	const result = securityScanPlanSchema(value);
 	if (result instanceof type.errors) throw schemaError("Security scan plan", result);
+	if (result.model.provider !== result.account.provider) {
+		throw new Error("Security scan authentication provider mismatch");
+	}
 	return result as SecurityScanPlan;
 }
 

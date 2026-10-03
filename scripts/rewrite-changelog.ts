@@ -102,12 +102,13 @@ async function openModel(modelSpec: string): Promise<RewriteModel> {
 	const modelId = modelSpec.slice(slash + 1);
 	const model = getBundledModel(provider as GeneratedProvider, modelId);
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
-	const storage = await discoverAuthStorage({ sourceLabel: "rewrite-changelog" });
+	const sourceLabel = "rewrite-changelog";
+	const storage = await discoverAuthStorage({ sourceLabel });
 	try {
-		const apiKey = await storage.getApiKey(provider);
+		const apiKey = await storage.keys.get(provider);
 		if (!apiKey) {
 			throw new Error(
-				`no credentials for provider "${provider}" via ${storage.sourceLabel ?? "auth storage"} (check broker or run \`omp login\`)`,
+				`no credentials for provider "${provider}" via ${sourceLabel} (check broker or run \`omp login\`)`,
 			);
 		}
 		return { model, apiKey, spec: modelSpec };

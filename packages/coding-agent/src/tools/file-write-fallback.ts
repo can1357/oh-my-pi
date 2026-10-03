@@ -109,10 +109,10 @@
  * Handlers live in one process-wide list, and a process can host several sessions
  * (a subagent gets its own `ExtensionRunner`). A handler is therefore consulted
  * for denied mutations from ANY session in the process, not only the one whose
- * extension registered it. Filtering by session here would be wrong: a subagent
- * spawned with `restrictToolNames` loads no extensions of its own, so scoping
- * would leave its denied writes with nothing to broker them, and a host that
- * registers once in its top-level session expects subagent writes covered.
+ * extension registered it. A host that registers once in its top-level session
+ * expects subagent writes covered, including sessions without inherited
+ * extension factories. Restricted children may rebind parent hooks, but that
+ * does not make each session responsible for registering its own broker.
  *
  * So the request names its origin instead, and the policy stays with the party
  * that owns it. `req.sessionId` is the session that issued the mutation (see

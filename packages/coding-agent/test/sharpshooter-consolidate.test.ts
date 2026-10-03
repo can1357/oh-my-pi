@@ -27,13 +27,14 @@ interface Harness {
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	sessionId: string;
 }
 
 function createHarness(root: string): Harness {
 	const agentDir = path.join(root, "agent");
 	const cwd = path.join(root, "project");
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	authStorage.keys.setRuntime("anthropic", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 	if (!modelRegistry.find("anthropic", "claude-haiku-4-5")) {
 		throw new Error("Expected bundled anthropic/claude-haiku-4-5 model");
@@ -46,6 +47,7 @@ function createHarness(root: string): Harness {
 			"sharpshooter.intervalMinutes": 5,
 		}),
 		modelRegistry,
+		sessionId: "01900000-0000-7000-8000-000000000001",
 	};
 }
 

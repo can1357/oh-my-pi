@@ -7,7 +7,7 @@ import { updateHelp as commandHelp } from "../cli/command-help";
 import * as pluginCli from "../cli/plugin-cli";
 import * as updateCli from "../cli/update-cli";
 import { CliUsageError } from "../cli/usage-error";
-import { initTheme } from "../modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 export default class Update extends Command {
 	static description = commandHelp.description;

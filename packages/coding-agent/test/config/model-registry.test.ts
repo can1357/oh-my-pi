@@ -1,21 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "../../src/config/model-registry";
-
-/** Stub auth storage for registry lifecycle and missing-credential coverage. */
-function createStubAuthStorage(): AuthStorage {
-	const stub = {
-		setFallbackResolver: () => {},
-		clearConfigApiKeys: () => {},
-		hasAuth: () => false,
-		getApiKey: async () => undefined,
-	};
-	return stub as unknown as AuthStorage;
-}
 
 const testModel = buildModel({
 	id: "test-model",
@@ -33,19 +22,22 @@ const testModel = buildModel({
 describe("ModelRegistry", () => {
 	let tmpDir: string;
 	let registry: ModelRegistry;
+	let authStorage: AuthStorage;
 
-	beforeEach(() => {
-		tmpDir = mkdtempSync(path.join(os.tmpdir(), "omp-reg-"));
+	beforeEach(async () => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-reg-"));
+		authStorage = await AuthStorage.create(":memory:");
 		// Construct with an explicit modelsPath inside the temp dir so the
 		// constructor's #loadModels read returns "not-found" rather than
 		// touching the host's ~/.omp/agent/models.yaml. isBunTestRuntime()
 		// auto-stubs #fetch in the constructor.
-		registry = new ModelRegistry(createStubAuthStorage(), path.join(tmpDir, "models.yaml"));
+		registry = new ModelRegistry(authStorage, path.join(tmpDir, "models.yaml"));
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		rmSync(tmpDir, { recursive: true, force: true });
+		authStorage.close();
+		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
 	test("resolves immediately when no background refresh is in flight", async () => {
@@ -157,7 +149,7 @@ describe("ModelRegistry", () => {
 	test("resolves API keys and provider headers for legacy extensions", async () => {
 		const model = testModel;
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
-		vi.spyOn(registry, "getProviderHeaders").mockReturnValue({ "x-test": "value" });
+		vi.spyOn(registry, "getProviderHeaders").mockResolvedValue({ "x-test": "value" });
 
 		expect(await registry.getApiKeyAndHeaders(model)).toEqual({
 			ok: true,

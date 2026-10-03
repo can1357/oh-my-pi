@@ -4,22 +4,23 @@
  * Faithful port of the o2 reference (`taxonomy.rs`): class membership
  * matchers, product families, revision extraction, reviewed identity
  * overrides, and the collapse/discovery vocabularies, with the same
- * validation rules (unique class names and override ids/pairs, exactly one
+ * validation rules (unique class names, override ids/selectors, exactly one
  * non-empty collapse, at most one discovery).
  */
 
 import { isEffortTier, isThinkingMode } from "../../src/compat/axes";
-import { formatRevision, parseRevision } from "../../src/compat/revision";
-import type {
-	CompiledClass,
-	CompiledCollapse,
-	CompiledDiscovery,
-	CompiledFamily,
-	CompiledIdentityOverride,
-	CompiledMatcher,
-	CompiledTaxonomy,
-	CompiledVariantFamily,
-	VariantTier,
+import { formatRevision, parseRevision, parseRevisionConstraint } from "../../src/compat/revision";
+import {
+	type CompiledClass,
+	type CompiledCollapse,
+	type CompiledDiscovery,
+	type CompiledFamily,
+	type CompiledIdentityOverride,
+	type CompiledMatcher,
+	type CompiledTaxonomy,
+	type CompiledVariantFamily,
+	REVISION_PLACEHOLDER,
+	type VariantTier,
 } from "../../src/compat/types";
 import type { Effort } from "../../src/effort";
 import {
@@ -89,6 +90,7 @@ const OVERRIDE_PROPS = [
 	"id",
 	"provider",
 	"model",
+	"glob",
 	"logical",
 	"class",
 	"family",
@@ -107,12 +109,20 @@ function parseOverride(node: KdlNodeView): CompiledIdentityOverride {
 		const value = propString(node, name);
 		if (value !== undefined && value === "") malformed(node);
 	}
-	const override: CompiledIdentityOverride = {
+	const model = propString(node, "model");
+	const glob = propString(node, "glob");
+	if ((model === undefined) === (glob === undefined) || model === "" || glob === "") malformed(node);
+	const fields = {
 		id: requiredProp(node, "id"),
-		model: requiredProp(node, "model"),
 		rationale: requiredProp(node, "rationale"),
 		provenance: requiredProp(node, "provenance"),
 	};
+	const override: CompiledIdentityOverride =
+		model !== undefined
+			? { ...fields, model }
+			: glob !== undefined
+				? { ...fields, glob: glob.toLowerCase() }
+				: malformed(node);
 	const provider = propString(node, "provider");
 	if (provider !== undefined) override.provider = provider;
 	const logical = propString(node, "logical");
@@ -283,11 +293,14 @@ function parseVariantTier(node: KdlNodeView, value: string): VariantTier {
 }
 
 /**
- * `variant-family "<provider>" "<logical id>" name="…" { … }` — reviewed
- * per-provider effort/thinking sibling routing (see `rules/README.md`).
+ * `variant-family "<provider>" "<logical id>" name="…" [revision="…"] { … }`
+ * — reviewed per-provider effort/thinking sibling routing (see
+ * `rules/README.md`). A `{rev}` in the logical id makes the node a template:
+ * every wire id in the body must carry the placeholder too, and `revision=`
+ * bounds the generations it instantiates for.
  */
 function parseVariantFamily(node: KdlNodeView): CompiledVariantFamily {
-	validateProps(node, ["name"]);
+	validateProps(node, ["name", "revision"]);
 	const args = positionalStrings(node);
 	if (args.length !== 2 || args.some(value => !value) || !node.children) malformed(node);
 	const family: CompiledVariantFamily = {
@@ -297,6 +310,12 @@ function parseVariantFamily(node: KdlNodeView): CompiledVariantFamily {
 		members: [],
 		routing: {},
 	};
+	const templated = family.id.includes(REVISION_PLACEHOLDER);
+	const revision = propString(node, "revision");
+	if (revision !== undefined) {
+		if (!templated || parseRevisionConstraint(revision) === undefined) malformed(node);
+		family.revision = revision;
+	}
 	for (const child of node.children) {
 		validateProps(child, []);
 		if (child.children) malformed(child);
@@ -378,6 +397,14 @@ function parseVariantFamily(node: KdlNodeView): CompiledVariantFamily {
 		}
 	}
 	if (family.members.length === 0) malformed(node);
+	const wireIds = [
+		...family.members,
+		...Object.values(family.routing),
+		...(family.retiredMembers ?? []),
+		...(family.extraAliases ?? []),
+		...(family.defaultMember !== undefined ? [family.defaultMember] : []),
+	];
+	if (wireIds.some(id => id.includes(REVISION_PLACEHOLDER) !== templated)) malformed(node);
 	return family;
 }
 
@@ -527,9 +554,12 @@ export function compileTaxonomy(sources: readonly { file: string; text: string }
 							throw new CompatCompileError(file, node.line, `duplicate override id \`${override.id}\``);
 						}
 						overrideIds.add(override.id);
-						const key = `${override.provider?.toLowerCase() ?? ""}\0${override.model.toLowerCase()}`;
+						const selectorKind = override.model === undefined ? "glob" : "model";
+						const selector = override.model ?? override.glob;
+						const key = `${selectorKind}\0${override.provider?.toLowerCase() ?? ""}\0${selector.toLowerCase()}`;
 						if (overrideKeys.has(key)) {
-							throw new CompatCompileError(file, node.line, `duplicate override pair for \`${override.model}\``);
+							const label = selectorKind === "model" ? "pair" : "glob";
+							throw new CompatCompileError(file, node.line, `duplicate override ${label} for \`${selector}\``);
 						}
 						overrideKeys.add(key);
 					}

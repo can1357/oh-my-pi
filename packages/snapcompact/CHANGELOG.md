@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed summaries incorrectly advertising a `¶think:` scope when thinking content is excluded from the archive.
+
+## [18.2.1] - 2026-09-15
+
+### Changed
+
+- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+
+## [18.1.18] - 2026-09-11
+
+### Fixed
+
+- A snapcompact pass now also strips a superseded Anthropic server-compaction payload (`preserveData.anthropicCompaction`) alongside the OpenAI replacement history, so a stale native summary can never replay ahead of the archived frames.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added

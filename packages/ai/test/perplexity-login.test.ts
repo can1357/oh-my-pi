@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { loginPerplexity } from "@oh-my-pi/pi-ai/registry/oauth/perplexity";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { LoginCancelledError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import type { OAuthCredentials, OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { withEnv } from "./helpers";
 
@@ -10,6 +13,18 @@ type CapturedRequest = {
 
 function cookiePairs(header: string | null): Set<string> {
 	return new Set(header?.split("; ") ?? []);
+}
+
+async function loginPerplexity(callbacks: OAuthController): Promise<OAuthCredentials> {
+	const provider = getProviderDefinition("perplexity");
+	if (!provider?.login) throw new Error("expected perplexity provider");
+	const result = await provider.login({
+		...callbacks,
+		onAuth: callbacks.onAuth ?? (() => {}),
+		onPrompt: callbacks.onPrompt ?? (async () => ""),
+	});
+	if (typeof result === "string") throw new Error("expected Perplexity OAuth credentials");
+	return result;
 }
 
 afterEach(() => {
@@ -109,12 +124,15 @@ describe("Perplexity email OTP login", () => {
 			}
 			throw new Error(`Unexpected request: ${url.pathname}`);
 		});
-		const answers = ["user@example.com", "123456", "654321"];
+		const answers = ["email", "user@example.com", "123456", "654321"];
 
 		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
 			const credentials = await loginPerplexity({
 				fetch: fetchMock,
 				onPrompt: async () => answers.shift() ?? "",
+				onBrowserSession: async () => {
+					throw new Error("Email login must not open a browser");
+				},
 			});
 			expect(credentials.access).toBe("session-cookie");
 		});
@@ -129,5 +147,149 @@ describe("Perplexity email OTP login", () => {
 			code: "654321",
 		});
 		expect(requests[3]?.cookie).toBe("next-auth.csrf-token=csrf-cookie");
+	});
+});
+
+describe("Perplexity browser SSO login", () => {
+	it("stores a validated browser session without prompting for the secret", async () => {
+		const storage = await AuthStorage.create(":memory:");
+		const token = "sso-session-cookie";
+		let prompts = 0;
+		try {
+			await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+				const identity = await storage.oauth.login("perplexity", {
+					onAuth: () => {
+						throw new Error("The host already owns the login browser");
+					},
+					onPrompt: async () => {
+						if (prompts++) throw new Error("Unexpected credential prompt");
+						return " SSO ";
+					},
+					onBrowserSession: async request => {
+						expect(request).toEqual({
+							url: "https://www.perplexity.ai/auth/signin",
+							cookieNames: ["__Secure-next-auth.session-token", "next-auth.session-token"],
+						});
+						return token;
+					},
+					fetch: async (input, init) => {
+						expect(String(input)).toBe("https://www.perplexity.ai/api/auth/session");
+						expect(new Headers(init?.headers).get("Cookie")).toBe(`__Secure-next-auth.session-token=${token}`);
+						expect(init?.redirect).toBe("error");
+						return Response.json({ user: { email: "sso@example.com" } });
+					},
+				});
+				expect(identity).toMatchObject({ type: "oauth", email: "sso@example.com" });
+				expect((await storage.oauth.access("perplexity"))?.accessToken).toBe(token);
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects a successful HTTP response without an authenticated identity", async () => {
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			await expect(
+				loginPerplexity({
+					onPrompt: async () => "",
+					onBrowserSession: async () => "invalid-session",
+					fetch: async () => Response.json({ user: { email: " " } }),
+				}),
+			).rejects.toBeInstanceOf(OAuthError);
+		});
+	});
+
+	it("surfaces HTTP failure status without exposing the session or response body", async () => {
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			const token = "private-session-cookie";
+			const result = loginPerplexity({
+				onPrompt: async () => "",
+				onBrowserSession: async () => token,
+				fetch: async () => new Response(`Rejected ${token}`, { status: 403 }),
+			});
+			await expect(result).rejects.toBeInstanceOf(ProviderHttpError);
+			await expect(result).rejects.toThrow(/403/);
+			await expect(result).rejects.not.toThrow(token);
+		});
+	});
+
+	it("does not expose session content through malformed JSON errors", async () => {
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			const token = "PrivateSessionTokenDontLog";
+			const response = new Response(token);
+			vi.spyOn(response, "json").mockImplementation(async () => JSON.parse(await response.text()));
+			const result = loginPerplexity({
+				onPrompt: async () => "",
+				onBrowserSession: async () => token,
+				fetch: async () => response,
+			});
+			await expect(result).rejects.not.toThrow(token);
+			await expect(result).rejects.toBeInstanceOf(OAuthError);
+		});
+	});
+
+	it("rejects cookie-header injection before contacting the service", async () => {
+		const fetchSession = vi.fn(async () => Response.json({ user: { email: "sso@example.com" } }));
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			await expect(
+				loginPerplexity({
+					onPrompt: async () => "",
+					onBrowserSession: async () => "session; another-cookie=value",
+					fetch: fetchSession,
+				}),
+			).rejects.toBeInstanceOf(OAuthError);
+			expect(fetchSession).not.toHaveBeenCalled();
+		});
+	});
+
+	it("rejects a cookie returned after the user cancels browser sign-in", async () => {
+		const controller = new AbortController();
+		const captureStarted = Promise.withResolvers<void>();
+		const captured = Promise.withResolvers<string>();
+		const fetchSession = vi.fn(async () => Response.json({ user: { email: "sso@example.com" } }));
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			const result = loginPerplexity({
+				signal: controller.signal,
+				onPrompt: async () => "",
+				onBrowserSession: () => {
+					captureStarted.resolve();
+					return captured.promise;
+				},
+				fetch: fetchSession,
+			});
+			await captureStarted.promise;
+			controller.abort();
+			captured.resolve("late-session-cookie");
+			await expect(result).rejects.toBeInstanceOf(LoginCancelledError);
+			expect(fetchSession).not.toHaveBeenCalled();
+		});
+	});
+
+	it("does not save credentials when validation finishes after cancellation", async () => {
+		const storage = await AuthStorage.create(":memory:");
+		const controller = new AbortController();
+		const validationStarted = Promise.withResolvers<void>();
+		const response = Promise.withResolvers<Response>();
+		try {
+			await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+				const result = storage.oauth.login("perplexity", {
+					signal: controller.signal,
+					onAuth: () => {},
+					onPrompt: async () => "",
+					onBrowserSession: async () => "session-cookie",
+					fetch: () => {
+						validationStarted.resolve();
+						return response.promise;
+					},
+				});
+				await validationStarted.promise;
+				controller.abort();
+				response.resolve(Response.json({ user: { email: "sso@example.com" } }));
+				await expect(result).rejects.toBeInstanceOf(LoginCancelledError);
+				expect(storage.credentials.all().perplexity).toBeUndefined();
+			});
+		} finally {
+			storage.close();
+		}
 	});
 });

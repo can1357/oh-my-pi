@@ -45,7 +45,8 @@ export interface FinalizeResult {
  */
 export async function finalize(error: unknown, opts: FinalizeOptions = {}): Promise<FinalizeResult> {
 	const aborted = opts.abortTracker ? opts.abortTracker.wasCallerAbort() : opts.signal?.aborted === true;
-	const currentStatus = status(error) ?? opts.capturedErrorResponse?.status;
+	const errorStatus = status(error);
+	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
 	let message: string;
 	try {
@@ -55,11 +56,17 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		message = error instanceof Error ? error.message : String(error);
 	}
 
+	// A captured status is transport context for the original error. Put it at
+	// the root of the classification cause chain so terminal 4xx policy governs
+	// nested diagnostics before they can contribute transient flags.
+	const classificationError =
+		errorStatus === undefined && currentStatus !== undefined ? { status: currentStatus, cause: error } : error;
+
 	const id = classifyMessage({
 		api: opts.api,
 		provider: opts.provider,
 		model: opts.model,
-		errorId: classify(error, opts.api),
+		errorId: classify(classificationError, opts.api),
 		errorMessage: message,
 		errorStatus: currentStatus,
 	});

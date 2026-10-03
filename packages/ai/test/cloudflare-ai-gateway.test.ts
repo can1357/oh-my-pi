@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { loginCloudflareAiGateway } from "@oh-my-pi/pi-ai/registry/cloudflare-ai-gateway";
+import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -41,6 +41,18 @@ const WORKERS_MODEL = buildModel({
 });
 
 const CONTEXT = { messages: [{ role: "user" as const, content: "Say hello", timestamp: 0 }] };
+
+function registeredLogin(options: OAuthController) {
+	const login = getProviderDefinition("cloudflare-ai-gateway")?.login;
+	if (!login) throw new Error("Cloudflare AI Gateway login is not registered");
+	return login(options);
+}
+
+async function loginCloudflareAiGateway(options: OAuthController): Promise<string> {
+	const result = await registeredLogin(options);
+	if (typeof result !== "string") throw new Error("Expected Cloudflare AI Gateway API-key credential");
+	return result;
+}
 
 interface CapturedRequest {
 	url?: string;
@@ -151,7 +163,7 @@ describe("Cloudflare AI Gateway", () => {
 		const authStorage = new AuthStorage(store);
 		const prompts = ["persisted-token", "persisted-account", "persisted-gateway"];
 		try {
-			await authStorage.login("cloudflare-ai-gateway", {
+			await authStorage.oauth.login("cloudflare-ai-gateway", {
 				onAuth: () => {},
 				onPrompt: async () => prompts.shift() ?? "",
 			});
@@ -182,8 +194,8 @@ describe("Cloudflare AI Gateway", () => {
 				onAuth: () => {},
 				onPrompt: async () => prompts.shift() ?? "",
 			};
-			await authStorage.login("cloudflare-ai-gateway", controller);
-			await authStorage.login("cloudflare-ai-gateway", controller);
+			await authStorage.oauth.login("cloudflare-ai-gateway", controller);
+			await authStorage.oauth.login("cloudflare-ai-gateway", controller);
 
 			const credentials = store.listAuthCredentials("cloudflare-ai-gateway");
 			expect(credentials).toHaveLength(1);
