@@ -6,6 +6,17 @@
 
 - Empty and older synchronization batches no longer move peer checkpoints backward. ([#12288](https://github.com/can1357/oh-my-pi/pull/12288) by [@iliaal](https://github.com/iliaal))
 
+## [18.5.1] - 2026-10-03
+
+### Changed
+
+- Upgraded local embedding support to fastembed 3.0.0. Models now download from Hugging Face into the updated cache layout, with interrupted downloads resuming automatically; existing models are migrated on first use while producing the same vectors.
+
+### Fixed
+
+- Fixed enhanced recall returning cached results from an unrelated longer query when answering a shorter query.
+- Fixed local embedding setup on fresh caches and Linux ARM64, including compatibility with current model downloads and ARM64 tokenization support.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

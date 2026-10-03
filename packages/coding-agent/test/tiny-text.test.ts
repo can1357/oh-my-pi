@@ -6,7 +6,12 @@ import {
 	preprocessTinyMessage,
 	stripCodeBlocks,
 } from "@oh-my-pi/pi-coding-agent/tiny/message-preproc";
-import { isLowSignalTitleInput, NO_TITLE_SENTINEL, normalizeGeneratedTitle } from "@oh-my-pi/pi-coding-agent/tiny/text";
+import {
+	isAttachmentOnlyTitleInput,
+	isLowSignalTitleInput,
+	NO_TITLE_SENTINEL,
+	normalizeGeneratedTitle,
+} from "@oh-my-pi/pi-coding-agent/tiny/text";
 
 describe("stripCodeBlocks", () => {
 	it("drops fenced code blocks but keeps the surrounding prose", () => {
@@ -292,6 +297,32 @@ describe("normalizeGeneratedTitle source-aware casing", () => {
 		expect(normalizeGeneratedTitle("Fix GitHub Api rate limit", "fix the GitHub API rate limit")).toBe(
 			"Fix GitHub API rate limit",
 		);
+	});
+});
+
+describe("isAttachmentOnlyTitleInput", () => {
+	it("flags requests that only point at an attachment", () => {
+		for (const msg of [
+			"fix [Image #1, 1568x200]",
+			"plz fix this [Image #1, 275x588]",
+			"[Image #1, 757x786] [Image #2, 1568x1195]",
+			"why do i get this? [Image #1, 610x200]",
+			"oh uh, what did we break [Image #1, 1249x200]",
+			"[Video #1, 960x310]",
+		]) {
+			expect(isAttachmentOnlyTitleInput(msg)).toBe(true);
+		}
+	});
+
+	it("keeps requests whose words name a task, and plain text without attachments", () => {
+		for (const msg of [
+			"[Image #1, 407x322] this feels a bit too colorful for some themes. can u suggest some alternatives",
+			"can u summarize my changes for v0.2.1 [Image #1, 946x701] user-facing",
+			"fix this",
+			"fix the login redirect",
+		]) {
+			expect(isAttachmentOnlyTitleInput(msg)).toBe(false);
+		}
 	});
 });
 

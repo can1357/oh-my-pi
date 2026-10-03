@@ -1,5 +1,5 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
-import { CODEX_CLIENT_VERSION } from "../wire/codex";
+import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
@@ -91,9 +91,15 @@ function cursorCredentialSubject(apiKey: string): string | undefined {
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
-		case "openai-codex":
-			// The backend filters the roster by client version.
-			return `${providerId}:${CODEX_CLIENT_VERSION}`;
+		case "openai-codex": {
+			// The backend filters the roster by client version. A Codex-compatible
+			// gateway publishes its own roster; discovery is authoritative, so the
+			// namespace must follow the endpoint. The official backend keeps the
+			// unhashed namespace so existing caches stay valid.
+			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
+			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
+			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor": {

@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTmux, wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions/types";
@@ -65,7 +66,7 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 			};
 			const osc = `\x1b]777;notify;${WARP_CLI_AGENT_SENTINEL};${JSON.stringify(body)}\x07`;
 			if (!isInsideTmux()) {
-				process.stdout.write(osc);
+				writeTerminalSequence(osc);
 				return;
 			}
 			// DCS-wrap every OSC so Warp can parse it under allow-passthrough.
@@ -75,7 +76,7 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 			const wrapped = wrapTmuxPassthrough(osc);
 			const eventName = event.event;
 			const ring = typeof eventName === "string" && Object.hasOwn(WARP_ATTENTION_EVENTS, eventName);
-			process.stdout.write(ring ? `${wrapped}\x07` : wrapped);
+			writeTerminalSequence(ring ? `${wrapped}\x07` : wrapped);
 		},
 	};
 }

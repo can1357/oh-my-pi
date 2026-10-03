@@ -24,7 +24,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
-use crate::host::{Host, StreamWriter, Utility};
+use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
 
 use ignore::{
 	Match,
@@ -1252,16 +1252,20 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 	Ok(RgWalk { request, filters })
 }
 
+/// Display spelling of a walked `path` under the `operand` it was found from
+/// (resolved to `root`), with `/` separators on Windows like the shell's other
+/// path-printing utilities.
 fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(root).unwrap_or(path);
 	if rel.as_os_str().is_empty() {
 		return PathBuf::from(operand);
 	}
-	if operand == OsStr::new(".") {
+	let display = if operand == OsStr::new(".") {
 		rel.to_path_buf()
 	} else {
 		Path::new(operand).join(rel)
-	}
+	};
+	forward_slash_display(&display).unwrap_or(display)
 }
 
 fn process_reader<M: Matcher, R: Read, W: Write>(
