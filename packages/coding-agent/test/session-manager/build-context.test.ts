@@ -865,6 +865,78 @@ describe("buildSessionContext", () => {
 			expect(JSON.stringify(transcript.messages)).toContain("kept assistant suffix");
 		});
 
+		it("keeps the final answer when advisor notes follow a kept mid-turn suffix", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "original request"),
+				msg("2", "1", "assistant", "tool-loop continuation"),
+				msg("3", "2", "assistant", "final answer"),
+				{
+					type: "custom_message",
+					id: "4",
+					parentId: "3",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "advisor-note",
+					content: "review note",
+					display: true,
+					attribution: "agent",
+				},
+				compaction("5", "4", "Idle compaction", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(message => message.role)).toEqual([
+				"assistant",
+				"assistant",
+				"custom",
+				"compactionSummary",
+			]);
+			expect(transcript.messages[1]).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "final answer" }],
+			});
+		});
+
+		it("trims past agent notes to a later user-invoked skill request", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old request"),
+				msg("2", "1", "assistant", "orphaned continuation"),
+				{
+					type: "custom_message",
+					id: "3",
+					parentId: "2",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "advisor-note",
+					content: "note on the old turn",
+					display: true,
+					attribution: "agent",
+				},
+				{
+					type: "custom_message",
+					id: "4",
+					parentId: "3",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "skill-prompt",
+					content: "review this change",
+					display: true,
+					attribution: "user",
+				},
+				msg("5", "4", "assistant", "new response"),
+				compaction("6", "5", "Summary", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(message => message.role)).toEqual(["custom", "assistant", "compactionSummary"]);
+			expect(transcript.messages[0]).toMatchObject({ content: "review this change", attribution: "user" });
+		});
+
 		it("trimmed assistants consume reset state before the first visible turn", () => {
 			const entries: SessionEntry[] = [
 				msg("1", null, "user", "old request"),

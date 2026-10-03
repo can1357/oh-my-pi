@@ -2180,21 +2180,24 @@ export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | n
 }
 
 /**
- * Fireworks Fast variants we surface. Each inherits the base model's
- * limits/modalities/thinking and overrides only the cost with the Standard-column
- * Fast prices from the Serverless pricing table; `cacheWrite` stays 0 (Fireworks
- * bills no cache-write). Derived from the bundled base entries so metadata stays
- * in lockstep, and the runtime auto-falls back to the base id on a failed fast
- * request. See https://docs.fireworks.ai/serverless/pricing.
+ * Fireworks Fast variants we surface: the Fast table on
+ * https://docs.fireworks.ai/serverless/serverless-modes, minus the US-only
+ * router (it needs the `us.api.fireworks.ai` host). That table, not a request
+ * outcome, decides membership: add or drop a row when Fireworks changes it.
+ * Each inherits the base model's limits/modalities/thinking and overrides
+ * only the cost with the Fast prices from the Serverless pricing table;
+ * `cacheWrite` stays 0 (Fireworks bills no cache-write). Derived from the
+ * bundled base entries so metadata stays in lockstep, and the runtime
+ * auto-falls back to the base id on a failed fast request.
+ * See https://docs.fireworks.ai/serverless/pricing.
  */
 const FIREWORKS_FAST_VARIANT_SPECS: ReadonlyArray<{
 	base: string;
 	name: string;
 	cost: { input: number; output: number; cacheRead: number };
 }> = [
-	{ base: "kimi-k2.7-code", name: "Kimi K2.7 Code Fast", cost: { input: 1.9, output: 8, cacheRead: 0.38 } },
-	{ base: "kimi-k2.6", name: "Kimi K2.6 Fast", cost: { input: 2, output: 8, cacheRead: 0.3 } },
-	{ base: "glm-5.1", name: "GLM-5.1 Fast", cost: { input: 2.8, output: 8.8, cacheRead: 0.52 } },
+	{ base: "kimi-k3", name: "Kimi K3 Fast", cost: { input: 4.5, output: 22.5, cacheRead: 0.45 } },
+	{ base: "glm-5.3", name: "GLM-5.3 Fast", cost: { input: 2.1, output: 6.6, cacheRead: 0.39 } },
 	{ base: "glm-5.2", name: "GLM-5.2 Fast", cost: { input: 2.1, output: 6.6, cacheRead: 0.21 } },
 ];
 
@@ -2299,6 +2302,7 @@ function mapFireworksControlPlaneModel(
 	publicModelId: string,
 	reference: ModelSpec<"openai-completions"> | undefined,
 	baseUrl: string,
+	cost: ModelSpec<"openai-completions">["cost"] | undefined,
 ): ModelSpec<"openai-completions"> {
 	const name = toModelName(record.displayName, reference?.name ?? publicModelId);
 	const supportsImage = toBoolean(record.supportsImageInput) === true;
@@ -2332,6 +2336,7 @@ function mapFireworksControlPlaneModel(
 		provider: "fireworks",
 		baseUrl,
 		name,
+		cost: cost ?? base.cost,
 		// The control plane exposes capability flags but no reasoning bit. Every
 		// serverless chat LLM Fireworks ships reasons, and `buildModel` derives
 		// the Fireworks effort map from the id at build time — so default
@@ -2355,6 +2360,7 @@ async function fetchFireworksServerlessModels(options: {
 	baseUrl: string;
 	apiKey: string;
 	resolveReference: (publicModelId: string) => ModelSpec<"openai-completions"> | undefined;
+	resolveCost: (publicModelId: string) => ModelSpec<"openai-completions">["cost"] | undefined;
 	fetch?: FetchImpl;
 }): Promise<ModelSpec<"openai-completions">[] | null> {
 	const listUrl = toFireworksControlPlaneModelsUrl(options.baseUrl, FIREWORKS_CONTROL_PLANE_ACCOUNT);
@@ -2401,6 +2407,7 @@ async function fetchFireworksServerlessModels(options: {
 					publicModelId,
 					options.resolveReference(publicModelId),
 					options.baseUrl,
+					options.resolveCost(publicModelId),
 				),
 			);
 		}
@@ -2449,6 +2456,39 @@ async function loadModelsDevReferences<TApi extends Api>(fetchImpl?: FetchImpl):
 		return new Map<string, ModelSpec<TApi>>();
 	}
 }
+
+/**
+ * Fireworks' own models.dev rows, consulted only for pricing during dynamic
+ * discovery. A bare-id reference comes from whichever host carries the id with
+ * the largest window, so its price is often another host's, and Fireworks-only
+ * models have none. models.dev keys these rows by wire id
+ * (`accounts/fireworks/models/glm-5p3`), so they are re-keyed to public ids.
+ * Rows that publish no price are skipped so the reference price stays; a
+ * published zero is Fireworks' price and wins. Absent from
+ * `MODELS_DEV_PROVIDER_DESCRIPTORS`: the control plane alone decides which
+ * models exist.
+ */
+const FIREWORKS_MODELS_DEV_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
+	openAiCompletionsDescriptor("fireworks-ai", "fireworks", "https://api.fireworks.ai/inference/v1", {
+		// `mapModelsDevToModels` maps an absent price to zeros, so tell them apart on the raw row.
+		filterModel: (_id, raw) => typeof raw.cost?.input === "number" || typeof raw.cost?.output === "number",
+	}),
+];
+
+async function loadFireworksModelsDevCosts(
+	fetchImpl?: FetchImpl,
+): Promise<Map<string, ModelSpec<"openai-completions">["cost"]>> {
+	const costs = new Map<string, ModelSpec<"openai-completions">["cost"]>();
+	try {
+		const payload = await fetchWellKnownModels(fetchImpl);
+		for (const model of mapModelsDevToModels(payload as Record<string, unknown>, FIREWORKS_MODELS_DEV_DESCRIPTORS)) {
+			costs.set(toFireworksPublicModelId(model.id), model.cost);
+		}
+	} catch {
+		// Optional enrichment: without it, discovered rows keep their reference price.
+	}
+	return costs;
+}
 export function fireworksModelManagerOptions(
 	config?: FireworksModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -2461,12 +2501,17 @@ export function fireworksModelManagerOptions(
 		providerId: "fireworks",
 		...(apiKey && {
 			fetchDynamicModels: async () => {
-				const modelsDevReferences = await loadModelsDevReferences<"openai-completions">(config?.fetch);
+				// Both loaders share one in-flight models.dev request.
+				const [modelsDevReferences, fireworksCosts] = await Promise.all([
+					loadModelsDevReferences<"openai-completions">(config?.fetch),
+					loadFireworksModelsDevCosts(config?.fetch),
+				]);
 				return fetchFireworksServerlessModels({
 					baseUrl,
 					apiKey,
 					resolveReference: publicModelId =>
 						modelsDevReferences.get(publicModelId) ?? bundledReferences(publicModelId),
+					resolveCost: publicModelId => fireworksCosts.get(publicModelId),
 					fetch: config?.fetch,
 				});
 			},
@@ -3004,7 +3049,7 @@ function openCodeBaseUrlForApi(api: Api, basePath: string): string {
 // rules (`runtime/behavior.kdl`; #887, #1617, #8957).
 // Runtime-discovered rows cached before model-identity corrections retain
 // stale capability metadata until the authoritative catalog TTL expires.
-const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash"] as const;
+const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash", "longcat-2.5-preview-free", "space-bunny-free"] as const;
 const OPENCODE_ZEN_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash", "gemini-3.8-flash"] as const;
 
 // Billing-variant suffixes the OpenCode gateways append to a base model id
@@ -4480,8 +4525,8 @@ const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses"
  * text-only model with no limits. Only ids that classify into the
  * `muse-spark` family with a revision qualify. The template's explicit
  * `thinking` is dropped: only reviewed seed rows may advertise `max` (1.3
- * standard), so an unknown revision takes the provider's five-tier ladder
- * from `providers/meta.kdl` at build time.
+ * standard and contributor), so an unknown revision takes the provider's
+ * five-tier ladder from `providers/meta.kdl` at build time.
  */
 function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
 	const identity = classifyModel("meta", id, { lenient: true });
@@ -6333,9 +6378,19 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						// With COPILOT_API_HEADERS the served window is the long-context
 						// ceiling; the default tier ends at token_prices.default.context_max
 						// prompt tokens. Cap the base entry to the default tier — the long
-						// tier is the opt-in `-1m` sibling below.
+						// tier is the opt-in `-1m` sibling below. On tiered rows
+						// max_prompt_tokens is the default lane's prompt budget, and the
+						// billed default ceiling can overlap the long lane (#13912), so the
+						// tighter of the two bounds the base entry.
 						const tokenPrices = extractCopilotTokenPrices(entry);
-						const defaultContextMax = tokenPrices.defaultTier?.contextMax;
+						const billedDefaultMax = tokenPrices.defaultTier?.contextMax;
+						const tieredPromptBudget =
+							(tokenPrices.longContext?.contextMax ?? 0) > 0 ? (copilotLimits.maxPromptTokens ?? 0) : 0;
+						const defaultContextMax =
+							tieredPromptBudget > 0 &&
+							(billedDefaultMax === undefined || billedDefaultMax <= 0 || tieredPromptBudget < billedDefaultMax)
+								? tieredPromptBudget
+								: billedDefaultMax;
 						const defaultTierWindow =
 							defaultContextMax !== undefined &&
 							defaultContextMax > 0 &&

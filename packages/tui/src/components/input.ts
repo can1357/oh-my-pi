@@ -583,6 +583,7 @@ export class Input implements Component, Focusable {
 		const props: TspInputProps = {
 			text: value,
 			cursor,
+			sendable: false,
 			prompt: prompt || undefined,
 			placeholder: this.placeholder,
 		};

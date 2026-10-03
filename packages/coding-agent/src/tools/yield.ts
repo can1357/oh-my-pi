@@ -295,6 +295,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly #normalizeData?: (value: unknown) => unknown;
+	readonly #normalizeSection?: (label: string, value: unknown) => unknown;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
@@ -325,6 +327,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	constructor(session: ToolSession) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
+		let normalizeData: ((value: unknown) => unknown) | undefined;
+		let normalizeSection: ((label: string, value: unknown) => unknown) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
@@ -354,6 +358,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			if (!schemaError && normalizedSchema !== undefined) {
 				const strictProbe = tryEnforceStrictSchema(normalizedSchema);
 				if (strictProbe.strict) {
+					if (validator) {
+						normalizeData = value => validator.normalize(value);
+						normalizeSection = (label, value) => validator.normalizeSection(label, value);
+					}
 					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedSchema);
 				} else {
 					sanitizedSchema = normalizedSchema;
@@ -389,11 +397,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				looseRecordSchema(`Structured JSON output (schema processing failed: ${errorMsg})`),
 			);
 			validate = undefined;
+			normalizeData = undefined;
+			normalizeSection = undefined;
 			this.#schemaStrict = false;
 		}
 
 		this.#session = session;
 		this.#validate = validate;
+		this.#normalizeData = normalizeData;
+		this.#normalizeSection = normalizeSection;
 		this.#validateSection = validateSection;
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
@@ -558,6 +570,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				useLastTurn = false;
 			}
 		}
+		const normalizeData = (value: unknown): unknown =>
+			workPoolItemId !== undefined
+				? value
+				: Array.isArray(yieldType) && yieldType.length === 1
+					? (this.#normalizeSection?.(yieldType[0], value) ?? value)
+					: !isIncremental
+						? (this.#normalizeData?.(value) ?? value)
+						: value;
+		if (status === "success" && data !== undefined) data = normalizeData(data);
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
@@ -579,9 +600,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				// and then warn post-mortem instead of giving a retryable error.
 				const decoded = parseJsonEncodedValue(data);
 				if (decoded.parsed && decoded.value !== null) {
-					const revalidated = validateData(decoded.value);
+					const normalized = normalizeData(decoded.value);
+					const revalidated = validateData(normalized);
 					if (revalidated === undefined || revalidated.success) {
-						data = decoded.value;
+						data = normalized;
 						sectionFailure = revalidated;
 					}
 				}

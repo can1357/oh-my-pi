@@ -357,6 +357,9 @@ export interface TspEditorProps {
 	/** The text is code in this language (`python`, `bash`): highlighted, in the mono face. */
 	lang?: string;
 	readonly?: boolean;
+	/** Ready to accept an atomic `send` when advertised in `hello.features`.
+	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
+	sendable?: boolean;
 	maxLines?: number;
 }
 export type TspInputProps = Omit<TspEditorProps, "maxLines">;
@@ -902,7 +905,7 @@ export interface TspPalette {
 
 /** Verb `q`. */
 export type TspQuery =
-	| { q: "hello"; v: readonly number[]; app: string; ver?: string }
+	| { q: "hello"; v: readonly number[]; app: string; ver?: string; features?: readonly string[] }
 	| { q: "blobs"; ids: readonly string[] };
 
 /** Verb `r`. */
@@ -954,6 +957,16 @@ export type TspEvent =
 	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
 	 */
 	| { ev: "undo"; sf: string; id: string }
+	/**
+	 * Submit `text` as one prompt through the addressed composer's ordinary
+	 * submission path, without paste or keyboard simulation. Sent only when
+	 * the program's `hello.features` includes `"send"` and `sf`/`id` identify
+	 * a live editable composer whose `sendable` is exactly true. Writable text
+	 * or keyboard focus alone does not imply submission readiness. Blank text is
+	 * a no-op; an existing draft is retained for local recall, not appended to
+	 * the supplied prompt.
+	 */
+	| { ev: "send"; sf: string; id: string; text: string }
 	/**
 	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
 	 * a `prefs` sheet while the focus is outside it): the program moves its

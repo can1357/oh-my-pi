@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [18.5.1] - 2026-10-03
+
+### Fixed
+
+- Fixed macOS computer-use scrolling so takeover and desktop scroll actions move iPhone Mirroring and other pixel-forwarding windows reliably, with smooth mouse-like wheel steps.
+- Fixed macOS computer-use value entry for date and time controls, including Calendar date pickers, with support for ISO 8601 dates and date-times and clear validation for unsupported formats.
+- Fixed macOS computer-use value entry for popup buttons, allowing options to be selected by title with confirmation and reporting available options when a title is not found.
+- Fixed macOS accessibility values for checkboxes, radio buttons, and radio groups so snapshots, attributes, and window information return usable numbers, titles, and referenced element values instead of debug representations.
+
 ## [18.5.0] - 2026-10-03
 
 ### Fixed

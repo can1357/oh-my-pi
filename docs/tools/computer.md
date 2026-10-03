@@ -112,6 +112,10 @@ Screenshots are PNGs written under the OS temp directory. Native capture is resi
 - reads: `value()`, `bounds()`, `attributes()`, `actions()`, `parent()`, `children()`;
 - mutations: `setValue(value)`, `perform(action)`, `press()`, `click({ takeover? })`, and `focus()`.
 
+On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) takes ISO-8601: `YYYY-MM-DD` changes the day and keeps the control's time of day, `YYYY-MM-DDTHH:MM[:SS]` is local time, and a date-time followed by `Z` or `±HH:MM` is that exact instant. Anything else is refused before a write, naming these forms and the control's current date, as is a local time that daylight saving skips or repeats (add an offset to pick a repeated one).
+
+On macOS, `setValue(value)` on a popup button (`popupbutton`) chooses the menu option titled exactly `value`: it opens a closed menu, presses the option, and confirms the choice by reading the popup's value back. No match, or several options with that title, throws with the available option titles, and a menu the call opened is closed again.
+
 AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. A window AX snapshot advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
 
 ### Clipboard
