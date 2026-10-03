@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.6.0] - 2026-10-03
+
 ### Fixed
 
 - Saved credentials are no longer reported as fully removed when local or broker-backed removal fails ([#14184](https://github.com/can1357/oh-my-pi/pull/14184) by [@fskaeh](https://github.com/fskaeh)).
