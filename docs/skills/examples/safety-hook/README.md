@@ -1,6 +1,8 @@
 # safety-hook
 
-An `oh-my-pi` extension that demonstrates `tool_call` blocking. It intercepts `bash` tool calls and returns `{ block: true, reason: "..." }` when the command contains `rm -rf /` with normal whitespace, preventing the tool from executing.
+An `omp` extension that demonstrates `tool_call` blocking. It intercepts `bash` tool calls and returns `{ block: true, reason: "..." }` when the command matches `rm -rf` followed by an absolute path, preventing the tool from executing.
+
+This deliberately narrow regex also blocks targets such as `/tmp/example`. It does not parse shell syntax or cover reordered flags, quoting, aliases, other deletion tools, or direct eval helpers; do not treat it as a complete safety boundary.
 
 ## What it demonstrates
 
@@ -14,7 +16,9 @@ An `oh-my-pi` extension that demonstrates `tool_call` blocking. It intercepts `b
 cp -r . ~/.omp/agent/extensions/safety-hook
 ```
 
-Restart `omp`. The hook is active for all sessions.
+Restart `omp`. The hook is active in sessions that load this extension.
+
+For a named profile, use that profile's agent extensions directory. `PI_CODING_AGENT_DIR` overrides the default profile's agent directory, not a named profile's. Initialized XDG roots can change these locations.
 
 Or load once:
 

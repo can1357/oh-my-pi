@@ -639,15 +639,16 @@ export class ClaudeMessagesProxy {
 		if (rest.length > 0) {
 			clientTls.unshift(rest);
 		}
-		const upstreamTls = this.#track(
-			tls.connect({
-				host: target.host,
-				port: target.port,
-				servername: net.isIP(target.host) ? undefined : target.host,
-				rejectUnauthorized: this.#upstreamTlsRejectUnauthorized,
-				ALPNProtocols: ["http/1.1"],
-			}),
-		);
+		const upstreamTlsSocket: tls.TLSSocket = tls.connect({
+			host: target.host,
+			port: target.port,
+			servername: net.isIP(target.host) ? undefined : target.host,
+			rejectUnauthorized: this.#upstreamTlsRejectUnauthorized,
+			ALPNProtocols: ["http/1.1"],
+		});
+		// Annotate: `tls.connect` infers `any` under some @types/node versions,
+		// which would leave the "data" listener parameter untyped below.
+		const upstreamTls = this.#track(upstreamTlsSocket);
 		const requestParser = new HttpMessageParser("request");
 		const responseParser = new HttpMessageParser("response");
 		const responseQueue: Array<PendingCapturedRequest | null> = [];

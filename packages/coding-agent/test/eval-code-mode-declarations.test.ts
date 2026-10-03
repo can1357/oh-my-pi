@@ -3,7 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Settings } from "../src/config/settings";
 import type { ToolSession } from "../src/tools";
 import { EvalTool } from "../src/tools/eval";
-import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
+import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 
 describe("generateCodeModeDeclarations", () => {
 	test("emits a declare-const block with typed signatures", () => {
@@ -79,7 +79,6 @@ test("EvalTool advertises only tools authorized for its bridge", () => {
 		hasUI: false,
 		getSessionFile: () => null,
 		settings: Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
-		getActiveModel: () => ({ provider: "openai-codex", toolMode: "code_mode_only" }),
 		toolRegistry: new Map<string, { name: string; parameters: object }>([
 			["read", read],
 			["write", write],
@@ -120,6 +119,19 @@ test("EvalTool omits tools the model can still call directly", () => {
 
 test("EvalTool advertises bridged tool declarations only while Code Mode is active", () => {
 	const read = { name: "read", parameters: type({ path: "string" }) };
+	let preludeEnabled = true;
+	const prelude = {
+		name: "fixture",
+		documentation: "fixture docs",
+		javascript: "",
+		python: "",
+		exports: [],
+		codeModeDeclarations: "declare const fixturePreludeDeclaration: true;",
+		enabled: () => preludeEnabled,
+		async invoke() {
+			return { content: [] };
+		},
+	};
 	const baseSession = {
 		cwd: "/tmp",
 		hasUI: false,
@@ -127,13 +139,19 @@ test("EvalTool advertises bridged tool declarations only while Code Mode is acti
 		settings: Settings.isolated(),
 		toolRegistry: new Map([["read", read]]),
 		getEvalBridgeToolNames: () => ["eval", "read"],
+		getEvalPreludes: () => [prelude],
 	};
-	const active = new EvalTool({
+	const activeTool = new EvalTool({
 		...baseSession,
 		getCodeModeDirectToolNames: () => ["eval"],
-	} as unknown as ToolSession).description;
+	} as unknown as ToolSession);
+	const active = activeTool.description;
 	expect(active).toContain("declare const tool: {");
 	expect(active).toContain("read(args:");
+	expect(active).toContain("declare const fixturePreludeDeclaration: true;");
+
+	preludeEnabled = false;
+	expect(activeTool.description).not.toContain("fixturePreludeDeclaration");
 
 	const inactive = new EvalTool({
 		...baseSession,
@@ -141,6 +159,7 @@ test("EvalTool advertises bridged tool declarations only while Code Mode is acti
 	} as unknown as ToolSession).description;
 	expect(inactive).not.toContain("declare const tool");
 	expect(inactive).not.toContain("read(args:");
+	expect(inactive).not.toContain("fixturePreludeDeclaration");
 });
 
 test("EvalTool withholds Code Mode transport support when the JS backend is disabled", () => {

@@ -1,19 +1,21 @@
 import type { ReactNode } from "react";
-import type { ConnectionPhase } from "../../lib/client";
+import type { ConnectionPhase, GuestSnapshot } from "../../lib/client";
 
 export interface BannersProps {
 	phase: ConnectionPhase;
 	endedReason: string | null;
+	loading: GuestSnapshot["loading"];
 	onRejoin(): void;
 	onNewLink(): void;
 }
 
-export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProps): ReactNode {
+export function Banners({ phase, endedReason, loading, onRejoin, onNewLink }: BannersProps): ReactNode {
+	const progress = loading && loading.total > 0 ? ` ${Math.floor((loading.received / loading.total) * 100)}%` : "";
 	if (phase === "connecting" || phase === "waiting") {
 		return (
 			<div className="sh-banner" role="status">
 				<span className="sh-banner-dot" />
-				{phase === "connecting" ? "connecting to relay…" : "joining session…"}
+				{phase === "connecting" ? "Connecting to relay…" : `Joining session…${progress}`}
 			</div>
 		);
 	}
@@ -21,7 +23,7 @@ export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProp
 		return (
 			<div className="sh-banner" role="status">
 				<span className="sh-banner-dot" />
-				reconnecting…
+				{`Reconnecting…${progress}`}
 			</div>
 		);
 	}
@@ -29,7 +31,7 @@ export function Banners({ phase, endedReason, onRejoin, onNewLink }: BannersProp
 		return (
 			<div className="sh-ended" role="alertdialog" aria-label="session ended">
 				<div className="sh-ended-card">
-					<div className="sh-ended-title">session ended</div>
+					<div className="sh-ended-title">Session ended</div>
 					{endedReason && <div className="sh-ended-reason">{endedReason}</div>}
 					<div className="sh-ended-actions">
 						<button type="button" className="sh-btn sh-btn-primary" onClick={onRejoin}>

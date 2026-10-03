@@ -46,7 +46,10 @@ describe("write tool shebang chmod", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	it("marks files starting with #! as executable and flags the result", async () => {
+	// POSIX execute bits: Windows accepts chmod but keeps no execute bits.
+	const posixIt = it.skipIf(process.platform === "win32");
+
+	posixIt("marks files starting with #! as executable and flags the result", async () => {
 		const filePath = path.join(tmpDir, "run.sh");
 		const tool = new WriteTool(createSession(tmpDir));
 
@@ -63,6 +66,19 @@ describe("write tool shebang chmod", () => {
 		expect(resultText(result)).toContain("[Notice: Made executable via chmod +x]");
 	});
 
+	it.skipIf(process.platform !== "win32")("does not claim chmod +x where execute bits cannot stick", async () => {
+		const filePath = path.join(tmpDir, "run.sh");
+		const tool = new WriteTool(createSession(tmpDir));
+
+		const result = await tool.execute("call-win", {
+			path: filePath,
+			content: "#!/bin/sh\necho hi\n",
+		});
+
+		expect(details(result).madeExecutable).toBeUndefined();
+		expect(resultText(result)).not.toContain("[Notice: Made executable via chmod +x]");
+	});
+
 	it("does not chmod files without a shebang", async () => {
 		const filePath = path.join(tmpDir, "data.txt");
 		const tool = new WriteTool(createSession(tmpDir));
@@ -77,7 +93,7 @@ describe("write tool shebang chmod", () => {
 		expect(details(result).madeExecutable).toBeUndefined();
 	});
 
-	it("does not re-flag when file is already executable", async () => {
+	posixIt("does not re-flag when file is already executable", async () => {
 		const filePath = path.join(tmpDir, "preexec.sh");
 		await fs.writeFile(filePath, "#!/bin/sh\nold\n");
 		await fs.chmod(filePath, 0o755);

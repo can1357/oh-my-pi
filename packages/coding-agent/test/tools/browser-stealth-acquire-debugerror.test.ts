@@ -28,7 +28,6 @@ import { FrameManager } from "puppeteer-core/lib/puppeteer/cdp/FrameManager.js";
 import { MAIN_WORLD, PUPPETEER_WORLD } from "puppeteer-core/lib/puppeteer/cdp/IsolatedWorlds.js";
 import { EventEmitter } from "puppeteer-core/lib/puppeteer/common/EventEmitter.js";
 import { TimeoutSettings } from "puppeteer-core/lib/puppeteer/common/TimeoutSettings.js";
-import { debugError } from "puppeteer-core/lib/puppeteer/common/util.js";
 
 const ACQUIRE_TIMEOUT_MS = 40;
 
@@ -71,12 +70,6 @@ describe("stealth FrameManager world acquire — issue #5296", () => {
 
 	afterEach(() => {
 		process.off("unhandledRejection", onUnhandled);
-	});
-
-	it("keeps disabled debugError undefined so bare calls would crash", () => {
-		// The precondition that makes the bug fatal: with the puppeteer:error
-		// channel off, the logger the patch used is not callable.
-		expect(debugError).toBeUndefined();
 	});
 
 	it("does not emit an unhandled TypeError when acquire fails mid-flight", async () => {

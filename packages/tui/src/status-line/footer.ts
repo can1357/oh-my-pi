@@ -1,0 +1,416 @@
+import { stripVTControlCharacters } from "node:util";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { type Component, padding, truncateToWidth, visibleWidth } from "../index";
+import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+import { theme } from "../theme";
+import type { FooterHost, FooterSession } from "./host";
+import { shortenPath } from "../render/render-utils";
+import { sanitizeStatusText } from "../chrome/shared";
+import { formatMetric } from "../components/metric";
+import { formatBillingSummary } from "./metrics";
+import {
+	formatContextUsage,
+	getContextUsageLevel,
+	getContextUsageThemeColor,
+	getContextUsageTone,
+} from "../chrome/context-thresholds";
+import type { TspProps, TspSpan } from "@oh-my-pi/pi-wire";
+import type { NativeNode } from "../native/node";
+import { col, node, span } from "../native/describe";
+
+/**
+ * Footer component that shows pwd, token stats, and context usage
+ */
+export class FooterComponent implements Component {
+	#cachedBranch: string | null | undefined = undefined;
+	#branchResolve: AbortController | undefined;
+	#branchGeneration = 0;
+	#gitUnwatch: (() => void) | null = null;
+	#onBranchChange: (() => void) | null = null;
+	#disposed = false;
+	#autoCompactEnabled: boolean = true;
+	#extensionStatuses: Map<string, string> = new Map();
+	#nativeMemo: { node: NativeNode; fingerprint: string } | undefined;
+
+	constructor(
+		private readonly session: FooterSession,
+		private readonly host: FooterHost,
+	) {}
+
+	setAutoCompactEnabled(enabled: boolean): void {
+		this.#autoCompactEnabled = enabled;
+	}
+
+	/**
+	 * Set extension status text to display in the footer.
+	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
+	 * The combined status line is trimmed and truncated to terminal width.
+	 * @param key - Unique key to identify this status
+	 * @param text - Status text, or undefined to clear
+	 */
+	setExtensionStatus(key: string, text: string | undefined): void {
+		if (text === undefined) {
+			this.#extensionStatuses.delete(key);
+		} else {
+			this.#extensionStatuses.set(key, text);
+		}
+	}
+
+	/**
+	 * Watch the repository head for label changes and repaint the footer.
+	 */
+	watchBranch(onBranchChange: () => void): void {
+		this.#onBranchChange = onBranchChange;
+		this.#setupGitWatcher();
+	}
+
+	#setupGitWatcher(): void {
+		this.#gitUnwatch?.();
+		this.#gitUnwatch = null;
+
+		if (!this.host.gitEnabled()) return;
+		const repository = vcs.repoForDisplay(getProjectDir());
+		if (!repository) return;
+
+		try {
+			this.#gitUnwatch = vcs.watch(repository, () => {
+				this.#invalidateBranch();
+				this.#onBranchChange?.();
+			});
+		} catch {
+			// Silently fail if we can't watch
+		}
+	}
+
+	/**
+	 * Clean up the file watcher
+	 */
+	dispose(): void {
+		this.#disposed = true;
+		this.#branchResolve?.abort();
+		this.#branchResolve = undefined;
+		this.#gitUnwatch?.();
+		this.#gitUnwatch = null;
+	}
+
+	invalidate(): void {
+		this.#invalidateBranch();
+	}
+
+	#invalidateBranch(): void {
+		this.#branchGeneration++;
+		this.#branchResolve?.abort();
+		this.#branchResolve = undefined;
+		this.#cachedBranch = undefined;
+	}
+
+	/**
+	 * Get the current branch, bookmark, or change-id label.
+	 */
+	#getCurrentBranch(): string | null {
+		if (!this.host.gitEnabled()) return null;
+		if (this.#cachedBranch !== undefined) {
+			return this.#cachedBranch;
+		}
+
+		const repository = (() => {
+			try {
+				return vcs.repoForDisplay(getProjectDir());
+			} catch {
+				return null;
+			}
+		})();
+		if (!repository) {
+			this.#cachedBranch = null;
+			return null;
+		}
+
+		const gitRepository = repository.asGit();
+		if (!gitRepository) {
+			if (!this.#branchResolve) {
+				const request = new AbortController();
+				const generation = this.#branchGeneration;
+				this.#branchResolve = request;
+				void repository
+					.label(request.signal)
+					.then(label => {
+						if (this.#disposed || this.#branchGeneration !== generation) return;
+						const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
+						const changed = this.#cachedBranch !== clean;
+						this.#cachedBranch = clean;
+						if (changed) this.#onBranchChange?.();
+					})
+					.catch(() => {
+						if (this.#disposed || this.#branchGeneration !== generation) return;
+						this.#cachedBranch = null;
+					})
+					.finally(() => {
+						if (this.#branchResolve === request) this.#branchResolve = undefined;
+					});
+			}
+			return this.#cachedBranch ?? null;
+		}
+
+		const headState = (() => {
+			try {
+				return gitRepository.headSync();
+			} catch {
+				return null;
+			}
+		})();
+		this.#cachedBranch =
+			headState === null
+				? null
+				: headState.kind === "ref"
+					? (headState.branch ?? headState.refName ?? "HEAD")
+					: "detached";
+		return this.#cachedBranch;
+	}
+
+	/**
+	 * Native footer: a `status` bar (path and branch, usage counters, billing
+	 * and context on the left, model on the right) plus the extension statuses.
+	 * Rebuilt per call from cheap session reads; the node identity holds while
+	 * the description is unchanged.
+	 */
+	describe(): NativeNode {
+		const state = this.session.state;
+		let input = 0;
+		let output = 0;
+		let cacheRead = 0;
+		let cacheWrite = 0;
+		let cost = 0;
+		let premiumRequests = 0;
+		for (const entry of this.session.sessionManager.getEntries()) {
+			if (entry.type === "message" && entry.message?.role === "assistant") {
+				input += entry.message.usage.input;
+				output += entry.message.usage.output;
+				cacheRead += entry.message.usage.cacheRead;
+				cacheWrite += entry.message.usage.cacheWrite;
+				cost += entry.message.usage.cost.total;
+				premiumRequests += entry.message.usage.premiumRequests ?? 0;
+			}
+		}
+		const segs: NativeNode[] = [];
+		const seg = (key: string, props: TspProps<"seg">): void => {
+			segs.push(node("seg", { role: `omp.footer.${key}`, ...props }, undefined, key));
+		};
+		const pathSpans: TspSpan[] = [span(shortenPath(getProjectDir()), "path dim")];
+		const branch = this.#getCurrentBranch();
+		if (branch) pathSpans.push(span(` (${branch})`, "dim"));
+		seg("path", { side: "left", priority: 6, icon: "folder", spans: pathSpans });
+		const counters: [string, string, number][] = [
+			["input", "↑", input],
+			["output", "↓", output],
+			["cache-read", "R", cacheRead],
+			["cache-write", "W", cacheWrite],
+		];
+		for (const [key, glyph, amount] of counters) {
+			if (amount) seg(key, { side: "left", priority: 1, spans: [span(`${glyph}${formatNumber(amount)}`, "dim")] });
+		}
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const billing = formatBillingSummary({ cost, usingSubscription, premiumRequests, fractionDigits: 3 }, theme);
+		if (billing) seg("cost", { side: "left", priority: 3, spans: [span(billing, "dim")] });
+		const contextUsage = this.session.getContextUsage();
+		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+		const contextPercent = contextWindow > 0 ? (contextUsage?.percent ?? 0) : null;
+		const level =
+			contextUsage && contextPercent !== null ? getContextUsageLevel(contextPercent, contextWindow) : "normal";
+		const contextSpans: TspSpan[] = [
+			span(
+				formatContextUsage(contextPercent, contextWindow, contextUsage?.tokens ?? 0),
+				getContextUsageThemeColor(level),
+			),
+		];
+		if (this.#autoCompactEnabled && theme.icon.auto) contextSpans.push(span(` ${theme.icon.auto}`, "dim"));
+		const contextProps: TspProps<"seg"> = { side: "left", priority: 4, icon: "context", spans: contextSpans };
+		const tone = getContextUsageTone(level);
+		if (tone) contextProps.tone = tone;
+		seg("context", contextProps);
+		let model = state.model?.id || "no-model";
+		if (state.model?.thinking) {
+			const level = this.session.isAutoThinking
+				? (this.session.autoResolvedThinkingLevel() ?? `${theme.thinking.autoPending} auto`)
+				: (state.thinkingLevel ?? ThinkingLevel.Off);
+			model += ` • ${level}`;
+		}
+		seg("model", { side: "right", priority: 5, icon: "model", spans: [span(model, "dim")] });
+		const bar = node("status", { role: "omp.footer" }, segs, "bar");
+		const children: NativeNode[] = [bar];
+		if (this.#extensionStatuses.size > 0) {
+			const statuses = Array.from(this.#extensionStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, value]) => sanitizeStatusText(value))
+				.join(" ");
+			children.push(node("text", { text: statuses, wrap: "none", role: "omp.footer.extensions" }, undefined, "ext"));
+		}
+		const built = children.length === 1 ? bar : col(children, { role: "omp.footer.panel" });
+		const fingerprint = JSON.stringify(built);
+		if (this.#nativeMemo?.fingerprint === fingerprint) return this.#nativeMemo.node;
+		this.#nativeMemo = { node: built, fingerprint };
+		return built;
+	}
+
+	render(width: number): readonly string[] {
+		const state = this.session.state;
+
+		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
+		let totalInput = 0;
+		let totalOutput = 0;
+		let totalCacheRead = 0;
+		let totalCacheWrite = 0;
+		let totalCost = 0;
+		let totalPremiumRequests = 0;
+
+		for (const entry of this.session.sessionManager.getEntries()) {
+			if (entry.type === "message" && entry.message?.role === "assistant") {
+				totalInput += entry.message.usage.input;
+				totalOutput += entry.message.usage.output;
+				totalCacheRead += entry.message.usage.cacheRead;
+				totalCacheWrite += entry.message.usage.cacheWrite;
+				totalCost += entry.message.usage.cost.total;
+				totalPremiumRequests += entry.message.usage.premiumRequests ?? 0;
+			}
+		}
+
+		// Calculate context usage from session (handles compaction correctly).
+		// After compaction, tokens are unknown until the next LLM response.
+		const contextUsage = this.session.getContextUsage();
+		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+		const contextTokens = contextUsage?.tokens ?? 0;
+		const contextPercentValue = contextWindow > 0 ? (contextUsage?.percent ?? 0) : null;
+
+		// Replace home directory with ~
+		let pwd = shortenPath(getProjectDir());
+
+		// Add git branch if available
+		const branch = this.#getCurrentBranch();
+		if (branch) {
+			pwd = `${pwd} (${branch})`;
+		}
+
+		// Truncate path if too long to fit width
+		if (pwd.length > width) {
+			const half = Math.floor(width / 2) - 1;
+			if (half > 1) {
+				const start = pwd.slice(0, half);
+				const end = pwd.slice(-(half - 1));
+				pwd = `${start}…${end}`;
+			} else {
+				pwd = pwd.slice(0, Math.max(1, width));
+			}
+		}
+
+		// Build stats line
+		const statsParts: string[] = [];
+		for (const [glyph, amount] of [
+			["↑", totalInput],
+			["↓", totalOutput],
+			["R", totalCacheRead],
+			["W", totalCacheWrite],
+		] as const) {
+			const part = formatMetric({
+				leading: glyph,
+				separator: "",
+				value: amount ? formatNumber(amount) : undefined,
+			});
+			if (part !== undefined) statsParts.push(part);
+		}
+
+		// Show billing summary with subscription and premium-request indicators
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const { auto: autoIcon } = theme.icon;
+		const billing = formatBillingSummary(
+			{ cost: totalCost, usingSubscription, premiumRequests: totalPremiumRequests, fractionDigits: 3 },
+			theme,
+		);
+		if (billing) statsParts.push(billing);
+		// Colorize context percentage based on usage
+		let contextPercentStr: string;
+		const autoIndicator = this.#autoCompactEnabled && autoIcon ? ` ${autoIcon}` : "";
+		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow, contextTokens)}${autoIndicator}`;
+		if (contextUsage && contextPercentValue !== null) {
+			const color = getContextUsageThemeColor(getContextUsageLevel(contextPercentValue, contextWindow));
+			contextPercentStr =
+				color === "statusLineContext" ? contextPercentDisplay : theme.fg(color, contextPercentDisplay);
+		} else {
+			contextPercentStr = contextPercentDisplay;
+		}
+		statsParts.push(contextPercentStr);
+
+		let statsLeft = statsParts.join(" ");
+
+		// Add model name on the right side, plus thinking level if model supports it
+		const modelName = state.model?.id || "no-model";
+
+		// Add thinking level hint when the current model advertises supported efforts
+		let rightSide = modelName;
+		if (state.model?.thinking) {
+			if (this.session.isAutoThinking) {
+				// Pending (no turn classified yet / classifying) shows a symbol-theme
+				// question-box marker; once resolved it shows `<level>`.
+				const resolved = this.session.autoResolvedThinkingLevel();
+				rightSide = `${modelName} • ${resolved ? resolved : `${theme.thinking.autoPending} auto`}`;
+			} else {
+				const thinkingLevel = state.thinkingLevel ?? ThinkingLevel.Off;
+				rightSide = `${modelName} • ${thinkingLevel}`;
+			}
+		}
+
+		let statsLeftWidth = visibleWidth(statsLeft);
+		const rightSideWidth = visibleWidth(rightSide);
+
+		// If statsLeft is too wide, truncate it
+		if (statsLeftWidth > width) {
+			// Drop styling and truncate by terminal cells (not code points) so wide
+			// glyphs and non-SGR escapes can't overflow the line.
+			statsLeft = truncateToWidth(stripVTControlCharacters(statsLeft), width);
+			statsLeftWidth = visibleWidth(statsLeft);
+		}
+
+		// Calculate available space for padding (minimum 2 spaces between stats and model)
+		const minPadding = 2;
+		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+
+		let statsLine: string;
+		if (totalNeeded <= width) {
+			// Both fit - add padding to right-align model
+			const pad = padding(width - statsLeftWidth - rightSideWidth);
+			statsLine = statsLeft + pad + rightSide;
+		} else {
+			// Need to truncate right side
+			const availableForRight = width - statsLeftWidth - minPadding;
+			if (availableForRight > 3) {
+				// Drop styling and truncate by terminal cells so the right side fits.
+				const truncatedRight = truncateToWidth(stripVTControlCharacters(rightSide), availableForRight);
+				const pad = padding(width - statsLeftWidth - visibleWidth(truncatedRight));
+				statsLine = statsLeft + pad + truncatedRight;
+			} else {
+				// Not enough space for right side at all
+				statsLine = statsLeft;
+			}
+		}
+
+		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
+		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
+		// before and after the colored section independently.
+		const dimStatsLeft = theme.fg("dim", statsLeft);
+		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
+		const dimRemainder = theme.fg("dim", remainder);
+
+		const lines = [theme.fg("dim", pwd), dimStatsLeft + dimRemainder];
+
+		// Add extension statuses on a single line, sorted by key alphabetically
+		if (this.#extensionStatuses.size > 0) {
+			const sortedStatuses = Array.from(this.#extensionStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => sanitizeStatusText(text));
+			const statusLine = sortedStatuses.join(" ");
+			// Truncate to terminal width with dim ellipsis for consistency with footer style
+			lines.push(truncateToWidth(statusLine, width));
+		}
+
+		return lines;
+	}
+}

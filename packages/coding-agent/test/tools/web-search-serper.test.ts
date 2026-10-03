@@ -9,11 +9,13 @@ const originalSerperApiKey = process.env.SERPER_API_KEY;
 
 function createAuthStorage(authenticated = true): AuthStorage {
 	return {
-		hasAuth(provider: string) {
-			return authenticated && provider === "serper";
-		},
-		resolver() {
-			return async () => (authenticated ? "test-serper-key" : undefined);
+		keys: {
+			source(provider: string) {
+				return authenticated && provider === "serper" ? "stored" : undefined;
+			},
+			resolver() {
+				return async () => (authenticated ? "test-serper-key" : undefined);
+			},
 		},
 	} as unknown as AuthStorage;
 }

@@ -184,7 +184,7 @@ async function callSerperSearch(apiKey: string, params: SerperSearchParams): Pro
 }
 
 export async function searchSerper(params: SerperSearchParams): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("serper", { sessionId: params.sessionId });
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("serper", { sessionId: params.sessionId });
 	return withAuth(keyOrResolver, key => callSerperSearch(key, params), {
 		signal: params.signal,
 		missingKeyMessage:
@@ -197,7 +197,7 @@ export class SerperProvider extends SearchProvider {
 	readonly label = "Serper";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("serper") || !!getEnvApiKey("serper");
+		return authStorage.keys.source("serper") !== undefined || !!getEnvApiKey("serper");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

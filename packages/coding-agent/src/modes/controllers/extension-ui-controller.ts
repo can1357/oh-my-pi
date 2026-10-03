@@ -1,7 +1,8 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
-import { KeybindingsManager } from "../../config/keybindings";
+import type { CollabHost } from "../../collab/host";
+import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -18,25 +19,47 @@ import type {
 	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
+	SendMessageHandler,
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
-import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
-import { EditorTopGap } from "../../modes/components/editor-top-gap";
-import { HookEditorComponent } from "../../modes/components/hook-editor";
-import { HookInputComponent } from "../../modes/components/hook-input";
-import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
-import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
+import {
+	type AskDialogPrompt,
+	type AskDialogPromptValue,
+	AskDialogComponent,
+	normalizeDialogQuestions,
+} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
+import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 
 const MAX_WIDGET_LINES = 10;
+
+/**
+ * Footer hint for a guest-rendered ask selector. The guest's selector handles
+ * the keys, so the host can't know its bindings: advertise the defaults.
+ */
+function guestAskHelpText(enterAction: string, extra = ""): string {
+	return `${formatKeyHints(["up", "down"])} navigate  ${formatKeyHint("enter")} ${enterAction}  ${extra}${formatKeyHint("escape")} cancel`;
+}
+
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+
+async function editDialogExternally(text: string): Promise<string | null> {
+	const command = getEditorCommand();
+	return command ? openInEditor(command, text) : null;
+}
 
 interface CollabDialogWinner {
 	source: "local" | "remote";
@@ -164,18 +187,7 @@ export class ExtensionUiController {
 		}
 
 		const actions: ExtensionActions = {
-			sendMessage: (message, options) => {
-				const wasStreaming = this.ctx.session.isStreaming;
-				const normalized = normalizeCustomMessagePayload(message);
-				this.ctx.session
-					.sendCustomMessage(normalized, options)
-					.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
-					.catch((err: unknown) => {
-						this.ctx.showError(
-							`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`,
-						);
-					});
-			},
+			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
@@ -205,15 +217,11 @@ export class ExtensionUiController {
 			isIdle: () => !this.ctx.session.isStreaming,
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
-			shutdown: () => {
-				// Defer the actual teardown to the main loop, which calls
-				// `checkShutdownRequested()` at idle boundaries so any queued
-				// steering / follow-up messages drain first (see issue #1020).
-				this.ctx.shutdownRequested = true;
-			},
+			shutdown: () => this.ctx.requestShutdown(),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -225,6 +233,7 @@ export class ExtensionUiController {
 				this.ctx.showStatus("Reloaded session");
 			},
 			newSession: async options => {
+				await this.ctx.prepareSessionSwitch();
 				this.ctx.clearTransientSessionUi();
 
 				// Create new session
@@ -257,6 +266,7 @@ export class ExtensionUiController {
 				return { cancelled: false };
 			},
 			branch: async entryId => {
+				await this.ctx.prepareSessionSwitch();
 				const result = await this.ctx.session.branch(entryId);
 				if (result.cancelled) {
 					return { cancelled: true };
@@ -288,6 +298,7 @@ export class ExtensionUiController {
 			},
 			compact: async instructionsOrOptions => this.#handleInteractiveCompact(instructionsOrOptions),
 			switchSession: async sessionPath => {
+				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
 				const result = await this.ctx.session.switchSession(sessionPath);
 				if (!result) {
@@ -398,17 +409,7 @@ export class ExtensionUiController {
 		}
 
 		const actions: ExtensionActions = {
-			sendMessage: (message, options) => {
-				const wasStreaming = this.ctx.session.isStreaming;
-				const normalized = normalizeCustomMessagePayload(message);
-				this.ctx.session
-					.sendCustomMessage(normalized, options)
-					.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
-					.catch((err: unknown) => {
-						const errorText = `Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`;
-						this.ctx.showError(errorText);
-					});
-			},
+			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
@@ -438,15 +439,11 @@ export class ExtensionUiController {
 			isIdle: () => !this.ctx.session.isStreaming,
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
-			shutdown: () => {
-				// Defer the actual teardown to the main loop, which calls
-				// `checkShutdownRequested()` at idle boundaries so any queued
-				// steering / follow-up messages drain first (see issue #1020).
-				this.ctx.shutdownRequested = true;
-			},
+			shutdown: () => this.ctx.requestShutdown(),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -458,6 +455,7 @@ export class ExtensionUiController {
 				this.ctx.showStatus("Reloaded session");
 			},
 			newSession: async options => {
+				await this.ctx.prepareSessionSwitch();
 				this.ctx.clearTransientSessionUi();
 
 				// Create new session
@@ -487,6 +485,7 @@ export class ExtensionUiController {
 				return { cancelled: false };
 			},
 			branch: async entryId => {
+				await this.ctx.prepareSessionSwitch();
 				const result = await this.ctx.session.branch(entryId);
 				if (result.cancelled) {
 					return { cancelled: true };
@@ -518,6 +517,7 @@ export class ExtensionUiController {
 			},
 			compact: async instructionsOrOptions => this.#handleInteractiveCompact(instructionsOrOptions),
 			switchSession: async sessionPath => {
+				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
 				const result = await this.ctx.session.switchSession(sessionPath);
 				if (!result) {
@@ -615,17 +615,22 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
+		// Normalize the public extension input once for both race participants:
+		// malformed entries (missing/non-string fields) coerce to empty
+		// strings/arrays here instead of throwing inside `sanitizeCarriageReturns`
+		// on the guest path or taking down the local render.
+		const normalized = normalizeDialogQuestions(questions);
 		const host = this.ctx.collabHost;
-		if (!host) return this.#showLocalAskDialog(questions, dialogOptions);
+		if (!host) return this.#showLocalAskDialog(normalized, dialogOptions);
 		const localAbort = new AbortController();
 		const remoteAbort = new AbortController();
 		const parentSignal = dialogOptions?.signal;
 		const localSignal = parentSignal ? AbortSignal.any([parentSignal, localAbort.signal]) : localAbort.signal;
 		const remoteSignal = parentSignal ? AbortSignal.any([parentSignal, remoteAbort.signal]) : remoteAbort.signal;
-		const localWinner = this.#showLocalAskDialog(questions, { ...dialogOptions, signal: localSignal }).then(
+		const localWinner = this.#showLocalAskDialog(normalized, { ...dialogOptions, signal: localSignal }).then(
 			(value): CollabAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(questions, remoteSignal).then(
+		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(host, normalized, remoteSignal).then(
 			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
 		);
 		const winner = await Promise.race([localWinner, remoteWinner]);
@@ -640,7 +645,7 @@ export class ExtensionUiController {
 	): Promise<ExtensionAskDialogResult | undefined> {
 		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
-			let promptResolve: ((value: string | undefined) => void) | undefined;
+			let promptResolve: ((value: AskDialogPromptValue | undefined) => void) | undefined;
 			let closed = false;
 			const draftEditor = this.ctx.editor;
 			const inputGuard =
@@ -670,30 +675,61 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			};
 
-			const finishPrompt = (value: string | undefined): void => {
+			const finishPrompt = (value: AskDialogPromptValue | undefined): void => {
 				const resolvePrompt = promptResolve;
 				promptResolve = undefined;
+				promptEditor?.dispose();
 				promptEditor = undefined;
-				restoreAskDialog();
 				resolvePrompt?.(value);
+				// Let AskDialog apply the answer and clear its prompt guard before
+				// making the dialog visible and interactive again. This single-hop
+				// deferral relies on #promptForCustomInput/#promptForNote clearing
+				// #promptActive in the synchronous resume after their lone
+				// `await this.#openPrompt(...)` (no await before the `finally`); adding one
+				// there reopens the drop-Enter race, so revisit this deferral then.
+				queueMicrotask(restoreAskDialog);
 			};
 
-			const promptForText = (title: string, prefill?: string): Promise<string | undefined> => {
-				if (closed) return Promise.resolve(undefined);
-				const { promise, resolve } = Promise.withResolvers<string | undefined>();
-				promptResolve = resolve;
+			const openPrompt = (
+				prompt: AskDialogPrompt,
+				prefill: string | undefined,
+				options: HookEditorOptions,
+			): void => {
 				promptEditor = new HookEditorComponent(
 					this.ctx.ui,
-					title,
+					prompt.title,
 					prefill,
-					value => finishPrompt(value),
+					(text, images) => finishPrompt({ text, images }),
 					() => finishPrompt(undefined),
-					{ promptStyle: true },
+					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
 				this.ctx.ui.setFocus(promptEditor);
 				this.ctx.ui.requestRender();
+			};
+
+			const promptForText = (prompt: AskDialogPrompt, prefill?: string): Promise<string | undefined> => {
+				if (closed) return Promise.resolve(undefined);
+				const { promise, resolve } = Promise.withResolvers<string | undefined>();
+				promptResolve = value => resolve(value?.text);
+				openPrompt(prompt, prefill, {});
+				return promise;
+			};
+
+			const promptWithImages = (
+				prompt: AskDialogPrompt,
+				prefill: AskDialogPromptValue | undefined,
+			): Promise<AskDialogPromptValue | undefined> => {
+				if (closed) return Promise.resolve(undefined);
+				const { promise, resolve } = Promise.withResolvers<AskDialogPromptValue | undefined>();
+				promptResolve = resolve;
+				openPrompt(prompt, prefill?.text, {
+					acceptImages: true,
+					images: prefill?.images,
+					onPasteImage: () => this.ctx.handleImagePaste(),
+					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
+				});
 				return promise;
 			};
 
@@ -703,6 +739,7 @@ export class ExtensionUiController {
 					onSubmit: result => settle(result),
 					onCancel: () => settle(undefined),
 					onPrompt: promptForText,
+					onImagePrompt: dialogOptions?.acceptImages ? promptWithImages : undefined,
 				},
 				{
 					timeout: dialogOptions?.timeout,
@@ -720,6 +757,7 @@ export class ExtensionUiController {
 			return () => {
 				closed = true;
 				askDialog?.dispose();
+				promptEditor?.dispose();
 				promptResolve?.(undefined);
 				promptResolve = undefined;
 				promptEditor = undefined;
@@ -765,12 +803,13 @@ export class ExtensionUiController {
 	}
 
 	async #runGuestAskDialog(
+		host: CollabHost,
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
 		const results: ExtensionAskDialogResultItem[] = [];
 		for (const question of questions) {
-			const result = await this.#runGuestAskQuestion(question, signal);
+			const result = await this.#runGuestAskQuestion(host, question, signal);
 			if (result === "unavailable" || result === undefined) return result;
 			if (result === "chat") return { kind: "chat" };
 			results.push(result);
@@ -779,13 +818,33 @@ export class ExtensionUiController {
 	}
 
 	async #runGuestAskQuestion(
+		host: CollabHost,
 		question: ExtensionAskDialogQuestion,
 		signal: AbortSignal,
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
 		const selected = new Set<string>();
 		let customInput: string | undefined;
-		const baseOptions: CollabUiSelectItem[] = question.options.map(option =>
-			option.description?.trim() ? { label: option.label, description: option.description.trim() } : option.label,
+		// Sanitize display copies for the guest wire (same degeneration as
+		// the local dialog). `selected` and results keep the ORIGINAL labels
+		// so both race winners echo identical correlation values. Display
+		// labels are unique and sentinel-safe; the suffix maps back below.
+		const displayLabels = disambiguateDisplayLabels(
+			question.options.map(option => option.label),
+			[ASK_OTHER_OPTION, ASK_CHAT_OPTION, ASK_NEXT_OPTION],
+		);
+		const originalByDisplay = new Map<string, string>();
+		question.options.forEach((option, index) => {
+			originalByDisplay.set(displayLabels[index]!, option.label);
+		});
+		// Map a guest answer (a display label, suffix included) back to the
+		// original correlation value; unknown values pass through and are
+		// ignored at result build, as before.
+		const resolveGuestLabel = (value: string): string => originalByDisplay.get(value) ?? value;
+		const displayQuestion = sanitizeCarriageReturns(question.question);
+		const baseOptions: CollabUiSelectItem[] = question.options.map((option, index) =>
+			option.description?.trim()
+				? { label: displayLabels[index]!, description: sanitizeCarriageReturns(option.description.trim()) }
+				: displayLabels[index]!,
 		);
 		if (question.multi) {
 			while (true) {
@@ -802,16 +861,15 @@ export class ExtensionUiController {
 				if (hasAnswer) options.push(ASK_NEXT_OPTION);
 				options.push(ASK_CHAT_OPTION);
 				const choice = await this.#requestGuestUiString(
+					host,
 					{
 						kind: "select",
-						title: question.question,
+						title: displayQuestion,
 						options,
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: hasAnswer
-							? "up/down navigate  enter toggle  Next → continue  esc cancel"
-							: "up/down navigate  enter toggle  esc cancel",
+						helpText: guestAskHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
 					},
 					signal,
 				);
@@ -821,7 +879,8 @@ export class ExtensionUiController {
 				if (choice.value === ASK_NEXT_OPTION) break;
 				if (choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
-						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
+						host,
+						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
 						signal,
 					);
 					if (input.kind === "unavailable") return "unavailable";
@@ -831,8 +890,9 @@ export class ExtensionUiController {
 					customInput = input.value;
 					break;
 				}
-				if (selected.has(choice.value)) selected.delete(choice.value);
-				else selected.add(choice.value);
+				const picked = resolveGuestLabel(choice.value);
+				if (selected.has(picked)) selected.delete(picked);
+				else selected.add(picked);
 			}
 		} else {
 			const recommended =
@@ -842,14 +902,15 @@ export class ExtensionUiController {
 			const initialIndex = Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
 			while (true) {
 				const choice = await this.#requestGuestUiString(
+					host,
 					{
 						kind: "select",
-						title: question.question,
+						title: displayQuestion,
 						options: [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION],
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
-						helpText: "up/down navigate  enter select  esc cancel",
+						helpText: guestAskHelpText("select"),
 					},
 					signal,
 				);
@@ -858,7 +919,8 @@ export class ExtensionUiController {
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
-						{ kind: "editor", title: boundPromptTitle("Custom answer: ", question.question) },
+						host,
+						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
 						signal,
 					);
 					if (input.kind === "unavailable") return "unavailable";
@@ -867,7 +929,7 @@ export class ExtensionUiController {
 					if (input.kind === "cancelled") continue;
 					customInput = input.value;
 				} else {
-					selected.add(choice.value);
+					selected.add(resolveGuestLabel(choice.value));
 				}
 				break;
 			}
@@ -882,9 +944,11 @@ export class ExtensionUiController {
 		};
 	}
 
-	async #requestGuestUiString(request: CollabUiRequestDraft, signal: AbortSignal): Promise<GuestUiResult> {
-		const host = this.ctx.collabHost;
-		if (!host) return { kind: "unavailable" };
+	async #requestGuestUiString(
+		host: CollabHost,
+		request: CollabUiRequestDraft,
+		signal: AbortSignal,
+	): Promise<GuestUiResult> {
 		const remote = host.requestGuestUi(request, signal);
 		if (!remote) return { kind: "unavailable" };
 		const result = await remote;
@@ -1021,7 +1085,7 @@ export class ExtensionUiController {
 				prefill,
 				value => settle(value),
 				() => settle(undefined),
-				editorOptions,
+				{ ...editorOptions, externalEditor: editDialogExternally },
 			);
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
@@ -1035,6 +1099,7 @@ export class ExtensionUiController {
 	 * Hide the hook editor.
 	 */
 	hideHookEditor(): void {
+		this.ctx.hookEditor?.dispose();
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookEditor = undefined;
@@ -1192,7 +1257,39 @@ export class ExtensionUiController {
 		await this.ctx.sessionManager.setSessionName(name, "user");
 	}
 
+	/**
+	 * Collab guest: the replica session only mirrors the host, and mirrored host
+	 * lifecycle events (`agent_end`, `turn_end`, …) reach guest extensions. An
+	 * extension reacting to them must not start or queue a turn on the replica —
+	 * it would run on the guest's local model and diverge from the host. Refuse
+	 * like typed prompts are refused (input-controller); true when dropped.
+	 */
+	#rejectGuestExtensionTurn(): boolean {
+		if (!this.ctx.collabGuest) return false;
+		this.ctx.showStatus("Extension-initiated turns are host-only during a collab session");
+		return true;
+	}
+
+	#sendExtensionMessage: SendMessageHandler = (message, options) => {
+		const startsTurn =
+			options?.triggerTurn === true ||
+			options?.deliverAs === "steer" ||
+			options?.deliverAs === "followUp" ||
+			options?.deliverAs === "aside";
+		if (startsTurn && this.#rejectGuestExtensionTurn()) return;
+		const wasStreaming = this.ctx.session.isStreaming;
+		const normalized = normalizeCustomMessagePayload(message);
+		this.ctx.session
+			.sendCustomMessage(normalized, options)
+			.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
+			.catch((err: unknown) => {
+				this.ctx.showError(`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+			});
+	};
+
+	/** Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`). */
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
+		if (this.#rejectGuestExtensionTurn()) return;
 		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});

@@ -294,8 +294,8 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 	beforeAll(async () => {
 		sharedRegistryDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-registry-${Snowflake.next()}-`));
 		const authStorage = await AuthStorage.create(path.join(sharedRegistryDir, "auth.db"));
-		authStorage.setRuntimeApiKey("openai", "test-key");
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("openai-codex", "test-key");
 		sharedModelRegistry = new ModelRegistry(authStorage);
 	});
 

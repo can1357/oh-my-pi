@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -6,6 +6,7 @@ import {
 	type ModelLookupRegistry,
 	resolveModelOverrideWithAuthFallback,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 /**
  * Regression test for #985.
@@ -252,27 +253,81 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 			'Invalid thinking level "invalid" in pattern "qwen3.6-plus-free:invalid". Using default instead.',
 		);
 	});
+});
 
-	test("still falls back when getApiKey returns undefined even with sessionId", async () => {
-		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
-			getAvailable: () => [parentModel, unauthedTaskModel],
-			getApiKey: async (model: Model<Api>, _sessionId?: string) => {
-				if (model.provider === "deepseek") return "sk-test";
-				// Genuinely broken: undefined even with sessionId (stale OAuth, revoked token)
-				return undefined;
-			},
-		} as never;
+describe("issue #11709: disabled provider subagent model resolution", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	test("skips an authenticated model from a disabled provider", async () => {
+		const settings = await Settings.init({
+			inMemory: true,
+			overrides: { disabledProviders: ["opencode-zen"] },
+		});
+		const registry = createMockRegistry({
+			models: [unauthedTaskModel, parentModel],
+			authedProviders: new Set(["opencode-zen", "deepseek"]),
+		});
 
 		const result = await resolveModelOverrideWithAuthFallback(
-			["qwen3.6-plus-free"],
-			"deepseek/deepseek-v4-pro",
-			registry,
+			["opencode-zen/qwen3.6-plus-free", "deepseek/deepseek-v4-pro"],
 			undefined,
-			"subagent-session-456",
+			registry,
+			settings,
 		);
 
-		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");
 	});
+});
+
+describe("requested candidate authentication order", () => {
+	for (const parent of ["deepseek/deepseek-v4-pro", undefined]) {
+		test(`uses a later authenticated candidate with parent ${parent ?? "omitted"}`, async () => {
+			const registry = createMockRegistry({
+				models: [parentModel, unauthedTaskModel, sharedModel],
+				authedProviders: new Set(["deepseek"]),
+			});
+			const resolved = await resolveModelOverrideWithAuthFallback(
+				["opencode-zen/qwen3.6-plus-free", "deepseek/shared-id:high"],
+				parent,
+				registry,
+			);
+			expect(resolved.model?.id).toBe("shared-id");
+			expect(resolved.authFallbackUsed).toBe(false);
+			expect(resolved.explicitThinkingLevel).toBe(true);
+		});
+	}
+
+	test("exhausts candidates inside a configured role before using the parent", async () => {
+		const settings = Settings.isolated({ modelRoles: { qa: "opencode-zen/qwen3.6-plus-free,deepseek/shared-id" } });
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, sharedModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+		const resolved = await resolveModelOverrideWithAuthFallback(
+			["@qa"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+			settings,
+		);
+		expect(resolved.model?.id).toBe("shared-id");
+		expect(resolved.authFallbackUsed).toBe(false);
+	});
+});
+
+test("accepts a keyless parent after requested credentials fail", async () => {
+	const local = { ...parentModel, provider: "ollama", id: "local-model" };
+	const registry = {
+		getAvailable: () => [unauthedTaskModel, local],
+		getApiKey: async (model: Model<Api>) => (model.provider === "ollama" ? kNoAuth : undefined),
+	};
+	const resolved = await resolveModelOverrideWithAuthFallback(
+		["opencode-zen/qwen3.6-plus-free"],
+		"ollama/local-model",
+		registry,
+	);
+	expect(resolved.model?.id).toBe("local-model");
+	expect(resolved.authFallbackUsed).toBe(true);
 });

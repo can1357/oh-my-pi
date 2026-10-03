@@ -5,13 +5,14 @@
  * followed by the message history as per-message markdown headings: `## User`,
  * `## Assistant` (with `<thinking>` blocks and `### Tool Call: <name>` + YAML
  * args), `### Tool Result: <name>`, and the execution/summary sections.
+ * `/dump all` renders each persisted subagent as its own `# Subagent: <path>` document.
  */
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderDelimitedThinking, renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { YAML } from "bun";
-import { canonicalizeMessage } from "../utils/thinking-display";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import {
 	type BashExecutionMessage,
 	type BranchSummaryMessage,
@@ -30,6 +31,18 @@ export interface SessionDumpToolInfo {
 	description: string;
 	parameters: unknown;
 	examples?: readonly ToolExample[];
+}
+
+/** A persisted subagent transcript rendered as its own `/dump all` document. */
+export interface SessionDumpSubagent {
+	/** Slash-joined agent path relative to the main session, e.g. "Explore/Helper". */
+	key: string;
+	messages: readonly AgentMessage[];
+	/** Persisted default-role model string ("provider/id"). */
+	model?: string;
+	thinkingLevel?: string;
+	/** The subagent was explicitly killed before finishing. */
+	aborted?: boolean;
 }
 
 export interface FormatSessionDumpTextOptions {
@@ -246,4 +259,42 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 	const lines = renderDumpHeader(options, inventoryTools);
 	appendMarkdownTranscript(lines, options.messages);
 	return lines.join("\n").trim();
+}
+
+/**
+ * Format one persisted subagent transcript. Subagent system prompts and tool
+ * inventories are not persisted, so the header carries only model, thinking
+ * level, and whether the agent was killed.
+ */
+export function formatSubagentDumpText(subagent: SessionDumpSubagent): string {
+	const lines = [`# Subagent: ${subagent.key}\n`, `Model: ${subagent.model ?? "(unknown)"}`];
+	if (subagent.thinkingLevel) lines.push(`Thinking Level: ${subagent.thinkingLevel}`);
+	if (subagent.aborted) lines.push("Status: aborted");
+	lines.push("\n");
+	appendMarkdownTranscript(lines, subagent.messages);
+	return lines.join("\n").trim();
+}
+
+/** Result of writing a `/dump all` zip (see `AgentSession.dumpSessionArchiveToTmpDir`). */
+export interface SessionDumpArchive {
+	path: string;
+	/** Archive member names in write order. */
+	files: string[];
+	subagentCount: number;
+	/** Why subagent discovery failed; the main dump is archived regardless. */
+	subagentError?: string;
+}
+
+/** Lines describing a `/dump all` archive: path, members, and any subagent discovery failure. */
+export function formatDumpArchiveReport(archive: SessionDumpArchive): string[] {
+	const fileCount = archive.files.length;
+	const subCount = archive.subagentCount;
+	const lines = [
+		`Session dump archive: ${archive.path}`,
+		`Contains ${fileCount} file${fileCount === 1 ? "" : "s"} (${subCount} subagent transcript${subCount === 1 ? "" : "s"}):`,
+		...archive.files.map(file => `  ${file}`),
+	];
+	if (archive.subagentError) lines.push(`Subagent transcripts unavailable: ${archive.subagentError}`);
+	lines.push("This archive persists on disk and may contain raw context/secrets — treat accordingly.");
+	return lines;
 }

@@ -345,35 +345,3 @@ export interface GhActionsJobApi {
 	completed_at?: string | null;
 	html_url?: string | null;
 }
-
-export interface GhRunJobSnapshot {
-	id: number;
-	name: string;
-	status?: string;
-	conclusion?: string;
-	startedAt?: string;
-	completedAt?: string;
-	url?: string;
-}
-
-export interface GhRunSnapshot {
-	id: number;
-	workflowName?: string;
-	displayTitle?: string;
-	status?: string;
-	conclusion?: string;
-	branch?: string;
-	headSha?: string;
-	createdAt?: string;
-	updatedAt?: string;
-	url?: string;
-	jobs: GhRunJobSnapshot[];
-}
-
-export interface GhFailedJobLog {
-	run: GhRunSnapshot;
-	job: GhRunJobSnapshot;
-	full?: string;
-	tail?: string;
-	available: boolean;
-}

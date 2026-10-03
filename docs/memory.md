@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-Oh My Pi supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+omp supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                   | Guide                                                   |
 | ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -23,6 +23,8 @@ memory:
 
 At session start, if a consolidated summary or manually captured lesson exists for the current project, it is injected into the system prompt as a **Memory Guidance** block. The summary and lessons share `memories.summaryInjectionTokenLimit`.
 
+If startup consolidation finishes after the first prompt build, the active session's summary snapshot is refreshed. Captured lessons remain pinned to the initial snapshot, so a concurrent `learn` call still affects only later sessions.
+
 - Treat memory as heuristic context — useful for process and prior decisions, not authoritative on current repo state.
 - Cite the memory artifact path when memory changes the plan, and pair it with current-repo evidence before acting.
 - Prefer repo state and user instruction when they conflict with memory; treat conflicting memory as stale.
@@ -40,6 +42,8 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 | `memory://<memory-id>`                 | Full Mnemopi memory row (working or episodic) with a YAML frontmatter metadata header; only available when `memory.backend` is `mnemopi` |
 
 The `memory://<memory-id>` form returns the full stored row rather than the clipped recall preview (recall content that exceeds the preview cap ends with a trailing `…`); agents are instructed to read it before any `memory_edit update`.
+
+The `memory://root[/…]` rows are file-backed and only exist with `memory.backend: local`, which populates the on-disk memory root via the consolidation pipeline. Under `hindsight` or `mnemopi` the root is never written, so those URLs do not resolve — use `recall`/`reflect` (and `read memory://<memory-id>` on `mnemopi`) instead.
 
 ### `/memory` slash command
 

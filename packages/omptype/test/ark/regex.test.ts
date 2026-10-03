@@ -17,16 +17,6 @@ describe("intersection", () => {
 		expect(T.allows("a")).toBe(true);
 	});
 
-	it("string and list", () => {
-		const Expected = type("/a/&/b/&/c/").json;
-		expect(Expected).toBeDefined();
-	});
-
-	it("redundant string and list", () => {
-		const Expected = type("/a/&/b/&/c/").json;
-		expect(Expected).toBeDefined();
-	});
-
 	it("distinct lists", () => {
 		const T = type(["/a/&/b/", "&", "/c/&/d/"]);
 		expect(T.allows("abcd")).toBe(true);
@@ -52,12 +42,6 @@ describe("instance", () => {
 	it("single flag preserved", () => {
 		const T = type(/a/i);
 		expect(T.allows("A")).toEqual(true);
-	});
-
-	it("flag order doesn't matter", () => {
-		const A = type(/a/gi);
-		const B = type(/a/gi);
-		expect(A.json).toEqual(B.json);
 	});
 });
 

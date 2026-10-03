@@ -44,24 +44,24 @@ import {
 	type SetSessionModeResponse,
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
-import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
+import { disableProvider, enableProvider } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	getExtensionUISelectOptionLabel,
+	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
-import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
-import { theme } from "../../modes/theme/theme";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -70,19 +70,14 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
+import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
-import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
+import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { OTHER_OPTION } from "../../tools/ask";
-import { normalizeLocalScheme } from "../../tools/path-utils";
-import { ToolError } from "../../tools/tool-errors";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODELS,
-	TTS_LOCAL_VOICE_OPTIONS,
-} from "../../tts/models";
-import { canonicalizeMessage } from "../../utils/thinking-display";
+import { resolvePlanFilePath } from "../../plan-mode/plan-files";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS, TTS_LOCAL_VOICE_OPTIONS } from "../../tts/models";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	extractAssistantMessageText,
@@ -90,6 +85,9 @@ import {
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
+
+import { cfgDisabledExtensions } from "../../extensibility/settings";
+import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
 const ACP_PLAN_MODE_ID = "plan";
@@ -128,6 +126,7 @@ type PromptQueueState = {
 type PromptLifecycleError = Error & { readonly code: "ACP_SESSION_CLOSED" };
 
 type PromptTurnState = {
+	abortController: AbortController;
 	cancelRequested: boolean;
 	settled: boolean;
 	/**
@@ -251,32 +250,39 @@ type AcpSpeechTtsModelOption = AcpSpeechOption & {
 };
 
 function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
+	const localSelector = (modelId: string) => `local/${modelId}`;
+	const defaultSpeechModel = localSelector(TTS_LOCAL_MODELS[0].key);
+	const defaultDictationModel = localSelector(DEFAULT_STT_MODEL_KEY);
 	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 	return {
 		settings: {
-			speechToTextModel: "stt.modelName",
-			textToSpeechModel: "tts.localModel",
+			speechToTextModel: "modelRoles.dictation",
+			textToSpeechModel: "modelRoles.speech",
 			textToSpeechVoice: "tts.localVoice",
 			speechVoice: "speech.voice",
 		},
 		defaults: {
-			speechToTextModel: DEFAULT_STT_MODEL_KEY,
-			textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
+			speechToTextModel: defaultDictationModel,
+			textToSpeechModel: defaultSpeechModel,
 			voice: DEFAULT_TTS_VOICE,
 		},
 		speechToText: {
-			setting: "stt.modelName",
-			defaultValue: DEFAULT_STT_MODEL_KEY,
-			models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+			setting: "modelRoles.dictation",
+			defaultValue: defaultDictationModel,
+			models: STT_MODELS.map(({ key, label, description }) => ({
+				value: localSelector(key),
+				label,
+				description,
+			})),
 		},
 		textToSpeech: {
-			modelSetting: "tts.localModel",
+			modelSetting: "modelRoles.speech",
 			voiceSetting: "tts.localVoice",
 			speechVoiceSetting: "speech.voice",
-			defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
+			defaultModel: defaultSpeechModel,
 			defaultVoice: DEFAULT_TTS_VOICE,
 			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
-				value: key,
+				value: localSelector(key),
 				label,
 				description,
 				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
@@ -514,28 +520,7 @@ export function createAcpExtensionUiContext(
 					},
 				},
 			);
-			if (timedOut) {
-				return {
-					kind: "submit",
-					results: questions.map(question => {
-						const labels = question.options.map(option => option.label);
-						const fallbackIndex = Math.min(
-							Math.max(question.recommended ?? 0, 0),
-							Math.max(labels.length - 1, 0),
-						);
-						const fallback = labels[fallbackIndex];
-						return {
-							id: question.id,
-							question: question.question,
-							options: labels,
-							multi: question.multi ?? false,
-							selectedOptions: fallback === undefined ? [] : [fallback],
-							customInput: undefined,
-							timedOut: true,
-						};
-					}),
-				};
-			}
+			if (timedOut) return timedOutAskDialogResult(questions);
 			if (!content) return undefined;
 
 			return {
@@ -640,7 +625,7 @@ export class AcpAgent implements Agent {
 			authMethods.push({
 				type: "terminal",
 				id: "terminal",
-				name: "Set up Oh My Pi in terminal",
+				name: "Set up omp in terminal",
 				description: "Launch the omp TUI to add provider keys and select models.",
 				args: [ACP_TERMINAL_AUTH_FLAG],
 			});
@@ -648,8 +633,8 @@ export class AcpAgent implements Agent {
 		return {
 			protocolVersion: PROTOCOL_VERSION,
 			agentInfo: {
-				name: "oh-my-pi",
-				title: "Oh My Pi",
+				name: "omp",
+				title: "omp",
 				version: VERSION,
 			},
 			authMethods,
@@ -853,6 +838,7 @@ export class AcpAgent implements Agent {
 			const converted = this.#convertPromptBlocks(params.prompt);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
+				abortController: new AbortController(),
 				cancelRequested: false,
 				settled: false,
 				errorTextDelivery: undefined,
@@ -959,8 +945,9 @@ export class AcpAgent implements Agent {
 	}
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+		const promptTurn = record.promptTurn;
 		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult) {
+		if (skillResult || promptTurn?.cancelRequested) {
 			return;
 		}
 
@@ -969,6 +956,7 @@ export class AcpAgent implements Agent {
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
 			cwd: record.session.sessionManager.getCwd(),
+			signal: promptTurn?.abortController.signal,
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
@@ -992,10 +980,20 @@ export class AcpAgent implements Agent {
 					},
 				});
 			},
-			notifyConfigChanged: async () => {
+			notifyConfigChanged: async options => {
+				// Mirrors `setSessionConfigOption`: once the session-lifetime
+				// subscription is installed, `model_changed`/`thinking_level_changed`
+				// already reach `#handleLifetimeEvent`, which pushes the
+				// `config_option_update`. Pushing again here would make clients
+				// redraw their config UI twice for a single change.
+				if (options?.handledBySessionEvent && record.lifetimeUnsubscribe !== undefined) {
+					await this.#waitForPromptEventHandlers(record);
+					return;
+				}
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});
+		if (promptTurn?.cancelRequested) return;
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				const residualBaseline = new Set(record.extensionUserMessageTasks);
@@ -1012,7 +1010,6 @@ export class AcpAgent implements Agent {
 				}
 				return;
 			}
-			const promptTurn = record.promptTurn;
 			this.#finishPrompt(record, {
 				stopReason: "end_turn",
 				usage: this.#buildTurnUsage(
@@ -1050,7 +1047,7 @@ export class AcpAgent implements Agent {
 		if (!skill) {
 			return false;
 		}
-		const built = await buildSkillPromptMessage(skill, parsed.args, "user");
+		const built = await buildSkillPromptMessage(skill, parsed, "user");
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -1091,6 +1088,7 @@ export class AcpAgent implements Agent {
 			return promptTurn.cleanup;
 		}
 		promptTurn.cancelRequested = true;
+		promptTurn.abortController.abort();
 		promptTurn.unsubscribe?.();
 		const cleanup = this.#runCancelCleanup(record, promptTurn);
 		promptTurn.cleanup = cleanup;
@@ -1180,7 +1178,7 @@ export class AcpAgent implements Agent {
 			case "_omp/extensions": {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
 				const sm = await Settings.init();
-				const disabledIds = (sm.get("disabledExtensions") as string[] | undefined) ?? [];
+				const disabledIds = cfgDisabledExtensions.get(sm);
 				const extensions = await loadAllExtensions(cwd, disabledIds);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
@@ -1360,14 +1358,20 @@ export class AcpAgent implements Agent {
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}
+		// Config delivery is part of command completion, even though the
+		// subscription lives beyond an individual prompt turn.
+		const delivery = this.#pushConfigOptionUpdate(record);
+		record.promptEventHandlers.add(delivery);
 		try {
-			await this.#pushConfigOptionUpdate(record);
+			await delivery;
 		} catch (error) {
 			logger.warn("Failed to push config_option_update after a lifetime event", {
 				sessionId: record.session.sessionId,
 				eventType: event.type,
 				error,
 			});
+		} finally {
+			record.promptEventHandlers.delete(delivery);
 		}
 	}
 
@@ -1519,7 +1523,7 @@ export class AcpAgent implements Agent {
 	/**
 	 * Surface a turn-fatal provider error that never reached the client. A
 	 * request that fails before streaming any assistant events — e.g. GitHub
-	 * Copilot's `HTTP 400 model_not_supported` after retries — emits only
+	 * Copilot's `HTTP 400 model_not_supported` — emits only
 	 * `agent_end` with an empty assistant message carrying `errorMessage`
 	 * (`Agent#runLoop`'s catch), so no `message_update`/`message_end` ever maps
 	 * to a session update and the client sees the turn end silently. Errors
@@ -1824,7 +1828,7 @@ export class AcpAgent implements Agent {
 
 	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
 		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
-		if (session.settings.get("plan.enabled")) {
+		if (cfgPlanEnabled.get(session.settings)) {
 			modes.push({
 				id: ACP_PLAN_MODE_ID,
 				name: "Plan",
@@ -1917,10 +1921,24 @@ export class AcpAgent implements Agent {
 		}
 		// Approved. Set the plan reference so the next turn injects the plan
 		// content as context (the file keeps its agent-chosen name — no rename),
-		// then exit plan mode so the agent regains full tools.
 		session.setPlanReferencePath(planFilePath);
 		session.setPlanProposalHandler?.(null);
 		session.setPlanModeState(undefined);
+		let autosaveFailed = false;
+		try {
+			await autosaveApprovedPlan({
+				settings: session.settings,
+				cwd: session.sessionManager.getCwd(),
+				title: resolvedTitle,
+				planContent,
+			});
+		} catch (error) {
+			logger.warn("Failed to autosave approved plan", {
+				sessionId: session.sessionId,
+				error,
+			});
+			autosaveFailed = true;
+		}
 		try {
 			await this.#connection.sessionUpdate({
 				sessionId: session.sessionId,
@@ -1937,7 +1955,9 @@ export class AcpAgent implements Agent {
 			content: [
 				{
 					type: "text" as const,
-					text: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
+					text: autosaveFailed
+						? `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation. (Plan autosave failed; continuing.)`
+						: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
 				},
 			],
 			details,
@@ -1945,14 +1965,13 @@ export class AcpAgent implements Agent {
 	}
 
 	#resolveAcpPlanFilePath(session: AgentSession, planFilePath: string): string {
-		if (planFilePath.startsWith("local:")) {
-			const normalized = normalizeLocalScheme(planFilePath);
-			return resolveLocalUrlToPath(normalized, {
+		return resolvePlanFilePath(planFilePath, {
+			localProtocolOptions: {
 				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 				getSessionId: () => session.sessionManager.getSessionId(),
-			});
-		}
-		return path.resolve(session.sessionManager.getCwd(), planFilePath);
+			},
+			cwd: session.sessionManager.getCwd(),
+		});
 	}
 
 	async #readAcpPlanFile(session: AgentSession, planFilePath: string): Promise<string | null> {
@@ -2079,9 +2098,20 @@ export class AcpAgent implements Agent {
 				return;
 			}
 			if (!record.lifetimeUnsubscribe) {
-				record.lifetimeUnsubscribe = record.session.subscribe(event => {
+				const unsubscribeEvents = record.session.subscribe(event => {
 					void this.#handleLifetimeEvent(record, event);
 				});
+				// Skills/commands rediscovery (live `skills.*`/`commands.*` edits, MCP
+				// prompts, manage_skill) re-advertises the palette.
+				const unsubscribeCommands = record.session.subscribeCommandMetadataChanged(() => {
+					void this.#emitAvailableCommandsUpdate(record).catch(error => {
+						logger.warn("Failed to emit ACP available commands update", { error: String(error) });
+					});
+				});
+				record.lifetimeUnsubscribe = () => {
+					unsubscribeEvents();
+					unsubscribeCommands();
+				};
 			}
 			void this.#emitBootstrapUpdates(sessionId, record);
 		}, ACP_BOOTSTRAP_RACE_GUARD_MS);
@@ -2130,13 +2160,7 @@ export class AcpAgent implements Agent {
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
-		resetCapabilities();
-		await record.session.refreshSkills();
-		const fileCommands = await loadSlashCommands({
-			cwd,
-			extensionRoots: record.session.effectiveExtensionRoots,
-		});
-		record.session.setSlashCommands(fileCommands);
+		await record.session.refreshSkillsAndCommands();
 		await this.#emitAvailableCommandsUpdate(record);
 	}
 
@@ -2179,6 +2203,7 @@ export class AcpAgent implements Agent {
 			orchestrationCacheRead: usage.orchestrationCacheRead,
 			premiumRequests: usage.premiumRequests,
 			cost: usage.cost,
+			subagentCost: usage.subagentCost,
 		};
 	}
 
@@ -2583,6 +2608,7 @@ export class AcpAgent implements Agent {
 				shutdown: () => {},
 				getContextUsage: () => record.session.getContextUsage(),
 				getSystemPrompt: () => record.session.systemPrompt,
+				runEphemeralTurn: args => record.session.runEphemeralTurn(args),
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
 			{

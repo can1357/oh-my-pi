@@ -7,9 +7,9 @@ import {
 	isRustAnalyzerClient,
 	type LspServerStatus,
 	notifySaved,
+	refreshFile,
 	sendNotification,
 	sendRequest,
-	setIdleTimeout,
 	shutdownClientInstance,
 	syncContent,
 	WARMUP_TIMEOUT_MS,
@@ -17,6 +17,7 @@ import {
 import { getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
+import { uriToFile } from "./utils";
 
 /**
  * LSP actions that do not mutate the workspace or language-server state.
@@ -75,7 +76,6 @@ export function discoverStartupLspServers(
  */
 export async function warmupLspServers(cwd: string, options?: LspWarmupOptions): Promise<LspWarmupResult> {
 	const config = loadConfig(cwd);
-	setIdleTimeout(config.idleTimeoutMs);
 	const servers: LspWarmupResult["servers"] = [];
 	const lspServers = getLspServers(config);
 
@@ -191,19 +191,6 @@ export async function notifyFileSaved(
 	throwIfAborted(signal);
 }
 
-// Cache config per cwd to avoid repeated file I/O
-export const configCache = new Map<string, LspConfig>();
-
-export function getConfig(cwd: string): LspConfig {
-	let config = configCache.get(cwd);
-	if (!config) {
-		config = loadConfig(cwd);
-		configCache.set(cwd, config);
-	}
-	setIdleTimeout(config.idleTimeoutMs);
-	return config;
-}
-
 function isCustomLinter(serverConfig: ServerConfig): boolean {
 	return Boolean(serverConfig.createClient);
 }
@@ -295,7 +282,6 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 	try {
 		const params = reloadConfigurationParams(client.config);
 		await sendNotification(client, "workspace/didChangeConfiguration", params, signal);
-		return `Reloaded ${serverName}`;
 	} catch {
 		throwIfAborted(signal);
 		// The reload notification could not be delivered — the connection is
@@ -315,4 +301,6 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 		}
 		return `Restarted ${serverName}`;
 	}
+	await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), signal)));
+	return `Reloaded ${serverName}`;
 }

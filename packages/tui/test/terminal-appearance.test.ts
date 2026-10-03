@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { extractPrintableText } from "@oh-my-pi/pi-tui/keys";
-import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import { ProcessTerminal, type TerminalStartOptions } from "@oh-my-pi/pi-tui/terminal";
 import {
 	type CellDimensions,
 	getCellDimensions,
@@ -139,7 +139,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// Seed the current appearance and drain all startup probe sentinels.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 
 		const events: Array<{ kind: "report" | "change"; appearance: string; token: number | undefined }> = [];
 		terminal.onAppearanceReport?.((appearance, token) => {
@@ -198,7 +198,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// Complete the startup query and drain every startup probe sentinel before
 		// issuing explicit refreshes, so each response belongs to a real query cycle.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 
 		terminal.refreshAppearance?.();
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
@@ -321,8 +321,8 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
 		process.stdin.emit("data", "\x1b[?2031;0$y");
 		// Drain startup sentinels in send order: keyboard, OSC 11, DEC 2026,
-		// DEC 2048, DEC 2031, and xterm ?1010/?1011.
-		for (let i = 0; i < 7; i++) {
+		// DEC 2048, DEC 2031, DEC 2004, and xterm ?1010/?1011.
+		for (let i = 0; i < 8; i++) {
 			process.stdin.emit("data", "\x1b[?1;2c");
 		}
 		const afterStartup = queryCount();
@@ -337,11 +337,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	it("refreshAppearance() issues exactly one OSC 11 re-query per call (#5352)", () => {
 		const { terminal, queryCount } = setupTerminal();
 
-		// Drain the OSC 11 reply and all seven startup DA1 sentinels (keyboard,
-		// OSC 11, and the DECRQM probes for 2026/2048/2031/1010/1011) so the
+		// Drain the OSC 11 reply and all eight startup DA1 sentinels (keyboard,
+		// OSC 11, and the DECRQM probes for 2026/2048/2031/2004/1010/1011) so the
 		// probe FIFO is empty before the refresh gesture.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const afterInitial = queryCount();
 
 		// An explicit refresh gesture (Ctrl+L) issues one bounded probe.
@@ -372,7 +372,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(writes).toContain("\x1b[c");
 
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
 
 		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\");
@@ -386,7 +386,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, received, queryCount } = setupTerminal();
 
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const reports: Array<{ appearance: string; token: number | undefined }> = [];
 		terminal.onAppearanceReport?.((appearance, token) => reports.push({ appearance, token }));
 		const beforeRefresh = queryCount();
@@ -419,7 +419,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, queryCount, sentinelCount } = setupTerminal();
 
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const directQueriesBeforeRefresh = queryCount();
 		const directSentinelsBeforeRefresh = sentinelCount();
 
@@ -440,7 +440,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// Startup classifies the terminal as light.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		expect(terminal.appearance).toBe("light");
 		expect(appearances).toEqual(["light"]);
 
@@ -464,7 +464,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// terminal may still never emit an appearance notification, so an explicit
 		// refresh must not be gated on advertised 2031 support.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?2031;2$y");
 		const afterInitial = queryCount();
 
@@ -615,10 +615,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(writes.some(w => w.includes("\x1b[>31u"))).toBe(false);
 		expect(writes).toContain("\x1b[?u\x1b[c");
 
-		// Seven DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
-		// the DECRQM probes for DEC 2026, 2048, 2031, 1010, and 1011 (each rides the
-		// shared FIFO). Consume them in send-order and verify none leaks to the input
-		// handler.
+		// Eight DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
+		// the DECRQM probes for DEC 2026, 2048, 2031, 2004, 1010, and 1011 (each
+		// rides the shared FIFO). Consume them in send-order and verify none leaks
+		// to the input handler.
+		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
@@ -628,7 +629,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		expect(received).toEqual([]);
 
-		// An eighth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
+		// A ninth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
 		// exclusively a terminal->host report, never a keystroke, so a reply that
 		// lands after the sentinel FIFO drains (slow SSH/PTY links) must not leak
 		// into the composer as literal text (#8542).
@@ -675,6 +676,22 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("routes resize by the injected ConPTY override, not the ambient platform", () => {
+		// The override must gate every ConPTY-dependent path uniformly. Reading
+		// isConPTYHosted() here instead made a { conpty: false } terminal report
+		// non-ConPTY writes and kitty flags but ConPTY resize routing on Windows
+		// and WSL, so no test could model the opposite host.
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const posix = setupTerminal({ conpty: false });
+		expect(posix.terminal.hostOwnsGridOnResize).toBe(false);
+		posix.terminal.stop();
+
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		const conpty = setupTerminal({ conpty: true });
+		expect(conpty.terminal.hostOwnsGridOnResize).toBe(true);
+		conpty.terminal.stop();
+	});
+
 	it("shutdown balances the single kitty push performed on detection", () => {
 		const { terminal, writes } = setupTerminal();
 
@@ -714,7 +731,7 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		setCellDimensions(originalCellDims);
 	});
 
-	function setup() {
+	function setup(startOptions?: TerminalStartOptions) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		let resizeCount = 0;
@@ -735,6 +752,8 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 			() => {
 				resizeCount++;
 			},
+			undefined,
+			startOptions,
 		);
 		return { terminal, writes, received, reports, resizeCount: () => resizeCount };
 	}
@@ -746,6 +765,52 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		expect(writes.some(w => w.includes("\x1b[?2031$p"))).toBe(true);
 		expect(writes.some(w => w.includes("\x1b[?1010$p"))).toBe(true);
 		expect(writes.some(w => w.includes("\x1b[?1011$p"))).toBe(true);
+		expect(writes.some(w => w.includes("\x1b[?2004$p"))).toBe(true);
+		terminal.stop();
+	});
+
+	it("decides each unbracketed multiline burst by the stall probe once DECRQM confirms 2004 (#13344, #12540)", () => {
+		let stalled = false;
+		const { terminal, received } = setup({ isLoopStalled: () => stalled });
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		received.length = 0;
+
+		// IME/dictation commits are typed input, never bracketed: on a responsive
+		// loop the block lands as one paste instead of one submit per line.
+		process.stdin.emit("data", "1. do xxx\r2. do yyy\r3. do zzz");
+		expect(received).toEqual(["\x1b[200~1. do xxx\r2. do yyy\r3. do zzz\x1b[201~"]);
+
+		// The same shape drained after an event-loop stall is batched typing:
+		// every Enter must still submit.
+		stalled = true;
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
+		expect(received).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+		terminal.stop();
+	});
+
+	it("reasserts confirmed bracketed paste after a terminal resets mode 2004", () => {
+		vi.useFakeTimers();
+		const { terminal, writes } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		const before = writes.filter(write => write.includes("\x1b[?2004h")).length;
+		vi.advanceTimersByTime(1000);
+		expect(writes.filter(write => write.includes("\x1b[?2004h")).length).toBe(before + 1);
+		terminal.stop();
+		const stopped = writes.length;
+		vi.advanceTimersByTime(1000);
+		expect(writes).toHaveLength(stopped);
+	});
+
+	it("coalesces an unbracketed multiline burst when bracketed paste is unconfirmed (#12540)", () => {
+		const { terminal, received } = setup();
+
+		// No DECRQM 2004 confirmation: the terminal may not bracket pastes, so the
+		// raw-burst heuristic stays on and re-wraps the burst with paste markers.
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
+
+		expect(received).toEqual(["\x1b[200~aaa\rbbb\rccc\x1b[201~"]);
 		terminal.stop();
 	});
 
@@ -775,6 +840,19 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		const { terminal, reports } = setup();
 		process.stdin.emit("data", "\x1b[?2026;0$y");
 		expect(reports).toContainEqual({ mode: 2026, supported: false });
+		terminal.stop();
+	});
+
+	it("forwards DECRPM status so subscribers can distinguish unrecognized from permanently reset", () => {
+		const { terminal } = setup();
+		const statuses: Array<{ mode: number; status?: number }> = [];
+		terminal.onPrivateModeReport?.((mode, _supported, _confirmed, status) => {
+			statuses.push({ mode, status });
+		});
+		process.stdin.emit("data", "\x1b[?2026;0$y");
+		process.stdin.emit("data", "\x1b[?2048;4$y");
+		expect(statuses).toContainEqual({ mode: 2026, status: 0 });
+		expect(statuses).toContainEqual({ mode: 2048, status: 4 });
 		terminal.stop();
 	});
 

@@ -36,6 +36,22 @@ pub(crate) struct FilenameExpansionOptions {
 	pub require_dot_in_pattern_to_match_dot_files: bool,
 }
 
+/// Returns the `scheme://` root when the pattern's leading components spell a
+/// virtual path (`scheme:` then an empty component, from splitting on `/`).
+fn url_pattern_root(components: &[PatternWord]) -> Option<std::path::PathBuf> {
+	let [first, second, ..] = components else {
+		return None;
+	};
+	if !second.iter().all(|piece| piece.as_str().is_empty()) {
+		return None;
+	}
+	let mut root: String = first.iter().map(|piece| piece.as_str()).collect();
+	let scheme_len = root.strip_suffix(':')?.len();
+	root.push_str("//");
+	let root = std::path::PathBuf::from(root);
+	(pi_vfs::url_scheme(&root).map(str::len) == Some(scheme_len)).then_some(root)
+}
+
 /// Result of a pattern expansion, distinguishing "no glob metacharacters" from
 /// "glob expansion attempted but found no matches".
 #[derive(Debug, Default)]
@@ -145,28 +161,22 @@ impl Pattern {
 		self.pieces.iter().all(|p| p.as_str().is_empty())
 	}
 
-	/// Placeholder function that always returns true.
-	pub(crate) const fn accept_all_expand_filter(_path: &Path) -> bool {
-		true
-	}
-
-	/// Expands the pattern into a list of matching file paths.
+	/// Expands the pattern into a list of matching file paths, reading
+	/// directories through `fs`. Patterns rooted at `scheme://` expand within
+	/// that virtual namespace.
 	///
 	/// # Arguments
 	///
+	/// * `fs` - The filesystem to search.
 	/// * `working_dir` - The current working directory, used for relative paths.
-	/// * `path_filter` - Optionally provides a function that filters paths after
-	///   expansion.
+	/// * `options` - Expansion options.
 	#[expect(clippy::too_many_lines)]
-	pub(crate) fn expand<PF>(
+	pub(crate) async fn expand(
 		&self,
+		fs: &pi_vfs::Fs,
 		working_dir: &Path,
-		path_filter: Option<&PF>,
 		options: &FilenameExpansionOptions,
-	) -> Result<PatternExpansionResult, error::Error>
-	where
-		PF: Fn(&Path) -> bool,
-	{
+	) -> Result<PatternExpansionResult, error::Error> {
 		// If the pattern has no pieces at all, short-circuit; there's nothing to
 		// expand. Note: we intentionally do NOT short-circuit when pieces are present
 		// but empty (e.g. from a quoted empty string ""); those fall through to the
@@ -182,15 +192,6 @@ impl Pattern {
 				&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
 		}) {
 			let concatenated: String = self.pieces.iter().map(|piece| piece.as_str()).collect();
-
-			if let Some(filter) = path_filter
-				&& !filter(Path::new(&concatenated))
-			{
-				// No globs, but the literal was filtered out. Return NoGlob
-				// (not Expanded) so that callers don't mistake this for a
-				// failed glob match (which would trigger failglob).
-				return Ok(PatternExpansionResult::NoGlob);
-			}
 
 			return Ok(PatternExpansionResult::Expanded(vec![concatenated]));
 		}
@@ -241,7 +242,10 @@ impl Pattern {
 			)
 		});
 		let (absolute_root, components_to_remove) =
-			if let Some((root, consumed)) = alias_root {
+			if let Some(root) = url_pattern_root(&components) {
+				// `scheme:` and the empty component between the two slashes.
+				(Some(root), 2)
+			} else if let Some((root, consumed)) = alias_root {
 				(Some(root), consumed)
 			} else {
 				(
@@ -276,17 +280,29 @@ impl Pattern {
 			vec![working_dir.to_path_buf()]
 		};
 
+		// URL spelling: an absolute `scheme://` pattern is already spelled
+		// percent-encoded, while a relative pattern under a virtual working
+		// directory names raw segments (encoded once when joined, decoded back
+		// once in the results). Host paths keep their spelling untouched.
+		let virtual_spelling = paths_so_far.first().is_some_and(|p| pi_vfs::is_virtual_path(p));
+		let raw_relative = virtual_spelling && prefix_to_remove.is_some();
+		let match_encoded = virtual_spelling && prefix_to_remove.is_none();
+
 		for component in components {
 			if !component.iter().any(|piece| {
 				matches!(piece, PatternPiece::Pattern(_))
 					&& requires_expansion(piece.as_str(), self.enable_extended_globbing)
 			}) {
+				let flattened = component
+					.iter()
+					.map(|piece| piece.as_str())
+					.collect::<String>();
 				for p in &mut paths_so_far {
-					let flattened = component
-						.iter()
-						.map(|piece| piece.as_str())
-						.collect::<String>();
-					sys::fs::push_path_for_pattern(p, &flattened);
+					if raw_relative {
+						*p = pi_vfs::join_path(p, Path::new(&flattened));
+					} else {
+						sys::fs::push_path_for_pattern(p, &flattened);
+					}
 				}
 				continue;
 			}
@@ -305,26 +321,38 @@ impl Pattern {
 				let allow_dot_files =
 					!options.require_dot_in_pattern_to_match_dot_files || subpattern_starts_with_dot;
 
-				let matches_dotfile_policy = |dir_entry: &std::fs::DirEntry| {
-					!dir_entry.file_name().to_string_lossy().starts_with('.') || allow_dot_files
-				};
-
 				let regex = subpattern.to_regex(true, true)?;
-				let matches_regex = |dir_entry: &std::fs::DirEntry| {
-					regex
-						.is_match(dir_entry.file_name().to_string_lossy().as_ref())
-						.unwrap_or(false)
-				};
 
-				let mut matching_paths_in_dir: Vec<_> = current_path
-					.read_dir()
-					.map_or_else(|_| vec![], |dir| dir.into_iter().collect())
-					.into_iter()
-					.filter_map(|result| result.ok())
-					.filter(matches_regex)
-					.filter(matches_dotfile_policy)
-					.map(|entry| entry.path())
-					.collect();
+				// Matches keep the pattern's spelling (`./`, `../`), but a virtual
+				// provider is only asked to list a lexically normalized path.
+				let listing = if fs.is_native_local(&current_path) {
+					fs.read_dir(&current_path).await
+				} else {
+					fs.read_dir(pi_vfs::normalize_lexically(&current_path)).await
+				};
+				let mut matching_paths_in_dir: Vec<_> = match listing {
+					Ok(entries) => entries
+						.filter_map(Result::ok)
+						.filter_map(|entry| {
+							let file_name = entry.file_name();
+							let name = file_name.to_string_lossy();
+							if !allow_dot_files && name.starts_with('.') {
+								return None;
+							}
+							// Raw names match as on any filesystem; a pattern
+							// spelled as an absolute URL may also name the
+							// encoded segment (`my%20*`).
+							let matches = regex.is_match(name.as_ref()).unwrap_or(false)
+								|| (match_encoded && {
+									let encoded = pi_vfs::encode_segment(&file_name);
+									matches!(encoded, std::borrow::Cow::Owned(_))
+										&& regex.is_match(&encoded.to_string_lossy()).unwrap_or(false)
+								});
+							matches.then(|| pi_vfs::child_path(&current_path, &file_name))
+						})
+						.collect(),
+					Err(_) => vec![],
+				};
 
 				matching_paths_in_dir.sort();
 
@@ -334,13 +362,7 @@ impl Pattern {
 
 		let results: Vec<_> = paths_so_far
 			.into_iter()
-			.filter_map(|path| {
-				if let Some(filter) = path_filter
-					&& !filter(path.as_path())
-				{
-					return None;
-				}
-
+			.map(|path| {
 				// Normalize separators *before* stripping the working-dir
 				// prefix so that `prefix_to_remove` (already normalized to
 				// use `/`) matches paths that may contain a mix of `\` and
@@ -355,7 +377,21 @@ impl Pattern {
 					path_ref = stripped;
 				}
 
-				Some(path_ref.to_string())
+				if raw_relative {
+					// Back to the raw relative spelling the user typed, so
+					// resolving it against the virtual cwd encodes it once.
+					return path_ref
+						.split('/')
+						.map(|segment| {
+							pi_vfs::decode_segment(std::ffi::OsStr::new(segment))
+								.to_string_lossy()
+								.into_owned()
+						})
+						.collect::<Vec<_>>()
+						.join("/");
+				}
+
+				path_ref.to_string()
 			})
 			.collect();
 
@@ -889,8 +925,8 @@ mod tests {
 	/// On Unix, the same code path is exercised (both builds go through the
 	/// shared `normalize_path_separators` helpers), so this test serves as a
 	/// regression guard on both platforms.
-	#[test]
-	fn test_relative_glob_returns_relative_paths() -> Result<()> {
+	#[tokio::test]
+	async fn test_relative_glob_returns_relative_paths() -> Result<()> {
 		let scratch = tempfile::tempdir()?;
 		let sub = scratch.path().join("sub");
 		std::fs::create_dir_all(&sub)?;
@@ -898,11 +934,9 @@ mod tests {
 		std::fs::write(sub.join("b.txt"), "")?;
 
 		let pattern = Pattern::from("sub/*.txt").set_extended_globbing(false);
-		let result = pattern.expand::<fn(&Path) -> bool>(
-			scratch.path(),
-			None,
-			&FilenameExpansionOptions::default(),
-		)?;
+		let result = pattern
+			.expand(&pi_vfs::Fs::native(), scratch.path(), &FilenameExpansionOptions::default())
+			.await?;
 
 		let paths = expect_expanded(result)?;
 
@@ -924,8 +958,8 @@ mod tests {
 
 	/// Verifies absolute-pattern expansion still works after the prefix
 	/// handling changes.
-	#[test]
-	fn test_absolute_glob_returns_absolute_paths() -> Result<()> {
+	#[tokio::test]
+	async fn test_absolute_glob_returns_absolute_paths() -> Result<()> {
 		let scratch = tempfile::tempdir()?;
 		std::fs::write(scratch.path().join("one.log"), "")?;
 		std::fs::write(scratch.path().join("two.log"), "")?;
@@ -936,11 +970,9 @@ mod tests {
 		let abs_pattern = abs_pattern.replace('\\', "/");
 
 		let pattern = Pattern::from(abs_pattern.as_str()).set_extended_globbing(false);
-		let result = pattern.expand::<fn(&Path) -> bool>(
-			Path::new("/"),
-			None,
-			&FilenameExpansionOptions::default(),
-		)?;
+		let result = pattern
+			.expand(&pi_vfs::Fs::native(), Path::new("/"), &FilenameExpansionOptions::default())
+			.await?;
 
 		let paths = expect_expanded(result)?;
 
@@ -961,9 +993,71 @@ mod tests {
 		Ok(())
 	}
 
+	/// Serves a fixed `mem://` tree: `a.md`, `b.txt`, `.hidden.md`, and
+	/// `dir/c.md`.
+	#[derive(Debug)]
+	struct MemListing;
+
+	#[async_trait::async_trait]
+	impl pi_vfs::FileSystem for MemListing {
+		async fn open(
+			&self,
+			_path: &Path,
+			_options: &pi_vfs::OpenOptions,
+		) -> std::io::Result<pi_vfs::File> {
+			Err(pi_vfs::unsupported("open"))
+		}
+
+		async fn metadata(&self, _path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+			Err(std::io::ErrorKind::NotFound.into())
+		}
+
+		async fn read_dir(&self, path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
+			let names: &[&str] = match path.to_str() {
+				Some("mem://") => &["a.md", "b.txt", ".hidden.md", "dir"],
+				Some("mem://dir") => &["c.md"],
+				_ => return Err(std::io::ErrorKind::NotFound.into()),
+			};
+			let entries: Vec<_> = names
+				.iter()
+				.map(|name| {
+					Ok(pi_vfs::DirEntry::new(
+						pi_vfs::child_path(path, std::ffi::OsStr::new(name)),
+						(*name).into(),
+						None,
+					))
+				})
+				.collect();
+			Ok(pi_vfs::ReadDir::from_entries(entries))
+		}
+	}
+
+	/// A glob rooted at `scheme://` lists that virtual root instead of being
+	/// read as a relative `scheme:` directory, and a relative glob in a
+	/// virtual working directory keeps results relative to it.
+	#[tokio::test]
+	async fn test_globs_expand_within_virtual_namespaces() -> Result<()> {
+		let fs = pi_vfs::Fs::new(std::sync::Arc::new(MemListing));
+		let options = FilenameExpansionOptions { require_dot_in_pattern_to_match_dot_files: true };
+		let expand = async |pattern: &str, cwd: &str| {
+			let result = Pattern::from(pattern)
+				.set_extended_globbing(false)
+				.expand(&fs, Path::new(cwd), &options)
+				.await?;
+			expect_expanded(result)
+		};
+
+		assert_eq!(expand("mem://*.md", "/").await?, vec!["mem://a.md".to_string()]);
+		assert_eq!(expand("mem://d*/*.md", "/").await?, vec!["mem://dir/c.md".to_string()]);
+		assert_eq!(expand("*.md", "mem://dir").await?, vec!["c.md".to_string()]);
+		assert_eq!(expand("mem://*.none", "/").await?, Vec::<String>::new());
+
+		Ok(())
+	}
+
 	#[cfg(windows)]
-	#[test]
-	fn test_msys_drive_alias_glob_expands_from_drive_root() -> Result<()> {
+	#[tokio::test]
+	async fn test_msys_drive_alias_glob_expands_from_drive_root() -> Result<()> {
 		let scratch = tempfile::tempdir()?;
 		std::fs::write(scratch.path().join("one.txt"), "")?;
 		std::fs::write(scratch.path().join("two.txt"), "")?;
@@ -975,11 +1069,9 @@ mod tests {
 		let alias_pattern = format!("/{}/{}/*.txt", drive.to_ascii_lowercase(), tail);
 
 		let pattern = Pattern::from(alias_pattern.as_str()).set_extended_globbing(false);
-		let result = pattern.expand::<fn(&Path) -> bool>(
-			Path::new("/"),
-			None,
-			&FilenameExpansionOptions::default(),
-		)?;
+		let result = pattern
+			.expand(&pi_vfs::Fs::native(), Path::new("/"), &FilenameExpansionOptions::default())
+			.await?;
 
 		let paths = expect_expanded(result)?;
 		assert_eq!(paths.len(), 2, "unexpected results: {paths:?}");

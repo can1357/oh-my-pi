@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { collectSubSessions, exportFromFile } from "../src/export/html";
+import { exportFromFile } from "../src/export/html";
+import { collectSubSessions } from "../src/session/sub-sessions";
 
 /**
  * Contract: a session at `<dir>/<name>.jsonl` embeds subagent transcripts from
@@ -89,6 +90,15 @@ describe("collectSubSessions", () => {
 		expect(html).not.toContain(subPreviousPath);
 	});
 
+	test("rejects a missing input without creating session or export files", async () => {
+		const missingInput = path.join(root, "missing.jsonl");
+		const outputPath = path.join(root, "export.html");
+
+		await expect(exportFromFile(missingInput, { outputPath })).rejects.toThrow(`File not found: ${missingInput}`);
+		expect(await Bun.file(missingInput).exists()).toBe(false);
+		expect(await Bun.file(outputPath).exists()).toBe(false);
+	});
+
 	test("skips corrupt, empty, backup, and non-jsonl files", async () => {
 		await Bun.write(path.join(root, "main/Good.jsonl"), sessionJsonl("good", ["g1"]));
 		await Bun.write(path.join(root, "main/corrupt.jsonl"), "{not json\n");
@@ -99,6 +109,38 @@ describe("collectSubSessions", () => {
 		const subs = await collectSubSessions(mainFile);
 
 		expect(Object.keys(subs)).toEqual(["Good"]);
+	});
+
+	test("skips advisor transcripts stored alongside subagent sessions", async () => {
+		await Bun.write(path.join(root, "main/Scout.jsonl"), sessionJsonl("scout", ["s1"]));
+		await Bun.write(path.join(root, "main/__advisor.jsonl"), sessionJsonl("adv", ["v1"]));
+		await Bun.write(path.join(root, "main/__advisor.reviewer.jsonl"), sessionJsonl("adv2", ["v2"]));
+		await Bun.write(path.join(root, "main/Scout/__advisor.jsonl"), sessionJsonl("adv3", ["v3"]));
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(Object.keys(subs)).toEqual(["Scout"]);
+	});
+
+	test("terminates when a transcript stem names the directory itself", async () => {
+		// "..jsonl" has the stem "."; descending into `<dir>/.` used to rescan the same directory forever.
+		await Bun.write(path.join(root, "main/..jsonl"), sessionJsonl("dot", ["d1"]));
+		await Bun.write(path.join(root, "main/Scout.jsonl"), sessionJsonl("scout", ["s1"]));
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(Object.keys(subs).sort()).toEqual([".", "Scout"]);
+	});
+
+	test("flags subagents killed with a tombstone sidecar as aborted", async () => {
+		await Bun.write(path.join(root, "main/Killed.jsonl"), sessionJsonl("killed", ["k1"]));
+		await Bun.write(path.join(root, "main/Killed.jsonl.tombstone"), "");
+		await Bun.write(path.join(root, "main/Live.jsonl"), sessionJsonl("live", ["l1"]));
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(subs.Killed.aborted).toBe(true);
+		expect(subs.Live.aborted).toBe(false);
 	});
 
 	test("returns empty record when no subagent dir exists", async () => {

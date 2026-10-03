@@ -18,8 +18,8 @@ pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
 		.mode(0o600)
 		.open(path)?;
 	// SAFETY: `file` owns a live descriptor for the duration of this call. The
-	// non-blocking operation only changes the advisory lock attached to that open
-	// file description.
+	// non-blocking operation only changes the advisory lock attached to that
+	// open file description.
 	let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
 	if status == 0 {
 		return Ok(Some(PlatformFileLock { file: Some(file) }));

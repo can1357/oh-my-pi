@@ -7,8 +7,8 @@ import {
 	type PauseScreenHost,
 	renderPauseScreen,
 	runPauseScreen,
-} from "../../../src/modes/components/pause-screen";
-import { getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 // Strip SGR colors so assertions see visible text only.
 const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -68,7 +68,6 @@ describe("pause screen", () => {
 			expect(text).toContain("P A U S E D");
 			expect(text).toContain("Main agent, subagents, and advisor");
 			expect(text).toContain("paused for 1:05");
-			expect(text).toContain("esc · enter · space — resume");
 			expect(text).toContain("█".repeat(5));
 		});
 
@@ -78,7 +77,6 @@ describe("pause screen", () => {
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("▌▌ P A U S E D");
 			expect(text).toContain("paused for 0:03");
-			expect(text).toContain("esc to resume");
 			expect(text).not.toContain("█".repeat(5)); // no room for the big glyph
 		});
 

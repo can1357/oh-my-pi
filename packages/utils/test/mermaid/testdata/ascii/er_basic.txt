@@ -1,8 +1,0 @@
-erDiagram
-  CUSTOMER ||--o{ ORDER : places
----
-+----------+      +-------+
-| CUSTOMER ||---o<| ORDER |
-+----------+places+-------+
-
-

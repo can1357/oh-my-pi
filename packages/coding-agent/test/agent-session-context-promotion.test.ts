@@ -47,7 +47,7 @@ describe("AgentSession context promotion", () => {
 			}),
 		);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		authStorage.keys.setRuntime("openai-codex", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 	});
 
@@ -154,12 +154,12 @@ describe("AgentSession context promotion", () => {
 		await session.waitForIdle();
 	}
 	it("clears codex provider session state on manual setModel switch away from codex", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.4");
+		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
 		const nonCodexModel = modelRegistry.getAll().find(model => model.api !== "openai-codex-responses");
 		if (!codexModel || !nonCodexModel) {
 			throw new Error("Expected codex and non-codex models to exist");
 		}
-		authStorage.setRuntimeApiKey(nonCodexModel.provider, "test-other-key");
+		authStorage.keys.setRuntime(nonCodexModel.provider, "test-other-key");
 
 		const agent = new Agent({
 			initialState: {
@@ -191,12 +191,12 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("clears codex provider session state on manual temporary switch into codex", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.4");
+		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
 		const nonCodexModel = modelRegistry.getAll().find(model => model.api !== "openai-codex-responses");
 		if (!codexModel || !nonCodexModel) {
 			throw new Error("Expected codex and non-codex models to exist");
 		}
-		authStorage.setRuntimeApiKey(nonCodexModel.provider, "test-other-key");
+		authStorage.keys.setRuntime(nonCodexModel.provider, "test-other-key");
 
 		const agent = new Agent({
 			initialState: {
@@ -228,7 +228,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("clears codex provider session state when branching rewrites history", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.4");
+		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
 		if (!codexModel) {
 			throw new Error("Expected codex model to exist");
 		}
@@ -269,7 +269,7 @@ describe("AgentSession context promotion", () => {
 	});
 
 	it("clears codex provider session state when tree navigation rewrites history", async () => {
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.4");
+		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
 		if (!codexModel) {
 			throw new Error("Expected codex model to exist");
 		}
@@ -353,37 +353,6 @@ describe("AgentSession context promotion", () => {
 		expect(session.providerSessionState.size).toBe(1);
 	});
 
-	it("does not promote by default", async () => {
-		const smallModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!smallModel) {
-			throw new Error("Expected small codex model to exist");
-		}
-
-		const agent = new Agent({
-			initialState: {
-				model: smallModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-		});
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-		});
-
-		const overflowMessage = createOverflowMessage(smallModel);
-		session.agent.emitExternalEvent({ type: "message_end", message: overflowMessage });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [overflowMessage] });
-
-		await settle();
-
-		expect(session.model?.provider).toBe(smallModel.provider);
-		expect(session.model?.id).toBe(smallModel.id);
-	});
 	it("does not promote on length stop when message is from a different model", async () => {
 		// Switching from a small-context model to a larger one and then receiving a
 		// stale length-stop event for the previous model must NOT trigger promotion

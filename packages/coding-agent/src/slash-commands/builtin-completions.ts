@@ -3,8 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
+import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { expandTilde } from "../tools/path-utils";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
@@ -25,6 +27,49 @@ export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix:
 				hint: s.usage,
 			}));
 		return matches.length > 0 ? matches : null;
+	};
+}
+
+/**
+ * Build getArgumentCompletions for `/effort <level>`. The static `subcommands`
+ * list documents the full vocabulary for ACP clients, but the dropdown must
+ * offer only what the active model exposes: suggesting a tier the model lacks
+ * (e.g. `xhigh` on a model capped at `high`) would make the handler answer the
+ * accepted completion with `Unknown thinking level`. Returns null for a model
+ * with no reasoning dial — there is nothing to pick.
+ */
+export function buildEffortArgumentCompletions(
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => AutocompleteItem[] | null {
+	return (argumentPrefix: string) => {
+		if (argumentPrefix.includes(" ")) return null;
+		const lower = argumentPrefix.toLowerCase();
+		const current = runtime.ctx.session.configuredThinkingLevel();
+		const matches = runtime.ctx.session
+			.getAvailableEffortSelectors()
+			.filter(level => level.startsWith(lower))
+			.map(level => {
+				const { description } = getConfiguredThinkingLevelMetadata(level);
+				return {
+					value: `${level} `,
+					label: level,
+					description: level === current ? `${description} (current)` : description,
+				};
+			});
+		return matches.length > 0 ? matches : null;
+	};
+}
+
+/**
+ * Build getInlineHint for `/effort <level>` from the same live list as the
+ * dropdown, so the ghost text never completes a tier the active model lacks.
+ */
+export function buildEffortInlineHint(runtime: TuiSlashCommandRuntime): (argumentText: string) => string | null {
+	return (argumentText: string) => {
+		const prefix = argumentText.trimStart().toLowerCase();
+		if (prefix.length === 0 || prefix.includes(" ")) return null;
+		const match = runtime.ctx.session.getAvailableEffortSelectors().find(level => level.startsWith(prefix));
+		return match && match !== prefix ? match.slice(prefix.length) : null;
 	};
 }
 
@@ -188,6 +233,41 @@ export function buildSubcommandInlineHint(subcommands: SubcommandDef[]): (argume
  */
 export function buildStaticInlineHint(hint: string): (argumentText: string) => string | null {
 	return (argumentText: string) => (argumentText.trim().length === 0 ? hint : null);
+}
+
+/**
+ * Build getArgumentCompletions for `/switch <model>`: configured `@role`
+ * aliases first, then the session's cycle scope (or every authenticated
+ * model) as `provider/id`, substring-filtered on the typed prefix. Any
+ * `:level` suffix already typed is kept out of the match and re-appended.
+ * Returning matches also keeps `@smol` from falling through to `@`-file
+ * mention completion.
+ */
+export function buildModelSelectorCompletions(
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => AutocompleteItem[] | null {
+	return (argumentPrefix: string) => {
+		if (argumentPrefix.includes(" ")) return null;
+		const suffixIndex = argumentPrefix.indexOf(":");
+		const suffix = suffixIndex === -1 ? "" : argumentPrefix.slice(suffixIndex);
+		const query = (suffixIndex === -1 ? argumentPrefix : argumentPrefix.slice(0, suffixIndex)).toLowerCase();
+		const { session, settings } = runtime.ctx;
+		const matches: AutocompleteItem[] = [];
+		for (const role of getKnownRoleIds(settings)) {
+			const configured = settings.getModelRole(role);
+			if (!configured) continue;
+			const alias = formatModelRoleAlias(role);
+			if (!alias.toLowerCase().includes(query)) continue;
+			matches.push({ value: `${alias}${suffix} `, label: alias, description: configured });
+		}
+		const scoped = session.scopedModels.map(entry => entry.model);
+		for (const model of scoped.length > 0 ? scoped : session.modelRegistry.getAvailable()) {
+			const selector = `${model.provider}/${model.id}`;
+			if (!selector.toLowerCase().includes(query)) continue;
+			matches.push({ value: `${selector}${suffix} `, label: selector, description: model.name });
+		}
+		return matches.length > 0 ? matches : null;
+	};
 }
 
 /**

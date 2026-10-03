@@ -1,5 +1,7 @@
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../stream";
 import type {
 	Api,
@@ -82,6 +84,7 @@ type OllamaChatChunk = {
 	done?: boolean;
 	done_reason?: string;
 	prompt_eval_count?: number;
+	prompt_eval_cached_count?: number;
 	eval_count?: number;
 };
 
@@ -403,7 +406,7 @@ function endToolCallBlock(stream: AssistantMessageEventStream, output: Assistant
 	}
 	const toolCall = block as InternalToolCallBlock;
 	if (toolCall[kStreamingPartialJson]) {
-		toolCall.arguments = parseStreamingJson<Record<string, unknown>>(toolCall[kStreamingPartialJson]);
+		toolCall.arguments = parseToolCallArguments(toolCall[kStreamingPartialJson]);
 		clearStreamingPartialJson(toolCall);
 	}
 	stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
@@ -698,9 +701,18 @@ const streamOllamaOnce = (
 					if (healedToolCallEmitted && output.stopReason === "stop") {
 						output.stopReason = "toolUse";
 					}
-					output.usage.input = chunk.prompt_eval_count ?? 0;
+					// Ollama reports prompt cache splits as prompt_eval_cached_count
+					// (cached) vs prompt_eval_count (total; cached + uncached =
+					// total). Map cached → cacheRead, uncached → input so
+					// cache_turn/cache_hit status segments and the cache-prefix
+					// audit see real hit rates. Local Ollama omits the cached
+					// field; the ?? 0 fallbacks keep local behavior
+					// byte-identical to before.
+					output.usage.cacheRead = chunk.prompt_eval_cached_count ?? 0;
+					output.usage.input = (chunk.prompt_eval_count ?? 0) - output.usage.cacheRead;
 					output.usage.output = chunk.eval_count ?? 0;
-					output.usage.totalTokens = output.usage.input + output.usage.output;
+					output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
+					calculateCost(model, output.usage, output.timestamp);
 				}
 			}
 			if (streamMarkupHealing) {
@@ -714,6 +726,7 @@ const streamOllamaOnce = (
 			}
 			endActiveThinkingBlock();
 			endActiveTextBlock();
+			for (const index of activeToolIndices) endToolCallBlock(stream, output, index);
 			if (output.stopReason === "length" && !hasVisibleAssistantContent(output)) {
 				output.stopReason = "error";
 				output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;

@@ -1,12 +1,39 @@
 // Provider-wire compat for "google-antigravity"; regenerated from the frozen census using deployment contract selectors.
 
 provider "google-antigravity" {
+	default-model "gemini-3.1-pro"
+	kind-apis {
+		image "google-gemini-cli"
+	}
+	web-search "gemini"
+
+	seed api="google-gemini-cli" base-url="https://daily-cloudcode-pa.googleapis.com" bundle="always" {
+		model "gemini-3-pro-image" name="Gemini 3 Pro Image" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	// Routed wire profiles overwrite caller caps with fixed output limits.
+	// Conservatively reject requested bounds for this provider, including
+	// logical ids whose effort routing selects a profiled wire id later.
+	preserves-max-output-tokens #false
+
 	class "anthropic" {
 		family "opus" {
 			thinking-mode "budget"
 		}
 	}
 	class "gemini" {
+		// Cloud Code Assist rejects an unsigned first function call; the bypass
+		// sentinel is required only on that first call (secondary parallel calls
+		// may stay unsigned). Host contract, so it lives with the provider.
+		revision ">=3" {
+			requires-skip-thought-signature-on-first-function-call #true
+		}
 		family "flash" {
 			revision ">=3 <3.6" {
 				thinking-effort-budgets {
@@ -18,7 +45,7 @@ provider "google-antigravity" {
 				thinking-mode "budget"
 				thinking-suppress-when-off #true
 			}
-			revision ">=3.6 <3.8" {
+			revision ">=3.6" {
 				thinking-mode "google-level"
 				thinking-requires-effort #true
 			}
@@ -36,6 +63,9 @@ provider "google-antigravity" {
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "gemini-3-pro" {
 		thinking-mode "google-level"
+	}
+	models "gemini-3-pro-image" {
+		kind "image"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "gemini-3.1-flash-lite" {

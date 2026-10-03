@@ -376,9 +376,10 @@ fn ansi_seq_len_u16(data: &[u16], pos: usize) -> Option<usize> {
 			None
 		},
 		0x50 | 0x58 | 0x5e | 0x5f => {
-			// 'P' DCS, 'X' SOS, '^' PM, '_' APC — string sequences terminated by ST
-			// (`ESC \`) or, as most terminals also accept (like OSC), BEL. The TUI's
-			// cursor marker is a BEL-terminated APC, so BEL must close these too.
+			// 'P' DCS, 'X' SOS, '^' PM, '_' APC — string sequences terminated by
+			// ST (`ESC \`) or, as most terminals also accept (like OSC), BEL.
+			// The TUI's cursor marker is a BEL-terminated APC, so BEL must
+			// close these too.
 			for (i, &b) in data[pos + 2..].iter().enumerate() {
 				if b == 0x07 {
 					return Some(i + 3);
@@ -1081,9 +1082,10 @@ fn break_long_word(
 		}
 
 		if word[i] == ESC {
-			// An ESC that ansi_seq_len_u16 could not classify (truncated or unknown
-			// sequence). Emit it as a zero-width byte and advance — otherwise the
-			// non-ESC scan below cannot move past it and the loop spins forever.
+			// An ESC that ansi_seq_len_u16 could not classify (truncated or
+			// unknown sequence). Emit it as a zero-width byte and advance —
+			// otherwise the non-ESC scan below cannot move past it and the loop
+			// spins forever.
 			current_line.push(word[i]);
 			i += 1;
 			continue;
@@ -1567,7 +1569,8 @@ fn slice_with_width_impl(
 		}
 	}
 
-	// Include trailing ANSI sequences (e.g., reset codes) that immediately follow
+	// Include trailing ANSI sequences (e.g., reset codes) that immediately
+	// follow
 	while i < line.len() {
 		if line[i] == ESC
 			&& let Some(len) = ansi_seq_len_u16(line, i)
@@ -2083,9 +2086,9 @@ mod tests {
 
 	#[test]
 	fn test_wrap_text_with_ansi_apc_in_overflowing_word_terminates() {
-		// Same BEL-APC embedded in content that overflows, forcing break_long_word:
-		// it must terminate (keeping the zero-width marker) and every wrapped row
-		// must stay within the target width.
+		// Same BEL-APC embedded in content that overflows, forcing
+		// break_long_word: it must terminate (keeping the zero-width marker)
+		// and every wrapped row must stay within the target width.
 		let data = to_u16("\x1b_pi:c\x07abcdefghijklmnopqrstuvwxyz0123456789");
 		let lines = wrap_text_with_ansi_impl(&data, 10, DEFAULT_TAB_WIDTH);
 		assert!(lines.len() > 1);

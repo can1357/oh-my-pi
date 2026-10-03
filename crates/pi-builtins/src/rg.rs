@@ -11,13 +11,12 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	fs::File,
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
 use clap::{ArgAction, Parser, ValueEnum};
-use grep_cli::DecompressionReaderBuilder;
+use grep_cli::{CommandReader, DecompressionReaderBuilder};
 use grep_matcher::{Captures, LineTerminator, Matcher};
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
@@ -25,9 +24,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
-use crate::host::{Host, StreamWriter, Utility};
-// Conventional shell status for a process terminated by SIGPIPE.
-const SIGPIPE_EXIT_CODE: i32 = 141;
+use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
 
 use ignore::{
 	Match,
@@ -896,7 +893,7 @@ fn build_rust_matcher(patterns: &[String], cli: &Rg) -> Result<RegexMatcher, gre
 		.crlf(crlf);
 	if cli.null_data {
 		builder.line_terminator(Some(b'\0'));
-	} else if !cli.multiline {
+	} else if !cli.multiline && !crlf {
 		builder.line_terminator(Some(b'\n'));
 	}
 	builder.build_many(patterns)
@@ -991,8 +988,9 @@ fn read_pattern_file(host: &mut Host, path: &OsStr) -> Result<Vec<String>, Strin
 			.map_err(|err| format!("rg: -: {err}"))?;
 	} else {
 		let resolved = host.resolve(path);
-		File::open(&resolved)
-			.and_then(|mut file| file.read_to_string(&mut text))
+		text = host
+			.fs()
+			.read_to_string(&resolved)
 			.map_err(|err| format!("rg: {}: {err}", path.to_string_lossy()))?;
 	}
 	Ok(text
@@ -1113,6 +1111,7 @@ struct RgWalk {
 }
 
 struct PathFilters {
+	fs:           pi_vfs::BlockingFs,
 	overrides:    Option<Override>,
 	explicit:     Option<Gitignore>,
 	types:        Option<Types>,
@@ -1155,7 +1154,7 @@ impl PathFilters {
 			return false;
 		}
 		if let Some(limit) = self.max_filesize {
-			let size = size.or_else(|| std::fs::metadata(path).ok().map(|meta| meta.len() as f64));
+			let size = size.or_else(|| self.fs.metadata(path).ok().map(|meta| meta.len() as f64));
 			if size.is_some_and(|size| size > limit as f64) {
 				return false;
 			}
@@ -1203,7 +1202,7 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 		let mut builder = GitignoreBuilder::new(&cwd);
 		for path in &cli.ignore_files {
 			let resolved = host.resolve(path);
-			if let Some(error) = builder.add(&resolved) {
+			if let Some(error) = pi_walker::add_ignore_file(&mut builder, host.fs(), &resolved) {
 				return Err(format!("rg: {}: {error}", path.to_string_lossy()));
 			}
 		}
@@ -1218,7 +1217,7 @@ fn build_path_filters(host: &mut Host, cli: &Rg) -> Result<PathFilters, String> 
 				.map_err(|error| format!("rg: {error}"))?,
 		)
 	};
-	Ok(PathFilters { overrides, explicit, types, max_filesize })
+	Ok(PathFilters { fs: host.fs().clone(), overrides, explicit, types, max_filesize })
 }
 
 fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> {
@@ -1232,6 +1231,7 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 		pi_walker::WalkOrder::Unordered
 	};
 	let request = pi_walker::WalkRequest::new(root)
+		.filesystem(host.fs().clone())
 		.hidden(include_hidden)
 		.gitignore(!no_ignore)
 		.skip_git(!no_ignore)
@@ -1252,16 +1252,20 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 	Ok(RgWalk { request, filters })
 }
 
+/// Display spelling of a walked `path` under the `operand` it was found from
+/// (resolved to `root`), with `/` separators on Windows like the shell's other
+/// path-printing utilities.
 fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(root).unwrap_or(path);
 	if rel.as_os_str().is_empty() {
 		return PathBuf::from(operand);
 	}
-	if operand == OsStr::new(".") {
+	let display = if operand == OsStr::new(".") {
 		rel.to_path_buf()
 	} else {
 		Path::new(operand).join(rel)
-	}
+	};
+	forward_slash_display(&display).unwrap_or(display)
 }
 
 fn process_reader<M: Matcher, R: Read, W: Write>(
@@ -1325,19 +1329,26 @@ fn process_file<M: Matcher, W: Write>(
 	stats: &mut Stats,
 	out: &mut W,
 ) -> io::Result<SearchOutcome> {
+	if host.path_is_stdout(path) {
+		return Ok(SearchOutcome { any_match: false, had_error: false });
+	}
+	let fs = host.fs();
 	let result = if cli.search_zip && !cli.no_search_zip {
 		let builder = DecompressionReaderBuilder::new();
-		if builder.get_matcher().has_command(path) {
+		if !builder.get_matcher().has_command(path) {
+			fs.open(path)
+				.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
+		} else if fs.is_native_local(path) {
 			builder
 				.build(path)
 				.map_err(|error| io::Error::other(error.to_string()))
 				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
 		} else {
-			File::open(path)
-				.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
+			open_provider_decompression(&builder, fs, path)
+				.and_then(|reader| process_reader(matcher, searcher, reader, display, opts, stats, out))
 		}
 	} else {
-		File::open(path)
+		fs.open(path)
 			.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
 	};
 	match result {
@@ -1348,6 +1359,70 @@ fn process_file<M: Matcher, W: Write>(
 			had_error: report_path_error(host, display, path, error, opts),
 		}),
 	}
+}
+
+/// Compressed input read through a filesystem provider rather than a host path.
+enum ProviderDecompression {
+	/// Decompressor child process whose stdin is fed from the provider file.
+	Command { reader: CommandReader, feeder: Option<std::thread::JoinHandle<io::Result<()>>> },
+	/// No decompressor could be spawned; search the raw bytes like
+	/// `DecompressionReaderBuilder` does for host paths.
+	Passthru(pi_vfs::File),
+}
+
+impl Read for ProviderDecompression {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		match self {
+			Self::Passthru(file) => file.read(buf),
+			Self::Command { reader, feeder } => {
+				let read = reader.read(buf)?;
+				if read == 0
+					&& !buf.is_empty()
+					&& let Some(feeder) = feeder.take()
+				{
+					match feeder.join() {
+						Ok(Ok(())) => {},
+						Ok(Err(error)) => return Err(error),
+						Err(_) => return Err(io::Error::other("decompression input feeder panicked")),
+					}
+				}
+				Ok(read)
+			},
+		}
+	}
+}
+
+/// Decompress a provider-owned file by streaming its bytes into the matching
+/// decompressor's stdin. External decompressors cannot open virtual paths, so
+/// the path itself is never passed to the child process.
+fn open_provider_decompression(
+	builder: &DecompressionReaderBuilder,
+	fs: &pi_vfs::BlockingFs,
+	path: &Path,
+) -> io::Result<ProviderDecompression> {
+	let mut file = fs.open(path)?;
+	let Some(mut command) = builder.get_matcher().command(path) else {
+		return Ok(ProviderDecompression::Passthru(file));
+	};
+	let (stdin, mut feed) = io::pipe()?;
+	command.stdin(stdin);
+	let reader = match CommandReader::new(&mut command) {
+		Ok(reader) => reader,
+		// Match `DecompressionReaderBuilder::build`: an unavailable decompressor
+		// falls back to searching the undecoded bytes.
+		Err(_) => return Ok(ProviderDecompression::Passthru(file)),
+	};
+	// Drop the parent's copy of the pipe read end so the child sees EOF once
+	// the feeder finishes.
+	drop(command);
+	let feeder = std::thread::spawn(move || match io::copy(&mut file, &mut feed) {
+		Ok(_) => Ok(()),
+		// The decompressor stopped reading (search ended early or it failed);
+		// its own exit status/stderr is reported by `CommandReader`.
+		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+		Err(error) => Err(error),
+	});
+	Ok(ProviderDecompression::Command { reader, feeder: Some(feeder) })
 }
 
 fn report_path_error(
@@ -1584,7 +1659,7 @@ fn list_files<W: Write>(
 		}
 		processed_operand = true;
 		let resolved = host.resolve(operand);
-		match std::fs::metadata(&resolved) {
+		match host.fs().metadata(&resolved) {
 			Ok(meta) if meta.is_dir() => {
 				let mut files = match collect_filtered_files(host, cli, &resolved) {
 					Ok(files) => files,
@@ -1602,6 +1677,9 @@ fn list_files<W: Write>(
 					files.sort_unstable_by(|a, b| b.cmp(a));
 				}
 				for path in files {
+					if host.path_is_stdout(&path) {
+						continue;
+					}
 					let display = display_path(operand.as_os_str(), &resolved, &path);
 					let _ =
 						write_display_bytes(out, display.as_os_str().as_encoded_bytes(), path_separator);
@@ -1609,7 +1687,7 @@ fn list_files<W: Write>(
 					any = true;
 				}
 			},
-			Ok(meta) if meta.is_file() => {
+			Ok(meta) if meta.is_file() && !host.path_is_stdout(&resolved) => {
 				let _ = write_display_bytes(out, operand.as_encoded_bytes(), path_separator);
 				let _ = out.write_all(if cli.null { b"\0" } else { b"\n" });
 				any = true;
@@ -1700,7 +1778,7 @@ fn execute_search<M: Matcher, W: Write>(
 	};
 	let recursive = paths.iter().any(|path| {
 		path.as_os_str() != OsStr::new("-")
-			&& std::fs::metadata(host.resolve(path)).is_ok_and(|meta| meta.is_dir())
+			&& host.fs().metadata(&host.resolve(path)).is_ok_and(|meta| meta.is_dir())
 	});
 	let show_names = show_names_for(paths, recursive, cli, opts);
 	let mut stats = Stats::new();
@@ -1729,7 +1807,7 @@ fn execute_search<M: Matcher, W: Write>(
 			) {
 				Ok(matched) => any_match |= matched,
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return SIGPIPE_EXIT_CODE;
+					return crate::host::SIGPIPE_EXIT_CODE;
 				},
 				Err(error) => {
 					had_error = true;
@@ -1745,7 +1823,7 @@ fn execute_search<M: Matcher, W: Write>(
 			continue;
 		}
 		let resolved = host.resolve(operand);
-		match std::fs::metadata(&resolved) {
+		match host.fs().metadata(&resolved) {
 			Ok(meta) if meta.is_dir() => {
 				match search_dir(
 					host,
@@ -1764,7 +1842,7 @@ fn execute_search<M: Matcher, W: Write>(
 						had_error |= outcome.had_error;
 					},
 					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return SIGPIPE_EXIT_CODE;
+						return crate::host::SIGPIPE_EXIT_CODE;
 					},
 					Err(error) => {
 						had_error = true;
@@ -1793,7 +1871,7 @@ fn execute_search<M: Matcher, W: Write>(
 						had_error |= outcome.had_error;
 					},
 					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return SIGPIPE_EXIT_CODE;
+						return crate::host::SIGPIPE_EXIT_CODE;
 					},
 					Err(error) => {
 						had_error = true;
@@ -1821,11 +1899,11 @@ fn execute_search<M: Matcher, W: Write>(
 		if write_json_summary(out, &stats)
 			.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
 		{
-			return SIGPIPE_EXIT_CODE;
+			return crate::host::SIGPIPE_EXIT_CODE;
 		}
 	}
 	if out.flush().is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe) {
-		return SIGPIPE_EXIT_CODE;
+		return crate::host::SIGPIPE_EXIT_CODE;
 	}
 	if opts.quiet {
 		if any_match {
@@ -1933,7 +2011,6 @@ impl Utility for Rg {
 mod tests {
 	use super::*;
 	use crate::host::{Host, run_util};
-	use brush_core::openfiles::OpenFile;
 
 	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Rg>(args, stdin, "/");
@@ -1945,6 +2022,15 @@ mod tests {
 		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n");
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
+	}
+
+	#[test]
+	fn crlf_anchors_end_of_line_before_carriage_return() {
+		// Defends: `--crlf` must configure the matcher and searcher with the
+		// same terminator; a mismatch fails every search with a config error.
+		let (code, out, err) = run(&["--crlf", "-c", "x$", "-"], "ax\r\nbx\nc\r\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n");
 	}
 
 	#[test]
@@ -1993,23 +2079,6 @@ mod tests {
 	}
 
 
-	#[test]
-	fn broken_pipe_on_stdout_is_silent_and_exits_141() {
-		// Regression: `rg … | head` printed a BrokenPipe diagnostic and exited
-		// 2 after the downstream reader closed instead of dying silently.
-		let tree = tempfile::tempdir().unwrap();
-		std::fs::write(tree.path().join("match.txt"), "hit\n").unwrap();
-		let cli = Rg::try_parse_from(["rg", "hit", "match.txt"]).expect("argv");
-		let (mut host, capture) = Host::for_test("rg", "", tree.path());
-		let (reader, writer) = std::io::pipe().expect("pipe");
-		drop(reader); // downstream reader (e.g. `head`) already exited
-		host.stdout = OpenFile::from(writer);
-
-		let code = cli.run(&mut host);
-
-		assert_eq!(code, SIGPIPE_EXIT_CODE, "BrokenPipe must map to 128+SIGPIPE");
-		assert!(capture.err().is_empty(), "stderr must stay clean on a broken pipe");
-	}
 	#[test]
 	fn recursive_walk_observes_cancellation() {
 		let tree = tempfile::tempdir().unwrap();

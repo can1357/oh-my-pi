@@ -65,9 +65,8 @@ describe("Fireworks Kimi K2 maxTokens cap (#1849)", () => {
 		expect(clampFireworksKimiMaxTokens("glm-5.1", 65_536)).toBe(65_536);
 	});
 
-	it("ships the capped maxTokens in the bundled Fireworks/Fire Pass catalog", () => {
-		const entries: Array<["fireworks" | "firepass", string]> = [
-			["firepass", "kimi-k2.6-turbo"],
+	it("ships the capped maxTokens in the bundled Fireworks catalog", () => {
+		const entries: Array<["fireworks", string]> = [
 			["fireworks", "kimi-k2.5"],
 			["fireworks", "kimi-k2.6"],
 		];
@@ -75,17 +74,6 @@ describe("Fireworks Kimi K2 maxTokens cap (#1849)", () => {
 			const model = getBundledModel(provider, id);
 			expect(model).toBeDefined();
 			expect(model.maxTokens).toBe(FIREWORKS_KIMI_MAX_TOKENS);
-		}
-	});
-
-	it("leaves Kimi K2.7-Code uncapped on Fireworks", () => {
-		// K2.7-Code is not part of the K2.5/K2.6 cap; its output ceiling tracks
-		// Fireworks' reported max_completion_tokens rather than being pinned to
-		// the 32,768 family ceiling.
-		for (const id of ["kimi-k2.7-code", "kimi-k2.7-code-fast"]) {
-			const model = getBundledModel("fireworks", id);
-			expect(model).toBeDefined();
-			expect(model.maxTokens).toBeGreaterThan(FIREWORKS_KIMI_MAX_TOKENS);
 		}
 	});
 });

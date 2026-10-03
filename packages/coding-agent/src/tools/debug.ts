@@ -1,3 +1,4 @@
+import { type DebugToolDetails, formatLocation, formatSessionSnapshot } from "@oh-my-pi/pi-tui/tools/debug";
 import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -5,11 +6,9 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	RenderResultOptions,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import {
 	type DapBreakpointRecord,
@@ -38,26 +37,17 @@ import {
 	selectAttachAdapter,
 	selectLaunchAdapter,
 } from "../dap";
-import type { Theme } from "../modes/theme/theme";
 import debugDescription from "../prompts/tools/debug.md" with { type: "text" };
-import { renderStatusLine } from "../tui";
-import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import type { OutputMeta } from "./output-meta";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
-import {
-	formatExpandHint,
-	formatStatusIcon,
-	PREVIEW_LIMITS,
-	replaceTabs,
-	shortenPath,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
+
+import { cfgDebugEnabled, cfgToolsMaxTimeout } from "./settings";
 
 /**
  * DAP debug actions that only read program state (no mutation, no execution).
@@ -150,7 +140,7 @@ const debugSchema = type({
 export type DebugParams = typeof debugSchema.infer;
 export type DebugAction = DebugParams["action"];
 
-interface DebugToolDetails {
+interface DebugExecutionDetails extends DebugToolDetails {
 	action: DebugAction;
 	success: boolean;
 	snapshot?: DapSessionSummary;
@@ -178,35 +168,6 @@ interface DebugToolDetails {
 	state?: DapContinueOutcome["state"];
 	timedOut?: boolean;
 	meta?: OutputMeta;
-}
-
-function formatLocation(snapshot: DapSessionSummary | undefined): string | null {
-	if (!snapshot?.source?.path || snapshot.line === undefined) {
-		return null;
-	}
-	return `${snapshot.source.path}:${snapshot.line}${snapshot.column !== undefined ? `:${snapshot.column}` : ""}`;
-}
-
-function formatSessionSnapshot(snapshot: DapSessionSummary): string[] {
-	const lines = [
-		`Session ${snapshot.id}`,
-		`Adapter: ${snapshot.adapter}`,
-		`Status: ${snapshot.status}`,
-		`CWD: ${snapshot.cwd}`,
-	];
-	if (snapshot.program) lines.push(`Program: ${snapshot.program}`);
-	if (snapshot.stopReason) lines.push(`Stop reason: ${snapshot.stopReason}`);
-	if (snapshot.frameName) lines.push(`Frame: ${snapshot.frameName}`);
-	if (snapshot.instructionPointerReference) {
-		lines.push(`Instruction pointer: ${snapshot.instructionPointerReference}`);
-	}
-	const location = formatLocation(snapshot);
-	if (location) lines.push(`Location: ${location}`);
-	if (snapshot.needsConfigurationDone) {
-		lines.push("Configuration: pending configurationDone; set breakpoints, then continue.");
-	}
-	if (snapshot.exitCode !== undefined) lines.push(`Exit code: ${snapshot.exitCode}`);
-	return lines;
 }
 
 function formatBreakpoints(filePath: string, breakpoints: DapBreakpointRecord[]): string {
@@ -550,8 +511,6 @@ function validateLaunchProgram(
 	);
 }
 
-interface DebugRenderArgs extends Partial<DebugParams> {}
-
 function getActiveSessionSnapshot(): DapSessionSummary {
 	const snapshot = dapSessionManager.getActiveSession();
 	if (!snapshot) {
@@ -581,101 +540,7 @@ function resolveDisassemblyReference(memoryReference: string | undefined): strin
 	);
 }
 
-function summarizeDebugCall(args: DebugRenderArgs): string {
-	const action = args.action ? args.action.replaceAll("_", " ") : "request";
-	if (args.program) {
-		return `${action} ${truncateToWidth(args.program, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.file && args.line !== undefined) {
-		return `${action} ${truncateToWidth(`${args.file}:${args.line}`, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.function) {
-		return `${action} ${truncateToWidth(args.function, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.expression) {
-		return `${action} ${truncateToWidth(args.expression, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.command) {
-		return `${action} ${truncateToWidth(args.command, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.memory_reference) {
-		return `${action} ${truncateToWidth(args.memory_reference, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.instruction_reference) {
-		return `${action} ${truncateToWidth(args.instruction_reference, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.data_id) {
-		return `${action} ${truncateToWidth(args.data_id, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	if (args.name) {
-		return `${action} ${truncateToWidth(args.name, TRUNCATE_LENGTHS.TITLE)}`;
-	}
-	return action;
-}
-
-export const debugToolRenderer = {
-	animatedPartialResult: true,
-	renderCall(args: DebugRenderArgs, _options: RenderResultOptions, theme: Theme): Component {
-		const text = renderStatusLine({ icon: "pending", title: "Debug", description: summarizeDebugCall(args) }, theme);
-		return new Text(text, 0, 0);
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: DebugToolDetails; isError?: boolean },
-		options: RenderResultOptions,
-		theme: Theme,
-		args?: DebugRenderArgs,
-	): Component {
-		const outputBlock = new CachedOutputBlock();
-		return markFramedBlockComponent({
-			render(width: number): readonly string[] {
-				const action = (args?.action ?? result.details?.action ?? "debug").replaceAll("_", " ");
-				const success = !options.isPartial && !result.isError;
-				const statusIcon = success
-					? theme.styledSymbol("tool.debug", "accent")
-					: formatStatusIcon(options.isPartial ? "running" : "error", theme, options.spinnerFrame);
-				const header = `${statusIcon} Debug ${action}`;
-				const summaryLines = result.details?.snapshot
-					? formatSessionSnapshot(result.details.snapshot).map(line => replaceTabs(line))
-					: [];
-				const text = result.content.find(block => block.type === "text")?.text ?? "No output";
-				const rawLines = replaceTabs(text).split("\n");
-				const previewLimit = options.expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
-				const displayedLines = rawLines
-					.slice(0, previewLimit)
-					.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE));
-				const remaining = rawLines.length - displayedLines.length;
-				if (remaining > 0) {
-					displayedLines.push(
-						theme.fg("muted", `… ${remaining} more lines ${formatExpandHint(theme, options.expanded, true)}`),
-					);
-				}
-				return outputBlock.render(
-					{
-						header,
-						state: result.isError ? "error" : "success",
-						sections: [
-							...(summaryLines.length > 0
-								? [{ label: theme.fg("toolTitle", "Session"), lines: summaryLines }]
-								: []),
-							{ label: theme.fg("toolTitle", "Output"), lines: displayedLines },
-						],
-						width,
-						applyBg: false,
-					},
-					theme,
-				);
-			},
-			invalidate() {
-				outputBlock.invalidate();
-			},
-		});
-	},
-	mergeCallAndResult: true,
-	inline: true,
-};
-
-export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails> {
+export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDetails> {
 	readonly name = "debug";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawAction = (args as Partial<DebugParams>).action;
@@ -719,20 +584,20 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 	}
 
 	static createIf(session: ToolSession): DebugTool | null {
-		return session.settings.get("debug.enabled") ? new DebugTool(session) : null;
+		return cfgDebugEnabled.get(session.settings) ? new DebugTool(session) : null;
 	}
 
 	async execute(
 		_toolCallId: string,
 		params: DebugParams,
 		signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<DebugToolDetails>,
+		_onUpdate?: AgentToolUpdateCallback<DebugExecutionDetails>,
 		_context?: AgentToolContext,
-	): Promise<AgentToolResult<DebugToolDetails>> {
-		const timeoutSec = clampTimeout("debug", params.timeout, this.session.settings.get("tools.maxTimeout"));
+	): Promise<AgentToolResult<DebugExecutionDetails>> {
+		const timeoutSec = clampTimeout("debug", params.timeout, cfgToolsMaxTimeout.get(this.session.settings));
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-		const details: DebugToolDetails = { action: params.action, success: true };
+		const details: DebugExecutionDetails = { action: params.action, success: true };
 		const result = toolResult(details);
 		switch (params.action) {
 			case "launch": {

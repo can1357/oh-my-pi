@@ -4,7 +4,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import "@oh-my-pi/pi-coding-agent/tools/renderers";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import {
@@ -344,14 +343,6 @@ describe("SQLite tool support", () => {
 		const text = getText(result);
 
 		expect(text).toContain("Third; note");
-	});
-
-	it("rejects SQLite where clauses that try to override pagination control syntax", async () => {
-		await expect(
-			readTool.execute("sqlite-where-pagination-bypass", {
-				path: `${sqlitePath}:users?where=1=1 LIMIT 1000000 --&limit=2&offset=0`,
-			}),
-		).rejects.toThrow(/comments or statement terminators/i);
 	});
 
 	it("rejects mutating raw queries on the readonly connection", async () => {

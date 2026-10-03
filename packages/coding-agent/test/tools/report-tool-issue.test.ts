@@ -25,10 +25,19 @@ function openTempDb(): Database {
 			tool TEXT NOT NULL,
 			report TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			pushed INTEGER NOT NULL DEFAULT 0
+			pushed INTEGER NOT NULL DEFAULT 0,
+			push_error TEXT
 		);
 	`);
 	return db;
+}
+
+/** Rows the collector permanently refused — parked, never retried. */
+function selectRejected(db: Database): Array<{ id: number; push_error: string }> {
+	return db.prepare("SELECT id, push_error FROM grievances WHERE pushed = -1 ORDER BY id ASC").all() as Array<{
+		id: number;
+		push_error: string;
+	}>;
 }
 
 function insertGrievance(db: Database, tool: string, report: string): number {
@@ -221,16 +230,95 @@ describe("flushGrievances", () => {
 		expect(selectPushedIds(db)).toEqual([1]);
 	});
 
-	it("leaves rows unpushed on 5xx and reports failure", async () => {
+	it("leaves rows unpushed on 5xx and surfaces the server error", async () => {
 		insertGrievance(db, "glob", "boom");
 		const fetchSpy = vi.fn(async () => new Response("nope", { status: 500 }));
 
 		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
 
-		expect(result).toEqual({ pushed: 0, ok: false });
+		expect(result).toEqual({ pushed: 0, ok: false, error: "HTTP 500: nope" });
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(selectUnpushedIds(db)).toEqual([1]);
 		expect(selectPushedIds(db)).toEqual([]);
+	});
+
+	it("keeps rows queued on 401 instead of parking them as rejected", async () => {
+		// An auth failure says nothing about the payload — parking rows here
+		// would silently discard grievances over a misconfigured token.
+		insertGrievance(db, "glob", "unauthorized");
+		const fetchSpy = vi.fn(async () => new Response("bad token", { status: 401 }));
+
+		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({ pushed: 0, ok: false, error: "HTTP 401: bad token" });
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(selectUnpushedIds(db)).toEqual([1]);
+		expect(selectRejected(db)).toEqual([]);
+	});
+
+	it("clamps an over-long tool name at send time and keeps the full line in the report", async () => {
+		// Recorded by an older build that stored a whole sentence as the tool
+		// name; the collector rejects the batch above 128 UTF-8 bytes.
+		const prose =
+			"eval içindeki tool.glob exact ve var olmayan yolu çağırınca beklenmedik şekilde RuntimeError fırlatıyor, sessizce boş dönmüyor";
+		insertGrievance(db, prose, "glob threw instead of returning empty");
+
+		interface SentEntry {
+			tool: string;
+			report: string;
+		}
+		let entries: SentEntry[] = [];
+		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
+			const payload: { entries: SentEntry[] } = JSON.parse(String(init?.body));
+			entries = payload.entries;
+			const oversized = entries.some(e => Buffer.byteLength(e.tool, "utf8") > 128);
+			return new Response(oversized ? "tool exceeds 128 bytes" : "", { status: oversized ? 400 : 200 });
+		});
+
+		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({ pushed: 1, ok: true });
+		expect(Buffer.byteLength(entries[0]?.tool ?? "", "utf8")).toBeLessThanOrEqual(128);
+		expect(prose.startsWith(entries[0]?.tool ?? "")).toBe(true);
+		// Truncation happens on a code-point boundary, never mid-character.
+		expect(entries[0]?.tool ?? "").not.toContain("\ufffd");
+		// The clamped prefix isn't the report — the full original line is.
+		expect(entries[0]?.report).toBe(`${prose}\nglob threw instead of returning empty`);
+		expect(selectPushedIds(db)).toEqual([1]);
+	});
+
+	it("parks a permanently rejected row and drains the rest of the backlog", async () => {
+		// Reproduces #13091: the oldest row is refused, so before the fix every
+		// later flush re-sent the same first batch and nothing ever shipped.
+		for (let i = 0; i < 6; i++) insertGrievance(db, i === 0 ? "poison" : "read", `report-${i}`);
+
+		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
+			const payload: { entries: Array<{ tool: string }> } = JSON.parse(String(init?.body));
+			const bad = payload.entries.findIndex(e => e.tool === "poison");
+			return bad >= 0
+				? new Response(`{"error":"entries[${bad}].tool rejected"}`, { status: 400 })
+				: new Response("", { status: 200 });
+		});
+
+		const settings = pushSettings();
+		const result = await flushGrievances(db, settings, { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({
+			pushed: 5,
+			ok: true,
+			rejected: 1,
+			error: 'HTTP 400: {"error":"entries[0].tool rejected"}',
+		});
+		expect(selectPushedIds(db)).toEqual([2, 3, 4, 5, 6]);
+		expect(selectRejected(db)).toEqual([{ id: 1, push_error: 'HTTP 400: {"error":"entries[0].tool rejected"}' }]);
+		expect(selectUnpushedIds(db)).toEqual([]);
+
+		// A later session finds nothing to send — the parked row is not retried.
+		__resetAutoQaFlushStateForTests();
+		fetchSpy.mockClear();
+		const second = await flushGrievances(db, settings, { fetch: mockFetch(fetchSpy) });
+		expect(second).toEqual({ pushed: 0, ok: true });
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it("drains mid-flight inserts in a follow-up batch within the same loop", async () => {
@@ -295,7 +383,7 @@ describe("flushGrievances", () => {
 		const firstResult = await flushGrievances(db, settings, { fetch: mockFetch(fetchSpy) });
 		const secondResult = await flushGrievances(db, settings, { fetch: mockFetch(fetchSpy) });
 
-		expect(firstResult).toEqual({ pushed: 0, ok: false });
+		expect(firstResult).toEqual({ pushed: 0, ok: false, error: "HTTP 500: nope" });
 		expect(secondResult).toEqual({ pushed: 0, ok: false, skipped: true });
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(selectUnpushedIds(db)).toEqual([1]);
@@ -342,7 +430,7 @@ describe("flushGrievances", () => {
 
 		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
 
-		expect(result).toEqual({ pushed: firstBatch, ok: false });
+		expect(result).toEqual({ pushed: firstBatch, ok: false, error: "HTTP 500" });
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
 		expect(selectPushedIds(db).length).toBe(firstBatch);
 		expect(selectUnpushedIds(db).length).toBe(secondBatch);
@@ -402,6 +490,27 @@ describe("dispatchReportIssueDevice", () => {
 			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(row).toEqual({ tool: "grep", report: "reported matches include a deleted file" });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it("clamps a prose first line so the stored tool stays within the collector limit", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const prose =
+				"eval içindeki tool.glob exact ve var olmayan yolu çağırınca beklenmedik şekilde RuntimeError fırlatıyor, sessizce boş dönmüyor";
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(session, `${prose}\nglob threw instead of returning empty`);
+			await settlePipeline();
+			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
+			expect(Buffer.byteLength(row.tool, "utf8")).toBeLessThanOrEqual(128);
+			expect(prose.startsWith(row.tool)).toBe(true);
+			// The sentence is preserved in the report, not dropped on the floor.
+			expect(row.report).toBe(`${prose}\nglob threw instead of returning empty`);
 		} finally {
 			openSpy.mockRestore();
 			db.close();

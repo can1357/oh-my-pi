@@ -657,6 +657,41 @@ describe("OpenAI-family first-event timeouts", () => {
 		);
 	});
 
+	it("disarms the completions first-event watchdog before onResponse runs", async () => {
+		let releaseHook: (() => void) | undefined;
+		vi.useFakeTimers();
+		try {
+			const hookEntered = Promise.withResolvers<void>();
+			const gate = Promise.withResolvers<void>();
+			releaseHook = gate.resolve;
+			const fetchMock: FetchImpl = () =>
+				Promise.resolve(createOpenAICompletionsSuccessResponse(openAICompletionsModel.id));
+			const resultPromise = streamOpenAICompletions(openAICompletionsModel, baseContext(), {
+				apiKey: "test-key",
+				streamFirstEventTimeoutMs: 20,
+				fetch: fetchMock,
+				onResponse: async () => {
+					hookEntered.resolve();
+					await gate.promise;
+				},
+			}).result();
+
+			await hookEntered.promise;
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			// A still-armed timer would abort the connected body while the hook
+			// below is parked; nothing else in this path arms a timer, so zero
+			// here proves the headers-arrival disarm ran before the hook.
+			expect(vi.getTimerCount()).toBe(0);
+			releaseHook();
+			const result = await resultPromise;
+			expect(result.stopReason).toBe("stop");
+			expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+		} finally {
+			releaseHook?.();
+			vi.useRealTimers();
+		}
+	});
+
 	it("does not arm the first-event watchdog before Azure OpenAI responses setup finishes", async () => {
 		await expectDelayedRequestSetupSucceeds(
 			(streamFirstEventTimeoutMs, fetchMock) =>
