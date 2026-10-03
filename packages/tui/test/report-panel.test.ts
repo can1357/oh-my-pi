@@ -122,10 +122,7 @@ describe("ReportPanel in text mode", () => {
 			preferences: { ...COMPOSER_DEFAULTS, quiet: false },
 		});
 		const transcript = new TranscriptContainer();
-		for (let i = 0; i < 15; i++) {
-			const row = i;
-			transcript.addChild({ render: () => [`Transcript ${row}`], isTranscriptBlockFinalized: () => true } as never);
-		}
+		let transcriptRows = 0;
 		const dock = new Container();
 		const editor = new Container();
 		editor.addChild(new Text("EDITOR", 0, 0));
@@ -133,7 +130,16 @@ describe("ReportPanel in text mode", () => {
 		composer.start({ playWelcomeIntro: false });
 		await scheduler.settle(terminal);
 		const editorRow = () => terminal.getViewport().findIndex(row => row.includes("EDITOR"));
+		// The welcome tip is picked at random and wraps to a varying height, so
+		// grow the transcript until the frame exactly fills the screen.
+		for (; transcriptRows < ROWS && editorRow() < ROWS - 1; transcriptRows++) {
+			const row = transcriptRows;
+			transcript.addChild({ render: () => [`Transcript ${row}`], isTranscriptBlockFinalized: () => true } as never);
+			composer.ui.requestRender();
+			await scheduler.settle(terminal);
+		}
 		expect(editorRow()).toBe(ROWS - 1);
+		expect(terminal.getViewport().some(row => row.includes("Tip:"))).toBe(true);
 		const viewport = composer.ui.getMutableViewport();
 		expect(viewport.top + viewport.length).toBe(ROWS);
 
@@ -157,7 +163,7 @@ describe("ReportPanel in text mode", () => {
 		await scheduler.settle(terminal);
 
 		expect(editorRow()).toBe(ROWS - 1);
-		expect(terminal.getViewport().some(row => row.includes("Transcript 14"))).toBe(true);
+		expect(terminal.getViewport().some(row => row.includes(`Transcript ${transcriptRows - 1}`))).toBe(true);
 		composer.stop();
 	});
 

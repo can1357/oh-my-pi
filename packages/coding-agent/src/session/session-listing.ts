@@ -140,7 +140,7 @@ function formatTimeAgo(date: Date): string {
  * then a timestamp-based label. The raw UUID `id` is intentionally never used —
  * it is unfriendly and indistinguishable from neighboring sessions in the UI.
  */
-function sessionDisplayName(info: SessionInfo): string {
+export function sessionDisplayName(info: SessionInfo): string {
 	const title = sanitizeSessionName(info.title);
 	if (title) return title;
 	const first =
@@ -718,6 +718,156 @@ function sessionIdFromSessionPath(file: string): string | undefined {
 	return base.slice(sep + 1, -".jsonl".length) || undefined;
 }
 
+/** A session file with its stat identity, before any content scan. */
+interface StatedSessionFile {
+	file: string;
+	stat: SessionStorageStat;
+}
+
+/**
+ * Files matching `pattern` under `root`, newest mtime first. Stat-only: costs
+ * one glob plus one stat per file, never a content read. Files that vanish
+ * between discovery and stat are dropped.
+ */
+async function newestSessionFiles(
+	root: string,
+	pattern: string,
+	storage: SessionStorage,
+): Promise<StatedSessionFile[]> {
+	let files: string[];
+	try {
+		files =
+			storage instanceof FileSessionStorage
+				? await Array.fromAsync(new Bun.Glob(pattern).scan(root), name => path.join(root, name))
+				: storage.listFilesSync(root, pattern);
+	} catch {
+		return [];
+	}
+	const stated: StatedSessionFile[] = [];
+	if (storage instanceof FileSessionStorage) {
+		const stats = await Promise.all(
+			files.map(async file => {
+				try {
+					return { file, stat: await fs.promises.stat(file) };
+				} catch {
+					return undefined;
+				}
+			}),
+		);
+		for (const entry of stats) {
+			if (entry) stated.push(entry);
+		}
+	} else {
+		for (const file of files) {
+			try {
+				stated.push({ file, stat: storage.statSync(file) });
+			} catch {}
+		}
+	}
+	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+}
+
+/** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
+export function readSessionInfo(file: string): Promise<SessionInfo | undefined> {
+	return scanSessionFile(file, new FileSessionStorage(), true);
+}
+
+/** Selects which session files {@link listRecentSessions} considers. */
+export interface RecentSessionsQuery {
+	/** Maximum sessions returned. */
+	limit: number;
+	/** One project's session directory; omitted spans every project under `sessionsRoot`. */
+	sessionDir?: string;
+	/** Root holding one directory per project. Default: {@link getSessionsDir}. */
+	sessionsRoot?: string;
+}
+
+/**
+ * Newest non-empty sessions by mtime, with lifecycle status. Stats every
+ * candidate file but content-scans only until `limit` sessions are found, so
+ * it stays fast across tens of thousands of sessions where
+ * {@link listAllSessions} scans everything.
+ */
+export async function listRecentSessions(query: RecentSessionsQuery): Promise<SessionInfo[]> {
+	const storage = new FileSessionStorage();
+	const files = query.sessionDir
+		? await newestSessionFiles(query.sessionDir, "*.jsonl", storage)
+		: await newestSessionFiles(query.sessionsRoot ?? getSessionsDir(), "*/*.jsonl", storage);
+	const sessions: SessionInfo[] = [];
+	for (const { file, stat } of files) {
+		if (sessions.length >= query.limit) break;
+		const info = await scanSessionFile(file, storage, true, stat);
+		if (info && !isEmptySession(info)) sessions.push(info);
+	}
+	return sessions;
+}
+
+/** One project directory summarized from its session files. */
+export interface ProjectSummary {
+	/** Working directory recorded by the project's newest non-empty session. */
+	cwd: string;
+	/** Session files in the project's directory, 0-turn empties included. */
+	sessionCount: number;
+	/** Newest non-empty session; its `modified` is the project's last activity. */
+	latest: SessionInfo;
+}
+
+/**
+ * Projects by last activity, newest first. Stats every session file under
+ * `sessionsRoot` but content-scans only the files needed to find each listed
+ * project's newest non-empty session. Directories holding only empty sessions
+ * are skipped; directories resolving to an already-listed cwd are not repeated.
+ */
+export async function listRecentProjects(
+	limit: number,
+	sessionsRoot: string = getSessionsDir(),
+): Promise<ProjectSummary[]> {
+	const storage = new FileSessionStorage();
+	// Insertion order follows the newest-first file order, so directories come
+	// out ordered by their newest session file.
+	const byDir = new Map<string, StatedSessionFile[]>();
+	for (const entry of await newestSessionFiles(sessionsRoot, "*/*.jsonl", storage)) {
+		const dir = path.dirname(entry.file);
+		const files = byDir.get(dir);
+		if (files) files.push(entry);
+		else byDir.set(dir, [entry]);
+	}
+	const projects: ProjectSummary[] = [];
+	const listed = new Set<string>();
+	for (const files of byDir.values()) {
+		if (projects.length >= limit) break;
+		for (const { file, stat } of files) {
+			const info = await scanSessionFile(file, storage, true, stat);
+			if (!info || isEmptySession(info)) continue;
+			if (info.cwd && !listed.has(info.cwd)) {
+				listed.add(info.cwd);
+				projects.push({ cwd: info.cwd, sessionCount: files.length, latest: info });
+			}
+			break;
+		}
+	}
+	// A directory's newest file may be an empty stub; order by the activity actually listed.
+	return projects.sort((a, b) => b.latest.modified.getTime() - a.latest.modified.getTime());
+}
+
+/**
+ * Session files under every project directory whose session id starts with
+ * `idPrefix`, located by filename without reading content. Prefixes outside
+ * `[A-Za-z0-9_-]` match nothing, so the prefix is never interpreted as a glob.
+ */
+export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
+	if (!/^[\w-]+$/.test(idPrefix)) return [];
+	try {
+		const files = await Array.fromAsync(new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan(sessionsRoot), name =>
+			path.join(sessionsRoot, name),
+		);
+		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
+		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
+	} catch {
+		return [];
+	}
+}
+
 /**
  * Get recent sessions for display in the welcome screen.
  *
@@ -733,46 +883,11 @@ export async function getRecentSessions(
 	limit = 4,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
-	let files: string[];
-	try {
-		files =
-			storage instanceof FileSessionStorage
-				? await Array.fromAsync(new Bun.Glob("*.jsonl").scan(sessionDir), name => path.join(sessionDir, name))
-				: storage.listFilesSync(sessionDir, "*.jsonl");
-	} catch {
-		return [];
-	}
-	const byMtime: Array<{ file: string; stat: SessionStorageStat }> = [];
-	if (storage instanceof FileSessionStorage) {
-		const stats = await Promise.all(
-			files.map(async file => {
-				try {
-					return { file, stat: await fs.promises.stat(file) };
-				} catch {
-					// Vanished between discovery and stat; skip.
-					return undefined;
-				}
-			}),
-		);
-		for (const entry of stats) {
-			if (entry) byMtime.push(entry);
-		}
-	} else {
-		for (const file of files) {
-			try {
-				byMtime.push({ file, stat: storage.statSync(file) });
-			} catch {
-				// Vanished between discovery and stat; skip.
-			}
-		}
-	}
-	byMtime.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-
 	// The index is keyed by real session ids; in-memory test storages must not
 	// touch the process-wide history.db.
 	const useIndex = storage instanceof FileSessionStorage;
 	const recent: RecentSessionInfo[] = [];
-	for (const { file, stat } of byMtime) {
+	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
 		if (recent.length >= limit) break;
 		const id = useIndex ? sessionIdFromSessionPath(file) : undefined;
 		const indexed = id ? lookupSessionTitle(id) : undefined;

@@ -71,7 +71,7 @@ mod imp {
 
 	#[cfg(unix)]
 	use crate::fsmeta::{display_permissions, metadata_get_time};
-	use crate::host::{self, Host, Utility, matches_parser};
+	use crate::host::{self, Host, Utility, matches_parser, strip_errno};
 
 	const ABOUT: &str = "Display file or file system status.";
 	const USAGE: &str = "stat [OPTION]... FILE...";
@@ -633,15 +633,6 @@ for details about the options it supports.";
 			};
 		}
 		stats.fs_type_name.clone().unwrap_or_else(|| "?".to_string())
-	}
-
-	/// Renders an I/O error like `strerror`, without Rust's ` (os error N)`.
-	fn io_msg(error: &std::io::Error) -> String {
-		let mut message = error.to_string();
-		if let Some(position) = message.find(" (os error ") {
-			message.truncate(position);
-		}
-		message
 	}
 
 	fn process_token_filesystem(
@@ -1355,7 +1346,7 @@ for details about the options it supports.";
 							"stat: {}",
 							StatError::CannotReadFilesystemInfo {
 								file:  display_name.quote().to_string(),
-								error: io_msg(&error),
+								error: strip_errno(&error),
 							}
 						);
 						return 1;
@@ -2446,7 +2437,7 @@ for details about the options it supports.";
 							"stat: {}",
 							StatError::CannotReadFilesystemInfo {
 								file:  display_name.quote().to_string(),
-								error: io_msg(&error),
+								error: strip_errno(&error),
 							}
 						);
 						return 1;

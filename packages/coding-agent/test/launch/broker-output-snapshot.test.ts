@@ -195,7 +195,13 @@ process.stdout.write("READY\\x1b[6n");
 				timeoutMs: 1_000,
 			});
 			if (logs.op !== "logs") throw new Error("unexpected logs result");
-			expect(logs.text).toContain("CPR:1:1");
+			// Coordinates come from whichever terminal answered the probe: on
+			// Windows ConPTY answers from the console's real cursor position,
+			// while on POSIX the broker's headless responder is the only thing
+			// that can answer, and it reports home (1;1). Pin that exactly — a
+			// POSIX regression where the responder stopped answering while
+			// something else did would otherwise pass.
+			expect(logs.text).toMatch(process.platform === "win32" ? /CPR:\d+:\d+/u : /CPR:1:1/u);
 			expect(logs.text).not.toContain("\x1b[1;1R");
 		} finally {
 			await client.request({ op: "stop", name: "terminal-query", timeoutMs: 2_000 }).catch(() => undefined);

@@ -72,8 +72,10 @@ function timeoutResponse(): Response {
 	return Response.json({ error: { code: "user_request_timeout", message: BODY_READ_TIMEOUT } }, { status: 408 });
 }
 
+// A 400 the session retries (model-side NaN decode fault) but the provider-level
+// stream retry declines as a terminal 4xx, so it spends exactly one session retry.
 function ordinaryTransientErrorResponse(): Response {
-	return Response.json({ error: { message: "Provider returned error" } }, { status: 400 });
+	return Response.json({ error: { message: "Floating point NaN detected in generation" } }, { status: 400 });
 }
 
 function defaultMessages(): AgentMessage[] {

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import type { RpcPromptResultFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
+import { rejectionOf } from "./helpers/rejection";
 
 describe("RPC queued-message editing", () => {
 	let client: RpcClient;
@@ -28,15 +29,15 @@ describe("RPC queued-message editing", () => {
 		await client.start();
 		await client.followUp("cancel this");
 		await client.followUp("keep this");
-		await expect(client.removeQueuedMessage(null as unknown as string, "followUp")).rejects.toMatchObject({
+		expect(await rejectionOf(client.removeQueuedMessage(null as unknown as string, "followUp"))).toMatchObject({
 			command: "remove_queued_message",
 		});
-		await expect(client.removeQueuedMessage("cancel this", "steer" as unknown as "steering")).rejects.toMatchObject({
-			command: "remove_queued_message",
-		});
-		await expect(client.removeQueuedMessage("cancel this", undefined as unknown as "steering")).rejects.toMatchObject(
-			{ command: "remove_queued_message" },
-		);
+		expect(
+			await rejectionOf(client.removeQueuedMessage("cancel this", "steer" as unknown as "steering")),
+		).toMatchObject({ command: "remove_queued_message" });
+		expect(
+			await rejectionOf(client.removeQueuedMessage("cancel this", undefined as unknown as "steering")),
+		).toMatchObject({ command: "remove_queued_message" });
 		expect(await client.removeQueuedMessage("cancel this", "steering")).toEqual({ removed: false });
 		expect(await client.removeQueuedMessage("absent", "followUp")).toEqual({ removed: false });
 		expect((await client.getState()).queuedMessageCount).toBe(2);
@@ -126,7 +127,7 @@ describe("RPC queued-message editing", () => {
 	test("rejects malformed promotion, preserves missing targets, and promotes without duplicate delivery", async () => {
 		await client.start();
 		await client.followUp("queued request");
-		await expect(client.promoteQueuedMessage(null as unknown as string)).rejects.toMatchObject({
+		expect(await rejectionOf(client.promoteQueuedMessage(null as unknown as string))).toMatchObject({
 			command: "promote_queued_message",
 		});
 		expect(await client.promoteQueuedMessage("missing")).toEqual({ promoted: false });

@@ -135,6 +135,34 @@ describe("native composer", () => {
 		expect(focused).toEqual(["AckAudit", "Main"]);
 	});
 
+	it("memoizes send readiness separately from editability during bootstrap", () => {
+		const editor = composer({ running: false });
+		editor.disableSubmit = true;
+		editor.setText("editable draft");
+		const bootstrap = editor.describe(cx);
+		expect(nodes(bootstrap).find(n => n.k === "editor")?.p).toMatchObject({
+			text: "editable draft",
+			sendable: false,
+		});
+		editor.onSubmit = vi.fn();
+		expect(editor.describe(cx)).toBe(bootstrap);
+
+		editor.disableSubmit = false;
+		const ready = editor.describe(cx);
+		expect(ready).not.toBe(bootstrap);
+		expect(nodes(ready).find(n => n.k === "editor")?.p).toMatchObject({
+			text: "editable draft",
+			sendable: true,
+		});
+		expect(editor.describe(cx)).toBe(ready);
+
+		editor.onSubmit = undefined;
+		expect(nodes(editor.describe(cx)).find(n => n.k === "editor")?.p).toMatchObject({
+			text: "editable draft",
+			sendable: false,
+		});
+	});
+
 	it("submits the draft on a send click like Enter", () => {
 		const editor = composer({ running: false });
 		const submitted: string[] = [];
