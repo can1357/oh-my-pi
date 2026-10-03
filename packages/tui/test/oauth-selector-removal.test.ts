@@ -99,7 +99,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		);
 		search(selector, target.id);
 
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		expect(rendered(selector)).toContain("Remove all saved credentials");
 		expect(rendered(selector)).toContain("every saved account and API key");
 		expect(removed).toEqual([]);
@@ -109,6 +109,21 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		await Promise.resolve();
 		expect(removed).toEqual([target.storeCredentialsAs ?? target.id]);
 		expect(selected).toEqual([]);
+	});
+
+	it("uses Ctrl+D for removal and leaves Ctrl+R unhandled by the provider selector", () => {
+		const target = provider("opencode-go");
+		const removed: string[] = [];
+		const selector = makeSelector(authSource({ saved: [target.id] }), async id => void removed.push(id));
+		search(selector, target.id);
+
+		selector.handleInput("\x12");
+		expect(rendered(selector)).not.toContain("Remove all saved credentials");
+		expect(removed).toEqual([]);
+
+		selector.handleInput("\x04");
+		expect(rendered(selector)).toContain("Remove all saved credentials");
+		expect(removed).toEqual([]);
 	});
 
 	it("cancels the confirmation without closing the provider list", () => {
@@ -125,7 +140,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 			() => cancelled++,
 		);
 		search(selector, target.id);
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\x1b");
 
 		expect(rendered(selector)).not.toContain("Remove all saved credentials");
@@ -141,7 +156,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		const removed: string[] = [];
 		const selector = makeSelector(authSource({ saved: [target.id] }), async id => void removed.push(id));
 		search(selector, target.id);
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\n");
 		await Promise.resolve();
 
@@ -157,7 +172,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 			async id => void removed.push(id),
 		);
 		search(selector, alias.id);
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 
 		expect(rendered(selector)).toContain(alias.storeCredentialsAs);
 		selector.handleInput("\n");
@@ -173,7 +188,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 
 		expect(rendered(selector)).toContain(unavailable.name);
 		expect(rendered(selector)).toContain("remove saved credentials");
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\n");
 		await Promise.resolve();
 
@@ -192,7 +207,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		);
 		search(selector, "opencode-go");
 		expect(rendered(selector)).not.toContain("remove saved credentials");
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 
 		expect(rendered(selector)).not.toContain("No saved credentials");
 		expect(rendered(selector)).not.toContain("Remove all saved credentials");
@@ -224,7 +239,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 			removals++;
 		});
 		search(selector, "no-provider-matches-this");
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 
 		expect(rendered(selector)).toContain("No matching providers");
 		expect(removals).toBe(0);
@@ -240,10 +255,10 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 			await gate.promise;
 		});
 		search(selector, first.id);
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\n");
 		selector.handleInput("\n");
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 
 		expect(removed).toEqual(["opencode-go"]);
 		expect(rendered(selector)).toContain("removal continues");
@@ -260,6 +275,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		const idle = findPicker([selector.describe(pickerContext)])?.p as TspPickerProps | undefined;
 		const removalAction = idle?.actions?.find(action => action.id === "remove");
 		expect(removalAction?.danger).toBe(true);
+		expect(removalAction?.keys).toEqual(["ctrl", "d"]);
 		selector.handleNativeEvent(pickerActionEvent("remove"));
 		const confirming = findPicker([selector.describe(pickerContext)])?.p as TspPickerProps | undefined;
 		expect(confirming?.confirm?.text).toContain("opencode-go");
@@ -287,13 +303,13 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 			if (attempts === 1) throw new Error("credential store unavailable");
 		});
 		search(selector, target.id);
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\n");
 		await Bun.sleep(0);
 
 		expect(attempts).toBe(1);
 		expect(rendered(selector)).toContain("Could not remove saved credentials");
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\n");
 		await Bun.sleep(0);
 		expect(attempts).toBe(2);
@@ -319,7 +335,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 			async id => (id === target.id ? validation.promise : false),
 		);
 		search(selector, target.id);
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		selector.handleInput("\n");
 		await removed.promise;
 		validation.resolve(true);
@@ -334,7 +350,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		const selected: string[] = [];
 		const selector = makeSelector(authSource({ saved: [target.id] }), undefined, id => selected.push(id));
 		search(selector, target.id);
-		expect(rendered(selector)).not.toContain("Ctrl+R");
+		expect(rendered(selector)).not.toContain("Ctrl+D");
 		selector.handleInput("\n");
 		expect(selected).toEqual([target.id]);
 	});
@@ -353,7 +369,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 
 		// Selection stops auth validation while the scene runs login. A failed
 		// login keeps the same selector mounted, so its removal shortcut stays usable.
-		selector.handleInput("\x12");
+		selector.handleInput("\x04");
 		expect(rendered(selector)).toContain("Remove all saved credentials");
 	});
 });

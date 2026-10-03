@@ -224,9 +224,10 @@ export interface RemoteAuthCredentialStoreOptions {
 	 */
 	streamSnapshots?: boolean;
 	/**
-	 * Called with each broker-sourced raw full snapshot after the filtered
-	 * public view is applied. The constructor's initial snapshot intentionally
-	 * does not trigger this hook.
+	 * Called with each broker-sourced full snapshot after locally acknowledged
+	 * credential removals are suppressed. Accounts outside the client account
+	 * pool remain in the callback snapshot for cache portability. The
+	 * constructor's initial snapshot intentionally does not trigger this hook.
 	 */
 	onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
 	/**
@@ -266,6 +267,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#credentialRevision = 0;
 	/** Revision last reported as "seen" by {@link pollExternalChanges}; seeded from the initial snapshot. */
 	#acknowledgedRevision = 0;
+	/** Acknowledged local disables hidden from snapshots until the broker confirms they are absent. */
+	#pendingDisabledCredentialIds = new Set<number>();
 	#usageOverlays: Map<string, UsageReport> = new Map();
 	#backgroundAbort = new AbortController();
 	readonly #backgroundIdleMs: number;
@@ -331,9 +334,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	#applySnapshot(snapshot: SnapshotResponse, generation: number, protectNewBlocks = true): void {
 		const nowMs = Date.now();
-		this.#replaceBrokerUsageAccounts(snapshot.credentials);
+		const snapshotIds = new Set(snapshot.credentials.map(entry => entry.id));
+		for (const id of this.#pendingDisabledCredentialIds) {
+			if (!snapshotIds.has(id)) this.#pendingDisabledCredentialIds.delete(id);
+		}
+		const incomingCredentials = snapshot.credentials.filter(
+			entry => !this.#pendingDisabledCredentialIds.has(entry.id),
+		);
+		this.#replaceBrokerUsageAccounts(incomingCredentials);
 		const previousCredentials = this.#snapshot.credentials;
-		const credentials = snapshot.credentials
+		const credentials = incomingCredentials
 			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
 			.map(entry => this.#normalizeSnapshotEntryBlocks(entry, nowMs));
 		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
@@ -345,7 +355,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
-			onSnapshot(snapshot, generation);
+			onSnapshot(
+				incomingCredentials.length === snapshot.credentials.length
+					? snapshot
+					: { ...snapshot, credentials: incomingCredentials },
+				generation,
+			);
 		} catch (error) {
 			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
 		}
@@ -570,6 +585,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		generation: number,
 		serverNowMs: number,
 	): void {
+		if (this.#pendingDisabledCredentialIds.has(entry.id)) return;
 		this.#upsertBrokerUsageAccount(entry);
 		if (!isCredentialInAccountPool(entry, this.#accountPool)) {
 			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, { retainBrokerUsageAccount: true });
@@ -811,7 +827,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
 		if (!found) return false;
 		await this.#client.disableCredential(id, disabledCause);
-		this.#removeCredentialById(id);
+		this.#hideDisabledCredential(id);
 		this.#maybeRefreshSnapshot("delete credential");
 		return true;
 	}
@@ -905,10 +921,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		const existing = this.listAuthCredentials(provider);
+		const failures: unknown[] = [];
 		for (const entry of existing) {
 			try {
 				await this.#client.disableCredential(entry.id, disabledCause);
+				this.#hideDisabledCredential(entry.id);
 			} catch (error) {
+				failures.push(error);
 				logger.warn("auth-broker disable during delete failed", {
 					provider,
 					id: entry.id,
@@ -916,8 +935,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				});
 			}
 		}
-		this.#removeProviderEntries(provider);
 		this.#maybeRefreshSnapshot("delete");
+		if (failures.length > 0) {
+			throw new AggregateError(failures, `Failed to disable ${failures.length} saved credential(s) for ${provider}`);
+		}
 	}
 
 	#applyProviderEntries(provider: string, entries: AuthCredentialSnapshotEntry[]): void {
@@ -961,6 +982,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#removeCredentialById(id: number): void {
 		const next = this.#snapshot.credentials.filter(entry => entry.id !== id);
 		this.#snapshot = { ...this.#snapshot, credentials: next };
+	}
+
+	#hideDisabledCredential(id: number): void {
+		this.#pendingDisabledCredentialIds.add(id);
+		this.#removeCredentialById(id);
 	}
 
 	#normalizeSnapshotEntryBlocks(entry: SnapshotEntry, nowMs: number): SnapshotEntry {

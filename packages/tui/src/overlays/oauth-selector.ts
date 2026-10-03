@@ -414,7 +414,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			);
 		} else if (this.#canRemoveSelected()) {
 			this.#listContainer.addChild(
-				new TruncatedText(theme.fg("dim", `${formatKeyHint("ctrl+r")} remove saved credentials`), 0, 0),
+				new TruncatedText(theme.fg("dim", `${formatKeyHint("ctrl+d")} remove saved credentials`), 0, 0),
 			);
 		}
 	}
@@ -505,7 +505,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			}
 			return;
 		}
-		if (matchesKey(keyData, "ctrl+r")) {
+		if (matchesKey(keyData, "ctrl+d")) {
 			this.#requestRemoval();
 			return;
 		}
@@ -640,7 +640,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 				}),
 			);
 			if (this.#canRemoveSelected()) {
-				actions.push(pickerAction("remove", "Remove saved credentials", "ctrl+r", { danger: true }));
+				actions.push(pickerAction("remove", "Remove saved credentials", "ctrl+d", { danger: true }));
 			}
 			actions.push(CLOSE_ACTION);
 		}
@@ -728,7 +728,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			children.push(
 				node(
 					"text",
-					{ spans: [span(`${formatKeyHint("ctrl+r")} remove saved credentials`, "dim")] },
+					{ spans: [span(`${formatKeyHint("ctrl+d")} remove saved credentials`, "dim")] },
 					undefined,
 					"remove-hint",
 				),

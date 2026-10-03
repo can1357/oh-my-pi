@@ -79,7 +79,7 @@ describe("provider credential removal persistence", () => {
 		scene = new SignInScene(host);
 
 		searchProvider(scene, "opencode-go");
-		scene.handleInput("\x12");
+		scene.handleInput("\x04");
 		expect(scene.render(120).join("\n")).toContain("Remove all saved credentials");
 		const keyBeforeConfirmation = await authStorage.keys.get("opencode-go");
 		if (keyBeforeConfirmation === undefined) throw new Error("expected a stored OpenCode Go API key before removal");

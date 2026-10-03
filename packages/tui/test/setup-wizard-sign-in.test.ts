@@ -104,7 +104,7 @@ describe("SignInScene", () => {
 		const target = getOAuthProviders()[0];
 		if (!target) throw new Error("OAuth provider fixture is empty");
 		const fixture = removalScene({ credentials: [[target.id, 1]] });
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 
 		const output = fixture.scene
 			.render(80, 12)
@@ -128,7 +128,7 @@ describe("SignInScene", () => {
 			onRefresh: () => refreshStarted.resolve(),
 		});
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\n");
 		await refreshStarted.promise;
 		await Bun.sleep(0);
@@ -143,7 +143,7 @@ describe("SignInScene", () => {
 	it("cancels removal without deleting credentials, refreshing models, or finishing setup", () => {
 		const fixture = removalScene({ credentials: [["opencode-go", 1]] });
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\x1b");
 
 		expect(fixture.credentials.get("opencode-go")).toBe(1);
@@ -158,7 +158,7 @@ describe("SignInScene", () => {
 			externalSources: [["opencode-go", "OPENCODE_GO_API_KEY"]],
 		});
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\n");
 		await Bun.sleep(0);
 
@@ -174,14 +174,16 @@ describe("SignInScene", () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const fixture = removalScene({ credentials: [["opencode-go", 1]], failRemove: true });
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\n");
 		await Bun.sleep(0);
 
 		expect(fixture.credentials.has("opencode-go")).toBe(true);
 		expect(fixture.refreshes).toEqual([]);
-		expect(fixture.scene.render(100).join("\n")).toContain("Could not remove saved credentials");
-		expect(fixture.scene.render(100).join("\n")).not.toContain("private credential store detail");
+		const output = fixture.scene.render(100).join("\n");
+		expect(output).toContain("Some credentials may have been removed");
+		expect(output).toContain("Check the credential store and try again");
+		expect(output).not.toContain("private credential store detail");
 		expect(warn).toHaveBeenCalledWith(
 			"Provider credential removal failed",
 			expect.objectContaining({ providerId: "opencode-go", error: expect.any(Error) }),
@@ -192,7 +194,7 @@ describe("SignInScene", () => {
 	it("reports model refresh failure separately after credentials are removed", async () => {
 		const fixture = removalScene({ credentials: [["opencode-go", 1]], failRefresh: true });
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\n");
 		await Bun.sleep(0);
 
@@ -213,7 +215,7 @@ describe("SignInScene", () => {
 			removeStarted: () => removeStarted.resolve(),
 		});
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\n");
 		await removeStarted.promise;
 		const inFlight = fixture.scene
@@ -244,7 +246,7 @@ describe("SignInScene", () => {
 			},
 		});
 		searchProvider(fixture.scene, "opencode-go");
-		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x04");
 		fixture.scene.handleInput("\n");
 		await Bun.sleep(0);
 

@@ -53,7 +53,7 @@ app.history.search: []
 
 ## Contextual shortcuts
 
-In `/providers`, `Ctrl+R` opens a confirmation to remove all saved credentials for the highlighted provider. The shortcut and native action appear only when that provider has saved credentials. This selector-specific chord does not change the global `app.history.search` binding.
+In `/providers`, `Ctrl+D` opens a confirmation to remove all saved credentials for the highlighted provider. The shortcut and native action appear only when that provider has saved credentials. This selector-specific chord does not change the global `app.history.search` binding (`Ctrl+R`).
 
 ## Recover a cleared prompt
 

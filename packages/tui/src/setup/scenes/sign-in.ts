@@ -372,8 +372,14 @@ export class SignInScene implements SetupSceneController {
 		} catch (error) {
 			if (this.#disposed) return;
 			logger.warn("Provider credential removal failed", { providerId, error });
-			this.#statusLines = [{ text: `Could not remove saved credentials for ${providerId}.`, color: "error" }];
+			this.#statusLines = [
+				{
+					text: "Could not remove all saved credentials. Some credentials may have been removed; retry to remove any that remain.",
+					color: "error",
+				},
+			];
 			this.#host.requestRender();
+			throw error;
 		} finally {
 			this.#removingProvider = undefined;
 		}
