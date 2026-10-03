@@ -1,0 +1,11 @@
+auth "infron" {
+	name "Infron"
+	login "api-key" {
+		auth-url "https://infron.ai/dashboard/apiKeys"
+		instructions "Create or copy your API key from the Infron dashboard"
+		prompt "Paste your Infron API key" placeholder="..."
+		// Validate against inference, not /models: Infron's models endpoint is
+		// public and would accept any string as a key.
+		validate "chat-completions" label="Infron" base-url="https://llm.onerouter.pro/v1" model="z-ai/glm-5.2"
+	}
+}
