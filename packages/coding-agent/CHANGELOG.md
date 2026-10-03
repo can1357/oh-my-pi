@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/jobs kill <id>|all` cancels a running background job straight from the command line, so a stuck job can be stopped even while the agent is busy or unresponsive; `/jobs` still lists jobs and opens the live sheet ([#14015](https://github.com/can1357/oh-my-pi/issues/14015), [#14160](https://github.com/can1357/oh-my-pi/pull/14160) by [@KanwarGill](https://github.com/KanwarGill)).
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes
