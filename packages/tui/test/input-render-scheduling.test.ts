@@ -136,6 +136,34 @@ describe("TUI input/render scheduling", () => {
 			}
 		});
 
+		it("re-paces a parked frame when the ceiling changes live, both ways", () => {
+			setMaxFps(1);
+			const { tui, scheduler, probe } = primed();
+			try {
+				// A content frame parked under the 1 fps ceiling …
+				scheduler.nowMs = 40;
+				tui.requestComponentRender(probe);
+				scheduler.immediates.shift()?.();
+				const parked = scheduler.timers.shift();
+				expect(parked?.delayMs).toBe(960);
+				// … is re-armed for the new 120 fps ceiling (overdue → now) instead of waiting out the second …
+				setMaxFps(120);
+				expect(parked?.canceled).toBe(true);
+				const repaced = scheduler.timers.shift();
+				expect(repaced?.delayMs).toBe(0);
+				// … and a frame parked under 120 fps waits for a new 1 fps ceiling instead of painting early.
+				setMaxFps(1);
+				expect(repaced?.canceled).toBe(true);
+				expect(scheduler.timers.shift()?.delayMs).toBe(960);
+				// A stopped TUI no longer re-arms anything.
+				tui.stop();
+				setMaxFps(120);
+				expect(scheduler.timers).toHaveLength(0);
+			} finally {
+				tui.stop();
+			}
+		});
+
 		it("paints a keystroke within one 30 fps frame at any ceiling", () => {
 			setMaxFps(1);
 			const { tui, scheduler, term, events } = primed();

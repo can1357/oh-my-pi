@@ -455,4 +455,42 @@ describe("Loader component", () => {
 			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 		}
 	});
+
+	it("applies a live interval change at once: static pins frame 0 and re-arms, animated resumes without waiting", () => {
+		vi.useFakeTimers();
+		const ui = { requestComponentRender: vi.fn() };
+		try {
+			const loader = new Loader(
+				ui as unknown as TUI,
+				t => t,
+				t => t,
+				"Checking",
+				["0", "1", "2", "3"],
+			);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(loader.render(20).join("\n")).toContain("1 Checking");
+
+			// Mid-animation → static: the glyph snaps to frame 0 immediately, not on the old 80 ms timer.
+			ui.requestComponentRender.mockClear();
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			expect(loader.render(20).join("\n")).toContain("0 Checking");
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 3);
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+			expect(loader.render(20).join("\n")).toContain("0 Checking");
+
+			// Static → animated: the first frame advances one period later, not after the 1 s refresh.
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(loader.render(20).join("\n")).toContain("1 Checking");
+			loader.stop();
+
+			// A stopped loader no longer listens.
+			ui.requestComponentRender.mockClear();
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			expect(ui.requestComponentRender).toHaveBeenCalledTimes(0);
+		} finally {
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		}
+	});
 });

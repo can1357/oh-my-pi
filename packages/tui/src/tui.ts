@@ -54,7 +54,7 @@ import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
 import { stripExtensionLinkMarkers } from "./render/extension-links";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
-import { minFrameIntervalMs } from "./frame-rate";
+import { minFrameIntervalMs, onMaxFpsChange } from "./frame-rate";
 import {
 	Ellipsis,
 	getWidthConfigEpoch,
@@ -943,6 +943,7 @@ export class TUI extends Container {
 	onDebug?: () => void;
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
+	#unsubscribeMaxFps: (() => void) | undefined;
 	#renderScheduler: RenderScheduler;
 	#lastRenderAt = 0;
 	/**
@@ -1555,6 +1556,7 @@ export class TUI extends Container {
 			unsubscribe?.();
 			unsubscribeFallback();
 		};
+		this.#unsubscribeMaxFps ??= onMaxFpsChange(this.#repaceScheduledRender);
 		this.#debugPaint = undefined;
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
@@ -2741,6 +2743,8 @@ export class TUI extends Container {
 		this.#stopped = true;
 		this.#started = false;
 		this.#watchdog.stop();
+		this.#unsubscribeMaxFps?.();
+		this.#unsubscribeMaxFps = undefined;
 		if (this.#renderTimer) {
 			this.#renderTimer.cancel();
 			this.#renderTimer = undefined;
@@ -2910,6 +2914,18 @@ export class TUI extends Container {
 		if (this.#renderRequested) {
 			this.#scheduleRender();
 		}
+	};
+
+	/**
+	 * A live `tui.maxFps` change re-paces the parked ordinary frame against the new ceiling instead
+	 * of leaving it on the deadline the old one set (120 → 1 would paint early, 1 → 120 would wait
+	 * out the old second). Input, backlog and adaptive pacing are recomputed with it.
+	 */
+	#repaceScheduledRender = (): void => {
+		if (this.#stopped || !this.#renderTimer || this.#nativeLive) return;
+		this.#renderTimer.cancel();
+		this.#renderTimer = undefined;
+		this.#scheduleRender();
 	};
 
 	#scheduleRender(): void {
