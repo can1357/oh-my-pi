@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { CurrencyCode, Model } from "@oh-my-pi/pi-catalog/types";
+import { calculateUsageCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { CurrencyCode, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { renderSegment } from "../src/status-line/segments";
 import type { SegmentContext } from "../src/status-line/types";
 import { initTheme } from "../src/theme";
@@ -211,9 +211,56 @@ describe("cost status-line segment", () => {
 		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("¥9.04 (+1.00) ↑");
 	});
 
+	it("renders the bundled DeepSeek row in CNY end to end, with no injected card", () => {
+		const model = getBundledModel("deepseek", "deepseek-v4-flash");
+		// The bundled artifact must itself carry the native CNY table: `models.ts`
+		// consumes models.json verbatim and never reruns the compat cascade, so a
+		// KDL rule without a regenerated bundle leaves the chip inert.
+		expect(model.cost.currencyCards?.CNY).toEqual({ input: 2, output: 8, cacheRead: 0.04, cacheWrite: 0 });
+
+		const priceAt = (iso: string): Usage => {
+			const record: Usage = {
+				input: 1_000_000,
+				output: 1_000_000,
+				cacheRead: 1_000_000,
+				cacheWrite: 0,
+				totalTokens: 3_000_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			calculateUsageCost(model.cost, record, Date.parse(iso));
+			return record;
+		};
+		const chipAt = (record: Usage, iso: string): string => {
+			const coverage = { USD: record.cost.total, CNY: record.cost.total };
+			return stripVTControlCharacters(
+				renderSegment(
+					"cost",
+					costCtx({
+						cost: record.cost.total,
+						costByCurrency: {
+							USD: record.costByCurrency?.USD?.total,
+							CNY: record.costByCurrency?.CNY?.total,
+						},
+						costByCurrencyCoverage: coverage,
+						costCurrency: "CNY",
+						model,
+						now: new Date(iso),
+						onAdvisorSubscriptionProbe: () => {},
+					}),
+				).content,
+			);
+		};
+
+		// Wednesday 2026-09-16 02:00 UTC is inside the weekday morning peak window;
+		// 05:00 UTC is between windows, so the schedule's 50% discount applies.
+		expect(chipAt(priceAt("2026-09-16T02:00:00Z"), "2026-09-16T02:00:00Z")).toBe("¥10.04 ↑");
+		expect(chipAt(priceAt("2026-09-16T05:00:00Z"), "2026-09-16T05:00:00Z")).toBe("¥5.02 ↓");
+	});
+
 	it("falls back to the base card instead of labelling its numbers with the preferred symbol", () => {
-		// The bundled row publishes only the USD card, so a CNY preference cannot be
-		// satisfied: the chip must keep `$` on the USD amount rather than show `¥`.
+		// The DeepSeek row publishes a CNY card, but this ledger carries no per-currency
+		// coverage, so a CNY preference cannot be satisfied: the chip must keep `$` on
+		// the USD amount rather than label it with `¥`.
 		const ctx = costCtx({
 			cost: 1.25,
 			costCurrency: "CNY",
