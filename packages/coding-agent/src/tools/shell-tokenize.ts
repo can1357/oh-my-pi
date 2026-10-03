@@ -3,7 +3,8 @@
  * matcher and the gh-cache invalidator.
  *
  * Splits a bash command into independent command segments, each a list of word
- * tokens. Handles single/double-quoted strings, backslash escapes, and the
+ * tokens. Handles single/double-quoted strings, ANSI-C `$'...'` strings, where
+ * an escaped quote does not close the string, backslash escapes, and the
  * standard operators (`;`, `&&`, `||`, `|`, `&`, `(`, `)`, newlines) as segment
  * boundaries so callers treat the pieces as independent command sequences.
  *
@@ -17,6 +18,8 @@ export function tokenizeShellSegments(command: string): string[][] {
 	let buffer = "";
 	let inSingle = false;
 	let inDouble = false;
+	let ansi = false;
+	let inComment = false;
 	const pushBuffer = () => {
 		if (buffer.length > 0) {
 			current.push(buffer);
@@ -31,8 +34,17 @@ export function tokenizeShellSegments(command: string): string[][] {
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (inSingle) {
+			// Inside an ANSI-C `$'...'` string a backslash escapes the next
+			// character, so `\'` keeps the string open; in a plain `'...'`
+			// string a backslash is literal text and nothing is escaped.
+			if (ansi && ch === "\\" && i + 1 < command.length) {
+				buffer += ch + command[i + 1];
+				i++;
+				continue;
+			}
 			if (ch === "'") {
 				inSingle = false;
+				ansi = false;
 				continue;
 			}
 			buffer += ch;
@@ -54,26 +66,48 @@ export function tokenizeShellSegments(command: string): string[][] {
 			buffer += ch;
 			continue;
 		}
-		if (ch === "'") {
+		if (ch === "'" && !inComment) {
 			inSingle = true;
+			// `$'...'` is an ANSI-C string: escapes are active inside it. An
+			// ESCAPED dollar (`\$'...'`) degrades to plain quoting. A `#`
+			// comment runs to end of line and eats any quote after it; this
+			// branch is unreachable inside one because a `#` at a word start
+			// sets `inComment` below. Both probed against bash.
+			ansi = command[i - 1] === "$" && (i === 1 || command[i - 2] !== "\\");
 			continue;
 		}
-		if (ch === '"') {
+		if (ch === '"' && !inComment) {
 			inDouble = true;
 			continue;
 		}
-		if (ch === "\\" && i + 1 < command.length) {
+		if (ch === "\\" && i + 1 < command.length && !inComment) {
 			buffer += command[i + 1];
 			i++;
+			continue;
+		}
+		if (ch === "#" && (i === 0 || /[ \t\n;|&]/.test(command[i - 1]))) {
+			// A comment eats the rest of the line, quotes and operators
+			// included. A `#` glued to a word (`$#`, `${x#y}` shape words)
+			// stays plain text, as in the `$` and `{` handling right above.
+			inComment = true;
 			continue;
 		}
 		if (ch === " " || ch === "\t") {
 			pushBuffer();
 			continue;
 		}
-		if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === ")") {
+		if (ch === "\n") {
+			inComment = false;
 			pushSegment();
 			// `&&`, `||` already collapsed by the segment break above.
+			continue;
+		}
+		if (ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === ")") {
+			if (!inComment) {
+				pushSegment();
+				continue;
+			}
+			buffer += ch;
 			continue;
 		}
 		buffer += ch;
