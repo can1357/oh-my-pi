@@ -296,7 +296,7 @@ impl GitRepo {
 	pub fn checkout(&self, rev: &str) -> Result<()> {
 		let repo = self.gix()?;
 		let (target, symbolic) = resolve_checkout_target(&repo, rev)?;
-		checkout_tree(self, &repo, target, false)?;
+		checkout_tree(self, &repo, target, CheckoutMode::Normal)?;
 		write_head(self.info().head_path.as_path(), symbolic.as_deref(), target)?;
 		Ok(())
 	}
@@ -411,7 +411,7 @@ impl GitRepo {
 		let repo = self.gix()?;
 		let id = resolve_commit(&repo, target.unwrap_or("HEAD"))?;
 		if mode == ResetMode::Hard {
-			checkout_tree(self, &repo, id, true)?;
+			checkout_tree(self, &repo, id, CheckoutMode::HardReset)?;
 		} else if mode == ResetMode::Mixed {
 			self.read_tree(&id.to_hex().to_string(), None)?;
 		}
@@ -616,7 +616,9 @@ impl GitRepo {
 					},
 					Err(err) => {
 						clone_error = Some(err.to_string());
-						cleanup_worktree_add(path, &self.info().common_dir);
+						cleanup_worktree_add(path, &self.info().common_dir).map_err(|cleanup| {
+							Error::backend("git worktree add", format!("{err}; cleanup failed: {cleanup}"))
+						})?;
 					},
 				}
 			}
@@ -626,7 +628,12 @@ impl GitRepo {
 		let admin = register_worktree(path, &self.info().common_dir, &head)?;
 		let linked = Self::require(path)?;
 		let linked_repo = linked.gix()?;
-		checkout_tree(&linked, &linked_repo, id, true)?;
+		if let Err(err) = checkout_tree(&linked, &linked_repo, id, CheckoutMode::DisposableWorktree) {
+			cleanup_worktree_add(path, &self.info().common_dir).map_err(|cleanup| {
+				Error::backend("git worktree add", format!("{err}; cleanup failed: {cleanup}"))
+			})?;
+			return Err(err);
+		}
 		if options.keep_changes {
 			self.seed_worktree_changes(path, &admin, id)?;
 		}
@@ -779,7 +786,12 @@ impl GitRepo {
 			match fs::remove_file(&full) {
 				Ok(()) => prune_empty_parents(path, full.parent(), &BTreeSet::new())?,
 				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-				Err(err) => return Err(err.into()),
+				Err(err) => {
+					return Err(Error::backend(
+						"git worktree add",
+						format!("remove {}: {err}", full.display()),
+					));
+				},
 			}
 		}
 
@@ -795,6 +807,7 @@ impl GitRepo {
 				.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
 				.map_err(|err| Error::backend("git worktree add", err))?;
 			checkout_options.overwrite_existing = true;
+			checkout_options.keep_going = true;
 			let progress = gix::progress::Discard;
 			let interrupt = std::sync::atomic::AtomicBool::new(false);
 			let outcome = gix::worktree::state::checkout(
@@ -810,16 +823,7 @@ impl GitRepo {
 				checkout_options,
 			)
 			.map_err(|err| Error::backend("git worktree add", err))?;
-			if !outcome.collisions.is_empty() || !outcome.errors.is_empty() {
-				return Err(Error::backend(
-					"git worktree add",
-					format!(
-						"checkout reported {} collisions and {} errors",
-						outcome.collisions.len(),
-						outcome.errors.len()
-					),
-				));
-			}
+			check_checkout_outcome(path, &outcome, "git worktree add")?;
 			Some(changed)
 		};
 
@@ -1399,11 +1403,17 @@ fn resolve_checkout_target(
 	Ok((resolve_commit(repo, branch.as_deref().unwrap_or(rev))?, branch))
 }
 
+enum CheckoutMode {
+	Normal,
+	HardReset,
+	DisposableWorktree,
+}
+
 fn checkout_tree(
 	owner: &GitRepo,
 	repo: &gix::Repository,
 	commit: gix::hash::ObjectId,
-	overwrite: bool,
+	mode: CheckoutMode,
 ) -> Result<()> {
 	let tree = commit_tree(repo, &commit)?;
 	let mut target = repo
@@ -1411,7 +1421,7 @@ fn checkout_tree(
 		.map_err(|e| Error::backend("git checkout", e))?;
 	let current = load_index_or_head(repo, "git checkout")?;
 	let conflicts = checkout_conflicts(owner.root(), repo, &current, &target)?;
-	if !overwrite && !conflicts.is_empty() {
+	if matches!(mode, CheckoutMode::Normal) && !conflicts.is_empty() {
 		return Err(Error::Conflict { paths: conflicts });
 	}
 	let mut collisions = Vec::new();
@@ -1444,9 +1454,10 @@ fn checkout_tree(
 		.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
 		.map_err(|e| Error::backend("git checkout", e))?;
 	opts.overwrite_existing = true;
+	opts.keep_going = matches!(mode, CheckoutMode::DisposableWorktree);
 	let progress = gix::progress::Discard;
 	let interrupt = std::sync::atomic::AtomicBool::new(false);
-	gix::worktree::state::checkout(
+	let outcome = gix::worktree::state::checkout(
 		&mut target,
 		owner.root(),
 		repo
@@ -1460,9 +1471,40 @@ fn checkout_tree(
 		opts,
 	)
 	.map_err(|e| Error::backend("git checkout", e))?;
+	if matches!(mode, CheckoutMode::DisposableWorktree) {
+		check_checkout_outcome(owner.root(), &outcome, "git checkout")?;
+	}
 	target
 		.write(INDEX_WRITE)
 		.map_err(|e| Error::backend("git checkout", e))
+}
+
+fn check_checkout_outcome(
+	root: &Path,
+	outcome: &gix::worktree::state::checkout::Outcome,
+	operation: &'static str,
+) -> Result<()> {
+	if let Some(failure) = outcome.errors.first() {
+		let mut cause: &dyn std::error::Error = failure.error.as_ref();
+		while let Some(source) = cause.source() {
+			cause = source;
+		}
+		return Err(Error::backend(
+			operation,
+			format!("checkout {}: {cause}", root.join(failure.path.to_path_lossy()).display()),
+		));
+	}
+	if let Some(collision) = outcome.collisions.first() {
+		return Err(Error::backend(
+			operation,
+			format!(
+				"checkout {}: {}",
+				root.join(collision.path.to_path_lossy()).display(),
+				collision.error_kind
+			),
+		));
+	}
+	Ok(())
 }
 
 fn checkout_conflicts(
@@ -1707,12 +1749,87 @@ fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> 
 	Ok(admin)
 }
 
-fn cleanup_worktree_add(path: &Path, common: &Path) {
+fn cleanup_worktree_add(path: &Path, common: &Path) -> Result<()> {
 	let admin = registered_admin(&path.join(".git")).ok().flatten();
-	let _ = fs::remove_dir_all(path);
-	if let Some(admin) = admin.filter(|admin| admin.starts_with(common.join("worktrees"))) {
-		let _ = fs::remove_dir_all(admin);
+	match fs::symlink_metadata(path) {
+		Ok(meta) if meta.is_dir() => match fs::remove_dir_all(path) {
+			Ok(()) => {},
+			Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+				clear_clone_permissions(path)?;
+				fs::remove_dir_all(path).map_err(|err| {
+					Error::backend("git worktree add", format!("remove {}: {err}", path.display()))
+				})?;
+			},
+			Err(err) => {
+				return Err(Error::backend(
+					"git worktree add",
+					format!("remove {}: {err}", path.display()),
+				));
+			},
+		},
+		Ok(_) => {
+			return Err(Error::backend(
+				"git worktree add",
+				format!("refusing to clean non-directory {}", path.display()),
+			));
+		},
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+		Err(err) => {
+			return Err(Error::backend(
+				"git worktree add",
+				format!("inspect {}: {err}", path.display()),
+			));
+		},
 	}
+	if let Some(admin) = admin.filter(|admin| admin.starts_with(common.join("worktrees"))) {
+		fs::remove_dir_all(&admin).map_err(|err| {
+			Error::backend("git worktree add", format!("remove {}: {err}", admin.display()))
+		})?;
+	}
+	Ok(())
+}
+
+fn clear_clone_permissions(path: &Path) -> Result<()> {
+	let meta = fs::symlink_metadata(path).map_err(|err| {
+		Error::backend("git worktree add", format!("inspect {}: {err}", path.display()))
+	})?;
+	if meta.file_type().is_symlink() {
+		return Ok(());
+	}
+	#[cfg(unix)]
+	if meta.is_dir() {
+		use std::os::unix::fs::PermissionsExt;
+		let mut permissions = meta.permissions();
+		if permissions.mode() & 0o700 != 0o700 {
+			permissions.set_mode(permissions.mode() | 0o700);
+			fs::set_permissions(path, permissions).map_err(|err| {
+				Error::backend("git worktree add", format!("chmod {}: {err}", path.display()))
+			})?;
+		}
+	}
+	#[cfg(windows)]
+	if meta.permissions().readonly() {
+		let mut permissions = meta.permissions();
+		#[allow(
+			clippy::permissions_set_readonly_false,
+			reason = "only the disposable cloned tree is modified"
+		)]
+		permissions.set_readonly(false);
+		fs::set_permissions(path, permissions).map_err(|err| {
+			Error::backend("git worktree add", format!("chmod {}: {err}", path.display()))
+		})?;
+	}
+	if meta.is_dir() {
+		for entry in fs::read_dir(path).map_err(|err| {
+			Error::backend("git worktree add", format!("read {}: {err}", path.display()))
+		})? {
+			let entry = entry.map_err(|err| {
+				Error::backend("git worktree add", format!("read {}: {err}", path.display()))
+			})?;
+			clear_clone_permissions(&entry.path())?;
+		}
+	}
+	Ok(())
 }
 
 /// Remove a file, symlink, or directory tree at `path`; missing is fine.
@@ -2280,6 +2397,37 @@ mod tests {
 		assert!(!repo.delete_branch("missing", true).unwrap());
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn checkout_and_hard_reset_stop_on_unwritable_target() {
+		use std::os::unix::fs::PermissionsExt;
+
+		for hard_reset in [false, true] {
+			let (temp, repo) = fixture();
+			git(temp.path(), &["checkout", "-qb", "target"]);
+			fs::create_dir(temp.path().join("a-blocked")).unwrap();
+			fs::write(temp.path().join("a-blocked/file"), "blocked\n").unwrap();
+			fs::write(temp.path().join("z-later"), "should not appear\n").unwrap();
+			git(temp.path(), &["add", "-A"]);
+			git(temp.path(), &["commit", "-qm", "target"]);
+			git(temp.path(), &["checkout", "-q", "main"]);
+			fs::create_dir(temp.path().join("a-blocked")).unwrap();
+			fs::set_permissions(temp.path().join("a-blocked"), fs::Permissions::from_mode(0o555))
+				.unwrap();
+
+			let result = if hard_reset {
+				repo.reset(ResetMode::Hard, Some("target"))
+			} else {
+				repo.checkout("target")
+			};
+			fs::set_permissions(temp.path().join("a-blocked"), fs::Permissions::from_mode(0o755))
+				.unwrap();
+			assert!(result.is_err(), "unwritable target must fail checkout");
+			assert!(!temp.path().join("z-later").exists(), "checkout must stop at the first error");
+			assert_eq!(git(temp.path(), &["symbolic-ref", "--short", "HEAD"]), "main");
+		}
+	}
+
 	#[test]
 	fn checkout_restore_and_worktree_remove_honor_autocrlf() {
 		// Regression: conflict and dirty checks hashed raw worktree bytes, so a
@@ -2674,6 +2822,61 @@ mod tests {
 			);
 		}
 		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_recovers_from_readonly_untracked_cache() {
+		use std::os::unix::fs::{PermissionsExt, symlink};
+
+		let temp = tempfile::tempdir().unwrap();
+		let source = temp.path().join("source");
+		git(temp.path(), &["init", "-q", source.to_str().unwrap()]);
+		git(&source, &["config", "user.name", "Test"]);
+		git(&source, &["config", "user.email", "test@example.com"]);
+		fs::create_dir(source.join("cache")).unwrap();
+		fs::write(source.join("cache/tracked"), "old\n").unwrap();
+		git(&source, &["add", "cache/tracked"]);
+		git(&source, &["commit", "-qm", "initial"]);
+		fs::remove_file(source.join("cache/tracked")).unwrap();
+		git(&source, &["add", "-u"]);
+		git(&source, &["commit", "-qm", "removed"]);
+		symlink("missing", source.join("cache/data")).unwrap();
+		fs::set_permissions(source.join("cache"), fs::Permissions::from_mode(0o555)).unwrap();
+
+		let repo = GitRepo::require(&source).unwrap();
+		let linked = temp.path().join("linked");
+		let result = repo
+			.worktree_add(&linked, "HEAD~1", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert_eq!(fs::read_to_string(linked.join("cache/tracked")).unwrap(), "old\n");
+		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		assert_eq!(git(&linked, &["ls-files", "cache/tracked"]), "cache/tracked");
+		assert!(source.join("cache/data").is_symlink());
+		assert_eq!(
+			fs::metadata(source.join("cache"))
+				.unwrap()
+				.permissions()
+				.mode() & 0o777,
+			0o555
+		);
+		if !pi_iso::clone_candidates(None).is_empty() {
+			assert!(
+				result.clone_error.is_some(),
+				"read-only clone must fall back to a clean checkout"
+			);
+		}
+		if let Some(error) = &result.clone_error
+			&& error.contains("Permission denied")
+		{
+			assert!(error.contains(&linked.join("cache/data").display().to_string()), "{error}");
+			assert!(error.contains("os error 13"), "{error}");
+		}
+		fs::set_permissions(source.join("cache"), fs::Permissions::from_mode(0o755)).unwrap();
 	}
 
 	/// Whether any host-available clone backend can actually clone a tree

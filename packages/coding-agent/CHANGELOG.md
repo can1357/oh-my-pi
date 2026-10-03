@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed clone-first worktree creation failing when the source contains read-only cache directories; failed clones now clean up before falling back to a plain checkout ([#14190](https://github.com/can1357/oh-my-pi/issues/14190)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
