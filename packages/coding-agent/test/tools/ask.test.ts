@@ -1198,6 +1198,33 @@ describe("AskTool multi-question navigation", () => {
 		expect(result.details?.results?.[1]?.selectedOptions).toEqual(["two"]);
 		expect(editor).toHaveBeenCalledTimes(1);
 	});
+
+	it("offers Done selecting for multi-select inside a multi-question ask without arrow navigation", async () => {
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			select: async (prompt, options) => {
+				const labels = options.map(selectItemLabel);
+				if (prompt.includes("Pick one")) return labels.find(label => label?.endsWith("gamma"));
+				if (!prompt.includes("selected")) return labels.find(label => label?.endsWith("alpha"));
+				return labels.find(label => label?.includes("Done selecting"));
+			},
+		});
+
+		const result = await tool.execute(
+			"call-multi-in-many-done",
+			{
+				questions: [
+					{ id: "many", question: "Pick many", options: [{ label: "alpha" }, { label: "beta" }], multi: true },
+					{ id: "one", question: "Pick one", options: [{ label: "gamma" }, { label: "delta" }] },
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.results?.map(r => r.selectedOptions)).toEqual([["alpha"], ["gamma"]]);
+	});
 });
 
 describe("AskTool option markers", () => {

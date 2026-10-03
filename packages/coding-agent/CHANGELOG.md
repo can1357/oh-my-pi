@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed multi-select questions in a multi-question `ask` having no way to continue in RPC clients: the `Done selecting` row now appears there too, instead of relying on the TUI-only right-arrow key
+
 ## [18.6.0] - 2026-10-03
 
 ### Added
