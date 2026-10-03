@@ -1,5 +1,14 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import type { Context, ImageContent, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	estimateInlineSavings,
@@ -500,22 +509,16 @@ describe("SnapcompactInlineTransformer", () => {
 			systemPrompt: context.systemPrompt!,
 			messages: context.messages,
 		});
-		const frameCountSpy = spyOn(snapcompact, "frames");
-		try {
-			const result = await new SnapcompactInlineTransformer(options).transform(context, model);
+		const result = await new SnapcompactInlineTransformer(options).transform(context, model);
 
-			expect(frameCountSpy).not.toHaveBeenCalled();
-			expect(estimate.toolResults?.total).toBe(2);
-			expect(estimate.toolResults?.swapped).toBe(0);
-			expect(estimate.toolResults?.savedTokens).toBe(0);
-			expect(estimate.systemPrompt?.applied).toBe(false);
-			expect(estimate.systemPrompt?.reason).toBe("budget");
-			expect(estimate.savedTokens).toBe(0);
-			expect(result).toBe(context);
-			expect(result.messages[1]).toBe(mixedResult);
-		} finally {
-			frameCountSpy.mockRestore();
-		}
+		expect(estimate.toolResults?.total).toBe(2);
+		expect(estimate.toolResults?.swapped).toBe(0);
+		expect(estimate.toolResults?.savedTokens).toBe(0);
+		expect(estimate.systemPrompt?.applied).toBe(false);
+		expect(estimate.systemPrompt?.reason).toBe("budget");
+		expect(estimate.savedTokens).toBe(0);
+		expect(result).toBe(context);
+		expect(result.messages[1]).toBe(mixedResult);
 	});
 
 	it("caches renders across turns: identical input does not re-rasterize", async () => {
@@ -545,23 +548,53 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
-	it("over the provider cap, reverts only the newest imaged results and keeps earlier ones", async () => {
+	it("stamps a cap retraction of an already-sent result so thinking bound to its frames is dropped", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 		);
 		const model = makeModel({ provider: "groq" });
-		const history: Message[] = [userMessage("go"), toolResult("call_1", LARGE), toolResult("call_2", LARGE)];
-		const before = await transformer.transform({ messages: history }, model);
-		expect(imageCount({ messages: [before.messages[1]] })).toBe(2);
-		expect(imageCount({ messages: [before.messages[2]] })).toBe(2);
+		const thinkingTurn = (text: string, timestamp: number): AssistantMessage => ({
+			...createAssistantMessage(text),
+			content: [
+				{ type: "thinking", thinking: "reasoning", thinkingSignature: "sig" },
+				{ type: "text", text },
+			],
+			model: "test-model",
+			timestamp,
+		});
+		const history: Message[] = [
+			{ ...userMessage("go"), timestamp: 1 },
+			{ ...toolResult("call_1", LARGE), timestamp: 2 },
+			thinkingTurn("next", 3),
+			{ ...toolResult("call_2", LARGE), timestamp: 4 },
+			thinkingTurn("done", 5),
+		];
+		const sent = await transformer.transform({ messages: history }, model);
+		expect(imageCount({ messages: [sent.messages[1]] })).toBe(2);
+		expect(imageCount({ messages: [sent.messages[3]] })).toBe(2);
 
-		// Two pasted screenshots would put the 5-image fallback cap at 6.
+		// Two pasted screenshots would put the 5-image fallback cap at 6, so
+		// call_2, already sent as frames, goes back to text.
 		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
-		const pasted: Message = { role: "user", content: [screenshot, screenshot], timestamp: 0 };
-		const after = await transformer.transform({ messages: [...history, pasted] }, model);
-		expect(after.messages[1]).toEqual(before.messages[1]);
-		expect(after.messages[2]).toBe(history[2]);
+		const pasted: Message = { role: "user", content: [screenshot, screenshot], timestamp: 6 };
+		const after = await transformer.transform({ messages: [...history, pasted, thinkingTurn("seen", 7)] }, model);
+		expect(after.messages[1]).toEqual(sent.messages[1]);
 		expect(imageCount(after)).toBe(4);
+		const retracted = after.messages[3] as ToolResultMessage;
+		expect(retracted.content).toEqual(history[3].content as ToolResultMessage["content"]);
+		expect(retracted.prunedAt).toBe(6);
+
+		// A prefix-binding provider drops only the thinking minted against the frames.
+		const anthropic = makeModel();
+		const bindingModel = {
+			...anthropic,
+			thinking: { ...anthropic.thinking, prefixBinding: true },
+		} as Model<"anthropic-messages">;
+		const replayed = transformMessages(after.messages, bindingModel);
+		const thinkingByTurn = replayed
+			.filter(message => message.role === "assistant")
+			.map(message => message.content.some(block => block.type === "thinking"));
+		expect(thinkingByTurn).toEqual([true, false, true]);
 	});
 
 	it("never changes how an already-sent message goes out as the conversation grows", async () => {
@@ -650,7 +683,7 @@ describe("planInlineSwaps", () => {
 		expect(plan.toolResults.map(swap => swap.id)).toEqual(["a", "c"]);
 	});
 
-	it("decides each item from the images before it, so later images never flip an earlier swap", () => {
+	it("decides each item from the images before it and, over the cap, gives back the newest swaps first", () => {
 		const input = {
 			options: { renderSystemPrompt: "all" as const, renderToolResults: true },
 			shape,

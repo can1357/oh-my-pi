@@ -17,7 +17,7 @@
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { Context, ImageContent, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -68,13 +68,6 @@ function messageImageCount(message: { content?: unknown }): number {
 	for (const block of message.content as BlockViews) {
 		if (block.type === "image") count++;
 	}
-	return count;
-}
-
-/** Count image blocks already present across message contents. */
-function countMessageImages(messages: readonly { content?: unknown }[]): number {
-	let count = 0;
-	for (const message of messages) count += messageImageCount(message);
 	return count;
 }
 
@@ -177,8 +170,16 @@ export interface InlinePlanInput {
 export interface InlineSwapPlan {
 	/** Tool results to swap, oldest first. */
 	toolResults: Array<{ id: string; textTokens: number; frames: number }>;
-	/** Set when the system prompt should swap to frames (uses leftover budget). */
+	/** Set when the system prompt should swap to frames (claims frames before any tool result). */
 	systemPrompt: InlineSystemPromptCandidate | undefined;
+	/**
+	 * Swaps the provider-cap backstop gave back to text. An earlier request may
+	 * have sent them as frames, so the transform treats them as a history rewrite.
+	 */
+	retracted: {
+		toolResults: Array<{ id: string; frames: number }>;
+		systemPrompt: InlineSystemPromptCandidate | undefined;
+	};
 }
 
 /**
@@ -194,7 +195,8 @@ export interface InlineSwapPlan {
  *   included, and keeps that form while it stays in context;
  * - the system prompt, whose frames ride the first user message, claims its
  *   frames before any tool result;
- * - the only revision is the provider-cap backstop at the end.
+ * - the only revision is the provider-cap backstop at the end, which the
+ *   transform stamps as a history rewrite (`stampCapRetractions`).
  */
 export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
 	const { imageLimit } = input;
@@ -230,14 +232,84 @@ export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
 
 	// Images that arrived after a swapped item (a pasted screenshot, an image
 	// tool result) can push the request over the cap. Give back the newest
-	// swaps first: reverting them to text loses nothing, whereas the
-	// downstream clamp would drop the oldest real images.
+	// swaps first: reverting them to text keeps every real image, whereas the
+	// downstream clamp would drop the oldest ones.
+	const retracted: InlineSwapPlan["retracted"] = { toolResults: [], systemPrompt: undefined };
 	while (input.existingImages + frames > imageLimit && toolResults.length > 0) {
-		frames -= toolResults.pop()!.frames;
+		const swap = toolResults.pop()!;
+		retracted.toolResults.push({ id: swap.id, frames: swap.frames });
+		frames -= swap.frames;
 	}
-	if (systemPrompt && input.existingImages + frames > imageLimit) systemPrompt = undefined;
+	if (systemPrompt && input.existingImages + frames > imageLimit) {
+		retracted.systemPrompt = systemPrompt;
+		systemPrompt = undefined;
+	}
 
-	return { toolResults, systemPrompt };
+	return { toolResults, systemPrompt, retracted };
+}
+
+/**
+ * Stamp the cap backstop's retractions as a history rewrite, the way pruning
+ * stamps `prunedAt`. A retracted item may have gone out as frames in an
+ * earlier request, and signed thinking after it is bound to those bytes; the
+ * stamp makes `transformMessages` drop that thinking instead of the provider
+ * rejecting it. The rewrite time is the message whose images first pushed the
+ * request over the cap, so thinking minted after the switch to text is kept.
+ * Items with no assistant turn between them and that message were never
+ * followed by thinking in their framed form and stay unstamped.
+ */
+function stampCapRetractions(
+	original: readonly Message[],
+	messages: Message[],
+	plan: InlineSwapPlan,
+	toolResultIndex: ReadonlyMap<string, number>,
+	firstUserIndex: number,
+	imageLimit: number,
+): boolean {
+	const retractedAt = new Map<number, "toolResult" | "systemPrompt">();
+	const framesAt = new Map<number, number>();
+	const place = (index: number | undefined, frames: number) => {
+		if (index !== undefined && index >= 0) framesAt.set(index, (framesAt.get(index) ?? 0) + frames);
+	};
+	for (const swap of plan.toolResults) place(toolResultIndex.get(swap.id), swap.frames);
+	for (const swap of plan.retracted.toolResults) {
+		const index = toolResultIndex.get(swap.id);
+		place(index, swap.frames);
+		if (index !== undefined) retractedAt.set(index, "toolResult");
+	}
+	const prompt = plan.systemPrompt ?? plan.retracted.systemPrompt;
+	if (prompt) place(firstUserIndex, prompt.frames);
+	if (plan.retracted.systemPrompt && firstUserIndex >= 0) retractedAt.set(firstUserIndex, "systemPrompt");
+	if (retractedAt.size === 0) return false;
+
+	let images = 0;
+	let crossing = -1;
+	for (let index = 0; index < original.length; index++) {
+		images += messageImageCount(original[index]) + (framesAt.get(index) ?? 0);
+		if (images > imageLimit) {
+			crossing = index;
+			break;
+		}
+	}
+	if (crossing < 0) return false;
+	const rewriteAt = original[crossing].timestamp;
+
+	let stamped = false;
+	for (const [index, kind] of retractedAt) {
+		if (!original.slice(index + 1, crossing).some(message => message.role === "assistant")) continue;
+		const message = messages[index];
+		if (kind === "toolResult" && message.role === "toolResult") {
+			messages[index] = { ...message, prunedAt: Math.max(message.prunedAt ?? rewriteAt, rewriteAt) };
+			stamped = true;
+		} else if (kind === "systemPrompt" && message.role === "user") {
+			messages[index] = {
+				...message,
+				historyRewriteAt: Math.max(message.historyRewriteAt ?? rewriteAt, rewriteAt),
+			};
+			stamped = true;
+		}
+	}
+	return stamped;
 }
 
 // ============================================================================
@@ -535,9 +607,6 @@ export class SnapcompactInlineTransformer {
 		const shapeKey = JSON.stringify(shape);
 		const tokenizer = new Tokenizer(model);
 		const imageLimit = snapcompact.providerImageBudget(model.provider);
-		// Already at the cap: no frame can fit anywhere.
-		if (countMessageImages(context.messages) >= imageLimit) return context;
-
 		const messages = [...context.messages];
 
 		// Tool-result candidates (in order) for the planner, plus the text/index
@@ -632,6 +701,20 @@ export class SnapcompactInlineTransformer {
 				content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
 			};
 			systemPrompt = systemPromptTarget.replacement;
+			changed = true;
+		}
+
+		if (
+			(plan.retracted.toolResults.length > 0 || plan.retracted.systemPrompt) &&
+			stampCapRetractions(
+				context.messages,
+				messages,
+				plan,
+				new Map(scan.toolResults.map(built => [built.candidate.id, built.index])),
+				userIndex,
+				imageLimit,
+			)
+		) {
 			changed = true;
 		}
 
