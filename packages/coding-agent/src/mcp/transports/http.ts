@@ -11,12 +11,22 @@ import type {
 	JsonRpcError,
 	JsonRpcMessage,
 	JsonRpcRequest,
+	MCPDiscoverResult,
 	MCPHttpServerConfig,
 	MCPRequestOptions,
 	MCPSseServerConfig,
+	MCPStreamableHttpServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import {
+	MCP_CLIENT_CAPABILITIES_META_KEY,
+	MCP_CLIENT_INFO_META_KEY,
+	MCP_MODERN_PROTOCOL_VERSION,
+	MCP_NAME_HEADER_SOURCE,
+	MCP_PROTOCOL_VERSION_META_KEY,
+	MCP_SERVER_INFO_META_KEY,
+	toJsonRpcError,
+} from "../../mcp/types";
 import {
 	createMCPJsonRpcError,
 	type MCPFailureStage,
@@ -36,6 +46,52 @@ import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 const DEFAULT_SSE_RETRY_MS = 3_000;
+
+/** 2026-07-28 era selected on a `streamable-http` endpoint. */
+type MCPHttpEra = "modern" | "legacy";
+
+const BASE64_SENTINEL_PREFIX = "=?base64?";
+const BASE64_SENTINEL_SUFFIX = "?=";
+/**
+ * JSON-RPC error a modern-only endpoint answers a 2025-era request with
+ * (`-32022`, `UnsupportedProtocolVersion`); its reply is the expected
+ * downgrade signal when probing a pre-2026 server.
+ */
+const UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
+/** Probe refusals that mean "this endpoint speaks the 2025 handshake". */
+const legacyDowngradeCodes = new Set([UNSUPPORTED_PROTOCOL_VERSION, -32601]);
+
+/**
+ * Encode an `Mcp-Method` / `Mcp-Name` value per the 2026-07-28 standard-header
+ * rules: values outside RFC 9110 field-value bytes (or already wearing the
+ * sentinel) travel Base64-wrapped so the header stays ASCII-safe.
+ */
+function encodeMcpHeaderValue(value: string): string {
+	let needsEncoding = value.length === 0 || value !== value.trim();
+	if (!needsEncoding) {
+		if (value.startsWith(BASE64_SENTINEL_PREFIX) && value.endsWith(BASE64_SENTINEL_SUFFIX)) {
+			needsEncoding = true;
+		} else {
+			for (let i = 0; i < value.length; i++) {
+				const code = value.codePointAt(i)!;
+				if (code === 9 || (code >= 32 && code <= 126)) continue;
+				needsEncoding = true;
+				break;
+			}
+		}
+	}
+	if (!needsEncoding) return value;
+	return `${BASE64_SENTINEL_PREFIX}${Buffer.from(value, "utf8").toString("base64")}${BASE64_SENTINEL_SUFFIX}`;
+}
+
+/** The `params` field an `Mcp-Name` header mirrors for `method`, if any. */
+function mcpNameHeaderSource(method: string, params: Record<string, unknown> | undefined): string | undefined {
+	const field = Object.hasOwn(MCP_NAME_HEADER_SOURCE, method) ? MCP_NAME_HEADER_SOURCE[method] : undefined;
+	if (field === undefined) return undefined;
+	const raw = params?.[field];
+	return typeof raw === "string" ? raw : undefined;
+}
 
 interface SSEResumeState {
 	lastEventId: string | null;
@@ -99,6 +155,16 @@ export class HttpTransport implements MCPTransport {
 	 * a newer version sent before negotiation completes.
 	 */
 	#protocolVersion: string | null = null;
+	/**
+	 * Era of a `streamable-http` endpoint. `null` until {@link negotiate} runs;
+	 * plain `http`/`sse` transports always use the legacy handshake.
+	 */
+	#era: MCPHttpEra | null = null;
+	/** Client identity + capabilities stamped into every modern `_meta` envelope. */
+	#clientInfo: { name: string; version: string } | null = null;
+	#clientCapabilities: Record<string, unknown> | null = null;
+	/** Result of the `server/discover` probe once the modern era is selected. */
+	#discoverResult: MCPDiscoverResult | null = null;
 
 	onClose?: () => void;
 	onError?: (error: Error) => void;
@@ -107,7 +173,7 @@ export class HttpTransport implements MCPTransport {
 	/** Called on 401/403 to attempt token refresh. Returns updated headers or null. */
 	onAuthError?: () => Promise<Record<string, string> | null>;
 
-	constructor(private config: MCPHttpServerConfig | MCPSseServerConfig) {}
+	constructor(private config: MCPHttpServerConfig | MCPStreamableHttpServerConfig | MCPSseServerConfig) {}
 
 	/**
 	 * Fetch the configured endpoint with header precedence and origin policy.
@@ -174,6 +240,238 @@ export class HttpTransport implements MCPTransport {
 	/** Record the protocol version negotiated during `initialize`. */
 	setProtocolVersion(version: string): void {
 		this.#protocolVersion = version;
+	}
+
+	/** `true` once {@link negotiate} selected the 2026-07-28 stateless era. */
+	get isModern(): boolean {
+		return this.#era === "modern";
+	}
+
+	/**
+	 * Decide the wire era for a `streamable-http` endpoint, before any
+	 * handshake. The client identity is captured for the per-request `_meta`
+	 * envelope and a `server/discover` probe runs on the modern slot (no
+	 * `MCP-Protocol-Version` header — a probe is the first sender of the
+	 * envelope claim, and the version derives from the body). Servers that
+	 * answer with an overlapping modern revision select the modern era;
+	 * anything else (probe HTTP error, unsupported-version refusal, malformed
+	 * result) falls back to the legacy `initialize` handshake so pre-2026
+	 * endpoints keep working.
+	 */
+	async negotiate(
+		clientInfo: { name: string; version: string },
+		capabilities: Record<string, unknown>,
+		options?: { signal?: AbortSignal },
+	): Promise<void> {
+		if (this.config.type !== "streamable-http") return;
+		this.#clientInfo = clientInfo;
+		this.#clientCapabilities = capabilities;
+		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));
+		try {
+			const id = this.#requestIds.next(this.config.requestIdFormat);
+			const response = await this.#fetch(
+				{
+					method: "POST",
+					body: JSON.stringify(this.#modernBody("server/discover", {}, id)),
+					signal: operation.signal,
+				},
+				this.#modernHeaders("server/discover"),
+			);
+			const payload = await this.#readJsonRpcPayload(response, "server/discover");
+			if (payload.error !== undefined) {
+				logger.debug("MCP server/discover probe returned a JSON-RPC error; using the legacy handshake", {
+					url: this.config.url,
+					code: payload.error.code,
+					...(!legacyDowngradeCodes.has(payload.error.code) && { message: payload.error.message }),
+				});
+				this.#era = "legacy";
+				return;
+			}
+			const result = payload.result;
+			if (!isRecord(result)) throw new SyntaxError("Malformed server/discover result");
+			const supported = Array.isArray(result.supportedVersions)
+				? result.supportedVersions.filter((version): version is string => typeof version === "string")
+				: [];
+			if (!supported.includes(MCP_MODERN_PROTOCOL_VERSION)) {
+				this.#era = "legacy";
+				return;
+			}
+			const serverInfo = isRecord(result._meta) ? result._meta[MCP_SERVER_INFO_META_KEY] : undefined;
+			this.#discoverResult = {
+				supportedVersions: supported,
+				capabilities: isRecord(result.capabilities) ? result.capabilities : {},
+				...(typeof result.instructions === "string" && { instructions: result.instructions }),
+				...(isRecord(serverInfo) &&
+					typeof serverInfo.name === "string" &&
+					typeof serverInfo.version === "string" && {
+						serverInfo: { name: serverInfo.name, version: serverInfo.version },
+					}),
+			};
+			this.#protocolVersion = MCP_MODERN_PROTOCOL_VERSION;
+			this.#era = "modern";
+		} catch (error) {
+			if (options?.signal?.aborted) throw error;
+			if (error instanceof Error && error.name === "AbortError" && this.#lifecycleController.signal.aborted) {
+				throw error;
+			}
+			logger.debug("MCP modern protocol probe failed; falling back to the legacy handshake", {
+				url: this.config.url,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.#era = "legacy";
+		} finally {
+			operation.clear();
+		}
+	}
+
+	/** Result of the `server/discover` probe; non-null only in the modern era. */
+	get discoverResult(): MCPDiscoverResult | null {
+		return this.#discoverResult;
+	}
+
+	/**
+	 * Request params for a modern exchange: the caller's params with the
+	 * per-request `_meta` envelope merged in. Envelope keys are written last so
+	 * protocol fields always win over a colliding caller key.
+	 */
+	#modernParams(params: Record<string, unknown> | undefined): Record<string, unknown> {
+		const meta: Record<string, unknown> = {
+			[MCP_PROTOCOL_VERSION_META_KEY]: MCP_MODERN_PROTOCOL_VERSION,
+			[MCP_CLIENT_CAPABILITIES_META_KEY]: this.#clientCapabilities ?? {},
+		};
+		if (this.#clientInfo) meta[MCP_CLIENT_INFO_META_KEY] = this.#clientInfo;
+		return { ...params, _meta: { ...(isRecord(params?._meta) ? params._meta : {}), ...meta } };
+	}
+
+	#modernBody(
+		method: string,
+		params: Record<string, unknown> | undefined,
+		id?: string | number,
+	): Record<string, unknown> {
+		return {
+			jsonrpc: "2.0" as const,
+			...(id !== undefined && { id }),
+			method,
+			params: this.#modernParams(params),
+		};
+	}
+
+	/**
+	 * Standard headers for a modern request: the `MCP-Protocol-Version` slot
+	 * follows from the envelope claim, `Mcp-Method` mirrors the body method,
+	 * and `Mcp-Name` mirrors the named `params` field for name-bearing methods.
+	 */
+	#modernHeaders(method: string, params?: Record<string, unknown>): Record<string, string> {
+		const headers: Record<string, string> = {
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+			"MCP-Protocol-Version": MCP_MODERN_PROTOCOL_VERSION,
+			"Mcp-Method": encodeMcpHeaderValue(method),
+		};
+		const name = mcpNameHeaderSource(method, params);
+		if (name !== undefined) headers["Mcp-Name"] = encodeMcpHeaderValue(name);
+		return headers;
+	}
+
+	/**
+	 * Parse one JSON-RPC payload on the modern slot, transparently accepting an
+	 * SSE-framed body. Modern endpoints answer with `application/json`, but the
+	 * revision permits a stream; the match is by request id either way.
+	 *
+	 * A 4xx body that itself parses as this exchange's JSON-RPC error is
+	 * returned as `{ error }` — the era probe needs the refusal code, and call
+	 * sites turn errors into the same typed failure either way.
+	 */
+	async #readJsonRpcPayload(
+		response: Response,
+		label: string,
+		expectedId?: string | number,
+	): Promise<{ result?: unknown; error?: JsonRpcError }> {
+		const contentType = response.headers.get("Content-Type") ?? "";
+		if (!response.ok) {
+			if (contentType.includes("application/json")) {
+				const payload: unknown = await response.json().catch(() => undefined);
+				if (
+					isRecord(payload) &&
+					isRecord(payload.error) &&
+					typeof payload.error.code === "number" &&
+					typeof payload.error.message === "string"
+				) {
+					return { error: payload.error as unknown as JsonRpcError };
+				}
+			}
+			const text = contentType.includes("application/json") ? "" : await response.text().catch(() => "");
+			throw new MCPTransportError({
+				transport: "http",
+				stage: "receive",
+				failure: "http_status",
+				message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}`,
+				retryable: response.status === 404 || response.status === 502 || response.status === 503,
+				code: response.status,
+				traceId: mcpTraceIdFromHeaders(response.headers),
+			});
+		}
+		if (contentType.includes("text/event-stream") && response.body) {
+			for await (const event of readSseJson<JsonRpcMessage>(response.body, this.#operationSignal())) {
+				if (Array.isArray(event)) continue;
+				if ("method" in event && !("id" in event)) {
+					this.onNotification?.(event.method, event.params);
+					continue;
+				}
+				if ("result" in event || "error" in event) {
+					if (expectedId !== undefined && event.id !== expectedId) continue;
+					return event;
+				}
+			}
+			throw new MCPTransportError({
+				transport: "http",
+				stage: "receive",
+				failure: "eof",
+				message: `No response received for ${label}`,
+				retryable: false,
+			});
+		}
+		const payload: unknown = await response.json();
+		if (!isRecord(payload) || payload.jsonrpc !== "2.0") throw new SyntaxError("Malformed JSON-RPC response");
+		return payload as { result?: unknown; error?: JsonRpcError };
+	}
+
+	async #modernRequest<T>(method: string, params: Record<string, unknown>, options?: MCPRequestOptions): Promise<T> {
+		const id = this.#requestIds.next(this.config.requestIdFormat);
+		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));
+		let stage: MCPFailureStage = "send";
+		let traceId: string | undefined;
+		try {
+			const response = await this.#fetch(
+				{ method: "POST", body: JSON.stringify(this.#modernBody(method, params, id)), signal: operation.signal },
+				this.#modernHeaders(method, params),
+			);
+			stage = "receive";
+			traceId = mcpTraceIdFromHeaders(response.headers);
+			const payload = await this.#readJsonRpcPayload(response, method, id);
+			if (payload.error !== undefined) {
+				throw createMCPJsonRpcError("http", payload.error, traceId);
+			}
+			return payload.result as T;
+		} catch (error) {
+			if (operation.isTimeoutAbort(error) || operation.timedOut()) {
+				throw new MCPTransportError({
+					transport: "http",
+					stage,
+					failure: "timeout",
+					message: `Request timeout after ${timeout}ms`,
+					retryable: false,
+					traceId,
+					cause: error,
+				});
+			}
+			if (error instanceof Error && error.name === "AbortError") throw error;
+			throw normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+		} finally {
+			operation.clear();
+		}
 	}
 
 	get connected(): boolean {
@@ -398,7 +696,53 @@ export class HttpTransport implements MCPTransport {
 	}
 
 	request<T = unknown>(method: string, params?: Record<string, unknown>, options?: MCPRequestOptions): Promise<T> {
+		if (this.#era === "modern") {
+			return this.#trackRequest(this.#modernRequestWithDiscovery<T>(method, params, options));
+		}
 		return this.#trackRequest(this.#requestWithAuthRetry<T>(method, params, options));
+	}
+
+	/**
+	 * Modern-slot request wrapper: the era's discovery payload answers the
+	 * `initialize` method the client always sends, and auth refreshes keep the
+	 * one-retry contract of the legacy slot.
+	 */
+	async #modernRequestWithDiscovery<T>(
+		method: string,
+		params: Record<string, unknown> | undefined,
+		options: MCPRequestOptions | undefined,
+	): Promise<T> {
+		if (method === "initialize") {
+			const discover = this.#discoverResult;
+			if (!discover) {
+				throw new MCPTransportError({
+					transport: "http",
+					stage: "protocol",
+					failure: "unknown",
+					message: "Modern transport chosen without a server/discover result",
+					retryable: false,
+				});
+			}
+			return {
+				protocolVersion: MCP_MODERN_PROTOCOL_VERSION,
+				capabilities: discover.capabilities,
+				serverInfo: discover.serverInfo ?? { name: "mcp", version: "0" },
+				...(discover.instructions !== undefined && { instructions: discover.instructions }),
+			} as T;
+		}
+		try {
+			return await this.#modernRequest<T>(method, params ?? {}, options);
+		} catch (error) {
+			const status = error instanceof Error ? AIError.status(error) : undefined;
+			if (this.onAuthError && (status === 401 || status === 403)) {
+				const newHeaders = await this.onAuthError();
+				if (newHeaders) {
+					this.config = { ...this.config, headers: newHeaders };
+					return await this.#modernRequest<T>(method, params ?? {}, options);
+				}
+			}
+			throw error;
+		}
 	}
 
 	async #requestWithAuthRetry<T>(
@@ -777,7 +1121,78 @@ export class HttpTransport implements MCPTransport {
 	}
 
 	notify(method: string, params?: Record<string, unknown>): Promise<void> {
+		if (this.#era === "modern") {
+			return this.#trackRequest(this.#modernNotify(method, params));
+		}
 		return this.#trackRequest(this.#sendNotification(method, params));
+	}
+
+	/**
+	 * Send a modern notification. Notifications carry no `id` — the endpoint
+	 * distinguishes them from requests (a posted `id` addresses the method for
+	 * dispatch and 404s unknown ones). `notifications/initialized` is a
+	 * courtesy on this stateless era, so a 202/bodyless answer is the norm;
+	 * carrier notifications on an SSE body are dispatched instead of dropped.
+	 */
+	async #modernNotify(method: string, params?: Record<string, unknown>): Promise<void> {
+		if (!this.#connected) {
+			throw new MCPTransportError({
+				transport: "http",
+				stage: "connect",
+				failure: "closed",
+				message: "Transport not connected",
+				retryable: true,
+			});
+		}
+		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const operation = createMCPTimeout(timeout, this.#operationSignal());
+		let stage: MCPFailureStage = "send";
+		let traceId: string | undefined;
+		try {
+			const response = await this.#fetch(
+				{ method: "POST", body: JSON.stringify(this.#modernBody(method, params)), signal: operation.signal },
+				this.#modernHeaders(method, params),
+			);
+			stage = "receive";
+			traceId = mcpTraceIdFromHeaders(response.headers);
+			if (!response.ok) {
+				const text = await response.text().catch(() => "");
+				throw new MCPTransportError({
+					transport: "http",
+					stage,
+					failure: "http_status",
+					message: `HTTP ${response.status}: ${text}`,
+					retryable: response.status === 404 || response.status === 502 || response.status === 503,
+					code: response.status,
+					traceId,
+				});
+			}
+			const contentType = response.headers.get("Content-Type") ?? "";
+			if (contentType.includes("text/event-stream") && response.body) {
+				const signal = this.#sseConnection
+					? this.#operationSignal(this.#sseConnection.signal)
+					: this.#lifecycleController.signal;
+				this.#trackBackgroundDrain(this.#readSSEStream(response.body, signal));
+			} else {
+				await response.body?.cancel();
+			}
+		} catch (error) {
+			if (operation.isTimeoutAbort(error) || operation.timedOut()) {
+				throw new MCPTransportError({
+					transport: "http",
+					stage,
+					failure: "timeout",
+					message: `Notify timeout after ${timeout}ms`,
+					retryable: false,
+					traceId,
+					cause: error,
+				});
+			}
+			if (error instanceof Error && error.name === "AbortError") throw error;
+			throw normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+		} finally {
+			operation.clear();
+		}
 	}
 
 	async #sendNotification(method: string, params?: Record<string, unknown>): Promise<void> {
@@ -927,7 +1342,9 @@ export class HttpTransport implements MCPTransport {
 /**
  * Create and connect an HTTP transport.
  */
-export async function createHttpTransport(config: MCPHttpServerConfig | MCPSseServerConfig): Promise<HttpTransport> {
+export async function createHttpTransport(
+	config: MCPHttpServerConfig | MCPStreamableHttpServerConfig | MCPSseServerConfig,
+): Promise<HttpTransport> {
 	const transport = new HttpTransport(config);
 	await transport.connect();
 	return transport;

@@ -142,7 +142,36 @@ export interface MCPSseServerConfig extends MCPServerConfigBase {
 	headerPolicy?: "origin-locked";
 }
 
-export type MCPServerConfig = MCPStdioServerConfig | MCPHttpServerConfig | MCPSseServerConfig;
+/**
+ * Modern Streamable HTTP server configuration (MCP `2026-07-28`).
+ *
+ * The modern revision drops the `initialize` handshake and `Mcp-Session-Id`
+ * for a stateless per-request model: every request carries the protocol
+ * version in an `_meta` envelope and mirrors its method (and, for
+ * `tools/call`-style methods, its name) into the `Mcp-Method` / `Mcp-Name`
+ * headers. Servers behind this transport may also answer a `2025-11-25`
+ * fallback, which OMP uses when the endpoint rejects the modern envelope.
+ */
+export interface MCPStreamableHttpServerConfig extends MCPServerConfigBase {
+	type: "streamable-http";
+	url: string;
+	headers?: Record<string, string>;
+	/** See {@link MCPHttpServerConfig.headerPolicy}. */
+	headerPolicy?: "origin-locked";
+}
+
+export type MCPServerConfig =
+	| MCPStdioServerConfig
+	| MCPHttpServerConfig
+	| MCPStreamableHttpServerConfig
+	| MCPSseServerConfig;
+
+/** A config served over the network rather than a child process. */
+export function isRemoteMCPConfig(
+	config: MCPServerConfig,
+): config is MCPHttpServerConfig | MCPStreamableHttpServerConfig | MCPSseServerConfig {
+	return config.type === "http" || config.type === "streamable-http" || config.type === "sse";
+}
 
 export const MCP_CONFIG_SCHEMA_URL =
 	"https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json";
@@ -173,6 +202,44 @@ export interface MCPConfigFile {
  * is refused even for a caller whose consent is already stored.
  */
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
+
+/**
+ * The MCP `2026-07-28` revision served by the stateless Streamable HTTP
+ * transport. The modern era replaces the `initialize` handshake with
+ * `server/discover`; see {@link MCPStreamableHttpServerConfig}.
+ */
+export const MCP_MODERN_PROTOCOL_VERSION = "2026-07-28";
+
+/** `_meta` envelope key naming the protocol revision of a modern request. */
+export const MCP_PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion";
+
+/** `_meta` envelope key declaring the client's capabilities for a modern request. */
+export const MCP_CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities";
+
+/** `_meta` envelope key carrying the client identity for a modern request. */
+export const MCP_CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo";
+
+/** `_meta` result key a modern server stamps its identity into. */
+export const MCP_SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo";
+
+/** Bodies of modern requests whose `params` name the addressed entity. */
+export const MCP_NAME_HEADER_SOURCE: Record<string, string> = {
+	"tools/call": "name",
+	"prompts/get": "name",
+	"resources/read": "uri",
+	"tasks/get": "taskId",
+	"tasks/update": "taskId",
+	"tasks/cancel": "taskId",
+};
+
+/** Result of `server/discover` (the modern replacement for `initialize`). */
+export interface MCPDiscoverResult {
+	supportedVersions: string[];
+	capabilities: MCPServerCapabilities;
+	instructions?: string;
+	/** Server identity, lifted from the result `_meta` envelope by the server. */
+	serverInfo?: MCPImplementation;
+}
 
 /** Optionally-sized icon for MCP UI metadata (implementation, tools, resources). */
 export interface MCPIcon {

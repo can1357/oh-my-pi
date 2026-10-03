@@ -206,7 +206,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 							prompt?: string;
 					  }
 					| undefined,
-				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+				transport: serverConfig.type as "stdio" | "sse" | "http" | "streamable-http" | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			});
 		}

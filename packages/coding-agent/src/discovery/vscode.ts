@@ -92,8 +92,8 @@ async function loadMCPConfig(
 				expanded.headers && typeof expanded.headers === "object"
 					? (expanded.headers as Record<string, string>)
 					: undefined,
-			transport: ["stdio", "sse", "http"].includes(expanded.transport as string)
-				? (expanded.transport as "stdio" | "sse" | "http")
+			transport: ["stdio", "sse", "http", "streamable-http"].includes(expanded.transport as string)
+				? (expanded.transport as "stdio" | "sse" | "http" | "streamable-http")
 				: undefined,
 			timeout: typeof expanded.timeout === "number" ? expanded.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),

@@ -12,7 +12,7 @@ import {
 	mcpOAuthServerUrlFromCredentialId,
 	refreshMCPOAuthToken,
 } from "./oauth-flow";
-import type { MCPAuthConfig, MCPServerConfig } from "./types";
+import { type MCPAuthConfig, type MCPServerConfig, isRemoteMCPConfig } from "./types";
 
 export interface MCPOAuthCredentialLookup {
 	credentialId: string;
@@ -32,7 +32,7 @@ export function mcpOAuthCredentialIdsForServerUrl(serverUrl: string | undefined)
 }
 
 export function hasMcpAuthorizationHeader(config: MCPServerConfig): boolean {
-	if (config.type !== "http" && config.type !== "sse") return false;
+	if (!isRemoteMCPConfig(config)) return false;
 	return Object.keys(config.headers ?? {}).some(header => header.toLowerCase() === "authorization");
 }
 
@@ -69,7 +69,7 @@ export function lookupMcpOAuthCredential(
 	config: MCPServerConfig,
 ): MCPOAuthCredentialLookup | undefined {
 	const auth = config.auth;
-	if (config.type !== "http" && config.type !== "sse") {
+	if (!isRemoteMCPConfig(config)) {
 		return lookupMcpOAuthCredentialForServer(authStorage, auth, undefined);
 	}
 	if (hasMcpAuthorizationHeader(config)) {

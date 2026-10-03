@@ -74,6 +74,17 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		return config;
 	}
 
+	if (transport === "streamable-http") {
+		const config: MCPServerConfig = {
+			...shared,
+			type: "streamable-http" as const,
+			url: server.url ?? "",
+		};
+		if (server.headers) config.headers = server.headers;
+		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
+		return config;
+	}
+
 	if (transport === "sse") {
 		const config: MCPServerConfig = {
 			...shared,
@@ -191,7 +202,7 @@ export function isExaMCPServer(name: string, config: MCPServerConfig): boolean {
 	}
 
 	// Check by URL for HTTP/SSE servers
-	if (config.type === "http" || config.type === "sse") {
+	if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 		const httpConfig = config as { url?: string };
 		if (httpConfig.url && EXA_MCP_URL_PATTERN.test(httpConfig.url)) {
 			return true;
@@ -214,7 +225,7 @@ export function isExaMCPServer(name: string, config: MCPServerConfig): boolean {
  */
 export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 	// Check URL for HTTP/SSE servers
-	if (config.type === "http" || config.type === "sse") {
+	if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 		const httpConfig = config as { url?: string };
 		if (httpConfig.url) {
 			const match = EXA_API_KEY_PATTERN.exec(httpConfig.url);
@@ -253,7 +264,7 @@ const NATIVE_EXA_MCP_TOOLS: Record<string, true> = { web_search_exa: true };
  */
 function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 	const raw = (() => {
-		if (config.type === "http" || config.type === "sse") {
+		if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 			const httpConfig = config as { url?: string };
 			if (!httpConfig.url) return undefined;
 			try {
@@ -350,7 +361,7 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 		if (!stdioConfig.command) {
 			errors.push(`Server "${name}": stdio server requires "command" field`);
 		}
-	} else if (serverType === "http" || serverType === "sse") {
+	} else if (serverType === "http" || serverType === "streamable-http" || serverType === "sse") {
 		const httpConfig = config as { url?: string };
 		if (!httpConfig.url) {
 			errors.push(`Server "${name}": ${serverType} server requires "url" field`);
@@ -408,7 +419,7 @@ export function isBrowserMCPServer(name: string, config: MCPServerConfig): boole
 	}
 
 	// Check by URL for HTTP/SSE servers
-	if (config.type === "http" || config.type === "sse") {
+	if (config.type === "http" || config.type === "streamable-http" || config.type === "sse") {
 		const httpConfig = config as { url?: string };
 		if (httpConfig.url && BROWSER_MCP_URL_PATTERN.test(httpConfig.url)) {
 			return true;

@@ -12,7 +12,7 @@ import {
 import { MCPManager } from "../../mcp/manager";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
-import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
+import { type MCPServerConfig, type MCPServerConnection, isRemoteMCPConfig } from "../../mcp/types";
 import { parseCommandArgs } from "../../utils/command-args";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseNamedScopeArgs, parseSubcommand, usage } from "./parse";
@@ -23,7 +23,7 @@ interface ParsedMcpAddArgs {
 	name?: string;
 	scope: AcpMcpScope;
 	url?: string;
-	transport: "http" | "sse";
+	transport: "http" | "streamable-http" | "sse";
 	authToken?: string;
 	commandTokens?: string[];
 	error?: string;
@@ -62,7 +62,8 @@ const MCP_ADD_OPTION_PARSERS = new Map<string, McpAddOptionParser>([
 	[
 		"--transport",
 		(parsed, value) => {
-			if (!value || (value !== "http" && value !== "sse")) return "Invalid --transport value. Use http or sse.";
+			if (!value || (value !== "http" && value !== "streamable-http" && value !== "sse"))
+				return "Invalid --transport value. Use http, streamable-http, or sse.";
 			parsed.transport = value;
 			return undefined;
 		},
@@ -303,7 +304,7 @@ function buildMcpServerConfig(parsed: ParsedMcpAddArgs): MCPServerConfig | undef
 	if (!parsed.url) return undefined;
 	const normalizedUrl = /^https?:\/\//i.test(parsed.url) ? parsed.url : `https://${parsed.url}`;
 	return {
-		type: parsed.transport === "sse" ? "sse" : "http",
+		type: parsed.transport === "sse" ? "sse" : parsed.transport === "streamable-http" ? "streamable-http" : "http",
 		url: normalizedUrl,
 		headers: parsed.authToken ? { Authorization: `Bearer ${parsed.authToken}` } : undefined,
 	} as MCPServerConfig;
@@ -387,7 +388,7 @@ async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCom
 					const type = config.type ?? "stdio";
 					const enabled = config.enabled !== false && !disabledSet.has(name) ? "enabled" : "disabled";
 					let location: string | undefined;
-					if (config.type === "http" || config.type === "sse") {
+					if (isRemoteMCPConfig(config)) {
 						// Strip query string and userinfo from URLs to avoid leaking
 						// API keys carried in the query (e.g. `?apiKey=…`). Skip the
 						// redaction entirely for missing/empty URLs so the row falls
