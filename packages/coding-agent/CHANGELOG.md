@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.compressDescriptions` (default `true`). Set it to `false` to render skill descriptions in the system prompt exactly as authored, without the 100-character preview, the `skill-descriptions.db` cache, or background compression calls to the smol model ([#13291](https://github.com/can1357/oh-my-pi/issues/13291), [#13385](https://github.com/can1357/oh-my-pi/pull/13385) by [@mttzzz](https://github.com/mttzzz))
+
 ### Breaking Changes
 
 - `createAgentSession` now throws `Could not restore model <provider/id>` when a resumed session's saved models cannot be restored, and `AgentSession.switchSession` throws it, keeping the current session, when it opens such a session; both still fall back with a warning when `hasUI` is set and `retry.modelFallback` is on, and hosts that cannot show that warning can opt out with `allowSessionModelFallback: false` ([#13689](https://github.com/can1357/oh-my-pi/pull/13689) by [@alphastorm](https://github.com/alphastorm)).
