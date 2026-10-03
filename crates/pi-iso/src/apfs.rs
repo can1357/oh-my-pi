@@ -50,6 +50,18 @@ impl IsolationBackend for ApfsBackend {
 		}
 	}
 
+	fn clone_tree(&self, lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		#[cfg(target_os = "macos")]
+		{
+			imp::clone_tree(lower, merged, skip)
+		}
+		#[cfg(not(target_os = "macos"))]
+		{
+			let _ = (lower, merged, skip);
+			Err(IsoError::unavailable("APFS clonefile isolation is only available on macOS"))
+		}
+	}
+
 	fn stop(&self, merged: &Path) -> IsoResult<()> {
 		#[cfg(target_os = "macos")]
 		{
@@ -66,13 +78,26 @@ impl IsolationBackend for ApfsBackend {
 #[cfg(target_os = "macos")]
 mod imp {
 	use std::{
-		ffi::CString,
 		fs,
-		os::unix::ffi::OsStrExt,
 		path::{Path, PathBuf},
 	};
 
-	use crate::{IsoError, IsoResult};
+	use crate::{
+		IsoError, IsoResult,
+		cow::{self, CLONE_NOFOLLOW},
+	};
+
+	/// Classifies a failed `clonefile` of `src` to `dst`.
+	fn clone_error(src: &Path, dst: &Path, err: &std::io::Error) -> IsoError {
+		if cow::is_unsupported(err) {
+			return IsoError::unavailable(format!(
+				"APFS clonefile unsupported on this volume ({err}); {} -> {}",
+				src.display(),
+				dst.display()
+			));
+		}
+		IsoError::other(format!("clonefile {} -> {}: {err}", src.display(), dst.display()))
+	}
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
 		let lower = canonical_existing_dir(lower)?;
@@ -88,28 +113,64 @@ mod imp {
 			})?;
 		}
 
-		let src_c = to_cstring(lower.as_os_str().as_bytes(), "lower")?;
-		let dst_c = to_cstring(merged.as_os_str().as_bytes(), "merged")?;
+		// A directory source clones the whole tree in one call.
+		cow::clonefile(&lower, merged, 0).map_err(|err| clone_error(&lower, merged, &err))
+	}
 
-		// SAFETY: both pointers are valid CStrings whose backing storage lives
-		// until after the call. `clonefile` with `flags = 0` performs a
-		// recursive reflink clone and does not retain the pointers past the
-		// syscall.
-		let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
-		if rc == 0 {
-			return Ok(());
+	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		let lower = canonical_existing_dir(lower)?;
+		if let Some(parent) = merged.parent() {
+			fs::create_dir_all(parent).map_err(|err| {
+				IsoError::other(format!("unable to create parent of {}: {err}", merged.display()))
+			})?;
 		}
-		let err = std::io::Error::last_os_error();
-		if let Some(code) = err.raw_os_error()
-			&& matches!(code, libc::ENOTSUP | libc::EOPNOTSUPP | libc::EXDEV)
-		{
-			return Err(IsoError::unavailable(format!(
-				"APFS clonefile unsupported on this volume ({err}); {} -> {}",
-				lower.display(),
-				merged.display()
-			)));
+		if merged.exists() {
+			if fs::read_dir(merged)
+				.map_err(|err| IsoError::other(format!("read_dir {}: {err}", merged.display())))?
+				.next()
+				.is_some()
+			{
+				return Err(IsoError::other(format!(
+					"clone destination {} is not empty",
+					merged.display()
+				)));
+			}
+		} else {
+			fs::create_dir(merged)
+				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
 		}
-		Err(IsoError::other(format!("clonefile {} -> {}: {err}", lower.display(), merged.display())))
+
+		let result = (|| {
+			for entry in fs::read_dir(&lower)
+				.map_err(|err| IsoError::other(format!("read_dir {}: {err}", lower.display())))?
+			{
+				let entry = entry.map_err(|err| {
+					IsoError::other(format!("dir entry in {}: {err}", lower.display()))
+				})?;
+				if skip.contains(&entry.file_name().as_os_str()) {
+					continue;
+				}
+				// `clonefile` only accepts regular files, directories, and
+				// symlinks as a top-level source (EINVAL otherwise). Sockets,
+				// fifos, and devices are process-owned ephemera — skip them, as
+				// the recursive walkers on other platforms do.
+				let file_type = entry.file_type().map_err(|err| {
+					IsoError::other(format!("file_type {}: {err}", entry.path().display()))
+				})?;
+				if !(file_type.is_file() || file_type.is_dir() || file_type.is_symlink()) {
+					continue;
+				}
+				let src = entry.path();
+				let dst = merged.join(entry.file_name());
+				cow::clonefile(&src, &dst, CLONE_NOFOLLOW)
+					.map_err(|err| clone_error(&src, &dst, &err))?;
+			}
+			Ok(())
+		})();
+		if result.is_err() {
+			let _ = fs::remove_dir_all(merged);
+		}
+		result
 	}
 
 	pub fn stop(merged: &Path) -> IsoResult<()> {
@@ -140,9 +201,60 @@ mod imp {
 		}
 		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
 	}
+}
 
-	fn to_cstring(bytes: &[u8], label: &str) -> IsoResult<CString> {
-		CString::new(bytes)
-			.map_err(|err| IsoError::other(format!("{label} path contains NUL byte: {err}")))
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+	use std::{
+		ffi::OsStr,
+		fs,
+		os::unix::{ffi::OsStrExt, fs::symlink},
+	};
+
+	use super::*;
+
+	#[test]
+	fn clone_tree_skips_top_level_entry_and_preserves_symlink() {
+		let nonce = format!(
+			"pi-iso-clone-tree-{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap()
+				.as_nanos()
+		);
+		let root = std::env::temp_dir().join(nonce);
+		let lower = root.join("lower");
+		let merged = root.join("merged");
+		fs::create_dir_all(lower.join("nested")).unwrap();
+		fs::create_dir_all(lower.join(".git")).unwrap();
+		fs::write(lower.join("file"), "file").unwrap();
+		fs::write(lower.join("nested/child"), "child").unwrap();
+		fs::write(lower.join(".git/config"), "skip").unwrap();
+		symlink("file", lower.join("link")).unwrap();
+		// Special files at the checkout root (debug sockets, fifos) are
+		// rejected by `clonefile` with EINVAL and must be skipped, not fatal.
+		let fifo = std::ffi::CString::new(lower.join("debug.fifo").as_os_str().as_bytes()).unwrap();
+		// SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
+		assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+		let result = backend().clone_tree(&lower, &merged, &[OsStr::new(".git")]);
+		if matches!(result, Err(crate::IsoError::Unavailable(_))) {
+			let _ = fs::remove_dir_all(root);
+			return;
+		}
+		result.unwrap();
+		assert!(!merged.join(".git").exists());
+		assert!(fs::symlink_metadata(merged.join("debug.fifo")).is_err());
+		assert_eq!(fs::read_to_string(merged.join("file")).unwrap(), "file");
+		assert_eq!(fs::read_to_string(merged.join("nested/child")).unwrap(), "child");
+		assert_eq!(fs::read_link(merged.join("link")).unwrap(), std::path::Path::new("file"));
+		assert!(
+			fs::symlink_metadata(merged.join("link"))
+				.unwrap()
+				.file_type()
+				.is_symlink()
+		);
+		fs::remove_dir_all(root).unwrap();
 	}
 }

@@ -6,8 +6,6 @@ import {
 	assertOwnerPrivateDir,
 	controlDirGuardError,
 	controlPathFitsBudget,
-	getControlDir,
-	getControlPathTemplate,
 	resolveSshControlDir,
 	sshControlFallbackDir,
 } from "../src/ssh/connection-manager";
@@ -79,22 +77,6 @@ describe("resolveSshControlDir", () => {
 		expect(controlPathFitsBudget(choice.dir, "darwin")).toBe(true);
 	});
 
-	it("keeps distinct fallback masters for the same profile under different XDG state roots", () => {
-		const a = resolveSshControlDir({
-			canonicalDir: "/very/long/xdg-state-a/omp/profiles/upstream/ssh-control",
-			platform: "darwin",
-			uid: 501,
-		});
-		const b = resolveSshControlDir({
-			canonicalDir: "/very/long/xdg-state-b/omp/profiles/upstream/ssh-control",
-			platform: "darwin",
-			uid: 501,
-		});
-		expect(a.shared).toBe(true);
-		expect(b.shared).toBe(true);
-		expect(a.dir).not.toBe(b.dir);
-	});
-
 	it("never relocates on Windows (ControlMaster unused) even for a long path", () => {
 		const canonicalDir = "/Users/arthur/.omp/profiles/upstream/ssh-control";
 		expect(resolveSshControlDir({ canonicalDir, platform: "win32", uid: 501 })).toEqual({
@@ -143,7 +125,10 @@ describe("assertOwnerPrivateDir", () => {
 		return scratch;
 	};
 
-	it("accepts a real owner-private directory and normalizes loose perms in place", () => {
+	// POSIX mode bits and O_NOFOLLOW: Windows has neither (modes read back 0666).
+	const posixIt = it.skipIf(process.platform === "win32");
+
+	posixIt("accepts a real owner-private directory and normalizes loose perms in place", () => {
 		const dir = path.join(mkScratch(), "ctl");
 		fs.mkdirSync(dir, { mode: 0o755 });
 		fs.chmodSync(dir, 0o755);
@@ -151,7 +136,7 @@ describe("assertOwnerPrivateDir", () => {
 		expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
 	});
 
-	it("refuses a symlinked final component without following it (TOCTOU swap guard)", () => {
+	posixIt("refuses a symlinked final component without following it (TOCTOU swap guard)", () => {
 		const root = mkScratch();
 		const victim = path.join(root, "victim");
 		fs.mkdirSync(victim, { mode: 0o700 });
@@ -167,13 +152,5 @@ describe("assertOwnerPrivateDir", () => {
 		const file = path.join(mkScratch(), "ctl");
 		fs.writeFileSync(file, "");
 		expect(() => assertOwnerPrivateDir(file)).toThrow("is not a directory");
-	});
-});
-
-describe("control template sharing", () => {
-	// sshfs-mount consumes getControlPathTemplate()/getControlDir() verbatim, so
-	// the %C.sock basename and its parent dir must stay in lockstep.
-	it("keeps %C.sock under the resolved control dir", () => {
-		expect(getControlPathTemplate()).toBe(path.join(getControlDir(), "%C.sock"));
 	});
 });

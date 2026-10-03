@@ -71,11 +71,13 @@ rust_library(
         "util.base32",
         "util.base64",
         "util.basename",
+        "util.bre",
         "util.cat",
         "util.cksum",
         "util.cmp",
         "util.combine",
         "util.comm",
+        "util.cp",
         "util.cut",
         "util.date",
         "util.diff",
@@ -143,8 +145,11 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.2.0",
     deps = all_crate_deps(normal = True) + [
+        "//crates/pi-iso",
+        "//crates/pi-vfs",
         "//crates/pi-walker",
         "//crates/vendor/brush-core",
+        "//crates/vendor/brush-parser",
     ],
 )
 

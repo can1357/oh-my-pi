@@ -3,16 +3,12 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(unix)]
-use std::fs;
-#[cfg(unix)]
-use std::os::unix::prelude::PermissionsExt;
 use std::{
 	env,
 	ffi::{OsStr, OsString},
 	io::{self, ErrorKind, Write},
 	iter,
-	path::{MAIN_SEPARATOR, Path, PathBuf},
+	path::{Path, PathBuf, is_separator},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
@@ -20,15 +16,15 @@ use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{TypedValueParser, ValueParserFactory},
 };
+use pi_vfs::{BlockingFs, TempOptions};
 use rand::{
 	RngExt as _, SeedableRng as _,
 	rngs::{self, SmallRng},
 };
-use tempfile::Builder;
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, forward_slash_display, format_usage, matches_parser, os_bytes, util};
 
 static DEFAULT_TEMPLATE: &str = "tmp.XXXXXXXXXX";
 
@@ -42,18 +38,18 @@ static OPT_T: &str = "t";
 
 static ARG_TEMPLATE: &str = "template";
 
+/// Variables naming the temporary directory, in precedence order. The shell
+/// emulates bash, so `TMPDIR` comes first on every platform; Windows sessions
+/// usually carry only `TMP`/`TEMP`.
 #[cfg(not(windows))]
-const TMPDIR_ENV_VAR: &str = "TMPDIR";
+const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR"];
 #[cfg(windows)]
-const TMPDIR_ENV_VAR: &str = "TMP";
+const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR", "TMP", "TEMP"];
 
 const FALLBACK_TMPDIR: &str = "/tmp";
 
 #[derive(Error, Debug)]
 enum MkTempError {
-	#[error("could not persist file {}", .0.quote())]
-	Persist(PathBuf),
-
 	#[error("with --suffix, template {} must end in X", .0.quote())]
 	MustEndInX(String),
 
@@ -119,7 +115,7 @@ impl Options {
 				OsString::from(DEFAULT_TEMPLATE),
 			),
 			Some(template) => {
-				let tmpdir = if let Some(tmpdir) = host.var(TMPDIR_ENV_VAR)
+				let tmpdir = if let Some(tmpdir) = tmpdir_var(host)
 					&& matches.get_flag(OPT_T)
 				{
 					Some(PathBuf::from(tmpdir))
@@ -200,29 +196,29 @@ impl Params {
 			None => return Err(MkTempError::TooFewXs(template_str)),
 		};
 
-		// Combine the option directory and the template prefix, then split the
-		// parent directory from the final file-name component.
+		// Split the template prefix into its directory part (through the last
+		// separator) and the file-name prefix, then place the directory part
+		// under the option directory. Splitting the template itself keeps an
+		// empty file-name prefix distinct from the option directory's last
+		// component, which matters for URL directories.
 		let tmpdir = options.tmpdir;
-		let prefix_from_option = tmpdir.clone().unwrap_or_default();
 		let prefix_from_template = &template_str[..i];
-		let prefix_path = Path::new(&prefix_from_option).join(prefix_from_template);
-		if options.treat_as_template && prefix_from_template.contains(MAIN_SEPARATOR) {
+		if options.treat_as_template && prefix_from_template.contains(is_separator) {
 			return Err(MkTempError::PrefixContainsDirSeparator(template_str));
 		}
 		if tmpdir.is_some() && Path::new(prefix_from_template).is_absolute() {
 			return Err(MkTempError::InvalidTemplate(template_str.into()));
 		}
-		let (directory, prefix) = {
-			let prefix_str = prefix_path.to_string_lossy();
-			if prefix_str.ends_with(MAIN_SEPARATOR) {
-				(prefix_path, String::new())
-			} else {
-				let directory = prefix_path.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-				let prefix = prefix_path
-					.file_name()
-					.map_or_else(String::new, |f| f.to_string_lossy().into_owned());
-				(directory, prefix)
-			}
+		// Every separator is one byte: `/`, plus `\` on Windows.
+		let (template_dir, prefix) = match prefix_from_template.rfind(is_separator) {
+			Some(pos) => prefix_from_template.split_at(pos + 1),
+			None => ("", prefix_from_template),
+		};
+		let prefix = prefix.to_owned();
+		let directory = match tmpdir {
+			Some(tmpdir) if template_dir.is_empty() => tmpdir,
+			Some(tmpdir) => pi_vfs::join_path(&tmpdir, Path::new(template_dir)),
+			None => PathBuf::from(template_dir),
 		};
 
 		// Combine a suffix embedded in the template with `--suffix`.
@@ -232,7 +228,7 @@ impl Params {
 			.unwrap_or_default();
 		let suffix_from_template = &template_str[j..];
 		let suffix = format!("{suffix_from_template}{suffix_from_option}");
-		if suffix.contains(MAIN_SEPARATOR) {
+		if suffix.contains(is_separator) {
 			return Err(MkTempError::SuffixContainsDirSeparator(suffix));
 		}
 
@@ -416,8 +412,8 @@ fn app() -> Command {
 			Arg::new(OPT_TMPDIR)
 				.long(OPT_TMPDIR)
 				.help(
-					"interpret TEMPLATE relative to DIR; if DIR is not specified, use $TMPDIR ($TMP on \
-					 windows) if set, else /tmp. With this option, TEMPLATE must not be an absolute \
+					"interpret TEMPLATE relative to DIR; if DIR is not specified, use $TMPDIR ($TMP or \
+					 $TEMP on windows) if set, else /tmp. With this option, TEMPLATE must not be an absolute \
 					 name; unlike with -t, TEMPLATE may contain slashes, but mktemp creates only the \
 					 final component",
 				)
@@ -432,8 +428,8 @@ fn app() -> Command {
 			Arg::new(OPT_T)
 				.short('t')
 				.help(
-					"Generate a template (using the supplied prefix and TMPDIR (TMP on windows) if \
-					 set) to create a filename template [deprecated]",
+					"Generate a template (using the supplied prefix and TMPDIR (TMP or TEMP on windows) \
+					 if set) to create a filename template [deprecated]",
 				)
 				.action(ArgAction::SetTrue),
 		)
@@ -465,59 +461,45 @@ fn dry_exec(tmpdir: &Path, prefix: &str, rand: usize, suffix: &str) -> PathBuf {
 	}
 	// Every byte was mapped into the ASCII alphanumeric range.
 	let buf = String::from_utf8(buf).unwrap();
-	tmpdir.join(buf)
+	display_join(tmpdir, &buf)
 }
 
-/// Creates a temporary directory with owner-only permissions.
-fn make_temp_dir(
+/// Creates a temporary file (owner-only, `0o600`) or directory (`0o700`)
+/// with `create_new` semantics in `dir` on the shell's filesystem.
+fn make_temp(
+	fs: &BlockingFs,
 	dir: &Path,
 	display_dir: &Path,
 	prefix: &str,
 	rand: usize,
 	suffix: &str,
+	make_dir: bool,
 ) -> Result<PathBuf, MkTempError> {
-	let mut builder = Builder::new();
-	builder.prefix(prefix).rand_bytes(rand).suffix(suffix);
-	#[cfg(not(windows))]
-	builder.permissions(fs::Permissions::from_mode(0o700));
-
-	match builder.tempdir_in(dir) {
-		Ok(directory) => Ok(directory.keep()),
-		Err(err) if err.kind() == ErrorKind::NotFound => {
+	let options = TempOptions::new().prefix(prefix).random_len(rand).suffix(suffix);
+	let created = if make_dir {
+		fs.create_temp_dir(dir, &options)
+	} else {
+		fs.create_temp(dir, &options).and_then(|(path, file)| match file.close() {
+			Ok(()) => Ok(path),
+			Err(error) => {
+				// The name is never printed, so nobody else could remove it.
+				let _ = fs.for_cleanup().remove_file(&path);
+				Err(error)
+			},
+		})
+	};
+	created.map_err(|err| {
+		if err.kind() == ErrorKind::NotFound {
+			let kind = if make_dir { "directory" } else { "file" };
 			let filename = format!("{prefix}{}{suffix}", "X".repeat(rand));
-			Err(MkTempError::NotFound(
-				"directory".to_string(),
-				display_dir.join(filename),
-			))
-		},
-		Err(err) => Err(err.into()),
-	}
-}
-
-/// Creates a temporary file with owner-only permissions.
-fn make_temp_file(
-	dir: &Path,
-	display_dir: &Path,
-	prefix: &str,
-	rand: usize,
-	suffix: &str,
-) -> Result<PathBuf, MkTempError> {
-	let mut builder = Builder::new();
-	builder.prefix(prefix).rand_bytes(rand).suffix(suffix);
-	match builder.tempfile_in(dir) {
-		Ok(file) => file.keep().map(|(_, path)| path).map_err(|err| {
-			let path = err.file.path();
-			let display_path = path
-				.file_name()
-				.map_or_else(|| display_dir.to_path_buf(), |name| display_dir.join(name));
-			MkTempError::Persist(display_path)
-		}),
-		Err(err) if err.kind() == ErrorKind::NotFound => {
-			let filename = format!("{prefix}{}{suffix}", "X".repeat(rand));
-			Err(MkTempError::NotFound("file".to_string(), display_dir.join(filename)))
-		},
-		Err(err) => Err(err.into()),
-	}
+			MkTempError::NotFound(
+				kind.to_string(),
+				display_join(display_dir, &filename),
+			)
+		} else {
+			err.into()
+		}
+	})
 }
 
 fn exec(
@@ -531,20 +513,28 @@ fn exec(
 	// Only the filesystem-facing form is resolved. The returned path retains
 	// the spelling implied by the user's operands, which scripts consume.
 	let resolved_dir = host.resolve(dir);
-	let created = if make_dir {
-		make_temp_dir(&resolved_dir, dir, prefix, rand, suffix)?
-	} else {
-		make_temp_file(&resolved_dir, dir, prefix, rand, suffix)?
-	};
-	let filename = created.file_name().expect("tempfile path has a file name");
-	Ok(dir.join(filename))
+	let created = make_temp(host.fs(), &resolved_dir, dir, prefix, rand, suffix, make_dir)?;
+	let filename = pi_vfs::file_name(&created).expect("temporary path has a file name");
+	Ok(display_join(dir, &filename.to_string_lossy()))
+}
+
+/// Path of `name` inside `dir` as printed: separators `/`, as GNU mktemp
+/// concatenates them, except where Windows requires native spelling.
+fn display_join(dir: &Path, name: &str) -> PathBuf {
+	let joined = pi_vfs::join_path(dir, Path::new(name));
+	forward_slash_display(&joined).unwrap_or(joined)
+}
+
+/// The shell's temporary-directory variable, if any is set.
+fn tmpdir_var(host: &Host) -> Option<&str> {
+	TMPDIR_ENV_VARS.iter().find_map(|name| host.var(name))
 }
 
 /// Reads the shell's temporary-directory variable, falling back to the platform
 /// default. An explicitly empty variable uses `/tmp`, matching GNU mktemp.
 fn get_tmpdir_env_or_default(host: &Host) -> PathBuf {
-	match host.var(TMPDIR_ENV_VAR) {
-		Some(value) if value.is_empty() => PathBuf::from(FALLBACK_TMPDIR),
+	match tmpdir_var(host) {
+		Some("") => PathBuf::from(FALLBACK_TMPDIR),
 		Some(value) => PathBuf::from(value),
 		None => env::temp_dir(),
 	}

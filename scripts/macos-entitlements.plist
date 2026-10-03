@@ -9,6 +9,8 @@
 	  These are NOT optional. The binary is a Bun single-file executable, and:
 	    * allow-jit / allow-unsigned-executable-memory — JavaScriptCore JITs at
 	      runtime; the hardened runtime kills JIT (MAP_JIT) pages without these.
+	    * automation.apple-events — macOS must allow omp to request Automation
+	      access before xcrun mcpbridge can connect to Xcode.
 	    * disable-library-validation — omp extracts its native addon
 	      (pi_natives.<triple>.node) and other optional dylibs to a runtime cache
 	      and dlopen()s them. Those dylibs do not share the main binary's Team ID,
@@ -19,6 +21,8 @@
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.automation.apple-events</key>
 	<true/>
 	<key>com.apple.security.cs.disable-library-validation</key>
 	<true/>

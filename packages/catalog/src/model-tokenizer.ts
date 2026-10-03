@@ -52,10 +52,14 @@ function glmTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
  * This is catalog policy, not a runtime caller heuristic: [`buildModel`](./build.ts)
  * materializes the result as `Model.tokenizer`; consumers read that property.
  */
-export function resolveModelTokenizer(modelId: string): ModelTokenizer | undefined {
-	const cached = modelTokenizerCache.get(modelId);
+export function resolveModelTokenizer(modelId: string, provider = ""): ModelTokenizer | undefined {
+	const cacheKey = `${provider}\0${modelId}`;
+	const cached = modelTokenizerCache.get(cacheKey);
 	if (cached !== undefined) return cached ?? undefined;
-	const identity = classifyModel("", bareModelId(modelId), { lenient: true });
+	// Provider-scoped identity overrides (e.g. Yolo-Auto's `yolo` alias for
+	// Qwen3.8 Flash) only apply when the provider is known; bare ids stay
+	// provider-agnostic so unrelated namespaces never inherit them.
+	const identity = classifyModel(provider, bareModelId(modelId), { lenient: true });
 	const tokenizer =
 		claudeTokenizer(identity) ??
 		qwenTokenizer(identity) ??
@@ -63,6 +67,6 @@ export function resolveModelTokenizer(modelId: string): ModelTokenizer | undefin
 		kimiTokenizer(identity) ??
 		glmTokenizer(identity);
 	if (modelTokenizerCache.size === MAX_TOKENIZER_CACHE_ENTRIES) modelTokenizerCache.clear();
-	modelTokenizerCache.set(modelId, tokenizer ?? null);
+	modelTokenizerCache.set(cacheKey, tokenizer ?? null);
 	return tokenizer;
 }

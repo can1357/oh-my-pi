@@ -1,0 +1,36 @@
+// Catalog entry for "deepinfra"; no deployment-contract compat rules are needed.
+
+provider "deepinfra" {
+	default-model "deepseek-ai/DeepSeek-V4-Flash-0731"
+	env "DEEPINFRA_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="DeepInfra" allow-unauthenticated=#true
+	kind-apis {
+		image "openai-images"
+		tts "openai-speech"
+	}
+
+	seed base-url="https://api.deepinfra.com/v1/openai" bundle="always" {
+		model "black-forest-labs/FLUX-2-pro" name="FLUX.2 Pro" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "hexgrad/Kokoro-82M" name="Kokoro-82M" api="openai-speech" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "black-forest-labs/FLUX-2-pro" {
+		kind "image"
+	}
+	models "hexgrad/Kokoro-82M" {
+		kind "tts"
+	}
+}

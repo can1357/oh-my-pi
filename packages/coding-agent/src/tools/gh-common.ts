@@ -4,9 +4,9 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
-import type { GhToolDetails } from "./gh";
+import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import type { GhLabel, GhUser } from "./gh-types";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 export function normalizeText(value: string | null | undefined): string {
@@ -139,11 +139,6 @@ export function formatLabels(labels: GhLabel[] | undefined): string | undefined 
 	const names = labels?.map(label => label.name).filter((value): value is string => Boolean(value)) ?? [];
 	if (names.length === 0) return undefined;
 	return names.join(", ");
-}
-
-export function pushLine(lines: string[], label: string, value: string | number | boolean | undefined): void {
-	if (value === undefined || value === "") return;
-	lines.push(`${label}: ${value}`);
 }
 
 export function parsePullRequestUrl(value: string | undefined): { repo?: string; prNumber?: number } {

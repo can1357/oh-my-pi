@@ -1,7 +1,13 @@
 // Provider-wire compat for "ollama-cloud"; regenerated from the frozen census using deployment contract selectors.
 
 provider "ollama-cloud" {
+	default-model "gpt-oss:120b"
+	env "OLLAMA_CLOUD_API_KEY"
+	discovery label="Ollama Cloud" oauth-provider="ollama-cloud"
+
 	thinking-mode "effort"
+	// Same runtime as local Ollama: a trailing assistant turn is continued verbatim.
+	supports-assistant-prefill #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { loginOllamaCloud } from "@oh-my-pi/pi-ai/registry/ollama-cloud";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
+
+const loginOllamaCloud = getProviderDefinition("ollama-cloud")!.login!;
 
 describe("ollama cloud login", () => {
 	it("opens Ollama Cloud key settings and trims the pasted key", async () => {
@@ -32,10 +35,10 @@ describe("ollama cloud login", () => {
 			loginOllamaCloud({
 				onPrompt: async () => "   ",
 			}),
-		).rejects.toThrow("Ollama Cloud API key is required");
+		).rejects.toBeInstanceOf(AIError.ApiKeyRequiredError);
 	});
 
 	it("requires onPrompt callback", async () => {
-		await expect(loginOllamaCloud({})).rejects.toThrow("Interactive prompt is required for Ollama Cloud login");
+		await expect(loginOllamaCloud({})).rejects.toBeInstanceOf(AIError.OnPromptRequiredError);
 	});
 });

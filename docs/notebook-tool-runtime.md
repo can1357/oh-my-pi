@@ -6,17 +6,19 @@ The critical distinction: **notebook support is file conversion/editing, not not
 
 ## Implementation files
 
-- [`src/edit/notebook.ts`](../packages/coding-agent/src/edit/notebook.ts)
-- [`src/edit/read-file.ts`](../packages/coding-agent/src/edit/read-file.ts)
+- [`crates/pi-edit/src/notebook.rs`](../crates/pi-edit/src/notebook.rs)
+- [`crates/pi-edit/src/files.rs`](../crates/pi-edit/src/files.rs)
 - [`src/tools/read.ts`](../packages/coding-agent/src/tools/read.ts)
 - [`src/tools/eval.ts`](../packages/coding-agent/src/tools/eval.ts)
 - [`src/eval/py/executor.ts`](../packages/coding-agent/src/eval/py/executor.ts)
 - [`src/eval/py/kernel.ts`](../packages/coding-agent/src/eval/py/kernel.ts)
-- [`src/session/streaming-output.ts`](../packages/coding-agent/src/session/streaming-output.ts)
+- [`src/eval/kernel-session-registry.ts`](../packages/coding-agent/src/eval/kernel-session-registry.ts)
+- [`src/eval/executor-base.ts`](../packages/coding-agent/src/eval/executor-base.ts)
+- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts)
 
 ## 1) Runtime boundary: editing vs executing
 
-## `.ipynb` file conversion (`src/edit/notebook.ts`)
+## `.ipynb` file conversion (`crates/pi-edit/src/notebook.rs`)
 
 - `read` treats `.ipynb` files as notebooks unless the selector is `:raw`.
 - The default notebook view is editable text with markers:
@@ -24,10 +26,10 @@ The critical distinction: **notebook support is file conversion/editing, not not
   - `# %% [markdown] cell:N`
   - `# %% [raw] cell:N`
 - Line selectors and multi-range selectors operate on that virtual text.
-- The edit pipeline round-trips virtual text back to notebook JSON through `serializeEditedNotebookText(...)`.
+- The edit pipeline round-trips virtual text back to notebook JSON through `serialize_edited_notebook_text(...)`.
 - Existing notebook metadata is preserved when a marker references an existing unused `cell:N`; new cells get fresh empty metadata.
 - A missing notebook passed to the serializer starts from an empty nbformat 4.5 notebook.
-- The standalone `write` tool is not notebook-aware: it replaces the file with the supplied bytes. Use it only with valid notebook JSON, not the virtual marker representation.
+- The standalone `write` tool is not notebook-aware: it replaces the file content rather than converting cell markers. Use it only with valid notebook JSON, not the virtual marker representation.
 
 No kernel lifecycle exists in this path:
 
@@ -64,7 +66,7 @@ A source line that itself looks like a cell marker is escaped on render by addin
 - A non-empty representation must start with a marker; text before the first marker, including a blank line, is rejected. Empty text serializes to a notebook with no cells.
 - Markers must match `# %% [code|markdown|raw]` with optional `cell:N`.
 - If `cell:N` points at an unused existing cell, that cell is cloned, its `cell_type` and `source` are updated, and unrelated fields are preserved.
-- Existing code-cell `execution_count` and `outputs` are preserved rather than cleared; missing fields are initialized to `null` and `[]`.
+- Existing code-cell `execution_count` and `outputs` are preserved rather than cleared, even when source changes; missing or null fields are initialized to `null` and `[]`. Editing therefore does not make stored outputs current.
 - Markdown/raw cells remove `execution_count` and `outputs`.
 - If no valid unused original index is present, a new cell with empty metadata is created.
 - Notebook-level metadata, format fields, and unrelated top-level fields survive because serialization clones the original document and replaces only `cells`.
@@ -92,7 +94,7 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 - `session` (default)
   - kernels are cached by `(session id, cwd, interpreter)`
   - multiple owners can share a retained kernel for the same key
-  - execution is serialized by the tool's exclusive concurrency and backend execution path
+  - foreground eval tool calls use exclusive concurrency; this is not a blanket lock on background cells or kernel-defined tool requests
   - dead kernels are replaced before execution
 - `per-call`
   - creates a subprocess for the request
@@ -103,12 +105,12 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 
 Each eval call has an optional `reset` flag. `reset: true` resets the selected Python session before that call executes; it does not reset other enabled language runtimes.
 
-## Kernel death / restart / retry
+## Kernel death and restart
 
 In session mode:
 
 - if the retained subprocess is not alive before execution, it is replaced
-- if execution fails because the subprocess died, the kernel is replaced and the code is retried once
+- if the subprocess dies during execution, completion is uncertain and the cell is **not replayed**; the next call starts a fresh kernel
 - concurrent resets for the same session key coalesce: a reset already in flight is awaited instead of starting another, and runs queued behind it proceed on the freshly-restarted kernel
 
 ## 4) Environment/session variable injection
@@ -122,7 +124,7 @@ Kernel startup and per-execution environment patching can receive:
 - `PI_TOOL_BRIDGE_SESSION`
 - `PI_EVAL_LOCAL_ROOTS`
 
-The runner initializes process state so code executes in the requested cwd, managed env entries are reflected in `os.environ`, and cwd is available on `sys.path`.
+The runner applies the requested cwd and managed environment patch before each cell, with cwd placed first on `sys.path`. A `%cd` or `os.chdir()` inside a cell does not override the host session cwd for the next eval call. Managed entries omitted from the patch are removed from `os.environ`.
 
 ## 5) Streaming/chunk and display handling (kernel-backed path)
 
@@ -153,12 +155,14 @@ Cancellation/timeout:
 
 ## 6) Truncation and artifact behavior
 
-`OutputSink` in `src/session/streaming-output.ts` is used by kernel execution paths:
+`OutputSink` in `packages/tui/src/tools/streaming-output.ts` is used by kernel execution paths:
 
 - sanitizes every chunk
 - tracks total/output lines and bytes
 - optionally spills full output to an artifact file
-- keeps a UTF-8-safe in-memory tail buffer when output exceeds the configured threshold
+- keeps a UTF-8-safe head/tail view within one inline byte budget (50 KiB by default), eliding the middle when head retention is enabled
+- caps individual lines using `tools.outputMaxColumns`, while preserving uncapped sanitized text in the artifact
+- reports artifact I/O failures separately and withholds the artifact ID if full capture failed
 
 `eval` converts this metadata into result truncation notices and TUI warnings.
 

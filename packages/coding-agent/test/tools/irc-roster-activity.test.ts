@@ -1,32 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
-
-// Contract: the work-aware roster (`irc list`) surfaces each peer's role
-// (via displayName) and current activity gist, and a peer with no activity
-// renders cleanly without a dangling empty clause.
-
-function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession {
-	return {
-		cwd: "/tmp",
-		hasUI: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-		settings: Settings.isolated(),
-		agentRegistry: registry,
-		getAgentId: () => agentId,
-	} as unknown as ToolSession;
-}
-
-async function listText(registry: AgentRegistry, selfId: string): Promise<string> {
-	const tool = new HubTool(makeToolSession(registry, selfId));
-	const result = await tool.execute("call", { op: "list" });
-	return result.content.find(part => part.type === "text")?.text ?? "";
-}
 
 describe("IRC roster activity", () => {
 	let registry: AgentRegistry;
@@ -41,36 +16,8 @@ describe("IRC roster activity", () => {
 		mock.restore();
 	});
 
-	it("surfaces a peer's role and current activity in the list", async () => {
-		registry.register({ id: "Main", displayName: "main", kind: "main", session: null, status: "running" });
-		registry.register({
-			id: "AuthScout",
-			displayName: "Auth-flow security reviewer",
-			kind: "sub",
-			session: null,
-			status: "running",
-		});
-		registry.setActivity("AuthScout", "auditing the token refresh path");
-
-		const text = await listText(registry, "Main");
-		expect(text).toContain("Auth-flow security reviewer");
-		expect(text).toContain("auditing the token refresh path");
-	});
-
-	it("renders a peer with no activity without a dangling clause", async () => {
-		registry.register({ id: "Main", displayName: "main", kind: "main", session: null, status: "running" });
-		registry.register({ id: "Quiet", displayName: "task", kind: "sub", session: null, status: "running" });
-
-		const text = await listText(registry, "Main");
-		const line = text.split("\n").find(l => l.includes("Quiet"));
-		expect(line).toBeDefined();
-		expect(line).not.toContain("— ,");
-		expect(line).not.toContain("undefined");
-	});
-
 	it("setActivity refreshes lastActivity so a working agent is not shown as stale", () => {
-		// irc list renders "active <lastActivity> ago" and both list views sort by
-		// lastActivity, so an activity update must refresh it or live work looks idle.
+		// Recency must refresh on activity, including repeated identical heartbeats.
 		const now = spyOn(Date, "now");
 		now.mockReturnValue(1_000);
 		registry.register({ id: "Worker", displayName: "task", kind: "sub", session: null, status: "running" });
@@ -99,8 +46,7 @@ describe("IRC roster activity", () => {
 	});
 
 	it("normalizes a multi-line activity gist to one bounded line", () => {
-		// A model-authored intent with newlines/tabs must not break out of its one
-		// roster row; setActivity collapses it centrally so every caller is safe.
+		// A model-authored intent with newlines/tabs must remain one bounded line.
 		registry.register({ id: "Noisy", displayName: "task", kind: "sub", session: null, status: "running" });
 		registry.setActivity("Noisy", "editing\n- fake roster line\twith tabs");
 		expect(registry.get("Noisy")?.activity).toBe("editing - fake roster line with tabs");

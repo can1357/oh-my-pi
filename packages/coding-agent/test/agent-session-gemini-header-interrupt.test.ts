@@ -146,7 +146,7 @@ describe("AgentSession Gemini header-runaway interrupt", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-gemini-header-interrupt-shared-");
 		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
+		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

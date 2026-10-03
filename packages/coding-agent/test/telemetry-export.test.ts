@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-export";
+import { cfgTelemetryOtlpExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-settings";
 
 /**
  * Gating contract for the OTLP export bootstrap. These cases all short-circuit
  * before a provider is registered, so they never mutate the module singleton
- * and are order-independent. The positive export path runs in a subprocess (see
- * the "exports spans" test) so the registered global provider can't leak here.
+ * and are order-independent. Transport-path probes run in subprocesses so any
+ * registered global provider can't leak into the test runner.
  */
 const OTEL_KEYS = [
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -40,46 +42,53 @@ afterEach(() => {
 
 describe("initTelemetryExport gating", () => {
 	it("stays disabled when no OTLP endpoint is configured", async () => {
-		await initTelemetryExport();
+		await initTelemetryExport(true);
+		expect(isTelemetryExportEnabled()).toBe(false);
+	});
+
+	it("keeps OTLP export disabled when the user opts out despite configured endpoints", async () => {
+		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318/v1/traces";
+		const settings = Settings.isolated({ "telemetry.otlpExportEnabled": false });
+		await initTelemetryExport(cfgTelemetryOtlpExportEnabled.get(settings));
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("stays disabled when OTEL_SDK_DISABLED=true even with an endpoint", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "true";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("stays disabled when OTEL_TRACES_EXPORTER=none and only the traces endpoint is set", async () => {
 		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_TRACES_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("declines unsupported OTLP protocols instead of misrouting spans", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4317";
 		process.env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
 		process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/json";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("honors the kill-switches case-insensitively per the OTEL env contract", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "TRUE";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
 		delete process.env.OTEL_SDK_DISABLED;
 		process.env.OTEL_TRACES_EXPORTER = "otlp,None";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
@@ -88,9 +97,28 @@ describe("initTelemetryExport gating", () => {
 		process.env.OTEL_TRACES_EXPORTER = "none";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
+});
+
+describe("initTelemetryExport exporter selection", () => {
+	it("does not send OTLP when console is explicitly selected for every signal", async () => {
+		const probe = fileURLToPath(new URL("./otel-non-otlp-probe.ts", import.meta.url));
+		const proc = Bun.spawn([process.execPath, probe], {
+			env: { ...process.env },
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const output = new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+
+		expect({ exitCode, output: (await output).trim() }).toEqual({
+			exitCode: 0,
+			output: "PROBE: NO_EXPORT",
+		});
+	}, 10_000);
 });
 
 describe("initTelemetryExport signals export path", () => {

@@ -1,20 +1,49 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import * as path from "node:path";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
+import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { COMPOSER_DEFAULTS, Composer, type ComposerPreferences } from "@oh-my-pi/pi-coding-agent/modes/composer";
+import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { Composer, type ComposerPreferences } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import {
 	applyStartupComposerPreferences,
 	beginStartupComposer,
 	ComposerLease,
-	setStartupComposerLspServers,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createTestSession } from "./utilities";
+
+import {
+	cfgAutocompleteMaxVisible,
+	cfgComposerShape,
+	cfgMarketplaceAutoUpdate,
+	cfgShowHardwareCursor,
+	cfgSpellingAutocomplete,
+	cfgSpellingAutocorrect,
+	cfgSpellingTypoDetection,
+	cfgStartupChangelogMode,
+	cfgStartupCheckUpdate,
+	cfgStartupQuiet,
+	cfgStartupSetupWizard,
+	cfgStartupShowSplash,
+	cfgTuiImeSafeCursor,
+	cfgTuiMaxInlineImages,
+	cfgTuiResizeScrollback,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;
@@ -54,6 +83,193 @@ class InputTrackingTerminal extends CountingTerminal {
 	}
 }
 
+describe("outer startup collaboration gate", () => {
+	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
+		const originalProject = getProjectDir();
+		const originalIsTTY = process.stdin.isTTY;
+		resetSettingsForTest();
+		await initTheme();
+		const testSession = await createTestSession({
+			inMemory: true,
+			settingsOverrides: {
+				"collab.autoStart": "control",
+				"collab.relayUrl": "ws://localhost:8788",
+				"collab.webUrl": "https://collab.example",
+			},
+		});
+		setProjectDir(testSession.tempDir);
+		const activeSettings = await Settings.init({ inMemory: true, cwd: testSession.tempDir });
+		cfgStartupCheckUpdate.override(activeSettings, false);
+		cfgStartupChangelogMode.override(activeSettings, "hidden");
+		cfgStartupSetupWizard.override(activeSettings, false);
+		cfgStartupShowSplash.override(activeSettings, false);
+		cfgMarketplaceAutoUpdate.override(activeSettings, "off");
+		installInMemoryRelay();
+		const publish = registry.publishCollabHost;
+		vi.spyOn(registry, "publishCollabHost").mockImplementation((source, options) =>
+			publish(source, { ...options, dir: testSession.tempDir }),
+		);
+		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
+		vi.spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
+		const init = InteractiveMode.prototype.init;
+		vi.spyOn(InteractiveMode.prototype, "init").mockImplementation(function (this: InteractiveMode, options) {
+			vi.spyOn(this.statusLine, "watchBranch").mockImplementation(() => {});
+			return init.call(this, options);
+		});
+		const enteredReplay = Promise.withResolvers<InteractiveMode>();
+		const releaseReplay = Promise.withResolvers<void>();
+		const enteredCleanup = Promise.withResolvers<void>();
+		const releaseCleanup = Promise.withResolvers<void>();
+		const startupFailure = new Error("initial replay failed");
+		const finished = new Error("finished observing startup");
+		const renderInitialMessages = InteractiveMode.prototype.renderInitialMessages;
+		vi.spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
+			async function (this: InteractiveMode, options) {
+				await renderInitialMessages.call(this, options);
+				enteredReplay.resolve(this);
+				await releaseReplay.promise;
+				if (result === "fails") throw startupFailure;
+			},
+		);
+		vi.spyOn(InteractiveMode.prototype, "getUserInput").mockRejectedValue(finished);
+		type GuestOutcome = "refused" | "prompt" | "abort" | "agent";
+		let outcome = Promise.withResolvers<GuestOutcome>();
+		vi.spyOn(testSession.session, "prompt").mockResolvedValue(true);
+		const prompt = vi.spyOn(testSession.session, "promptCustomMessage").mockImplementation(async () => {
+			outcome.resolve("prompt");
+			return true;
+		});
+		const abort = vi.spyOn(testSession.session, "abort").mockImplementation(async () => {
+			outcome.resolve("abort");
+		});
+		const ensureLive = vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockImplementation(async () => {
+			outcome.resolve("agent");
+			return testSession.session;
+		});
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		const authStorage = await AuthStorage.create(path.join(testSession.tempDir, "startup-auth.db"));
+		beginStartupComposer({
+			terminal: new VirtualTerminal(),
+			version: "test",
+			cache: false,
+		});
+		const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
+		const running = runRootCommand(parseArgs(rawArgs), rawArgs, {
+			settings: activeSettings,
+			discoverAuthStorage: async () => authStorage,
+			createAgentSession: async options => {
+				if (!options?.preloadedExtensions || !options.eventBus) throw new Error("Missing startup context");
+				await options.sessionManager?.close();
+				return {
+					session: testSession.session,
+					setToolUIContext: () => {},
+					extensionsResult: options.preloadedExtensions,
+					eventBus: options.eventBus,
+				};
+			},
+		}).then(
+			() => undefined,
+			error => error,
+		);
+		let mode: InteractiveMode | undefined;
+		let writer: CollabSocket | undefined;
+		try {
+			mode = await Promise.race([
+				enteredReplay.promise,
+				running.then(error => {
+					throw error ?? new Error("startup exited before replay");
+				}),
+			]);
+			await mode.collabController.idle();
+			const host = mode.collabHost;
+			if (!host) throw new Error("early startup room missing");
+			expect(await registry.listCollabHosts({ dir: testSession.tempDir })).toMatchObject([{ access: "control" }]);
+			const link = parseCollabLink(host.link);
+			if ("error" in link) throw new Error(link.error);
+			const welcomed = Promise.withResolvers<boolean>();
+			const asked = Promise.withResolvers<number>();
+			writer = new CollabSocket({ wsUrl: link.wsUrl, role: "guest", key: await importRoomKey(link.key) });
+			writer.onFrame = frame => {
+				if (frame.t === "welcome") welcomed.resolve(frame.readOnly === true);
+				if (frame.t === "error") outcome.resolve("refused");
+				if (frame.t === "ui-request") asked.resolve(frame.request.reqId);
+			};
+			const guest = writer;
+			guest.onOpen = () =>
+				guest.send({
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: "writer",
+					writeToken: link.writeToken ? Buffer.from(link.writeToken).toString("base64url") : undefined,
+				});
+			guest.connect();
+			expect(await welcomed.promise).toBe(false);
+			const mutations: CollabFrame[] = [
+				{ t: "prompt", text: "during replay" },
+				{ t: "abort" },
+				{ t: "agent-cmd", cmd: "chat", agentId: "startup-agent", text: "during replay" },
+			];
+			for (const frame of mutations) {
+				outcome = Promise.withResolvers<GuestOutcome>();
+				guest.send(frame);
+				expect(await outcome.promise).toBe("refused");
+			}
+			expect(prompt).not.toHaveBeenCalled();
+			expect(abort).not.toHaveBeenCalled();
+			expect(ensureLive).not.toHaveBeenCalled();
+			const answer = host.requestGuestUi({ kind: "select", title: "Startup question", options: ["Yes", "No"] });
+			if (!answer) throw new Error("startup dialog unavailable");
+			guest.send({ t: "ui-response", reqId: await asked.promise, value: "Yes" });
+			expect(await answer).toEqual({ kind: "answered", value: "Yes" });
+
+			if (result === "fails") {
+				const shutdown = mode.collabController.shutdown.bind(mode.collabController);
+				vi.spyOn(mode.collabController, "shutdown").mockImplementation(async reason => {
+					enteredCleanup.resolve();
+					await releaseCleanup.promise;
+					await shutdown(reason);
+				});
+			}
+			releaseReplay.resolve();
+			if (result === "fails") {
+				await enteredCleanup.promise;
+				outcome = Promise.withResolvers<GuestOutcome>();
+				guest.send({ t: "prompt", text: "during failure cleanup" });
+				expect(await outcome.promise).toBe("refused");
+				expect(prompt).not.toHaveBeenCalled();
+				releaseCleanup.resolve();
+				expect(await running).toBe(startupFailure);
+				expect(await registry.listCollabHosts({ dir: testSession.tempDir })).toEqual([]);
+			} else {
+				expect(await running).toBe(finished);
+				outcome = Promise.withResolvers<GuestOutcome>();
+				guest.send({ t: "prompt", text: "after startup" });
+				expect(await outcome.promise).toBe("prompt");
+				expect(prompt).toHaveBeenCalledWith(
+					expect.objectContaining({ content: "after startup", attribution: "user" }),
+					expect.objectContaining({ streamingBehavior: "steer" }),
+				);
+			}
+		} finally {
+			releaseReplay.resolve();
+			releaseCleanup.resolve();
+			await running;
+			writer?.close();
+			await mode?.collabController.shutdown("test cleanup");
+			mode?.stop();
+			stopPendingStartupComposer();
+			vi.restoreAllMocks();
+			uninstallInMemoryRelay();
+			authStorage.close();
+			// setProjectDir chdir'd into tempDir; Windows cannot delete the process cwd.
+			setProjectDir(originalProject);
+			await testSession.cleanup();
+			resetSettingsForTest();
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		}
+	});
+});
+
 describe("Composer prepaint", () => {
 	let settings: Settings;
 
@@ -63,16 +279,16 @@ describe("Composer prepaint", () => {
 		await initTheme();
 		settings = await Settings.init({ inMemory: true });
 		config = {
-			quiet: settings.get("startup.quiet"),
-			composerShape: settings.get("composer.shape") ?? "box",
-			showHardwareCursor: settings.get("showHardwareCursor"),
-			maxInlineImages: settings.get("tui.maxInlineImages"),
-			resizeScrollback: settings.get("tui.resizeScrollback"),
-			imeSafeCursor: settings.get("tui.imeSafeCursor"),
-			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
-			spellingTypoDetection: settings.get("spelling.typoDetection"),
-			spellingAutocomplete: settings.get("spelling.autocomplete"),
-			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			quiet: cfgStartupQuiet.get(settings),
+			composerShape: cfgComposerShape.get(settings) ?? "box",
+			showHardwareCursor: cfgShowHardwareCursor.get(settings),
+			maxInlineImages: cfgTuiMaxInlineImages.get(settings),
+			resizeScrollback: cfgTuiResizeScrollback.get(settings),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
+			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
+			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
+			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
 		};
 	});
 
@@ -128,7 +344,7 @@ describe("Composer prepaint", () => {
 
 		try {
 			await initTheme(false, "ascii");
-			settings.set("composer.shape", "box");
+			cfgComposerShape.set(settings, "box");
 			vi.spyOn(KeybindingsManager, "create").mockReturnValue(KeybindingsManager.inMemory({ "app.clear": "ctrl+x" }));
 			mode = new InteractiveMode(
 				testSession.session,
@@ -367,18 +583,27 @@ describe("Composer prepaint", () => {
 		expect(exit).toHaveBeenCalledWith(130);
 	});
 
-	it("uses standard emergency exit before interactive keybindings load", () => {
+	it("forward-deletes a startup draft before interactive keybindings load, exiting once it is empty", () => {
 		const terminal = new CountingTerminal();
 		const exit = vi.fn();
 		const composer = new Composer({ preferences: config, terminal, exit });
 		composer.start();
 
 		terminal.sendInput("draft");
+		terminal.sendInput("\x1b[D"); // Left, so Ctrl+D has a character ahead of the cursor
+		terminal.sendInput("\x04");
+		expect(composer.editor.getExpandedText()).toBe("draf");
+		expect(exit).not.toHaveBeenCalled();
+		expect(terminal.stops).toBe(0);
+
+		for (let i = 0; i < 4; i++) terminal.sendInput("\x7f"); // Backspace the rest of the draft
+		expect(composer.editor.getExpandedText()).toBe("");
 		terminal.sendInput("\x04");
 
 		expect(exit).toHaveBeenCalledWith(0);
 		expect(terminal.stops).toBe(1);
 	});
+
 	it("keeps emergency exit live after adoption until interactive handlers replace it", () => {
 		const terminal = new CountingTerminal();
 		const exit = vi.fn();
@@ -395,61 +620,34 @@ describe("Composer prepaint", () => {
 		expect(terminal.stops).toBe(1);
 	});
 
-	it("first frame mirrors the canonical settings-schema defaults", () => {
-		expect(COMPOSER_DEFAULTS).toEqual({
-			quiet: getDefault("startup.quiet"),
-			composerShape: getDefault("composer.shape") ?? "box",
-			showHardwareCursor: getDefault("showHardwareCursor"),
-			maxInlineImages: getDefault("tui.maxInlineImages"),
-			resizeScrollback: getDefault("tui.resizeScrollback"),
-			imeSafeCursor: getDefault("tui.imeSafeCursor"),
-			autocompleteMaxVisible: getDefault("autocompleteMaxVisible"),
-			spellingTypoDetection: getDefault("spelling.typoDetection"),
-			spellingAutocomplete: getDefault("spelling.autocomplete"),
-			spellingAutocorrect: getDefault("spelling.autocorrect"),
-		});
-	});
 	it("renders the complete interactive welcome scene on the first frame", async () => {
 		const terminal = new CountingTerminal(80, 32);
 		const composer = new Composer({
 			preferences: config,
 			terminal,
-			welcome: {
-				version: "9.9.9",
-				recentSessions: [{ name: "prior work", timeAgo: "5m ago" }],
-			},
+			welcome: { version: "9.9.9" },
 		});
 		composer.start();
-		await terminal.waitForRender(() =>
-			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
-		);
+		await terminal.waitForRender(() => terminal.getViewport().some(row => Bun.stripANSI(row).includes("v9.9.9")));
 
 		const output = terminal
 			.getViewport()
 			.map(r => Bun.stripANSI(r))
 			.join("\n");
-		expect(output).toContain("Welcome back!");
-		expect(output).toContain("omp");
-		expect(output).toContain("9.9.9");
-		expect(output).toContain("prior work");
 		expect(output).not.toContain("Starting OMP");
-		expect(output).toContain("╭");
+		expect(output).toContain("╰");
 		const initialEditorRow = terminal
 			.getViewport()
 			.map(row => Bun.stripANSI(row))
-			.findLastIndex(row => row.startsWith("╭"));
-		composer.updateWelcome({
-			modelName: "provider/model-with-an-authoritative-name-that-is-longer-than-the-left-column",
-			providerName: "provider-with-a-long-name",
-			lspServers: [{ name: "rust-analyzer", status: "connecting", fileTypes: [".rs"] }],
-		});
+			.findLastIndex(row => row.startsWith("╰"));
+		composer.updateWelcome({ version: "10.0.0-authoritative" });
 		await terminal.waitForRender(() =>
-			terminal.getViewport().some(row => Bun.stripANSI(row).includes("rust-analyzer")),
+			terminal.getViewport().some(row => Bun.stripANSI(row).includes("v10.0.0-authoritative")),
 		);
 		const updatedEditorRow = terminal
 			.getViewport()
 			.map(row => Bun.stripANSI(row))
-			.findLastIndex(row => row.startsWith("╭"));
+			.findLastIndex(row => row.startsWith("╰"));
 		expect(updatedEditorRow).toBe(initialEditorRow);
 		composer.stop();
 	});
@@ -459,21 +657,14 @@ describe("Composer prepaint", () => {
 		const composer = new Composer({
 			preferences: config,
 			terminal,
-			welcome: {
-				version: "9.9.9",
-				modelName: "Claude Fable 5",
-				providerName: "anthropic",
-				recentSessions: [{ name: "prior work", timeAgo: "5m ago" }],
-			},
+			// The prepaint's speculative version; InteractiveMode's is authoritative.
+			welcome: { version: "9.9.8" },
 		});
 		composer.start();
-		await terminal.waitForRender(() =>
-			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
-		);
+		await terminal.waitForRender(() => terminal.getViewport().some(row => Bun.stripANSI(row).includes("v9.9.8")));
 		const prepaintRows = terminal.getViewport().map(row => Bun.stripANSI(row));
-		expect(prepaintRows.join("\n")).toContain("Claude Fable 5");
-		expect(prepaintRows.join("\n")).toContain("anthropic");
-		const prepaintEditorRow = prepaintRows.findLastIndex(row => row.startsWith("╭"));
+		expect(prepaintRows.join("\n")).toContain("v9.9.8");
+		const prepaintEditorRow = prepaintRows.findLastIndex(row => row.startsWith("╰"));
 
 		terminal.sendInput("draft message");
 		const lease = new ComposerLease(composer);
@@ -508,19 +699,19 @@ describe("Composer prepaint", () => {
 				.getViewport()
 				.map(r => Bun.stripANSI(r))
 				.join("\n");
-			const modelName = testSession.session.model?.name ?? "";
-			expect(output).toContain(modelName);
+			expect(output).toContain("v9.9.9");
+			expect(output).not.toContain("v9.9.8");
 			realTopBorder.mockReturnValue({ content: "real status bar *18 ?5", width: 21, revision: 2 });
 			mode.ui.requestRender();
 			await terminal.waitForRender(() =>
 				terminal.getViewport().some(row => Bun.stripANSI(row).includes("real status bar *18 ?5")),
 			);
-			const welcomeMatches = (output.match(/Welcome back!/g) || []).length;
+			const welcomeMatches = (output.match(/v9\.9\.9/g) || []).length;
 			expect(welcomeMatches).toBe(1);
 			const adoptedEditorRow = terminal
 				.getViewport()
 				.map(row => Bun.stripANSI(row))
-				.findLastIndex(row => row.startsWith("╭"));
+				.findLastIndex(row => row.startsWith("╰"));
 			expect(adoptedEditorRow).toBe(prepaintEditorRow);
 		} finally {
 			mode?.stop();
@@ -538,15 +729,7 @@ describe("Composer prepaint", () => {
 			version: "9.9.9",
 			cache: false,
 		});
-		await terminal.waitForRender(() =>
-			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
-		);
-		expect(
-			terminal
-				.getViewport()
-				.map(r => Bun.stripANSI(r))
-				.join("\n"),
-		).toContain("Welcome back!");
+		await terminal.waitForRender(() => terminal.getViewport().some(row => Bun.stripANSI(row).includes("v9.9.9")));
 
 		applyStartupComposerPreferences({
 			quiet: true,
@@ -556,9 +739,9 @@ describe("Composer prepaint", () => {
 			resizeScrollback: config.resizeScrollback,
 			imeSafeCursor: config.imeSafeCursor,
 			autocompleteMaxVisible: config.autocompleteMaxVisible,
-			spellingTypoDetection: settings.get("spelling.typoDetection"),
-			spellingAutocomplete: settings.get("spelling.autocomplete"),
-			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
+			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
+			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
 			theme: {},
 		});
 		await terminal.waitForRender();
@@ -567,7 +750,7 @@ describe("Composer prepaint", () => {
 			.getViewport()
 			.map(r => Bun.stripANSI(r))
 			.join("\n");
-		expect(output).not.toContain("Welcome back!");
+		expect(output).not.toContain("v9.9.9");
 
 		terminal.sendInput("still editable");
 		await terminal.waitForRender();
@@ -579,53 +762,20 @@ describe("Composer prepaint", () => {
 		).toContain("still editable");
 	});
 
-	it("LSP feed fills the welcome rows", async () => {
-		const terminal = new CountingTerminal(80, 32);
-		beginStartupComposer({
-			preferences: config,
-			terminal,
-			version: "9.9.9",
-			cache: false,
-		});
-		await terminal.waitForRender(() =>
-			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
-		);
-
-		setStartupComposerLspServers([{ name: "rust-analyzer", status: "connecting", fileTypes: [".rs"] }]);
-		await terminal.waitForRender(() =>
-			terminal.getViewport().some(row => Bun.stripANSI(row).includes("rust-analyzer")),
-		);
-
-		const output = terminal
-			.getViewport()
-			.map(r => Bun.stripANSI(r))
-			.join("\n");
-		expect(output).toContain("rust-analyzer");
-	});
-	it("transfers the in-flight recent-session load across composer ownership", async () => {
-		const terminal = new CountingTerminal(80, 32);
-		const load = Promise.withResolvers<Array<{ name: string; timeAgo: string }>>();
-		beginStartupComposer({
-			preferences: config,
-			terminal,
-			version: "9.9.9",
-			cache: false,
-			recentSessions: () => load.promise,
-		});
-
-		const lease = takeStartupComposerLease();
-		expect(lease).toBeDefined();
-		const rows = [{ name: "already loading", timeAgo: "just now" }];
-		load.resolve(rows);
-		expect(await lease?.recentSessions).toEqual(rows);
-		lease?.dispose();
-	});
 	it("defers raw input until resolved settings arrive, adoption as fallback", async () => {
 		// Regression contract: losing the deferral re-blinds typing during the
 		// startup module-load stall; losing the enable leaves the keyboard dead
 		// for the whole session.
 		const terminal = new InputTrackingTerminal(80, 32);
-		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "9.9.9",
+			cache: false,
+		});
+		// The prepaint must be physically written before any async runtime import
+		// can monopolize the event loop; a merely queued render is still a blind gap.
+		expect(terminal.getViewport().some(row => Bun.stripANSI(row).includes("9.9.9"))).toBeTrue();
 		expect(terminal.startOptions?.deferInput).toBeTrue();
 		expect(terminal.inputEnables).toBe(0);
 
@@ -641,7 +791,12 @@ describe("Composer prepaint", () => {
 
 	it("adoption enables raw input when settings never resolved", () => {
 		const terminal = new InputTrackingTerminal(80, 32);
-		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "9.9.9",
+			cache: false,
+		});
 		const lease = takeStartupComposerLease();
 		lease?.adopt();
 		expect(terminal.inputEnables).toBe(1);

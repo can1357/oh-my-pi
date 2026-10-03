@@ -11,7 +11,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
@@ -114,11 +114,38 @@ async function readRegisteredProjects(root: string): Promise<string[]> {
 	}
 }
 
+/**
+ * Claude Code encodes a project cwd into its `projects/` directory name by
+ * replacing every non-alphanumeric character with `-`, on every platform
+ * (`/home/x/my_app.v2` → `-home-x-my-app-v2`, `C:\Users\x` → `C--Users-x`).
+ */
+function encodeProjectDir(project: string): string {
+	return project.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
 function projectCwd(encoded: string, registered: readonly string[]): string {
-	const exact = registered.find(project => project.replaceAll(path.sep, "-") === encoded);
+	const exact = registered.find(project => encodeProjectDir(project) === encoded);
 	if (exact) return exact;
 	if (!encoded.startsWith("-")) return encoded;
 	return encoded.replaceAll("-", path.sep);
+}
+
+const CLAUDE_CWD_PREFIX_BYTES = 64 * 1024;
+
+/**
+ * The working directory Claude recorded for a session, taken from the
+ * transcript itself. Claude writes it on the first user record, so listing only
+ * reads a bounded prefix and falls back to the encoded project directory when
+ * that prefix has no cwd.
+ */
+async function recordedCwd(file: string): Promise<string | undefined> {
+	const prefix = await Bun.file(file).slice(0, CLAUDE_CWD_PREFIX_BYTES).text();
+	for (const value of parseJsonlLenient<unknown>(prefix)) {
+		if (!isRecord(value)) continue;
+		const cwd = stringField(value, "cwd");
+		if (cwd) return cwd;
+	}
+	return undefined;
 }
 
 async function projectFiles(root: string): Promise<Array<{ file: string; cwd: string }>> {
@@ -149,17 +176,19 @@ function imageContent(value: unknown): ImageContent | undefined {
 	return data && mimeType ? { type: "image", data, mimeType } : undefined;
 }
 
+function userPart(value: unknown): TextContent | ImageContent | undefined {
+	if (!isRecord(value)) return undefined;
+	if (value.type === "text" && typeof value.text === "string") return { type: "text", text: value.text };
+	return imageContent(value);
+}
+
 function userContent(value: unknown): string | (TextContent | ImageContent)[] | undefined {
 	if (typeof value === "string") return value;
 	if (!Array.isArray(value)) return undefined;
 	const content: (TextContent | ImageContent)[] = [];
 	for (const block of value) {
-		if (!isRecord(block)) continue;
-		if (block.type === "text" && typeof block.text === "string") content.push({ type: "text", text: block.text });
-		else {
-			const image = imageContent(block);
-			if (image) content.push(image);
-		}
+		const part = userPart(block);
+		if (part) content.push(part);
 	}
 	return content.length > 0 ? content : undefined;
 }
@@ -254,7 +283,9 @@ function convertRecord(
 			provider: "anthropic",
 			model,
 			usage: claudeUsage(record.message.usage),
-			stopReason: stopReason(record.message.stop_reason),
+			// An API-error record still carries a completed stop_reason, so the flag
+			// beside it is the only thing that says the turn failed.
+			stopReason: record.isApiErrorMessage === true ? "error" : stopReason(record.message.stop_reason),
 			timestamp,
 		};
 		const responseId = stringField(record.message, "id");
@@ -268,11 +299,28 @@ function convertRecord(
 	const rawContent = record.message.content;
 	if (Array.isArray(rawContent)) {
 		const results: ConvertedMessage[] = [];
+		let content: (TextContent | ImageContent)[] = [];
+		let contentStart = 0;
+		const flushContent = () => {
+			if (content.length === 0) return;
+			results.push({
+				message: { role: "user", content, timestamp },
+				suffix: `user-${contentStart}`,
+			});
+			content = [];
+		};
 		for (let index = 0; index < rawContent.length; index += 1) {
 			const block = rawContent[index];
+			const part = userPart(block);
+			if (part) {
+				if (content.length === 0) contentStart = index;
+				content.push(part);
+				continue;
+			}
 			if (!isRecord(block) || block.type !== "tool_result") continue;
 			const toolCallId = stringField(block, "tool_use_id");
 			if (!toolCallId) continue;
+			flushContent();
 			const message: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId,
@@ -283,6 +331,7 @@ function convertRecord(
 			};
 			results.push({ message, suffix: `tool-${index}` });
 		}
+		flushContent();
 		if (results.length > 0) return results;
 	}
 	const content = userContent(rawContent);
@@ -311,7 +360,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 		this.#root = path.resolve(root);
 	}
 
-	/** Lists indexed Claude sessions without reading transcript bodies. */
+	/** Lists Claude sessions, reading a bounded transcript prefix only when indexed cwd metadata is absent. */
 	async list(): Promise<ForeignSessionInfo[]> {
 		const [history, files] = await Promise.all([
 			readHistoryIndex(path.join(this.#root, "history.jsonl")),
@@ -329,7 +378,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 					source: this.source,
 					id,
 					path: item.file,
-					cwd: indexed?.cwd ?? item.cwd,
+					cwd: indexed?.cwd ?? (await recordedCwd(item.file)) ?? item.cwd,
 					created: new Date(createdMs),
 					modified: new Date(modifiedMs),
 					firstMessage: indexed?.firstMessage,

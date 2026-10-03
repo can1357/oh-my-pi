@@ -197,6 +197,32 @@ describe("streamProxy — server disconnect without terminal event", () => {
 		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
 	});
 
+	it("preserves server-priced usage for both terminal events, including a zero charge", async () => {
+		const model = { ...mockModel, cost: { input: 10, output: 20, cacheRead: 1, cacheWrite: 5 } };
+		for (const total of [0, 0.75]) {
+			const usage = {
+				...baseUsage,
+				input: 1_000_000,
+				totalTokens: 1_000_000,
+				cost: { input: total, output: 0, cacheRead: 0, cacheWrite: 0, total },
+			};
+			const terminalEvents: ProxyAssistantMessageEvent[] = [
+				{ type: "done", reason: "stop", usage },
+				{ type: "error", reason: "error", errorMessage: "provider disconnected", usage },
+			];
+			for (const terminal of terminalEvents) {
+				const fetchMock: FetchImpl = async () =>
+					new Response(buildSseBody([{ type: "start" }, terminal]), { status: 200 });
+				const result = await streamProxy(model, mockContext, {
+					proxyUrl: "http://localhost:0",
+					authToken: "test",
+					fetch: fetchMock,
+				}).result();
+				expect(result.usage.cost).toEqual(usage.cost);
+			}
+		}
+	});
+
 	it("restores terminal blocks that have no proxy stream events", async () => {
 		const finalizedContent: AssistantMessage["content"] = [
 			{ type: "thinking", thinking: "Search first.", thinkingSignature: "sig-1" },
@@ -303,5 +329,32 @@ describe("streamProxy — server disconnect without terminal event", () => {
 		if (toolCall) {
 			expect(getStreamingPartialJson(toolCall)).toBeUndefined();
 		}
+	});
+
+	it("finalizes throttled trailing deltas when the server disconnects mid-tool-call", async () => {
+		// Small deltas all fall below the throttle gate, so mid-stream parses
+		// never fire; the disconnect error path must still finalize the full
+		// buffered arguments.
+		const deltas = ["{", '"c', "om", "ma", "nd", '":', '"l', 's"', "}"];
+		const events: ProxyAssistantMessageEvent[] = [
+			{ type: "start" },
+			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "bash" },
+			...deltas.map(delta => ({ type: "toolcall_delta", contentIndex: 0, delta }) as const),
+		];
+		const body = buildSseBody(events);
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+		const stream = streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		});
+
+		await collectEvents(stream);
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		const toolCall = result.content.find((c): c is ToolCall => c.type === "toolCall");
+		expect(toolCall?.arguments).toEqual({ command: "ls" });
+		expect(getStreamingPartialJson(toolCall)).toBeUndefined();
 	});
 });

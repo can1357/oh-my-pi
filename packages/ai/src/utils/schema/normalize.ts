@@ -1877,12 +1877,12 @@ function inferStrictPrimitiveTypeFromEnumOrConst(node: Record<string, unknown>):
 }
 
 /**
- * Per-schema-object memoization slot. The result of `tryEnforceStrictSchema`
- * is stamped directly onto the input via `stamp(target, kStrictSchema, …)`
- * so repeated calls (different providers, retries, batching) reuse the same
+ * Per-schema-object memoization key. The result of `tryEnforceStrictSchema`
+ * is memoized against the input via `stamp(target, kStrictSchema, …)` so
+ * repeated calls (different providers, retries, batching) reuse the same
  * computed pair without re-walking the tree.
  */
-const kStrictSchema = Symbol("pi.schema.strict");
+const kStrictSchema = Symbol("omp.schema.strict");
 
 /**
  * A boolean schema (`true`/`false`) or the empty object schema `{}`: an

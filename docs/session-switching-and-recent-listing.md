@@ -10,8 +10,8 @@ It focuses on current implementation behavior, including fallback paths and cave
 - [`../src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts)
 - [`../src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts)
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
-- [`../src/cli/session-picker.ts`](../packages/coding-agent/src/cli/session-picker.ts)
-- [`../src/modes/components/session-selector.ts`](../packages/coding-agent/src/modes/components/session-selector.ts)
+- [`packages/tui/src/apps/session-picker.ts`](../packages/tui/src/apps/session-picker.ts)
+- [`packages/tui/src/overlays/session-selector.ts`](../packages/tui/src/overlays/session-selector.ts)
 - [`../src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts)
 - [`../src/main.ts`](../packages/coding-agent/src/main.ts)
 - [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
@@ -32,19 +32,21 @@ It focuses on current implementation behavior, including fallback paths and cave
 
 There are two different listing pipelines:
 
-1. `getRecentSessions(sessionDir, limit)` (welcome/summary view)
-   - Reads only a 4 KiB prefix from each file.
-   - Understands both current fixed-width title-slot files and legacy header-first files.
-   - Parses header + earliest user text preview.
+1. `getRecentSessions(sessionDir, limit = 4)` (welcome/summary view)
+   - Lists files and sorts by `mtime` descending.
+   - Uses the `history.db` session-title index to avoid reading indexed files.
+   - For files without an indexed title, uses the same prefix/tail scan and assistant-detection fallback as full listings, skips untitled empty stubs, and backfills discovered titles into the index.
+   - Understands current fixed-width title-slot files and legacy header-first files.
    - Returns lightweight `RecentSessionInfo` (`path`, `name`, `timeAgo`).
-   - Sorts by file `mtime` descending.
 
 2. `SessionManager.list(...)` / `SessionManager.listAll()` (resume pickers and ID matching)
-   - Reads a 4 KiB prefix plus a bounded 32 KiB tail per file, not the full JSONL body.
+   - Normally reads a 4 KiB prefix plus a bounded 32 KiB tail per file. If neither window finds an assistant turn, a storage-provided fallback may scan body lines until it finds one, avoiding false empty-session classification.
    - Builds `SessionInfo` (`path`, `id`, `cwd`, title/parent metadata, dates, size, message previews/count, and lifecycle status).
    - Uses prefix parsing plus marker counting for list text, and tail parsing for final-message lifecycle status; later messages beyond the prefix may not be present in `allMessagesText`.
    - Status is `complete`, `interrupted`, `aborted`, `error`, `pending`, or `unknown`.
-   - Sorts by `modified` descending. Stat-keyed scan results are cached; large listings use bounded parallel workers.
+   - The underlying scans sort by `modified` descending; manager APIs put pinned sessions first. Stat-keyed scan results are cached; large listings use bounded parallel workers.
+
+Picker callers use `listForPicker(...)` / `listAllForPicker()`, which also drop untitled empty stubs unless pinned. Titles or discoverable first prompts preserve zero-turn sessions; tail lifecycle status prevents an answered session from being mistaken for an empty stub. Explicit ID resolution keeps the unfiltered scan.
 
 Normal per-directory scans repair the newest orphaned `.bak` created by the EPERM atomic-rewrite fallback when its primary JSONL is absent. `listSessionsReadOnly` is the non-mutating variant.
 
@@ -60,7 +62,7 @@ For `SessionInfo` list entries:
 
 - `title` is the fixed title-slot value when present, otherwise `header.title`, otherwise the last compaction `shortSummary` seen in the prefix
 - `firstMessage` is first user message text discoverable from the prefix or `"(no messages)"`
-- the picker also shows modified time, file size, lifecycle status (except `unknown`), fork marker, and cwd in all-projects scope
+- the picker also shows modified time, file size, a `current` marker on the live session, lifecycle status (except `unknown`), fork marker, and cwd in all-projects scope
 
 ## `--continue` resolution and terminal breadcrumb preference
 
@@ -70,11 +72,11 @@ For `SessionInfo` list entries:
 2. Validate the breadcrumb. A materialized target is usable; a missing target is usable only when its optional third line is `fresh`, denoting a lazily-unmaterialized `/new` boundary.
 3. A missing fresh target starts a new session instead of falling back and resurrecting the prior transcript.
 4. Resolve stale pre-fix subagent breadcrumbs to their interactive parent session.
-5. If the breadcrumb's cwd differs from current cwd, no longer exists, and the current location has no session of its own, re-root the breadcrumb session into current cwd (`open` + `moveTo`).
-6. Otherwise use a breadcrumb whose cwd matches current cwd; for a cwd mismatch use the newest current-bucket session.
-7. Without a usable breadcrumb, choose newest file by mtime; if none exists, create a new session.
+5. If the breadcrumb's cwd differs, no longer exists, and no genuine current-cwd session takes precedence, re-root only when its recorded device/inode matches the current directory (`open` + `moveTo`). A deleted, unmounted, or cross-filesystem-moved project is not positive evidence of a rename.
+6. Otherwise use a breadcrumb whose cwd matches current cwd (and is within an explicit `sessionDir`, when supplied); for a cwd mismatch use the newest non-empty current-bucket session.
+7. Without a usable breadcrumb, choose the newest non-empty session by mtime; if none exists, create a new session.
 
-Terminal ID derivation prefers TTY path and falls back to env-based identifiers (`ZELLIJ_PANE_ID`, `TMUX_PANE`, `CMUX_SURFACE_ID`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, `TERM_SESSION_ID`, `WT_SESSION`).
+Terminal ID derivation prefers TTY path and falls back to env-based identifiers (`ZELLIJ_PANE_ID`, `TMUX_PANE`, `CMUX_SURFACE_ID`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, `TERM_SESSION_ID`, `WT_SESSION`). Zellij IDs also include `ZELLIJ_SESSION_NAME` when present, with path separators normalized.
 
 Breadcrumb writes are best-effort and non-fatal.
 
@@ -104,8 +106,8 @@ No match throws `Session "..." not found.`.
 
 Handled after initial session-manager construction:
 
-1. list current-folder sessions with `SessionManager.list(cwd, parsed.sessionDir)`
-2. if empty, probe `SessionManager.listAll()` only to distinguish globally empty state and preload the Tab scope; the picker itself never auto-switches into all-projects scope (issue #3099)
+1. list current-folder sessions with `SessionManager.listForPicker(cwd, parsed.sessionDir)`
+2. if empty, probe `SessionManager.listAllForPicker()` only to distinguish globally empty state and preload the Tab scope; the picker itself never auto-switches into all-projects scope
 3. if both lists are empty, print `No sessions found` and exit
 4. open the fullscreen TUI picker (`selectSession`)
 5. if canceled, print `No session selected` and exit
@@ -117,7 +119,7 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 
 ## Picker-based selection internals
 
-## CLI picker (`src/cli/session-picker.ts`)
+## CLI picker (`packages/tui/src/apps/session-picker.ts`)
 
 `selectSession(sessions, options)` creates a fullscreen alternate-screen TUI with `SessionSelectorComponent` and resolves exactly once:
 
@@ -133,8 +135,8 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 
 Flow:
 
-1. fetch current-folder sessions via `SessionManager.list(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
-2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, and pinned-session markers
+1. fetch current-folder sessions via `SessionManager.listForPicker(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
+2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, pinned-session markers, and a current-session marker
 3. callbacks:
    - select -> lock picker input and call `handleResumeSession(sessionPath)`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
    - cancel -> hide overlay, restore editor focus, rerender
@@ -153,6 +155,7 @@ Flow:
 - Tab to toggle current-folder / all-projects scope
 - mouse wheel/click in the fullscreen picker
 - multi-token search across id/title/cwd/first message/prefix message text/path: literal matches lead by recency, then sufficiently strong fuzzy matches; prompt-history matches from `history.db` may be promoted after typing pauses
+- the live session (when `currentSessionPath` is supplied) is labeled `current` on its metadata line and focused on open and after a Tab scope toggle
 
 Empty-list render behavior:
 
@@ -181,7 +184,7 @@ Lifecycle/state transition:
 13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
 `switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
 
-Any failure after the snapshot restores the previous manager and runtime state, reconnects/reconciles it, marks the bash transition failed, then rethrows.
+Failures after the snapshot restore the previous manager and runtime state, reconnect/reconcile it, and mark the bash transition failed. Cwd-policy rejection returns `false`; other failures rethrow. Mode-reconciliation and base-prompt-refresh failures on the success path are logged without rolling back the switch.
 
 ## UI state rebuild after interactive switch
 
@@ -233,10 +236,12 @@ So visible conversation/todo state is rebuilt from the new session file.
 
 When opening/switching to a specific path (`setSessionFile`):
 
-- ENOENT -> treated as empty -> new session initialized at that exact path and persisted.
-- malformed/invalid header (or effectively unreadable parsed entries) -> treated as empty -> new session initialized and persisted.
+- Missing or empty explicit paths passed to `setSessionFile` initialize and persist a fresh session at that path.
+- A missing/malformed header in a non-empty file throws `Cannot resume session "...": the session header is missing or malformed. The file was not modified.`
+- Strict open/resume paths may reject files with no entries instead of creating them.
+- Malformed body records after a valid header are recovered leniently and mark the loaded file for rewrite.
 
-This is recovery behavior, not hard failure.
+Invalid-header recovery never overwrites the original file.
 
 ### Hard failures
 

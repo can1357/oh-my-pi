@@ -5,7 +5,7 @@ Native Rust functionality via N-API.
 ## What's Inside
 
 - **Grep**: Regex-based search powered by ripgrep's engine with native file walking and matching
-- **Find**: Glob-based file/directory discovery with gitignore support (pure TypeScript via `globPaths`)
+- **Find**: Native glob-based file/directory discovery with gitignore support
 - **SIXEL**: Terminal image encoding for SIXEL-capable terminals (decode, resize, encode in one pass)
 - **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
@@ -44,6 +44,14 @@ const sequence = encodeSixel(pngBytes, widthPx, heightPx);
 const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
+
+### Lazy Windows path helpers
+
+Import `expandWindowsLongPath` and `getWindowsShortPath` from
+`@oh-my-pi/pi-natives/path` when importing a module must not load the native addon.
+The addon loads only when a helper is called on Windows; other platforms preserve
+the input path without loading it. These helpers change long/8.3 spellings without
+resolving symlinks or junctions.
 
 ## Building
 

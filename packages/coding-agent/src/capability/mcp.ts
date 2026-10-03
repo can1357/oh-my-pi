@@ -21,6 +21,8 @@ export interface MCPServer {
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
 	requestIdFormat?: MCPRequestIdFormat;
+	/** Include server-provided instructions in the system prompt (default: true) */
+	instructions?: boolean;
 	/** Command to run (for stdio transport) */
 	command?: string;
 	/** Command arguments */

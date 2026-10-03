@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, Context, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import {
 	createInbandScanner,
 	type Dialect,
@@ -8,8 +9,72 @@ import {
 	getDialectDefinition,
 	type InbandScanEvent,
 	parseInbandToolMessage,
-	renderInbandToolPrompt,
 } from "@oh-my-pi/pi-ai/dialect";
+
+describe("final in-band JSON arguments", () => {
+	const raw = '{"path":"repaired.txt","content":"hello';
+	const wrapped = "<tool_call>" + JSON.stringify({ name: "write", arguments: raw }) + "</tool_call>";
+	const cases: [Dialect, string][] = [
+		[
+			"kimi",
+			"<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" +
+				raw +
+				"<|tool_call_end|><|tool_calls_section_end|>",
+		],
+		["harmony", "<|start|>assistant<|channel|>commentary to=functions.write<|message|>" + raw + "<|call|>"],
+		[
+			"deepseek",
+			"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>write<｜tool▁sep｜>" +
+				raw +
+				"<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+		],
+		["hermes", wrapped],
+		["qwen3", wrapped],
+	];
+	it.each(cases)("refuses truncated final JSON in %s", (dialect, text) => {
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), dialect, TOOLS);
+		expect(parsed.stopReason).toBe("toolUse");
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+		expect(() => validateToolArguments(TOOLS[1]!, call)).toThrow("Tool call arguments are not valid JSON");
+	});
+
+	it.each([
+		["kimi", "<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" + raw],
+		["hermes", '<tool_call>{"name":"write","arguments":' + raw],
+		["qwen3", '<tool_call>{"name":"write","arguments":' + raw],
+		[
+			"anthropic",
+			'<function_calls><invoke name="write"><parameter name="path">repaired.txt</parameter><parameter name="content">hello',
+		],
+	] as const)("refuses unfinished %s envelopes instead of executing the preview", (dialect, text) => {
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), dialect, TOOLS);
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: text });
+		expect(() => validateToolArguments(TOOLS[1]!, call)).toThrow("Tool call arguments are not valid JSON");
+	});
+
+	it("reports the unfinished envelope, not earlier prose, in the diagnostic", () => {
+		const envelope =
+			"<|tool_calls_section_begin|><|tool_call_begin|>functions.write:0<|tool_call_argument_begin|>" + raw;
+		const text = "Planning the edit. ".repeat(40) + envelope;
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), "kimi", TOOLS);
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: text.slice(-512) });
+	});
+
+	it("keeps a fabricated tool response out of the diagnostic", () => {
+		const envelope = '<tool_call>{"name":"write","arguments":' + raw;
+		const text = envelope + "<tool_response>" + "fabricated output ".repeat(40);
+		const parsed = parseInbandToolMessage(assistant([{ type: "text", text }]), "hermes", TOOLS);
+		const call = parsed.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: envelope });
+	});
+});
 
 const TOOLS = [
 	{
@@ -150,16 +215,6 @@ const XML_PARAMETER_STREAMS: readonly { dialect: Dialect; chunks: readonly strin
 ];
 
 describe("in-band tool dialects", () => {
-	it("renders a tool prompt for every dialect", () => {
-		for (const dialect of DIALECTS) {
-			const prompt = renderInbandToolPrompt(TOOLS, dialect);
-			expect(prompt).toContain("<tools>");
-			expect(prompt).toContain("</tools>");
-			expect(prompt).toContain('"name":"read"');
-			expect(prompt).toContain(getDialectDefinition(dialect).prompt.trim().split("\n", 1)[0]!);
-		}
-	});
-
 	it("each dialect renders calls that its scanner parses back", () => {
 		const call: ToolCall = {
 			type: "toolCall",

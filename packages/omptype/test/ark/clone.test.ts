@@ -27,14 +27,6 @@ it("can be configured to mutate", () => {
 	expect(out).toBe(original);
 });
 
-it("can be configured to mutate", () => {
-	const types = type.module({ trimAndMutate: { foo: "string.trim" } }, { clone: false });
-	const original = { foo: "  bar  " };
-	const out = types.trimAndMutate(original);
-	expect(out).toEqual({ foo: "bar" });
-	expect(out).toBe(original);
-});
-
 it("can be configured to use a custom clone implementation", () => {
 	const types = type.module(
 		{ trimAndMutate: { foo: "string.trim" } },

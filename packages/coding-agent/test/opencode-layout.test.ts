@@ -4,14 +4,14 @@ import * as url from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
-import { taskToolRenderer } from "@oh-my-pi/pi-coding-agent/task/renderer";
-import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { LayoutMode } from "@oh-my-pi/pi-coding-agent/modes/layout-mode";
-import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
-import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { CachedOutputBlock, markFramedBlockComponent } from "@oh-my-pi/pi-coding-agent/tui/output-block";
+import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import type { LayoutMode } from "@oh-my-pi/pi-tui/chat/layout-mode";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { CachedOutputBlock, markFramedBlockComponent } from "@oh-my-pi/pi-tui/render/output-block";
+import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
+import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
+import { type TaskToolDetails, taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
 import { replaceTabs, Text, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 
 /**
@@ -97,7 +97,7 @@ describe("opencode layout", () => {
 	});
 
 	it("collapses a multi-file edit to one dim status row per file", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		try {
 			const paths = ["alpha.ts", "beta.ts", "gamma.ts"].map(name => path.resolve("/workspace/src", name));
 			const component = new ToolExecutionComponent(
@@ -124,7 +124,7 @@ describe("opencode layout", () => {
 				expect(stripVTControlCharacters(row)).toContain(paths[index]!);
 			}
 		} finally {
-			settings.clearOverride("tui.hyperlinks");
+			cfgTuiHyperlinks.clearOverride(settings);
 		}
 	});
 
@@ -185,10 +185,10 @@ describe("opencode layout", () => {
 		expect(visibleRows(flat)).toHaveLength(1);
 
 		const gutterMsg = stripVTControlCharacters(
-			new UserMessageComponent("hello world", false, undefined, () => ocMode.layout).render(60)[0]!,
+			new UserMessageComponent("hello world", { layout: () => ocMode.layout }).render(60)[0]!,
 		);
 		const plainMsg = stripVTControlCharacters(
-			new UserMessageComponent("hello world", false, undefined, () => ompMode.layout).render(60)[0]!,
+			new UserMessageComponent("hello world", { layout: () => ompMode.layout }).render(60)[0]!,
 		);
 		expect(gutterMsg.trimStart().startsWith("│")).toBe(true);
 		expect(plainMsg).not.toContain("│");
@@ -202,18 +202,16 @@ describe("opencode layout", () => {
 
 	it("prefixes user messages with a left gutter only in opencode layout", () => {
 		const withGutter = stripVTControlCharacters(
-			new UserMessageComponent("hello world", false, undefined, opencode).render(60)[0]!,
+			new UserMessageComponent("hello world", { layout: opencode }).render(60)[0]!,
 		);
 		expect(withGutter.trimStart().startsWith("│")).toBe(true);
 
-		const plain = stripVTControlCharacters(
-			new UserMessageComponent("hello world", false, undefined, omp).render(60)[0]!,
-		);
+		const plain = stripVTControlCharacters(new UserMessageComponent("hello world", { layout: omp }).render(60)[0]!);
 		expect(plain).not.toContain("│");
 	});
 
 	it("keeps the OSC-8 file link in a collapsed write row", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		try {
 			const resolvedPath = path.resolve("/workspace/src/example.ts");
 			const component = new ToolExecutionComponent(
@@ -237,12 +235,12 @@ describe("opencode layout", () => {
 			expect(rows[0]).toContain("\x1b]8;;");
 			expect(stripVTControlCharacters(rows[0]!)).toContain("example.ts");
 		} finally {
-			settings.clearOverride("tui.hyperlinks");
+			cfgTuiHyperlinks.clearOverride(settings);
 		}
 	});
 
 	it("keeps the OSC-8 link around a truncated collapsed write path", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		try {
 			const filePath = "src/a-directory-with-a-long-name/example.ts";
 			const resolvedPath = path.resolve("/workspace", filePath);
@@ -267,7 +265,7 @@ describe("opencode layout", () => {
 			expect(row!.slice(open, close)).toContain("src/a");
 			expect(stripVTControlCharacters(row!)).toContain("…");
 		} finally {
-			settings.clearOverride("tui.hyperlinks");
+			cfgTuiHyperlinks.clearOverride(settings);
 		}
 	});
 
@@ -524,6 +522,26 @@ describe("opencode layout", () => {
 		component.updateResult({ content: [], details }, false);
 
 		expect(visibleRows(component).join("\n")).toContain("failure");
+	});
+
+	it("keeps web_search details-only failures expanded", () => {
+		const component = new ToolExecutionComponent(
+			"web_search",
+			{ query: "q" },
+			{ layout: opencode },
+			undefined,
+			ui,
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Error: No web search model configured." }],
+				details: { response: { provider: "none", sources: [] }, error: "No web search model configured." },
+			},
+			false,
+		);
+
+		expect(visibleRows(component).join("\n")).toContain("No web search model configured.");
 	});
 
 	it("renders an ascii squeezed settled row through the oc.* marker, not `•`", async () => {

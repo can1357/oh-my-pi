@@ -12,7 +12,10 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { CacheWarmingMode } from "../../session/cache-warmer";
+import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -31,7 +34,10 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcOpenSessionResult,
+	RpcPromptResultFrame,
 	RpcResponse,
+	RpcSessionSettledFrame,
 	RpcSessionState,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
@@ -99,6 +105,8 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
+export type RpcSessionSettledListener = () => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -136,6 +144,7 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"message_end",
 	"tool_execution_start",
 	"tool_execution_update",
+	"tool_stream_update",
 	"tool_execution_end",
 ]);
 
@@ -145,6 +154,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"auto_compaction_end",
 	"auto_retry_start",
 	"auto_retry_end",
+	"cache_warming_start",
+	"cache_warming_end",
 	"retry_fallback_applied",
 	"retry_fallback_succeeded",
 	"ttsr_triggered",
@@ -155,6 +166,7 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"thinking_level_changed",
 	"model_changed",
 	"goal_updated",
+	"queue_update",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
@@ -206,6 +218,15 @@ function isRpcSubagentProgressFrame(value: unknown): value is RpcSubagentProgres
 function isRpcSubagentEventFrame(value: unknown): value is RpcSubagentEventFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "subagent_event" && isRecord(value.payload);
+}
+
+function isRpcPromptResultFrame(value: unknown): value is RpcPromptResultFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "prompt_result" && typeof value.agentInvoked === "boolean";
+}
+
+function isRpcSessionSettledFrame(value: unknown): value is RpcSessionSettledFrame {
+	return isRecord(value) && value.type === "session_settled";
 }
 
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
@@ -276,6 +297,12 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
+	#promptResultListeners = new Set<RpcPromptResultListener>();
+	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
+	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
+	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
+	/** Same-id failures that arrive after the success ack removed the pending request. */
+	#promptErrorWaiters = new Map<string, (error: Error) => void>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -567,6 +594,25 @@ export class RpcClient {
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
 	}
 
+	/** Subscribe to `prompt_result` frames: the terminal outcome of each prompt, correlated by request id. */
+	onPromptResult(listener: RpcPromptResultListener): () => void {
+		this.#promptResultListeners.add(listener);
+		return () => {
+			this.#promptResultListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Subscribe to `session_settled`: the session is done — the agent yielded and no
+	 * background work remains that could inject messages and wake it again.
+	 */
+	onSessionSettled(listener: RpcSessionSettledListener): () => void {
+		this.#sessionSettledListeners.add(listener);
+		return () => {
+			this.#sessionSettledListeners.delete(listener);
+		};
+	}
+
 	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
@@ -586,11 +632,15 @@ export class RpcClient {
 
 	/**
 	 * Send a prompt to the agent.
-	 * Returns immediately after sending; use onEvent() to receive streaming events.
-	 * Use waitForIdle() to wait for completion.
+	 * Returns the request id once the message is admitted (dispatched, queued via
+	 * `streamingBehavior` while the agent is busy, or routed to an extension command);
+	 * use onEvent() to receive streaming events and onPromptResult() to observe its
+	 * completion under that id.
 	 */
-	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp"): Promise<string> {
+		const response = await this.#send({ type: "prompt", message, images, streamingBehavior });
+		this.#getData(response);
+		return response.id ?? "";
 	}
 
 	/**
@@ -608,6 +658,23 @@ export class RpcClient {
 	}
 
 	/**
+	 * Remove the first matching user message and its companions from one pending queue.
+	 */
+	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<{ removed: boolean }> {
+		const response = await this.#send({ type: "remove_queued_message", message, queue });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Move the first matching queued follow-up into steering.
+	 * A missing target returns false; retrying may promote another occurrence.
+	 */
+	async promoteQueuedMessage(message: string): Promise<{ promoted: boolean }> {
+		const response = await this.#send({ type: "promote_queued_message", message });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Abort current operation.
 	 */
 	async abort(): Promise<void> {
@@ -619,6 +686,24 @@ export class RpcClient {
 	 */
 	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
 		await this.#send({ type: "abort_and_prompt", message, images });
+	}
+
+	/**
+	 * Continue the newest session in `sessionDir`, or start a fresh one there.
+	 * Lets a pre-spawned process bind to a host-keyed conversation.
+	 */
+	async openSession(sessionDir: string): Promise<RpcOpenSessionResult> {
+		const response = await this.#send({ type: "open_session", sessionDir });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Forward only the listed session event types (`null` forwards all).
+	 * Responses, prompt results, and UI/host frames are never filtered.
+	 */
+	async setEventFilter(events: string[] | null): Promise<string[] | null> {
+		const response = await this.#send({ type: "set_event_filter", events });
+		return this.#getData<{ events: string[] | null }>(response).events;
 	}
 
 	/**
@@ -641,6 +726,7 @@ export class RpcClient {
 			...state,
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
+			goal: state.goal ?? null,
 			tokensPerSecond:
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
@@ -653,6 +739,20 @@ export class RpcClient {
 	 */
 	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
 		const response = await this.#send({ type: "set_fast_mode", enabled });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Read or change goal mode. `get` never mutates or starts a turn; `create`/`resume`
+	 * start a turn only when the server enables `goal.continuationModes: ["rpc"]`.
+	 */
+	async goal(op: RpcGoalOp, options?: { objective?: string; tokenBudget?: number }): Promise<RpcGoalResult> {
+		const response = await this.#send({
+			type: "goal",
+			op,
+			objective: options?.objective,
+			token_budget: options?.tokenBudget,
+		});
 		return this.#getData(response);
 	}
 
@@ -691,6 +791,27 @@ export class RpcClient {
 	}
 
 	/**
+	 * Cancel one running subagent (foreground or background) without aborting
+	 * the session. Resolves `false` when the subagent is unknown or already
+	 * finished.
+	 */
+	async cancelSubagent(subagentId: string): Promise<boolean> {
+		const response = await this.#send({ type: "cancel_subagent", subagentId });
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
+
+	/**
+	 * Send a message to a running subagent as its user, the same way Agent Hub
+	 * chat does: a mid-turn subagent is steered at its next step boundary and one
+	 * between turns starts its next turn. Resolves once the message is queued or
+	 * the subagent's turn starts; rejects when the subagent is not running or the
+	 * message is dropped or refused before that.
+	 */
+	async steerSubagent(subagentId: string, message: string): Promise<void> {
+		this.#getData(await this.#send({ type: "steer_subagent", subagentId, message }));
+	}
+
+	/**
 	 * Set model by provider and ID.
 	 */
 	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
@@ -724,6 +845,33 @@ export class RpcClient {
 	async getAvailableCommands(): Promise<RpcAvailableSlashCommand[]> {
 		const response = await this.#send({ type: "get_available_commands" });
 		return this.#getData<{ commands: RpcAvailableSlashCommand[] }>(response).commands;
+	}
+
+	/**
+	 * Pi-compatible append-history read. Delegates to the canonical
+	 * `SessionManager` on the server: no `since` returns all entries in append
+	 * order, `since` returns entries strictly after the matching durable entry.
+	 */
+	async getEntries(since?: string): Promise<{ entries: SessionEntry[]; leafId: string | null }> {
+		const response = await this.#send({ type: "get_entries", since });
+		return this.#getData<{ entries: SessionEntry[]; leafId: string | null }>(response);
+	}
+
+	/**
+	 * Pi-compatible raw session tree plus the current leaf id.
+	 */
+	async getTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null }> {
+		const response = await this.#send({ type: "get_tree" });
+		return this.#getData<{ tree: SessionTreeNode[]; leafId: string | null }>(response);
+	}
+
+	/**
+	 * Selectable thinking levels for the live model, with `off` first.
+	 * OMP-only `auto`/`inherit` selectors are omitted from discovery.
+	 */
+	async getAvailableThinkingLevels(): Promise<ThinkingLevel[]> {
+		const response = await this.#send({ type: "get_available_thinking_levels" });
+		return this.#getData<{ levels: ThinkingLevel[] }>(response).levels;
 	}
 
 	/**
@@ -770,6 +918,12 @@ export class RpcClient {
 		await this.#send({ type: "set_auto_compaction", enabled });
 	}
 
+	/** Set the session-scoped cache warming mode and return the effective mode. */
+	async setCacheWarming(mode: CacheWarmingMode): Promise<CacheWarmingMode> {
+		const response = await this.#send({ type: "set_cache_warming", mode });
+		return this.#getData<{ mode: CacheWarmingMode }>(response).mode;
+	}
+
 	/**
 	 * Set auto-retry enabled/disabled.
 	 */
@@ -808,7 +962,7 @@ export class RpcClient {
 	}
 
 	/**
-	 * Hand off session context to a new session.
+	 * Summarize the session into a handoff document and compact it in place.
 	 */
 	async handoff(customInstructions?: string): Promise<RpcHandoffResult | null> {
 		const response = await this.#send({ type: "handoff", customInstructions });
@@ -842,6 +996,16 @@ export class RpcClient {
 	}
 
 	/**
+	 * Fork into a new session file and switch to it: history up to and including
+	 * `entryId`, or the whole session when omitted.
+	 * @returns Object with `cancelled: true` if an extension cancelled the fork
+	 */
+	async fork(entryId?: string): Promise<{ cancelled: boolean }> {
+		const response = await this.#send({ type: "fork", entryId });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Get messages available for branching.
 	 */
 	async getBranchMessages(): Promise<Array<{ entryId: string; text: string }>> {
@@ -855,6 +1019,26 @@ export class RpcClient {
 	async getLastAssistantText(): Promise<string | null> {
 		const response = await this.#send({ type: "get_last_assistant_text" });
 		return this.#getData<{ text: string | null }>(response).text;
+	}
+
+	/**
+	 * Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset
+	 * into `text`), from the `spelling.autocomplete` engine; `null` when none applies.
+	 */
+	async predictWord(text: string, cursor: number): Promise<string | null> {
+		// The server runs one prediction at a time per session and holds at most one
+		// more behind it, so this request may wait out an in-flight cold request
+		// (up to 3 daemon-start rounds of 30s plus a 30s first completion) before
+		// its own 30s completion: ~150s. Outlast that so the server's answer, not
+		// our timeout, decides.
+		const response = await this.#send({ type: "predict_word", text, cursor }, 155_000);
+		return this.#getData<{ suffix: string | null }>(response).suffix;
+	}
+
+	/** Report a shown suggestion the user accepted or typed past, with the text and cursor it was shown at. */
+	async predictWordFeedback(text: string, cursor: number, suggestion: string, accepted: boolean): Promise<void> {
+		const response = await this.#send({ type: "predict_word_feedback", text, cursor, suggestion, accepted });
+		this.#getData(response);
 	}
 
 	/**
@@ -980,6 +1164,7 @@ export class RpcClient {
 			parameters: tool.parameters,
 			hidden: tool.hidden,
 			loadMode: tool.loadMode,
+			readsSkillUris: tool.readsSkillUris,
 		}));
 		const response = await this.#send({ type: "set_host_tools", tools: definitions });
 		return this.#getData<{ toolNames: string[] }>(response).toolNames;
@@ -1041,12 +1226,60 @@ export class RpcClient {
 	}
 
 	/**
-	 * Send prompt and wait for completion, returning all events.
+	 * Wait until the session is done, not merely yielded: resolves at once when
+	 * `get_state` reports it settled, otherwise at the next `session_settled`.
+	 * Use after {@link promptAndWait} when background jobs may still wake the agent.
+	 */
+	async waitForSettled(timeout = 60000): Promise<void> {
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const unsubscribe = this.onSessionSettled(resolve);
+		let timeoutId: NodeJS.Timeout | undefined;
+		try {
+			// Subscribed before asking, so a settle between the two cannot be missed.
+			if ((await this.getState()).isSettled) return;
+			timeoutId = this.#startTimeout(timeout, () => {
+				reject(new Error(`Timeout waiting for session_settled. Stderr: ${this.#process?.peekStderr() ?? ""}`));
+			});
+			await promise;
+		} finally {
+			unsubscribe();
+			clearTimeout(timeoutId);
+		}
+	}
+
+	/**
+	 * Send a prompt and wait for its own `prompt_result`, returning the agent events
+	 * streamed meanwhile. A local-only prompt answered synchronously resolves with
+	 * the events seen so far.
 	 */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		return eventsPromise;
+		const id = `req_${++this.#requestId}`;
+		const events: AgentEvent[] = [];
+		const { promise, resolve, reject } = Promise.withResolvers<AgentEvent[]>();
+		const unsubscribe = this.onEvent(event => events.push(event));
+		this.#promptResultWaiters.set(id, result => {
+			if (result.status === "error") {
+				reject(new Error(result.error?.message ?? "Prompt failed"));
+				return;
+			}
+			resolve(events);
+		});
+		this.#promptErrorWaiters.set(id, reject);
+		let timeoutId: NodeJS.Timeout | undefined;
+		try {
+			const response = await this.#send({ type: "prompt", message, images }, 30_000, id);
+			const data = this.#getData<{ agentInvoked?: boolean } | undefined>(response);
+			if (data?.agentInvoked === false) return events;
+			timeoutId = this.#startTimeout(timeout, () => {
+				reject(new Error(`Timeout waiting for prompt_result. Stderr: ${this.#process?.peekStderr() ?? ""}`));
+			});
+			return await promise;
+		} finally {
+			unsubscribe();
+			clearTimeout(timeoutId);
+			this.#promptResultWaiters.delete(id);
+			this.#promptErrorWaiters.delete(id);
+		}
 	}
 
 	// =========================================================================
@@ -1062,6 +1295,14 @@ export class RpcClient {
 				this.#pendingRequests.delete(id);
 				pending.resolve(data);
 				return;
+			}
+			if (id && data.success === false) {
+				const rejectLate = this.#promptErrorWaiters.get(id);
+				if (rejectLate) {
+					this.#promptErrorWaiters.delete(id);
+					rejectLate(new RpcCommandError(data.error, data.command, data.code));
+					return;
+				}
 			}
 		}
 
@@ -1103,6 +1344,21 @@ export class RpcClient {
 			return;
 		}
 
+		if (isRpcSessionSettledFrame(data)) {
+			for (const listener of this.#sessionSettledListeners) {
+				listener();
+			}
+			return;
+		}
+
+		if (isRpcPromptResultFrame(data)) {
+			if (data.id !== undefined) this.#promptResultWaiters.get(data.id)?.(data);
+			for (const listener of this.#promptResultListeners) {
+				listener(data);
+			}
+			return;
+		}
+
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
@@ -1123,12 +1379,10 @@ export class RpcClient {
 		}
 	}
 
-	#send(command: RpcCommandBody, timeoutMs = 30_000): Promise<RpcResponse> {
+	#send(command: RpcCommandBody, timeoutMs = 30_000, id = `req_${++this.#requestId}`): Promise<RpcResponse> {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}
-
-		const id = `req_${++this.#requestId}`;
 		const fullCommand = { ...command, id } as RpcCommand;
 		const { promise, resolve, reject } = Promise.withResolvers<RpcResponse>();
 		let settled = false;

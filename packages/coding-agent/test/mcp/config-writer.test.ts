@@ -2,7 +2,29 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { addMCPServer, readDisabledServers, readMCPConfigFile, setServerDisabled } from "../../src/mcp/config-writer";
+import {
+	addMCPServer,
+	readDisabledServers,
+	readMCPConfigFile,
+	setServerDisabled,
+	validateServerName,
+} from "../../src/mcp/config-writer";
+
+describe("validateServerName", () => {
+	it("accepts human display labels with spaces (#11731)", () => {
+		expect(validateServerName("MaaS Slack")).toBeUndefined();
+	});
+
+	it("still accepts namespaced colon names and rejects unsupported characters", () => {
+		expect(validateServerName("cloudflare:cloudflare-api")).toBeUndefined();
+		expect(validateServerName("bad/name")).toBeDefined();
+		expect(validateServerName("")).toBeDefined();
+		expect(validateServerName(" ")).toBeDefined();
+		expect(validateServerName(" MaaS Slack")).toBeDefined();
+		expect(validateServerName("MaaS Slack ")).toBeDefined();
+		expect(validateServerName("MaaS  Slack")).toBeDefined();
+	});
+});
 
 describe("config-writer concurrent mutations", () => {
 	let dir: string;
@@ -25,6 +47,12 @@ describe("config-writer concurrent mutations", () => {
 
 		const config = await readMCPConfigFile(filePath);
 		expect(Object.keys(config.mcpServers ?? {}).sort()).toEqual(["alpha", "bravo"]);
+	});
+
+	it("persists a server name containing spaces (#11731)", async () => {
+		await addMCPServer(filePath, "MaaS Slack", { type: "stdio", command: "s" });
+		const config = await readMCPConfigFile(filePath);
+		expect(Object.keys(config.mcpServers ?? {})).toContain("MaaS Slack");
 	});
 
 	it("preserves both denylist edits when disable calls race", async () => {

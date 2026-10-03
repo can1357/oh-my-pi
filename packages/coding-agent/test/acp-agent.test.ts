@@ -20,16 +20,10 @@ import type {
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODELS,
-	TTS_LOCAL_VOICE_OPTIONS,
-} from "@oh-my-pi/pi-coding-agent/tts/models";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -49,6 +43,8 @@ import {
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
+
+import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
@@ -141,9 +137,9 @@ class FakeAgentSession {
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
-	refreshSkillsCalls = 0;
-	async refreshSkills(): Promise<void> {
-		this.refreshSkillsCalls++;
+	async refreshSkillsAndCommands(): Promise<void> {}
+	subscribeCommandMetadataChanged(_listener: () => void): () => void {
+		return () => {};
 	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
@@ -181,6 +177,10 @@ class FakeAgentSession {
 
 	getAvailableModels(): Model[] {
 		return this.models;
+	}
+
+	getAvailableEffortSelectors(): ReadonlyArray<string> {
+		return ["off", "auto", ...this.getAvailableThinkingLevels()];
 	}
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
@@ -385,6 +385,10 @@ class FakeAgentSession {
 		return this.fastMode;
 	}
 
+	isUltrafastModeEnabled(): boolean {
+		return false;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}
@@ -475,6 +479,8 @@ afterEach(async () => {
 	}
 	resetSettingsForTest();
 
+	// Renames index titles in the process-wide `<agentDir>/history.db`; Windows cannot delete it while open.
+	resetSessionIndexForTests();
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });
 	}
@@ -624,7 +630,7 @@ describe("ACP agent", () => {
 
 	it("advertises plan mode and emits schema-valid mode updates", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		expectAcpStructure(zNewSessionResponse, created);
@@ -681,7 +687,7 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler errors when the plan file is missing", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -702,7 +708,7 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler approves the agent-named plan and exits plan mode on submit", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -760,6 +766,76 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
+	it("plan-proposal handler autosaves the approved plan without leaking the path", async () => {
+		const harness = await createHarness();
+		cfgPlanEnabled.set(Settings.instance, true);
+		cfgPlanAutosave.set(Settings.instance, true);
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+			details: { planFilePath: string; title: string; planExists: boolean };
+		};
+
+		expect(result.details.planExists).toBe(true);
+		expect(result.content[0]?.text).toMatch(/Plan approved/);
+		expect(result.content[0]?.text).not.toContain(harness.cwdA);
+		expect(result.content[0]?.text).not.toContain("autosaved to");
+		const saved = path.join(harness.cwdA, ".omp", "plans", "WORDS_COUNTER_PLAN.md");
+		expect(await Bun.file(saved).text()).toBe("# Words Counter\n\nFile contents.");
+		expect(session.planModeState).toBeUndefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("plan-proposal handler approves and notes autosave failure without the path", async () => {
+		const harness = await createHarness();
+		cfgPlanEnabled.set(Settings.instance, true);
+		const blocker = path.join(harness.cwdA, "blocker");
+		await Bun.write(blocker, "x");
+		cfgPlanAutosave.set(Settings.instance, true);
+		cfgPlanAutosaveDir.set(Settings.instance, path.join(blocker, "sub"));
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+		};
+		const text = result.content[0]?.text ?? "";
+
+		expect(text).toMatch(/Plan approved/);
+		expect(text).toMatch(/autosave failed/);
+		expect(text).not.toContain(harness.cwdA);
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planReferencePath).toBe("local://words-counter-plan.md");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 
 	it("plan-proposal handler treats dismissed elicitation as refine, never approves", async () => {
 		// Regression for the P1 review finding on #1870: when a form-capable
@@ -771,7 +847,7 @@ describe("ACP agent", () => {
 		const harness = await createHarness({
 			elicitationHandler: async () => ({ action: "cancel" }),
 		});
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -943,6 +1019,118 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("emits a single config_option_update per /effort change", async () => {
+		// `/effort <level>` calls AgentSession.setThinkingLevel, which fires
+		// `thinking_level_changed`; the lifetime subscription turns that into a
+		// `config_option_update`. The command's explicit notifyConfigChanged
+		// must not add a second identical push, or clients redraw their config
+		// UI twice per change.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await advanceBootstrapGuard();
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(session.thinkingLevel).toBe("high");
+		expect(configUpdates.length).toBe(1);
+		expectAcpNotifications(configUpdates);
+		const update = configUpdates[0]!.update;
+		if (update.sessionUpdate !== "config_option_update") {
+			throw new Error("expected config_option_update");
+		}
+		const thinkingOption = update.configOptions.find(option => option.id === "thinking") as
+			| { currentValue?: unknown }
+			| undefined;
+		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("delivers the thinking config update before resolving the command", async () => {
+		const blocked = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let holdConfig = false;
+		const harness = await createHarness({
+			sessionUpdateHook: async notification => {
+				if (holdConfig && notification.update.sessionUpdate === "config_option_update") {
+					blocked.resolve();
+					await release.promise;
+				}
+			},
+		});
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		holdConfig = true;
+		const baseline = harness.updates.length;
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+		await blocked.promise;
+		try {
+			expect(await Promise.race([prompt.then(() => true), Bun.sleep(0).then(() => false)])).toBe(false);
+			release.resolve();
+			expect((await prompt).stopReason).toBe("end_turn");
+			const updates = harness.updates.slice(baseline).filter(n => n.update.sessionUpdate === "config_option_update");
+			expect(updates).toHaveLength(1);
+			const update = updates[0]!.update;
+			if (update.sessionUpdate !== "config_option_update") throw new Error("Expected config update");
+			expect(update.configOptions.find(option => option.id === "thinking")?.currentValue).toBe("high");
+		} finally {
+			release.resolve();
+			await prompt;
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("still pushes config_option_update for /effort before the lifetime subscription exists", async () => {
+		// Pre-bootstrap there is no lifetime subscription, so the explicit
+		// notifyConfigChanged is the only path that tells the client — same
+		// contract as `setSessionConfigOption`'s pre-bootstrap push.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		// Deliberately do not advance the 50ms bootstrap guard: the lifetime
+		// subscription is not installed yet.
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(1);
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("pushes config_option_update when the model changes internally", async () => {
 		// Internal callers (prewalk hand-offs, retry-fallback, model cycling)
 		// change AgentSession's model directly without going through the ACP
@@ -1024,44 +1212,46 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("lists static speech models for ACP mobile voice settings", async () => {
+	it("lists role selectors for ACP mobile voice settings", async () => {
 		const harness = await createHarness();
-		const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 
-		const result = await harness.agent.extMethod("speech.models.list", {});
+		const result = (await harness.agent.extMethod("speech.models.list", {})) as Record<string, unknown> & {
+			speechToText: { models: Array<{ value: string }> };
+			textToSpeech: { models: Array<{ value: string; voices: unknown[] }>; voices: unknown[] };
+		};
 
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			settings: {
-				speechToTextModel: "stt.modelName",
-				textToSpeechModel: "tts.localModel",
+				speechToTextModel: "modelRoles.dictation",
+				textToSpeechModel: "modelRoles.speech",
 				textToSpeechVoice: "tts.localVoice",
 				speechVoice: "speech.voice",
 			},
 			defaults: {
-				speechToTextModel: DEFAULT_STT_MODEL_KEY,
-				textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				voice: DEFAULT_TTS_VOICE,
+				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				textToSpeechModel: "local/kokoro",
+				voice: "af_heart",
 			},
 			speechToText: {
-				setting: "stt.modelName",
-				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+				setting: "modelRoles.dictation",
+				defaultValue: "local/parakeet-tdt-0.6b-v3",
 			},
 			textToSpeech: {
-				modelSetting: "tts.localModel",
+				modelSetting: "modelRoles.speech",
 				voiceSetting: "tts.localVoice",
 				speechVoiceSetting: "speech.voice",
-				defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				defaultVoice: DEFAULT_TTS_VOICE,
-				models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }) => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				})),
-				voices,
+				defaultModel: "local/kokoro",
+				defaultVoice: "af_heart",
 			},
 		});
+		expect(result.speechToText.models.map(model => model.value)).toEqual([
+			"local/whisper-base",
+			"local/whisper-small",
+			"local/whisper-large-v3-turbo",
+			"local/parakeet-tdt-0.6b-v3",
+		]);
+		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
+		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1298,7 +1488,7 @@ describe("ACP agent", () => {
 
 	it("surfaces a provider error that reaches the client only via agent_end", async () => {
 		// A request that fails before streaming any assistant events (e.g.
-		// GitHub Copilot's HTTP 400 model_not_supported after retries) emits no
+		// GitHub Copilot's HTTP 400 model_not_supported) emits no
 		// message_update/message_end — only agent_end carrying an empty
 		// assistant message with errorMessage. The client must still see why
 		// the turn ended instead of a silent stop.
@@ -1307,8 +1497,7 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId);
 		if (!session) throw new Error("session not registered");
 
-		const errorText =
-			"GitHub Copilot rejected this model (HTTP 400 model_not_supported) after retries. Try again in a few seconds.";
+		const errorText = "400 The requested model is not supported.";
 		const failedMessage = {
 			...makeAssistantMessage(""),
 			stopReason: "error" as const,
@@ -1472,7 +1661,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("does not replay internal Hub messages to ACP clients", async () => {
+	it("does not replay internal peer messages to ACP clients", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
 		harness.sessions.push(stored);
@@ -1483,8 +1672,8 @@ describe("ACP agent", () => {
 				{
 					type: "toolCall",
 					id: "toolu_hub_replay",
-					name: "hub",
-					arguments: { op: "send", to: "Scout", message: "Private coordination" },
+					name: "write",
+					arguments: { path: "agent://Scout", content: "Private coordination" },
 				},
 			],
 			stopReason: "toolUse",
@@ -1492,8 +1681,8 @@ describe("ACP agent", () => {
 		stored.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "toolu_hub_replay",
-			toolName: "hub",
-			content: [{ type: "text", text: "Private reply" }],
+			toolName: "write",
+			content: [{ type: "text", text: "Delivered to Scout." }],
 			isError: false,
 			timestamp: Date.now(),
 		});
@@ -1790,7 +1979,7 @@ describe("ACP agent", () => {
 		expect(names).toContain("handoff");
 		expect(names).not.toContain("fork");
 		expect(names).not.toContain("btw");
-		expect(names).not.toContain("drop");
+		expect(names).not.toContain("delete");
 		expect(names).not.toContain("resume");
 		expect(names).not.toContain("agents");
 		expect(names).not.toContain("extensions");
@@ -2254,44 +2443,6 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("queues next prompt until AgentSession idle cleanup completes", async () => {
-		const harness = await createHarness();
-		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		const session = harness.findSession(created.sessionId)!;
-		const { promise: idleBlocked, resolve: markIdleBlocked } = Promise.withResolvers<void>();
-		const { promise: releaseIdle, resolve: unblockIdle } = Promise.withResolvers<void>();
-		session.waitForIdleBlocker = async () => {
-			markIdleBlocked();
-			await releaseIdle;
-		};
-
-		const firstPrompt = harness.agent.prompt({
-			sessionId: created.sessionId,
-			messageId: "00000000-0000-4000-8000-000000000030",
-			prompt: [{ type: "text", text: "wait for cleanup" }],
-		} as PromptRequest);
-		await idleBlocked;
-
-		try {
-			const secondPrompt = harness.agent.prompt({
-				sessionId: created.sessionId,
-				messageId: "00000000-0000-4000-8000-000000000031",
-				prompt: [{ type: "text", text: "after cleanup" }],
-			} as PromptRequest);
-			await Bun.sleep(0);
-			expect(session.promptCalls).toEqual(["wait for cleanup"]);
-
-			unblockIdle();
-			await firstPrompt;
-			await secondPrompt;
-			expect(session.promptCalls).toEqual(["wait for cleanup", "after cleanup"]);
-		} finally {
-			unblockIdle();
-			harness.abortController.abort();
-			await Bun.sleep(0);
-		}
-	});
-
 	it("serializes multiple prompts queued during idle cleanup", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -2392,6 +2543,88 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("keeps a cancelled bare rename from updating or settling its successor", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const inferences = [
+			{ started: Promise.withResolvers<void>(), title: Promise.withResolvers<string | null>() },
+			{ started: Promise.withResolvers<void>(), title: Promise.withResolvers<string | null>() },
+		];
+		const titleSignals: Array<AbortSignal | undefined> = [];
+		let inferenceIndex = 0;
+		try {
+			await session.sessionManager.setSessionName("Original title", "user");
+			session.sessionManager.appendMessage({
+				role: "user",
+				content: "Investigate why cancelling a generated session title interrupts the next rename request.",
+				timestamp: Date.now(),
+			});
+			Object.assign(session, {
+				messages: session.sessionManager.buildSessionContext().messages,
+				titleGenerationSignal: new AbortController().signal,
+				generateTitle: (_context: string, _systemPrompt?: string, signal?: AbortSignal) => {
+					const inference = inferences[inferenceIndex++];
+					titleSignals.push(signal);
+					inference.started.resolve();
+					// Deliberately ignore abort so a cancelled inference can return late.
+					return inference.title.promise;
+				},
+			});
+
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/rename" }],
+			});
+			await Promise.race([inferences[0].started.promise, firstPrompt]);
+			await harness.agent.cancel({ sessionId: created.sessionId });
+			expect((await firstPrompt).stopReason).toBe("cancelled");
+			expect(titleSignals[0]?.aborted).toBe(true);
+
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/rename" }],
+			});
+			await Promise.race([inferences[1].started.promise, secondPrompt]);
+			expect(titleSignals[1]?.aborted).toBe(false);
+			const beforeLateResult = harness.updates.length;
+
+			inferences[0].title.resolve("Cancelled title");
+			const settledByOldRename = await Promise.race([secondPrompt.then(() => true), Bun.sleep(0).then(() => false)]);
+			expect(settledByOldRename).toBe(false);
+			expect(session.sessionManager.getSessionName()).toBe("Original title");
+			expect(
+				harness.updates
+					.slice(beforeLateResult)
+					.filter(
+						update =>
+							update.sessionId === created.sessionId &&
+							(update.update.sessionUpdate === "session_info_update" ||
+								update.update.sessionUpdate === "agent_message_chunk"),
+					),
+			).toEqual([]);
+
+			inferences[1].title.resolve("Rename cancellation isolation");
+			expect((await secondPrompt).stopReason).toBe("end_turn");
+			expect(session.sessionManager.getSessionName()).toBe("Rename cancellation isolation");
+			expect(harness.updates.slice(beforeLateResult)).toContainEqual({
+				sessionId: created.sessionId,
+				update: {
+					sessionUpdate: "session_info_update",
+					title: "Rename cancellation isolation",
+					updatedAt: expect.any(String),
+				},
+			});
+		} finally {
+			for (const inference of inferences) {
+				inference.started.resolve();
+				inference.title.resolve(null);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("closes the ACP session when cancel cleanup times out", async () => {

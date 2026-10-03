@@ -1,47 +1,60 @@
-/* Transcript — dense gutter-labeled rows, terminal heritage. tr-* namespace. */
+/* Transcript — calm gutter-labeled rows; user turns sit on a raised card. tr-* namespace. */
 
 .tr-root {
 	height: 100%;
 	overflow-y: auto;
 	overflow-x: hidden;
-	padding: 12px 16px 24px;
+	padding: 24px 24px 16px;
 	font-family: var(--font-ui);
-	font-size: 13px;
-	line-height: 1.5;
+	font-size: 14px;
+	line-height: 1.6;
 	color: var(--fg);
 }
 
 .tr-empty {
-	padding: 24px 0;
+	padding: 48px 0;
 	text-align: center;
 	color: var(--fg-faint);
-	font-family: var(--font-mono);
-	font-size: 12px;
+	font-size: 13px;
 }
 
 /* ---- rows ---- */
 
 .tr-row {
 	display: grid;
-	grid-template-columns: 72px minmax(0, 1fr);
-	gap: 0 12px;
-	padding: 5px 0;
+	grid-template-columns: 64px minmax(0, 1fr);
+	gap: 0 16px;
+	padding: 7px 0;
+	animation: rise 320ms var(--ease-out) backwards;
 }
 
 .tr-gutter {
 	padding-top: 3px;
 	text-align: right;
 	font-family: var(--font-mono);
-	font-size: 10px;
+	font-size: 11.5px;
 	font-weight: 500;
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
 	color: var(--fg-faint);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 	user-select: none;
 }
 
 .tr-row--user .tr-gutter {
-	color: var(--accent);
+	padding-top: 12px;
+	color: var(--fg-muted);
+}
+
+/* User turns: a raised card so prompts stand apart from agent prose. */
+.tr-row--user .tr-body {
+	justify-self: start;
+	max-width: 100%;
+	padding: 9px 14px;
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-card);
 }
 
 .tr-body {
@@ -83,13 +96,13 @@
 
 .tr-badge {
 	display: inline-block;
-	padding: 0 5px;
-	border-radius: var(--radius-sm);
+	padding: 0 7px;
+	border-radius: 999px;
 	background: var(--accent-muted);
 	color: var(--accent);
 	font-family: var(--font-mono);
-	font-size: 10px;
-	line-height: 16px;
+	font-size: 11px;
+	line-height: 18px;
 	text-transform: none;
 	letter-spacing: 0;
 }
@@ -97,14 +110,14 @@
 .tr-chip {
 	display: inline-flex;
 	align-items: center;
-	height: 16px;
-	padding: 0 6px;
+	height: 20px;
+	padding: 0 8px;
 	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
-	background: var(--bg-inset);
+	border-radius: 999px;
+	background: var(--bg-raised);
 	color: var(--fg-muted);
 	font-family: var(--font-mono);
-	font-size: 10px;
+	font-size: 11px;
 	white-space: nowrap;
 }
 
@@ -183,12 +196,9 @@
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	margin: 10px 0;
+	margin: 16px 0;
 	color: var(--fg-faint);
-	font-family: var(--font-mono);
-	font-size: 10px;
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
+	font-size: 12px;
 	user-select: none;
 }
 
@@ -206,6 +216,24 @@
 	font-size: 11px;
 }
 
+.tr-earlier {
+	display: block;
+	margin: 4px auto 16px;
+	height: 28px;
+	padding: 0 14px;
+	border: 1px solid var(--border-strong);
+	border-radius: 999px;
+	background: var(--bg-raised);
+	color: var(--fg-muted);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.tr-earlier:hover {
+	color: var(--fg-muted);
+	border-color: var(--border-strong);
+}
+
 .tr-shimmer {
 	color: var(--fg-muted);
 	font-size: 12.5px;
@@ -219,6 +247,7 @@
 .tr-body > .tv-card {
 	align-self: stretch;
 	background: var(--bg-raised);
+	border-radius: var(--radius);
 }
 
 /* ---- markdown ---- */
@@ -298,16 +327,17 @@
 }
 
 .tr-md code {
-	padding: 1px 4px;
-	border-radius: var(--radius-sm);
-	background: var(--bg-inset);
+	padding: 1px 5px;
+	border: 1px solid var(--border);
+	border-radius: 5px;
+	background: var(--bg-raised);
 	font-family: var(--font-mono);
-	font-size: 12px;
+	font-size: 0.86em;
 }
 
 .tr-md pre {
-	margin: 8px 0;
-	padding: 8px 10px;
+	margin: 10px 0;
+	padding: 12px 14px;
 	overflow-x: auto;
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -316,6 +346,7 @@
 
 .tr-md pre code {
 	padding: 0;
+	border: 0;
 	border-radius: 0;
 	background: none;
 	font-size: 12px;
@@ -325,7 +356,7 @@
 .tr-md blockquote {
 	margin: 8px 0;
 	padding: 2px 12px;
-	border-left: 3px solid var(--border-strong);
+	border-left: 2px solid var(--accent);
 	color: var(--fg-muted);
 }
 
@@ -347,8 +378,8 @@
 }
 
 .tr-md th {
-	background: var(--bg-inset);
-	font-weight: 600;
+	background: var(--bg-raised);
+	font-weight: 550;
 }
 
 .tr-md a {
@@ -391,8 +422,8 @@
 /* ---- compact variant (agent drawer) ---- */
 
 .tr-root--compact {
-	padding: 8px 10px 16px;
-	font-size: 12px;
+	padding: 12px 14px 16px;
+	font-size: 13px;
 }
 
 .tr-root--compact .tr-row {
@@ -402,7 +433,7 @@
 }
 
 .tr-root--compact .tr-gutter {
-	font-size: 9px;
+	font-size: 10.5px;
 }
 
 .tr-root--compact .tv-pre {
@@ -430,10 +461,14 @@
 		gap: 4px;
 		padding: 8px 0;
 	}
-	.tr-gutter {
+	.tr-root {
+		padding: 16px 14px 12px;
+	}
+	.tr-gutter,
+	.tr-row--user .tr-gutter {
 		text-align: left;
 		padding-top: 0;
-		font-size: 10px;
+		font-size: 11px;
 		margin-bottom: 2px;
 	}
 	.tr-gutter:empty {

@@ -28,7 +28,7 @@ describe("AgentSession concurrent disposal", () => {
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-dispose-concurrent-");
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {

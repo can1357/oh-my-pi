@@ -119,7 +119,13 @@ function stripReferenceTrailingMarker(candidate: string): string | undefined {
 	return suffixLength > 0 && suffixLength < candidate.length ? candidate.slice(0, -suffixLength) : undefined;
 }
 
-function getReferenceCandidateIds(modelId: string): string[] {
+/**
+ * Expand a proxied/affixed model id into the ids it may be catalogued under,
+ * least-stripped first: bracket affixes, model-like segments, `:cloud`,
+ * namespace prefix, `:`→`-`, lowercase, and declared trailing markers.
+ * Shared by reference recovery and catalog-metric matching (`./metrics`).
+ */
+export function getReferenceCandidateIds(modelId: string): string[] {
 	const candidates = new Set<string>();
 	const queue = [modelId];
 	for (let index = 0; index < queue.length; index += 1) {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type Component,
+	CURSOR_MARKER,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
 	TUI,
@@ -188,6 +189,28 @@ class TmuxPreservedClearTerminal extends VirtualTerminal {
 		super.write(translated);
 	}
 }
+/**
+ * Models ConPTY materializing a pending wrap before the cursor move that follows
+ * an exact-width bottom-row repaint, as observed in issue #9783's PTY capture.
+ */
+class ConptyPendingWrapTerminal extends VirtualTerminal {
+	override write(data: string): void {
+		const cursorMove = /\x1b\[\d+;\d+H/g;
+		let offset = 0;
+		for (let match = cursorMove.exec(data); match; match = cursorMove.exec(data)) {
+			const beforeMove = data.slice(offset, match.index);
+			super.write(beforeMove);
+			const lastReturn = Math.max(beforeMove.lastIndexOf("\r"), beforeMove.lastIndexOf("\n"));
+			const trailingText = Bun.stripANSI(beforeMove.slice(lastReturn + 1));
+			if (trailingText.length >= this.columns && this.getCursor().row === this.rows - 1) {
+				super.write("\r\n");
+			}
+			super.write(match[0]);
+			offset = match.index + match[0].length;
+		}
+		super.write(data.slice(offset));
+	}
+}
 
 describe("terminal frame plans", () => {
 	it("appends finalized history once and leaves the requested mutable viewport intact", () => {
@@ -202,6 +225,48 @@ describe("terminal frame plans", () => {
 		expect(provider.acknowledged).toEqual([1]);
 		expect(terminal.getBufferPosition().baseY).toBe(1);
 		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["history two", "editor", "status"]);
+		tui.stop();
+	});
+	it("keeps an exact-width live row out of scrollback when ConPTY materializes pending wrap", () => {
+		const terminal = new ConptyPendingWrapTerminal(20, 4);
+		const provider = new Provider({
+			history: { id: 1, rows: ["history one", "history two"] },
+			viewport: [`editor${CURSOR_MARKER}`, "status one".padEnd(20, ".")],
+		});
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		for (let frame = 2; frame <= 8; frame++) {
+			provider.plan = { viewport: [`editor${CURSOR_MARKER}`, `status ${frame}`.padEnd(20, ".")] };
+			tui.requestRender(true);
+		}
+
+		expect(terminal.getBufferPosition().baseY).toBe(0);
+		expect(plainBuffer(terminal)).toEqual(["history one", "history two", "editor", "status 8............"]);
+		tui.stop();
+	});
+	it("places the cursor from a moved marker row and hides it once the marker is gone", () => {
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new Provider({ viewport: ["alpha", `ed${CURSOR_MARKER}it`, "status"] });
+		const tui = new TUI(terminal, true, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		// Every row moved, so each is reused by content rather than position.
+		terminal.writes.length = 0;
+		provider.plan = { viewport: [`ed${CURSOR_MARKER}it`, "status", "alpha"] };
+		tui.requestRender(true);
+		let written = terminal.writes.join("");
+		expect(written).not.toContain(CURSOR_MARKER);
+		expect(written).toContain("\x1b[1;3H\x1b[?25h");
+
+		// The marker-free row now matches the stripped row painted last frame.
+		terminal.writes.length = 0;
+		provider.plan = { viewport: ["status", "alpha", "edit"] };
+		tui.requestRender(true);
+		written = terminal.writes.join("");
+		expect(written).not.toContain("\x1b[?25h");
+		expect(written).toContain("\x1b[?25l");
+		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["status", "alpha", "edit", ""]);
 		tui.stop();
 	});
 	it("keeps live viewport rows out of tmux-style preserved-clear scrollback on a scrolling append", () => {
@@ -259,6 +324,52 @@ describe("terminal frame plans", () => {
 			"live",
 			"editor",
 		]);
+		tui.stop();
+	});
+
+	it("publishes composer-space hit-test origin across a replay pad", () => {
+		// A replay splices history rows over the viewport's leading blanks for
+		// painting, but click spans stay indexed to the composer's unpadded
+		// rows: the published top must back out that pad so a click on a live
+		// row resolves to its own span instead of one pad-length above it.
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new Provider({ viewport: ["", "", "live", "editor"] });
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		provider.plan = {
+			history: { id: 1, rows: ["history one", "history two"], kind: "replay" },
+			viewport: ["", "", "live", "editor"],
+		};
+		tui.requestRender(true);
+
+		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual([
+			"history one",
+			"history two",
+			"live",
+			"editor",
+		]);
+		expect(tui.getMutableViewport()).toEqual({ top: 0, length: 2 });
+		tui.stop();
+	});
+
+	it("publishes composer-space origin when a replay prepends blanks", () => {
+		// A short viewport is prepended with blanks before the replay split,
+		// so composer row 0 sits that many screens below the painted top even
+		// when fewer blanks were replaced by history rows.
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new Provider({ viewport: ["live", "editor"] });
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		provider.plan = {
+			history: { id: 1, rows: ["history one"], kind: "replay" },
+			viewport: ["live", "editor"],
+		};
+		tui.requestRender(true);
+
+		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["history one", "", "live", "editor"]);
+		expect(tui.getMutableViewport()).toEqual({ top: 2, length: 3 });
 		tui.stop();
 	});
 

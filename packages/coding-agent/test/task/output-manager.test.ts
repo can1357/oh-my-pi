@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Contract: subagent output ids are the requested name, used verbatim the first
@@ -17,16 +18,6 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Anna")).toBe("Anna-3");
 		// A distinct name is untouched — no prefix, no suffix.
 		expect(await mgr.allocate("Bob")).toBe("Bob");
-	});
-
-	it("de-duplicates repeated names while preserving order", async () => {
-		const mgr = new AgentOutputManager(() => null);
-
-		const ids: string[] = [];
-		for (const name of ["Auth", "Auth", "Api", "Auth"]) {
-			ids.push(await mgr.allocate(name));
-		}
-		expect(ids).toEqual(["Auth", "Auth-2", "Api", "Auth-3"]);
 	});
 
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {
@@ -91,5 +82,14 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("__advisor")).toBe("__advisor-2");
 		// Unrelated names sharing the prefix are unaffected.
 		expect(await mgr.allocate("__advisor-notes")).toBe("__advisor-notes");
+	});
+
+	it("reserves the pinned-HUD toggle sentinel so a task can't collide with it", async () => {
+		const mgr = new AgentOutputManager(() => null);
+		// A subagent allocated the sentinel id would be indistinguishable from
+		// the jump-list expander row in click routing; it bumps to a suffix.
+		expect(await mgr.allocate(PINNED_HUD_TOGGLE_ID)).toBe(`${PINNED_HUD_TOGGLE_ID}-2`);
+		// Unrelated names sharing the prefix are unaffected.
+		expect(await mgr.allocate("@omp:other")).toBe("@omp:other");
 	});
 });

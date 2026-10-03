@@ -189,18 +189,20 @@ export async function callConfiguredCompletion(
 		return null;
 	}
 	try {
-		const message = await retryTransientCompletion(() =>
-			completeSimple(
-				model,
-				{
-					messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-				},
-				{
-					apiKey: llmApiKey() || undefined,
-					maxTokens: opts.maxTokens ?? llmMaxTokens(),
-					temperature,
-				},
-			),
+		const message = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+					},
+					{
+						apiKey: llmApiKey() || undefined,
+						maxTokens: opts.maxTokens ?? llmMaxTokens(),
+						temperature,
+					},
+				),
+			{ provider: model.provider },
 		);
 		return assistantText(message).trim() || null;
 	} catch {

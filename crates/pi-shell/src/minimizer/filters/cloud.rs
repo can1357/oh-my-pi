@@ -1599,9 +1599,9 @@ mod tests {
 	fn s3_ls_summarize_footer_is_not_parsed_as_row() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = aws_ctx("s3", "aws s3 ls --summarize s3://b/", &cfg);
-		// `--summarize` appends `Total Objects:`/`Total Size:` footers that lack a
-		// real date/time prefix; they must not be reshaped into bogus object rows or
-		// silently dropped.
+		// `--summarize` appends `Total Objects:`/`Total Size:` footers that lack
+		// a real date/time prefix; they must not be reshaped into bogus object
+		// rows or silently dropped.
 		let input = "2026-05-27 01:02:03 100 builds\n\nTotal Objects: 1\nTotal Size: 100\n";
 		let out = filter(&ctx, input, 0);
 		assert!(out.text.contains("builds\t2026-05-27 01:02:03"), "{:?}", out.text);
@@ -1613,8 +1613,8 @@ mod tests {
 	fn s3_ls_common_prefix_with_spaces_is_preserved() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = aws_ctx("s3", "aws s3 ls s3://b/", &cfg);
-		// `PRE` common-prefix names can contain spaces; the full name must survive
-		// rather than being truncated to the first token.
+		// `PRE` common-prefix names can contain spaces; the full name must
+		// survive rather than being truncated to the first token.
 		let out = filter(&ctx, "                           PRE my folder/\n", 0);
 		assert!(out.text.contains("my folder"), "{:?}", out.text);
 	}

@@ -61,7 +61,6 @@ function decodeConversationId(chunk: Buffer): string | undefined {
 type WireRequest = {
 	conversationId?: string;
 	action?: string;
-	userText?: string;
 	pendingToolCalls: number;
 };
 
@@ -69,11 +68,9 @@ function decodeRunRequest(chunk: Buffer): WireRequest | undefined {
 	const msg = fromBinary(AgentClientMessageSchema, chunk.subarray(5));
 	if (msg.message.case !== "runRequest") return undefined;
 	const req = msg.message.value;
-	const action = req.action?.action;
 	return {
 		conversationId: req.conversationId,
 		action: req.action?.action.case,
-		userText: action?.case === "userMessageAction" ? action.value.userMessage?.text : undefined,
 		pendingToolCalls: req.conversationState?.pendingToolCalls?.length ?? 0,
 	};
 }
@@ -306,25 +303,43 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 		expect(seenConversationIds[1]).not.toBe("sess-sticky");
 	});
 
-	it("rotated retry recovers a resume-action turn", async () => {
+	it("rotated retry resumes the same completed history on the fresh id", async () => {
+		// The retry must not replay the last user message: that drops every tool
+		// call and result after it, and the model restarts work it already did.
+		// It resumes over the identical rebuilt history, without the cached
+		// checkpoint (whose pending calls would re-poison the new id).
 		const seen: WireRequest[] = [];
 		const baseUrl = await startScriptedServer(seen, ["reject", "ok"]);
-		const ctx = resumeContext();
+		const replayed: string[][] = [];
+		const capture = (payload: unknown) => {
+			const run = payload as { conversationState?: { rootPromptMessagesJson: Uint8Array[] } };
+			replayed.push(
+				(run.conversationState?.rootPromptMessagesJson ?? []).map(id => Buffer.from(id).toString("hex")),
+			);
+			return undefined;
+		};
+		const run = async () => {
+			const stream = streamCursor(makeModel(baseUrl), resumeContext(), {
+				apiKey: "test-token",
+				sessionId: "sess-resume",
+				onPayload: capture,
+			});
+			let terminal: string | undefined;
+			for await (const event of stream) {
+				if (event.type === "done" || event.type === "error") terminal = event.type;
+			}
+			await stream.result().catch(() => {});
+			return terminal;
+		};
 
-		const first = await runToEnd(baseUrl, "sess-resume", ctx);
-		expect(first.type).toBe("error");
-		expect(first.message).toMatch(/resource.?exhausted/i);
-
-		const second = await runToEnd(baseUrl, "sess-resume", ctx);
-		expect(second.type).toBe("done");
+		expect(await run()).toBe("error");
+		expect(await run()).toBe("done");
 
 		expect(seen).toHaveLength(2);
-		expect(seen[0]?.conversationId).toBe("sess-resume");
-		expect(seen[0]?.action).toBe("resumeAction");
 		expect(seen[1]?.conversationId).not.toBe(seen[0]?.conversationId);
-		expect(seen[1]?.action).toBe("userMessageAction");
-		expect(seen[1]?.userText).toBe("Use the read tool.");
+		expect(seen.map(request => request.action)).toEqual(["resumeAction", "resumeAction"]);
 		expect(seen[1]?.pendingToolCalls).toBe(0);
+		expect(replayed[1]).toEqual(replayed[0]);
 	});
 
 	it("re-rotates when the rotated conversation is poisoned later", async () => {

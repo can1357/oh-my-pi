@@ -2,6 +2,79 @@
 
 ## [Unreleased]
 
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added the `printStatsSummary` export, shared by `omp-stats --sync` and `omp stats --summary`.
+
+## [18.4.3] - 2026-09-28
+
+### Fixed
+
+- Fixed `omp stats` dashboard numbers following the browser locale while the rest of the UI is English (e.g. `546 B` meaning 546 thousand and `$38.003,33` on a Turkish browser); figures now always use en-US formatting ([#13640](https://github.com/can1357/oh-my-pi/pull/13640) by [@NaC-L](https://github.com/NaC-L))
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed `/trace` and `omp stats` dashboards failing to load after operating-system temporary-file cleanup ([#13487](https://github.com/can1357/oh-my-pi/pull/13487) by [@Peter-Tam](https://github.com/Peter-Tam)).
+
+## [18.4.0] - 2026-09-28
+
+### Changed
+
+- Redesigned the dashboard: new layout, navigation (`g` + letter to jump, `1`–`6` to pick a range), sortable tables and in-house charts on every page
+- The dashboard opens immediately and ingests sessions in the background, most recent activity first, with live progress in the header; pages update as data lands and new session activity appears within seconds
+- Switching time ranges is now near-instant: range queries read hourly rollups instead of scanning every request (seconds → milliseconds on large histories)
+- Frustration judge runs now scale how many requests they keep in flight (up to 256, backing off on rate limits and retrying after a short delay) and save verdicts in batches; the progress line shows the rate and requests in flight
+- Provider subscription windows load separately from the rest of the Providers page, and the Projects page lists the 2,000 busiest folders
+- Replaced the dashboard's Behavior page with a Frustration page showing, per model version, how often users are annoyed, annoyed at the assistant, and angry at it; a button judges unclassified messages with the host's `judge` model (after a cost estimate) and the chart refines live as verdicts arrive
+
+### Fixed
+
+- Made session-statistics synchronization atomic to prevent duplicate entries when synchronization is interrupted.
+- Improved the speed and reliability of initial and repeat `omp stats` imports, including large session histories and already-indexed histories.
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed background statistics spans to use unique identifiers and close jobs correctly.
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved session and fork-detection polling performance, reducing unnecessary filesystem and database work when monitoring sessions.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed the sessions API returning an encoded storage key instead of the session working directory ([#12078](https://github.com/can1357/oh-my-pi/pull/12078) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed Traces search inputs and checkbox using unthemed browser defaults, and iOS viewport zoom on search focus.
+- Fixed garbage tool names from provider-side parse failures (e.g. a gateway returning the model's whole invocation text as the tool name) polluting the tools dashboard's per-tool rows and filter dropdown; such names now collapse to their leading identifier, and existing databases re-ingest cleaned on next sync.
+- Reduced repeat stats-sync reads to appended transcript data while preserving service-tier accounting across restarts.
+- Rebuilt stats for replaced or truncated session files instead of retaining stale totals.
+- Reclaimed lingering stats dashboards from older releases using their versioned HTTP identity when process command lines are unavailable, so upgrades no longer leave `omp stats` blocked by an opaque Bun listener.
+
+## [18.1.17] - 2026-09-10
+
+### Fixed
+
+- Fixed historical cost estimates after a scheduled price change: usage is estimated at the request's own time, and charges recorded at the time are preserved.
+- Fixed legacy requests that recorded no cost at all being stored as free usage: they are estimated at their request timestamp, and requests without a recoverable timestamp stay unpriced instead of being billed as 1970.
+- Fixed a legacy entry whose malformed token counter was summed into an inflated request total; counters that are not finite numbers now count as absent.
+- Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
+- Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
+
+## [18.1.3] - 2026-09-02
+
+### Changed
+
+- Provider, tool, and project `<select>` dropdowns are now styled to match the dashboard design, with dark and light theme support.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added

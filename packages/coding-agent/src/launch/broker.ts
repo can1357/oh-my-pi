@@ -2,12 +2,25 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
-import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
+import {
+	truncateHead,
+	truncateHeadBytes,
+	truncateTail,
+	truncateTailBytes,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import {
+	DAEMON_META_FILE,
+	DAEMON_SPEC_FILE,
+	daemonBrokerEndpoint,
+	readStoredDaemonRecord,
+	writeDaemonScopeMeta,
+} from "./paths";
+import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -17,11 +30,8 @@ import {
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
 	type DaemonOperation,
-	type DaemonReadySpec,
 	type DaemonRpcResult,
 	type DaemonSignal,
-	type DaemonSnapshot,
-	type DaemonSpec,
 	type DaemonWireRequest,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
@@ -46,7 +56,13 @@ const RESTART_BACKOFF_BASE_MS = 1_000;
 const MAX_TERMINAL_DAEMONS_LISTED = 10;
 const TOKEN_FILE = "broker.token";
 const PID_FILE = "broker.pid";
-const META_FILE = "meta.json";
+/**
+ * How long a live lease left by a broker without the native lock is given to
+ * bind its endpoint before the lease is treated as stale (issue #11080).
+ */
+const LEASE_HANDOFF_GRACE_MS = 500;
+/** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
+const LEASE_PROBE_TIMEOUT_MS = 250;
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
 const DAEMON_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
@@ -89,11 +105,16 @@ interface ManagedDaemon {
 	pendingCompletions: DaemonCompletionNotification[];
 	completionSubscriptionId?: string;
 	persistQueue: Promise<void>;
+	/** Serialized spec last written (or recovered); a write is skipped while unchanged. */
+	persistedSpec?: string;
+	/** Serialized metadata last written (or recovered); a write is skipped while unchanged. */
+	persistedMeta?: string;
 }
 
 interface BrokerLease {
 	path: string;
-	instanceId: string;
+	/** Process-owned native lock; the OS drops it however this broker exits. */
+	lock: FileLock;
 }
 
 interface DaemonLogRead {
@@ -165,6 +186,13 @@ function syncReadyPending(record: ManagedDaemon): void {
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
+/** Replace `filePath` via a pid-scoped temp file so readers never see a partial write. */
+async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+	const tempPath = `${filePath}.${process.pid}.tmp`;
+	await Bun.write(tempPath, content);
+	await fs.rename(tempPath, filePath);
+}
+
 async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
 	try {
 		const stat = await fs.stat(filePath);
@@ -187,6 +215,7 @@ class DaemonLog {
 	#currentBytes = 0;
 	#queue: Promise<void> = Promise.resolve();
 	#closed = false;
+	#closing: Promise<void> | undefined;
 
 	constructor(logPath: string, previousPath: string, file: Bun.BunFile, writer: Bun.FileSink) {
 		this.#path = logPath;
@@ -195,6 +224,17 @@ class DaemonLog {
 		this.#writer = writer;
 	}
 
+	/** Opens an empty log for a newly started daemon, discarding output from any earlier daemon of the same name. */
+	static async create(dir: string): Promise<DaemonLog> {
+		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+		const logPath = path.join(dir, LOG_FILE);
+		const previousPath = path.join(dir, PREVIOUS_LOG_FILE);
+		await Promise.all([fs.rm(previousPath, { force: true }), fs.rm(logPath, { force: true })]);
+		const file = Bun.file(logPath);
+		return new DaemonLog(logPath, previousPath, file, file.writer());
+	}
+
+	/** Opens a log for a relaunch of the same daemon, keeping the prior generation's output as the previous log. */
 	static async open(dir: string): Promise<DaemonLog> {
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		const logPath = path.join(dir, LOG_FILE);
@@ -236,11 +276,12 @@ class DaemonLog {
 		return snapshot;
 	}
 
-	async close(): Promise<void> {
-		if (this.#closed) return;
+	close(): Promise<void> {
 		this.#closed = true;
-		await this.#queue;
-		await this.#writer.end();
+		this.#closing ??= this.#queue.then(async () => {
+			await this.#writer.end();
+		});
+		return this.#closing;
 	}
 
 	static async readFiles(
@@ -286,47 +327,83 @@ class DaemonLog {
 	}
 }
 
-async function acquireBrokerLease(runtimeDir: string): Promise<BrokerLease | null> {
-	const pidPath = path.join(runtimeDir, PID_FILE);
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			const handle = await fs.open(pidPath, "wx", 0o600);
-			const instanceId = crypto.randomUUID();
-			try {
-				await handle.writeFile(JSON.stringify({ pid: process.pid, instanceId }), "utf8");
-			} finally {
-				await handle.close();
-			}
-			return { path: pidPath, instanceId };
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-			try {
-				const raw: unknown = await Bun.file(pidPath).json();
-				if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") {
-					try {
-						process.kill(raw.pid, 0);
-						return null;
-					} catch {
-						// Stale PID file; the next loop iteration claims it.
-					}
-				}
-			} catch {
-				// Malformed or partially-written PID files are stale.
-			}
-			await fs.rm(pidPath, { force: true });
-		}
+/** Whether a broker is accepting connections on the scope endpoint right now. */
+function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	const socket = net.createConnection({ path: endpoint });
+	let settled = false;
+	const finish = (connected: boolean): void => {
+		if (settled) return;
+		settled = true;
+		socket.destroy();
+		resolve(connected);
+	};
+	socket.once("connect", () => finish(true));
+	socket.once("error", () => finish(false));
+	socket.setTimeout(LEASE_PROBE_TIMEOUT_MS, () => finish(false));
+	return promise;
+}
+
+/**
+ * Whether a live lease left by a broker that predates the native lock still
+ * owns this scope. The recorded PID alone cannot answer it: PID reuse by an
+ * unrelated process looks exactly like a live broker, while a real broker only
+ * becomes observable when it binds the endpoint — milliseconds after writing
+ * the lease. Probe, allow one startup grace, then probe again.
+ */
+async function holdsLiveForeignLease(pidPath: string, endpoint: string): Promise<boolean> {
+	let pid: number | undefined;
+	try {
+		// `fs.readFile` (libuv) rather than `Bun.file().json()`: the CLI entry runs
+		// as a floating promise, so an await that completes without an active
+		// libuv handle lets Bun exit this worker before it ever listens — exactly
+		// what happens on the cold-start path when broker.pid is absent.
+		const raw: unknown = JSON.parse(await fs.readFile(pidPath, "utf8"));
+		if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") pid = raw.pid;
+	} catch {
+		// Missing or torn lease: nothing to honor.
 	}
-	return null;
+	if (pid === undefined || pid === process.pid) return false;
+	try {
+		process.kill(pid, 0);
+	} catch {
+		return false; // Dead PID: the lease outlived its broker.
+	}
+	if (await probeBrokerEndpoint(endpoint)) return true;
+	await Bun.sleep(LEASE_HANDOFF_GRACE_MS);
+	return probeBrokerEndpoint(endpoint);
+}
+
+/**
+ * Claim the one-broker-per-scope lease. The native lock is process-owned, so
+ * the OS releases it however the broker dies — a crashed broker can never wedge
+ * the scope behind a stale lease again (issue #11080). `broker.pid` stays as
+ * human-readable metadata for `omp ps` and dead-scope pruning.
+ */
+async function acquireBrokerLease(runtimeDir: string, endpoint: string): Promise<BrokerLease | null> {
+	const pidPath = path.join(runtimeDir, PID_FILE);
+	const lock = FileLock.tryAcquire(pidPath);
+	if (!lock.acquired) return null;
+	try {
+		// A broker from a build without the native lock cannot be seen through it;
+		// adopt the scope instead of starting a duplicate supervisor.
+		if (await holdsLiveForeignLease(pidPath, endpoint)) {
+			lock.release();
+			return null;
+		}
+		await fs.writeFile(pidPath, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+		return { path: pidPath, lock };
+	} catch (error) {
+		lock.release();
+		throw error;
+	}
 }
 
 async function releaseBrokerLease(lease: BrokerLease): Promise<void> {
 	try {
-		const raw: unknown = await Bun.file(lease.path).json();
-		if (typeof raw === "object" && raw !== null && "instanceId" in raw && raw.instanceId === lease.instanceId) {
-			await fs.rm(lease.path, { force: true });
-		}
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
+		await fs.rm(lease.path, { force: true });
+	} finally {
+		lease.lock.release();
 	}
 }
 
@@ -388,7 +465,7 @@ class DaemonBroker {
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 	}
 
-	async run(): Promise<void> {
+	async run(onListening?: () => void): Promise<void> {
 		await this.#recoverRecords();
 		if (process.platform !== "win32") await fs.rm(this.#endpoint, { force: true });
 		const server = net.createServer(socket => this.#accept(socket));
@@ -400,6 +477,7 @@ class DaemonBroker {
 		await listening;
 		if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
 		this.#scheduleIdleShutdown();
+		onListening?.();
 		await this.#finished.promise;
 	}
 
@@ -411,6 +489,10 @@ class DaemonBroker {
 		for (const record of this.#records.values()) {
 			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
 			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
+			// The detached daemon outlives this broker and the next one recovers it from
+			// metadata. Retire this broker's generation so a late exit or readiness
+			// callback cannot settle the stale record over the new owner's metadata.
+			if (detached) record.generation++;
 			clearTimeout(record.restartTimer);
 			await record.log?.close();
 			await record.persistQueue;
@@ -472,8 +554,11 @@ class DaemonBroker {
 		let id = "unknown";
 		try {
 			const decoded: unknown = JSON.parse(line);
+			// Correlate before validating: an operation this broker cannot parse (a newer omp
+			// reaching a broker that predates it) must fail the caller's request, not strand it
+			// until the client-side timeout.
+			if (isRecord(decoded) && typeof decoded.id === "string") id = decoded.id;
 			const request = parseDaemonWireRequest(decoded);
-			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
@@ -562,7 +647,7 @@ class DaemonBroker {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir };
 			case "start":
-				return this.#start(operation.spec, operation.owner);
+				return this.#start(operation.spec, operation.owner, operation.replace);
 			case "list": {
 				await Promise.all([...this.#records.values()].map(record => this.#refreshDetached(record)));
 				return {
@@ -583,6 +668,8 @@ class DaemonBroker {
 			}
 			case "restart":
 				return this.#restart(operation.name);
+			case "mode":
+				return this.#mode(operation);
 			case "describe": {
 				const record = this.#record(operation.name);
 				await this.#refreshDetached(record);
@@ -593,7 +680,7 @@ class DaemonBroker {
 		}
 	}
 
-	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
+	async #start(spec: DaemonSpec, owner?: string, replace = false): Promise<DaemonRpcResult> {
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}
@@ -616,11 +703,15 @@ class DaemonBroker {
 			const existing = this.#records.get(spec.name);
 			if (existing) await this.#refreshDetached(existing);
 			if (existing && !terminalState(existing.snapshot.state)) {
-				throw new Error(`Daemon ${spec.name} is already ${existing.snapshot.state}`);
+				if (!replace) throw new Error(`Daemon ${spec.name} is already ${existing.snapshot.state}`);
+				await this.#stopRecord(existing, 2_000);
+				if (!terminalState(existing.snapshot.state)) throw new Error(`Daemon ${spec.name} did not stop`);
 			}
-			if (existing && existing.pendingCompletions.length > 0) {
+			if (existing && existing.pendingCompletions.length > 0 && !replace) {
 				throw new Error(`Daemon ${spec.name} has unacknowledged completion notifications`);
 			}
+			// The replaced generation's log writer must finish before its files are discarded.
+			await existing?.log?.close();
 			if (spec.ready?.log) {
 				try {
 					new RegExp(spec.ready.log, "u");
@@ -647,7 +738,7 @@ class DaemonBroker {
 					detached: spec.detached,
 				},
 				dir,
-				log: await DaemonLog.open(dir),
+				log: await DaemonLog.create(dir),
 				generation: 0,
 				stopRequested: false,
 				logReady: !spec.ready?.log,
@@ -659,7 +750,7 @@ class DaemonBroker {
 				persistQueue: Promise.resolve(),
 				completionCapable: owner !== undefined && this.#completionSubscriptions.has(owner),
 				completionSubscriptionId: owner === undefined ? undefined : this.#completionSubscriptions.get(owner),
-				pendingCompletions: [],
+				pendingCompletions: replace ? (existing?.pendingCompletions ?? []) : [],
 			};
 			syncReadyPending(record);
 			this.#records.set(spec.name, record);
@@ -690,6 +781,8 @@ class DaemonBroker {
 		const generation = record.generation;
 		record.stopRequested = false;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
+		record.snapshot.persist = record.spec.persist;
+		record.snapshot.detached = record.spec.detached;
 		record.snapshot.startedAt = Date.now();
 		record.snapshot.readyAt = undefined;
 		record.snapshot.exitedAt = undefined;
@@ -725,10 +818,23 @@ class DaemonBroker {
 			cols: DAEMON_PTY_COLUMNS,
 			rows: DAEMON_PTY_ROWS,
 		};
+		// Nothing plays terminal for a supervised PTY, so a program probing for
+		// cursor position or device attributes would block on the reply. Answer
+		// the queries from the output stream and write the replies to its stdin.
+		const responder = new TerminalQueryResponder();
 		const onChunk = (error: Error | null, chunk: string): void => {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
-			if (chunk) this.#onOutput(record, generation, chunk);
+			if (!chunk) return;
+			const reply = responder.feed(chunk);
+			if (reply) {
+				try {
+					session.write(reply);
+				} catch {
+					// The PTY may exit between emitting its final output and receiving the reply.
+				}
+			}
+			this.#onOutput(record, generation, chunk);
 		};
 		const started = Promise.withResolvers<number | undefined>();
 		const onStart = (error: Error | null, pid: number): void => {
@@ -1083,9 +1189,13 @@ class DaemonBroker {
 			if (generationEnded()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
-				if (!match) return false;
-				matched = match[0].slice(0, 500);
-				return true;
+				if (match) {
+					matched = match[0].slice(0, 500);
+					return true;
+				}
+				// No further output can arrive once the process is gone; blocking
+				// for the full window would hide the exit behind a bogus timeout.
+				return terminalState(record.snapshot.state);
 			}
 			if (operation.for === "exit") return terminalState(record.snapshot.state);
 			// Wake on observed readiness or any terminal state so the wait never
@@ -1119,7 +1229,8 @@ class DaemonBroker {
 		if (operation.data !== undefined) {
 			if (record.pty) record.pty.write(operation.data);
 			else if (record.input) {
-				record.input.write(operation.data);
+				// PTYs interpret Enter as CR; pipe-backed shells require LF to end a line.
+				record.input.write(operation.data.endsWith("\r") ? `${operation.data.slice(0, -1)}\n` : operation.data);
 				await record.input.flush();
 			} else throw new Error(`Daemon ${operation.name} stdin is unavailable`);
 		}
@@ -1165,9 +1276,37 @@ class DaemonBroker {
 		await record.log?.close();
 		record.log = await DaemonLog.open(record.dir);
 		record.stopRequested = false;
+		// Settled history does not need subscription writes, but a new generation
+		// must persist the owner's current capability for crash recovery.
+		const owner = record.snapshot.owner;
+		record.completionCapable = owner !== undefined && this.#completionSubscriptions.has(owner);
+		record.completionSubscriptionId = owner === undefined ? undefined : this.#completionSubscriptions.get(owner);
 		await this.#launch(record);
 		await record.persistQueue;
 		return { op: "restart", daemon: record.snapshot };
+	}
+
+	async #mode(operation: Extract<DaemonOperation, { op: "mode" }>): Promise<DaemonRpcResult> {
+		const record = this.#record(operation.name);
+		await this.#refreshDetached(record);
+		if (terminalState(record.snapshot.state) || record.snapshot.state === "stopping") {
+			throw new Error(`Daemon ${operation.name} is ${record.snapshot.state}`);
+		}
+		if (operation.mode === "detached") {
+			if (!record.spec.detached) {
+				record.spec = { ...record.spec, detached: true, pty: false, persist: true };
+				await this.#restart(operation.name);
+			}
+		} else {
+			if (record.spec.detached && operation.mode === "session") {
+				throw new Error(`Detached daemon ${operation.name} must remain persistent`);
+			}
+			record.spec = { ...record.spec, persist: operation.mode === "persist" };
+			record.snapshot.persist = record.spec.persist;
+			this.#persist(record);
+		}
+		await record.persistQueue;
+		return { op: "mode", daemon: record.snapshot };
 	}
 
 	async #waitUntil(record: ManagedDaemon, condition: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -1189,12 +1328,9 @@ class DaemonBroker {
 		throw new Error(`Unknown daemon ${name}${names.length ? `. Available: ${names.join(", ")}` : ""}`);
 	}
 
-	#persist(record: ManagedDaemon): void {
-		const metaPath = path.join(record.dir, META_FILE);
-		const tempPath = `${metaPath}.${process.pid}.tmp`;
-		const metadata = {
+	#serializeMetadata(record: ManagedDaemon): string {
+		return JSON.stringify({
 			daemon: { ...record.snapshot },
-			spec: record.spec,
 			completionEvents: record.completionCapable,
 			completionSubscriptionId: record.completionSubscriptionId,
 			completionPending: record.pendingCompletions.length > 0,
@@ -1203,13 +1339,27 @@ class DaemonBroker {
 				...completion,
 				daemon: { ...completion.daemon },
 			})),
-		};
+		});
+	}
+
+	#persist(record: ManagedDaemon): void {
+		const spec = JSON.stringify(record.spec);
+		const metadata = this.#serializeMetadata(record);
+		const writeSpec = spec !== record.persistedSpec;
+		const writeMeta = metadata !== record.persistedMeta;
+		if (!writeSpec && !writeMeta) return;
+		record.persistedSpec = spec;
+		record.persistedMeta = metadata;
 		record.persistQueue = record.persistQueue
 			.then(async () => {
-				await Bun.write(tempPath, JSON.stringify(metadata));
-				await fs.rename(tempPath, metaPath);
+				// Spec first: recovery must never find metadata whose spec is not on disk.
+				if (writeSpec) await writeFileAtomic(path.join(record.dir, DAEMON_SPEC_FILE), spec);
+				if (writeMeta) await writeFileAtomic(path.join(record.dir, DAEMON_META_FILE), metadata);
 			})
 			.catch(error => {
+				// Unknown on-disk state: force the next persist to write both files.
+				record.persistedSpec = undefined;
+				record.persistedMeta = undefined;
 				logger.warn("Failed to persist daemon metadata", {
 					name: record.snapshot.name,
 					error: error instanceof Error ? error.message : String(error),
@@ -1221,6 +1371,9 @@ class DaemonBroker {
 		const subscriptionId = capable ? this.#completionSubscriptions.get(owner) : undefined;
 		const persistence: Promise<void>[] = [];
 		for (const record of this.#records.values()) {
+			// A settled record has no future completion to deliver once its pending
+			// events are acknowledged. Rebinding the owner must not rewrite its history.
+			if (terminalState(record.snapshot.state) && record.pendingCompletions.length === 0) continue;
 			const clearPendingCompletions = !capable && record.pendingCompletions.length > 0;
 			if (
 				record.snapshot.owner !== owner ||
@@ -1249,12 +1402,11 @@ class DaemonBroker {
 			if (!entry.isDirectory()) continue;
 			const dir = path.join(root, entry.name);
 			try {
-				const decoded: unknown = await Bun.file(path.join(dir, META_FILE)).json();
-				if (typeof decoded !== "object" || decoded === null || !("daemon" in decoded) || !("spec" in decoded)) {
-					continue;
-				}
+				const stored = await readStoredDaemonRecord(dir);
+				if (!stored) continue;
+				const { meta: decoded, spec: storedSpec, legacyLayout } = stored;
 				const snapshot = parseDaemonSnapshot(decoded.daemon);
-				const spec = parseDaemonSpec(decoded.spec);
+				const spec = parseDaemonSpec(storedSpec);
 				const processRef = snapshot.pid === undefined ? null : Process.fromPid(snapshot.pid);
 				const recoverableExit = !terminalState(snapshot.state) && snapshot.state !== "stopping";
 				const detached = spec.detached && recoverableExit && processRef?.status() === "running";
@@ -1285,6 +1437,9 @@ class DaemonBroker {
 					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
+					// Legacy files are rewritten once into the split layout.
+					persistedSpec: legacyLayout ? undefined : JSON.stringify(storedSpec),
+					persistedMeta: legacyLayout ? undefined : JSON.stringify(decoded),
 					completionCapable: "completionEvents" in decoded && decoded.completionEvents === true,
 					completionSubscriptionId:
 						"completionSubscriptionId" in decoded && typeof decoded.completionSubscriptionId === "string"
@@ -1343,6 +1498,8 @@ class DaemonBroker {
 						});
 					});
 				}
+				// Recovery may only change a subset of records; #persist writes only
+				// the files whose serialized form differs from what was read.
 				this.#persist(record);
 			} catch (error) {
 				logger.warn("Failed to recover daemon record", {
@@ -1376,6 +1533,12 @@ class DaemonBroker {
 export interface DaemonBrokerStartOptions {
 	/** Base of the exponential child-restart backoff. */
 	restartBackoffBaseMs?: number;
+	/**
+	 * Called once the broker accepts connections. An embedding host connects its
+	 * clients after this; a client that connects earlier finds no endpoint and
+	 * spawns a competing broker process.
+	 */
+	onListening?: () => void;
 }
 
 /** Start the detached project or global daemon broker selected by the CLI worker host. */
@@ -1395,7 +1558,10 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 			? requestedRestartBackoffBaseMs
 			: RESTART_BACKOFF_BASE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const lease = await acquireBrokerLease(runtimeDir);
+	const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+	// Hold the lease for the whole broker lifetime: it is a native lock the OS
+	// releases on exit, so keeping `lease` referenced keeps the scope owned.
+	const lease = await acquireBrokerLease(runtimeDir, endpoint);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
 	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
@@ -1417,7 +1583,7 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
-		await broker.run();
+		await broker.run(options.onListening);
 	} finally {
 		cancelCleanup();
 		await releaseBrokerLease(lease);

@@ -1,0 +1,7 @@
+// Catalog entry for "litellm"; no deployment-contract compat rules are needed.
+
+provider "litellm" {
+	default-model "claude-opus-5-5"
+	env "LITELLM_API_KEY"
+	discovery label="LiteLLM" allow-unauthenticated=#true
+}

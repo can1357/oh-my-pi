@@ -4,7 +4,6 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	fs::File,
 	io::{BufWriter, Read, Write},
 };
 
@@ -12,10 +11,11 @@ use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use memchr::memmem;
 use memmap2::Mmap;
+use pi_vfs::File;
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
 
 mod options {
 	pub static BEFORE: &str = "before";
@@ -38,14 +38,6 @@ enum TacError {
 	/// An error writing the reversed contents of a file or stdin.
 	#[error("failed to write to stdout: {}", strip_errno(.0))]
 	Write(std::io::Error),
-}
-
-fn strip_errno(error: &std::io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
 }
 
 /// Parsed `tac` invocation.
@@ -316,6 +308,9 @@ fn tac(
 	};
 
 	for filename in filenames {
+		if host.is_cancelled() {
+			break;
+		}
 		let mmap;
 		let buffer;
 		let data: &[u8] = if filename == "-" {
@@ -332,7 +327,7 @@ fn tac(
 			}
 		} else {
 			let path = host.resolve(filename);
-			let mut file = match File::open(path) {
+			let mut file = match host.fs().open(path) {
 				Ok(file) => file,
 				Err(error) => {
 					show(host, &TacError::Open(filename.clone(), error));
@@ -369,10 +364,13 @@ fn tac(
 	Ok(())
 }
 
+/// Maps `file` when its provider exposes a native host handle; provider-backed
+/// files are read into memory instead.
 fn try_mmap_file(file: &File) -> Option<Mmap> {
+	let native = file.native()?;
 	// SAFETY: If the file is truncated while mapped, SIGBUS terminates the
 	// process before invalid memory can be accessed.
-	unsafe { Mmap::map(file).ok() }
+	unsafe { Mmap::map(native).ok() }
 }
 
 /// Creates the `tac` builtin registration.

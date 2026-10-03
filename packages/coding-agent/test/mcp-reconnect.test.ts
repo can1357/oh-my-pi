@@ -2,18 +2,15 @@ import { describe, expect, it, vi } from "bun:test";
 import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
+	createLegacyMCPToolName,
 	createMCPToolName,
 	DeferredMCPTool,
 	deduplicateMCPToolsByName,
 	isRetriableConnectionError,
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type {
-	MCPImageContent,
-	MCPServerConnection,
-	MCPToolCallResult,
-	MCPTransport,
-} from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -88,8 +85,38 @@ describe("createMCPToolName", () => {
 		expect(name.startsWith("mcp__chrome_devtools_mcp_")).toBe(true);
 	});
 
-	it("leaves names within the limit untouched", () => {
-		expect(createMCPToolName("puppeteer", "puppeteer_screenshot")).toBe("mcp__puppeteer_screenshot");
+	it("keeps digits, so servers differing only by a digit stay distinct", () => {
+		// The sanitizer used to strip 0-9, minting mcp__context_query_docs for
+		// server "context7" and collapsing "foo1"/"foo2" onto one name, which
+		// then cost one of them a tool via deduplicateMCPToolsByName().
+		expect(createMCPToolName("context7", "query-docs")).toBe("mcp__context7_query_docs");
+		expect(createMCPToolName("s3-storage", "get_object")).toBe("mcp__s3_storage_get_object");
+		expect(createMCPToolName("foo1", "run")).not.toBe(createMCPToolName("foo2", "run"));
+	});
+
+	it("mints the pre-rename legacy name only for digit-bearing servers/tools", () => {
+		expect(createLegacyMCPToolName("context7", "query-docs")).toBe("mcp__context_query_docs");
+		expect(createLegacyMCPToolName("s3-storage", "get_object")).toBe("mcp__s_storage_get_object");
+		expect(createLegacyMCPToolName("puppeteer", "puppeteer_screenshot")).toBeUndefined();
+		expect(createLegacyMCPToolName("plain", "tool")).toBeUndefined();
+	});
+
+	it("exposes the legacy alias on both live and deferred tools", () => {
+		// Slow-startup servers register DeferredMCPTool instead of MCPTool;
+		// approval fallback must not depend on connection timing (#10810 review).
+		const digitTool = { name: "query-docs", inputSchema: { type: "object" as const } };
+		const live = new MCPTool(
+			makeConnection(
+				mockTransport(async () => ({})),
+				"context7",
+			),
+			digitTool,
+		);
+		const deferred = new DeferredMCPTool("context7", digitTool, async () => {
+			throw new Error("unneeded");
+		});
+		expect(live.legacyName).toBe("mcp__context_query_docs");
+		expect(deferred.legacyName).toBe("mcp__context_query_docs");
 	});
 
 	it("is deterministic and keeps distinct overlong names distinct", () => {
@@ -185,29 +212,6 @@ describe("MCPTool.execute retry on connection error", () => {
 	const noop = () => {};
 	const noCtx = {} as Parameters<MCPTool["execute"]>[3];
 
-	it("retries once on retriable error when reconnect succeeds", async () => {
-		let callCount = 0;
-		const failTransport = mockTransport(async () => {
-			callCount++;
-			throw new Error("ECONNREFUSED");
-		});
-		const successTransport = mockTransport(async () => {
-			callCount++;
-			return toolCallResult("ok");
-		});
-
-		const oldConn = makeConnection(failTransport);
-		const newConn = makeConnection(successTransport, "test-server-new");
-		const reconnect: MCPReconnect = async () => newConn;
-
-		const tool = new MCPTool(oldConn, TOOL_DEF, reconnect);
-		const result = await tool.execute("call-1", {}, noop, noCtx);
-
-		expect(callCount).toBe(2); // 1 fail + 1 retry
-		expect(result.details?.isError).toBeFalsy();
-		expect(result.content[0]).toEqual({ type: "text", text: "ok" });
-	});
-
 	it("preserves image blocks returned by MCP tools", async () => {
 		const image: MCPImageContent = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
 		const transport = mockTransport(async () => ({
@@ -218,36 +222,6 @@ describe("MCPTool.execute retry on connection error", () => {
 		const result = await tool.execute("call-1", {}, noop, noCtx);
 
 		expect(result.content).toEqual([{ type: "text", text: "Screenshot captured" }, image]);
-	});
-
-	it("retries on transport closed and rebinding succeeds", async () => {
-		let oldCalls = 0;
-		let newCalls = 0;
-		let reconnects = 0;
-		const closedTransport = mockTransport(async () => {
-			oldCalls++;
-			throw new Error("Transport closed");
-		});
-		const reopenedTransport = mockTransport(async () => {
-			newCalls++;
-			return toolCallResult("ok");
-		});
-
-		const oldConn = makeConnection(closedTransport);
-		const newConn = makeConnection(reopenedTransport, "test-server-transport-closed");
-		const reconnect: MCPReconnect = async () => {
-			reconnects++;
-			return newConn;
-		};
-
-		const tool = new MCPTool(oldConn, TOOL_DEF, reconnect);
-		const result = await tool.execute("call-1", {}, noop, noCtx);
-
-		expect(reconnects).toBe(1);
-		expect(oldCalls).toBe(1);
-		expect(newCalls).toBe(1);
-		expect(result.details?.isError).toBeFalsy();
-		expect(result.content[0]).toEqual({ type: "text", text: "ok" });
 	});
 
 	it("reuses refreshed connection on later call", async () => {

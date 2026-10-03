@@ -6,6 +6,14 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
+/**
+ * How long an `@` fuzzy search may run before the immediate-directory prefix
+ * listing is reported through `onPartial`. Fuzzy walks of normal repos finish
+ * well under this, so they never flash an interim list; huge roots (a volume
+ * of sibling projects) take seconds and would otherwise show nothing new.
+ */
+const AT_PARTIAL_DELAY_MS = 150;
+
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
@@ -111,6 +119,16 @@ function parsePathPrefix(prefix: string): { rawPrefix: string; isAtPrefix: boole
 	return { rawPrefix: prefix, isAtPrefix: false, isQuotedPrefix: false };
 }
 
+/**
+ * Whether an autocomplete value represents a directory: trailing slash or
+ * backslash, optionally followed by a closing quote for quoted paths.
+ * Shared by the provider suffix logic and the editor chain-on-accept
+ * behavior so Tab and Enter acceptance stay in sync.
+ */
+export function isDirectoryCompletionValue(value: string): boolean {
+	return /[\\/]["']?$/.test(value);
+}
+
 function buildCompletionValue(
 	path: string,
 	options: { isDirectory: boolean; isAtPrefix: boolean; isQuotedPrefix: boolean },
@@ -127,11 +145,8 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
-/**
- * Check if query is a subsequence of target (fuzzy match).
- * "wig" matches "skill:wig" because w-i-g appear in order.
- */
-function fuzzyMatch(query: string, target: string): boolean {
+/** Ranked-tier subsequence match ("wig" ~ "skill:wig"); distinct from fuzzy.ts's word-local engine. */
+export function subsequenceMatch(query: string, target: string): boolean {
 	if (query.length === 0) return true;
 	if (query.length > target.length) return false;
 
@@ -143,10 +158,18 @@ function fuzzyMatch(query: string, target: string): boolean {
 }
 
 /**
- * Score a fuzzy match. Higher = better match.
- * Prioritizes: exact match > starts-with > contains > subsequence
+ * Whether an `@` file completion `value` still fits the live `@` token.
+ * The editor narrows a stale `@` list with this while a fresh search runs;
+ * mirrors the subsequence filter `getSuggestions` applies to fuzzy results.
  */
-function fuzzyScore(query: string, target: string): number {
+export function atCompletionMatches(token: string, value: string): boolean {
+	const query = parsePathPrefix(token).rawPrefix.replaceAll("\\", "/").toLowerCase();
+	const target = parsePathPrefix(value).rawPrefix.replace(/"$/, "").toLowerCase();
+	return subsequenceMatch(query, target);
+}
+
+/** Ranked-tier subsequence score (100/80/60/40−gaps·5); higher is better, 0 is no match. */
+export function subsequenceScore(query: string, target: string): number {
 	if (query.length === 0) return 1;
 	if (target === query) return 100;
 	if (target.startsWith(query)) return 80;
@@ -176,6 +199,12 @@ export interface AutocompleteItem {
 	description?: string;
 	/** Optional type-indicator glyph rendered in an aligned column before the label */
 	icon?: string;
+	/** Named icon for TSP terminals (`folder`, `file`, a slash-command icon name). */
+	iconName?: string;
+	/** Native detail when it differs from {@link description} (static text, parent dir). */
+	nativeDetail?: string;
+	/** Live state drawn right-aligned natively ("demo/demo", "off"). */
+	state?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
 }
@@ -188,6 +217,8 @@ export interface SlashCommand {
 	description?: string;
 	/** Optional type-indicator glyph shown before the command name in autocomplete */
 	icon?: string;
+	/** Named icon for TSP terminals, drawn instead of the {@link icon} glyph. */
+	iconName?: string;
 	argumentHint?: string;
 	/** Whether the command consumes argument text after the command name. False means the full input stays normal prompt text once args are present. */
 	allowArgs?: boolean;
@@ -201,12 +232,16 @@ export interface SlashCommand {
 }
 
 export interface AutocompleteProvider {
-	/** Get autocomplete suggestions for current text/cursor position. Expensive providers SHOULD stop when `signal` aborts. */
+	/**
+	 * Get autocomplete suggestions for current text/cursor position. Expensive providers SHOULD stop when `signal` aborts.
+	 * Slow providers MAY report interim suggestions through `onPartial` before resolving; the resolved value supersedes them.
+	 */
 	getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
 		signal?: AbortSignal,
+		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string }) => void,
 	): Promise<{
 		items: AutocompleteItem[];
 		prefix: string; // What we're matching against (e.g., "/" or "src/")
@@ -285,6 +320,23 @@ function getAutocompleteCommandDescription(cmd: CommandEntry): string {
 	return cmd.description ?? "";
 }
 
+/**
+ * Native split of a command's autocomplete text: a live description in
+ * `Label: state` form ("Model: demo/demo") becomes the static description as
+ * the detail and the state as the item's right-aligned value.
+ */
+function nativeCommandText(
+	liveDesc: string,
+	staticDesc: string,
+	hint: string | undefined,
+): Pick<AutocompleteItem, "nativeDetail" | "state"> {
+	if (!liveDesc || liveDesc === staticDesc) return {};
+	const colon = liveDesc.indexOf(": ");
+	if (colon <= 0) return {};
+	const detail = staticDesc || liveDesc.slice(0, colon);
+	return { nativeDetail: hint ? `${hint} - ${detail}` : detail, state: liveDesc.slice(colon + 2) };
+}
+
 function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): boolean {
 	const name = getCommandName(cmd);
 	if (name === commandName) return true;
@@ -299,7 +351,7 @@ export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string):
 	// name first (e.g. `/set` → `setup` above `settings`), silently changing the
 	// command that the sync-completion path applies on Enter.
 	if (lowerTarget.startsWith(lowerPrefix)) return 900;
-	return fuzzyMatch(lowerPrefix, lowerTarget) ? fuzzyScore(lowerPrefix, lowerTarget) : 0;
+	return subsequenceMatch(lowerPrefix, lowerTarget) ? subsequenceScore(lowerPrefix, lowerTarget) : 0;
 }
 
 function buildSlashCommandCompletions(
@@ -316,6 +368,7 @@ function buildSlashCommandCompletions(
 				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 				const staticDesc = getStaticCommandDescription(cmd);
 				let fullDescMemo: string | undefined;
+				let nativeTextMemo: Pick<AutocompleteItem, "nativeDetail" | "state"> = {};
 				let fullDescComputed = false;
 				// Resolve the (possibly live) display description lazily, only once a
 				// candidate actually matches — getAutocompleteDescription reads live
@@ -324,6 +377,7 @@ function buildSlashCommandCompletions(
 					if (!fullDescComputed) {
 						const displayDesc = getAutocompleteCommandDescription(cmd);
 						fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
+						nativeTextMemo = nativeCommandText(displayDesc, staticDesc, hint);
 						fullDescComputed = true;
 					}
 					return fullDescMemo;
@@ -341,12 +395,14 @@ function buildSlashCommandCompletions(
 						: isSkillCommand
 							? Math.max(
 									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
-									scoreCommandTextMatch(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
+									skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
 								)
 							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
 				const lowerDesc = staticDesc.toLowerCase();
 				const descScore =
-					lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
+					lowerDesc && subsequenceMatch(lowerPrefix, lowerDesc)
+						? subsequenceScore(lowerPrefix, lowerDesc) * 0.5
+						: 0;
 				const primaryScore = Math.max(nameScore, descScore);
 				if (primaryScore > 0) {
 					const fullDesc = resolveFullDesc();
@@ -356,7 +412,9 @@ function buildSlashCommandCompletions(
 						score: primaryScore,
 						usage,
 						...(cmd.icon && { icon: cmd.icon }),
+						...(cmd.iconName && { iconName: cmd.iconName }),
 						...(fullDesc && { description: fullDesc }),
+						...nativeTextMemo,
 					};
 				}
 
@@ -372,7 +430,9 @@ function buildSlashCommandCompletions(
 							score: aliasScore,
 							usage,
 							...(cmd.icon && { icon: cmd.icon }),
+							...(cmd.iconName && { iconName: cmd.iconName }),
 							...(fullDesc && { description: fullDesc }),
+							...nativeTextMemo,
 						};
 					}
 				}
@@ -400,16 +460,40 @@ function hasPromptTextBeforeSlash(
 
 export const SKILL_NAMESPACE = "skill:";
 
-/**
- * Match tier used to compare a skill's bare name against non-skill command
- * names when deciding whether the skill may break out of the collapsed
- * `skill:` group: exact (1000) > prefix (900) > anything weaker (0). Fuzzy
- * hits deliberately map to 0 — a fuzzy skill match is never strong enough to
- * mix skills into the command popup.
- */
-function skillBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
+/** Exact/leading-prefix tier for ordinary command names and aliases. */
+function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix === lowerTarget) return 1000;
 	if (lowerTarget.startsWith(lowerPrefix)) return 900;
+	return 0;
+}
+
+/**
+ * Match a bare skill name from the beginning of any hyphen-delimited segment.
+ * This stays allocation-free on the hot path: it scans segment boundaries
+ * in-place and never materializes split/slice arrays.
+ */
+function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
+	if (lowerPrefix.length === 0) return 0;
+	if (lowerPrefix === lowerBareName) return 1000;
+	if (lowerBareName.startsWith(lowerPrefix)) return 900;
+
+	let segmentStart = 0;
+	while (segmentStart < lowerBareName.length) {
+		while (segmentStart < lowerBareName.length && lowerBareName.charCodeAt(segmentStart) !== 45) {
+			segmentStart += 1;
+		}
+		segmentStart += 1;
+		if (segmentStart >= lowerBareName.length) break;
+
+		if (lowerBareName.startsWith(lowerPrefix, segmentStart)) {
+			let segmentEnd = segmentStart;
+			while (segmentEnd < lowerBareName.length && lowerBareName.charCodeAt(segmentEnd) !== 45) {
+				segmentEnd += 1;
+			}
+			return lowerPrefix.length === segmentEnd - segmentStart ? 1000 : 900;
+		}
+	}
+
 	return 0;
 }
 
@@ -418,11 +502,12 @@ function skillBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
  * typed prefix has not committed to the namespace. A lone group entry (shown
  * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
  * readable. A skill breaks out of the group only when its bare name matches
- * the prefix at a strictly stronger tier than every non-skill command name
- * and alias (`/batch` → `skill:batch` while no command prefix-matches
- * `batch`); a tie keeps the popup command-only, and fuzzy-only skill hits
- * never surface. Accepting the group inserts `/skill:` without a trailing
- * space so the reopened popup expands to the individual skills.
+ * the prefix at the beginning of the name or a hyphen-delimited segment, at a
+ * strictly stronger tier than every non-skill command name and alias. Ordinary
+ * commands keep exact/leading-prefix tiers only; a tie keeps the popup
+ * command-only, and fuzzy-only skill hits never surface. Accepting the group
+ * inserts `/skill:` without a trailing space so the reopened popup expands to
+ * the individual skills.
  */
 function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
 	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
@@ -432,23 +517,25 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 		for (const cmd of commands) {
 			const name = getCommandName(cmd);
 			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
-			commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, name.toLowerCase()));
+			commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
 			for (const alias of getCommandAliases(cmd)) {
-				commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, alias.toLowerCase()));
+				commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
 			}
 			if (commandTier === 1000) break;
 		}
 	}
 	let skillCount = 0;
 	let skillIcon: string | undefined;
+	let skillIconName: string | undefined;
 	const rest = commands.filter(cmd => {
 		const name = getCommandName(cmd);
 		if (!name?.startsWith(SKILL_NAMESPACE)) return true;
 		skillCount += 1;
 		skillIcon ??= cmd.icon;
+		skillIconName ??= cmd.iconName;
 		return (
 			!approachesNamespace &&
-			skillBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
+			skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
 		);
 	});
 	if (skillCount === 0) return commands;
@@ -457,6 +544,7 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 		name: SKILL_NAMESPACE,
 		description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
 		...(skillIcon && { icon: skillIcon }),
+		...(skillIconName && { iconName: skillIconName }),
 	});
 	return rest;
 }
@@ -468,7 +556,8 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
  * popup alive through fuzzy name/description hits, so a token only matches as
  * - a prefix of the `skill:` namespace (incl. the bare `/` entry point),
  * - an explicit `skill:…` query (full fuzzy name/description search), or
- * - a prefix of the skill's bare name (`/hum` → `skill:humanizer`).
+ * - a prefix at the start of the skill bare name or one of its hyphen-delimited
+ *   segments (`/hum` → `skill:humanizer`, `/last` → `skill:research-last30days`).
  * Anything else yields no items, letting the caller fall through to path
  * completion or close the popup. Shared with the editor's accept-time
  * staleness guard so Tab/Enter never accepts a skill the refreshed popup
@@ -481,7 +570,10 @@ export function midPromptSkillTokenMatches(lowerToken: string, name: string, des
 		if (scoreCommandTextMatch(lowerToken, lowerName) > 0) return true;
 		return !!description && scoreCommandTextMatch(lowerToken, description.toLowerCase()) > 0;
 	}
-	return lowerName.startsWith(SKILL_NAMESPACE) && lowerName.slice(SKILL_NAMESPACE.length).startsWith(lowerToken);
+	return (
+		lowerName.startsWith(SKILL_NAMESPACE) &&
+		skillBareNameBreakoutTier(lowerToken, lowerName.slice(SKILL_NAMESPACE.length)) > 0
+	);
 }
 
 function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {
@@ -523,6 +615,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		cursorLine: number,
 		cursorCol: number,
 		signal?: AbortSignal,
+		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string }) => void,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
@@ -618,16 +711,27 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				if (items.length === 0) return null;
 				return { items, prefix: atPrefix };
 			}
-			const suggestions =
-				rawPrefix.length > 0
-					? await this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix, signal })
-					: await this.#getFileSuggestions("@");
-			if (suggestions.length === 0 && rawPrefix.length > 0) {
+			if (rawPrefix.length === 0) {
+				const items = await this.#getFileSuggestions("@");
+				return items.length > 0 ? { items, prefix: atPrefix } : null;
+			}
+			const fuzzy = this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix, signal });
+			if (onPartial) {
+				const settled = await Promise.race([
+					fuzzy.then(() => true),
+					Bun.sleep(AT_PARTIAL_DELAY_MS).then(() => false),
+				]);
+				if (!settled) {
+					const listing = await this.#getFileSuggestions(atPrefix);
+					if (listing.length > 0 && !signal?.aborted) onPartial({ items: listing, prefix: atPrefix });
+				}
+			}
+			const suggestions = await fuzzy;
+			if (suggestions.length === 0) {
 				const fallback = await this.#getFileSuggestions(atPrefix);
 				if (fallback.length === 0) return null;
 				return { items: fallback, prefix: atPrefix };
 			}
-			if (suggestions.length === 0) return null;
 
 			return {
 				items: suggestions,
@@ -711,7 +815,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const isPathCompletionItem = item.value.startsWith("/") || item.value.startsWith('"');
 		if (findLeadingSlashCommandStart(prefix) !== null && leadingSlashStart !== null && !isPathCompletionItem) {
 			const slashPrefix = textBeforeCursor.slice(leadingSlashStart);
-			if (!slashPrefix.includes(" ") && !slashPrefix.slice(1).includes("/")) {
+			// A `/` past the leading one usually means an absolute path, but a
+			// namespaced skill (`skill:<ns>/<name>`) is a real command name too.
+			const isKnownCommand = this.#commands.some(cmd => commandMatchesNameOrAlias(cmd, item.value));
+			if (!slashPrefix.includes(" ") && (isKnownCommand || !slashPrefix.slice(1).includes("/"))) {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);
 				// The collapsed `/skill:` namespace row completes to the namespace
 				// itself: no trailing space, so completion continues with the
@@ -738,14 +845,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				beforePrefix = currentLine.slice(0, cursorCol - liveAtPrefix.length);
 			}
 			// This is a file attachment completion
-			const newLine = `${beforePrefix + item.value} ${afterCursor}`;
+			const isDirectory = isDirectoryCompletionValue(item.value);
+			const suffix = isDirectory ? "" : " ";
+			const newLine = `${beforePrefix + item.value}${suffix}${afterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
 
 			return {
 				lines: newLines,
 				cursorLine,
-				cursorCol: beforePrefix.length + item.value.length + 1, // +1 for space
+				cursorCol: beforePrefix.length + item.value.length + suffix.length,
 			};
 		}
 
@@ -1045,9 +1154,12 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					isQuotedPrefix,
 				});
 
+				const parentDir = path.posix.dirname(relativePath);
 				suggestions.push({
 					value,
 					label: name + (isDirectory ? "/" : ""),
+					iconName: isDirectory ? "folder" : "file",
+					...(parentDir !== "." && { nativeDetail: parentDir }),
 				});
 			}
 
@@ -1084,7 +1196,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				if (/(^|\/)\.git(\/|$)/.test(normalized)) {
 					return false;
 				}
-				return lowerQuery.length === 0 || fuzzyMatch(lowerQuery, normalized.toLowerCase());
+				return lowerQuery.length === 0 || subsequenceMatch(lowerQuery, normalized.toLowerCase());
 			});
 			// `fuzzyFind` is already capped via `maxResults` in
 			// `buildAutocompleteFuzzyDiscoveryProfile`; no extra slice here.
@@ -1102,10 +1214,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					isAtPrefix: true,
 					isQuotedPrefix: options.isQuotedPrefix,
 				});
+				const parentDir = path.posix.dirname(displayPath);
 				suggestions.push({
 					value,
 					label: entryName + (isDirectory ? "/" : ""),
 					description: displayPath,
+					iconName: isDirectory ? "folder" : "file",
+					nativeDetail: parentDir === "." ? "" : parentDir,
 				});
 			}
 			return suggestions;

@@ -41,8 +41,8 @@ describe("buildAvailableSlashCommands", () => {
 		});
 		expect(byName.usage.subcommands).toContainEqual({
 			name: "reset",
-			description: "Spend a saved Codex rate-limit reset",
-			usage: "[account|active]",
+			description: "Spend a saved provider rate-limit reset",
+			usage: "[provider/credential-id|provider/active]",
 		});
 		expect(byName["reset-usage"]).toBeUndefined();
 
@@ -80,6 +80,33 @@ describe("buildAvailableSlashCommands", () => {
 
 		expect(loadedCommands).toEqual(fileCommands);
 		expect(commands.find(command => command.name === "notes")?.source).toBe("file");
+	});
+
+	test("forwards file-command argumentHint as ACP input hint", async () => {
+		const fileCommands = [
+			{
+				name: "git-sync",
+				description: "Rebase branch",
+				content: "body",
+				source: "test",
+				argumentHint: "[base-branch]",
+			},
+			{ name: "notes", description: "Open notes", content: "body", source: "test" },
+		];
+
+		const commands = await buildAvailableSlashCommands(
+			{
+				customCommands: [],
+				skills: [],
+				sessionManager: { getCwd: () => process.cwd() },
+				setSlashCommands() {},
+			} as never,
+			async () => fileCommands,
+		);
+		const byName = Object.fromEntries(commands.map(command => [command.name, command]));
+
+		expect(byName["git-sync"].input).toEqual({ hint: "[base-branch]" });
+		expect(byName.notes.input).toBeUndefined();
 	});
 
 	test("classifies MCP prompts by path and bundled custom commands as custom", async () => {
@@ -123,5 +150,27 @@ describe("buildAvailableSlashCommands", () => {
 		);
 
 		expect(commands.find(command => command.name === "legacy")?.source).toBe("custom");
+	});
+
+	test("does not advertise custom or file commands shadowed by a builtin alias", async () => {
+		// ACP resolves builtin aliases before `session.prompt()` runs custom/file
+		// commands, so advertising `/plugin` or `/models` here would show the user a
+		// command that silently executes the builtin instead of their handler.
+		const fileCommands = [{ name: "models", description: "My models note", content: "body", source: "test" }];
+		const commands = await buildAvailableSlashCommands(
+			{
+				customCommands: [{ command: { name: "plugin", description: "My plugin helper" } }],
+				skills: [],
+				sessionManager: { getCwd: () => "/tmp" },
+				setSlashCommands: () => {},
+			} as never,
+			async () => fileCommands,
+		);
+
+		const byName = Object.fromEntries(commands.map(command => [command.name, command]));
+		expect(byName.plugin).toBeUndefined();
+		expect(byName.models).toBeUndefined();
+		expect(byName.plugins.source).toBe("builtin");
+		expect(byName.plugins.aliases).toEqual(["plugin"]);
 	});
 });

@@ -6,7 +6,8 @@ import { runSharpshooterConsolidation } from "./consolidate";
 import { readSharpshooterState, sharpshooterBankDir } from "./paths";
 import { sharpshooterQueueDepth } from "./queue";
 
-const DEFAULT_INTERVAL_MINUTES = 5;
+import { cfgSharpshooterIntervalMinutes } from "./settings";
+
 const SCHEDULER_TICK_MS = 60_000;
 
 interface SchedulerEntry {
@@ -21,6 +22,7 @@ export function startSharpshooterScheduler(options: {
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	sessionId: string;
 }): () => void {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
 	const existing = schedulers.get(bankDir);
@@ -35,7 +37,7 @@ export function startSharpshooterScheduler(options: {
 				sharpshooterQueueDepth(options.agentDir, options.cwd),
 				readSharpshooterState(options.agentDir, options.cwd),
 			]);
-			const intervalMinutes = options.settings.get("sharpshooter.intervalMinutes") ?? DEFAULT_INTERVAL_MINUTES;
+			const intervalMinutes = cfgSharpshooterIntervalMinutes.get(options.settings);
 			const due = Date.now() - state.lastConsolidatedAt >= intervalMinutes * 60_000;
 			if (depth === 0 && !due) return;
 			await runSharpshooterConsolidation(options);

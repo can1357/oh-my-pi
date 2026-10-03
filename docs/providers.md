@@ -6,23 +6,47 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
+## Factory Droid
+
+The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.
+
+1. Run `omp login factory-droid` or `/login factory-droid` in an interactive session.
+2. Open the printed `auth.factory.ai/device` link in your browser, enter the displayed device code, and approve the login.
+3. Select a model, for example `factory-droid/kimi-k3`, and send a prompt. The stored WorkOS session refreshes automatically. `omp auth-broker login factory-droid` supports broker-backed credentials.
+
+Use subscription OAuth for this provider. It does not discover credentials from an installed Droid CLI or read `FACTORY_API_KEY`; Factory's separate API-key products are not part of this integration.
+
+The roster ships as KDL (`packages/catalog/src/compat/rules/providers/factory-droid.kdl`, with each model's wire and billing pool in `rules/runtime/behavior.kdl`), maintained by hand against the Droid CLI version pinned by `FACTORY_DROID_CLIENT_VERSION` (`packages/catalog/src/wire/factory-droid.ts`). It contains concrete CLI models, not the Factory Auto Model router or app-only Flex variants. Account feature flags, hard-deprecation gates, organization policy (including explicit opt-in requirements), and serving region narrow it live; new model IDs require a catalog update. Until discovery has succeeded online, feature-gated and consent-gated models stay hidden. Offline or failed discovery can retain a cached snapshot, which is not a guarantee of current entitlement.
+
+Organization identity and residency travel with the credential serving each request, including account rotation, and each account/residency scope has its own model cache. Residency chooses the API host; the independent inference region (`global`, `us`, or `eu`) constrains upstream eligibility.
+
+`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's base credit rate; dollar figures are upstream list-price references, not Factory billing, and neither includes temporary promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
+
+If account rotation would narrow the selected model's context window, OMP stops before sending that retry rather than guessing whether the existing conversation fits. Refresh discovery with `omp models refresh factory-droid` and select the region-appropriate model before retrying.
+
+Factory's native context limits hold even when extended context is disabled. Factory GPT and Gemini routes omit output-token caps, so bounded ephemeral turns reject a `maxTokens` request instead of silently running uncapped.
+
 ## How `omp` decides a provider is available
 
-At startup the model registry assembles its catalog from four sources, in order:
+The model registry composes these sources:
 
-1. The bundled model catalog (every built-in provider and its known models).
-2. Custom provider and model entries from `~/.omp/agent/models.yml`.
-3. Runtime-discovered models for providers that support discovery (local engines and discovery-enabled gateways).
-4. Providers and models registered by extensions.
+1. The bundled model catalog.
+2. Custom provider and model entries from the active agent directory's `models.yml` (default: `~/.omp/agent/models.yml`).
+3. Cached and runtime-discovered models for local engines and discovery-enabled hosted providers.
+4. Providers and models registered by extensions, including extension-owned discovery.
+
+Startup loads configuration and cached discovery metadata without waiting for every endpoint. Online refresh fills discovery-backed catalogs afterward. Successful authoritative discovery can replace bundled provider rows; explicit custom models and overrides are reapplied to the discovered catalog. Broker-backed gateway mode ignores local `models.yml` routing, credentials, and custom models.
 
 The registry can hold a model even when it is not currently selectable. A model becomes **available** only when both conditions hold:
 
 1. its provider ID is **not** in the effective `disabledProviders` list; **and**
-2. the provider is either **keyless** (an implicit local provider, or a custom provider with `auth: none`) **or** has resolvable credentials.
+2. the provider is either **keyless** (an implicit local provider, a custom provider with `auth: none`, or an optional-key login saved in keyless mode) **or** has configured authentication.
+
+Availability is a fast configuration check, not a credential validation request: it does not execute command-backed keys or refresh OAuth tokens. An invalid configured key can therefore appear available and fail at inference.
 
 `disabledProviders` is checked _before_ credentials. If a provider ID is disabled, no stored key, OAuth session, environment variable, `.env` entry, or `models.yml` `apiKey` will make it selectable — the provider's models are dropped from availability regardless of credentials. Removing the ID from the effective list restores them.
 
-Keyless local engines are a special case: `ollama`, `llama.cpp`, and `lm-studio` are treated as keyless when no key is configured, so their discovered models are selectable as soon as the engine answers — no login required. See [Built-in local engines](#built-in-local-engines).
+Implicit `ollama` and `lm-studio` discovery is keyless by default; implicit `llama.cpp` is keyless when no authentication is configured. Apple Foundation Models is also keyless on supported Apple Silicon systems. See [Built-in local engines](#built-in-local-engines).
 
 ## Credentials and precedence
 
@@ -32,11 +56,11 @@ When a provider needs an API key, `omp` resolves it in this order (first match w
 2. **`models.yml` config key**: an `apiKey` pinned on a custom provider, registered as a config-sourced bearer. This deliberately beats stored OAuth, so a key supplied for a custom `baseUrl` or gateway is honored instead of forwarding an upstream OAuth token the proxy would reject.
 3. **Stored OAuth credential**: refreshed when needed; multiple accounts are ranked and rotated automatically. For Anthropic and ChatGPT (Codex), each organization or workspace counts as its own account: one email holding both a Team or Enterprise seat and a personal plan can log in once per subscription (pick the workspace on the browser consent page), and rotation treats them as two accounts.
 4. **Login-sourced stored API key**: an API-key credential saved by a successful `/login`.
-5. **Provider environment variable**: including values loaded from `.env` files (see [the env-var table](#environment-variables-and-env-files)).
-6. **Other stored API key**: for example, a broker-migrated key. This is a last resort so an explicit environment variable wins.
-7. **`models.yml` fallback resolver**: keys for custom providers not otherwise registered.
+5. **Extension config fallback**: an extension provider registered with both an `apiKey` reference and an OAuth/login flow ranks that reference below stored OAuth and login keys.
+6. **Provider environment variable**: including values loaded from `.env` files (see [the env-var table](#environment-variables-and-env-files)).
+7. **Other stored API key**: for example, a broker-migrated key. This is a last resort so an explicit environment variable wins.
 
-Stored credentials live in the auth store at `~/.omp/agent/agent.db` for local auth, or in the configured auth-broker snapshot when running in broker mode. (`PI_CODING_AGENT_DIR` relocates the `~/.omp/agent` base, and the auth store moves with it.)
+Local credentials live in the active auth store (default: `~/.omp/agent/agent.db`); broker mode uses the configured shared auth broker. Named profiles and Linux XDG layouts can relocate the store. In the default profile, `PI_CODING_AGENT_DIR` overrides the agent directory. See [Settings](./settings.md) and [Secrets and credentials](./secrets.md) for path resolution.
 
 ### OAuth vs API key, and provider-scoped logins
 
@@ -47,15 +71,19 @@ Use the interactive slash commands inside a session:
 - `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
 - `/logout` — opens the provider selector to remove stored credentials.
 
+Outside a session, `omp login [<provider>]` runs the same login from the terminal, including extension-registered providers: it prints the auth URL (and opens it in your browser), reads any prompts from stdin, and saves to the same store sessions use — local `agent.db`, or the configured auth broker. Without a provider it shows a numbered picker. Successful login refreshes that provider's model catalog online so newly unlocked models are visible.
+
 For headless or remote setups backed by a shared auth broker, the CLI exposes `omp auth-broker login <provider>` / `omp auth-broker logout` (and `status`, `list`, `import`, `migrate`). See [Secrets and credentials](./secrets.md) for the broker model.
 
 When a model has no credentials, `omp` tells you to run `/login` or set the provider's environment variable.
 
-For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key. OMP refreshes membership from Cline's public recommended-models endpoint and bundles the current sixteen-model roster with Cline-authored limits, subscription pricing, modalities, and per-model reasoning controls for offline startup. New live ids remain selectable before regeneration, using conservative metadata rather than guessed controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and work with the same key on any Cline account; subscription models show API-equivalent reference pricing, while streamed gateway cost remains authoritative for actual billed or discounted usage. Requests mirror Cline CLI client headers and a stable per-session task id, Qwen routes use Cline's prompt-cache shape, and Qwen3.7 Plus maps thinking levels to the gateway's token-budget field.
+For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key against `/users/me`, without a completion probe or subscription-quota charge. OMP refreshes membership from Cline's public recommended-models endpoint and bundles reviewed Cline metadata for offline startup. New live IDs are enriched from upstream references or use conservative metadata without invented reasoning controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and use the same key; subscription models show API-equivalent reference pricing, while streamed gateway cost is authoritative for the actual charge. Requests mirror Cline CLI client headers and a stable per-session task ID; reasoning controls remain model-specific.
+
+For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login checks the key against Command Code's `/alpha/whoami` endpoint and rejects it only on a 401, as the Command Code CLI does, so a 403 or an unreachable check keeps the key. Claude models use the Anthropic Messages endpoint, the ten GPT models use the OpenAI Responses endpoint, and every other model uses Chat Completions, the same split the Command Code CLI uses. Thinking levels, image input, output limits, and prices follow the Command Code CLI's model registry; Claude Sonnet 5.5, which that registry does not list yet, takes them from Anthropic's catalog. The GPT models can run hosted web search, but not hosted image generation, which Command Code does not serve. TypeSafe's `typesafe/jev` decision model is available to the `judge` role. `omp usage`, `/usage`, and the status line show the credit balance, plus the five-hour and weekly windows on plans that have them. These figures come from the account endpoints the Command Code CLI uses; the Provider API docs do not document them.
 
 ### Pinning a key in `models.yml`
 
-A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an existing environment variable, that variable's value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout (see [Model and Provider Configuration](./models.md) for the full value syntax).
+A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an exact-case environment variable with a non-empty value, that value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout (see [Model and Provider Configuration](./models.md) for the full value syntax).
 
 ```yaml
 # ~/.omp/agent/models.yml
@@ -75,7 +103,7 @@ If `authHeader: true` is set on a custom provider, the resolved key is injected 
 
 ## Environment variables and `.env` files
 
-Each provider has one or more environment variables that supply a key when no stored credential exists. The table below is the verified provider → variable map; the full catalog is large, so it is split into core and additional providers. OAuth-backed providers can also accept a token variable in addition to (or instead of) an API key.
+The variables below supply credentials after runtime/config overrides and stored OAuth/login credentials. Providers authenticated only through login may have no key variable. Ordinary fallback names come from catalog provider KDL; auth policies can override them with ordered names or computed resolvers.
 
 ### Core providers
 
@@ -85,7 +113,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `openai`         | `OPENAI_API_KEY`                                                                                                                                 |
 | `openai-codex`   | `OPENAI_CODEX_OAUTH_TOKEN`                                                                                                                       |
 | `google`         | `GEMINI_API_KEY`                                                                                                                                 |
-| `google-vertex`  | `GOOGLE_CLOUD_API_KEY`, or Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS` + `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION`) |
+| `google-vertex`  | `GOOGLE_CLOUD_API_KEY`, or ADC (explicit `GOOGLE_APPLICATION_CREDENTIALS` or gcloud's default ADC file, plus project and location variables; see below) |
 | `groq`           | `GROQ_API_KEY`                                                                                                                                   |
 | `openrouter`     | `OPENROUTER_API_KEY`                                                                                                                             |
 | `mistral`        | `MISTRAL_API_KEY`                                                                                                                                |
@@ -94,29 +122,34 @@ Each provider has one or more environment variables that supply a key when no st
 | `github-copilot` | `COPILOT_GITHUB_TOKEN`                                                                                                                           |
 | `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                            |
 | `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                           |
-| `amazon-bedrock` | `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA credential chain                                                 |
+| `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, AWS profiles, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA/EC2 credential chain                        |
 
 ### Additional hosted providers
 
 | Provider ID                      | Environment variable(s)                                                       |
 | -------------------------------- | ----------------------------------------------------------------------------- |
+| `abliteration`                   | `ABLITERATION_API_KEY`, then `ABLIT_KEY`                                       |
 | `aiand`                          | `AIAND_API_KEY`                                                               |
 | `cerebras`                       | `CEREBRAS_API_KEY`                                                            |
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`               |
 | `baseten`                        | `BASETEN_API_KEY`                                                             |
-| `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK`                                                    |
+| `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain (SigV4)                 |
+| `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                            |
 | `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                           |
 | `together`                       | `TOGETHER_API_KEY`                                                            |
+| `typesafe`                       | `TYPESAFE_API_KEY`                                                            |
 | `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                     |
 | `nvidia`                         | `NVIDIA_API_KEY`                                                              |
 | `devin`                          | `DEVIN_API_KEY`                                                               |
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
+| `stepfun`                        | `STEPFUN_API_KEY`                                                             |
+| `helmcode`                       | `HELMCODE_API_KEY`                                                            |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
 | `novita`                         | `NOVITA_API_KEY`                                                              |
@@ -141,6 +174,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
 | `cline-pass`                     | `CLINE_API_KEY`                                                               |
+| `factory-droid`                  | none — use `/login factory-droid`                                             |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
@@ -153,22 +187,37 @@ Each provider has one or more environment variables that supply a key when no st
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
+| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
+| `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
+| `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
+
+Vertex ADC availability accepts project aliases `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or `GCLOUD_PROJECT`, and location aliases `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, or `VERTEX_LOCATION`.
+
+For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not automatically make SuperGrok models available or preferred; automatic availability requires its dedicated `XAI_OAUTH_TOKEN` or stored/configured auth.
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
-OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+`charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
+
+SingularityAPI sells two unrelated products behind one brand, so OMP models them as two providers: they share no key, no billing model, and no effort ladder, and neither key is accepted by the other host.
+
+`singularityapi-dev` is the pay-as-you-go universal inference gateway (300+ models: DeepSeek, Kimi, GLM, frontier flagships). Create a key at `https://app.singularityapi.dev` (or run `/login singularityapi-dev`) and set `SINGULARITYAPI_DEV_API_KEY`; the roster, limits, and tariffs are discovered live from `https://api.singularityapi.dev/v1/models`.
+
+`singularityapi-tech` is the reserved DeepSeek lanes gateway. Usage bills against a booked reservation slot rather than prepaid credit, so a valid key with no active slot answers 403 until you book one at `https://app.singularityapi.tech`. Create an `sk-...` key there (or run `/login singularityapi-tech`), set `SINGULARITYAPI_TECH_API_KEY`, and the lane roster is discovered live from `https://api.singularityapi.tech/v1/models`.
+
+OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
 ### `.env` discovery and precedence
 
-`omp` eagerly loads `.env` files into the process environment before any provider lookup. It reads four files and, for each variable, the **first** source that defines it wins. Effective precedence, high to low:
+`omp` eagerly loads four `.env` files into the process environment before provider lookup. For each variable, the first **non-empty** source wins. Effective precedence, high to low:
 
-1. The process environment inherited by `omp` (already-set variables always win).
-2. `<cwd>/.env`
-3. `~/.omp/agent/.env`
-4. `~/.omp/.env`
+1. Non-empty values already in the process environment.
+2. `<project>/.env`
+3. The active agent directory's `.env` (default: `~/.omp/agent/.env`).
+4. The active config root's `.env` (default: `~/.omp/.env`).
 5. `~/.env`
 
-A variable already present in the process environment is never overwritten by a `.env` file. Among the files, a value set in `<cwd>/.env` wins over `~/.omp/agent/.env`, which wins over `~/.omp/.env`, which wins over `~/.env`. So a shell-exported `OPENAI_API_KEY` beats every `.env` file, and a project's `<cwd>/.env` beats your home `~/.env`.
+Existing non-empty process values are not overwritten; empty values can be filled by a later file. A non-empty project value beats the agent, config-root, and home files. Named profiles use their own config root and agent directory. Bun may also preload project dotenv variants before this loader; values already present are treated as process values.
 
 Project-local `.env` is the simplest way to make one repository use a project-specific gateway, key, or local endpoint:
 
@@ -178,23 +227,23 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
-`.env` parsing is intentionally minimal:
+`.env` files use Node's `parseEnv` grammar, including comments, quoted/multiline values, and `export` prefixes. After parsing:
 
-- blank lines and lines starting with `#` are ignored;
-- keys must match `[A-Za-z_][A-Za-z0-9_]*` (shell-identifier shape) — other names are dropped;
-- values may be wrapped in single or double quotes, which are stripped;
+- keys must match `[A-Za-z_][A-Za-z0-9_]*` — other names are dropped;
 - values containing a NUL byte are dropped;
-- an `OMP_`-prefixed key is also mirrored to the matching `PI_`-prefixed name.
+- an `OMP_`-prefixed key is mirrored to the matching `PI_` name, overriding a same-file `PI_` entry.
 
 ## Built-in local engines
 
-Three local engines are discovered automatically without needing a `models.yml` entry. Each uses a base URL that can be overridden by an environment variable:
+Ollama, llama.cpp, and LM Studio are discovered automatically without needing a `models.yml` entry. Each uses a base URL that can be overridden by an environment variable:
 
 | Provider ID | Base URL (env override → default)                                                 | Notes                                           |
 | ----------- | --------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `ollama`    | `OLLAMA_BASE_URL`, then `OLLAMA_HOST` (normalized), else `http://127.0.0.1:11434` | Keyless by default.                             |
-| `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless a key is stored for `llama.cpp`. |
+| `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless authentication is configured.    |
 | `lm-studio` | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1`                             | Keyless by default.                             |
+
+Implicit Ollama and llama.cpp models use `openai-responses`; LM Studio uses `openai-completions`. On macOS arm64, `apple` also probes the in-process Apple Foundation Models bridge (`local://apple-foundation-models`). It offers `apple/on-device` only when the bridge reports the model usable; an ineligible device, disabled Apple Intelligence, or build without the bridge yields no models.
 
 These implicit engines are **skipped** when:
 
@@ -290,7 +339,7 @@ For the example above:
 - `anthropic` and `openai` are additionally disabled under `~/projects/sensitive`.
 - `openrouter` is additionally disabled under `~/work/client-a` and `~/work/client-b`.
 
-Path scopes are resolved **after** the settings merge. Because a higher-precedence layer replaces the whole array, a project-level `disabledProviders` array drops any scoped entries that only existed in the global array. `enabledModels` is the only other setting that supports the same path-scoped form. See [Settings](./settings.md) for details.
+Path scopes are resolved **after** the settings merge. Because a higher-precedence layer replaces the whole array, a project-level `disabledProviders` array drops any scoped entries that only existed in the global array. `enabledModels` and `enabledProviders` also support this form. See [Settings](./settings.md) for details.
 
 ## Provider IDs vs discovery provider IDs
 
@@ -303,6 +352,8 @@ Path scopes are resolved **after** the settings merge. Because a higher-preceden
 | --------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | Model provider ID     | `anthropic`, `openai`, `google`, `groq`, `openrouter`, `ollama`, `my-gateway` | Removes that provider's models from availability.               |
 | Discovery provider ID | `native`, `claude`, `codex`, `gemini`, `agents`, `github`                     | Stops that discovery source from contributing capability items. |
+
+`enabledProviders` controls opt-in user-level foreign discovery sources; it is not a model-provider allowlist. Project-level foreign sources have separate discovery behavior. Use model settings to narrow model selection.
 
 Watch the related names. The Google Gemini **API** models use the model provider ID `google`; `gemini` is a **discovery** provider ID (the source that reads `GEMINI.md`), not the Google model provider. Use discovery IDs only when you intend to disable an entire config source. See [Context files](./context-files.md) for the discovery-provider side.
 
@@ -384,12 +435,12 @@ disabledProviders:
 
 ## Troubleshooting
 
-**A provider's models are not selectable.** Confirm the provider has credentials (`/login <provider>`, an exported environment variable, or a `models.yml` `apiKey`) and that its ID is not in the effective `disabledProviders` list. Remember the rule: not disabled **and** (keyless **or** has credentials). Keyless local engines only appear once the engine is actually running and responding.
+**A provider's models are not selectable.** Confirm the provider has credentials (`/login <provider>`, an exported environment variable, or a `models.yml` `apiKey`) and that its ID is not in the effective `disabledProviders` list. Remember the rule: not disabled **and** (keyless **or** has credentials). A local engine must respond to populate discovery initially; cached catalog rows may remain visible later, but inference still needs the engine. Apple availability is checked through its in-process bridge.
 
-**The wrong key is being used (a stale key from `.env`).** Resolution favors runtime `--api-key`, then a `models.yml` config key, stored OAuth, a key saved by `/login`, environment or `.env`, other stored API keys, and finally the `models.yml` fallback resolver. An already-set process environment variable also beats every `.env` file, and `<cwd>/.env` beats `~/.env`. If an unexpected key wins, check for an exported shell variable and the four `.env` files in precedence order, and clear the one that should not apply.
+**The wrong key is being used (a stale key from `.env`).** Resolution favors runtime `--api-key`, then a `models.yml` config key, stored OAuth, a key saved by `/login`, extension config fallbacks, environment or `.env`, and other stored API keys. A non-empty process environment variable also beats every `.env` file, and a non-empty `<project>/.env` value beats `~/.env`. If an unexpected key wins, check for an exported shell variable and the four `.env` files in precedence order, and clear the one that should not apply.
 
 **A provider still appears even though I disabled it.** `disabledProviders` arrays are replaced, not merged: a project `<project>/.omp/config.yml` array fully overrides the global one. Verify the _effective_ list for the directory you are in (path-scoped entries only apply at or under their configured path), and confirm the ID is spelled exactly. Use `omp config get disabledProviders` to inspect the merged value (see [Settings](./settings.md)).
 
 **A discovery provider name had no effect on models (or vice-versa).** The ID namespace is shared. `gemini`, `codex`, `claude`, `native`, and `agents` are discovery-source IDs; the Google model backend is `google`. Make sure you are disabling the right kind of provider.
 
-**A custom `models.yml` provider does not load.** A YAML or schema error makes the registry skip the custom file. Validate the file with `omp models` (use `omp models find <substr>` to scope it to one provider). A provider with custom `models` needs `baseUrl`, authentication (`apiKey`, unless `auth: none`), and `api` at provider level or on every model. A provider with no models is also valid when it defines at least one supported override (`baseUrl`, `headers`, `apiKey`, `auth: none`, `compat`, `disableStrictTools`, `remoteCompaction`, `modelOverrides`, or `discovery`). Discovery providers may omit `models`, but need provider-level `api` unless `discovery.type` is `proxy`. An explicit `ollama`, `lm-studio`, or `llama.cpp` entry intentionally replaces built-in discovery for that ID. See [Model and Provider Configuration](./models.md).
+**A custom `models.yml` provider does not load.** A YAML or schema error makes the registry skip the custom file. Validate the file with `omp models` (use `omp models find <substr>` to scope it to one provider). A provider with custom `models` needs `baseUrl`, authentication (`apiKey`, unless `auth: none` or `auth: oauth`), and `api` at provider level or on every model. A provider with no models is also valid when it defines at least one supported override (`baseUrl`, `headers`, `apiKey`, `auth: none`, `compat`, `disableStrictTools`, `guardrailIdentifier`, `requestMetadata`, `remoteCompaction`, `modelOverrides`, or `discovery`). Discovery providers may omit `models`, but need provider-level `api` unless `discovery.type` is `proxy`. An explicit `ollama`, `lm-studio`, or `llama.cpp` entry intentionally replaces built-in discovery for that ID. See [Model and Provider Configuration](./models.md).

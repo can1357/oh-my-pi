@@ -16,7 +16,7 @@ import {
 	type LiveServerEvent,
 } from "./protocol";
 import { CodexLiveTransport } from "./transport";
-import type { LivePhase } from "./visualizer";
+import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
 
 const OUTPUT_ACTIVE_LEVEL = 0.015;

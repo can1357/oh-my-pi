@@ -465,8 +465,9 @@ mod tests {
 	#[test]
 	fn resolve_logs_dir_reroots_absolute_pi_config_dir_under_home() {
 		// JS resolves the config root via `path.join(os.homedir(),
-		// getConfigDirName())`, which never honors an absolute PI_CONFIG_DIR — it is
-		// always re-rooted under `$HOME` (and `..` components are normalized away).
+		// getConfigDirName())`, which never honors an absolute PI_CONFIG_DIR — it
+		// is always re-rooted under `$HOME` (and `..` components are normalized
+		// away).
 		let dir = resolve_logs_dir(
 			Path::new("/tmp/pi-natives-test-home"),
 			Some(OsStr::new("/var/tmp/pi-natives-state")),
@@ -551,8 +552,8 @@ mod tests {
 	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_skipped_when_agent_dir_overridden() {
-		// `PI_CODING_AGENT_DIR` pointing elsewhere mirrors the JS `isDefault === false`
-		// branch in `packages/utils/src/dirs.ts` and must disable XDG.
+		// `PI_CODING_AGENT_DIR` pointing elsewhere mirrors the JS `isDefault ===
+		// false` branch in `packages/utils/src/dirs.ts` and must disable XDG.
 		let dir = xdg_state_logs(
 			Some(OsStr::new("/xdg/state")),
 			Some(OsStr::new("/some/custom/agent")),

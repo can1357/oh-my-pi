@@ -1,8 +1,9 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, ApiKey, AssistantMessage, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
-import { toReasoningEffort } from "../../thinking";
+import { toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ResolvedCommitModel } from "../model-selection";
+import { extractTextContent } from "../utils";
 import { type CommitInferenceCache, computeCommitCacheKey } from "./cache";
 import type { ConventionalGenerationConfig } from "./config";
 import type { ConventionalPromptFamily } from "./prompts";
@@ -50,6 +51,7 @@ export class OmpCommitInference implements CommitInference {
 	readonly #authStorage: AuthStorage | null;
 	readonly #onProgress?: CommitProgress;
 	readonly #signal?: AbortSignal;
+	readonly #sessionId = Bun.randomUUIDv7();
 
 	constructor(options: {
 		primary: ResolvedCommitModel;
@@ -123,12 +125,13 @@ export class OmpCommitInference implements CommitInference {
 					},
 					{
 						apiKey: target.apiKey,
+						sessionId: this.#sessionId,
 						maxTokens: 16_384,
 						reasoning,
 						signal,
 					},
 				);
-				responseText = extractAssistantText(message);
+				responseText = extractTextContent(message);
 				if (message.stopReason === "error") throw new Error(message.errorMessage ?? "Provider error");
 				if (!responseText.trim()) throw new Error("Empty model response");
 				const raw = { text: responseText, stopReason: message.stopReason };
@@ -172,12 +175,4 @@ export class OmpCommitInference implements CommitInference {
 		this.#cache?.close();
 		this.#authStorage?.close();
 	}
-}
-
-function extractAssistantText(message: AssistantMessage): string {
-	return message.content
-		.filter(content => content.type === "text")
-		.map(content => content.text)
-		.join("")
-		.trim();
 }

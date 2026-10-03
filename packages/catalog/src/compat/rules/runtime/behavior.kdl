@@ -20,6 +20,12 @@ behavior {
 	// `opencode` provider in the picker.
 	retired-providers "wafer-pass" "wandb" "opencode"
 
+	// ClinePass exposes gateway-specific limits, pricing, and reasoning
+	// controls; matching them by bare model id contaminates unrelated proxy
+	// models (a LiteLLM proxy serving `glm-5.3-flash`), so its rows are barred
+	// from seeding cross-provider bare-id enrichment references (#10932).
+	reference-isolated-providers "cline-pass"
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"
@@ -40,6 +46,14 @@ behavior {
 	}
 	// A bare composer-2.5 request defaults to the Fast lane server-side.
 	cursor-model-parameter model="composer-2.5" id="fast" value="false"
+
+	// Cursor's dashboard splits native Grok/Composer traffic from all other
+	// models. Substring fallbacks cover newly discovered family revisions.
+	quota-tiers provider="cursor" default="api" {
+		tier "auto" "composer-2.5"
+		fallback "auto" substring="grok"
+		fallback "auto" substring="composer"
+	}
 
 	// Exact quota bucket memberships reported by Google Gemini CLI.
 	quota-tiers provider="google-gemini-cli" {
@@ -75,6 +89,23 @@ behavior {
 		fallback "spark" substring="-spark"
 		fallback "chat" substring="gpt-"
 	}
+	// Factory Droid bills each model from one subscription pool: Droid Core
+	// (flat rate) or Standard Credits. Unknown ids have no inferred entitlement.
+	quota-tiers provider="factory-droid" {
+		tier "core" "inkling" "mistral-medium-3.5" "glm-5.3-flash" "glm-5.3" "glm-5.2" "glm-5.2-fast" \
+			"kimi-k3" "qwen3.8-max" "nemotron-3-ultra" "deepseek-v4.1-flash" "deepseek-v4-flash-0731" \
+			"deepseek-v4-pro" "minimax-m3" "minimax-m2.7"
+		tier "standard" "claude-fable-5.1" "claude-fable-5" "claude-opus-5-5" "claude-opus-5-5-fast" \
+			"claude-opus-5" "claude-opus-5-fast" "claude-opus-4-8" "claude-opus-4-8-fast" "claude-opus-4-7" \
+			"claude-opus-4-6" "claude-opus-4-5-20251101" "claude-sonnet-5-5" "claude-sonnet-5" \
+			"claude-sonnet-4-6" "claude-sonnet-4-5-20250929" "claude-haiku-4-5-20251001" "gpt-6-astra" \
+			"gpt-6.1-sol" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-sol-fast" "gpt-5.6-terra" \
+			"gpt-5.6-luna" "gpt-5.5" "gpt-5.5-fast" "gpt-5.5-pro" "gpt-5.4" "gpt-5.4-fast" "gpt-5.4-mini" \
+			"gpt-5.4-mini-fast" "gpt-5.3-codex" "gpt-5.3-codex-fast" "gpt-5.2" "garnet-07-15" \
+			"gemini-3.1-pro-preview" "gemini-3.8-flash" "gemini-3.7-flash" "gemini-3.6-flash" \
+			"gemini-3.5-flash" "gemini-3-flash-preview" "grok-4.7" "grok-4.6" "grok-4.5" "atlas-07-21" \
+			"aster-07-15"
+	}
 	// Subscription eligibility for model-aware Codex credential routing.
 	plan-requirement provider="openai-codex" {
 		tier "pro" substring="-spark"
@@ -82,6 +113,11 @@ behavior {
 			exact="gpt-5.6-luna" exact="gpt-5.6-luna-pro" glob="*/gpt-5.6" glob="*/gpt-5.6-sol" \
 			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro"
 	}
+
+	// Z.AI and Zhipu emit timezone-naive account-reset wall clocks in Beijing
+	// time. Provider-aware retry paths append this offset before parsing.
+	retry-reset-timezone provider="zai" offset="+08:00"
+	retry-reset-timezone provider="zhipu-coding-plan" offset="+08:00"
 
 	// Cloudflare AI Gateway namespace routing. The Workers AI prefix remains
 	// on the request id; the upstream namespaces are stripped.
@@ -102,6 +138,12 @@ behavior {
 
 	// Provider-default wire model for model-less hosted search operations.
 	hosted-default provider="kimi-search" model="kimi-for-coding"
+	// LiteLLM publishes task-specific endpoint models beside conversational
+	// models. Exact mode metadata avoids brittle model-name heuristics while
+	// unknown and malformed future values remain selectable.
+	exclude-discovery-modes "audio_speech" "audio_transcription" "batch" "embedding" "guardrail" \
+		"image_edit" "image_generation" "moderation" "ocr" "rerank" "search" "vector_store" \
+		"video_generation" provider="litellm"
 	// models.dev rows OMP cannot route successfully: AWS does not document
 	// the jp. Opus 5 profile, and the openai.gpt-5.x rows are Mantle-only
 	// ids that Bedrock rejects or misroutes.
@@ -121,9 +163,20 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-ams" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
+	// Text-chat transports cannot serve StepFun's audio-only and image-editing
+	// SKUs, which its /v1/models roster interleaves with the chat models.
+	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
+	// Helmcode's /v1/models roster lists embedding, rerank, TTS, and STT models
+	// beside the chat models (helmcode.com/docs/models).
+	exclude-models provider="helmcode" exact="qwen3-embedding" exact="rerank" exact="kokoro" exact="whisper"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
-	exclude-models provider="xai-oauth" prefix="grok-imagine-" prefix="grok-stt-" prefix="grok-voice-"
+	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
+		prefix="grok-imagine-video" prefix="grok-stt-" prefix="grok-voice-"
+	// Meta's /v1/models lists image generation and transcription SKUs beside
+	// the Muse Spark chat models.
+	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
+	exclude-models provider="muse-code" prefix="muse-image-" prefix="muse-voice-"
 	// NanoGPT's roster interleaves non-text SKUs by name token.
 	exclude-models provider="nanogpt" substring="embedding" substring="image" substring="vision" \
 		substring="audio" substring="speech" substring="transcribe" substring="moderation" \
@@ -147,29 +200,98 @@ behavior {
 		prefix="qwen-audio-" prefix="qwen-image-" prefix="text-embedding-" prefix="wan2.7-"
 	// Copilot's /models listing carries no transport field; route Claude ids
 	// to Anthropic Messages, the reviewed Responses roster to Responses, and
-	// everything else to chat completions.
+	// everything else to chat completions. Every Grok Copilot has served since
+	// 4.5 is Responses-only (chat completions answers 400
+	// unsupported_api_for_model), so the line is matched by prefix — including
+	// the synthesized `-1m` long-context siblings — instead of one exact id per
+	// revision (#7096, #8807, #12901). grok-code-fast-1 carries no 4.x revision
+	// and stays on chat completions.
 	api-routes provider="github-copilot" default="openai-completions" {
 		route "anthropic-messages" glob="claude-haiku-*" glob="claude-sonnet-*" glob="claude-opus-*" \
 			glob="claude-fable-*" glob="claude-mythos-*"
-		route "openai-responses" exact="grok-4.5" exact="grok-4.6" prefix="gpt-5" prefix="oswe" prefix="mai-"
+		route "openai-responses" prefix="grok-4." prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
+	}
+	// Command Code serves Claude ids through its Anthropic-compatible Messages
+	// endpoint and everything else through chat completions or Responses
+	// (`supported_endpoints` on /provider/v1/models). Chat completions rejects
+	// `reasoning_effort: "none"` (low|medium|high|xhigh|max only), while
+	// Responses accepts `reasoning.effort: "none"`. Every id with a reviewed
+	// effort ladder that lists `/responses` therefore rides Responses, so
+	// thinking-off actually disables reasoning instead of clamping to the
+	// lowest effort. Ladder ids without `/responses` (deepseek-v4-flash-fast,
+	// gemini-3.7-flash, Qwen3.8-Flash, Qwen3.8-Max-0902, hy4-preview,
+	// space-bunny-alpha), the Qwen3.8 ids (chat already disables them through
+	// `enable_thinking: false`), and non-reasoning ids stay on chat completions.
+	api-routes provider="commandcode" default="openai-completions" {
+		route "anthropic-messages" prefix="claude-"
+		route "openai-responses" exact="gpt-5.3-codex" exact="gpt-5.4" exact="gpt-5.4-mini" exact="gpt-5.5" \
+			exact="gpt-5.6-luna" exact="gpt-5.6-sol" exact="gpt-5.6-terra" exact="gpt-6-astra" \
+			exact="gpt-6-luna" exact="gpt-6-sol" \
+			exact="deepseek/deepseek-v4-flash" exact="deepseek/deepseek-v4-flash-vision-exp" \
+			exact="deepseek/deepseek-v4-pro" exact="deepseek/deepseek-v4.1-flash" \
+			exact="deepseek/deepseek-v4.1-flash-fast" exact="moonshotai/Kimi-K3" \
+			exact="z-ai/glm-5.3-flash" exact="z-ai/glm-5.3-flashx" exact="zai-org/GLM-5.2" \
+			exact="zai-org/GLM-5.3" exact="google/gemini-3.1-flash-lite" exact="google/gemini-3.5-flash" \
+			exact="google/gemini-3.5-flash-lite" exact="google/gemini-3.6-flash" \
+			exact="google/gemini-3.8-flash" exact="MiniMaxAI/MiniMax-M3" exact="stepfun/Step-5-Preview" \
+			exact="xai/grok-4.5" exact="xai/grok-4.6" exact="xai/grok-4.7" exact="meta/muse-spark-1.1" \
+			exact="meta/muse-spark-1.2" exact="meta/muse-spark-1.2-contributor" exact="meta/muse-spark-1.3" \
+			exact="meta/muse-spark-1.3-contributor" exact="stealth/pixel-canary" exact="sakana/fugu-ultra"
 	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.
 	api-routes provider="zenmux" default="openai-completions" {
 		route "anthropic-messages" prefix="anthropic/"
 	}
-	// OpenCode Zen: models.dev declares these with `@ai-sdk/anthropic`, but the
-	// gateway serves them only at /v1/chat/completions (#1617).
+	// GLM-5.3-Flash is available on Z.AI's native chat-completions API but
+	// not its Anthropic-compatible coding endpoint (#10539).
+	api-routes provider="zai" default="anthropic-messages" {
+		route "openai-completions" exact="glm-5.3-flash"
+	}
+	// OpenCode Zen: models.dev declares minimax-m3 with `@ai-sdk/anthropic`, but
+	// the gateway serves it only at /v1/chat/completions (#1617). It omits
+	// muse-spark-1.3-contributor-free entirely, and the gateway's GPT-6 Astra
+	// listing carries no transport metadata; both model lines are served only
+	// at /responses (#10610, #12030). The Muse prefix covers gateway-first
+	// revisions; exact ids stay as cache-migration identity.
 	api-routes provider="opencode-zen" {
+		route "anthropic-messages" exact="union-alpha"
+		route "openai-responses" prefix="muse-spark-" exact="muse-spark-1.3-contributor-free" exact="gpt-6-astra"
 		route "openai-completions" exact="minimax-m3" exact="minimax-m3-free"
 	}
 	// OpenCode Go: models.dev's npm hints misroute these (#887, #1617); the
 	// responses pins are gateway-verified (deepseek-v4-flash 2026-08-08;
-	// muse-spark per opencode.ai/docs/go/#endpoints, #8957).
+	// muse-spark per opencode.ai/docs/go/#endpoints, #8957, #10610).
 	api-routes provider="opencode-go" {
-		route "openai-responses" exact="deepseek-v4-flash" exact="muse-spark-1.2" exact="muse-spark-1.2-contributor"
+		route "anthropic-messages" exact="union-alpha"
+		route "openai-responses" prefix="muse-spark-" exact="deepseek-v4-flash" exact="muse-spark-1.2" \
+			exact="muse-spark-1.2-contributor" exact="muse-spark-1.3" exact="muse-spark-1.3-contributor"
 		route "openai-completions" exact="minimax-m2.7" exact="minimax-m3" exact="minimax-m3-free" \
 			exact="qwen3.5-plus" exact="qwen3.6-plus"
+	}
+	// Factory Droid's proxy multiplexes four wires behind one client identity
+	// (packages/ai/src/providers/factory-droid.ts); `google-generate` is its
+	// native Gemini client. The registry names each model's wire, so every
+	// roster id routes exactly; unknown ids fall back to chat completions.
+	api-routes provider="factory-droid" default="openai-completions" {
+		route "anthropic-messages" exact="claude-fable-5.1" exact="claude-fable-5" exact="claude-opus-5-5" \
+			exact="claude-opus-5-5-fast" exact="claude-opus-5" exact="claude-opus-5-fast" \
+			exact="claude-opus-4-8" exact="claude-opus-4-8-fast" exact="claude-opus-4-7" \
+			exact="claude-opus-4-6" exact="claude-opus-4-5-20251101" exact="claude-sonnet-5-5" \
+			exact="claude-sonnet-5" exact="claude-sonnet-4-6" exact="claude-sonnet-4-5-20250929" \
+			exact="claude-haiku-4-5-20251001" exact="atlas-07-21" exact="aster-07-15" exact="minimax-m2.7"
+		route "openai-responses" exact="gpt-6-astra" exact="gpt-6.1-sol" exact="gpt-6-sol" exact="gpt-6-luna" \
+			exact="gpt-5.6-sol" exact="gpt-5.6-sol-fast" exact="gpt-5.6-terra" exact="gpt-5.6-luna" \
+			exact="gpt-5.5" exact="gpt-5.5-fast" exact="gpt-5.5-pro" exact="gpt-5.4" exact="gpt-5.4-fast" \
+			exact="gpt-5.4-mini" exact="gpt-5.4-mini-fast" exact="gpt-5.3-codex" exact="gpt-5.3-codex-fast" \
+			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5"
+		route "google-generate" exact="garnet-07-15" exact="gemini-3.1-pro-preview" exact="gemini-3.8-flash" \
+			exact="gemini-3.7-flash" exact="gemini-3.6-flash" exact="gemini-3.5-flash" \
+			exact="gemini-3-flash-preview"
+		route "openai-completions" exact="inkling" exact="mistral-medium-3.5" exact="glm-5.3-flash" \
+			exact="glm-5.3" exact="glm-5.2" exact="glm-5.2-fast" exact="kimi-k3" exact="qwen3.8-max" \
+			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4-flash-0731" \
+			exact="deepseek-v4-pro" exact="minimax-m3"
 	}
 
 	// Copilot serves these models with tighter effective limits than its
@@ -234,6 +356,16 @@ behavior {
 	// xai equivalent, so the exact-id price mirror misses them.
 	pricing-peer provider="xai-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
+	}
+	// Token Plan rows report zero cost upstream; like the Antigravity and
+	// SuperGrok rules above, they show the pay-as-you-go equivalent (Credits
+	// overflow is billed at the PAYG list price). MiniMax-M3.1-Flash-Preview has
+	// no published price and borrows the MiniMax-M3 rate as an estimate.
+	pricing-peer provider="minimax-code" peers="minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
+	}
+	pricing-peer provider="minimax-code-cn" peers="minimax-cn" "minimax" {
+		alias "MiniMax-M3.1-Flash-Preview" peer-id="MiniMax-M3"
 	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"

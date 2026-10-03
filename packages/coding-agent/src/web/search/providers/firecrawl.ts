@@ -4,23 +4,16 @@
  * Calls Firecrawl's search API and maps web results into the unified
  * SearchResponse shape used by the web search tool.
  */
-import {
-	type AuthStorage,
-	type FetchImpl,
-	getEnvApiKey,
-	resolveApiKeyOnce,
-	seedApiKeyResolver,
-	withAuth,
-} from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
+import { resolveFirecrawlUrl } from "../../firecrawl";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-const FIRECRAWL_DEFAULT_BASE_URL = "https://api.firecrawl.dev/v2";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 100;
 
@@ -30,28 +23,6 @@ const RECENCY_TBS: Record<NonNullable<SearchParams["recency"]>, string> = {
 	month: "qdr:m",
 	year: "qdr:y",
 };
-function resolveSearchUrl(): string {
-	const configured = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-	if (!configured?.trim()) return `${FIRECRAWL_DEFAULT_BASE_URL}/search`;
-	let url: URL;
-	try {
-		url = new URL(configured.trim());
-	} catch {
-		throw new Error("Invalid Firecrawl base URL: expected an HTTP or HTTPS URL");
-	}
-	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		throw new Error("Invalid Firecrawl base URL: expected an HTTP or HTTPS URL");
-	}
-	if (url.username || url.password) {
-		throw new Error("Invalid Firecrawl base URL: URL credentials are not allowed");
-	}
-	url.search = "";
-	url.hash = "";
-	url.pathname = url.pathname.replace(/\/+$/, "");
-	if (!/\/v[12]$/i.test(url.pathname)) url.pathname += "/v2";
-	url.pathname += "/search";
-	return url.toString();
-}
 
 export interface FirecrawlSearchParams {
 	query: string;
@@ -93,7 +64,7 @@ export function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	return authStorage.getApiKey("firecrawl", sessionId, { signal });
+	return authStorage.keys.get("firecrawl", sessionId, { signal });
 }
 
 function buildRequestBody(params: FirecrawlSearchParams): Record<string, unknown> {
@@ -119,7 +90,7 @@ async function callFirecrawlSearch(
 	if (apiKey) {
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
-	const response = await (params.fetch ?? fetch)(resolveSearchUrl(), {
+	const response = await (params.fetch ?? fetch)(resolveFirecrawlUrl("/search"), {
 		method: "POST",
 		headers,
 		body: JSON.stringify(buildRequestBody(params)),
@@ -189,7 +160,7 @@ export async function searchFirecrawl(params: SearchParams): Promise<SearchRespo
 		timeoutMs: params.timeoutMs,
 		fetch: params.fetch,
 	};
-	const keyResolver = params.authStorage.resolver("firecrawl", {
+	const keyResolver = params.authStorage.keys.resolver("firecrawl", {
 		sessionId: params.sessionId,
 	});
 	const numResults = clampNumResults(firecrawlParams.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
@@ -231,21 +202,8 @@ export class FirecrawlProvider extends SearchProvider {
 	readonly id = "firecrawl";
 	readonly label = "Firecrawl";
 
-	/**
-	 * Auto-chain admission requires either a credential or an explicitly
-	 * configured self-hosted endpoint. Hosted keyless mode remains explicit-only
-	 * so it does not displace providers the user configured.
-	 */
-	isAvailable(authStorage: AuthStorage): boolean {
-		const configuredBaseUrl = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-		return !!configuredBaseUrl?.trim() || authStorage.hasAuth("firecrawl") || !!getEnvApiKey("firecrawl");
-	}
-
-	/**
-	 * Firecrawl supports keyless mode, so an explicit user selection
-	 * (`webSearch: firecrawl`) works without any credential configured.
-	 */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	/** Always available: without a credential or self-hosted endpoint, search runs in keyless mode. */
+	isAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 
