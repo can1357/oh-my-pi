@@ -300,6 +300,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `models` (read-only model query — see below)
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
+- `getContextBreakdown()` returns the `/context` breakdown: `categories` (`systemPrompt`, `systemTools`, `systemContext`, `skills`, `messages`, each with `tokens`, `label` and a theme `color` key), `usedTokens`, `freeTokens`, `autoCompactBufferTokens`, `contextWindow`, `thresholdTokens` and `snapcompact` (estimated wire savings, set only while a `snapcompact.*` setting is enabled), or `undefined` when the host has no session. Each call re-estimates those savings over the system prompt and message list, so poll it on a timer rather than per frame when snapcompact is on
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`

@@ -7,6 +7,7 @@ import {
 	type ContextBreakdown,
 	type ContextSavingsEstimate,
 } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ScopeLike } from "../config/registry";
 import type { AgentSession } from "./agent-session";
 import { resolveSpeculationMethod } from "./compaction-methods";
@@ -47,12 +48,18 @@ export function computeSessionContextBreakdown(
 		const renderSystemPrompt = cfgSnapcompactSystemPrompt.get(session.settings);
 		const renderToolResults = cfgSnapcompactToolResults.get(session.settings);
 		if (renderSystemPrompt !== "none" || renderToolResults) {
-			snapcompact = estimateInlineSavings({
-				options: { renderSystemPrompt, renderToolResults, shape: cfgSnapcompactShape.get(session.settings) },
-				model: session.model,
-				systemPrompt: session.systemPrompt ?? [],
-				messages: session.messages ?? [],
-			});
+			try {
+				snapcompact = estimateInlineSavings({
+					options: { renderSystemPrompt, renderToolResults, shape: cfgSnapcompactShape.get(session.settings) },
+					model: session.model,
+					systemPrompt: session.systemPrompt ?? [],
+					messages: session.messages ?? [],
+				});
+			} catch (err) {
+				// Savings are advisory, and a malformed prompt section must not sink the
+				// whole breakdown (issue #9331).
+				logger.warn("snapcompact savings estimate failed", { error: err });
+			}
 		}
 	}
 	return computeContextBreakdown(session, {
