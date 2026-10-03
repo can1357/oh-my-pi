@@ -4321,7 +4321,7 @@ export class AgentSession implements SettingsScope {
 	): Promise<AgentContinueOutcome> {
 		try {
 			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary();
-			if (signal.aborted || this.#isDisposed) {
+			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
 			// A cooldown-expiry revert can drop the active window below the
@@ -4331,7 +4331,7 @@ export class AgentSession implements SettingsScope {
 			// predictably oversized request to the reverted (smaller) model.
 			if (reverted) {
 				await this.#maintenance.runPrePromptCompactionIfNeeded([]);
-				if (signal.aborted || this.#isDisposed) {
+				if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 					return { status: "skipped", reason: "post-restore-unavailable" };
 				}
 			}
@@ -4339,6 +4339,9 @@ export class AgentSession implements SettingsScope {
 				if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
 					return { status: "skipped", reason: "session-unavailable" };
 				}
+			}
+			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
+				return { status: "skipped", reason: "session-unavailable" };
 			}
 			for (;;) {
 				try {
@@ -4356,7 +4359,13 @@ export class AgentSession implements SettingsScope {
 					});
 					await this.agent.waitForIdle();
 					await this.#drainInFlightEventHandlers();
-					if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+					if (
+						signal.aborted ||
+						this.#isDisposed ||
+						this.#abortInProgress ||
+						this.isCompacting ||
+						this.isGeneratingHandoff
+					) {
 						return { status: "skipped", reason: "session-unavailable" };
 					}
 					if (request.options.generation !== undefined && this.#promptGeneration !== request.options.generation) {
@@ -4395,7 +4404,13 @@ export class AgentSession implements SettingsScope {
 				// streaming turn — agent.continue() here would race the handoff's session
 				// reset. The first-class fix is in #checkCompaction/the agent_end handler,
 				// but this guard catches anything that bypasses that path.
-				if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+				if (
+					signal.aborted ||
+					this.#isDisposed ||
+					this.#abortInProgress ||
+					this.isCompacting ||
+					this.isGeneratingHandoff
+				) {
 					this.#skipAgentContinue("session-unavailable", request);
 					return;
 				}
@@ -9156,6 +9171,12 @@ export class AgentSession implements SettingsScope {
 			this.agent.abort(options?.reason);
 			await postPromptDrain;
 			await this.agent.waitForIdle();
+			// agent_end maintenance can enqueue a retry after the first cancellation.
+			// Keep the abort barrier up until those handlers settle, then cancel
+			// anything they scheduled before making the session revivable.
+			await this.#drainInFlightEventHandlers();
+			this.abortRetry();
+			await this.#cancelPostPromptTasks();
 			// `/compact` disconnects the agent subscription until its finally block.
 			// Do not let abort-and-replace callers start a new prompt before that cleanup
 			// finishes, or the replacement turn's events are neither forwarded nor persisted.

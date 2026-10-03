@@ -2388,6 +2388,7 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		const retrySettings = cfgRetry.get(this.#host.settings);
+		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
@@ -2781,6 +2782,9 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
+		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+			return this.#endCancelledRetry();
+		}
 
 		// Resolved stream-stall tools and proven-unexecuted malformed/refused
 		// calls keep their assistant/result pair. Continuation then sees explicit
