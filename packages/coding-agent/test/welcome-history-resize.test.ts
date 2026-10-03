@@ -226,9 +226,7 @@ describe("composer welcome native-history resize", () => {
 
 		settledViewport = terminal.getViewport().map(row => Bun.stripANSI(row));
 		expect(countRows(settledViewport, "vtest")).toBe(1);
-		expect(expectOneExactEditor(settledViewport, tail.status)).toBeGreaterThan(
-			rowOf(settledViewport, "vtest"),
-		);
+		expect(expectOneExactEditor(settledViewport, tail.status)).toBeGreaterThan(rowOf(settledViewport, "vtest"));
 		expect(countRows(plainBuffer(terminal), "EDITOR TOP")).toBe(1);
 		expect(offered).toHaveLength(1);
 		expect(acknowledged).toHaveLength(1);
