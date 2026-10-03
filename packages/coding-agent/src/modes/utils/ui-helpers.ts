@@ -58,7 +58,11 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	guestRefusesSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
@@ -1127,10 +1131,13 @@ export class UiHelpers {
 	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
 		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
-		// Queuing bypasses the slash block that guards the other recording sites, so the secret
-		// filter is repeated here: `/join <link>` and `/login <args>` carry a room key or an auth
-		// code, and `history.db` stores the row in the clear.
-		if (shouldSkipHistory(text)) this.ctx.editor.clearDraft();
+		// Queuing bypasses the slash block that guards the other recording sites, so the two
+		// filters are repeated here: the secret filter, because `/join <link>` and
+		// `/login <args>` carry a room key or an auth code, and the guest gate, because
+		// `handleFollowUp` reaches here during compaction before its own guest branch —
+		// and `history.db` stores every row in the clear.
+		if (shouldSkipHistory(text) || (this.ctx.collabGuest && guestRefusesSlashCommand(text)))
+			this.ctx.editor.clearDraft();
 		else if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
 		else this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();

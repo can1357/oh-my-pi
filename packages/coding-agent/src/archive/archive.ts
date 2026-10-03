@@ -154,8 +154,9 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	const recaps = listSessionRecaps({ sessionIds: [info.id] })
 		.map(toArchiveRecap)
 		.reverse();
-	const prompts = HistoryStorage.open()
-		.getRecent(limit, { kind: "session", value: info.id })
+	// Same reason as `archivePrompts`: an unreadable store must not throw out of an
+	// archive view.
+	const prompts = safeRecent(HistoryStorage.open(), limit, { kind: "session", value: info.id })
 		.map(toArchivePrompt)
 		.reverse();
 	const record: ArchiveSessionDetail = {
@@ -185,7 +186,15 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	return { text: lines.join("\n"), records: record };
 }
 
-/** Prompt history of one project (`cwd`) or every project, newest first; `query` switches to token search. */
+/** `getRecent` on an unusable store degrades to no prompts rather than throwing. */
+function safeRecent(history: HistoryStorage, limit: number, scope: HistoryScope) {
+	try {
+		return history.getRecent(limit, scope);
+	} catch {
+		return [];
+	}
+}
+
 export function archivePrompts(
 	query: string | undefined,
 	cwd: string | undefined,
@@ -193,9 +202,12 @@ export function archivePrompts(
 ): ArchiveView<ArchivePrompt[]> {
 	const history = HistoryStorage.open();
 	// `HistoryScope` narrows by kind; omitting it would read every project, so an
-	// absent `cwd` is stated as the `global` scope rather than left undefined.
-	const scope: HistoryScope = cwd ? { kind: "cwd", value: cwd } : { kind: "global" };
-	const entries = query ? history.search(query, limit, scope) : history.getRecent(limit, scope);
+	// absent `cwd` is stated as the `global` scope. Only `undefined` means "every
+	// project" — an empty `cwd` is a lookup that matches nothing.
+	const scope: HistoryScope = cwd === undefined ? { kind: "global" } : { kind: "cwd", value: cwd };
+	// `getRecent` throws when the store is unusable, unlike the pre-scope read that
+	// degraded to no rows; an archive view with no prompts is the honest answer here.
+	const entries = query ? history.search(query, limit, scope) : safeRecent(history, limit, scope);
 	const records = entries.map(toArchivePrompt);
 	const subject = query ? `${scopeLabel(cwd)} matching ${JSON.stringify(query)}` : scopeLabel(cwd);
 	if (records.length === 0) return { text: `No prompts ${subject}.`, records };

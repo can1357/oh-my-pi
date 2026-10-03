@@ -4,6 +4,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -377,6 +378,26 @@ describe("input controller — collab guest history", () => {
 		allowed.editor.setText("/hotkeys");
 		await allowed.controller.handleFollowUp();
 		expect(allowed.addToHistory).toHaveBeenCalledWith("/hotkeys");
+	});
+	// `handleFollowUp` queues the draft before it reaches its own guest branch while the
+	// main session compacts, so the compaction queue is the one recording site that has
+	// to repeat the gate itself — otherwise the refused command lands in `history.db`.
+	it("keeps a refused command out of history when it is queued during compaction", async () => {
+		const addToHistory = vi.fn();
+		const helpers = new UiHelpers({
+			collabGuest: { readOnly: false, sendPrompt: vi.fn() },
+			compactionQueuedMessages: [],
+			editor: { addToHistory, clearDraft: vi.fn(), getText: () => "" },
+			updatePendingMessagesDisplay: vi.fn(),
+			showStatus: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		} as unknown as InteractiveModeContext);
+
+		helpers.queueCompactionMessage("/new", "followUp", undefined, { preserveDraft: true });
+		expect(addToHistory).not.toHaveBeenCalled();
+
+		helpers.queueCompactionMessage("/hotkeys", "followUp", undefined, { preserveDraft: true });
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
 	});
 });
 
