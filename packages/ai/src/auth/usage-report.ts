@@ -227,6 +227,19 @@ export function reserveUsageLimits(
 	});
 }
 
+/** Reserve-evaluation limits whose window has not reset since the report was fetched. */
+export function currentReserveUsageLimits(
+	strategy: CredentialRankingStrategy | undefined,
+	report: UsageReport,
+	rankingContext: CredentialRankingContext,
+	nowMs: number,
+): UsageLimit[] {
+	return reserveUsageLimits(strategy, report, rankingContext).filter(limit => {
+		const resetsAt = limit.window?.resetsAt;
+		return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
+	});
+}
+
 /** Measure currently available quota outside expired windows. */
 export function remainingUsageFraction(
 	strategy: CredentialRankingStrategy | undefined,
@@ -235,11 +248,7 @@ export function remainingUsageFraction(
 	nowMs: number,
 ): number | undefined {
 	if (!report) return undefined;
-	const usedFractions = reserveUsageLimits(strategy, report, rankingContext)
-		.filter(limit => {
-			const resetsAt = limit.window?.resetsAt;
-			return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
-		})
+	const usedFractions = currentReserveUsageLimits(strategy, report, rankingContext, nowMs)
 		.map(resolveUsedFraction)
 		.filter((fraction): fraction is number => fraction !== undefined);
 	return usedFractions.length === 0 ? undefined : Math.max(0, 1 - Math.max(...usedFractions));

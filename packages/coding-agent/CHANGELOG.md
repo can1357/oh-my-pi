@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `retry.usageReserveTaperHours` (Reserve Taper, default `0` = unchanged static reserve) and per-account `auth.accountPolicies[].taperHours`: the usage reserve now releases linearly to 0 over that many hours before each quota window resets, so reserved quota is spent instead of expiring unused. `omp usage` policy lines reflect the tapered reserve ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
@@ -19,6 +23,7 @@
 - The `computer` tool's `clipboard.write` now updates only the desktop clipboard and no longer sends text to the terminal clipboard via OSC 52.
 - Improved terminal layout stability in Rebuild mode when resizing or zooming tmux panes.
 - Advisor concerns and notes now reach an active same-run continuation after a terminal answer instead of being retained unnecessarily.
+- `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
@@ -147,6 +152,7 @@
 - Fixed the `read` tool hanging and the TUI becoming unresponsive when asked to read standard input, FIFOs, or other non-regular files; these paths are now rejected.
 - Fixed project configuration from `~/.omp` being incorrectly applied to unrelated working directories under the user's home directory.
 - Fixed `omp update` failing on standalone-binary installs when npm advertised a version whose GitHub release was never published; the updater now installs the newest published release instead ([#12913](https://github.com/can1357/oh-my-pi/issues/12913)).
+- Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
 
 ## [18.4.10] - 2026-10-02
 
