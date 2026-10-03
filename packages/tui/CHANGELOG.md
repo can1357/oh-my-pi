@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added concrete thinking effort selectors to the task-effort API, with model support and effort ceiling enforcement ([#14207](https://github.com/can1357/oh-my-pi/pull/14207) by [@mabinogi80503](https://github.com/mabinogi80503)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

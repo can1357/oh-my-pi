@@ -417,6 +417,16 @@ describe("auto thinking classifier helpers", () => {
 		expect(parseConfiguredThinkingLevel("max")).toBe(ThinkingLevel.Max);
 	});
 
+	it("keeps concrete task effort distinct from relative hi and enforces the task ceiling", () => {
+		const model = buildLadderModel("mock-task-max", MAX_LADDER);
+
+		expect(resolveTaskEffortLevel(model, "xhigh")).toBe(Effort.XHigh);
+		expect(resolveTaskEffortLevel(model, "hi")).toBe(Effort.Max);
+		expect(resolveTaskEffortLevel(model, "xhigh", Effort.Max)).toBe(Effort.XHigh);
+		expect(resolveTaskEffortLevel(model, "xhigh", Effort.High)).toBe(Effort.High);
+		expect(resolveTaskEffortLevel(model, "hi", Effort.XHigh)).toBe(Effort.XHigh);
+	});
+
 	it("maps task effort selectors onto each model's supported thinking range", () => {
 		const xhighCeilingModel = buildModel({
 			id: "mock-xhigh-ceiling",

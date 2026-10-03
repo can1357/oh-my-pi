@@ -9,6 +9,7 @@ export type {
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { type BaseType, type } from "@oh-my-pi/omptype";
 import { $env } from "@oh-my-pi/pi-utils";
+import { TASK_EFFORTS } from "@oh-my-pi/pi-tui/thinking";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -42,8 +43,7 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
-// Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
-const effortRule = '"lo" | "med" | "hi"' as const;
+const effortRule = TASK_EFFORTS.map(effort => JSON.stringify(effort)).join(" | ");
 
 export const taskItemSchema = type({
 	"name?": "string",
