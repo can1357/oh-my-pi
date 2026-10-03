@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sessions stopping where the assistant wrote a tool call as literal text instead of emitting it; the reply now gets a corrective note and the turn continues so the call can be re-emitted ([#14169](https://github.com/can1357/oh-my-pi/pull/14169) by [@yingliang-zhang](https://github.com/yingliang-zhang))
 ## [18.5.1] - 2026-10-03
 
 ### Added
