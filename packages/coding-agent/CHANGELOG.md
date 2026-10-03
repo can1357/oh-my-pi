@@ -5,6 +5,9 @@
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
+- Added a post-input report to `computer` Eval cells: a cell that sends desktop input ends with each touched window re-read once, about half a second after the last input, and printed as its current tree with rows marked against the tree the model last saw (`~` changed, `+` added, `removed:`), plus windows the input opened, closed or focused; a call that fails on a ref gets its window's current tree the same way, so acting no longer needs a separate `ax()` call to see the result ([#13681](https://github.com/can1357/oh-my-pi/pull/13681) by [@will-bogusz](https://github.com/will-bogusz))
+- Added an optional `settleCell` hook to eval prelude definitions: host calls a cell makes carry that cell in their context (`EvalPreludeContext.cell`), and once the cell finishes, the hook receives what the cell printed and the text it returns is appended after the cell's own output, so a prelude can report what a whole cell left behind once instead of once per call ([#13681](https://github.com/can1357/oh-my-pi/pull/13681) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a fresh screenshot to the `computer` post-input report for windows the model is working by pixels (after a displayed screenshot or pixel-coordinate input, until an element action), and optional `images` on eval prelude `settleCell` replies ([#13690](https://github.com/can1357/oh-my-pi/pull/13690) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
