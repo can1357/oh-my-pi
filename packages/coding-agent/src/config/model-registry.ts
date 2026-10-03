@@ -283,6 +283,7 @@ export class ModelRegistry {
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
+	#extraModelsConfigFile: ConfigFile<ModelsConfig> | null = null;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
@@ -438,6 +439,13 @@ export class ModelRegistry {
 			/** Model discovery cache database. Defaults beside an explicit models config. */
 			cacheDbPath?: string;
 			fetch?: FetchImpl;
+			/**
+			 * Path to an additional models.yml-format file loaded alongside the
+			 * user's ~/.omp/agent/models.yml. Providers in this file are merged
+			 * after the user file; user file wins on provider-id conflicts.
+			 * Accepts OMP_EXTRA_MODELS_CONFIG env var as fallback.
+			 */
+			extraModelsPath?: string;
 		},
 	) {
 		this.#ignoreLocalModelConfig = options?.ignoreLocalModelConfig ?? false;
@@ -448,6 +456,10 @@ export class ModelRegistry {
 				? () => Promise.reject(new Error("network disabled in model-registry runtime test"))
 				: wrapFetchForExtraCa(fetch));
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
+		const extraModelsPath = options?.extraModelsPath ?? process.env["OMP_EXTRA_MODELS_CONFIG"];
+		if (extraModelsPath) {
+			this.#extraModelsConfigFile = ModelsConfigFile.relocate(extraModelsPath);
+		}
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
 		this.authStorage.keys.setResolver(resolveConfigValue);
@@ -1702,8 +1714,54 @@ export class ModelRegistry {
 			if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
 		}
 
+		// Merge providers from the extra models config (--models-config /
+		// OMP_EXTRA_MODELS_CONFIG). Providers whose id already exists in the
+		// user's own models.yml are skipped so user config always wins.
+		const extraModelOverlays: CustomModelOverlay[] = [];
+		if (this.#extraModelsConfigFile) {
+			const extra = this.#extraModelsConfigFile.tryLoad();
+			if (extra.status === "ok" && extra.value) {
+				for (const [providerName, providerConfig] of Object.entries(extra.value.providers ?? {})) {
+					if (configuredProviders.has(providerName)) continue;
+					configuredProviders.add(providerName);
+					const commandConfigs = new Set<string>();
+					this.#collectCommandConfigValues(commandConfigs, providerConfig.apiKey, providerConfig.headers);
+					if (
+						providerConfig.baseUrl ||
+						providerConfig.headers ||
+						providerConfig.apiKey ||
+						providerConfig.authHeader !== undefined ||
+						providerConfig.compat ||
+						providerConfig.disableStrictTools ||
+						providerConfig.transport
+					) {
+						overrides.set(providerName, {
+							baseUrl: providerConfig.baseUrl,
+							headers: providerConfig.headers,
+							apiKey: providerConfig.apiKey,
+							authHeader: providerConfig.authHeader,
+							compat: mergeCompat(providerConfig.compat, undefined),
+							transport: providerConfig.transport,
+						});
+					}
+					const authMode = (providerConfig.auth ?? "apiKey") as ProviderAuthMode;
+					if (authMode === "none") keylessProviders.add(providerName);
+					if (providerConfig.apiKey) this.#installProviderApiKey(providerName, providerConfig.apiKey);
+					if (providerConfig.modelOverrides) {
+						const perModel = new Map<string, ModelOverride>();
+						for (const [modelId, override] of Object.entries(providerConfig.modelOverrides)) {
+							this.#collectCommandConfigValues(commandConfigs, undefined, override.headers);
+							perModel.set(modelId, override);
+						}
+						allModelOverrides.set(providerName, perModel);
+					}
+					if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
+				}
+				extraModelOverlays.push(...this.#parseModels(extra.value));
+			}
+		}
 		return {
-			models: this.#parseModels(value),
+			models: [...this.#parseModels(value), ...extraModelOverlays],
 			overrides,
 			modelOverrides: allModelOverrides,
 			keylessProviders,

@@ -131,6 +131,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--fork": (result, value) => {
 		result.fork = value;
 	},
+	"--models-config": (result, value) => {
+		result.modelsConfig = value;
+	},
 	"--provider": (result, value) => {
 		result.provider = value;
 	},
