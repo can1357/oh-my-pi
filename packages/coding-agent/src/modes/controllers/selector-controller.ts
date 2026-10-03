@@ -1,6 +1,13 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
+import type {
+	Effort,
+	Model,
+	PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders,
+	UsageReport,
+} from "@oh-my-pi/pi-ai";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import type { ThinkingSelectorComponent as ThinkingSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
 import type { getOAuthProviders as GetOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -143,6 +150,7 @@ import { cfgTaskAgentModelOverrides } from "../../task/settings";
 interface ModelOverlayModules {
 	ModelHubComponent: typeof ModelHubComponentType;
 	ModelPickerComponent: typeof ModelPickerComponentType;
+	ThinkingSelectorComponent: typeof ThinkingSelectorComponentType;
 }
 
 /** Synchronous first-use boundary for model overlays; key callbacks require immediate mounting. */
@@ -150,6 +158,7 @@ function loadModelOverlayComponents(): ModelOverlayModules {
 	return {
 		ModelHubComponent: require("@oh-my-pi/pi-tui/overlays/model-hub.js").ModelHubComponent,
 		ModelPickerComponent: require("@oh-my-pi/pi-tui/overlays/model-picker.js").ModelPickerComponent,
+		ThinkingSelectorComponent: require("@oh-my-pi/pi-tui/overlays/thinking-selector.js").ThinkingSelectorComponent,
 	};
 }
 
@@ -624,17 +633,77 @@ export class SelectorController {
 	}
 
 	/**
+	 * Effort follow-up for a session-only switch (`/switch`, alt+p): when the
+	 * target model reasons with selectable efforts, offer them before applying.
+	 * Cancelling (Esc) resolves `undefined`, preserving the previous
+	 * role-configured/model-default behavior. Skipped (same outcome) when the
+	 * session runs `auto`/`off`, which have no row to offer, and for
+	 * non-reasoning models (and reasoners without an effort ladder).
+	 */
+	#promptSwitchEffort(model: Model): Promise<Effort | undefined> {
+		const configured = this.ctx.session.configuredThinkingLevel();
+		// `auto` and `off` have no row in the effort list, so there is no
+		// faithful default to offer: skip the prompt and keep the previous
+		// outcome (an explicit `:level` still applies, bypassing this).
+		if (configured === AUTO_THINKING || configured === ThinkingLevel.Off) {
+			return Promise.resolve(undefined);
+		}
+		const efforts = getSupportedEfforts(model);
+		if (efforts.length === 0) return Promise.resolve(undefined);
+		// Preselect the level the switch would have applied without the prompt
+		// (role-configured level, else the model's default, else the current
+		// effective level), so Enter keeps the previous outcome instead of
+		// silently pinning the lowest effort.
+		const supported = (level: unknown): level is Effort =>
+			typeof level === "string" && efforts.some(effort => effort === level);
+		const roleLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+		const modelDefault = model.thinking?.defaultLevel;
+		const current = this.ctx.session.thinkingLevel;
+		const preselect =
+			(supported(roleLevel) ? roleLevel : undefined) ??
+			(supported(modelDefault) ? modelDefault : undefined) ??
+			(supported(current) ? current : undefined) ??
+			efforts[0];
+		const { promise, resolve } = Promise.withResolvers<Effort | undefined>();
+		const { ThinkingSelectorComponent } = loadModelOverlayComponents();
+		const selector = new ThinkingSelectorComponent(
+			preselect,
+			[...efforts],
+			level => {
+				handle.hide();
+				resolve(level);
+			},
+			() => {
+				handle.hide();
+				resolve(undefined);
+			},
+		);
+		const handle = this.ctx.ui.showOverlay(selector, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+		return promise;
+	}
+
+	/**
 	 * Session-only model switch (`/switch <selector>`): applies the resolved
 	 * model without persisting it. Compacts first when the transcript exceeds
 	 * the target's context window, mirroring an over-context pick in the alt+p
-	 * picker. Failures surface as status errors.
+	 * picker. An explicit `:level` suffix applies directly; otherwise the
+	 * target's efforts are offered first (Esc keeps the previous behavior).
+	 * Failures surface as status errors.
 	 */
 	async switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
 		const contextTokens = this.ctx.session.getContextUsage()?.tokens ?? 0;
 		const contextWindow = model.contextWindow ?? 0;
 		const overContext = contextWindow > 0 && contextTokens > contextWindow;
 		try {
-			await this.#applySessionModel(model, `${model.provider}/${model.id}`, thinkingLevel, overContext);
+			const level = thinkingLevel ?? (await this.#promptSwitchEffort(model));
+			await this.#applySessionModel(model, `${model.provider}/${model.id}`, level, overContext);
 		} catch (error) {
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -709,10 +778,12 @@ export class SelectorController {
 			{
 				onPick: async (model, selector, { overContext }) => {
 					try {
+						// Effort choice precedes compaction so the switch lands with it.
+						const level = await this.#promptSwitchEffort(model);
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
 						if (overContext) done();
-						await this.#applySessionModel(model, selector, undefined, overContext);
+						await this.#applySessionModel(model, selector, level, overContext);
 						if (!overContext) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
