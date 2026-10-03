@@ -148,6 +148,33 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
+- `discovery.pricing`: optional object for `openai-models-list` discovery to extract token pricing from `/models` responses:
+  ```yaml
+  discovery:
+    type: openai-models-list
+    pricing:
+      input: "pricing.input_per_1m_usd"
+      output: "pricing.output_per_1m_usd"
+      cacheRead: "pricing.cache_read_input_per_1m_usd" # optional; defaults to 0
+      cacheWrite: "pricing.cache_creation_input_per_1m_usd" # optional; defaults to 0
+      unit: "per-1m" # optional: "per-1m" (default) or "per-token"
+  ```
+  Paths are dot-separated keys walked against each raw model entry in `data[]`. `input` and `output` are required; `cacheRead` and `cacheWrite` mappings are optional and default to `0`. When `unit` is `"per-token"`, rates are converted to USD per 1M tokens by multiplying by 1,000,000. Missing, non-numeric, or negative values resolve to `0`.
+
+  For Infron, configure its top-level minimum-price fields explicitly:
+  ```yaml
+  providers:
+    infron:
+      baseUrl: https://llm.onerouter.pro/v1
+      api: openai-completions
+      discovery:
+        type: openai-models-list
+        pricing:
+          input: min_prompt_price
+          output: min_completion_price
+          unit: per-1m
+  ```
+  These are minimum per-route prices, not accurate per-request totals when Infron routes to a dearer tier. The `per-1m` choice follows observed rates, not an official documented guarantee; the fields are not auto-detected. Add credentials as needed using the [provider-level fields](#provider-level-fields) and [API key resolution instructions](#auth-and-api-key-resolution-order).
 - `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, and `glm5`. Omit it to use catalog identity policy; unknown models retain the fast local estimate.
@@ -330,9 +357,15 @@ An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-
 A new custom model in `models.yml` that omits `cost` inherits its bundled reference row's card,
 schedule included. References are matched by model id and prefer larger context/output limits,
 then complete cache pricing and first-party OpenAI rows. A same-provider, same-id custom entry
-instead preserves the existing model's pricing when `cost` is omitted. Generic proxy and
-OpenAI-model-list discovery keeps pricing local-unknown (zero) rather than borrowing upstream
-prices; rich provider discovery such as LiteLLM can supply its own prices.
+instead preserves the existing model's pricing when `cost` is omitted.
+
+For `openai-models-list` discovery, token rates are resolved using the following precedence:
+1. **Configured mapping**: If `discovery.pricing` is specified, rates are extracted from the configured paths (`unit` defaults to `per-1m`).
+2. **Auto-detection (per 1M)**: If the raw model entry's `pricing` object contains `input_per_1m_usd` or `output_per_1m_usd`, those rates and any `cache_read_per_1m_usd` / `cache_write_5m_per_1m_usd` rates are used directly.
+3. **Auto-detection (per token)**: If the raw model entry's `pricing` object contains `prompt` or `completion`, those values and any `input_cache_read` / `input_cache_write` rates are scaled by 1,000,000 to USD per 1M tokens.
+4. **Unknown pricing**: Otherwise, all four rates remain `0`. Bundled reference models enrich capabilities and limits, but their provider-specific rate cards are not applied to a custom gateway. Generic proxy and OpenAI-model-list discovery only know a rate when it is configured or reported using one of the recognized formats; rich provider discovery such as LiteLLM can supply its own prices.
+
+Explicit `modelOverrides[id].cost` retains the highest priority and overrides any discovered pricing. Discovered models from other providers (such as `lm-studio`, `ollama`, or `llama.cpp`) continue to default to zero cost.
 
 ## Runtime discovery integration
 

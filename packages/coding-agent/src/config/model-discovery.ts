@@ -23,7 +23,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { KindApiKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { KindApiKind, ModelCost, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -819,6 +819,65 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	return modalities.has("image") ? ["text", "image"] : ["text"];
 }
 
+function resolveDotPath(target: unknown, dotPath: string): unknown {
+	const segments = dotPath.split(".");
+	let current: unknown = target;
+	for (const segment of segments) {
+		if (!isRecord(current)) return undefined;
+		current = current[segment];
+	}
+	return current;
+}
+
+function sanitizePricingValue(value: unknown, unit: "per-1m" | "per-token"): number {
+	const parsed = toPositiveNumberOrUndefined(value);
+	if (parsed === undefined) return 0;
+	const perMillion = unit === "per-token" ? parsed * 1_000_000 : parsed;
+	return Number.isFinite(perMillion) ? perMillion : 0;
+}
+
+function resolveOpenAIModelsListCost(
+	item: Record<string, unknown>,
+	pricingConfig: NonNullable<ProviderDiscovery["pricing"]> | undefined,
+): ModelCost {
+	if (pricingConfig) {
+		const unit = pricingConfig.unit ?? "per-1m";
+		return {
+			input: sanitizePricingValue(resolveDotPath(item, pricingConfig.input), unit),
+			output: sanitizePricingValue(resolveDotPath(item, pricingConfig.output), unit),
+			cacheRead:
+				pricingConfig.cacheRead !== undefined
+					? sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheRead), unit)
+					: 0,
+			cacheWrite:
+				pricingConfig.cacheWrite !== undefined
+					? sanitizePricingValue(resolveDotPath(item, pricingConfig.cacheWrite), unit)
+					: 0,
+		};
+	}
+
+	const rawPricing = item.pricing;
+	if (isRecord(rawPricing)) {
+		if ("input_per_1m_usd" in rawPricing || "output_per_1m_usd" in rawPricing) {
+			return {
+				input: sanitizePricingValue(rawPricing.input_per_1m_usd, "per-1m"),
+				output: sanitizePricingValue(rawPricing.output_per_1m_usd, "per-1m"),
+				cacheRead: sanitizePricingValue(rawPricing.cache_read_per_1m_usd, "per-1m"),
+				cacheWrite: sanitizePricingValue(rawPricing.cache_write_5m_per_1m_usd, "per-1m"),
+			};
+		}
+		if ("prompt" in rawPricing || "completion" in rawPricing) {
+			return {
+				input: sanitizePricingValue(rawPricing.prompt, "per-token"),
+				output: sanitizePricingValue(rawPricing.completion, "per-token"),
+				cacheRead: sanitizePricingValue(rawPricing.input_cache_read, "per-token"),
+				cacheWrite: sanitizePricingValue(rawPricing.input_cache_write, "per-token"),
+			};
+		}
+	}
+
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
 /**
  * Map an explicit non-chat output modality onto the runner kind and API that
  * serves it. Only endpoint-unambiguous tasks are routed: a row whose sole
@@ -898,18 +957,21 @@ export async function discoverOpenAIModelsList(
 				}
 				headers = h;
 				return (await res.json()) as {
-					data?: Array<{
-						id?: string;
-						max_model_len?: unknown;
-						context_length?: unknown;
-						limits?: unknown;
-						input?: unknown;
-						input_modalities?: unknown;
-						output?: unknown;
-						output_modalities?: unknown;
-						architecture?: unknown;
-						mode?: unknown;
-					}>;
+					data?: Array<
+						Record<string, unknown> & {
+							id?: string;
+							max_model_len?: unknown;
+							context_length?: unknown;
+							limits?: unknown;
+							input?: unknown;
+							input_modalities?: unknown;
+							output?: unknown;
+							output_modalities?: unknown;
+							architecture?: unknown;
+							mode?: unknown;
+							pricing?: unknown;
+						}
+					>;
 				};
 			}),
 			nativeMetadataPromise,
@@ -1005,10 +1067,10 @@ export async function discoverOpenAIModelsList(
 				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 				input,
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
-				// Proxy/gateway pricing is provider-specific and rarely matches
-				// upstream bundled catalogs, so keep costs local-unknown even
-				// when we successfully recover the upstream model identity.
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost:
+					providerConfig.discovery.type === "openai-models-list"
+						? resolveOpenAIModelsListCost(item, providerConfig.discovery.pricing)
+						: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
 				// Cap a provider-advertised output limit or the reference's output limit at
 				// the discovered context window so a larger limit can never request more
