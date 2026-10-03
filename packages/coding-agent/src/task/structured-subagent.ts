@@ -24,6 +24,7 @@ import {
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -300,6 +301,44 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 	}
 }
 
+/** A skill invocation applies only to the turn it started, not every loaded skill. */
+function invokedSkillModel(session: ToolSession): string | string[] | undefined {
+	const branch = session.sessionManager?.getBranch();
+	if (!branch) return undefined;
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type === "message" && entry.message.role === "user") return undefined;
+		if (entry.type !== "custom_message" || entry.attribution !== "user") continue;
+		if (entry.customType !== SKILL_PROMPT_MESSAGE_TYPE) return undefined;
+		const details = entry.details;
+		const name = details && typeof details === "object" && "name" in details ? details.name : undefined;
+		if (typeof name !== "string") return undefined;
+		const skill = session.skills?.find(candidate => candidate.name === name);
+		if (!skill) return undefined;
+		// Foreign providers may use `model` for their own, incompatible skill semantics.
+		const provider = skill.source.split(":", 1)[0];
+		const direct = ["native", "omp-managed", "omp-plugins", "custom"].includes(provider)
+			? skill.frontmatter?.model
+			: undefined;
+		const metadata = skill.frontmatter?.metadata;
+		const namespaced =
+			metadata && typeof metadata === "object" && "omp.model" in metadata ? metadata["omp.model"] : undefined;
+		const model = direct ?? namespaced;
+		if (model === undefined) return undefined;
+		if (typeof model !== "string" && (!Array.isArray(model) || !model.every(item => typeof item === "string"))) {
+			throw new StructuredSubagentError("preflight", `Invalid model in skill "${name}" frontmatter.`);
+		}
+		if (resolveConfiguredModelPatterns(model, session.settings).length === 0) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Skill "${name}" model does not resolve to an available selector.`,
+			);
+		}
+		return model;
+	}
+	return undefined;
+}
+
 /**
  * Reason a per-spawn `model` selector cannot mean anything useful, or
  * `undefined` when it is usable. The literal `"default"` (with or without a
@@ -393,10 +432,12 @@ export async function resolveEffectiveSubagentPolicy(
 		? compactionThresholdOverrides[agentName]
 		: undefined;
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
+	const agentModel = effectiveAgent.model;
 	const modelResolution = {
 		requestModel: request.model,
 		settingsOverride: agentModelOverrides[agentName],
-		agentModel: effectiveAgent.model,
+		agentModel,
+		skillModel: () => invokedSkillModel(request.session),
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Explicit `/skill:<name>` invocations can select the model for inheriting task subagents through OMP skill frontmatter ([#13437](https://github.com/can1357/oh-my-pi/pull/13437) by [@Dante-dan](https://github.com/Dante-dan)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

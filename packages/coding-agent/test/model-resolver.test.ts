@@ -1131,6 +1131,34 @@ describe("resolveAgentAdvisorSelection", () => {
 	});
 });
 describe("resolveAgentModelPatterns", () => {
+	test("skill selection applies only to inherited agents after request and configured overrides", () => {
+		const settings = Settings.isolated({ modelRoles: { task: "openai/task", default: "openai/default" } });
+		for (const agentModel of [undefined, "default", "@default", "*", "pi/default", "@task", "pi/task"]) {
+			expect(resolveAgentModelPatterns({ agentModel, skillModel: "openai/skill", settings })).toEqual([
+				"openai/skill",
+			]);
+		}
+		expect(resolveAgentModelPatterns({ agentModel: "openai/pinned", skillModel: "openai/skill", settings })).toEqual([
+			"openai/pinned",
+		]);
+		expect(
+			resolveAgentModelPatterns({
+				settingsOverride: "openai/override",
+				agentModel: "@task",
+				skillModel: "openai/skill",
+				settings,
+			}),
+		).toEqual(["openai/override"]);
+		expect(
+			resolveAgentModelPatterns({
+				requestModel: "openai/request",
+				settingsOverride: "openai/override",
+				agentModel: "@task",
+				skillModel: "openai/skill",
+				settings,
+			}),
+		).toEqual(["openai/request"]);
+	});
 	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {

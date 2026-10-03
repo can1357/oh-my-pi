@@ -31,6 +31,8 @@ const CUSTOM_DIR_PROVIDER_ID = "custom";
 export interface Skill {
 	name: string;
 	description: string;
+	/** Parsed metadata retained for invocation-scoped behavior. */
+	frontmatter?: SkillFrontmatter;
 	filePath: string;
 	baseDir: string;
 	source: string;
@@ -259,6 +261,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			name: capSkill.name,
 			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
 			filePath: capSkill.path,
+			frontmatter: capSkill.frontmatter,
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
@@ -457,6 +460,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			name: capSkill.name,
 			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
 			filePath: capSkill.path,
+			frontmatter: capSkill.frontmatter,
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
@@ -500,6 +504,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					description:
 						typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
 					filePath: capSkill.path,
+					frontmatter: capSkill.frontmatter,
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
@@ -583,6 +588,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			name: capSkill.name,
 			description: sanitizeManagedDescription(rawDescription),
 			filePath: capSkill.path,
+			frontmatter: capSkill.frontmatter,
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),

@@ -1299,6 +1299,8 @@ export interface AgentModelPatternResolutionOptions {
 	requestModel?: string | string[];
 	settingsOverride?: string | string[];
 	agentModel?: string | string[];
+	/** Invocation-scoped skill selector, below a pinned agent model. */
+	skillModel?: string | string[] | (() => string | string[] | undefined);
 	settings?: Settings;
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
@@ -1319,7 +1321,15 @@ function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingL
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
-	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
+	const {
+		requestModel,
+		settingsOverride,
+		agentModel,
+		skillModel,
+		settings,
+		activeModelPattern,
+		fallbackModelPattern,
+	} = options;
 	const inheritSessionModel = (requested?: SessionModelInheritance): EffectiveAgentModelSelection => {
 		const active = activeModelPattern?.trim();
 		const fallback = active || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
@@ -1361,6 +1371,11 @@ function resolveEffectiveAgentModelSelection(
 	const agentInheritance = singleAgentPattern
 		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
 		: undefined;
+	if (agentModel === undefined || agentInheritance) {
+		const selectedSkillModel = typeof skillModel === "function" ? skillModel() : skillModel;
+		const skillPatterns = resolveConfiguredModelPatterns(selectedSkillModel, settings);
+		if (skillPatterns.length > 0) return { source: selectedSkillModel, patterns: skillPatterns };
+	}
 	if (configuredAgentPatterns.length > 0) {
 		if (!agentInheritance || resolveExplicitModelRole(singleAgentPattern, settings) === "task") {
 			return { source: agentModel, patterns: configuredAgentPatterns };
