@@ -13,13 +13,14 @@ export const cfgMemoryBackend = register({
 	id: "memory.backend",
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
-	values: ["off", "local", "hindsight", "mnemopi", "sharpshooter"] as const,
+	values: ["off", "local", "hindsight", "mnemopi", "dakera", "sharpshooter"] as const,
 	default: "off",
 	ui: {
 		tab: "memory",
 		group: "General",
 		label: "Memory Backend",
-		description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
+		description:
+			"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, Dakera remote memory, or Sharpshooter",
 		options: [
 			{ value: "off", label: "Off", description: "No memory subsystem runs" },
 			{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -28,6 +29,11 @@ export const cfgMemoryBackend = register({
 				value: "mnemopi",
 				label: "Mnemopi",
 				description: "Local SQLite recall/retain backend with optional embeddings",
+			},
+			{
+				value: "dakera",
+				label: "Dakera",
+				description: "Dakera remote memory service (recall/retain/reflect over a REST API)",
 			},
 			{
 				value: "sharpshooter",

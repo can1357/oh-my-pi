@@ -10,6 +10,7 @@
  * event time.
  */
 
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "../session/session-entries";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
@@ -71,4 +72,19 @@ function extractAssistantText(msg: AssistantMessage): string {
 		if (block.type === "text" && block.text) parts.push(block.text);
 	}
 	return parts.join("\n");
+}
+
+/**
+ * Reduce live `AgentMessage`s to the same flat shape {@link extractMessages}
+ * builds from persisted entries — used by recall-on-compaction, where the
+ * transcript has not been written to disk yet.
+ */
+export function flattenAgentMessages(messages: AgentMessage[]): HindsightMessage[] {
+	const out: HindsightMessage[] = [];
+	for (const msg of messages) {
+		if (msg.role !== "user" && msg.role !== "assistant") continue;
+		const text = msg.role === "user" ? extractUserText(msg) : extractAssistantText(msg);
+		if (hasSubstantiveContent(text)) out.push({ role: msg.role, content: text });
+	}
+	return out;
 }
