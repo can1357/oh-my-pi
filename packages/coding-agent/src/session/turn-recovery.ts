@@ -114,6 +114,18 @@ const PREMATURE_STREAM_CLOSE_ERROR_RE =
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
 
+/**
+ * Bare abort sentinels with no provider reason: our own `"Request was aborted"`
+ * plus Node/Bun `AbortError`s (`"The operation was aborted"`) surfaced by
+ * transports when an internal (non-caller) abort fires.
+ */
+const GENERIC_ABORT_MESSAGES: Record<string, true> = {
+	"Request was aborted": true,
+	"Request was aborted.": true,
+	"The operation was aborted": true,
+	"The operation was aborted.": true,
+};
+
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
@@ -187,7 +199,6 @@ function toolReplayStart(messages: readonly AgentMessage[]): number | undefined 
 
 /** Result shape shared with automatic maintenance recovery. */
 export interface RecoveryCompactionResult {
-	deferredHandoff: boolean;
 	continuationScheduled: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
@@ -252,8 +263,6 @@ export interface TurnRecoveryHost {
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
-		deferred?: boolean,
-		allowDefer?: boolean,
 		options?: {
 			autoContinue?: boolean;
 			triggerContextTokens?: number;
@@ -779,10 +788,9 @@ export class TurnRecovery {
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
-		allowDefer: boolean,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
-		return this.#runRecoveryCompactionWithRollback(reason, message, allowDefer, options);
+		return this.#runRecoveryCompactionWithRollback(reason, message, options);
 	}
 
 	/**
@@ -1271,12 +1279,11 @@ export class TurnRecovery {
 	async #runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		assistantMessage: AssistantMessage,
-		allowDefer: boolean,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		await this.dropPersistedAssistantTurn(assistantMessage);
-		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
+		const result = await this.#host.runAutoCompaction(reason, true, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
 			phase: "mid_turn",
@@ -1440,7 +1447,7 @@ export class TurnRecovery {
 
 		const id = this.#classifyRetryMessage(message);
 		if (message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) return true;
-		if (message.errorMessage !== "Request was aborted" && message.errorMessage !== "Request was aborted.") {
+		if (message.errorMessage === undefined || !Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage)) {
 			return false;
 		}
 
@@ -1594,7 +1601,7 @@ export class TurnRecovery {
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
-			message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
+			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
 		const reasonlessAbort =
 			(message.stopReason === "aborted" || message.stopReason === "error") &&
 			!this.#host.abortInProgress() &&
