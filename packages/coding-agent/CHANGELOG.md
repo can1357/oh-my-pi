@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `snapcompact.toolResults` re-sending each large tool result as an image one turn after it was sent as text, which broke the prompt cache every turn and made Anthropic drop or reject the signed thinking after it (Opus 5.5 with thinking binding); each result's form is now decided on its first send, so the newest large result is imaged right away and already-sent results keep their form, except that the newest imaged results revert to text when later images push a request over the provider's image cap ([#14249](https://github.com/can1357/oh-my-pi/pull/14249) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `snapcompact.toolResults` re-sending each large tool result as images one turn after it went out as text, which broke the prompt cache every turn and invalidated Anthropic signed thinking; results are now imaged from their first send, the newest one included ([#14249](https://github.com/can1357/oh-my-pi/pull/14249) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.6.0] - 2026-10-03
 
