@@ -805,7 +805,7 @@ describe("Warp CLI-agent event routing", () => {
 		["tmux-wrapped", true],
 	] as const)("writes the %s OSC 777 through the active terminal, never straight to stdout", (_form, inTmux) => {
 		enableWarpProtocol();
-		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(inTmux);
+		setTmuxSession(inTmux);
 		harness = startActiveTerminal();
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 
