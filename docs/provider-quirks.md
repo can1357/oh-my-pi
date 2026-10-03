@@ -1545,6 +1545,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 ### Auth & usage
 - **Interactive CLI Login Flow**: Declared in `packages/catalog/src/compat/rules/auth/opencode-zen.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`): it opens `https://opencode.ai/auth` in the browser and prompts the user to paste their API key.
 - **Wire Authentication**: Credentials across both Anthropic and OpenAI-compatible protocol endpoints are passed via `X-Api-Key` headers rather than standard Bearer tokens.
+- **Client-restricted free tier**: Catalog availability does not guarantee permission to use a model from OMP. In [#12306](https://github.com/can1357/oh-my-pi/issues/12306), `muse-spark-1.3-contributor-free` returns HTTP 403 `FreeTierError` with `OpenCode's free tier can only be used from within OpenCode`, despite the same credential working in OpenCode. Use the restricted free model inside OpenCode itself, or choose a model and plan that Zen permits third-party clients to use. See [OpenCode Zen free-tier restrictions](./providers.md#opencode-zen-free-tier-restrictions).
 
 ### Catalog model handling
 - **Provider entry (`opencode-zen`)**: `packages/catalog/src/compat/rules/providers/opencode-zen.kdl` declares default model `claude-opus-5`. Environment keys: `OPENCODE_API_KEY`.
