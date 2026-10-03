@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Advisor message conversion honors the saved `messageRole` (`user` or `developer`) while keeping legacy and malformed metadata on `developer` and preserving agent attribution ([#14185](https://github.com/can1357/oh-my-pi/pull/14185) by [@olegpulatov](https://github.com/olegpulatov)).
+
 ## [18.4.11] - 2026-10-02
 
 ### Fixed
