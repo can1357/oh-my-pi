@@ -3,8 +3,7 @@ import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
-	bindHistoryScope,
-	historyScopeKey,
+	bindHistorySource,
 	resolveHistoryScope,
 	type HistoryScopeContext,
 } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
@@ -34,10 +33,8 @@ function bindEditor(
 	state: { setting: HistoryScopeKind; context: HistoryScopeContext },
 ): Editor {
 	const editor = new Editor(getEditorTheme());
-	editor.setHistoryStorage(
-		bindHistoryScope(storage, () => resolveHistoryScope(state.setting, state.context)),
-		() => historyScopeKey(resolveHistoryScope(state.setting, state.context)),
-	);
+	const source = bindHistorySource(storage, () => resolveHistoryScope(state.setting, state.context));
+	editor.setHistoryStorage(source.storage, source.sourceKey);
 	return editor;
 }
 
@@ -128,6 +125,64 @@ describe("scoped prompt recall", () => {
 			context: { sessionId: "11111111-1111-4111-8111-111111111111", cwd: repoA },
 		});
 		expect(recall(restarted)).toBe("ONLY_SESSION_A");
+	});
+
+	it("drops a prompt detached by a nested repository without a history write", async () => {
+		const dir = tempDir!;
+		const outer = dir.join("outer");
+		const inner = path.join(outer, "inner");
+		await fs.promises.mkdir(inner, { recursive: true });
+		runGit(outer, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("INNER_PROMPT", inner, "s1");
+		const editor = bindEditor(storage, { setting: "repo", context: { sessionId: "s1", cwd: outer } });
+		runGit(inner, "init", "--quiet");
+		expect(storage.getRecent(10, { kind: "repo", value: outer })).toEqual([]);
+		expect(recall(editor)).toBe("");
+	});
+
+	it("retires an active repo prompt while preserving canceled paste payloads", async () => {
+		const dir = tempDir!;
+		const outer = dir.join("outer");
+		const inner = path.join(outer, "inner");
+		await fs.promises.mkdir(inner, { recursive: true });
+		runGit(outer, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("RETIRED_PROMPT", inner, "s1");
+		const editor = bindEditor(storage, { setting: "repo", context: { sessionId: "s1", cwd: outer } });
+		const payload = "canceled paste ".repeat(120).trim();
+		editor.handleInput("\x1b[200~" + payload + "\x1b[201~");
+		editor.rememberDraft();
+		recall(editor);
+		expect(editor.getExpandedText()).toBe(payload);
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("RETIRED_PROMPT");
+		runGit(inner, "init", "--quiet");
+		editor.handleInput("\x1b[A");
+		expect(editor.getExpandedText()).toBe(payload);
+		editor.handleInput("\x1b[A");
+		expect(editor.getExpandedText()).toBe(payload);
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("");
+	});
+
+	it("advances Up and Down when repository membership is unchanged", async () => {
+		const dir = tempDir!;
+		const outer = dir.join("outer");
+		const inner = path.join(outer, "inner");
+		await fs.promises.mkdir(inner, { recursive: true });
+		runGit(outer, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("OLDER", inner, "s1");
+		await storage.add("NEWER", outer, "s1");
+		const editor = bindEditor(storage, { setting: "repo", context: { sessionId: "s1", cwd: outer } });
+		expect(recall(editor)).toBe("NEWER");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("OLDER");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("NEWER");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("");
 	});
 
 	it("keeps prompts submitted through the bound editor readable in cwd and repo scopes", async () => {

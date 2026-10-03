@@ -1058,6 +1058,9 @@ export class InputController {
 			// so a word that is only armed — not run — is never recorded.
 			if (bareSlashCommand) text = bareSlashCommand.command;
 
+			// Only suppress this submission's already-recorded text: a builtin can return a distinct body.
+			let recordedHistoryText: string | undefined;
+
 			// Handle built-in slash commands
 			if (text) {
 				this.#recordSlashCommandUsage(text);
@@ -1072,6 +1075,7 @@ export class InputController {
 				// the command in the destination's list, where the next Up would recall it.
 				if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
 					this.ctx.editor.addToHistory(text);
+					recordedHistoryText = text;
 				}
 				let slashResult: string | boolean;
 				try {
@@ -1134,7 +1138,12 @@ export class InputController {
 				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.ctx.queueCompactionMessage(
+						text,
+						"steer",
+						images,
+						text === recordedHistoryText ? { historyRecorded: true } : undefined,
+					);
 					return;
 				}
 				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
@@ -1192,7 +1201,12 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.ctx.queueCompactionMessage(
+					text,
+					"steer",
+					images,
+					text === recordedHistoryText ? { historyRecorded: true } : undefined,
+				);
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -1206,7 +1220,7 @@ export class InputController {
 			// submission path creates an optimistic user message; otherwise a
 			// consumed command remains rendered like a prompt sent to the model.
 			if (this.#isLocalExtensionCommand(text)) {
-				this.ctx.editor.clearDraft(text);
+				this.ctx.editor.clearDraft(text === recordedHistoryText ? undefined : text);
 				try {
 					await this.ctx.session.prompt(text, { images: inputImages });
 				} catch (error) {
@@ -1228,7 +1242,7 @@ export class InputController {
 			// If streaming, use prompt() with steer behavior
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
-				this.ctx.editor.addToHistory(text);
+				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 				// Enter already cleared the editor synchronously. A later clear here
 				// can erase the tail of an unbracketed paste arriving after Enter.
 				this.ctx.editor.imageLinks = undefined;
@@ -1353,7 +1367,7 @@ export class InputController {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-			this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 		};
 	}
 
@@ -1923,6 +1937,8 @@ export class InputController {
 			return;
 		}
 
+		let recordedHistoryText: string | undefined;
+
 		if (text) {
 			try {
 				const input =
@@ -1932,6 +1948,7 @@ export class InputController {
 				// still the one that context seeded.
 				if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
 					this.ctx.editor.addToHistory(text);
+					recordedHistoryText = text;
 				}
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached: true });
 				if (slashResult === true) {
@@ -1974,7 +1991,7 @@ export class InputController {
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -1990,7 +2007,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
 		try {
 			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
 				imageCount: images?.length ?? 0,

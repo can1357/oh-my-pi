@@ -605,8 +605,9 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - Table: `history(id, prompt, created_at, cwd, session_id, use_count)`, with unique `prompt`
 - FTS5 index: `history_fts`; new prompts are indexed by an insert trigger
 - Normalizes line endings and surrounding/trailing whitespace, then deduplicates prompts across the database
-- Resubmission updates the latest timestamp/cwd/session provenance and increments `use_count`
+- Each submission records a given text once; intentional resubmission updates the latest timestamp/cwd/session provenance and increments `use_count`.
 - Reads take an optional scope: `session` (one conversation), `cwd` (one directory), `repo` (every directory sharing a primary repository root, worktrees included), or `global`, and directory scopes compare normalized spellings, so a symlinked checkout reads its history under either path. `matchingSessionIds` stays unscoped on purpose, so resume-picker ranking still crosses projects.
+- Repository recall checks the membership of stored directories even when the repository root is unchanged. Creating a nested repository without writing another prompt retires its entries from the parent's recall list; locally canceled drafts remain available. This is membership refresh, not synchronization of every new prompt written by another process.
 - Writes are synchronous: a submitted prompt is durable when `add()` returns, so an exit racing a deferred flush cannot lose it; failures are logged rather than thrown
 - Consecutive-duplicate suppression lives in the editor's local list, not in storage.
 - The same DB also contains independent `session_titles` and append-only `session_recaps` tables. Idle recaps do not enter the session JSONL or model context.

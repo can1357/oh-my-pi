@@ -990,31 +990,30 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * Re-seed the persistent list when the host's data set changed. A no-op while the key
-	 * holds, so the common case costs nothing. A real change replaces the persistent entries
-	 * — the old ones belong to a context the user has left — and restarts browsing, but the
-	 * editor's own drafts (`Ctrl+C`) are carried over: they were never part of the data set
-	 * that changed, and the editor promises to recall them until the process exits.
+	 * Re-seed the persistent list when the host's data set changed. While the key holds,
+	 * keep both the list and the browse pointer. A real change replaces the persistent entries
+	 * and restarts browsing, but the editor's own drafts (`Ctrl+C`) are carried over: they
+	 * were never part of the data set that changed, and stay recallable until process exit.
 	 *
 	 * Returns false when the data set could not be read: the list still holds the context the
 	 * user left, so callers that would expose it — browsing, and filing a new entry — must skip
 	 * this call instead of serving that context under the new key.
 	 */
 	#rehydrateHistory(): boolean {
-		const key = this.#historySourceKey?.() ?? "";
-		if (key === this.#historySourceKeyValue) return true;
-		const storage = this.#historyStorage;
-		// Without persistent storage the list is the editor's own: never drop it.
-		if (!storage) {
-			this.#historySourceKeyValue = key;
-			return true;
-		}
-		// A read must never escape a keystroke handler, and a failed one must leave the key alone:
-		// the next browse retries this data set rather than serving the list it was replacing, and
-		// the seed keeps the list it has until a read succeeds. The read is synchronous and returns
-		// a plain array, so nothing re-enters here between the two statements.
+		let key: string;
 		let recent: HistoryEntry[];
 		try {
+			// The source key may itself query storage to resolve repository membership.
+			key = this.#historySourceKey?.() ?? "";
+			if (key === this.#historySourceKeyValue) return true;
+			const storage = this.#historyStorage;
+			// Without persistent storage the list is the editor's own: never drop it.
+			if (!storage) {
+				this.#historySourceKeyValue = key;
+				return true;
+			}
+			// A failed resolution or read leaves the key alone so the next browse retries,
+			// without exposing the list from the context it was replacing.
 			recent = storage.getRecent(HISTORY_LIMIT);
 		} catch (error) {
 			logger.warn("History re-seed failed", { error: String(error) });

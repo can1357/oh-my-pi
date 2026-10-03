@@ -6,6 +6,10 @@
 
 - Improved editor history handling: history can now refresh when its source context changes, while preserving drafts created within the editor; entries are also recorded under the context active when they are added ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Fixed
+
+- Editor history navigation now contains failed source-key resolution and retries on the next recall instead of letting the error escape the keystroke handler ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

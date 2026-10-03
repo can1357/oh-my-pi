@@ -301,6 +301,11 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return rows.map(row => this.#toEntry(row));
 	}
 
+	/** Stable signature of the stored directories currently belonging to this repository. */
+	getRepoScopeKey(root?: string): string {
+		return JSON.stringify(this.#scopeDirs("repo", root).sort());
+	}
+
 	/** Finds unique prompts matching every query token, newest first, restricted to `scope`. */
 	search(query: string, limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);

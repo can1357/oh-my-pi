@@ -206,44 +206,47 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("persisted in A");
 		});
 
-		it("retries the seed after a failed read instead of serving the previous context", () => {
-			const byKey: Record<string, { prompt: string }[]> = {
-				first: [{ prompt: "prompt from the first context" }],
-				second: [{ prompt: "prompt from the second context" }],
-			};
-			let key = "first";
-			let failNextRead = false;
-			const editor = new Editor(defaultEditorTheme);
-			editor.setHistoryStorage(
-				{
-					add: async () => {},
-					getRecent: () => {
-						if (failNextRead) {
-							failNextRead = false;
-							// `HistoryStorage.getRecent` reports a failed read by throwing, so a broken
-							// handle must not look like "this context has no history".
-							throw new Error("storage read failed");
-						}
-						return byKey[key] ?? [];
+		it.each(["read", "source key"] as const)(
+			"retries a failed %s instead of recalling the previous context",
+			failureSite => {
+				const byKey: Record<string, { prompt: string }[]> = {
+					first: [{ prompt: "prompt from the first context" }],
+					second: [{ prompt: "prompt from the second context" }],
+				};
+				let key = "first";
+				let failNextSeed = false;
+				const editor = new Editor(defaultEditorTheme);
+				editor.setHistoryStorage(
+					{
+						add: async () => {},
+						getRecent: () => {
+							if (failNextSeed && failureSite === "read") {
+								failNextSeed = false;
+								throw new Error("storage read failed");
+							}
+							return byKey[key] ?? [];
+						},
 					},
-				},
-				() => key,
-			);
+					() => {
+						if (failNextSeed && failureSite === "source key") {
+							failNextSeed = false;
+							throw new Error("scope resolution failed");
+						}
+						return key;
+					},
+				);
+				editor.handleInput("\x1b[A");
+				expect(editor.getText()).toBe("prompt from the first context");
 
-			editor.handleInput("\x1b[A");
-			expect(editor.getText()).toBe("prompt from the first context");
-
-			key = "second";
-			failNextRead = true;
-			editor.setText("");
-			// The failed read is contained and the press is a no-op: it neither escapes the
-			// keystroke handler nor recalls a prompt from the context just left.
-			editor.handleInput("\x1b[A");
-			expect(editor.getText()).toBe("");
-
-			editor.handleInput("\x1b[A");
-			expect(editor.getText()).toBe("prompt from the second context");
-		});
+				key = "second";
+				failNextSeed = true;
+				editor.setText("");
+				editor.handleInput("\x1b[A");
+				expect(editor.getText()).toBe("");
+				editor.handleInput("\x1b[A");
+				expect(editor.getText()).toBe("prompt from the second context");
+			},
+		);
 
 		it("clears the buffer when a re-seed retires the entry the editor is browsing", () => {
 			const byKey: Record<string, { prompt: string }[]> = {

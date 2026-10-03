@@ -1127,7 +1127,7 @@ export class UiHelpers {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; historyRecorded?: boolean },
 	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
 		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
@@ -1136,10 +1136,15 @@ export class UiHelpers {
 		// `/login <args>` carry a room key or an auth code, and the guest gate, because
 		// `handleFollowUp` reaches here during compaction before its own guest branch —
 		// and `history.db` stores every row in the clear.
-		if (shouldSkipHistory(text) || (this.ctx.collabGuest && guestRefusesSlashCommand(text)))
-			this.ctx.editor.clearDraft();
-		else if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
-		else this.ctx.editor.clearDraft(text);
+		const historyText =
+			options?.historyRecorded || shouldSkipHistory(text) || (this.ctx.collabGuest && guestRefusesSlashCommand(text))
+				? undefined
+				: text;
+		if (options?.preserveDraft) {
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText);
+		} else {
+			this.ctx.editor.clearDraft(historyText);
+		}
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
 			queuedImages ? "Queued message with image for after compaction" : "Queued message for after compaction",
