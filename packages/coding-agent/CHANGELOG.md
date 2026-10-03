@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- Fixed browser element `click({ button, count })` left-clicking once on Tern and cmux tabs, and declared the options; cmux now refuses buttons and click counts it cannot press ([#14232](https://github.com/can1357/oh-my-pi/pull/14232) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.5.1] - 2026-10-03
 

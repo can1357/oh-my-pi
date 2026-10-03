@@ -195,3 +195,42 @@ return {
 		}
 	}, 40_000);
 });
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser element handle clicks", () => {
+	test("presses the requested button and click count through an element handle", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-element-click" };
+		const tabName = `element-click-${crypto.randomUUID()}`;
+		const menuHtml = `<!doctype html><button id="menu">Menu</button>
+<script>window.presses = []; for (const type of ["mousedown", "dblclick", "contextmenu"]) document.querySelector("#menu").addEventListener(type, event => { presses.push(type + ":" + event.button); event.preventDefault(); });</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(menuHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const { elements } = await tab.observe();
+const menu = await tab.id(elements.find(element => element.name === "Menu").id);
+await menu.click({ button: "right" });
+await menu.click({ count: 2 });
+return await tab.evaluate(() => window.presses);`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<string[]>(result)).toEqual([
+				"mousedown:2",
+				"contextmenu:2",
+				"mousedown:0",
+				"mousedown:0",
+				"dblclick:0",
+			]);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+});

@@ -2200,7 +2200,20 @@ class CmuxElementHandle {
 		this.#selector = selector;
 	}
 
-	async click(): Promise<void> {
+	async click(options?: { button?: string; count?: number }): Promise<void> {
+		// Both cmux element-click paths (its click RPC and the synthetic-event fallback) press the
+		// left button once, so another button or count is refused rather than delivered as one left
+		// click. (Its dblclick fallback fires only a `dblclick` event, so it can't stand in for two clicks.)
+		if (options?.button !== undefined && options.button !== "left") {
+			throw new ToolError(
+				`handle.click({ button: ${JSON.stringify(options.button)} }) is not supported in a cmux browser, which only left-clicks elements`,
+			);
+		}
+		if (options?.count !== undefined && options.count !== 1) {
+			throw new ToolError(
+				`handle.click({ count: ${options.count} }) is not supported in a cmux browser; use handle.dblclick() for a double click`,
+			);
+		}
 		await this.#tab.click(this.#selector);
 	}
 
