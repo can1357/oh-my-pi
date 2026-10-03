@@ -844,9 +844,17 @@ function createConfigInputPanel(
 // Main Plugin Settings Selector
 // =============================================================================
 
+/** The plugin a toggle switched, and which way: consumers must warn that already-running sessions keep a disabled plugin bound. */
+export interface PluginSettingsChange {
+	readonly pluginName: string;
+	readonly enabled: boolean;
+	/** Scope still enabling the plugin after this toggle, when another install kept it on. */
+	readonly stillEnabledBy?: "user" | "project";
+}
+
 export interface PluginSettingsCallbacks {
 	onClose: () => void;
-	onPluginChanged: () => void | Promise<void>;
+	onPluginChanged: (change?: PluginSettingsChange) => void | Promise<void>;
 	/** Schedules a TUI frame after asynchronous plugin data loads. */
 	requestRender?: () => void;
 }
@@ -964,7 +972,7 @@ export class PluginSettingsComponent extends Container {
 		this.#viewComponent = new PluginDetailComponent(plugin, this.#manager, {
 			onEnabledChange: async enabled => {
 				await this.#manager.setEnabled(plugin.name, enabled);
-				await this.callbacks.onPluginChanged();
+				await this.callbacks.onPluginChanged({ pluginName: plugin.name, enabled });
 			},
 			onFeatureChange: async (feature, enabled) => {
 				const current = new Set((await this.#manager.getEnabledFeatures(plugin.name)) ?? []);
@@ -999,7 +1007,25 @@ export class PluginSettingsComponent extends Container {
 				try {
 					const mgr = await this.#host.createMarketplaceManager();
 					await mgr.setPluginEnabled(plugin.id, enabled, plugin.scope);
-					await this.callbacks.onPluginChanged();
+					// A disable only writes the toggled scope; report which install, if
+					// any, still enables the plugin, so the notice does not claim a
+					// restart is enough when another scope keeps it on.
+					let stillEnabledBy: "user" | "project" | undefined;
+					if (!enabled) {
+						// The toggle is persisted before this read, so a failed re-read
+						// must not drop the status update: fall back to the plain
+						// running-session notice.
+						stillEnabledBy = await mgr
+							.listInstalledPlugins()
+							.then(
+								remaining =>
+									remaining
+										.filter(summary => summary.id === plugin.id && summary.scope !== plugin.scope)
+										.find(summary => summary.entries.some(entry => entry.enabled !== false))?.scope,
+							)
+							.catch(() => undefined);
+					}
+					await this.callbacks.onPluginChanged({ pluginName: plugin.id, enabled, stillEnabledBy });
 				} catch (err) {
 					logger.error("Settings → Plugins: failed to toggle marketplace plugin", {
 						pluginId: plugin.id,

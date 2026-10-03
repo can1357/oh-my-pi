@@ -48,7 +48,7 @@ import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
 import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
-import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
+import { PluginSettingsComponent, type PluginSettingsChange, type PluginSettingsHost } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
@@ -602,8 +602,8 @@ export interface SettingsCallbacks {
 	getStatusLinePreview?: () => string;
 	/** Native status bar for the inline preview (TSP terminals dock the bar; its ANSI border geometry doesn't apply) */
 	describeStatusLinePreview?: () => NativeNode;
-	/** Called when plugins change */
-	onPluginsChanged?: () => void | Promise<void>;
+	/** Called when plugins change, with the toggled plugin and its new state */
+	onPluginsChanged?: (change?: PluginSettingsChange) => void | Promise<void>;
 	/** Called when settings panel is closed */
 	onCancel: () => void;
 }
@@ -1878,7 +1878,7 @@ export class SettingsSelectorComponent implements Component {
 	#showPluginsTab(): void {
 		this.#pluginComponent = new PluginSettingsComponent(this.#context.plugins, {
 			onClose: () => this.#callbacks.onCancel(),
-			onPluginChanged: () => this.#callbacks.onPluginsChanged?.(),
+			onPluginChanged: change => this.#callbacks.onPluginsChanged?.(change),
 			requestRender: this.#context.requestRender,
 		});
 	}
