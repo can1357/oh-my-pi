@@ -49,7 +49,7 @@ import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
-import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import { convertMessageToLlm, customMessageLlmRole } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -324,6 +324,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 			return {
 				role: message.role,
 				customType: message.customType,
+				messageRole: message.customType === "advisor" ? customMessageLlmRole(message) : undefined,
 				content: normalizeProviderReplayValue(message.content),
 			};
 		case "branchSummary":
@@ -927,23 +928,25 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {
 	if (!isCustomMessageContent(message.content)) return undefined;
 	if (typeof message.content === "string") return undefined;
+	if (customMessageLlmRole(message) === "user") return undefined;
 	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
 	const imageBlocks = message.content.filter((content): content is ImageContent => content.type === "image");
 	if (imageBlocks.length === 0) return undefined;
+	const attribution = message.attribution ?? (message.customType === "advisor" ? "agent" : undefined);
 
 	const converted: Message[] = [];
 	if (textBlocks.length > 0) {
 		converted.push({
 			role: "developer",
 			content: textBlocks,
-			attribution: message.attribution,
+			attribution,
 			timestamp: message.timestamp,
 		});
 	}
 	converted.push({
 		role: "user",
 		content: [{ type: "text", text: `Images attached to ${message.customType}.` }, ...imageBlocks],
-		attribution: message.attribution,
+		attribution,
 		timestamp: message.timestamp,
 	});
 	return converted;

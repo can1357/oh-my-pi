@@ -121,6 +121,7 @@ import {
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
 	cfgAdvisorMaxNotesPerUpdate,
+	cfgAdvisorMessageRole,
 	cfgAdvisorReviewInterval,
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
@@ -1652,7 +1653,10 @@ export class SessionAdvisors {
 								attribution: "agent",
 								timestamp: Date.now(),
 								content: formatAdvisorBatchContent(entries),
-								details: { notes: entries } satisfies AdvisorMessageDetails,
+								details: {
+									notes: entries,
+									messageRole: cfgAdvisorMessageRole.get(this.#host.settings),
+								} satisfies AdvisorMessageDetails,
 							} satisfies CustomMessage),
 				skipIdleFlush: true,
 			});
@@ -1826,7 +1830,10 @@ export class SessionAdvisors {
 	 *    agent-initiated turn as busy, so idle triggers are refused (#5628 review).
 	 */
 	#deliverAdvisorBatch(notes: AdvisorNote[], content: string, steer: boolean): void {
-		const details = { notes } satisfies AdvisorMessageDetails;
+		const details = {
+			notes,
+			messageRole: cfgAdvisorMessageRole.get(this.#host.settings),
+		} satisfies AdvisorMessageDetails;
 		if (steer) {
 			// Plan mode preserves would-be-steering advice as a visible card:
 			// only user-driven turns converge on ask/resolve.

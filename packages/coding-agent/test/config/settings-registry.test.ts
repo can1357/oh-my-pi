@@ -19,6 +19,7 @@ import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import { cfgAdvisorMessageRole } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
 const tick = () => Promise.resolve();
 
@@ -91,6 +92,21 @@ describe("settings registry", () => {
 		expect(() => lookup("steeringMode")?.override(settings, "sometimes")).toThrow("Invalid value for steeringMode");
 		expect(cfgTemperature.get(settings)).toBe(0.2);
 		expect(cfgTemperature.provenance(settings)).toBe("runtime");
+	});
+
+	it("keeps developer advisor transport unless user is explicitly selected and rejects unsupported roles", () => {
+		const settings = Settings.isolated();
+		expect(cfgAdvisorMessageRole.get(settings)).toBe("developer");
+		cfgAdvisorMessageRole.override(settings, "user");
+		expect(cfgAdvisorMessageRole.get(settings)).toBe("user");
+		cfgAdvisorMessageRole.override(settings, "developer");
+		expect(cfgAdvisorMessageRole.get(settings)).toBe("developer");
+		expect(() => lookup("advisor.messageRole")?.override(settings, "system")).toThrow(
+			"Invalid value for advisor.messageRole",
+		);
+		expect(() => Settings.isolated({ "advisor.messageRole": "assistant" })).toThrow(
+			"Invalid value for advisor.messageRole",
+		);
 	});
 
 	it("recomputes a derivation only when one of its inputs changes", () => {

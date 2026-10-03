@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `messageRole` (`user` or `developer`) to `AdvisorMessageDetails` to retain each advisor card's provider-facing role; legacy cards default to `developer` ([#14185](https://github.com/can1357/oh-my-pi/pull/14185) by [@olegpulatov](https://github.com/olegpulatov)).
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

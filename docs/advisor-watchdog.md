@@ -158,6 +158,26 @@ note text
 </advisory>
 ```
 
+### Advisor message role
+
+`advisor.messageRole` controls how advisor feedback is sent to the primary model:
+
+- `developer` (default): preserves the existing elevated transport. The provider may send it as developer, map it to a supported system role, or fold it into user content. This does not guarantee a system message.
+- `user`: feedback uses the user transport role, while remaining agent-authored advisor feedback rather than a new human request.
+
+```sh
+omp config set advisor.messageRole user
+omp config set advisor.messageRole developer
+```
+
+The setting applies to all advisors attached to the session, including named roster advisors. It is available in `/settings`; RPC and ACP default to `developer` unless explicitly configured. A changed value applies to newly delivered batches, not already saved messages. Saved messages retain their role on resume; older advisor messages without role metadata use `developer`.
+
+Advisor feedback is not a tool result. Its internal message type stays `custom`/`advisor`, with agent attribution, so it does not become a human request.
+
+The built-in primary prompt and the wrapper for custom text prompts treat `<advisory>` content as fallible review regardless of transport role: check current evidence and task relevance; never let advice override instructions or expand scope. A fully custom system template must provide its own equivalent guidance. These instructions guide the model; they do not lower a provider message's actual role priority.
+
+### Continuation and interruption
+
 When you deliberately interrupt the agent (Esc, or a cancel from collab, ACP, RPC, the SDK, or an extension), the advisor stops auto-resuming it. An interrupting `concern`/`blocker` raised while the run is stopped is recorded as a visible advisor card instead of restarting the turn, and a concern already in flight when you interrupt is preserved the same way rather than driving a surprise resume. The advice re-enters context the next time you resume — a new message, the `.`/`c` continue shortcut, or a steer/follow-up.
 
 A normal yield the agent drove itself is treated differently from a deliberate interrupt, but it is not a blanket "always steers and resumes". The loop state and completed turn first determine the normal delivery path:

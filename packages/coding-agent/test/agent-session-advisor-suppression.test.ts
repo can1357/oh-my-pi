@@ -13,9 +13,8 @@
  *     auto-continue, so the gate is keyed to the user interrupt, not any abort.
  *  4. A user message queued (as a steer) before the interrupt is delivered on
  *     resume even though the preserved advisor card is the trailing message.
- *  5. The same queued as a follow-up: continuing from the preserved advisor card
- *     (which converts to `developer`) would send an invalid provider tail, so the
- *     follow-up stays queued for the next explicit resume rather than auto-running.
+ *  5. A queued user follow-up stays queued for explicit resume after a user stop,
+ *     independent of the preserved advisor card's provider-facing role.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -28,8 +27,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgAdvisorMessageRole } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { isUserTurnInitiator } from "@oh-my-pi/pi-tui/chat/messages";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
 interface MockYieldDetails {
@@ -111,6 +112,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
@@ -198,6 +200,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
@@ -256,7 +259,30 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		return persisted;
 	}
 
-	it("preserves a final-yield blocker without starting a hidden post-yield turn", async () => {
+	function expectAdvisorRole(message: AgentMessage | undefined, role: "user" | "developer"): void {
+		if (!message || message.role !== "custom") throw new Error("Expected advisor card");
+		expect(message.customType).toBe("advisor");
+		expect(message.details).toMatchObject({ messageRole: role });
+		expect(message.attribution).toBe("agent");
+		expect(isUserTurnInitiator(message)).toBe(false);
+		expect(convertToLlm([message])[0]).toMatchObject({ role, attribution: "agent" });
+	}
+
+	it("selects role when an aside batch is delivered and retains earlier saved roles", async () => {
+		const { session } = await createCompletedAdvisorSession();
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.yieldQueue.enqueue("advisor", { note: "elevated aside", severity: "nit" });
+		const elevated = session.yieldQueue.drainLazy()[0]?.();
+		expectAdvisorRole(elevated ?? undefined, "developer");
+		session.yieldQueue.enqueue("advisor", { note: "ordinary aside", severity: "nit" });
+		const deferred = session.yieldQueue.drainLazy()[0];
+		cfgAdvisorMessageRole.override(session.settings, "user");
+		const ordinary = deferred?.();
+		expectAdvisorRole(ordinary ?? undefined, "user");
+		expectAdvisorRole(elevated ?? undefined, "developer");
+	});
+
+	it.each(["developer", "user"] as const)("preserves %s final-yield blocker without resuming", async messageRole => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
 			responses: [
@@ -282,10 +308,12 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [createMockYieldTool()] },
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
+			"advisor.messageRole": messageRole,
 			"compaction.enabled": false,
 			"retry.enabled": false,
 		});
@@ -311,10 +339,12 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
 		expect(advisorCards).toHaveLength(1);
 		expect(advisorCards[0].content).toContain("Final yield needs correction");
+		expectAdvisorRole(advisorCards[0], messageRole);
 	});
 
-	it("preserves a late advisor concern after a terminal answer without waking the primary", async () => {
+	it.each(["developer", "user"] as const)("preserves late %s concern without resuming", async messageRole => {
 		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession();
+		cfgAdvisorMessageRole.override(session.settings, messageRole);
 		const persisted = capturePersistedAdvice(sessionManager);
 
 		await session.prompt("read five fixture files and answer with exactly one line");
@@ -330,6 +360,8 @@ describe("AgentSession advisor auto-resume suppression", () => {
 
 		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
 		expect(advisorCards).toHaveLength(1);
+		expectAdvisorRole(advisorCards[0], messageRole);
+		expectAdvisorRole(sessionManager.buildSessionContext().messages.find(isAdvisorCard), messageRole);
 		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
 		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(1);
 		expect(mock.calls.length).toBe(1);
@@ -404,8 +436,9 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(mock.calls).toHaveLength(1);
 	});
 
-	it("steers a late advisor blocker after a terminal answer so the primary corrects it", async () => {
+	it.each(["developer", "user"] as const)("steers late %s blocker to correct answer", async messageRole => {
 		const { session, mock } = await createCompletedAdvisorSession("blocker");
+		cfgAdvisorMessageRole.override(session.settings, messageRole);
 
 		await session.prompt("read five fixture files and answer with exactly one line");
 		await session.waitForIdle();
@@ -419,6 +452,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await session.waitForIdle();
 
 		expect(mock.calls.length).toBe(2);
+		expectAdvisorRole(session.agent.state.messages.find(isAdvisorCard), messageRole);
+		const feedback = mock.calls[1]?.context.messages.find(message =>
+			JSON.stringify(message.content).includes("Fixture verdict confirmed"),
+		);
+		expect(feedback).toMatchObject({ role: messageRole, attribution: "agent" });
 	});
 
 	it("preserves another late advisor concern after an existing advisor card", async () => {
@@ -607,13 +645,9 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(userMessageText(session.agent.state.messages)).toContain("also rename the helper");
 	});
 
-	it("leaves a queued user follow-up queued behind a preserved advisor card", async () => {
-		// Same stranding, but the user message was queued as a follow-up (Ctrl+Enter).
-		// Only steering resumes safely behind a preserved advisor card: agentLoopContinue
-		// injects steering before the next model call, keeping the request tail valid. A
-		// follow-up would instead resume by continuing from the advisor card (which converts
-		// to `developer`) as the tail — a provider-invalid request — so it is NOT auto-run.
-		// It stays queued for the next explicit user resume.
+	it.each(["developer", "user"] as const)("holds follow-up behind stopped %s advisor card", async messageRole => {
+		// A user stop blocks follow-up-only auto-resume regardless of the advisor's
+		// provider-facing role. The queued follow-up waits for explicit user resume.
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession([
 			{ content: ["must not run"] },
 		]);
@@ -622,7 +656,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const running = session.prompt("do the thing");
 		await streamStarted;
 
-		await session.sendCustomMessage(advisorCard("missing a guard"), { deliverAs: "steer", triggerTurn: true });
+		const card = advisorCard("missing a guard");
+		await session.sendCustomMessage(
+			{ ...card, details: { ...card.details, messageRole } },
+			{ deliverAs: "steer", triggerTurn: true },
+		);
 		await session.prompt("then add the test", { streamingBehavior: "followUp" });
 
 		await session.abort({ reason: USER_INTERRUPT_LABEL });
@@ -632,13 +670,14 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		// Advisor preserved as a visible/persisted card; the follow-up stays queued and
 		// drives no resume (only the original, aborted turn ever called the model).
 		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expectAdvisorRole(session.agent.state.messages.find(isAdvisorCard), messageRole);
 		expect(persisted).toEqual(["missing a guard"]);
 		expect(userMessageText([...session.agent.peekFollowUpQueue()])).toContain("then add the test");
 		expect(userMessageText(session.agent.state.messages)).not.toContain("then add the test");
 		expect(mock.calls.length).toBe(1);
 	});
 
-	it("releases a strict final-review wait on user stop and preserves its blocker without restarting the run", async () => {
+	it.each(["developer", "user"] as const)("preserves %s final-review blocker after user stop", async messageRole => {
 		// A strict catch-up wait has no wall-clock cap: only an explicit release
 		// (here a user interrupt) may unblock the boundary. The stop must also
 		// stay authoritative at the boundary flush afterwards: the blocker the
@@ -688,10 +727,12 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "strict",
+			"advisor.messageRole": messageRole,
 			"compaction.enabled": false,
 			"retry.enabled": false,
 		});
@@ -724,6 +765,10 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(mock.calls.length).toBe(1);
 		const cards = session.agent.state.messages.filter(isAdvisorCard);
 		expect(cards.some(card => card.content.includes("deletes the audit table"))).toBe(true);
+		expectAdvisorRole(
+			cards.find(card => card.content.includes("deletes the audit table")),
+			messageRole,
+		);
 
 		// Releasing the parked review afterwards still starts nothing: the note
 		// was already delivered and no new advice arrives.

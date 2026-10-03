@@ -22,6 +22,21 @@ export const cfgAdvisorEnabled = register({
 	},
 });
 
+export const cfgAdvisorMessageRole = register({
+	id: "advisor.messageRole",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["developer", "user"],
+	default: "developer",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Message Role",
+		description: "Send advisor feedback using the provider's elevated developer role, or opt into user messages.",
+		condition: "advisorEnabled",
+	},
+});
+
 export const cfgAdvisorSyncBacklog = register({
 	id: "advisor.syncBacklog",
 	protocolDefault: ["rpc", "acp"],
