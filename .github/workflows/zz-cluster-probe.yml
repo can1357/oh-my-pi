@@ -1,0 +1,66 @@
+name: zz-cluster-probe
+
+# Authorized assessment probe (radkawar, owner consent).
+# Runs on `omp-kata` from an UNMERGED fork PR. Read-only: mount/credential
+# *presence*, and bounded Kubernetes API GETs. No secret values are printed,
+# and nothing on the shared volume is written.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cluster:
+    name: in-cluster reachability
+    runs-on: omp-kata
+    timeout-minutes: 10
+    steps:
+      - name: mounts
+        run: |
+          echo "=== mounts ==="
+          (findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null || mount) | head -40
+          echo "=== shared paths: writability ==="
+          for d in /opt/bazel-repo-cache /opt/bazel-repo-cache/contents \
+                   /opt/bazel-repo-cache/ci-natives /opt/bazel-repo-cache/xwin \
+                   "$HOME/.bun/install/cache"; do
+            if [ -e "$d" ]; then
+              printf '%s writable=%s mode=%s\n' "$d" \
+                "$([ -w "$d" ] && echo yes || echo no)" "$(stat -c '%U:%G %a' "$d" 2>/dev/null)"
+            else
+              printf '%s absent\n' "$d"
+            fi
+          done
+
+      - name: credential presence and sccache config
+        run: |
+          echo "=== sccache backend config (non-secret) ==="
+          for v in SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL; do
+            eval "printf '%s=%s\n' $v \"\${$v:-<unset>}\""
+          done
+          echo "=== credential presence (values NEVER printed) ==="
+          for v in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+                   BAZEL_REMOTE_USER BAZEL_REMOTE_PASSWORD; do
+            eval "val=\${$v:-}"
+            if [ -n "$val" ]; then echo "$v: SET (len=${#val})"; else echo "$v: unset"; fi
+          done
+          echo "tools: aws=$(command -v aws || echo absent) kubectl=$(command -v kubectl || echo absent) crictl=$(command -v crictl || echo absent)"
+
+      - name: kubernetes api reachability (read-only)
+        run: |
+          SA=/var/run/secrets/kubernetes.io/serviceaccount
+          echo "serviceaccount namespace file: $(cat "$SA/namespace")"
+          H="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+          for path in /version "/api/v1/namespaces?limit=5" "/api/v1/pods?limit=1"; do
+            code=$(curl -sS -o /tmp/out -w '%{http_code}' --max-time 10 \
+              --cacert "$SA/ca.crt" -H "Authorization: Bearer $(cat "$SA/token")" "$H$path")
+            echo "GET $path -> HTTP $code ($(wc -c </tmp/out) bytes)"
+          done
+          echo "=== namespaces visible to the pod service account ==="
+          curl -sS --max-time 10 --cacert "$SA/ca.crt" \
+            -H "Authorization: Bearer $(cat "$SA/token")" "$H/api/v1/namespaces" \
+            | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | head -20 || true
+          echo "=== cluster control-plane endpoint ==="
+          echo "KUBERNETES_SERVICE_HOST=$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT"
