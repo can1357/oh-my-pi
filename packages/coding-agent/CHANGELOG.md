@@ -60,7 +60,7 @@
 - Fixed quadratic slowdown in `omp cleanse` on large tsc/clippy/golangci output ([#14706](https://github.com/can1357/oh-my-pi/pull/14706) by [@H4vC](https://github.com/H4vC))
 - Fixed documents served as `application/octet-stream` being downloaded twice ([#14708](https://github.com/can1357/oh-my-pi/pull/14708) by [@H4vC](https://github.com/H4vC))
 - Fixed collab TUI guests rebuilding the transcript per token ([#14715](https://github.com/can1357/oh-my-pi/pull/14715) by [@H4vC](https://github.com/H4vC))
-- Fixed `snapcompact.toolResults` re-sending each large tool result as an image one turn after it was sent as text, which broke the prompt cache every turn and made Anthropic drop or reject the signed thinking after it (Opus 5.5 with thinking binding); each result's form is now decided on its first send, so the newest large result is imaged right away and nothing already sent changes ([#14249](https://github.com/can1357/oh-my-pi/pull/14249) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `snapcompact.toolResults` re-sending each large tool result as an image one turn after it was sent as text, which broke the prompt cache every turn and made Anthropic drop or reject the signed thinking after it (Opus 5.5 with thinking binding); each result's form is now decided on its first send, so the newest large result is imaged right away and already-sent results keep their form, except that the newest imaged results revert to text when later images push a request over the provider's image cap ([#14249](https://github.com/can1357/oh-my-pi/pull/14249) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.7.0] - 2026-10-06
 
