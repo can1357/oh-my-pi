@@ -4,7 +4,7 @@
 
 ### Added
 
-- Extensions can call `ctx.getContextBreakdown()` to read the same per-category context usage that `/context` shows, including free space and the auto-compaction buffer.
+- Extensions can call `ctx.getContextBreakdown()` to read the same per-category context usage that `/context` shows, including free space and the auto-compaction buffer ([#14208](https://github.com/can1357/oh-my-pi/pull/14208) by [@listellm](https://github.com/listellm)).
 
 ## [18.5.1] - 2026-10-03
 
