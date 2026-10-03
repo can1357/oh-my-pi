@@ -228,6 +228,8 @@ export class RelayBridge {
 	/** Instance whose hello ran last: answers browser-wide requests and owns created tabs. */
 	#lastHelloInstance: string | null = null;
 	#extensionSeen = false;
+	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
+	#extensionGoneSince: number | null = null;
 	#pendingRpc = new Map<
 		string,
 		{ resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
@@ -276,6 +278,11 @@ export class RelayBridge {
 	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
 	get extensionSeen(): boolean {
 		return this.#extensionSeen;
+	}
+
+	/** Milliseconds since the last ready extension disconnected, or null while one is connected or none ever was. */
+	get extensionGoneForMs(): number | null {
+		return this.#extensionGoneSince === null ? null : Date.now() - this.#extensionGoneSince;
 	}
 
 	/** Payload for `GET /json/version`. */
@@ -357,6 +364,7 @@ export class RelayBridge {
 			tab.ompGroupId = undefined;
 		}
 		this.#groupQueue = this.#groupQueue.filter(tab => tab.instanceId !== instanceId);
+		if (!this.ready) this.#extensionGoneSince ??= Date.now();
 	}
 
 	extMessage(socket: RelaySocket, raw: string): void {
@@ -436,6 +444,7 @@ export class RelayBridge {
 		};
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
+		this.#extensionGoneSince = null;
 		// The hello GC is scoped to this instance: another browser's tabs are
 		// untouched, which is what lets Chrome and Edge share one relay.
 		const seen = new Set<number>();

@@ -163,6 +163,10 @@ describe("browser relay discovery endpoint", () => {
 			response = await fetch(`http://127.0.0.1:${port}/json/version`);
 		}
 		expect(response.status).toBe(503);
-		expect(((await response.json()) as RelayUnavailableInfo).extensionSeen).toBeTrue();
+		const info = (await response.json()) as RelayUnavailableInfo;
+		expect(info.extensionSeen).toBeTrue();
+		// Clients measure the redial window from the disconnect, so a quit Chrome fails fast later.
+		expect(info.disconnectedMs).toBeGreaterThanOrEqual(0);
+		expect(info.disconnectedMs).toBeLessThan(5_000);
 	});
 });
