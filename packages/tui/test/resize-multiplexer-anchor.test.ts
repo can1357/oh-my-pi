@@ -207,6 +207,27 @@ describe("resize anchoring inside a terminal multiplexer", () => {
 		tui.stop();
 	});
 
+	it("waits for the new height when tmux answers from a grid taller than the application's cached size", () => {
+		const { terminal, tui, renderScheduler, writes } = startRig();
+		try {
+			terminal.resize(40, 20);
+			renderScheduler.settle();
+			writes.length = 0;
+			// tmux has grown again but throttles the corresponding SIGWINCH.
+			// Painting this cursor row using height 20 would erase the newly
+			// revealed history and leave the editor above a large blank band.
+			terminal.sendInput("\x1b[35;17R");
+			expect(writes).toEqual([]);
+			terminal.resize(40, 40);
+			renderScheduler.settle();
+			writes.length = 0;
+			terminal.sendInput("\x1b[35;18R");
+			expect(writes.join("")).toContain("\x1b[35;1H");
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("accounts for tmux width reflow in the CPR offset math", () => {
 		// tmux clips on height changes but REFLOWS the pane on width changes:
 		// a 36-cell row wraps to two physical rows at width 20, and the parked

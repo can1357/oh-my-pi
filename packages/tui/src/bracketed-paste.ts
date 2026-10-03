@@ -85,10 +85,17 @@ export class BracketedPasteHandler {
 	 *          buffer); omitted when still buffering.
 	 */
 	process(data: string): PasteResult {
-		if (data.includes(PASTE_START)) {
+		const start = data.indexOf(PASTE_START);
+		const end = data.indexOf(PASTE_END);
+		if (start !== -1 && (end === -1 || start < end)) {
+			if (!this.#active) this.#buffer = "";
 			this.#active = true;
-			this.#buffer = "";
-			data = data.replace(PASTE_START, "");
+			// Only strip nested starts before this paste's first end. Later starts
+			// belong to the next paste in `remaining`.
+			data =
+				end === -1
+					? data.replaceAll(PASTE_START, "")
+					: data.slice(0, end).replaceAll(PASTE_START, "") + data.slice(end);
 		}
 
 		if (!this.#active) return { handled: false };

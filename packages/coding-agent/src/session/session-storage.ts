@@ -1195,6 +1195,18 @@ function matchesPattern(name: string, pattern: string): boolean {
 	return name === pattern;
 }
 
+/**
+ * Name of `key` when it sits directly inside `resolvedDir` (a `path.resolve`d
+ * directory), else `undefined`. Key-indexed storages keep whatever spelling
+ * callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
+ * `path.join`-built `\sessions\x\…` keys must list as the same directory.
+ */
+export function directChildKeyName(resolvedDir: string, key: string): string | undefined {
+	const name = path.basename(key);
+	if (!name || name.includes("/") || name.includes("\\")) return undefined;
+	return path.resolve(path.dirname(key)) === resolvedDir ? name : undefined;
+}
+
 class MemorySessionStorageWriter implements SessionStorageWriter {
 	#storage: MemorySessionStorage;
 	#path: string;
@@ -1449,14 +1461,12 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
-		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+		const resolvedDir = path.resolve(dir);
 		const files: string[] = [];
-		for (const path of this.#files.keys()) {
-			if (!path.startsWith(prefix)) continue;
-			const name = path.slice(prefix.length);
-			if (name.includes("/") || name.includes("\\")) continue;
-			if (!matchesPattern(name, pattern)) continue;
-			files.push(path);
+		for (const key of this.#files.keys()) {
+			const name = directChildKeyName(resolvedDir, key);
+			if (name === undefined || !matchesPattern(name, pattern)) continue;
+			files.push(key);
 		}
 		return files;
 	}

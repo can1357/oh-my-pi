@@ -789,17 +789,43 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.stop();
 	});
 
-	it("reasserts confirmed bracketed paste after a terminal resets mode 2004", () => {
+	it("emits no output while idle after confirming bracketed paste", () => {
 		vi.useFakeTimers();
 		const { terminal, writes } = setup();
 		process.stdin.emit("data", "\x1b[?2004;1$y");
-		const before = writes.filter(write => write.includes("\x1b[?2004h")).length;
+		// Let the one-shot keyboard fallback finish before measuring idle output.
 		vi.advanceTimersByTime(1000);
-		expect(writes.filter(write => write.includes("\x1b[?2004h")).length).toBe(before + 1);
+		writes.length = 0;
+		vi.advanceTimersByTime(15000);
+		expect(writes).toEqual([]);
 		terminal.stop();
 		const stopped = writes.length;
 		vi.advanceTimersByTime(1000);
 		expect(writes).toHaveLength(stopped);
+	});
+
+	it("rearms bracketed paste on input so a subsequent multiline paste stays one input", () => {
+		const { terminal, writes, received } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		process.stdin.emit("data", "x");
+		expect(writes).toEqual(["\x1b[?2004h"]);
+		process.stdin.emit("data", "\x1b[200~first\nsecond\x1b[201~");
+		expect(received).toEqual(["x", "\x1b[200~first\nsecond\x1b[201~"]);
+		terminal.stop();
+	});
+
+	it("rearms confirmed bracketed paste in the same write as a render, only while active", () => {
+		const { terminal, writes } = setup();
+		terminal.write("before confirmation");
+		expect(writes.at(-1)).toBe("before confirmation");
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		terminal.write("frame");
+		expect(writes).toEqual(["\x1b[?2004hframe"]);
+		terminal.stop();
+		terminal.write("after stop");
+		expect(writes.at(-1)).toBe("after stop");
 	});
 
 	it("coalesces an unbracketed multiline burst when bracketed paste is unconfirmed (#12540)", () => {

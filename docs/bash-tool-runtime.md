@@ -198,7 +198,7 @@ Behavior highlights:
 - `esc` while running kills the PTY session,
 - terminal resize propagates to PTY (`session.resize(cols, rows)`).
 
-Unlike the non-PTY engine, the interactive PTY path does **not** apply the non-interactive hardening. It inherits the user's environment and sets a real `TERM=xterm-256color` (applied as an override on the Rust side) so editors, pagers, and TUIs behave like a normal terminal.
+Unlike the non-PTY engine, the interactive PTY path does **not** apply the non-interactive hardening. The Rust side starts from the process's native environment and applies the env it is handed as overrides; Bun's `process.env` writes never reach that base, so the PTY is handed the shell spawn environment (`getShellConfig().env`) minus its non-interactive guards (`GIT_EDITOR`, `GPG_TTY`, `CI`) and `NO_COLOR`, then a real `TERM=xterm-256color` so editors, pagers, and TUIs behave like a normal terminal, then the direnv values, which win over both. A key left out keeps the inherited value.
 
 PTY output is normalized (`CRLF`/`CR` to `LF`, `sanitizeText`) and written into `OutputSink`, including artifact spill support.
 

@@ -90,3 +90,30 @@ test("a project .omp between cwd and home is still found", async () => {
 
 	expect(prompts.map(p => [p.path, p.level])).toEqual([[path.join(project, ".omp", "SYSTEM.md"), "project"]]);
 });
+
+test("noncanonical home never becomes a native project config root", async () => {
+	const project = path.join(home, "scratch");
+	const cwd = path.join(project, "nested");
+	const link = path.join(tempDir, "home-link");
+	fs.mkdirSync(cwd, { recursive: true });
+	fs.symlinkSync(home, link, "dir");
+	writeFile(path.join(project, ".omp", "SYSTEM.md"), "project system prompt\n");
+
+	for (const alias of [`${home}${path.sep}`, link]) {
+		const ctx: LoadContext = { cwd, home: alias, repoRoot: null };
+		const prompts = await loadNative<SystemPrompt>(systemPromptCapability.id, ctx);
+		const rules = await loadNative<Rule>(ruleCapability.id, ctx);
+		const skills = await loadNative<Skill>(skillCapability.id, ctx);
+
+		expect(prompts.map(p => p.path)).toEqual([path.join(project, ".omp", "SYSTEM.md")]);
+		expect(rules.filter(rule => rule.path === path.join(home, ".omp", "RULES.md"))).toEqual([]);
+		expect(skills.filter(skill => skill.path === path.join(home, ".omp", "skills", "operator", "SKILL.md"))).toEqual(
+			[],
+		);
+	}
+
+	const atHome: LoadContext = { cwd: home, home: link, repoRoot: null };
+	expect((await loadNative<Rule>(ruleCapability.id, atHome)).some(rule => rule._source.level === "project")).toBe(
+		false,
+	);
+});

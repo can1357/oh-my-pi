@@ -10,7 +10,9 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 async function corruptDatabase(dbPath: string): Promise<Uint8Array<ArrayBuffer>> {
 	const db = new Database(dbPath);
 	db.run("CREATE TABLE IF NOT EXISTS preserved (value TEXT)");
-	db.prepare("INSERT INTO preserved (value) VALUES (?)").run("salvage this data");
+	// An unfinalized prepared statement would leave the closed connection a zombie
+	// still holding the files, which Windows then refuses to quarantine.
+	db.run("INSERT INTO preserved (value) VALUES (?)", ["salvage this data"]);
 	db.run("PRAGMA wal_checkpoint(TRUNCATE)");
 	db.close();
 
