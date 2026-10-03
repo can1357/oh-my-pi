@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in CoralBricks provider support (`coralbricks`, `CORAL_API_KEY`) with `/login` key validation, live model discovery from the key-protected `/v1/models`, and bundled GLM 5.3, GLM 5.3 Flash, and DeepSeek V4.1 Flash seed models. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+
 ## [18.5.0] - 2026-10-03
 
 ### Added

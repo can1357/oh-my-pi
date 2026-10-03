@@ -1,0 +1,65 @@
+// CoralBricks inference gateway deployment contract
+// (https://www.coralbricks.ai/docs.md; catalog snapshot 2026-10-02).
+//
+// Coral serves open-weight models behind an OpenAI-compatible wire at
+// https://inference.coralbricks.ai/v1 with a single bearer API key. The
+// key-protected `GET /v1/models` publishes each row's context window,
+// per-million pricing, and capability flags, and Coral documents those
+// flags as authoritative (unsupported content answers
+// `400 unsupported_content_type` rather than being dropped), so live
+// discovery is the deployment truth and same-id rows on other hosts must
+// not backfill capabilities or limits into this provider's rows.
+provider "coralbricks" {
+	default-model "glm-5.3-fp4"
+	// Official docs authenticate via `CORAL_API_KEY`
+	// (https://www.coralbricks.ai/docs.md#authentication); `CORALBRICKS_API_KEY`
+	// is the alias the Coral pi provider extension shipped with, kept as a
+	// compatibility fallback in precedence order.
+	env "CORAL_API_KEY" "CORALBRICKS_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="CoralBricks"
+
+	// Reviewed snapshot of the public catalog
+	// (https://www.coralbricks.ai/api/public/models). The public rows list
+	// input/output rates only; cache-write rates come from Coral's published
+	// pricing and cached reads are $0 on every model. `/v1/models` needs a
+	// key, so generation without credentials bundles these rows; successful
+	// runtime discovery replaces them.
+	seed api="openai-completions" base-url="https://inference.coralbricks.ai/v1" bundle="always" {
+		model "glm-5.3-fp4" name="GLM 5.3" {
+			reasoning #true
+			input "text"
+			cost input=1.12 output=4.4 cache-read=0 cache-write=1.68
+			limits context=1048576 max-tokens=131072
+		}
+		model "glm-5.3-flash-fp4" name="GLM 5.3 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.15 output=0.5 cache-read=0 cache-write=0.23
+			limits context=1048576 max-tokens=131072
+		}
+		model "deepseek-v4.1-flash-fast-fp4" name="DeepSeek V4.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.3 output=1.2 cache-read=0 cache-write=0.09
+			limits context=1048576 max-tokens=131072
+		}
+	}
+
+	// DeepSeek V4.1 Flash is the one CoralBricks SKU that advertises a genuine
+	// off value (`none` in its reasoning-effort vocabulary, per Coral's entry
+	// on models.dev), so a thinking-off request disables reasoning instead of
+	// clamping to the lowest effort like the GLM SKUs.
+	models "deepseek-v4.1-flash-fast-fp4" {
+		reasoning-disable-mode "none-effort"
+	}
+	// Gateway request dialect, matching Coral's plain Chat Completions
+	// surface ("unchanged from what your existing SDK expects"): output caps
+	// ride `max_tokens`, system prompts ride the `system` role, and no
+	// `store` field is sent. Coral accepts unknown fields, so acceptance is
+	// not evidence the semantics are honored (same call as charm-hyper).
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_tokens"
+}

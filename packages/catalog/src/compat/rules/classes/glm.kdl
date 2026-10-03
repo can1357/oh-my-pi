@@ -106,8 +106,11 @@ class "glm" {
 	// and flashx/preview shapes that keep host dialects; the explicit priority resolves
 	// the intentional overlap with census host-dialect residues such as
 	// baseten's `zai-org/GLM-5*`.
+	// CoralBricks' FP4-quantized deployments (`glm-5.3-fp4`, `glm-5.3-flash-fp4`)
+	// are the same coding SKUs served behind Coral's OpenAI-compatible gateway.
 	models "*glm-5.3" "*glm-5.3-air" "*glm-5.3-turbo" "*glm-5.3-flash" "*glm-5.3:*" \
-		"*glm-5.3-flash-uncensored" "*glm-5.3-free" "*glm-5.3-highspeed" "*glm-5.3-flash-lab" priority=10 {
+		"*glm-5.3-flash-uncensored" "*glm-5.3-free" "*glm-5.3-highspeed" "*glm-5.3-flash-lab" \
+		"*glm-5.3-fp4" "*glm-5.3-flash-fp4" priority=10 {
 		thinking-default-level "max"
 		thinking-efforts "low" "high" "max"
 		thinking-requires-effort #true
