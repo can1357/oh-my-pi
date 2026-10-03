@@ -68,6 +68,7 @@ const notificationDefs = {
 			"ExtensionError",
 			"ExtensionUiRequest",
 			"AvailableCommandsUpdateEvent",
+			"SkillDiagnosticsUpdateEvent",
 			"SubagentLifecycleEvent",
 			"SubagentProgressEvent",
 			"SubagentEvent",
