@@ -158,6 +158,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint         |
 | `kilo`                           | `KILO_API_KEY`                                                                |
+| `kenari`                         | `KENARI_API_KEY`                                                              |
 | `zai`                            | `ZAI_API_KEY`                                                                 |
 | `zenmux`                         | `ZENMUX_API_KEY`                                                              |
 | `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                               |

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Kenari as a /login provider (KENARI_API_KEY) ([#13958](https://github.com/can1357/oh-my-pi/pull/13958) by [@doedja](https://github.com/doedja)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
