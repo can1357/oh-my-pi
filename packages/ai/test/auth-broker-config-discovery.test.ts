@@ -69,6 +69,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				provider: "anthropic",
 				account: { email: "policy@example.com" },
 				reservePct: 25,
+				reclaimAbovePct: 60,
 			},
 		] satisfies AuthAccountPolicies;
 		await Bun.write(
@@ -243,6 +244,18 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].reservePct must be between 0 and 100",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      reclaimAbovePct: 0",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].reclaimAbovePct must be above 0 and at most 100",
 			},
 			{
 				yaml: [

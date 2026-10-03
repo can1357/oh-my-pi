@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Running sessions can now move back to a preferred account once it recovers: set `reclaimAbovePct` on its `auth.accountPolicies` entry, and sessions automatically pinned to a lower-priority account return on their next request once the preferred account has at least that much quota left. Opt-in; the value must be above the account's reserve, and explicitly chosen accounts never move ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Antigravity chat and image requests sending an outdated client version when the model list came from cache, which could make newer models such as Claude Opus 5.5 unavailable.

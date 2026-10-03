@@ -25,6 +25,13 @@ export type UsageCandidate<T extends AuthCredential> = {
 	 * spent, so if it still serves it draws on paid overage such as Codex credits.
 	 */
 	allowanceSpent?: boolean;
+	/** Present after policy-aware ranking: the account's configured `priority` (0 when unset). */
+	accountPriority?: number;
+	/**
+	 * Present after policy-aware ranking: the account is unblocked and measured at or above
+	 * its `reclaimAbovePct`, so it may take warm automatic pins back from lower-priority siblings.
+	 */
+	reclaimReady?: boolean;
 };
 
 /** OAuth credential eligible for usage ranking. */
@@ -152,5 +159,7 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		inReserve: candidate.inReserve,
 		reserveMeasured: candidate.reserveMeasured,
 		allowanceSpent: candidate.allowanceSpent,
+		accountPriority: candidate.accountPriority,
+		reclaimReady: candidate.reclaimReady,
 	}));
 }
