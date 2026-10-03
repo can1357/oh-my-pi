@@ -16,6 +16,12 @@
  * terminal sends; chords legacy encoding loses (modified Enter/Tab/Escape,
  * Ctrl+Shift+letter, …) translate to kitty CSI-u, which key matching already
  * parses.
+ *
+ * A host terminal that writes VT instead of key records (any ConPTY host
+ * besides Windows Terminal's native path) reaches us as one `Vk = 0` text
+ * record per byte: Alt+Up arrives as `ESC`, `[`, `1`, `;`, `3`, `A`. Those
+ * bytes are reassembled into the escape sequence they spell; delivering them
+ * one at a time turns every such key into a bare Escape plus typed garbage.
  */
 
 const W32IM_PATTERN = /^\x1b\[([\d;]*)_$/;
@@ -111,6 +117,31 @@ function baseCodepointForVk(vk: number): number {
 	return 0;
 }
 
+/** `split`: the leading ESC is a standalone Escape and the rest starts a new sequence. */
+type VtState = "partial" | "complete" | "invalid" | "split";
+
+/** Classify relayed VT text that starts with ESC. */
+function vtState(text: string): VtState {
+	if (text.length === 1) return "partial";
+	const introducer = text[1]!;
+	if (introducer === "\x1b") {
+		if (text.length === 2) return "partial";
+		// Only meta-CSI/SS3 (legacy Alt+Up is `ESC ESC [ A`) stays grouped; `ESC ESC d`
+		// is Escape followed by Alt+d, matching StdinBuffer.
+		return text[2] === "[" || text[2] === "O" ? vtState(text.slice(1)) : "split";
+	}
+	if (introducer === "[") {
+		if (/^\x1b\[[0-?]*[ -/]*[@-~]$/.test(text)) return "complete";
+		return /^\x1b\[[0-?]*[ -/]*$/.test(text) ? "partial" : "invalid";
+	}
+	if (introducer === "O") return text.length === 2 ? "partial" : text.length === 3 ? "complete" : "invalid";
+	if (introducer === "]" || introducer === "P" || introducer === "_") {
+		return text.endsWith("\x07") || (text.length > 3 && text.endsWith("\x1b\\")) ? "complete" : "partial";
+	}
+	// ESC + one character: Alt+character.
+	return text.length === 2 ? "complete" : "invalid";
+}
+
 function encodeKey(record: KeyRecord): string | null {
 	const { vk, uc, state } = record;
 	const shift = (state & SHIFT_PRESSED) !== 0;
@@ -165,9 +196,30 @@ function encodeKey(record: KeyRecord): string | null {
 	return uc === 0 ? null : text;
 }
 
-/** Stateful decoder: joins UTF-16 surrogate halves that arrive as separate records. */
+/**
+ * Stateful decoder: joins UTF-16 surrogate halves that arrive as separate
+ * records, and reassembles VT escape sequences relayed as text records.
+ */
 export class Win32InputModeDecoder {
 	#pendingHighSurrogate = 0;
+	/** Relayed VT text that starts with ESC and has not completed a sequence yet. */
+	#pendingVt = "";
+
+	/** Whether relayed VT text is held waiting for the rest of its sequence. */
+	get hasPendingSequence(): boolean {
+		return this.#pendingVt.length > 0;
+	}
+
+	/**
+	 * Release held VT text once no further bytes arrive. A bare ESC pair is two
+	 * Escape keys, like StdinBuffer, not an incomplete Alt prefix.
+	 */
+	flushPendingSequence(): string[] {
+		if (this.#pendingVt.length === 0) return [];
+		const pending = this.#pendingVt;
+		this.#pendingVt = "";
+		return pending === "\x1b\x1b" ? ["\x1b", "\x1b"] : [pending];
+	}
 
 	/**
 	 * Translate one stdin sequence. Returns `undefined` when `data` is not a
@@ -180,17 +232,42 @@ export class Win32InputModeDecoder {
 
 		if (!record.down) {
 			// Alt+Numpad composition delivers its character on the Alt release.
-			if (record.vk === VK_MENU && record.uc !== 0) return this.#emitText(record.uc);
+			if (record.vk === VK_MENU && record.uc !== 0) return this.#assembleVt(this.#emitText(record.uc));
 			return [];
 		}
 		if (MODIFIER_VKS.has(record.vk)) return [];
-		if (record.vk === 0 || record.vk === VK_PACKET) return this.#emitText(record.uc, record.repeat);
-		if (record.uc >= 0xd800 && record.uc <= 0xdfff) return this.#emitText(record.uc);
+		if (record.vk === 0 || record.vk === VK_PACKET) return this.#assembleVt(this.#emitText(record.uc, record.repeat));
+		if (record.uc >= 0xd800 && record.uc <= 0xdfff) return this.#assembleVt(this.#emitText(record.uc));
 
 		this.#pendingHighSurrogate = 0;
 		const encoded = encodeKey(record);
-		if (encoded === null) return [];
-		return Array.from({ length: record.repeat }, () => encoded);
+		// A real key ends whatever relayed text was still incomplete.
+		const flushed = this.flushPendingSequence();
+		if (encoded === null) return flushed;
+		for (let i = 0; i < record.repeat; i++) flushed.push(encoded);
+		return flushed;
+	}
+
+	/** Group relayed text into whole escape sequences; other text passes through per character. */
+	#assembleVt(texts: string[]): string[] {
+		const out: string[] = [];
+		for (const text of texts) {
+			if (this.#pendingVt.length === 0 && text !== "\x1b") {
+				out.push(text);
+				continue;
+			}
+			this.#pendingVt += text;
+			let state = vtState(this.#pendingVt);
+			while (state === "split") {
+				out.push("\x1b");
+				this.#pendingVt = this.#pendingVt.slice(1);
+				state = vtState(this.#pendingVt);
+			}
+			if (state === "partial") continue;
+			out.push(this.#pendingVt);
+			this.#pendingVt = "";
+		}
+		return out;
 	}
 
 	/**
@@ -245,9 +322,15 @@ export class Win32PasteMarkerNormalizer {
 	#marker = "";
 	#timer?: NodeJS.Timeout;
 	readonly #onInput: (data: string) => void;
+	readonly #onExpired?: () => void;
 
-	constructor(onInput: (data: string) => void) {
+	/**
+	 * `onExpired` runs after held records are released because their wait timed
+	 * out, so a downstream holder can treat the same wait as already elapsed.
+	 */
+	constructor(onInput: (data: string) => void, onExpired?: () => void) {
 		this.#onInput = onInput;
+		this.#onExpired = onExpired;
 	}
 
 	process(data: string): void {
@@ -324,7 +407,12 @@ export class Win32PasteMarkerNormalizer {
 		}
 
 		if (output) this.#onInput(output);
-		if (this.#candidate || this.#pending) this.#timer = setTimeout(() => this.flush(), 75);
+		if (this.#candidate || this.#pending) {
+			this.#timer = setTimeout(() => {
+				this.flush();
+				this.#onExpired?.();
+			}, 75);
+		}
 	}
 
 	/** Release an incomplete marker as its original key records. */
