@@ -6,6 +6,10 @@
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
 
+### Added
+
+- Added `examples/extensions/typesafe-jev.ts`: a `before_agent_start` hook that asks TypeSafe Jev which installed skill (if any) to read, then appends a per-turn `<skill_relevance>` line. Jev is not a chat model; copy the file to `~/.omp/agent/extensions/` and use `/login typesafe` or `TYPESAFE_API_KEY`. Fail-open on missing key, timeout, or HTTP error.
+
 ### Changed
 
 - Picking a model for a role in `/models` now puts the cursor on the model list, so ↑/↓ choose a model and Enter assigns it right away instead of moving through the sidebar and dropping the role selection; ← still reaches the providers ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
