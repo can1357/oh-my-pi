@@ -7,7 +7,7 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
-import { BUILTIN_SLASH_COMMANDS_INTERNAL, filterBuiltinSlashCommands } from "./builtin-registry";
+import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
 
 export type AvailableSlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
 
@@ -45,8 +45,9 @@ export async function buildAvailableSlashCommands(
 		commands.push(command);
 	};
 
-	for (const command of filterBuiltinSlashCommands(BUILTIN_SLASH_COMMANDS_INTERNAL, cfgCommandsHidden.get(session))) {
-		if (!command.handle) continue;
+	const hidden = cfgCommandsHidden.get(session);
+	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
+		if (!command.handle || hidden.includes(command.name)) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
 			name: command.name,
@@ -57,9 +58,8 @@ export async function buildAvailableSlashCommands(
 			source: "builtin",
 		});
 	}
-	// ACP dispatch resolves every builtin name and alias, hidden or not, before
-	// `session.prompt()` sees the input, so a custom/file command sharing one would be
-	// advertised but never run. TUI-only builtins have no `handle` and stay available.
+	// ACP dispatch resolves builtin names and aliases (hidden too) before `session.prompt()`,
+	// so a custom/file command sharing one would be advertised but never run.
 	for (const name of ACP_BUILTIN_RESERVED_NAMES) seenNames.add(name);
 
 	if (session.skillsSettings?.enableSkillCommands) {

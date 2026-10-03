@@ -645,10 +645,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const prefix = commandText.slice(1); // Remove the "/"
 				const lowerPrefix = prefix.toLowerCase();
 				// An exact hidden name runs as typed; a popup would let Enter swap in a fuzzy match.
-				if (
-					!isMidPromptSkillLookup &&
-					this.#commands.some(cmd => "hidden" in cmd && cmd.hidden && commandMatchesNameOrAlias(cmd, prefix))
-				) {
+				if (this.#commands.some(cmd => "hidden" in cmd && cmd.hidden && commandMatchesNameOrAlias(cmd, prefix))) {
 					return null;
 				}
 

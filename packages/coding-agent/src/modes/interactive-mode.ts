@@ -140,7 +140,6 @@ import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
-import { cfgCommandsHidden } from "../extensibility/settings";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
@@ -2559,10 +2558,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			icon: getSlashCommandTypeIcon(cmd.icon ?? "action"),
 			iconName: cmd.icon ?? "action",
 		}));
-		// Hidden builtins stay known so an exact typed name submits instead of fuzzy-completing elsewhere.
-		for (const name of cfgCommandsHidden.get(this)) {
-			if (BUILTIN_SLASH_COMMAND_RESERVED_NAMES.has(name)) builtinCommands.push({ name, hidden: true });
-		}
 
 		const hookCommands: SlashCommand[] = (
 			this.session.extensionRunner?.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES) ?? []
@@ -2631,7 +2626,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * the session's current file-based slash commands and prompt templates.
 	 */
 	#rebuildSlashCommandAutocomplete(basePath: string): void {
-		// Rebuilt every refresh: builtins read `commands.hidden` and icons the symbol preset.
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 		const fileCommands = this.session.slashCommands;
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
@@ -2652,8 +2646,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// execution resolves aliases before template expansion. Mirror that command
 		// resolution order by skipping templates whose names already appear in any
 		// builtin/hook/custom/skill/file command token.
-		// Hidden builtins still dispatch, so their names stay reserved.
-		const reservedNames = new Set(BUILTIN_SLASH_COMMAND_RESERVED_NAMES);
+		const reservedNames = new Set<string>();
 		for (const command of this.#pendingSlashCommands) {
 			reservedNames.add(command.name);
 			for (const alias of command.aliases ?? []) reservedNames.add(alias);

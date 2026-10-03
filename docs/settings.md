@@ -947,9 +947,7 @@ Provider credentials and custom model definitions are configured separately — 
 
 ### Commands
 
-| Key               | Type     | Default | Values / notes |
-| ----------------- | -------- | ------- | -------------- |
-| `commands.hidden` | string[] | `[]`    | Built-in command names (no leading `/`) to hide from the TUI palette/autocomplete and the ACP/RPC available-commands list. A primary name hides the command and its aliases; an alias hides only that alias. Unknown names are ignored; extension, custom, skill, and file commands are unaffected. Hidden commands still run when typed, and their names stay reserved. |
+`commands.hidden` (default `[]`) lists built-in command names, without `/`, to hide (with their aliases) from the palette and ACP/RPC command list. Hidden commands still run when typed.
 
 ```yaml
 commands:

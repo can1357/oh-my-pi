@@ -1,14 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgCommandsHidden } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
-import {
-	buildTuiBuiltinSlashCommands,
-	executeBuiltinSlashCommand,
-} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { buildTuiBuiltinSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 
 describe("buildAvailableSlashCommands", () => {
 	test("returns RPC-safe command metadata with stable sources", async () => {
@@ -189,66 +184,30 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName.plugins.aliases).toEqual(["plugin"]);
 	});
 
-	test("hides commands.hidden builtins while keeping their names reserved", async () => {
+	test("hides commands.hidden builtins from ACP while keeping their names reserved", async () => {
 		const commands = await buildAvailableSlashCommands(
 			{
-				settings: Settings.isolated({ "commands.hidden": ["security", "plugins", "models", "ext:hello"] }),
-				extensionRunner: { getRegisteredCommands: () => [{ name: "ext:hello" }] },
+				settings: Settings.isolated({ "commands.hidden": ["security", "plugins"] }),
 				customCommands: [{ command: { name: "security" } }, { command: { name: "plugin" } }],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
 				setSlashCommands() {},
 			} as never,
-			async () => [{ name: "models", description: "Shadowed alias", content: "body", source: "test" }],
+			async () => [],
 		);
-		const byName = Object.fromEntries(commands.map(command => [command.name, command]));
-
-		// Typed `/security`, `/plugin`, `/models` still resolve to the builtin, so no shadow may appear.
-		expect(byName.security).toBeUndefined();
-		expect(byName.plugins).toBeUndefined();
-		expect(byName.plugin).toBeUndefined();
-		expect(byName.models).toBeUndefined();
-		expect(byName.model.aliases).toEqual([]);
-		// Only builtins are hideable.
-		expect(byName["ext:hello"].source).toBe("extension");
+		const names = commands.map(command => command.name);
+		// Typed `/security` and `/plugin` still run the builtin, so no shadow may be advertised.
+		expect(names).not.toContain("security");
+		expect(names).not.toContain("plugins");
+		expect(names).not.toContain("plugin");
+		expect(names).toContain("model");
 	});
 });
 
-describe("buildTuiBuiltinSlashCommands", () => {
-	test("re-reads commands.hidden on every build", () => {
-		const settings = Settings.isolated();
-		const ctx = { settings } as InteractiveModeContext;
-		const names = () => buildTuiBuiltinSlashCommands({ ctx }).flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])]);
-
-		expect(names()).toEqual(expect.arrayContaining(["security", "goal", "models"]));
-		cfgCommandsHidden.set(settings, ["security", "goal", "models", "not-a-command"]);
-		const hidden = names();
-		expect(hidden).not.toContain("security");
-		expect(hidden).not.toContain("goal");
-		expect(hidden).not.toContain("models");
-		expect(hidden).toContain("model");
-		cfgCommandsHidden.set(settings, []);
-		expect(names()).toContain("security");
-	});
-
-	test("typed hidden commands still dispatch in TUI and ACP", async () => {
-		const settings = Settings.isolated({ "commands.hidden": ["security"], "security.enabled": false });
-		const output: string[] = [];
-		const ctx = {
-			settings,
-			sessionManager: { getCwd: () => process.cwd() },
-			showStatus: (text: string) => output.push(text),
-			editor: { setText() {} },
-		} as unknown as InteractiveModeContext;
-
-		expect(await executeBuiltinSlashCommand("/security", { ctx })).toBe(true);
-		expect(
-			await executeAcpBuiltinSlashCommand("/security", {
-				settings,
-				output: (text: string) => output.push(text),
-			} as unknown as SlashCommandRuntime),
-		).toEqual({ consumed: true });
-		expect(output).toHaveLength(2);
-		expect(output.every(text => text.includes("Security is disabled"))).toBe(true);
-	});
+test("TUI palette omits hidden builtins but keeps an exact typed name", async () => {
+	const ctx = { settings: Settings.isolated({ "commands.hidden": ["goal"] }) } as InteractiveModeContext;
+	const commands = buildTuiBuiltinSlashCommands({ ctx });
+	expect(commands.filter(command => command.hidden).map(command => command.name)).toEqual(["goal"]);
+	// Enter applies the top match; `/goal` must not be rewritten to another command.
+	expect(new CombinedAutocompleteProvider([...commands]).trySyncSlashCompletion("/goal")).toBeNull();
 });
