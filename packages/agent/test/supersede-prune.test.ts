@@ -348,7 +348,7 @@ describe("pruneToolOutputs — supersede priority fold", () => {
 			minimumSavings: 0,
 			protectedTools: [],
 		});
-		expect(protectedRun).toEqual({ prunedCount: 0, tokensSaved: 0 });
+		expect(protectedRun).toMatchObject({ prunedCount: 0, tokensSaved: 0 });
 		expect(resultText(protectedFixture.oldResult)).toBe(FILE_CONTENT);
 		expect(resultText(protectedFixture.newResult)).toBe(FILE_CONTENT);
 

@@ -5,6 +5,151 @@
 ### Fixed
 
 - Fixed tool-call echo cards corrupting payload bytes (`$` sigils dropped, identifiers subscripted, lines re-flowed): bash command, write file-content, and code echoes stay byte-verbatim with every byte recoverable (expanded soft-wraps across `↪`-marked rows, collapsed clips with a visible `…`), and task brief/context render as markdown with math spans and BRE groups kept literal ([#13736](https://github.com/can1357/oh-my-pi/pull/13736) by [@yingliang-zhang](https://github.com/yingliang-zhang)).
+## [18.5.0] - 2026-10-03
+
+### Breaking Changes
+
+- `WelcomeComponent` no longer takes a model or provider: its constructor is `(version)`, and `setModel()`, `setRecentSessions()`, `setLspServers()`, `handleNativeEvent()`, `RecentSession`, `LspServerInfo`, `WELCOME_SESSION_SLOTS` and `WELCOME_LSP_SLOTS` are gone; `ComposerWelcomeUpdate` drops `modelName`/`providerName`/`recentSessions`/`lspServers`, and `ComposerCache` drops `writeWelcome()`, `writeRecentSessions()`, `writeLspServers()`, `ComposerWelcomeCache` and the `welcome`/`recentSessions`/`lspServers` fields of `ComposerStartupCache`.
+- `renderWelcomeTip()` returns its lines without an indent, `Tip:` and the body wrapped together, for the caller to place.
+
+### Added
+
+- Added `ReportPanel`, a read-only command report: a `/btw`-style titled box with an Esc hint in text mode (above the editor, or as a full-screen page whose body scrolls on the arrow/page/Home/End keys and the wheel), and natively a `/usage`-style sheet whose body the terminal scrolls once it is long, with a Close button ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added `contextUsageHead()`, the `/context` title naming the model and its window ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added `Composer.rowsBelow()`, the rows the chrome under a below-transcript root took in the last frame ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added `Composer.pinInputToBottom()`, which keeps the input on the bottom row after chrome above the editor closes when rows it displaced went to scrollback ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added a repeatable native `reveal` (`{ at, n }`): a described node scrolls into view again whenever its `n` changes, without being re-added.
+
+### Changed
+
+- `ContextUsageView` is now a bare report body without its own title, rules or card; `setBreakdown()` was removed ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- The terminal welcome banner is the gradient logo beside the `omp` wordmark with the version under it and the tip, centered in the terminal; the logo stands alone when the lockup does not fit, and the tip drops below 50 columns. It no longer greets with "Welcome back!", natively either.
+
+### Fixed
+
+- Fixed tool previews on Windows showing a working directory on another drive as a raw absolute path instead of its home-shortened `~/…` form.
+- Fixed pasted drive-less `file:///…` URLs (forwarded from a macOS pasteboard or remote session) staying undecoded on Windows instead of loading as image paths.
+- Fixed an output artifact whose file cannot be opened (e.g. a directory in the way) being reported on Windows as a write failure and retried later, instead of a terminal open failure.
+- Fixed plan review's Contents in Tern: clicking an entry, or moving through them with the arrow keys, now scrolls the plan to that section.
+
+### Removed
+
+- Removed `JobsPanel`, the `/jobs` transcript block; `/jobs` now opens `JobsSheet` natively ([#14138](https://github.com/can1357/oh-my-pi/pull/14138) by [@H4vC](https://github.com/H4vC)).
+
+## [18.4.12] - 2026-10-02
+
+### Changed
+
+- Changed Ctrl+Z in Tern's native composer to undo the last edit (TSP `undo` event) instead of suspending
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added subagent completion percentages to the agent tree, task, and wait views.
+
+### Changed
+
+- Updated notebook evaluation cells in native hosts to use directional gutter indicators for inputs and outputs, with a progress indicator while a cell is running.
+
+### Fixed
+
+- Fixed multiline paste on Windows so pasted line breaks are inserted correctly instead of terminal escape sequences.
+
+## [18.4.10] - 2026-10-02
+
+### Added
+
+- Added ContextUsageView.setBreakdown to refresh usage card without recreating it
+- Added support for change events with flexible values in native TUI
+
+### Fixed
+
+- Keep settled responses reachable in scrollback while an ask panel is open, and keep the editor at the bottom after answering ([#12398](https://github.com/can1357/oh-my-pi/issues/12398), [#13993](https://github.com/can1357/oh-my-pi/pull/13993) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed a finished `wait` whose jobs were all still running going blank, and the next `wait` removing it while its turn's usage row stayed; the card now keeps its job snapshot ([#12248](https://github.com/can1357/oh-my-pi/issues/12248), [#13978](https://github.com/can1357/oh-my-pi/pull/13978) by [@Dante-dan](https://github.com/Dante-dan)).
+- Hidden thinking blocks no longer leave a faint "Thought for Ns" row in Tern's native transcript; only the live "Thinking…" indicator shows while the model reasons.
+- Fixed long Markdown paragraphs, such as a read preview of a file with no blank line, stalling rendering: a 44 KB paragraph now renders in about 8 ms instead of 95 ms ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with many unclosed `[`, `*` or `_`, or with a long address-like word, stalling rendering for seconds ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Markdown paragraphs with many unclosed `~~`, `$`, `\(` or `\[`, nested brackets or emphasis, or unclosed HTML, stalling rendering for seconds: 40 KB of unclosed `~~` took 85 s. Emphasis or links nested a thousand levels deep still render slowly, for seconds per few KB: each level restyles the text inside it ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed arrow keys acting as Escape and terminal query replies appearing as typed text when running omp on Windows over SSH ([#14034](https://github.com/can1357/oh-my-pi/issues/14034)).
+- Fixed `/model` under an `enabledModels`/`--models` scope hiding every judge, search, image, and speech model and dropping their configured role assignments (JUDGE, WEB, IMAGE, …) ([#14016](https://github.com/can1357/oh-my-pi/issues/14016))
+
+### Removed
+
+- Removed the internal `urlTokenPossible` export ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+- Removed the internal `autolinkSchemeScanIndex` export ([#13961](https://github.com/can1357/oh-my-pi/pull/13961) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Exported `wordCompletionQuery()` so hosts outside the editor can apply the same prose eligibility rules used by ghost-text word completion.
+- Added a full-featured Background jobs view with selectable jobs, live status and elapsed time, working directory, process IDs, exit code, command, tailing output, and cancellation for running jobs.
+
+### Changed
+
+- `OutputSink` now limits artifact files to 16 MiB by default while preserving the beginning and end of oversized output and marking the omitted bytes. Set `artifactMaxBytes: 0` to keep artifacts unbounded; `dump()` reports omitted bytes and full-output references identify sampled artifacts.
+
+### Fixed
+
+- Reduced unnecessary composer startup-cache writes and ensured the cache database is released when it closes on Windows.
+- Fixed Shift+Enter and Ctrl+Enter prompt behavior in Windows Terminal 1.24 and earlier; Shift+Enter now inserts a newline and Ctrl+Enter sends a follow-up, matching other platforms.
+- Improved the Tern native terminal experience across background jobs, settings, debugging, logs, extension management, interactive shell, and provider streams: views remain usable and navigable, preserve output and selection behavior, support keyboard scrolling, and keep key actions accessible.
+- Fixed multi-line labels in Background jobs and multi-line titles in native-terminal prompts so their formatting remains readable.
+
+## [18.4.8] - 2026-10-01
+
+### Fixed
+
+- Fixed native-terminal (TSP) frames held back by unacknowledged credits waiting for an unrelated render after the 5-second stall fallback expired; a credit-blocked change now renders as soon as the oldest frame counts as stalled.
+
+## [18.4.7] - 2026-10-01
+
+### Added
+
+- Added an optional `terminal` section to theme JSON (`background`, `foreground`, `chrome`, `widget`, 16 `ansi` colors) naming the terminal a theme was made for, for hosts that paint the terminal themselves; the built-in themes ported from known schemes (GitHub, Nord, Dracula, Catppuccin, Solarized, Gruvbox, Tokyo Night, One, Monokai, Rosé Pine, Poimandres, Celestial) carry their scheme's.
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added a full-page transcript replay experience for Rewind in native terminals, with branching navigation through the conversation.
+- Added agent lineage navigation, including headers and links for moving between a subagent and its ancestors or returning to the main session.
+- Added a Jobs overlay for viewing background jobs.
+- Added OSC 877 protocol support for native TUI surfaces in Windows ConPTY environments.
+- Added customizable native screen layouts through Component.describeScreen and programmatic scrolling for native nodes.
+- Added native-terminal text editing support for selections in the composer and single-line inputs, including undoable host edits and safe handling of stale or token-spanning ranges.
+- Added optional dismissal handling for error banners, including a Dismiss button in native terminal strips.
+
+### Changed
+
+- Notebook evaluation cells now use dedicated input and output gutters with clearer status indicators.
+- Streaming file operations now remain expanded while running and collapse after execution completes.
+- Improved native-terminal effort indicators, using terminal glyphs where available and block meters as a fallback.
+- Updated native composer navigation when viewing a subagent to show the agent lineage and provide a direct return to the main session.
+- Native `/resume` picker sheets drop the "Resume session" heading and the This folder / All projects tabs: the search placeholder names the scope ("Search sessions in app…", "Search all sessions…") and Tab (the footer's All projects / This folder action) switches it. Picker `title` is now optional on the wire.
+- Updated the native composer's context display to span the window and provide clearer context usage and session-cost information, with shortcuts to the context and usage views.
+- Updated status-line billing summaries to show subagent spend separately from session spend and avoid repeating the same currency or subscription marker for subsequent amounts.
+
+### Fixed
+
+- Fixed search results so gaps between non-adjacent context runs are displayed correctly.
+- Fixed custom-answer and note prompts in native terminals so questions are shown completely with the correct titles and are no longer truncated or incorrectly wrapped.
+- Fixed text fields in native dialogs to render without a duplicate prompt indicator.
+- Fixed native TUI surfaces falling back to plain text rendering in Tern on Windows by accepting OSC 877 messages received through ConPTY.
+- Fixed streaming edit, patch, and write operation cards so they remain fully visible while running and collapse only after completion.
+
+## [18.4.5] - 2026-09-30
+
+### Added
+
+- Added Factory Droid base-credit badges; models without a dollar-price reference no longer appear free ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz), continued in [#13276](https://github.com/can1357/oh-my-pi/pull/13276) by [@DusKing1](https://github.com/DusKing1)).
+
+### Fixed
+
+- Fixed home directories next to shell redirections, control operators or Markdown emphasis (`<`, `>`, `&`, `|`, `*`, `_`) leaking the full path in display-only text ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+- Fixed the subagent task card showing full home paths in tool intents and arguments, while keeping search patterns literal ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+- Fixed Enter doing nothing on a fully typed slash-command argument while its completion popup was open (e.g. `/mcp list`): it now submits instead of re-accepting the identical completion; subcommands that still need a required argument (e.g. `/mcp test`) keep inserting the subcommand so you can type it ([#13885](https://github.com/can1357/oh-my-pi/pull/13885) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.4.4] - 2026-09-29
 
@@ -14,6 +159,10 @@
 - Redesigned transcript, chat, dashboard, and picker UI components for native wire representation
 - `HookEditorComponent` accepts pasted images when constructed with `acceptImages`; the ask dialog returns them as `customInputImages` / `noteImages` ([#13774](https://github.com/can1357/oh-my-pi/pull/13774) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 - Added `formatFileMatches` and `FileMatchSection` to `tools/grouped-file-output` for rendering per-file grep/ast-grep matches in grouped or flat mode.
+
+### Fixed
+
+- The model browser shows `varies`, `included`, or `pricing unknown` for models whose catalog declares that state, instead of labeling them `free` ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.4.3] - 2026-09-28
 

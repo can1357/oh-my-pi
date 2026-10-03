@@ -75,6 +75,7 @@ export const TSP_KINDS = [
 	"agent",
 	"chart",
 	"meter",
+	"effort",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -98,7 +99,9 @@ export type TspEffect = "shimmer" | "pulse" | "none";
  * One styled run of text. `s` holds space-separated semantic tokens
  * (`muted`, `dim`, `strong`, `em`, `accent`, `success`, `warning`, `error`,
  * `info`, `code`, `mono`, `path`, `key`, `link`, `num`, `ins`, `del`, `mark`,
- * `icon`, `hide`) or omp theme token names (`thinkingText`, `toolTitle`, …).
+ * `typo`, `icon`, `hide`) or omp theme token names (`thinkingText`,
+ * `toolTitle`, …). `mark` highlights (a match, the selected row); `typo` is a
+ * misspelled word, which the terminal underlines as its own spell checker does.
  * `icon` marks a run of icon glyphs (Nerd Font / Private Use Area codepoints):
  * the terminal draws it in its icon face and spaces it from neighbouring text
  * itself, so senders omit padding spaces around icons. `hide` takes the run
@@ -114,8 +117,11 @@ export interface TspSpan {
 /** Text given either as one plain string or as styled spans. */
 export type TspText = string | readonly TspSpan[];
 
-/** What a pointer gesture on a node does. */
-export type TspAction = "toggle" | "copy" | "open" | "select" | "activate" | (string & {});
+/**
+ * What a pointer gesture on a node does. `zoom` shows an `image` (and the images
+ * beside it) large in the terminal's viewer; it is an image's click by default.
+ */
+export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
 /** Props every node accepts. */
 export interface TspCommonProps {
@@ -134,7 +140,16 @@ export interface TspCommonProps {
 	aria?: string;
 	/** Target of an `open` action on this node (a URL or `file://` path). */
 	href?: string;
+	/**
+	 * Transient selection state drawn over the node without restyling it (the
+	 * rewind page): `pick` marks the chosen point (adjacent picks read as one
+	 * run), `drop` dims what the choice discards.
+	 */
+	mark?: TspMark;
 }
+
+/** A {@link TspCommonProps.mark}. */
+export type TspMark = "pick" | "drop";
 
 export type TspWrap = "word" | "char" | "none";
 export type TspTruncate = "end" | "start" | "middle";
@@ -227,9 +242,13 @@ export interface TspMathProps {
 	text?: string;
 	display?: boolean;
 }
+/** Images the terminal ships (`image.p.builtin`): `omp` is omp's gradient mark. */
+export type TspBuiltinImage = "omp";
 export interface TspImageProps {
 	/** Content address (sha256 hex) of a blob sent with verb `b`. */
-	blob: string;
+	blob?: string;
+	/** An image the terminal ships, drawn instead of any blob. */
+	builtin?: TspBuiltinImage;
 	alt?: string;
 	w?: number;
 	h?: number;
@@ -464,8 +483,11 @@ export interface TspPickerGroup {
  * selected item's preview. A picker under `layer` is itself the modal sheet.
  */
 export interface TspPickerProps {
-	/** What is being picked, e.g. "Models" (plain: it is also the common `title` prop, which a picker does not use as a tooltip). */
-	title: string;
+	/**
+	 * What is being picked, e.g. "Models" (plain: it is also the common `title` prop, which a picker does not use as a
+	 * tooltip). Absent: the head is the icon and the search, and the placeholder names the sheet.
+	 */
+	title?: string;
 	subtitle?: TspText;
 	icon?: string;
 	/** Plural noun for counts and empty copy ("models", "sessions"). */
@@ -679,6 +701,8 @@ export interface TspAgentProps {
 		tokens?: number;
 		context?: number;
 		contextLabel?: string;
+		/** The agent's own completion estimate, 0–1; drawn while running. */
+		done?: number;
 		cost?: number;
 		age?: number;
 		took?: number;
@@ -692,20 +716,43 @@ export interface TspAgentProps {
 	collapsed?: boolean;
 }
 
+/**
+ * A thinking-effort glyph: a small ring that fills rung by rung with the level and
+ * turns into a flickering fireball at `max`. Leaf; the terminal draws everything.
+ */
+export interface TspEffortProps {
+	/** `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; anything else (e.g. `auto`) draws an empty dashed ring. */
+	level: string;
+}
+
+/**
+ * A tick on a meter's track (compaction threshold, speculation point). A bar mark's `icon`
+ * (a symbol name, e.g. `context.compaction`) sits on the track, which breaks for it.
+ */
+export interface TspMeterMark {
+	/** Position, 0–1. */
+	at: number;
+	tone?: TspTone;
+	title?: string;
+	icon?: string;
+}
+
 /** A value drawn as a bar, ring or block grid (§8.2): context %, usage windows, agent context. */
 export interface TspMeterProps {
 	/** 0–1, or null for unknown. */
 	value: number | null;
 	style?: "bar" | "ring" | "blocks";
-	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (effort meter). */
+	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (e.g. the effort chip's fallback meter). */
 	steps?: number;
 	/** Stacked parts instead of one fill (context breakdown); values sum to ≤ 1. */
 	parts?: readonly { value: number; token?: string; label?: string; hatch?: boolean }[];
-	/** Tick marks on the track (compaction threshold, speculation point). */
-	marks?: readonly { at: number; tone?: TspTone; title?: string }[];
+	marks?: readonly TspMeterMark[];
 	/** Tone switches: at or above `warn` → warning, `bad` → error. */
 	thresholds?: { warn?: number; bad?: number };
+	/** The value as text (`74%`). */
 	label?: TspText;
+	/** The whole the track spans as text (a context window's `200K`). */
+	total?: TspText;
 	size?: "sm" | "md" | "lg";
 }
 /** Series data drawn natively: the usage heatmap, app dashboards (§9.2). */
@@ -771,6 +818,7 @@ export interface TspPropsByKind {
 	agent: TspAgentProps;
 	chart: TspChartProps;
 	meter: TspMeterProps;
+	effort: TspEffortProps;
 }
 
 /** Props of a node of kind `K`: its kind-specific props plus the common ones. */
@@ -801,8 +849,16 @@ export type TspOp =
 	| readonly [op: "settle", id: string]
 	| readonly [op: "focus", id: string | null]
 	| readonly [op: "reveal", id: string, where: "start" | "end" | "nearest"]
+	| readonly [op: "scroll", id: string, by: TspScrollBy]
 	| readonly [op: "suspend"]
 	| readonly [op: "resume"];
+
+/**
+ * How far a `scroll` op moves the scroller holding a node: a line, a
+ * viewport less a line, or to an end (`end` makes a following `ansi` block
+ * follow again). Sent only when `hello.features` lists `scroll`.
+ */
+export type TspScrollBy = "line-up" | "line-down" | "page-up" | "page-down" | "start" | "end";
 
 /** Verb `f`: an atomic batch of ops for one surface. */
 export interface TspFrame {
@@ -886,5 +942,23 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/**
+	 * An edit over the terminal's selection in an `editor`/`input` node: replace
+	 * `[from, to)` with `text`, caret to `cursor` (UTF-16 offsets; `len` is the
+	 * text length the terminal saw, a mismatch makes the edit stale).
+	 */
+	| { ev: "edit"; sf: string; id: string; from: number; to: number; text: string; cursor: number; len: number }
+	/**
+	 * Undo the last change to the text of `editor`/`input` node `id` through the
+	 * program's own undo history (an applied `edit` is one unit, as typing is); a
+	 * no-op when there is nothing to undo. Sent only when `hello` lists `"undo"`.
+	 */
+	| { ev: "undo"; sf: string; id: string }
+	/**
+	 * The user clicked into node `id` (an `editor`/`input` without the focus, or
+	 * a `prefs` sheet while the focus is outside it): the program moves its
+	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).
+	 */
+	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

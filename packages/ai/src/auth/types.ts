@@ -214,6 +214,9 @@ export type CompletionProbeCredential =
 			email?: string;
 			enterpriseUrl?: string;
 			apiEndpoint?: string;
+			orgId?: string;
+			region?: string;
+			inferenceRegion?: "global" | "eu" | "us";
 	  };
 
 /**
@@ -486,6 +489,13 @@ export type AuthApiKeyOptions = {
 	refreshReason?: OAuthRefreshReason;
 };
 
+/** Non-secret identity bound to the OAuth credential selected for one request attempt. */
+export interface OAuthRequestIdentity {
+	orgId?: string;
+	region?: string;
+	inferenceRegion?: "global" | "eu" | "us";
+}
+
 /**
  * Refreshed OAuth access plus identity metadata returned by
  * {@link AuthStorage.oauth.access}. Callers that authenticate via a bearer
@@ -505,6 +515,8 @@ export interface OAuthAccess {
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+	region?: string;
+	inferenceRegion?: "global" | "eu" | "us";
 }
 
 /**
@@ -569,6 +581,8 @@ export interface OAuthAccountSummary {
 	orgName?: string;
 	/** True when this account is the session-sticky OAuth credential requested by `listOAuthAccounts`. */
 	active: boolean;
+	/** Last use recorded on the session sticky; set only on the `active` account. */
+	lastUsedAtMs?: number;
 }
 /** Scope a matching-key invalidation to a session or signal. */
 export interface InvalidateCredentialMatchingOptions {

@@ -544,6 +544,57 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
 	});
 
+	it("reports malformed JSON to the model instead of running a lenient tool with empty args", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: unknown[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			lenientArgValidation: true,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: {
+								__parseError: "Expected ',' or '}' in object",
+								__rawJson: '{"value":"ok" nope}',
+							},
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolResult = events.find(e => e.type === "message_start" && e.message.role === "toolResult");
+		if (toolResult?.type !== "message_start" || toolResult.message.role !== "toolResult") {
+			throw new Error("expected a tool result message");
+		}
+		expect(toolResult.message.isError).toBe(true);
+		const resultText = toolResult.message.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(resultText).toContain("Expected ',' or '}' in object");
+		expect(resultText).toContain('{"value":"ok" nope}');
+	});
+
 	it("runs completed tool calls after a transient stream_read_error", async () => {
 		const executedParams: Array<{ value: string }> = [];
 		const toolSchema = type({ value: "string" });
@@ -5527,6 +5578,7 @@ describe("agentLoop passive additionalContext", () => {
 				return {
 					content: [{ type: "text", text: "rewritten" }],
 					isError: true,
+					additionalContext: "post-tool context survives the error override",
 				};
 			},
 		};
@@ -5557,6 +5609,14 @@ describe("agentLoop passive additionalContext", () => {
 			expect(toolResultMessage.isError).toBe(true);
 			expect(toolResultMessage.content).toEqual([{ type: "text", text: "rewritten" }]);
 		}
+
+		const contextMessage = events
+			.filter(e => e.type === "message_start")
+			.map(e => (e.type === "message_start" ? e.message : undefined))
+			.find((m): m is Extract<AgentMessage, { role: "developer" }> => m !== undefined && m.role === "developer");
+		expect(contextMessage?.content).toEqual([
+			{ type: "text", text: "post-tool context survives the error override" },
+		]);
 	});
 
 	it("fails closed when afterToolCall returns malformed computer provider metadata", async () => {

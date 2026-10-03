@@ -39,7 +39,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
+			bearerTokens: ["gw-test-token"],
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -47,7 +47,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		try {
 			const res = await fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "google/gemini-3.5-flash",
 					messages: [{ role: "user", content: "hi" }],
@@ -77,7 +77,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		mock.push({ throw: "upstream exploded" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
+			bearerTokens: ["gw-test-token"],
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -85,7 +85,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		try {
 			const res = await fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "google/gemini-3.5-flash",
 					messages: [{ role: "user", content: "hi" }],
@@ -131,7 +131,7 @@ describe("auth-gateway auth retry", () => {
 		});
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
+			bearerTokens: ["gw-test-token"],
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -139,7 +139,7 @@ describe("auth-gateway auth retry", () => {
 		try {
 			const res = await fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "gateway-quota-model",
 					messages: [{ role: "user", content: "hi" }],

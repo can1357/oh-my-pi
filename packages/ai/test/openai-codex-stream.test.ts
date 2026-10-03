@@ -21,6 +21,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -364,6 +365,48 @@ class MockWebSocket {
 }
 
 describe("openai-codex streaming", () => {
+	it.each(["arguments.done", "output_item.done", "terminal"])(
+		"refuses truncated final JSON via %s",
+		async finalizer => {
+			const raw = '{"path":"repaired.txt","content":"hello';
+			const item = { type: "function_call", id: "fc_1", call_id: "call_1", name: "write", arguments: "" };
+			const events: unknown[] = [
+				{ type: "response.output_item.added", output_index: 0, item },
+				{ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_1", delta: raw },
+			];
+			if (finalizer === "arguments.done") {
+				events.push({
+					type: "response.function_call_arguments.done",
+					output_index: 0,
+					item_id: "fc_1",
+					arguments: raw,
+				});
+			}
+			if (finalizer !== "terminal") {
+				events.push({ type: "response.output_item.done", output_index: 0, item: { ...item, arguments: raw } });
+			}
+			events.push({ type: "response.completed", response: { id: "resp_1", status: "completed" } });
+			const output = await streamOpenAICodexResponses(
+				{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+				createCodexTestContext(),
+				{
+					apiKey: createCodexTestToken(),
+					fetch: async () =>
+						new Response(events.map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), {
+							headers: { "content-type": "text/event-stream" },
+						}),
+				},
+			).result();
+			expect(output.stopReason).toBe("toolUse");
+			const call = output.content.find(block => block.type === "toolCall");
+			if (!call) throw new Error("Expected tool call");
+			expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+			expect(() =>
+				validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, call),
+			).toThrow("Tool call arguments are not valid JSON");
+		},
+	);
+
 	it("normalizes Codex response endpoint base URLs", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

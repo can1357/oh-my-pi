@@ -14,6 +14,7 @@ import {
 	readArgsCollapseIntoGroup,
 	readArgsHaveTarget,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
@@ -889,11 +890,13 @@ export class EventController {
 
 	#setTerminalProgress(active: boolean): void {
 		if (active) {
-			if (
-				this.#terminalProgressActive ||
-				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) !== true
-			)
-				return;
+			// Tern reads the progress as the pane's busy state (its tab's live
+			// dot), so it gets it whatever the setting says. Tern's panes carry
+			// `KITTY_WINDOW_ID`, so `TERMINAL.id` says kitty there.
+			const wanted =
+				Bun.env.TERM_PROGRAM?.toLowerCase() === "tern" ||
+				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) === true;
+			if (this.#terminalProgressActive || !wanted) return;
 			this.ctx.ui.terminal.setProgress(true);
 			this.#terminalProgressActive = true;
 			return;
@@ -1215,7 +1218,7 @@ export class EventController {
 		if (
 			nextToolName === "wait" &&
 			previous.isDisplaceableBlock() &&
-			this.ctx.chatContainer.canRemoveBlock(previous)
+			this.ctx.chatContainer.canDisplaceBlock(previous)
 		) {
 			this.ctx.chatContainer.removeChild(previous);
 		}
@@ -2614,8 +2617,8 @@ export class EventController {
 
 	/**
 	 * Generate the idle recap with an ephemeral side-channel turn over the
-	 * current conversation (same pipeline as `/btw`), surface it as a status
-	 * line, and journal it to history.db (`session_recaps`) for the session that
+	 * current conversation (same pipeline as `/btw`), surface it in the transcript
+	 * ({@link RecapNotice}), and journal it to history.db (`session_recaps`) for the session that
 	 * produced it. Live goal/title and the active todo task are passed as anchoring
 	 * hints because the snapshot only carries conversation history, not the
 	 * controller's todo/goal state. The request is abortable: any activity
@@ -2641,7 +2644,7 @@ export class EventController {
 			const recap = previewLine(replyText, TRUNCATE_LENGTHS.RECAP);
 			if (!recap) return;
 			session.sessionManager.recordRecap(replyText);
-			this.ctx.showStatus(theme.fg("dim", theme.italic(`※ recap: ${recap}`)), { dim: false });
+			this.ctx.present(new RecapNotice(recap));
 		} catch (error) {
 			if (!abort.signal.aborted) logger.debug("Idle recap turn failed", { error: String(error) });
 		} finally {

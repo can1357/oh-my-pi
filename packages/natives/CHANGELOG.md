@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [18.5.0] - 2026-10-03
+
+### Fixed
+
+- Fixed Ctrl+V on Windows sometimes pasting text with a few characters replaced by unrelated glyphs (for example `https://` turning into `՞ttp缀難//`); clipboard reads and writes no longer run at the same time ([#14144](https://github.com/can1357/oh-my-pi/pull/14144) by [@H4vC](https://github.com/H4vC))
+
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- Fixed the embedded shell sometimes hanging on a pipeline with a stage that stopped (for example with `kill -STOP $$`) before the shell began waiting on it; the pipeline now becomes a stopped job ([#14023](https://github.com/can1357/oh-my-pi/pull/14023) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.4.9] - 2026-10-01
+
+### Added
+
+- Added `readTextFromClipboard()` for reading plain text from the system clipboard without starting a subprocess.
+- Added `Shell.pids()` to retrieve the IDs of still-running processes spawned by an in-flight shell command.
+
+## [18.4.7] - 2026-10-01
+
+### Fixed
+
+- Fixed omp 18.4.3 and later crashing with a segmentation fault at startup on Apple silicon Macs running macOS older than 27; Apple Foundation Models support now loads only on macOS 27 and later
+
+## [18.4.5] - 2026-09-30
+
+### Fixed
+
+- Fixed macOS spell checking and Apple word completion adding a duplicate terminal icon to the Dock for every omp session ([#12491](https://github.com/can1357/oh-my-pi/issues/12491))
+- Fixed `computer.windows()` on macOS marking every window of the frontmost app as focused. One window is marked now: the app's accessibility focused window, or its frontmost window when Accessibility permission is not granted. With the permission, `computer.focusedWindow()` no longer returns a floating panel such as TextEdit's Fonts panel in front of the document ([#13673](https://github.com/can1357/oh-my-pi/pull/13673) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed non-Latin prompts that quote code in backticks or fences losing most of their prose score, which made the typing predictor's vocabulary refuse to learn them ([#13758](https://github.com/can1357/oh-my-pi/pull/13758) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed `computer.window(...).ax()` leaving out everything inside an unnamed container. On macOS, Reminders, Contacts, Notes and Font Book windows showed only their toolbar and window buttons, and Calendar lost its month grid; Windows and Linux trees now also keep content under unnamed containers such as custom panes, lists and fillers ([#13822](https://github.com/can1357/oh-my-pi/pull/13822) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed Wayland `computer.drag()` sending all waypoints in one burst, preventing HTML5 drag-and-drop targets from receiving `drop` ([#13860](https://github.com/can1357/oh-my-pi/issues/13860)).
+- Fixed Wayland computer input staying unavailable after a cancelled RemoteDesktop permission prompt or a disconnected input session ([#13857](https://github.com/can1357/oh-my-pi/issues/13857)).
+- Fixed Wayland `win.screenshot()` returning the top-left of the monitor for native Wayland windows whose position AT-SPI cannot report (Discord, Teams, Chromium); it now fails with `CaptureFailed` instead of capturing the wrong region ([#13854](https://github.com/can1357/oh-my-pi/issues/13854)).
+- Fixed `computer.focusedElement()` failing with `AxFailed: atspi: null reference` on Linux while a Chromium or Electron app (Spotify, Discord, Steam, …) is running ([#13855](https://github.com/can1357/oh-my-pi/issues/13855)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Fixed

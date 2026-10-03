@@ -1376,7 +1376,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/** The native picker shows `#message`'s error until the next key or pointer event. */
 	#pickerErrorOpen = false;
 	readonly #standalone: boolean;
-	readonly #pickerTitle: string;
+	/** A caller's heading for the picker head; the default `/resume` picker has none (the search names it). */
+	readonly #pickerTitle: string | undefined;
 	/** The open delete confirmation's two answers, for the picker's confirm strip. */
 	#deleteChoice: DeleteChoice<T> | null = null;
 	/** The preview pane's content and the session it shows; follows the selection once it settles. */
@@ -1423,7 +1424,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
 		this.#title = options.title ?? "Resume Session";
-		this.#pickerTitle = options.title ?? "Resume session";
+		this.#pickerTitle = options.title;
 		this.#standalone = options.standalone ?? false;
 		this.#scopeLabel = options.scopeLabel;
 		this.title = this.#headerLabel();
@@ -1709,10 +1710,11 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	}
 
 	/**
-	 * `lg` cards sheet (`screen` for the standalone app): This folder / All
-	 * projects tabs, sessions grouped by day (ranked flat while searching),
-	 * the selected session's preview, the delete confirm strip, and the
-	 * actions of the keys Enter, Delete/Backspace, Tab and Esc.
+	 * `lg` cards sheet (`screen` for the standalone app): sessions grouped by
+	 * day (ranked flat while searching), the selected session's preview, the
+	 * delete confirm strip, and the actions of the keys Enter, Delete/Backspace,
+	 * Tab (the scope toggle, labelled with the scope it switches to) and Esc.
+	 * Untitled unless the caller named it; the placeholder says the scope.
 	 */
 	#describePicker(): NativeNode {
 		const list = this.#sessionList;
@@ -1742,11 +1744,17 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		actions.push(
 			pickerAction("close", "Close", boundKeys("app.interrupt", ["escape"])[0] ?? "escape", { end: true }),
 		);
-		const subtitle = this.#scopeLabel === false ? undefined : (this.#scopeLabel ?? path.basename(getProjectDir()));
+		const folder = this.#scopeLabel === false ? undefined : (this.#scopeLabel ?? path.basename(getProjectDir()));
+		const title = this.#pickerTitle;
+		const placeholder =
+			loading || this.#scope === "all"
+				? "Search all sessions…"
+				: folder && !title
+					? `Search sessions in ${folder}…`
+					: "Search sessions…";
 		const result = picker(
 			{
-				title: this.#pickerTitle,
-				...(subtitle ? { subtitle } : {}),
+				...(title ? { title, ...(folder ? { subtitle: folder } : {}) } : {}),
 				icon: "history",
 				noun: "sessions",
 				size: this.#standalone ? "screen" : "lg",
@@ -1754,16 +1762,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				preview: "side",
 				query: view.query,
 				cursor: view.cursor,
-				placeholder: "Search sessions…",
-				...(this.#hasScopeTabs()
-					? {
-							tabs: [
-								{ id: "folder", label: "This folder" },
-								{ id: "all", label: "All projects" },
-							],
-							tab: loading ? "all" : this.#scope,
-						}
-					: {}),
+				placeholder,
 				columns: [
 					{ id: "when", format: "time" },
 					{ id: "size", format: "dim" },
@@ -1846,7 +1845,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		} else if (choice) return;
 		else if (ev.act === "resume") list.resumeSelected();
 		else if (ev.act === "delete") list.requestDelete();
-		else if (ev.act === "scope" || (ev.act === "tab" && ev.value !== undefined && ev.value !== this.#scope)) {
+		else if (ev.act === "scope") {
 			list.onToggleScope?.();
 		} else if (ev.act === "clear") list.clearSearch();
 	}

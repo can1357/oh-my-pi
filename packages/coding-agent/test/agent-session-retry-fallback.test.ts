@@ -5358,7 +5358,8 @@ describe("AgentSession retry fallback", () => {
 			streamFn: (model, context, options) => {
 				requestCount++;
 				requestedModels.push(`${model.provider}/${model.id}`);
-				if (requestCount === 1) return transportErrorAfterToolCallStream(model, toolCall);
+				// The first mid-stream drop gets one same-model retry before fallback selection.
+				if (requestCount <= 2) return transportErrorAfterToolCallStream(model, toolCall);
 				const mock = createMockModel({ id: model.id, provider: model.provider });
 				mock.push({ content: ["Recovered on a fitting fallback"] });
 				return mock.stream(mock, context, options);
@@ -5386,6 +5387,7 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
 			`${primaryModel.provider}/${primaryModel.id}`,
 			`${largeFallback.provider}/${largeFallback.id}`,
 		]);

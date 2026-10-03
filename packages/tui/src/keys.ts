@@ -24,7 +24,7 @@ import {
 	parseKey as parseKeyNative,
 	parseKittySequence as parseKittySequenceNative,
 } from "@oh-my-pi/pi-natives";
-import { isInsideTerminalMultiplexer } from "./terminal-capabilities";
+import { isInsideTerminalMultiplexer, isSshSession } from "./terminal-capabilities";
 
 // =============================================================================
 // Platform Detection
@@ -32,9 +32,7 @@ import { isInsideTerminalMultiplexer } from "./terminal-capabilities";
 
 /** Whether the local process is running directly under Windows Terminal. */
 export function isWindowsTerminalSession(): boolean {
-	return (
-		Boolean(process.env.WT_SESSION) && !process.env.SSH_CONNECTION && !process.env.SSH_CLIENT && !process.env.SSH_TTY
-	);
+	return Boolean(process.env.WT_SESSION) && !isSshSession();
 }
 
 /**
