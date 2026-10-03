@@ -79,6 +79,12 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		}
 
 		let response: GoalToolResponse;
+		if (
+			(params.op === "create" || params.op === "resume") &&
+			(this.#session.getPlanModeState?.()?.enabled || this.#session.isPlanModePaused?.())
+		) {
+			throw new ToolError("Exit plan mode before starting a goal.");
+		}
 		if (params.op === "create") {
 			const created = await runtime.createGoal(validateCreateParams(params));
 			response = buildGoalToolResponse(created.goal);
@@ -86,6 +92,11 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			const state = this.#session.getGoalModeState?.();
 			response = buildGoalToolResponse(state?.goal ?? null);
 		} else if (params.op === "resume") {
+			// Pauses come from the user (`/goal pause`, an interrupt, or reopening the session);
+			// only the user lifts them.
+			if (this.#session.getGoalModeState?.()?.goal.status === "paused") {
+				throw new ToolError("The user paused this goal. Ask them to run `/goal resume` to continue it.");
+			}
 			const resumed = await runtime.resumeGoal();
 			response = buildGoalToolResponse(resumed.goal);
 		} else if (params.op === "drop") {

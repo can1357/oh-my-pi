@@ -280,7 +280,7 @@ describe("GoalTool", () => {
 		expect(result.details?.goal?.objective).toBe("Ship it");
 	});
 
-	it("op=resume re-activates a paused goal", async () => {
+	it("op=resume refuses to override a user-paused goal", async () => {
 		const harness = createRuntimeHarness({
 			enabled: false,
 			mode: "active",
@@ -293,10 +293,36 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		const result = await tool.execute("call-resume", { op: "resume", objective: undefined, token_budget: undefined });
-		expect(result.details?.op).toBe("resume");
-		expect(result.details?.goal?.status).toBe("active");
-		expect(harness.getState()?.enabled).toBe(true);
+		await expect(
+			tool.execute("call-resume", { op: "resume", objective: undefined, token_budget: undefined }),
+		).rejects.toThrow("/goal resume");
+		expect(harness.getState()?.enabled).toBe(false);
+		expect(harness.getState()?.goal.status).toBe("paused");
+	});
+
+	it("refuses create and resume while plan mode is paused", async () => {
+		const harness = createRuntimeHarness({
+			enabled: true,
+			mode: "active",
+			goal: createGoal({ status: "budget-limited", tokenBudget: 1, tokensUsed: 1 }),
+		});
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+				getPlanModeState: () => undefined,
+				isPlanModePaused: () => true,
+			}),
+		);
+
+		await expect(
+			tool.execute("call-resume", { op: "resume", objective: undefined, token_budget: undefined }),
+		).rejects.toThrow("Exit plan mode before starting a goal.");
+		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		await expect(
+			tool.execute("call-create", { op: "create", objective: "New goal", token_budget: undefined }),
+		).rejects.toThrow("Exit plan mode before starting a goal.");
+		expect(harness.getState()?.goal.objective).toBe("Ship it");
 	});
 
 	it("op=drop clears goal state", async () => {

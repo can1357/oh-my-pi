@@ -373,7 +373,7 @@ import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
-import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
+import { cfgGoalContinuationModes, cfgGoalEnabled, cfgGoalToolDefault } from "../goals/settings";
 import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
@@ -1224,7 +1224,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	hideToolActivity = false;
 	todoExpanded = false;
 	planModeEnabled = false;
-	planModePaused = false;
+	// The session owns the paused flag so session-scoped tools (e.g. `goal`) observe it too.
+	get planModePaused(): boolean {
+		return this.session.isPlanModePaused();
+	}
+	set planModePaused(paused: boolean) {
+		this.session.setPlanModePaused(paused);
+	}
 	goalModeEnabled = false;
 	goalModePaused = false;
 	vibeModeEnabled = false;
@@ -1514,6 +1520,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
+	/** Whether `goal` was in the launch tool set (`--tools=...,goal`), read once at {@link init}. */
+	#goalToolInitiallyEnabled = false;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
 	// tool use means it was abandoned for real work), the kickoff fails, or the
@@ -2027,6 +2035,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		// Read before any goal can add the tool, so a later exit can tell a requested
+		// `goal` tool (kept) from one goal mode added (removed again).
+		this.#goalToolInitiallyEnabled = this.session.getEnabledToolNames().includes("goal");
 
 		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
 		// Before first paint, so hints the user already learned never flash on.
@@ -4527,6 +4538,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#vibeScopeSuspendedForSwitch = true;
 	}
 
+	#previousGoalTools(): string[] {
+		const tools = this.session.getEnabledToolNames();
+		return cfgGoalToolDefault.get(this.session.settings) || this.#goalToolInitiallyEnabled
+			? tools
+			: tools.filter(name => name !== "goal");
+	}
+
 	#updateGoalModeStatus(): void {
 		const status =
 			this.goalModeEnabled || this.goalModePaused
@@ -4559,6 +4577,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (event.type === "goal_updated") {
+			// A goal starting outside goal mode (agent `goal create`, incl. the guided
+			// interview's) snapshots the live toolset now: an earlier snapshot may be
+			// stale (abandoned interview, tools changed since).
+			if (event.state?.enabled && !this.goalModeEnabled) {
+				this.#goalModePreviousTools = this.#previousGoalTools();
+			}
 			if (event.state) this.#guidedGoalInterviewActive = false;
 			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
 			// still restore the previous tool set while the flag is true.
@@ -4802,10 +4826,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
+			// Restore the current toolset after the goal exits, retaining an opt-in
+			// goal tool if it was active before this goal was resumed. Expose `goal` so
+			// the agent can inspect, complete, or drop the restored goal.
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+				const previousTools = this.#previousGoalTools();
 				this.#goalModePreviousTools = previousTools;
 				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 			}
@@ -5092,7 +5117,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+		const previousTools = this.#previousGoalTools();
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
@@ -5120,7 +5145,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
 		const previousTools = this.#goalModePreviousTools;
-		if (this.goalModeEnabled && previousTools) {
+		if (previousTools) {
 			await this.session.setActiveToolsByName(previousTools);
 		}
 		const currentState = this.session.getGoalModeState();
@@ -6106,11 +6131,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
+			// calling `goal create`; its `goal_updated` snapshots the toolset to restore.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}

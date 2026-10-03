@@ -221,6 +221,20 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 	});
 
+	it("restores the hidden toolset after a guided goal is dropped without opt-in", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+		await harness.mode.handleGuidedGoalCommand("Reply PING");
+		expect(harness.session.getEnabledToolNames()).toContain("goal");
+
+		await harness.session.goalRuntime.createGoal({ objective: "Reply PING" });
+		await harness.session.goalRuntime.dropGoal();
+		await waitForMicrotasks();
+
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.session.getEnabledToolNames()).not.toContain("goal");
+	});
+
 	it("replaces the active goal via /goal set", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const originalGoal = harness.session.getGoalModeState()?.goal;

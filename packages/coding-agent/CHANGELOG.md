@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the default-off `goal.toolDefault` setting, which lets the top-level agent start goal mode itself in ordinary sessions (subagents get `goal` only when their tool list requests it); an explicit `--tools=...,goal` now also exposes the tool while the default stays hidden. The agent cannot start a goal while plan mode is active or paused, and cannot resume a goal you paused — run `/goal resume` ([#13877](https://github.com/can1357/oh-my-pi/pull/13877) by [@shawnkoh](https://github.com/shawnkoh))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
