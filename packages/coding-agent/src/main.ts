@@ -186,6 +186,7 @@ import {
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
 	cfgTuiSpinnerInterval,
+	cfgTuiMaxFps,
 	cfgUpdateChannel,
 } from "./modes/settings";
 import {
@@ -2063,6 +2064,9 @@ export async function runRootCommand(
 		// Apply --spinner-interval CLI flag (ephemeral, not persisted)
 		if (parsedArgs.spinnerInterval !== undefined) {
 			cfgTuiSpinnerInterval.override(settingsInstance, parsedArgs.spinnerInterval);
+		}
+		if (parsedArgs.maxFps !== undefined) {
+			cfgTuiMaxFps.override(settingsInstance, parsedArgs.maxFps);
 		}
 
 		await logger.time(
