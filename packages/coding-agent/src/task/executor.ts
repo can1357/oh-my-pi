@@ -3004,10 +3004,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		session.trackIrcReply(relay.promise);
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
 		// A woken agent's yield is a completion its parent must receive exactly
-		// like the first run's. Register an owner-routed job the moment the yield
-		// is accepted — before the ref goes idle — so the parent's `wait` has a
-		// running job to block on while this turn finalizes, and the result then
-		// arrives through the ordinary async-result delivery.
+		// like the first run's, through an owner-routed job and the ordinary
+		// async-result delivery. When the parent's own message woke this turn,
+		// open the job now so the parent's `wait` has a running job to block on
+		// for the whole turn; a turn that ends without a yield then settles it
+		// with the turn's outcome. A turn another peer woke opens it only once
+		// the yield is accepted — before the ref goes idle — so the parent is not
+		// handed the outcome of a conversation it never started.
 		let wakeJob: { ownerId: string; outcome: PromiseWithResolvers<AsyncJobRunResult> } | undefined;
 		const registerWakeJob = (): void => {
 			if (wakeJob) return;
@@ -3029,6 +3032,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				});
 			}
 		};
+		const ownerId = AgentRegistry.global().get(id)?.parentId;
+		if (ownerId && wakeSources(records, id).some(source => source.from === ownerId)) registerWakeJob();
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,

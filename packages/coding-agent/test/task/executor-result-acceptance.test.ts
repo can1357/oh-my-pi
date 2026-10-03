@@ -10,6 +10,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -57,6 +58,8 @@ interface SessionHarness {
 	promptEntered: Promise<void>;
 	/** Emit a successful terminal `yield` tool result through the session event stream. */
 	emitTerminalYield: (data: unknown) => void;
+	/** End the turn's assistant output with plain text (no `yield`). */
+	emitAssistantReply: (text: string) => void;
 	/** The observer factory installed by {@link attachIrcWakeTurnMonitor}, if any. */
 	wakeObserver: () =>
 		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
@@ -91,6 +94,11 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 				details: { status: "success", data },
 			},
 		} as AgentSessionEvent);
+	};
+	const emitAssistantReply = (text: string) => {
+		const message = assistantStopMessage(text);
+		messages.push(message);
+		emit({ type: "message_end", message } as AgentSessionEvent);
 	};
 	const session = {
 		state: { messages },
@@ -145,6 +153,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		session: session as unknown as AgentSession,
 		promptEntered: promptEntered.promise,
 		emitTerminalYield,
+		emitAssistantReply,
 		wakeObserver: () => wakeObserver,
 	};
 }
@@ -161,6 +170,31 @@ function registerRunning(session: AgentSession) {
 
 async function flushMicrotasks(): Promise<void> {
 	for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+}
+
+/** Register {@link AGENT_ID} as an idle kept-alive child of `Parent`. */
+function registerIdleChild(session: AgentSession) {
+	return AgentRegistry.global().register({
+		id: AGENT_ID,
+		displayName: AGENT_ID,
+		kind: "sub",
+		parentId: "Parent",
+		session,
+		status: "idle",
+	});
+}
+
+/** One `irc:incoming` record from `from`, as the bridge hands it to a wake turn. */
+function ircFrom(from: string, id: string): AgentMessage {
+	return {
+		role: "custom",
+		customType: "irc:incoming",
+		content: "follow up",
+		display: false,
+		details: { id, from, message: "follow up" },
+		attribution: "agent",
+		timestamp: Date.now(),
+	} as unknown as AgentMessage;
 }
 
 describe("runSubprocess result acceptance", () => {
@@ -341,6 +375,96 @@ describe("runSubprocess result acceptance", () => {
 			expect(delivered).toHaveLength(2);
 			expect(delivered[0]).toContain("followup-done");
 			expect(delivered[1]).toContain("broadcast-ok");
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+	});
+
+	it("gives the parent a running job as soon as its message starts a wake turn", async () => {
+		const manager = new AsyncJobManager({});
+		const delivered: string[] = [];
+		manager.registerDeliverySink("Parent", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const harness = createHarness({ asyncJobManager: manager });
+		registerIdleChild(harness.session);
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		try {
+			const finish = observer([ircFrom("Parent", "msg-1")]);
+			// Before any yield: the parent's `wait` must have a job to block on.
+			expect(manager.getRunningJobs({ ownerId: "Parent" }).map(job => job.agentId)).toEqual([AGENT_ID]);
+			harness.emitTerminalYield({ report: "followup-done" });
+			await finish?.(undefined);
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 1000 });
+
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("followup-done");
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+	});
+
+	it("settles the parent's job with the reply when a parent-woken turn ends without a yield", async () => {
+		const manager = new AsyncJobManager({});
+		const delivered: string[] = [];
+		manager.registerDeliverySink("Parent", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const relays = vi
+			.spyOn(IrcBus.global(), "send")
+			.mockImplementation(async msg => ({ to: msg.to, outcome: "injected" }));
+		const harness = createHarness({ asyncJobManager: manager });
+		registerIdleChild(harness.session);
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		try {
+			const finish = observer([ircFrom("Parent", "msg-1")]);
+			const [job] = manager.getRunningJobs({ ownerId: "Parent" });
+			harness.emitAssistantReply("plain answer");
+			await finish?.(undefined);
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 1000 });
+
+			expect(job?.status).toBe("completed");
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("plain answer");
+			// The job carries the answer; a relay message would deliver it twice.
+			expect(relays).not.toHaveBeenCalled();
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+	});
+
+	it("opens no parent job for a sibling-woken turn that ends without a yield", async () => {
+		const manager = new AsyncJobManager({});
+		const delivered: string[] = [];
+		manager.registerDeliverySink("Parent", (_jobId, text) => {
+			delivered.push(text);
+		});
+		const relays = vi
+			.spyOn(IrcBus.global(), "send")
+			.mockImplementation(async msg => ({ to: msg.to, outcome: "injected" }));
+		const harness = createHarness({ asyncJobManager: manager });
+		registerIdleChild(harness.session);
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		try {
+			const finish = observer([ircFrom("Sibling", "msg-1")]);
+			expect(manager.getRunningJobs({ ownerId: "Parent" })).toEqual([]);
+			harness.emitAssistantReply("answer for sibling");
+			await finish?.(undefined);
+			await manager.drainDeliveries({ timeoutMs: 1000 });
+
+			expect(delivered).toEqual([]);
+			expect(relays.mock.calls.map(([msg]) => [msg.to, msg.body])).toEqual([["Sibling", "answer for sibling"]]);
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
