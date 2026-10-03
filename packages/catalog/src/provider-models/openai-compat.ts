@@ -1622,6 +1622,83 @@ export function deepinfraModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 5.7 Infron
+// ---------------------------------------------------------------------------
+
+export const INFRON_BASE_URL = "https://llm.onerouter.pro/v1";
+
+export interface InfronModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+function mapInfronModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> | null {
+	// The chat picker only serves `category_type: "LLM"` rows; the same roster
+	// interleaves embeddings, rerankers, image/video/audio SKUs, and search
+	// tools. Deprecated and display-only rows are not servable either.
+	if (entry.category_type !== "LLM" || entry.deprecated === true || entry.is_display_only === true) {
+		return null;
+	}
+	const base = mapWithBundledReference(entry, defaults, reference);
+	const contextWindow = toPositiveNumber(entry.context_length, base.contextWindow);
+	// A reported output cap at or above the context ceiling restates the total
+	// window rather than a real output limit (e.g. claude-sonnet-5).
+	let maxTokens = toPositiveNumber(entry.max_output_tokens, base.maxTokens);
+	if (maxTokens !== null && contextWindow !== null && maxTokens >= contextWindow) {
+		maxTokens = null;
+	}
+	const inputPrice = toPositiveNumber(entry.min_prompt_price, null);
+	const outputPrice = toPositiveNumber(entry.min_completion_price, null);
+	return {
+		...base,
+		name: toModelName(entry.display_name, base.name),
+		contextWindow,
+		maxTokens,
+		input:
+			Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image")
+				? ["text", "image"]
+				: ["text"],
+		cost: {
+			input: inputPrice ?? reference?.cost.input ?? 0,
+			output: outputPrice ?? reference?.cost.output ?? 0,
+			cacheRead: reference?.cost.cacheRead ?? 0,
+			cacheWrite: reference?.cost.cacheWrite ?? 0,
+		},
+		...(entry.supports_function_calling === false && { supportsTools: false }),
+	};
+}
+
+/**
+ * Infron model manager: OpenAI-compatible chat completions at
+ * `llm.onerouter.pro/v1` (infron.ai). The `/v1/models` endpoint is public and
+ * carries native limits, $/M-token min prices, and modalities per row, so
+ * discovery (and keyless `gen:models` generation) works without an API key;
+ * the endpoint cannot validate a key, so auth validation uses inference.
+ */
+export function infronModelManagerOptions(
+	config?: InfronModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "infron",
+		defaultBaseUrl: INFRON_BASE_URL,
+		config,
+		// No requireApiKey: the roster endpoint is public, so discovery (and
+		// keyless `gen:models` generation) works without a key; inference is
+		// still gated on credentials by the registry.
+		mapModel: mapInfronModel,
+		// Must live on the manager options, not only the KDL descriptor:
+		// `createModelManager()` prunes the bundled slice from this flag.
+		dynamicModelsAuthoritative: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 6. xAI
 // ---------------------------------------------------------------------------
 
