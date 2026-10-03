@@ -602,7 +602,8 @@ function formatPolicyLine(
 	const configuredReservePct = policy?.reservePct;
 	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
+	const reclaimLabel = policy?.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
+	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}${reclaimLabel}`;
 	// `omp usage` has no model/session context, so report the conservative
 	// account-wide state from the most-consumed visible window. Actual routing
 	// still scopes limits and selection in AuthStorage.

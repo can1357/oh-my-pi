@@ -471,6 +471,11 @@ export class CredentialSelector {
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
+				reclaimReady:
+					!blocked &&
+					policy?.reclaimAbovePct !== undefined &&
+					remainingFraction !== undefined &&
+					remainingFraction * 100 >= policy.reclaimAbovePct,
 				usageMeasured,
 				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: planPriority(args.planGate, usage),
@@ -651,9 +656,12 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		// A warm automatic pin normally wins. Two policies may evict it, each only
+		// A warm automatic pin normally wins. Three policies may evict it, each only
 		// while a sibling is confirmed better: reserve (sibling measured outside
-		// reserve) and spent allowance (unblocked sibling with allowance left).
+		// reserve), spent allowance (unblocked sibling with allowance left), and
+		// opt-in reclaim (higher-priority sibling measured at or above its
+		// `reclaimAbovePct`). Reclaim's threshold sits above the reserve, so a
+		// session leaves at the reserve and returns only after a reset refills it.
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean =>
 			!sessionPinIsExplicit &&
 			preferredCandidate !== undefined &&
@@ -667,11 +675,24 @@ export class CredentialSelector {
 				) {
 					return true;
 				}
+				const candidateUnblocked = !this.#deps.blocks.isBlocked(
+					provider,
+					providerKey,
+					candidate.selection.index,
+					blockScopes,
+				);
+				if (
+					candidate.reclaimReady === true &&
+					(candidate.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0) &&
+					candidateUnblocked
+				) {
+					return true;
+				}
 				return (
 					preferredCandidate.allowanceSpent === true &&
 					candidate.usage !== null &&
 					candidate.allowanceSpent === false &&
-					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes)
+					candidateUnblocked
 				);
 			});
 		const pinEvictedBeforePreflight = automaticPinWouldBeEvicted(false);
