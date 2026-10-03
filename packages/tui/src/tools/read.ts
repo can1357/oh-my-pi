@@ -502,11 +502,15 @@ export const readToolRenderer = {
 			}
 			const header = renderStatusLine({ icon: "error", title }, uiTheme);
 			const errorLines = sanitizeDisplayLines(errorText).map(line => uiTheme.fg("error", line));
-			return framedToolCard(uiTheme, () => ({
-				header,
-				phase: "error",
-				sections: [{ content: errorLines }],
-			}));
+			return framedToolCard(
+				uiTheme,
+				() => ({
+					header,
+					phase: "error",
+					sections: [{ content: errorLines }],
+				}),
+				{ flat: options.renderContext?.flat === true },
+			);
 		}
 		const details = result.details;
 		const rawText = result.content?.find(c => c.type === "text")?.text ?? "";
@@ -557,16 +561,20 @@ export const readToolRenderer = {
 				? sanitizeDisplayLines(contentText).map(line => uiTheme.fg("toolOutput", line))
 				: [];
 			const lines = [...detailLines, ...warningLines];
-			return framedToolCard(uiTheme, () => ({
-				header,
-				phase: "success",
-				sections: [
-					{
-						label: uiTheme.fg("toolTitle", "Details"),
-						content: lines.length > 0 ? lines : [uiTheme.fg("dim", "(image)")],
-					},
-				],
-			}));
+			return framedToolCard(
+				uiTheme,
+				() => ({
+					header,
+					phase: "success",
+					sections: [
+						{
+							label: uiTheme.fg("toolTitle", "Details"),
+							content: lines.length > 0 ? lines : [uiTheme.fg("dim", "(image)")],
+						},
+					],
+				}),
+				{ flat: options.renderContext?.flat === true },
+			);
 		}
 
 		const suffix = details?.suffixResolution;
@@ -600,6 +608,7 @@ export const readToolRenderer = {
 		let cachedWidth: number | undefined;
 		let cachedExpanded: boolean | undefined;
 		let cachedLines: string[] | undefined;
+		const flat = options.renderContext?.flat === true;
 		return markFramedBlockComponent({
 			render: (width: number) => {
 				const expanded = options.expanded;
@@ -613,6 +622,7 @@ export const readToolRenderer = {
 								output: warningLines.length > 0 ? warningLines.join("\n") : undefined,
 								expanded,
 								width,
+								flat,
 							},
 							uiTheme,
 						)
@@ -627,6 +637,7 @@ export const readToolRenderer = {
 								codeStartLine: details?.displayContent?.startLine,
 								codeLineNumbers: details?.displayContent?.lineNumbers,
 								width,
+								flat,
 							},
 							uiTheme,
 						);

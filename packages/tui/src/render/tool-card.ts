@@ -68,6 +68,9 @@ export interface ToolCardOptions {
 	paddingX?: number;
 	paddingY?: number;
 	ignoreTight?: boolean;
+	/** Framed cards only: render flat (opencode layout) instead of bordered. Tool
+	 * renderers resolve this from their render context's `flat` flag. */
+	flat?: boolean;
 	onInvalidate?: () => void;
 	onDispose?: () => void;
 }
@@ -151,19 +154,22 @@ export class ToolCard implements Component {
 	render(width: number): readonly string[] {
 		const configuredPadding = this.#options.paddingX ?? 0;
 		const plainPadding = this.#options.ignoreTight === false ? getPaddingX(configuredPadding) : configuredPadding;
+		const flat = this.#options.flat;
 		const defaultContentWidth =
-			this.#options.variant === "framed" ? outputBlockContentWidth(width) : Math.max(1, width - plainPadding * 2);
+			this.#options.variant === "framed"
+				? outputBlockContentWidth(width, undefined, undefined, flat)
+				: Math.max(1, width - plainPadding * 2);
 		const snapshot = this.#build({
 			width,
 			contentWidth: defaultContentWidth,
 			contentWidthFor: (contentPaddingLeft?: number, contentPaddingRight?: number) =>
 				this.#options.variant === "framed"
-					? outputBlockContentWidth(width, contentPaddingLeft, contentPaddingRight)
+					? outputBlockContentWidth(width, contentPaddingLeft, contentPaddingRight, flat)
 					: defaultContentWidth,
 		});
 		const contentWidth =
 			this.#options.variant === "framed"
-				? outputBlockContentWidth(width, snapshot.contentPaddingLeft, snapshot.contentPaddingRight)
+				? outputBlockContentWidth(width, snapshot.contentPaddingLeft, snapshot.contentPaddingRight, flat)
 				: defaultContentWidth;
 
 		const previousChildren = this.#renderedChildren;
@@ -232,6 +238,7 @@ export class ToolCard implements Component {
 				contentPaddingLeft: snapshot.contentPaddingLeft,
 				contentPaddingRight: snapshot.contentPaddingRight,
 				borderColor: snapshot.borderColor,
+				flat,
 			};
 			this.#lastBlockOptions = blockOptions;
 			return this.#block.render(blockOptions, this.#theme);

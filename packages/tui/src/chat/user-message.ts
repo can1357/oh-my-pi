@@ -20,6 +20,7 @@ import { MODEL_MENTION_TAG_RE } from "../prompt/model-mention-syntax";
 import { expandKeyHint, fileHyperlink } from "../render";
 import { imageReferenceHyperlink } from "../prompt/image-references";
 import { highlightMagicKeywords } from "../prompt/magic-keywords";
+import type { LayoutMode } from "./layout-mode";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
 import { base64ImageNode } from "../native/blobs";
@@ -63,6 +64,8 @@ export interface UserBubbleOptions {
 	skillPath?: (name: string) => string | undefined;
 	/** When the message was sent (ms); shown beside the native hover toolbar. */
 	timestamp?: number;
+	/** Owning mode's transcript layout; captured at construction (per-instance, never global). */
+	layout?: () => LayoutMode;
 }
 
 /**
@@ -131,6 +134,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	readonly #timestamp: number | undefined;
 	readonly #images: readonly ImageContent[];
 	readonly #imageLinks: readonly (string | undefined)[] | undefined;
+	readonly #layout: (() => LayoutMode) | undefined;
 	/** Display text: image markers collapsed to chips and model mentions to their labels. */
 	readonly #text: string;
 	/** Matches the composer tokens in {@link #text} (chips, skills, this message's mentions). */
@@ -159,6 +163,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		this.#timestamp = options.timestamp;
 		this.#images = options.images ?? [];
 		this.#imageLinks = options.imageLinks;
+		this.#layout = options.layout;
 		this.#text = text;
 		this.#tokens = composerTokenRegex(mentionLabels);
 		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
@@ -271,7 +276,12 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	}
 
 	override render(width: number): readonly string[] {
-		const lines = super.render(width);
+		// Opencode layout: prefix a left accent gutter (opencode's signature user
+		// message chrome). Children render 2 columns narrower to make room, and
+		// the derived array is memoized on the source ref like the OSC zone wrap.
+		const gutter = this.#layout?.() === "opencode";
+		const innerWidth = gutter ? Math.max(1, width - 2) : width;
+		const lines = super.render(innerWidth);
 		if (lines.length === 0) {
 			return lines;
 		}
@@ -279,7 +289,11 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 			return this.#zoneLines;
 		}
 		const wrapped = lines.slice();
-		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
+		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(innerWidth);
+		if (gutter) {
+			const bar = `${theme.fg("borderAccent", theme.boxRound.vertical)} `;
+			for (let i = 0; i < wrapped.length; i++) wrapped[i] = bar + wrapped[i];
+		}
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
 		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;
@@ -361,7 +375,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	readonly #text: string;
 	readonly #imageLinks?: readonly (string | undefined)[];
 
-	constructor(text: string, imageLinks?: readonly (string | undefined)[]) {
+	constructor(text: string, imageLinks?: readonly (string | undefined)[], layout?: () => LayoutMode) {
 		this.#text = text;
 		this.#imageLinks = imageLinks;
 
@@ -369,7 +383,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 		// first expanded render and retained across collapse/re-expand cycles.
 		this.#disclosure = new Disclosure({
 			summary: new SyntheticSummary(summarizeSyntheticInput(text)),
-			body: () => new UserMessageComponent(this.#text, { synthetic: true, imageLinks: this.#imageLinks }),
+			body: () => new UserMessageComponent(this.#text, { synthetic: true, imageLinks: this.#imageLinks, layout }),
 		});
 	}
 

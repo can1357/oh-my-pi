@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `display.layout` setting (Appearance → Display) with an `opencode` option: a flat, opencode-style transcript where collapsed tool calls render as one status line (Ctrl+O expands), framed tool output renders without borders, and user messages get a left accent gutter. A new setup-wizard scene offers the choice on first run and on upgrade ([#10530](https://github.com/can1357/oh-my-pi/pull/10530) by [@sethmorton](https://github.com/sethmorton)).
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

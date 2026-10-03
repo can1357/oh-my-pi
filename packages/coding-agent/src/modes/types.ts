@@ -38,6 +38,7 @@ import type { EventBus } from "../utils/event-bus";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import type { LayoutMode } from "@oh-my-pi/pi-tui/chat/layout-mode";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
@@ -200,6 +201,13 @@ export interface InteractiveModeContext {
 	loopCondition?: LoopConditionConfig;
 	planModePlanFilePath?: string;
 	hideThinkingBlock: boolean;
+	/**
+	 * Per-mode transcript layout (`display.layout`). Owned by the mode instance:
+	 * seeded from settings at construction, mutated by the settings hook and
+	 * the setup wizard. Components capture `() => ctx.layoutMode` at
+	 * construction, so two live modes never share layout state.
+	 */
+	layoutMode: LayoutMode;
 	/**
 	 * Effective thinking-block visibility: true when hidden by user setting OR
 	 * thinking level is "off" before the session has produced displayable

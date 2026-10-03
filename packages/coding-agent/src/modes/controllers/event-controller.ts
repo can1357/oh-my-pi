@@ -505,6 +505,7 @@ export class EventController {
 		if (!this.#lastReadGroup) {
 			const group = new ReadToolGroupComponent({
 				showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
+				layout: () => this.ctx.layoutMode,
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
 			this.ctx.chatContainer.addChild(group);
@@ -1469,6 +1470,7 @@ export class EventController {
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 							showImages: cfgTerminalShowImages.get(settings),
+							layout: () => this.ctx.layoutMode,
 						},
 						tool,
 						this.ctx.ui,
@@ -1776,6 +1778,7 @@ export class EventController {
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 					showImages: cfgTerminalShowImages.get(settings),
+					layout: () => this.ctx.layoutMode,
 				},
 				tool,
 				this.ctx.ui,

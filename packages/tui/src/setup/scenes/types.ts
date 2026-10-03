@@ -1,5 +1,6 @@
 import type { AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import type { OAuthBrowserSessionRequest } from "@oh-my-pi/pi-ai/oauth/types";
+import type { LayoutMode } from "../../chat/layout-mode";
 import type { SgrMouseEvent } from "../../mouse";
 import type { ComposerPreviewStatusSource } from "../../overlays/composer-shape-preview";
 import type { ComposerShape } from "../../overlays/composer-shape-registry";
@@ -26,6 +27,7 @@ export interface SetupHost extends SetupUiHost {
 	readonly composerShape: ComposerShape;
 	readonly symbolPreset: SymbolPreset;
 	readonly colorBlindMode: boolean;
+	readonly layoutMode: LayoutMode;
 	readonly disabledProviders: readonly string[];
 	readonly authStorage: AuthStorage;
 	readonly modelSource: ModelBrowserSource;
@@ -36,6 +38,7 @@ export interface SetupHost extends SetupUiHost {
 	saveComposerShape(shape: ComposerShape): Promise<void>;
 	saveSymbolPreset(preset: SymbolPreset): void;
 	saveColorBlindMode(enabled: boolean): void;
+	saveLayoutMode(mode: LayoutMode): void;
 	saveTheme(mode: "dark" | "light", name: string): void;
 	captureBrowserSession(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	copyToClipboard(text: string): Promise<void>;

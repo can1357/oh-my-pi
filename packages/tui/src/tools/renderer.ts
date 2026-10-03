@@ -26,6 +26,12 @@ export interface RenderResultOptions {
 	 * Streamed `xd://` previews stay queued until this is set.
 	 */
 	executionStarted?: boolean;
+	/**
+	 * Tool-specific render context built by ToolExecutionComponent. Always
+	 * carries `flat` (the owning mode's opencode-layout flag) for framed
+	 * renderers; built-ins like bash/eval intersect their own fields.
+	 */
+	renderContext?: { flat?: boolean };
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */

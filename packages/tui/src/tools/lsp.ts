@@ -205,56 +205,60 @@ export function renderResult(
 	if (request?.new_name) requestLines.push(theme.fg("dim", `new name: ${request.new_name}`));
 	if (request?.apply !== undefined) requestLines.push(theme.fg("dim", `apply: ${request.apply ? "true" : "false"}`));
 
-	return framedToolCard(theme, () => {
-		// Read mutable state at render time
-		const { expanded, isPartial, spinnerFrame } = options;
+	return framedToolCard(
+		theme,
+		() => {
+			// Read mutable state at render time
+			const { expanded, isPartial, spinnerFrame } = options;
 
-		// Determine label, state, bodyLines based on type + current expanded
-		let label = "Result";
-		let state: "success" | "warning" | "error" = "success";
-		let bodyLines: string[] = [];
+			// Determine label, state, bodyLines based on type + current expanded
+			let label = "Result";
+			let state: "success" | "warning" | "error" = "success";
+			let bodyLines: string[] = [];
 
-		if (codeBlockMatch) {
-			label = "Hover";
-			bodyLines = renderHover(codeBlockMatch, text, lines, expanded, theme);
-		} else if (errorMatch || warningMatch || hasStatusError) {
-			label = "Diagnostics";
-			const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
-			const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
-			state = errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success";
-			bodyLines = renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme);
-		} else if (refMatch) {
-			label = "References";
-			bodyLines = renderReferences(refMatch, lines, expanded, theme);
-		} else if (symbolsMatch) {
-			label = "Symbols";
-			bodyLines = renderSymbols(symbolsMatch, lines, expanded, theme);
-		} else if (result.details?.action === "diagnostics" && text === "OK") {
-			label = "Diagnostics";
-			state = "success";
-			bodyLines = [`${theme.styledSymbol("tool.lsp", "accent")} ${theme.fg("dim", "OK")}`];
-		} else {
-			label = "Response";
-			bodyLines = renderGeneric(text, lines, expanded, theme);
-		}
+			if (codeBlockMatch) {
+				label = "Hover";
+				bodyLines = renderHover(codeBlockMatch, text, lines, expanded, theme);
+			} else if (errorMatch || warningMatch || hasStatusError) {
+				label = "Diagnostics";
+				const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
+				const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
+				state = errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success";
+				bodyLines = renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme);
+			} else if (refMatch) {
+				label = "References";
+				bodyLines = renderReferences(refMatch, lines, expanded, theme);
+			} else if (symbolsMatch) {
+				label = "Symbols";
+				bodyLines = renderSymbols(symbolsMatch, lines, expanded, theme);
+			} else if (result.details?.action === "diagnostics" && text === "OK") {
+				label = "Diagnostics";
+				state = "success";
+				bodyLines = [`${theme.styledSymbol("tool.lsp", "accent")} ${theme.fg("dim", "OK")}`];
+			} else {
+				label = "Response";
+				bodyLines = renderGeneric(text, lines, expanded, theme);
+			}
 
-		const actionLabel = (request?.action ?? result.details?.action ?? label.toLowerCase()).replace(/_/g, " ");
-		const isSuccess = !isPartial && !result.isError;
-		const icon = isSuccess
-			? theme.styledSymbol("tool.lsp", "accent")
-			: formatStatusIcon(isPartial ? "running" : "error", theme, spinnerFrame);
-		const header = `${icon} LSP ${actionLabel}`;
+			const actionLabel = (request?.action ?? result.details?.action ?? label.toLowerCase()).replace(/_/g, " ");
+			const isSuccess = !isPartial && !result.isError;
+			const icon = isSuccess
+				? theme.styledSymbol("tool.lsp", "accent")
+				: formatStatusIcon(isPartial ? "running" : "error", theme, spinnerFrame);
+			const header = `${icon} LSP ${actionLabel}`;
 
-		return {
-			header,
-			phase: isPartial ? "partial" : state,
-			sections: [
-				...(requestLines.length > 0 ? [{ content: requestLines }] : []),
-				{ label: theme.fg("toolTitle", "Response"), content: bodyLines },
-			],
-			applyBg: false,
-		};
-	});
+			return {
+				header,
+				phase: isPartial ? "partial" : state,
+				sections: [
+					...(requestLines.length > 0 ? [{ content: requestLines }] : []),
+					{ label: theme.fg("toolTitle", "Response"), content: bodyLines },
+				],
+				applyBg: false,
+			};
+		},
+		{ flat: options.renderContext?.flat === true },
+	);
 }
 
 // =============================================================================

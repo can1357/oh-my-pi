@@ -18,6 +18,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspPickerColumn, TspPickerItem, TspPickerProps, TspText } from "@oh-my-pi/pi-wire";
 import { type Component, matchesKey, routeSgrMouseInput, type TUI, truncateToWidth, visibleWidth } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
+import type { LayoutMode } from "../chat/layout-mode";
 import {
 	recentTranscriptEntries,
 	type SessionMessageEntryLike as SessionMessageEntry,
@@ -274,6 +275,8 @@ export interface CopySelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	/** Owning mode's transcript layout accessor (replicated transcript matches the live one). */
+	layout?: () => LayoutMode;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Replaces the "Copy" header when the picker is reused for another purpose. */
@@ -379,6 +382,7 @@ export class CopySelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
+			layout: this.deps.layout,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});

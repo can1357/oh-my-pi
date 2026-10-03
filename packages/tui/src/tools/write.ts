@@ -592,32 +592,36 @@ export const writeToolRenderer = {
 		// back to the normalizing stringify.
 		const content = typeof args.content === "string" ? args.content : normalizeDisplayText(args.content);
 		const streamingCache = createRenderedStringCache();
-		return framedToolCard(uiTheme, () => {
-			const body = content
-				? formatStreamingContent(
-						content,
-						Boolean(options?.expanded),
-						lang,
-						uiTheme,
-						options?.spinnerFrame,
-						streamingCache,
-						// `options` is the ToolExecutionComponent's persistent
-						// render-state object — a stable identity across reveal ticks
-						// that keys the incremental preview state. `argsComplete`
-						// flushes the trailing line through the highlighter once.
-						options,
-						options?.argsComplete,
-					)
-				: "";
-			const bodyLines = body ? body.split("\n") : [];
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: "pending",
-				borderColor: "borderMuted",
-			};
-		});
+		return framedToolCard(
+			uiTheme,
+			() => {
+				const body = content
+					? formatStreamingContent(
+							content,
+							Boolean(options?.expanded),
+							lang,
+							uiTheme,
+							options?.spinnerFrame,
+							streamingCache,
+							// `options` is the ToolExecutionComponent's persistent
+							// render-state object — a stable identity across reveal ticks
+							// that keys the incremental preview state. `argsComplete`
+							// flushes the trailing line through the highlighter once.
+							options,
+							options?.argsComplete,
+						)
+					: "";
+				const bodyLines = body ? body.split("\n") : [];
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: "pending",
+					borderColor: "borderMuted",
+				};
+			},
+			{ flat: options.renderContext?.flat === true },
+		);
 	},
 
 	renderResult(
@@ -658,12 +662,16 @@ export const writeToolRenderer = {
 				{ icon: "error", title: "Write", description: `${langIcon} ${pathDisplay}` },
 				uiTheme,
 			);
-			return framedToolCard(uiTheme, () => ({
-				header,
-				sections: [{ content: formatErrorDetail(errorText, uiTheme).split("\n") }],
-				phase: "error",
-				borderColor: "error",
-			}));
+			return framedToolCard(
+				uiTheme,
+				() => ({
+					header,
+					sections: [{ content: formatErrorDetail(errorText, uiTheme).split("\n") }],
+					phase: "error",
+					borderColor: "error",
+				}),
+				{ flat: options.renderContext?.flat === true },
+			);
 		}
 
 		const isPartial = options.isPartial === true;
@@ -687,36 +695,40 @@ export const writeToolRenderer = {
 		const diagnostics = result.details?.diagnostics;
 
 		const previewCache = createRenderedStringCache();
-		return framedToolCard(uiTheme, () => {
-			const { expanded } = options;
-			let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
-			if (isPartial && progressText) {
-				const safeProgressText = truncateToWidth(
-					replaceTabs(progressText),
-					TRUNCATE_LENGTHS.LINE,
-					Ellipsis.Unicode,
-				);
-				body = `${uiTheme.fg("muted", safeProgressText)}${body ? `\n${body}` : ""}`;
-			}
-			if (!isPartial && diagnostics) {
-				const diagText = formatDiagnostics(diagnostics, expanded, uiTheme, fp =>
-					uiTheme.getLangIcon(getLanguageFromPath(fp)),
-				);
-				if (diagText.trim()) {
-					const diagLines = diagText.split("\n");
-					const firstNonEmpty = diagLines.findIndex(line => line.trim());
-					if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
+		return framedToolCard(
+			uiTheme,
+			() => {
+				const { expanded } = options;
+				let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
+				if (isPartial && progressText) {
+					const safeProgressText = truncateToWidth(
+						replaceTabs(progressText),
+						TRUNCATE_LENGTHS.LINE,
+						Ellipsis.Unicode,
+					);
+					body = `${uiTheme.fg("muted", safeProgressText)}${body ? `\n${body}` : ""}`;
 				}
-			}
-			const bodyLines = body.split("\n");
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: isPartial ? "partial" : "success",
-				borderColor: "borderMuted",
-			};
-		});
+				if (!isPartial && diagnostics) {
+					const diagText = formatDiagnostics(diagnostics, expanded, uiTheme, fp =>
+						uiTheme.getLangIcon(getLanguageFromPath(fp)),
+					);
+					if (diagText.trim()) {
+						const diagLines = diagText.split("\n");
+						const firstNonEmpty = diagLines.findIndex(line => line.trim());
+						if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
+					}
+				}
+				const bodyLines = body.split("\n");
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: isPartial ? "partial" : "success",
+					borderColor: "borderMuted",
+				};
+			},
+			{ flat: options.renderContext?.flat === true },
+		);
 	},
 	describeCall(
 		args: WriteRenderArgs,

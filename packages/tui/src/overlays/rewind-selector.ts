@@ -42,6 +42,7 @@ import {
 	visibleWidth,
 } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
+import type { LayoutMode } from "../chat/layout-mode";
 import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -83,6 +84,8 @@ export interface RewindSelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	/** Owning mode's transcript layout accessor (replicated transcript matches the live one). */
+	layout?: () => LayoutMode;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
@@ -226,6 +229,7 @@ export class RewindSelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
+			layout: this.deps.layout,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});

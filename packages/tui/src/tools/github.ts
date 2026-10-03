@@ -370,31 +370,36 @@ function renderFallbackComponent(
 		return new Text(`${header}\n${colored}`, 0, 0);
 	}
 
-	return framedToolCard(theme, ({ width }) => {
-		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
-		const expanded = options.expanded;
-		const limit = expanded ? allLines.length : Math.min(allLines.length, PREVIEW_LIMITS.OUTPUT_EXPANDED);
-		const visible = allLines.slice(0, limit);
-		const remaining = allLines.length - visible.length;
+	const flat = options.renderContext?.flat === true;
+	return framedToolCard(
+		theme,
+		({ width }) => {
+			const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, undefined, undefined, flat);
+			const expanded = options.expanded;
+			const limit = expanded ? allLines.length : Math.min(allLines.length, PREVIEW_LIMITS.OUTPUT_EXPANDED);
+			const visible = allLines.slice(0, limit);
+			const remaining = allLines.length - visible.length;
 
-		const out: string[] = [];
-		for (const line of visible) {
-			const colored = isError ? theme.fg("error", line) : theme.fg("toolOutput", line);
-			out.push(truncateVisualWidth(colored, lineWidth));
-		}
-		if (!expanded && remaining > 0) {
-			const hint = formatExpandHint(theme, expanded, true);
-			const more = `${formatMoreItems(remaining, "line")}${hint ? ` ${hint}` : ""}`;
-			out.push(theme.fg("dim", more));
-		}
-		return {
-			header,
-			sections: out.length > 0 ? [{ content: out }] : [],
-			phase: isError ? "error" : "success",
-			borderColor: isError ? "error" : "borderMuted",
-			applyBg: false,
-		};
-	});
+			const out: string[] = [];
+			for (const line of visible) {
+				const colored = isError ? theme.fg("error", line) : theme.fg("toolOutput", line);
+				out.push(truncateVisualWidth(colored, lineWidth));
+			}
+			if (!expanded && remaining > 0) {
+				const hint = formatExpandHint(theme, expanded, true);
+				const more = `${formatMoreItems(remaining, "line")}${hint ? ` ${hint}` : ""}`;
+				out.push(theme.fg("dim", more));
+			}
+			return {
+				header,
+				sections: out.length > 0 ? [{ content: out }] : [],
+				phase: isError ? "error" : "success",
+				borderColor: isError ? "error" : "borderMuted",
+				applyBg: false,
+			};
+		},
+		{ flat },
+	);
 }
 
 function renderWatchCall(args: GithubToolRenderArgs, options: RenderResultOptions, theme: Theme): Component {
@@ -551,17 +556,22 @@ export const githubToolRenderer = {
 							},
 				uiTheme,
 			);
-			return framedToolCard(uiTheme, ({ width }) => {
-				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
-				const sections = buildWatchSections(watch, uiTheme, options, innerWidth);
-				return {
-					header,
-					sections,
-					phase: isPartial ? "partial" : isError ? "error" : "success",
-					borderColor: isError ? "error" : "borderMuted",
-					applyBg: false,
-				};
-			});
+			const flat = options.renderContext?.flat === true;
+			return framedToolCard(
+				uiTheme,
+				({ width }) => {
+					const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, undefined, undefined, flat);
+					const sections = buildWatchSections(watch, uiTheme, options, innerWidth);
+					return {
+						header,
+						sections,
+						phase: isPartial ? "partial" : isError ? "error" : "success",
+						borderColor: isError ? "error" : "borderMuted",
+						applyBg: false,
+					};
+				},
+				{ flat },
+			);
 		}
 
 		return renderFallbackComponent(result, options, uiTheme, args ?? {});

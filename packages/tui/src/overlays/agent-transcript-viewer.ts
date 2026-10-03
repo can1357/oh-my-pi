@@ -24,6 +24,7 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import { editorKey } from "../chrome/keybinding-hints";
 import type { MessageRenderer } from "../chat/extension-types";
+import type { LayoutMode } from "../chat/layout-mode";
 import type { AgentLifecycleLike } from "./agent-hub-types";
 import type { AgentHubRegistry, AgentStatus } from "./agent-hub-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
@@ -73,6 +74,8 @@ export interface AgentTranscriptViewerDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	/** Owning mode's transcript layout accessor. */
+	layout?: () => LayoutMode;
 	expandKeys: KeyId[];
 	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
 	hubKeys: KeyId[];
@@ -199,6 +202,7 @@ export class AgentTranscriptViewer implements Component {
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
+			layout: deps.layout,
 			requestRender: deps.requestRender,
 		});
 		this.#browser = new TranscriptBrowser({

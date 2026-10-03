@@ -52,6 +52,8 @@ export interface CodeCellOptions {
 	width: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
+	/** Render flat (opencode layout); forwarded to {@link renderOutputBlock}. */
+	flat?: boolean;
 }
 
 function getState(status?: CodeCellOptions["status"]): State | undefined {
@@ -199,7 +201,7 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 		sections.push({ label: theme.fg("toolTitle", "Output"), lines: outputLines });
 	}
 
-	return renderOutputBlock({ header: title, headerMeta: meta, state, sections, width }, theme);
+	return renderOutputBlock({ header: title, headerMeta: meta, state, sections, width, flat: options.flat }, theme);
 }
 
 type CellHeaderOptions = Pick<CodeCellOptions, "index" | "total" | "title" | "duration" | "language" | "showLanguage">;
@@ -303,6 +305,8 @@ export interface MarkdownCellOptions {
 	contentMaxLines?: number;
 	expanded?: boolean;
 	width: number;
+	/** Render flat (opencode layout); forwarded to {@link renderOutputBlock}. */
+	flat?: boolean;
 }
 
 /** Render a Markdown preview and its optional output block. */
@@ -317,13 +321,14 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 		spinnerFrame: options.spinnerFrame,
 		duration: options.duration,
 		width,
+		flat: options.flat,
 	};
 	const { title, meta } = formatHeader(codeOptions, theme);
 	const state = getState(options.status);
 
 	// Markdown component manages its own wrapping at the same inner width as
 	// `renderOutputBlock`, so collapsed row caps are applied after final wrapping.
-	const innerWidth = Math.max(20, outputBlockContentWidth(width));
+	const innerWidth = Math.max(20, outputBlockContentWidth(width, undefined, undefined, options.flat));
 	const allLines = content.trim() ? new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth) : [];
 	const maxContentLines = expanded ? allLines.length : Math.min(allLines.length, contentMaxLines);
 	const contentLines = allLines.slice(0, maxContentLines);
@@ -341,5 +346,5 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 		sections.push({ label: theme.fg("toolTitle", "Output"), lines: outputLines });
 	}
 
-	return renderOutputBlock({ header: title, headerMeta: meta, state, sections, width }, theme);
+	return renderOutputBlock({ header: title, headerMeta: meta, state, sections, width, flat: options.flat }, theme);
 }

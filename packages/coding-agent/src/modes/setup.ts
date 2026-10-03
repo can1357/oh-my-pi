@@ -16,6 +16,7 @@ import type { InteractiveModeContext } from "./types";
 
 import {
 	cfgColorBlindMode,
+	cfgDisplayLayout,
 	cfgComposerShape,
 	cfgSetupVersion,
 	cfgSymbolPreset,
@@ -44,6 +45,9 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		get colorBlindMode() {
 			return cfgColorBlindMode.get(ctx.settings);
+		},
+		get layoutMode() {
+			return cfgDisplayLayout.get(ctx.settings);
 		},
 		get disabledProviders() {
 			return cfgDisabledProviders.get(ctx.settings);
@@ -74,6 +78,9 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		saveColorBlindMode: enabled => {
 			cfgColorBlindMode.set(ctx.settings, enabled);
+		},
+		saveLayoutMode: mode => {
+			cfgDisplayLayout.set(ctx.settings, mode);
 		},
 		saveTheme: (mode, name) => {
 			(mode === "dark" ? cfgThemeDark : cfgThemeLight).set(ctx.settings, name);

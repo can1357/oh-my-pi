@@ -404,25 +404,29 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// expensive part: defer it to the first paint, once per component,
 			// so a rebuild that is replaced before painting never pays for it.
 			let cmdLines: string[] | undefined;
-			return framedToolCard(uiTheme, () => {
-				cmdLines ??= formatBashCommandLines(renderArgs, uiTheme);
-				const header =
-					config.showHeader === false
-						? undefined
-						: renderStatusLine(
-								{
-									icon: options.spinnerFrame !== undefined ? "running" : "pending",
-									spinnerFrame: options.spinnerFrame,
-									title: config.resolveTitle(args, options),
-								},
-								uiTheme,
-							);
-				return {
-					header,
-					phase: options.spinnerFrame !== undefined ? "running" : "pending",
-					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
-				};
-			});
+			return framedToolCard(
+				uiTheme,
+				() => {
+					cmdLines ??= formatBashCommandLines(renderArgs, uiTheme);
+					const header =
+						config.showHeader === false
+							? undefined
+							: renderStatusLine(
+									{
+										icon: options.spinnerFrame !== undefined ? "running" : "pending",
+										spinnerFrame: options.spinnerFrame,
+										title: config.resolveTitle(args, options),
+									},
+									uiTheme,
+								);
+					return {
+						header,
+						phase: options.spinnerFrame !== undefined ? "running" : "pending",
+						sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
+					};
+				},
+				{ flat: options.renderContext?.flat === true },
+			);
 		},
 
 		renderResult(
@@ -578,6 +582,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					return snapshot;
 				},
 				{
+					flat: options.renderContext?.flat === true,
 					onInvalidate: () => {
 						cachedSnapshot = undefined;
 						cachedWidth = undefined;

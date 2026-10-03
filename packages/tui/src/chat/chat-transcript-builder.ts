@@ -34,6 +34,7 @@ import {
 	transcriptEntryMessage,
 } from "./transcript-entry";
 import { theme } from "../theme";
+import type { LayoutMode } from "./layout-mode";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -72,6 +73,8 @@ import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
+	/** Owning mode's transcript layout accessor; omitted surfaces render the default omp look. */
+	layout?: () => LayoutMode;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Whether the active registry entry came from a built-in factory. */
@@ -235,6 +238,7 @@ export class ChatTranscriptBuilder {
 		if (!this.#readGroup) {
 			this.#readGroup = new ReadToolGroupComponent({
 				showContentPreview: displayPreferences.readToolResultPreview,
+				layout: this.#deps.layout,
 			});
 			this.#trackExpandable(this.#readGroup);
 			this.container.addChild(this.#readGroup);
@@ -324,7 +328,7 @@ export class ChatTranscriptBuilder {
 					// collapse them behind a compact summary that builds Markdown only on
 					// ctrl+o expand. Real user prompts stay fully rendered.
 					if (isSynthetic) {
-						const collapsed = new CollapsedSyntheticMessageComponent(userText);
+						const collapsed = new CollapsedSyntheticMessageComponent(userText, undefined, this.#deps.layout);
 						this.#trackExpandable(collapsed);
 						this.container.addChild(collapsed);
 					} else {
@@ -333,6 +337,7 @@ export class ChatTranscriptBuilder {
 								liveSteered: message.role === "user" && message.liveSteered === true,
 								timestamp: message.timestamp,
 								images: imageContent(message.content),
+								layout: this.#deps.layout,
 							}),
 						);
 					}
@@ -494,6 +499,7 @@ export class ChatTranscriptBuilder {
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: displayPreferences.showImages,
+					layout: this.#deps.layout,
 				},
 				this.#deps.getTool?.(content.name),
 				this.#deps.ui,

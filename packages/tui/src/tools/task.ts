@@ -610,36 +610,40 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 	);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
 	const contextSection = createContextSectionRenderer(args, theme);
-	return framedToolCard(theme, ({ width }) => {
-		const sections: TaskRenderSection[] = [];
+	return framedToolCard(
+		theme,
+		({ width }) => {
+			const sections: TaskRenderSection[] = [];
 
-		// The call preview only exists to surface the dispatched agent while the
-		// args stream in. Once a result snapshot exists, `renderResult` draws the
-		// same agent (and the assignment brief) itself, so showing it here would
-		// repeat what the result frame already shows.
-		if (!options.renderContext?.hasResult) {
-			// Mirror renderResult's layout — context, assignment, then the
-			// per-agent list — so the agent rows do not jump from above the
-			// brief to below it when the first progress snapshot replaces the
-			// call view. This also matches the schema's field order (`context`
-			// streams before `tasks`), so the streaming preview grows
-			// append-only instead of inserting agent rows above the
-			// already-rendered markdown and pushing it down on every item.
-			if (contextSection) sections.push(contextSection(width));
-			if (assignmentSection) sections.push(assignmentSection(width));
-			const callLines = renderTaskCallLines(args, theme);
-			// Guarded: an empty trailing section would still draw its divider.
-			if (callLines.length > 0) sections.push({ separator: true, content: callLines });
-		}
+			// The call preview only exists to surface the dispatched agent while the
+			// args stream in. Once a result snapshot exists, `renderResult` draws the
+			// same agent (and the assignment brief) itself, so showing it here would
+			// repeat what the result frame already shows.
+			if (!options.renderContext?.hasResult) {
+				// Mirror renderResult's layout — context, assignment, then the
+				// per-agent list — so the agent rows do not jump from above the
+				// brief to below it when the first progress snapshot replaces the
+				// call view. This also matches the schema's field order (`context`
+				// streams before `tasks`), so the streaming preview grows
+				// append-only instead of inserting agent rows above the
+				// already-rendered markdown and pushing it down on every item.
+				if (contextSection) sections.push(contextSection(width));
+				if (assignmentSection) sections.push(assignmentSection(width));
+				const callLines = renderTaskCallLines(args, theme);
+				// Guarded: an empty trailing section would still draw its divider.
+				if (callLines.length > 0) sections.push({ separator: true, content: callLines });
+			}
 
-		return {
-			header,
-			headerMeta: showIsolated ? "isolated" : undefined,
-			sections,
-			phase: "pending",
-			borderColor: "borderMuted",
-		};
-	});
+			return {
+				header,
+				headerMeta: showIsolated ? "isolated" : undefined,
+				sections,
+				phase: "pending",
+				borderColor: "borderMuted",
+			};
+		},
+		{ flat: options.renderContext?.flat === true },
+	);
 }
 
 function truncateTaskRow(text: string, width: number, ellipsis?: ""): string {
@@ -1280,13 +1284,24 @@ function selectCollapsedResults(ordered: readonly SingleResult[]): readonly Sing
 	const picked = new Set<SingleResult>();
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
-		if (result.aborted || result.exitCode !== 0 || result.error) picked.add(result);
+		if (isTaskResultError(result) || result.error) picked.add(result);
 	}
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
 		picked.add(result);
 	}
 	return ordered.filter(result => picked.has(result));
+}
+/**
+ * Whether a settled task result makes the task card an error. Kept shared with
+ * transcript collapse so aggregate task failures cannot be hidden as success.
+ */
+export function isTaskResultError(result: Pick<SingleResult, "aborted" | "exitCode">): boolean {
+	return result.aborted === true || result.exitCode !== 0;
+}
+
+export function hasTaskResultError(details: unknown): boolean {
+	return isTaskToolDetails(details) && details.results.some(isTaskResultError);
 }
 
 /**
@@ -1317,16 +1332,20 @@ export function renderResult(
 					},
 					theme,
 				);
-		return framedToolCard(theme, ({ width }) => ({
-			header,
-			sections: [
-				...(contextSection ? [contextSection(width)] : []),
-				...(assignmentSection ? [assignmentSection(width)] : []),
-				...(text ? [{ separator: true, content: [theme.fg("dim", truncateToWidth(text, width))] }] : []),
-			],
-			phase: errored ? "error" : "success",
-			borderColor: errored ? "error" : "borderMuted",
-		}));
+		return framedToolCard(
+			theme,
+			({ width }) => ({
+				header,
+				sections: [
+					...(contextSection ? [contextSection(width)] : []),
+					...(assignmentSection ? [assignmentSection(width)] : []),
+					...(text ? [{ separator: true, content: [theme.fg("dim", truncateToWidth(text, width))] }] : []),
+				],
+				phase: errored ? "error" : "success",
+				borderColor: errored ? "error" : "borderMuted",
+			}),
+			{ flat: options.renderContext?.flat === true },
+		);
 	}
 
 	const hasResults = Boolean(details.results && details.results.length > 0);
@@ -1342,9 +1361,10 @@ export function renderResult(
 	if (hasResults) {
 		for (const r of details.results) {
 			requestTotal += r.requests ?? 0;
-			if (r.aborted) abortedCount++;
-			else if (r.exitCode !== 0) failCount++;
-			else if (r.error) mergeFailedCount++;
+			if (isTaskResultError(r)) {
+				if (r.aborted) abortedCount++;
+				else failCount++;
+			} else if (r.error) mergeFailedCount++;
 			else successCount++;
 		}
 	}
@@ -1377,146 +1397,150 @@ export function renderResult(
 		theme,
 	);
 
-	return framedToolCard(theme, ({ width, contentWidth }) => {
-		const { expanded, isPartial, spinnerFrame } = options;
-		const frozen = options.renderContext?.frozen === true;
-		const nowMs = options.renderContext?.nowMs ?? Date.now();
-		const lines: string[] = [];
+	return framedToolCard(
+		theme,
+		({ width, contentWidth }) => {
+			const { expanded, isPartial, spinnerFrame } = options;
+			const frozen = options.renderContext?.frozen === true;
+			const nowMs = options.renderContext?.nowMs ?? Date.now();
+			const lines: string[] = [];
 
-		// Result rows win once any exist; progress rows for spawns without a
-		// result (a mixed call's async subset) render as a supplement below.
-		const shouldRenderProgress =
-			Boolean(details.progress && details.progress.length > 0) && details.results.length === 0;
-		if (shouldRenderProgress && details.progress) {
-			const ordered = orderProgressForDisplay(details.progress);
-			// Collapsed view keeps the live edge: finished rows sort to the top of
-			// the display order, so folding from the top keeps running/pending
-			// agents (and their current-tool lines) visible while one summary line
-			// stands in for everything above it.
-			const visible = expanded ? ordered : ordered.slice(Math.max(0, ordered.length - COLLAPSED_AGENT_LIMIT));
-			if (visible.length < ordered.length) {
-				lines.push(formatHiddenProgressLine(ordered.slice(0, ordered.length - visible.length), theme));
-			}
-			for (const progress of visible) {
+			// Result rows win once any exist; progress rows for spawns without a
+			// result (a mixed call's async subset) render as a supplement below.
+			const shouldRenderProgress =
+				Boolean(details.progress && details.progress.length > 0) && details.results.length === 0;
+			if (shouldRenderProgress && details.progress) {
+				const ordered = orderProgressForDisplay(details.progress);
+				// Collapsed view keeps the live edge: finished rows sort to the top of
+				// the display order, so folding from the top keeps running/pending
+				// agents (and their current-tool lines) visible while one summary line
+				// stands in for everything above it.
+				const visible = expanded ? ordered : ordered.slice(Math.max(0, ordered.length - COLLAPSED_AGENT_LIMIT));
+				if (visible.length < ordered.length) {
+					lines.push(formatHiddenProgressLine(ordered.slice(0, ordered.length - visible.length), theme));
+				}
+				for (const progress of visible) {
+					lines.push(
+						...renderAgentProgress(
+							progress,
+							"",
+							"  ",
+							expanded,
+							theme,
+							spinnerFrame,
+							frozen,
+							undefined,
+							0,
+							nowMs,
+							contentWidth,
+						),
+					);
+				}
+			} else if (details.results && details.results.length > 0) {
+				const ordered = orderResultsForDisplay(details.results);
+				const visible = expanded ? ordered : selectCollapsedResults(ordered);
+				for (const res of visible) {
+					lines.push(...renderAgentResult(res, "", "  ", expanded, theme, undefined, 0, contentWidth));
+				}
+				if (visible.length < ordered.length) {
+					const hint = formatExpandHint(theme, false, true);
+					lines.push(
+						`${theme.fg("dim", formatMoreItems(ordered.length - visible.length, "agent"))}${hint ? ` ${hint}` : ""}`,
+					);
+				}
+
+				// Mixed blocking+async call: async spawns never land in `results`
+				// (their payloads deliver through jobs) — keep their rows visible
+				// beside the finalized inline results, live while running and
+				// settled once their jobs finish.
+				const supplementalProgress = details.progress
+					? orderProgressForDisplay(
+							details.progress.filter(progress => !details.results.some(res => res.id === progress.id)),
+						)
+					: [];
+				for (const progress of supplementalProgress) {
+					lines.push(
+						...renderAgentProgress(
+							progress,
+							"",
+							"  ",
+							expanded,
+							theme,
+							spinnerFrame,
+							frozen,
+							undefined,
+							0,
+							nowMs,
+							contentWidth,
+						),
+					);
+				}
+
+				const summaryParts: string[] = [];
+				if (abortedCount > 0) summaryParts.push(theme.fg("error", `${abortedCount} aborted`));
+				if (successCount > 0) summaryParts.push(theme.fg("success", `${successCount} succeeded`));
+				if (mergeFailedCount > 0) summaryParts.push(theme.fg("warning", `${mergeFailedCount} merge failed`));
+				if (failCount > 0) summaryParts.push(theme.fg("error", `${failCount} failed`));
+				const totalRequests = requestTotal;
+				if (totalRequests > 0) summaryParts.push(theme.fg("dim", `${formatNumber(totalRequests)} req`));
+				summaryParts.push(theme.fg("dim", formatDuration(details.totalDurationMs)));
+				// Wrap the run summary in the theme's bracket glyphs (dim chrome, colored
+				// counts) to match the bash tool's `[Wall: … | Exit: …]` footer.
 				lines.push(
-					...renderAgentProgress(
-						progress,
-						"",
-						"  ",
-						expanded,
-						theme,
-						spinnerFrame,
-						frozen,
-						undefined,
-						0,
-						nowMs,
-						contentWidth,
-					),
+					theme.fg("dim", theme.format.bracketLeft) +
+						summaryParts.join(theme.fg("dim", theme.sep.dot)) +
+						theme.fg("dim", theme.format.bracketRight),
 				);
 			}
-		} else if (details.results && details.results.length > 0) {
-			const ordered = orderResultsForDisplay(details.results);
-			const visible = expanded ? ordered : selectCollapsedResults(ordered);
-			for (const res of visible) {
-				lines.push(...renderAgentResult(res, "", "  ", expanded, theme, undefined, 0, contentWidth));
+
+			const phase = isPartial ? "partial" : isError ? "error" : mergeFailed ? "warning" : "success";
+			const borderColor = isError ? "error" : "borderMuted";
+
+			if (lines.length === 0) {
+				const text = fallbackText.trim() ? fallbackText : "No results";
+				return {
+					header,
+					sections: [
+						...(contextSection ? [contextSection(width)] : []),
+						...(assignmentSection ? [assignmentSection(width)] : []),
+						{ separator: true, content: [theme.fg("dim", truncateToWidth(text, width))] },
+					],
+					phase,
+					borderColor,
+				};
 			}
-			if (visible.length < ordered.length) {
-				const hint = formatExpandHint(theme, false, true);
-				lines.push(
-					`${theme.fg("dim", formatMoreItems(ordered.length - visible.length, "agent"))}${hint ? ` ${hint}` : ""}`,
+
+			if (fallbackText.trim()) {
+				const summaryLines = fallbackText.split("\n");
+				const markerIndex = summaryLines.findIndex(
+					line =>
+						line.includes("<system-notification>") ||
+						line.startsWith("Applied patches:") ||
+						line.startsWith("No changes to apply."),
 				);
+				if (markerIndex >= 0) {
+					const extra = summaryLines.slice(markerIndex);
+					for (const line of extra) {
+						if (!line.trim()) continue;
+						lines.push(theme.fg("dim", line));
+					}
+				}
 			}
 
-			// Mixed blocking+async call: async spawns never land in `results`
-			// (their payloads deliver through jobs) — keep their rows visible
-			// beside the finalized inline results, live while running and
-			// settled once their jobs finish.
-			const supplementalProgress = details.progress
-				? orderProgressForDisplay(
-						details.progress.filter(progress => !details.results.some(res => res.id === progress.id)),
-					)
-				: [];
-			for (const progress of supplementalProgress) {
-				lines.push(
-					...renderAgentProgress(
-						progress,
-						"",
-						"  ",
-						expanded,
-						theme,
-						spinnerFrame,
-						frozen,
-						undefined,
-						0,
-						nowMs,
-						contentWidth,
-					),
-				);
-			}
-
-			const summaryParts: string[] = [];
-			if (abortedCount > 0) summaryParts.push(theme.fg("error", `${abortedCount} aborted`));
-			if (successCount > 0) summaryParts.push(theme.fg("success", `${successCount} succeeded`));
-			if (mergeFailedCount > 0) summaryParts.push(theme.fg("warning", `${mergeFailedCount} merge failed`));
-			if (failCount > 0) summaryParts.push(theme.fg("error", `${failCount} failed`));
-			const totalRequests = requestTotal;
-			if (totalRequests > 0) summaryParts.push(theme.fg("dim", `${formatNumber(totalRequests)} req`));
-			summaryParts.push(theme.fg("dim", formatDuration(details.totalDurationMs)));
-			// Wrap the run summary in the theme's bracket glyphs (dim chrome, colored
-			// counts) to match the bash tool's `[Wall: … | Exit: …]` footer.
-			lines.push(
-				theme.fg("dim", theme.format.bracketLeft) +
-					summaryParts.join(theme.fg("dim", theme.sep.dot)) +
-					theme.fg("dim", theme.format.bracketRight),
-			);
-		}
-
-		const phase = isPartial ? "partial" : isError ? "error" : mergeFailed ? "warning" : "success";
-		const borderColor = isError ? "error" : "borderMuted";
-
-		if (lines.length === 0) {
-			const text = fallbackText.trim() ? fallbackText : "No results";
+			while (lines.length > 0 && lines[0].trim() === "") lines.shift();
 			return {
 				header,
 				sections: [
 					...(contextSection ? [contextSection(width)] : []),
 					...(assignmentSection ? [assignmentSection(width)] : []),
-					{ separator: true, content: [theme.fg("dim", truncateToWidth(text, width))] },
+					...(lines.length > 0 ? [{ separator: true, content: lines }] : []),
 				],
 				phase,
 				borderColor,
 			};
-		}
-
-		if (fallbackText.trim()) {
-			const summaryLines = fallbackText.split("\n");
-			const markerIndex = summaryLines.findIndex(
-				line =>
-					line.includes("<system-notification>") ||
-					line.startsWith("Applied patches:") ||
-					line.startsWith("No changes to apply."),
-			);
-			if (markerIndex >= 0) {
-				const extra = summaryLines.slice(markerIndex);
-				for (const line of extra) {
-					if (!line.trim()) continue;
-					lines.push(theme.fg("dim", line));
-				}
-			}
-		}
-
-		while (lines.length > 0 && lines[0].trim() === "") lines.shift();
-		return {
-			header,
-			sections: [
-				...(contextSection ? [contextSection(width)] : []),
-				...(assignmentSection ? [assignmentSection(width)] : []),
-				...(lines.length > 0 ? [{ separator: true, content: lines }] : []),
-			],
-			phase,
-			borderColor,
-		};
-	});
+		},
+		{ flat: options.renderContext?.flat === true },
+	);
 }
 
 /** Tests whether a persisted tool result carries a task snapshot. */

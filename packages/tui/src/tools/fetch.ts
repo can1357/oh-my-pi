@@ -230,11 +230,15 @@ export function renderReadUrlResult(
 		const description = urlText ? formatReadUrlDescription(urlText) : undefined;
 		const header = renderStatusLine({ icon: "error", title: "Read", description }, uiTheme);
 		const errorLines = sanitizeDisplayLines(errorText).map(line => uiTheme.fg("error", line));
-		return framedToolCard(uiTheme, () => ({
-			header,
-			phase: "error",
-			sections: [{ content: errorLines }],
-		}));
+		return framedToolCard(
+			uiTheme,
+			() => ({
+				header,
+				phase: "error",
+				sections: [{ content: errorLines }],
+			}),
+			{ flat: options.renderContext?.flat === true },
+		);
 	}
 
 	const description = formatReadUrlDescription(details.finalUrl);
@@ -316,6 +320,7 @@ export function renderReadUrlResult(
 			};
 		},
 		{
+			flat: options.renderContext?.flat === true,
 			onInvalidate: () => {
 				lastExpanded = undefined;
 				contentPreviewLines = undefined;

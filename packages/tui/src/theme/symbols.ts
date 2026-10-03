@@ -285,6 +285,13 @@ export type SymbolKey =
 	| "tool.irc"
 	| "tool.delete"
 	| "tool.move"
+	// Opencode-layout collapsed tool row glyphs (flat one-line transcript rows)
+	| "oc.read"
+	| "oc.search"
+	| "oc.shell"
+	| "oc.write"
+	| "oc.subagent"
+	| "oc.todo"
 	// Keyboard keys (rendered by formatKeyHint). `*Mac` variants replace the
 	// generic modifier on macOS, whose keycaps are labelled with ⌃ ⌥ ⌘.
 	| "key.ctrl"
@@ -665,6 +672,13 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
 	"tool.move": "➜",
+	// Opencode-layout collapsed tool row glyphs
+	"oc.read": "→",
+	"oc.search": "∗",
+	"oc.shell": "$",
+	"oc.write": "←",
+	"oc.subagent": "◆",
+	"oc.todo": "▪",
 	// Keys: word modifiers off macOS (⌃/⌥/⌘ name no key on a PC keyboard)
 	"key.ctrl": "Ctrl",
 	"key.ctrlMac": "⌃",
@@ -1134,6 +1148,13 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
 	"tool.move": "\uf061",
+	// Opencode-layout collapsed tool row glyphs
+	"oc.read": "→",
+	"oc.search": "∗",
+	"oc.shell": "$",
+	"oc.write": "←",
+	"oc.subagent": "◆",
+	"oc.todo": "▪",
 	// Keys: word modifiers off macOS; arrows stay Unicode (nerd arrows add nothing)
 	"key.ctrl": "Ctrl",
 	// pick: 󰘴 (nf-md-apple_keyboard_control) | alt: ⌃
@@ -1438,6 +1459,13 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.irc": "#",
 	"tool.delete": "rm",
 	"tool.move": "mv",
+	// Opencode-layout collapsed tool row glyphs
+	"oc.read": "->",
+	"oc.search": "*",
+	"oc.shell": "$",
+	"oc.write": "<-",
+	"oc.subagent": "#",
+	"oc.todo": "-",
 	"key.ctrl": "Ctrl",
 	"key.ctrlMac": "Ctrl",
 	"key.shift": "Shift",

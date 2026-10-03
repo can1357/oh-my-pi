@@ -220,6 +220,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import type { LayoutMode } from "@oh-my-pi/pi-tui/chat/layout-mode";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { AttachmentChipsBand } from "@oh-my-pi/pi-tui/prompt/attachment-chips";
 import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
@@ -327,6 +328,7 @@ import {
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
+	cfgDisplayLayout,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
@@ -420,6 +422,7 @@ const cfgLiveUiSettings = combine({
 	proseOnlyThinking: cfgProseOnlyThinking,
 	"display.cacheMissMarker": cfgDisplayCacheMissMarker,
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
+	"display.layout": cfgDisplayLayout,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
@@ -1261,6 +1264,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoPhasesOwner?: AgentSession;
 	#todoHudHidden = false;
 	hideThinkingBlock = false;
+	/** Per-mode transcript layout (`display.layout`); see InteractiveModeContext.layoutMode. */
+	layoutMode: LayoutMode = "omp";
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
@@ -1784,6 +1789,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		setTuiTight(cfgTuiTight.get(settings));
+		this.layoutMode = cfgDisplayLayout.get(settings);
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
@@ -3500,6 +3506,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (
 			any("display.cacheMissMarker", "display.collapseCompacted", "display.showTokenUsage", "display.showTurnTime")
 		) {
+			rebuildChat = true;
+		}
+		// Layout is captured by every transcript component: rebuild under the new
+		// layout, then retire rows already committed to native scrollback.
+		const layoutMode = cfgDisplayLayout.get(this.settings);
+		if (any("display.layout") && layoutMode !== this.layoutMode) {
+			this.layoutMode = layoutMode;
 			rebuildChat = true;
 		}
 		if (any("tui.renderMermaid")) {

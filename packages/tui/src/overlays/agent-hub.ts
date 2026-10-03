@@ -36,6 +36,7 @@ import {
 } from "./agent-activity";
 import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
+import type { LayoutMode } from "../chat/layout-mode";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
@@ -300,6 +301,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	/** Mirrors the main transcript's thinking-block visibility. */
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	/** Owning mode's transcript layout accessor (viewer transcripts match the live look). */
+	layout?: () => LayoutMode;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
@@ -445,6 +448,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
+	#layout: (() => LayoutMode) | undefined;
 	#expandKeys: KeyId[];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
 
@@ -490,6 +494,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
+		this.#layout = deps.layout;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
 
@@ -639,6 +644,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
+			layout: this.#layout,
 			expandKeys: this.#expandKeys,
 			hubKeys: this.#hubKeys,
 			requestRender: this.#requestRender,

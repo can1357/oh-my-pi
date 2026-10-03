@@ -543,12 +543,16 @@ export const todoToolRenderer = {
 		if (result.isError) {
 			const errorText = result.content?.find(content => content.type === "text")?.text ?? "Todo operation failed";
 			const header = renderStatusLine({ icon: "error", title: "Todo" }, uiTheme);
-			return framedToolCard(uiTheme, () => ({
-				header,
-				sections: [{ content: formatErrorDetail(errorText, uiTheme).split("\n") }],
-				phase: "error",
-				borderColor: "error",
-			}));
+			return framedToolCard(
+				uiTheme,
+				() => ({
+					header,
+					sections: [{ content: formatErrorDetail(errorText, uiTheme).split("\n") }],
+					phase: "error",
+					borderColor: "error",
+				}),
+				{ flat: options.renderContext?.flat === true },
+			);
 		}
 
 		const phases = (result.details?.phases ?? []).filter(phase => phase.tasks.length > 0);
@@ -579,75 +583,79 @@ export const todoToolRenderer = {
 			return new Text(`${header}\n  ${uiTheme.fg("dim", fallback)}`, 0, 0);
 		}
 
-		return framedToolCard(uiTheme, () => {
-			const { expanded, spinnerFrame } = options;
-			const multiPhase = phases.length > 1;
-			const indent = multiPhase ? "  " : "";
-			// Collapse phases this update didn't touch down to a one-line summary so
-			// a single task flip doesn't redraw every phase's full task list. The
-			// manual expand toggle (and the no-signal fallback) still shows all.
-			const touched = expanded || !multiPhase ? null : computeTouchedPhases(args, phases, completedTasks);
-			// A pending todo counts as active work when an in-flight subagent is
-			// executing it — the transient result surfaces the same active set the
-			// sticky HUD does (#5873). Empty outside an interactive session.
-			const activeDescs = expanded ? [] : activeTodoDescriptionsProvider();
-			const isMatched = (task: TodoItem): boolean =>
-				activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
-			const bodyLines: string[] = [];
-			for (let p = 0; p < phases.length; p++) {
-				const phase = phases[p];
-				if (touched && !touched.has(phase.name)) {
-					bodyLines.push(formatPhaseSummary(phase, p + 1, uiTheme));
-					continue;
-				}
-				if (multiPhase) {
-					// Progress belongs on the expanded header too: the collapsed
-					// viewport below hides closed rows, so without it the phase the
-					// agent is actually working in is the one phase with no visible
-					// completion signal at all.
-					const name = uiTheme.fg("accent", chalk.bold(formatPhaseDisplayName(phase.name, p + 1)));
-					bodyLines.push(`${name}${formatPhaseProgress(phase, uiTheme)}`);
-				}
-				const completionKeys = completionKeysByPhase.get(phase.name) ?? EMPTY_COMPLETION_KEYS;
-				// Collapsed: walking viewport — the last closed task leads, then
-				// active work (in-progress / subagent-matched), then following
-				// pending tasks (#5873). Expanded: every task in order.
-				const treeLines = expanded
-					? renderTreeList(
-							{
-								items: phase.tasks,
-								expanded,
-								itemType: "todo",
-								renderItem: todo => formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame),
-							},
-							uiTheme,
-						)
-					: (() => {
-							const selection = selectCollapsedTodos(phase.tasks, isMatched, PREVIEW_LIMITS.COLLAPSED_ITEMS);
-							return renderTreeList(
+		return framedToolCard(
+			uiTheme,
+			() => {
+				const { expanded, spinnerFrame } = options;
+				const multiPhase = phases.length > 1;
+				const indent = multiPhase ? "  " : "";
+				// Collapse phases this update didn't touch down to a one-line summary so
+				// a single task flip doesn't redraw every phase's full task list. The
+				// manual expand toggle (and the no-signal fallback) still shows all.
+				const touched = expanded || !multiPhase ? null : computeTouchedPhases(args, phases, completedTasks);
+				// A pending todo counts as active work when an in-flight subagent is
+				// executing it — the transient result surfaces the same active set the
+				// sticky HUD does (#5873). Empty outside an interactive session.
+				const activeDescs = expanded ? [] : activeTodoDescriptionsProvider();
+				const isMatched = (task: TodoItem): boolean =>
+					activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
+				const bodyLines: string[] = [];
+				for (let p = 0; p < phases.length; p++) {
+					const phase = phases[p];
+					if (touched && !touched.has(phase.name)) {
+						bodyLines.push(formatPhaseSummary(phase, p + 1, uiTheme));
+						continue;
+					}
+					if (multiPhase) {
+						// Progress belongs on the expanded header too: the collapsed
+						// viewport below hides closed rows, so without it the phase the
+						// agent is actually working in is the one phase with no visible
+						// completion signal at all.
+						const name = uiTheme.fg("accent", chalk.bold(formatPhaseDisplayName(phase.name, p + 1)));
+						bodyLines.push(`${name}${formatPhaseProgress(phase, uiTheme)}`);
+					}
+					const completionKeys = completionKeysByPhase.get(phase.name) ?? EMPTY_COMPLETION_KEYS;
+					// Collapsed: walking viewport — the last closed task leads, then
+					// active work (in-progress / subagent-matched), then following
+					// pending tasks (#5873). Expanded: every task in order.
+					const treeLines = expanded
+						? renderTreeList(
 								{
-									items: selection.items,
+									items: phase.tasks,
+									expanded,
 									itemType: "todo",
-									trailingSummary: selection.summary,
-									renderItem: todo =>
-										formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame, isMatched(todo)),
+									renderItem: todo => formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame),
 								},
 								uiTheme,
-							);
-						})();
-				for (const line of treeLines) {
-					bodyLines.push(`${indent}${line}`);
+							)
+						: (() => {
+								const selection = selectCollapsedTodos(phase.tasks, isMatched, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+								return renderTreeList(
+									{
+										items: selection.items,
+										itemType: "todo",
+										trailingSummary: selection.summary,
+										renderItem: todo =>
+											formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame, isMatched(todo)),
+									},
+									uiTheme,
+								);
+							})();
+					for (const line of treeLines) {
+						bodyLines.push(`${indent}${line}`);
+					}
 				}
-			}
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: options.isPartial ? "partial" : "success",
-				borderColor: "borderMuted",
-				applyBg: false,
-			};
-		});
+				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: options.isPartial ? "partial" : "success",
+					borderColor: "borderMuted",
+					applyBg: false,
+				};
+			},
+			{ flat: options.renderContext?.flat === true },
+		);
 	},
 	describeCall(args: TodoRenderArgs): NativeToolView {
 		const ops = normalizeTodoArg(args).map(e => {

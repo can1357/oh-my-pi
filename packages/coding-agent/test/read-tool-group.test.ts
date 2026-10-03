@@ -6,7 +6,10 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 import { ReadToolGroupComponent, readArgsCollapseIntoGroup } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
 import { cfgReadToolResultPreview } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -382,6 +385,99 @@ describe("ReadToolGroupComponent", () => {
 		expect(extractLinkUris(rendered)).toContain(previewUri);
 		expect(extractLinkTexts(rendered)).toContain("src/preview.ts");
 		expect(extractLinkTexts(rendered)).not.toContain("src/preview.ts:20-22");
+	});
+	it("keeps failed grouped reads full-detail in the flat opencode layout", () => {
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		component.updateArgs({ path: "/tmp/ok.ts" }, "read-ok");
+		component.updateResult({ content: [{ type: "text", text: "line 1\nline 2" }] }, false, "read-ok");
+		component.updateArgs({ path: "/tmp/missing.ts" }, "read-fail");
+		component.updateResult(
+			{ content: [{ type: "text", text: "ENOENT: no such file or directory" }], isError: true },
+			false,
+			"read-fail",
+		);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+
+		// Successful reads collapse to their one-line flat row…
+		expect(rendered).toContain("→ Read /tmp/ok.ts");
+		expect(rendered).not.toContain("line 1");
+		// …but a failed read keeps its actionable error message visible.
+		expect(rendered).toContain("Read /tmp/missing.ts");
+		expect(rendered).toContain("ENOENT: no such file or directory");
+	});
+
+	it("keeps selector line targets on flat opencode row hyperlinks", () => {
+		cfgTuiHyperlinks.override(settings, "always");
+		// Only the VS Code URI form carries a line position (plain file: URIs stay query-free).
+		const originalTerminalId = Object.getOwnPropertyDescriptor(TERMINAL, "id");
+		Object.defineProperty(TERMINAL, "id", { value: "vscode", configurable: true });
+		try {
+			const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+			const examplePath = path.resolve("/workspace/src/example.ts");
+			component.updateArgs({ path: "src/example.ts:50-70" }, "read-flat-link");
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "line 50" }],
+					details: { meta: { source: { type: "path", value: examplePath } } },
+				},
+				false,
+				"read-flat-link",
+			);
+
+			const rendered = component.render(120).join("\n");
+
+			expect(Bun.stripANSI(rendered)).toContain("Read src/example.ts:50-70");
+			expect(extractLinkUris(rendered)).toContain(fileUriForTerminal(examplePath, { line: 50 }, "vscode"));
+		} finally {
+			if (originalTerminalId) Object.defineProperty(TERMINAL, "id", originalTerminalId);
+		}
+	});
+
+	it("truncates over-wide flat opencode rows to a single line", () => {
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		const longPath = `/tmp/${"deeply-nested-".repeat(12)}dir/file\twith-tabs.ts`;
+		component.updateArgs({ path: longPath }, "read-wide");
+		component.updateResult({ content: [{ type: "text", text: "content" }] }, false, "read-wide");
+
+		const lines = component.render(40);
+
+		// The advertised one-line entry stays one line at the render width, with
+		// tabs sanitized so a pathological path cannot wrap or corrupt the row.
+		expect(lines).toHaveLength(1);
+		expect(Bun.stringWidth(Bun.stripANSI(lines[0]!))).toBeLessThanOrEqual(40);
+		expect(lines[0]!).not.toContain("\t");
+	});
+
+	it("restores the grouped view when the flat group is expanded", () => {
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		component.updateArgs({ path: "/tmp/a.ts" }, "read-a");
+		component.updateResult({ content: [{ type: "text", text: "alpha" }] }, false, "read-a");
+		component.updateArgs({ path: "/tmp/b.ts" }, "read-b");
+		component.updateResult({ content: [{ type: "text", text: "beta" }] }, false, "read-b");
+
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("→ Read /tmp/a.ts");
+
+		component.setExpanded(true);
+		const grouped = Bun.stripANSI(component.render(120).join("\n"));
+		expect(grouped).toContain("Read (2)");
+	});
+
+	it("renders ascii-preset flat rows with the ascii read glyph", async () => {
+		const baseTheme = await themeModule.getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		themeModule.setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+			component.updateArgs({ path: "/tmp/a.ts" }, "read-ascii");
+			component.updateResult({ content: [{ type: "text", text: "alpha" }] }, false, "read-ascii");
+
+			const rendered = Bun.stripANSI(component.render(120).join("\n"));
+			expect(rendered).toContain("-> Read /tmp/a.ts");
+			expect(rendered).toMatch(/^[\x20-\x7E\n]*$/);
+		} finally {
+			themeModule.setThemeInstance(baseTheme);
+		}
 	});
 });
 

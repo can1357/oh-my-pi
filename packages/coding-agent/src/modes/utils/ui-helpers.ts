@@ -300,6 +300,7 @@ export class UiHelpers {
 							images,
 							liveSteered: message.role === "user" && message.liveSteered === true,
 							timestamp: message.timestamp,
+							layout: () => this.ctx.layoutMode,
 						});
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
@@ -553,6 +554,7 @@ export class UiHelpers {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
 									showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
+									layout: () => this.ctx.layoutMode,
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
 								this.ctx.chatContainer.addChild(readGroup);
@@ -567,6 +569,7 @@ export class UiHelpers {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
 									showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
+									layout: () => this.ctx.layoutMode,
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
 								this.ctx.chatContainer.addChild(readGroup);
@@ -612,6 +615,7 @@ export class UiHelpers {
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 							showImages: cfgTerminalShowImages.get(settings),
+							layout: () => this.ctx.layoutMode,
 						},
 						tool,
 						this.ctx.ui,
@@ -686,6 +690,7 @@ export class UiHelpers {
 						if (!readGroup) {
 							readGroup = new ReadToolGroupComponent({
 								showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
+								layout: () => this.ctx.layoutMode,
 							});
 							readGroup.setExpanded(this.ctx.toolOutputExpanded);
 							this.ctx.chatContainer.addChild(readGroup);

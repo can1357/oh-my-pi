@@ -119,7 +119,7 @@ export const goalToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: GoalToolDetails; isError?: boolean },
-		_options: RenderResultOptions,
+		options: RenderResultOptions,
 		uiTheme: Theme,
 		args?: GoalRenderArgs,
 	): Component {
@@ -130,12 +130,16 @@ export const goalToolRenderer = {
 
 		if (result.isError) {
 			const header = renderStatusLine({ icon: "error", title: "Goal", description }, uiTheme);
-			return framedToolCard(uiTheme, () => ({
-				header,
-				sections: [{ content: formatErrorDetail(fallbackText || "Goal tool failed", uiTheme).split("\n") }],
-				phase: "error",
-				borderColor: "error",
-			}));
+			return framedToolCard(
+				uiTheme,
+				() => ({
+					header,
+					sections: [{ content: formatErrorDetail(fallbackText || "Goal tool failed", uiTheme).split("\n") }],
+					phase: "error",
+					borderColor: "error",
+				}),
+				{ flat: options.renderContext?.flat === true },
+			);
 		}
 
 		const goal = details?.goal ?? null;
@@ -178,12 +182,16 @@ export const goalToolRenderer = {
 			sections.push({ label: "Report", content: report.split("\n").map(line => uiTheme.fg("muted", line)) });
 		}
 
-		return framedToolCard(uiTheme, () => ({
-			header,
-			sections,
-			phase: "success",
-			borderColor: "borderMuted",
-		}));
+		return framedToolCard(
+			uiTheme,
+			() => ({
+				header,
+				sections,
+				phase: "success",
+				borderColor: "borderMuted",
+			}),
+			{ flat: options.renderContext?.flat === true },
+		);
 	},
 
 	describeCall(args: GoalRenderArgs): NativeToolView {
