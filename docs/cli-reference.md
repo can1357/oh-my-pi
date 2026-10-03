@@ -145,6 +145,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--auto-approve`, `--yolo` | Force yolo tier approval; explicit tool/user policies and provider safety checks still apply. |
 | `--advisor` | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md). |
 | `--max-time <duration>` | Stop the session after this duration (e.g. `600`, `10m`, `1h`). |
+| `--spinner-interval <ms>` | Milliseconds between spinner frames while the agent works — the working row, live tool cards, the status-line brand spinner, and the terminal title (default `80`; `0` shows static glyphs). Overrides `tui.spinnerInterval` for this run; `PI_SPINNER_INTERVAL`, when set, takes precedence over both. |
 
 #### Extensions, hooks, skills, and rules
 

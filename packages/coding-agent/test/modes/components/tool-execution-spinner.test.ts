@@ -8,7 +8,11 @@ import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { SPINNER_ADVANCE_MS } from "@oh-my-pi/pi-tui/components/loader";
+import {
+	DEFAULT_SPINNER_INTERVAL_MS,
+	setSpinnerInterval,
+	SPINNER_INTERVAL_STATIC,
+} from "@oh-my-pi/pi-tui/spinner-clock";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -197,17 +201,54 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		);
 
 		try {
-			const spinnerTimers = setIntervalSpy.mock.calls.filter(([, ms]) => ms === SPINNER_ADVANCE_MS).length;
+			const spinnerTimers = setIntervalSpy.mock.calls.filter(([, ms]) => ms === DEFAULT_SPINNER_INTERVAL_MS).length;
 			// One shared ticker for all three live blocks, not three.
 			expect(spinnerTimers).toBe(1);
 
 			// A single tick repaints every registered block in lockstep.
-			vi.advanceTimersByTime(SPINNER_ADVANCE_MS);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
 			for (const requestComponentRender of renders) {
 				expect(requestComponentRender).toHaveBeenCalledTimes(1);
 			}
 		} finally {
 			for (const component of components) component.stopAnimation();
+		}
+	});
+
+	it("follows the shared spinner clock live: a slower interval re-arms the ticker, a static one stops it", () => {
+		vi.useFakeTimers();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"eval",
+			{ language: "py", code: "import time\ntime.sleep(10)" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+		try {
+			// Slowed to 1 s: the default-period ticks no longer fire, the new period does.
+			setSpinnerInterval(1000);
+			requestComponentRender.mockClear();
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 5);
+			expect(requestComponentRender).toHaveBeenCalledTimes(0);
+			vi.advanceTimersByTime(1000 - DEFAULT_SPINNER_INTERVAL_MS * 5);
+			expect(requestComponentRender).toHaveBeenCalledTimes(1);
+
+			// Static: one repaint pins frame 0, then no timer ticks at all.
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			expect(requestComponentRender).toHaveBeenCalledTimes(2);
+			vi.advanceTimersByTime(10_000);
+			expect(requestComponentRender).toHaveBeenCalledTimes(2);
+			expect(vi.getTimerCount()).toBe(0);
+
+			// Back to the default: the shared ticker is re-armed at the default period.
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(requestComponentRender).toHaveBeenCalledTimes(3);
+		} finally {
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+			component.stopAnimation();
 		}
 	});
 
