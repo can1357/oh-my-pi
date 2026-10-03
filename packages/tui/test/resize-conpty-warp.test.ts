@@ -177,6 +177,9 @@ describe("resize on Warp hosted by Windows ConPTY", () => {
 		// from the grid it owns, so the reply carries the tag column after all.
 		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
 		const { terminal, tui, renderScheduler, writes } = startRig();
+		// A rebuild settle repaints from row zero and needs no anchor; the probe
+		// serves every settle that repaints over retained history.
+		tui.setResizeScrollback("preserve");
 		try {
 			renderScheduler.settle();
 			writes.length = 0;

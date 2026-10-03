@@ -116,6 +116,7 @@ import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
@@ -2173,6 +2174,27 @@ export class SelectorController {
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
 			return { component: selector, focus: selector };
+		});
+	}
+
+	showThinkingSelector(): void {
+		const configured = this.ctx.session.configuredThinkingLevel();
+		this.showSelector(done => {
+			const selector = new ThinkingSelectorComponent(
+				configured === ThinkingLevel.Inherit ? ThinkingLevel.Off : configured,
+				this.ctx.session.getAvailableEffortSelectors(),
+				level => {
+					done();
+					// thinking_level_changed refreshes the status line and editor border.
+					this.ctx.session.setThinkingLevel(level);
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
 		});
 	}
 

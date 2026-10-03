@@ -28,12 +28,14 @@ provider "cursor" {
 		}
 	}
 	// GetUsableModels advertises no input modalities or context windows.
-	// K3 (including the bare `k3` alias Cursor serves) is natively
-	// multimodal and 1M-context.
+	// Reviewed full-context K3 aliases are multimodal and 1M-context.
+	// K3 family identity alone does not verify other Cursor SKUs such as k3-256k.
 	class "kimi" {
 		family "k3" {
-			input-modalities "text" "image"
-			context-window-floor 1000000
+			models "*kimi-k3*" "k3" "*/k3" {
+				input-modalities "text" "image"
+				context-window-floor 1000000
+			}
 		}
 		family "k2.7-code" {
 			// Cursor advertised Kimi K2.7 Code Context window 262k.
@@ -55,10 +57,6 @@ provider "cursor" {
 			// raises unlabeled -fast variants from the 200k default.
 			context-window-floor 272000
 		}
-	}
-	models "k3" "*/k3" {
-		input-modalities "text" "image"
-		context-window-floor 1000000
 	}
 	models "default" {
 		context-window-floor 256000

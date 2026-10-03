@@ -361,20 +361,6 @@ export function buildJobResult(
 	};
 }
 
-/** Bare `wait` with no running jobs and nobody who could message: nothing to block on. */
-export function nothingToWaitForResult(session: ToolSession): AgentToolResult<CoordinationDetails> {
-	const agents = runningAgentsOutsideJobs(session);
-	const lines: string[] = ["No running background jobs to wait for."];
-	if (agents.length > 0) {
-		lines.push("", ...describeAgents(agents));
-	}
-	return {
-		content: [{ type: "text", text: lines.join("\n") }],
-		details: { op: "wait", jobs: [], ...(agents.length ? { agents } : {}) },
-		...(agents.length === 0 ? { useless: true } : {}),
-	};
-}
-
 /** `cancel`: kill the named jobs; returns immediately with outcomes + snapshots. */
 export async function executeCancel(
 	session: ToolSession,

@@ -104,7 +104,8 @@ describe("issue #4806 command output during streaming", () => {
 			await mode.handleChangelogCommand("full");
 			expect(mode.ui.overlayStack).toHaveLength(1);
 			// The sheet body is the terminal's scroller; Page Down reaches it as a scroll request.
-			const bodyScroll = () => (sheet()?.describe?.({ supports: () => true } as never) as Described).c?.[0]?.scroll;
+			const bodyScroll = () =>
+				(sheet()?.describe?.({ supports: () => true } as never) as Described | undefined)?.c?.[0]?.scroll;
 			expect(bodyScroll()).toBeUndefined();
 			sheet()?.handleInput?.("\x1b[6~");
 			expect(bodyScroll()).toEqual({ by: "page-down", n: 1 });

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
@@ -32,6 +33,8 @@ describe("extension runtime setting overrides", () => {
 	afterEach(() => {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// `Settings.init` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
+		AgentStorage.close();
 		tempDir?.removeSync();
 		tempDir = undefined;
 	});

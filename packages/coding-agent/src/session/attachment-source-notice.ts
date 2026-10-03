@@ -5,10 +5,17 @@ import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with {
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
 import { IMAGE_ATTACHMENT_TYPE, VIDEO_ATTACHMENT_TYPE } from "./queued-messages";
 
+/** Structured copy of the notice's attachment index and source path for transcript renderers. */
+export interface AttachmentSourceNoticeDetails {
+	index: number;
+	path: string;
+}
+
 /** Model-facing notice naming the file behind an image or video attachment. */
 export interface AttachmentSourceNotice {
 	customType: typeof IMAGE_ATTACHMENT_TYPE | typeof VIDEO_ATTACHMENT_TYPE;
 	content: string;
+	details: AttachmentSourceNoticeDetails;
 }
 
 /**
@@ -30,5 +37,6 @@ export function renderAttachmentSourceNotice(
 			path: source.path,
 			askAnswer: options?.askAnswer,
 		}),
+		details: { index, path: source.path },
 	};
 }

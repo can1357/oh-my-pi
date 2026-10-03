@@ -5530,7 +5530,10 @@ const ANTHROPIC_TOOL_SCHEMA_STRING_FORMATS = new Set([
 	"ipv6",
 	"uuid",
 ]);
-const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["bash", "python", "edit", "find"]);
+// Not `bash`: strict decoding fixes property order, so an optional key declared
+// before one the model has already written can no longer be emitted, and bash's
+// `timeout` vanished from every `async`-first call.
+const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["python", "edit", "find"]);
 const MAX_ANTHROPIC_STRICT_TOOLS = 20;
 const MAX_ANTHROPIC_STRICT_OPTIONAL_PARAMETERS = 24;
 const MAX_ANTHROPIC_STRICT_UNION_PARAMETERS = 16;

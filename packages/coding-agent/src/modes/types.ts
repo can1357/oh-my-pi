@@ -47,7 +47,6 @@ import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-mark
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import type { ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import type { RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
@@ -90,8 +89,6 @@ export interface InteractiveModeInitOptions {
 	clearInitialTerminalHistory?: boolean;
 	/** Opt into hosting when the caller owns outer startup readiness and shutdown. */
 	autoStartCollab?: boolean;
-	/** Recent-session rows loaded by the prepaint composer while runtime modules initialized. */
-	recentSessions?: Promise<RecentSession[] | undefined>;
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;
@@ -494,6 +491,8 @@ export interface InteractiveModeContext {
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
+	/** Open the `/effort` picker over the levels the current model accepts. */
+	showThinkingSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */
 	prepareSessionSwitch(): Promise<void>;
