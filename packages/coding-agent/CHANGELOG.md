@@ -27,6 +27,8 @@
 - Answering `c` during a `/guided-goal` interview reaches the session even when a command is named `c`: with `input.bareSlashCommands` on, the answer used to wait for a second Enter, or run `/c` outright on a fresh session and be lost without a status line ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit))
 - Collab guests no longer run or recall host-only commands: a command the guest gates refuse is neither recorded in `Up` history nor executed on the Ctrl+Enter path (`/new`, `/model …`, `/skill:…`). Queuing one with `->` or `=>` still records the queued text ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+- Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
