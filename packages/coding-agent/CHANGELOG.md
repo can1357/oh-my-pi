@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- Fixed browser `check()`, `uncheck()` and `click()` failing on custom-styled checkboxes and radios: a left click that lands on the control's own label (not on a link or button inside it) is no longer refused as covered, and `check()`/`uncheck()` click an `opacity:0` input where its drawn box is instead of waiting out the timeout ([#14231](https://github.com/can1357/oh-my-pi/pull/14231) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.5.1] - 2026-10-03
 

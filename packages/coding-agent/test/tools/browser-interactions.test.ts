@@ -194,4 +194,82 @@ return {
 			await prelude.invoke({ action: "close", name: STARVED_TAB_NAME, kill: true }, context).catch(() => undefined);
 		}
 	}, 40_000);
+
+	test("checks custom-styled checkboxes where their drawn box is, for the left button only", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-custom-checkbox" };
+		const tabName = `custom-checkbox-${crypto.randomUUID()}`;
+		// #faded: the real input is opacity:0 under a drawn box. #covered: a span inside the label is drawn over the input.
+		// #terms: like #faded, but most of the label is a link that must not be followed.
+		// #nested: a button inside the label is drawn over the input; it takes the click itself, so the input is covered.
+		// #shadowed: the same with a link whose icon draws in a shadow root, so the hit is inside that shadow tree.
+		const customHtml = `<!doctype html><style>label { position: relative; display: block; padding: 4px 24px } input { position: absolute; left: 4px; top: 4px; margin: 0 } .box { position: absolute; left: 2px; top: 2px; width: 18px; height: 18px; background: #fff; border: 1px solid #333 }</style>
+<label><input id="faded" type="checkbox" style="opacity:0"><span style="position:absolute;left:4px;top:4px;width:14px;height:14px;border:1px solid #333"></span>Faded option</label>
+<label><input id="covered" type="checkbox"><span class="box"></span>Covered option</label>
+<label style="display:inline-block"><input id="terms" type="checkbox" style="opacity:0"><span class="box"></span>I agree to the <a href="#terms-page">Terms of Service and Privacy Policy</a></label>
+<label><input id="nested" type="checkbox"><button class="box" type="button"></button>Nested option</label>
+<label><input id="shadowed" type="checkbox"><a class="box" href="#tos"><x-icon></x-icon></a>Shadowed option</label>
+<script>customElements.define("x-icon", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = '<span style="display:block;width:18px;height:18px"></span>'; } });</script>
+<script>
+window.changes = 0;
+window.links = 0;
+document.addEventListener("change", event => { if (event.isTrusted) changes++; });
+document.addEventListener("click", event => { if (event.target.closest("a")) { links++; event.preventDefault(); } });
+</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(customHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.check("#faded");
+await tab.check("#covered");
+await tab.uncheck("#covered");
+await tab.click("#covered");
+await tab.check("#terms");
+const refusal = async click => {
+	try {
+		await click();
+		return "pressed";
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+};
+const nested = await refusal(() => tab.click("#nested"));
+const shadowed = await refusal(() => tab.click("#shadowed"));
+const { elements } = await tab.observe();
+const covered = await tab.id(elements.find(element => element.name === "Covered option").id);
+const rightClick = await refusal(() => covered.click({ button: "right" }));
+const state = await tab.evaluate(() => ({
+	faded: document.querySelector("#faded").checked,
+	covered: document.querySelector("#covered").checked,
+	terms: document.querySelector("#terms").checked,
+	changes: window.changes,
+	links: window.links,
+}));
+return { ...state, nested, shadowed, rightClick };`,
+					timeout: 15,
+				},
+				context,
+			);
+			const value = valueFrom<Record<string, unknown>>(result);
+			expect(value).toMatchObject({
+				faded: true,
+				covered: true,
+				terms: true,
+				// One trusted change per call: a state forced through the DOM fires an untrusted one.
+				changes: 5,
+				links: 0,
+			});
+			expect(value.nested).toContain("covered by <button.box>");
+			expect(value.shadowed).toContain("covered by");
+			expect(value.rightClick).toContain("covered by <span.box>");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
 });

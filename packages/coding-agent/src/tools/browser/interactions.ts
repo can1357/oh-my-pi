@@ -12,6 +12,15 @@ export interface ClickAtOptions {
 	clickCount?: number;
 }
 
+/** Options accepted by element clicks. */
+export interface ElementClickOptions extends ClickAtOptions {
+	/**
+	 * Accept an `opacity:0` element. A custom checkbox keeps its real input transparent under a drawn
+	 * box, so `check()` clicks the input's own box and lands on whatever the page draws there.
+	 */
+	transparent?: boolean;
+}
+
 /** Options accepted by pointer movement. */
 export interface MouseMoveOptions {
 	/** Number of intermediate movement events. */
@@ -81,6 +90,8 @@ interface PageElement {
 	checked: boolean;
 	files: unknown;
 	inert: boolean;
+	readonly labels?: ArrayLike<PageElement> | null;
+	matches(selector: string): boolean;
 	readonly classList: ArrayLike<string>;
 	readonly dataset: Record<string, string>;
 	readonly style: Record<string, string>;
@@ -123,10 +134,20 @@ function requireFiniteNumber(value: number, label: string): void {
 	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
 }
 
-/** Return a visible point relative to the element's box, or explain why it cannot receive a click. */
-export async function isClickActionable(handle: ElementHandle, signal?: AbortSignal): Promise<ActionabilityResult> {
+/**
+ * Return a visible point relative to the element's box, or explain why it cannot receive a click.
+ * A hit on one of the control's own `<label>`s counts as on-target for the left button only: the
+ * label forwards a left click to its control, but no other button, and not when the hit is other
+ * interactive content inside the label (a link or button there takes the click itself).
+ */
+export async function isClickActionable(
+	handle: ElementHandle,
+	signal?: AbortSignal,
+	options: Pick<ElementClickOptions, "button" | "transparent"> = {},
+): Promise<ActionabilityResult> {
+	const flags = { viaLabel: (options.button ?? "left") === "left", transparent: options.transparent === true };
 	return (await untilAborted(signal, () =>
-		handle.evaluate(el => {
+		handle.evaluate((el, { viaLabel, transparent }) => {
 			const element = el as unknown as PageElement;
 			const page = globalThis as unknown as PageGlobals;
 			const style = page.getComputedStyle(element);
@@ -135,7 +156,7 @@ export async function isClickActionable(handle: ElementHandle, signal?: AbortSig
 				return { ok: false as const, reason: `visibility:${style.visibility}` };
 			}
 			if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
-			if (Number(style.opacity) === 0) return { ok: false as const, reason: "opacity:0" };
+			if (!transparent && Number(style.opacity) === 0) return { ok: false as const, reason: "opacity:0" };
 			const rect = element.getBoundingClientRect();
 			if (rect.width < 1 || rect.height < 1) return { ok: false as const, reason: "zero-size" };
 			const left = Math.max(0, Math.min(page.innerWidth, rect.left));
@@ -160,7 +181,29 @@ export async function isClickActionable(handle: ElementHandle, signal?: AbortSig
 				}
 				return false;
 			};
-			if (!composedContains(element, topElement) && !composedContains(topElement, element)) {
+			// A label forwards a click to its control unless the click lands on other interactive content
+			// inside it (HTML label activation behaviour). Walks the composed tree like composedContains.
+			const hit: PageElement = topElement;
+			const forwardedBy = (owner: PageElement): boolean => {
+				for (let current: PageElement | null = hit, depth = 0; current && depth < 64; depth++) {
+					if (current === owner) return true;
+					if (
+						current.matches(
+							'a[href], area[href], button, details, embed, iframe, input:not([type="hidden"]), label, select, textarea, summary, audio[controls], video[controls], [contenteditable=""], [contenteditable="true"]',
+						)
+					) {
+						return false;
+					}
+					const root: PageRoot = current.getRootNode();
+					current = current.parentElement ?? root.host ?? null;
+				}
+				return false;
+			};
+			const onTarget =
+				composedContains(element, topElement) ||
+				composedContains(topElement, element) ||
+				(viaLabel && Array.from(element.labels ?? []).some(forwardedBy));
+			if (!onTarget) {
 				const tag = topElement.tagName.toLowerCase();
 				const id = topElement.id ? `#${topElement.id}` : "";
 				const classes = Array.from(topElement.classList)
@@ -170,11 +213,16 @@ export async function isClickActionable(handle: ElementHandle, signal?: AbortSig
 				return { ok: false as const, reason: "covered", coveredBy: `<${tag}${id}${classes}>` };
 			}
 			return { ok: true as const, x: x - rect.left, y: y - rect.top };
-		}),
+		}, flags),
 	)) as ActionabilityResult;
 }
 
-async function actionableClickPoint(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<ClickPoint> {
+async function actionableClickPoint(
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+	options: ElementClickOptions,
+): Promise<ClickPoint> {
 	await untilAborted(signal, () =>
 		handle.evaluate(el => {
 			const element = el as unknown as PageElement;
@@ -193,7 +241,7 @@ async function actionableClickPoint(handle: ElementHandle, label: string, signal
 			Math.abs(previous.y - current.y) < 0.5 &&
 			Math.abs(previous.width - current.width) < 0.5 &&
 			Math.abs(previous.height - current.height) < 0.5;
-		const result = await isClickActionable(handle, signal);
+		const result = await isClickActionable(handle, signal, options);
 		// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
 		if (stable && result.ok && current) return { x: current.x + result.x, y: current.y + result.y };
 		if (stable && !result.ok && result.coveredBy) {
@@ -209,9 +257,9 @@ export async function clickElement(
 	handle: ElementHandle,
 	label: string,
 	signal?: AbortSignal,
-	options: ClickAtOptions = {},
+	options: ElementClickOptions = {},
 ): Promise<void> {
-	const point = await actionableClickPoint(handle, label, signal);
+	const point = await actionableClickPoint(handle, label, signal, options);
 	await untilAborted(signal, () =>
 		handle.frame.page().mouse.click(point.x, point.y, {
 			button: options.button,
@@ -355,7 +403,7 @@ export async function setElementChecked(
 		);
 		return;
 	}
-	await clickElement(handle, label, signal);
+	await clickElement(handle, label, signal, { transparent: true });
 	await untilAborted(signal, () =>
 		handle.evaluate((el, desired) => {
 			const element = el as unknown as PageElement;
