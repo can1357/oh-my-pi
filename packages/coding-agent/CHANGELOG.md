@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded each collab guest's queued welcomes and replies so slow connections cannot end sharing for the room; large-session joins remain usable and undeliverable guest questions settle as unavailable ([#11371](https://github.com/can1357/oh-my-pi/pull/11371) by [@iliaal](https://github.com/iliaal)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
