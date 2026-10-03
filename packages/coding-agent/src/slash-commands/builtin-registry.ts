@@ -1,3 +1,4 @@
+import { cfgCommandsHidden } from "../extensibility/settings";
 import { clearSubmittedText } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
@@ -37,6 +38,7 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 	getInlineHint?: (argumentText: string) => string | null;
 	getAutocompleteDescription?: () => string | undefined;
+	hidden?: boolean;
 }
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
@@ -119,7 +121,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<TuiBuiltinSlashCommand> = BUI
 );
 
 export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): ReadonlyArray<TuiBuiltinSlashCommand> {
-	return BUILTIN_SLASH_COMMAND_DEFS.map(cmd => materializeTuiBuiltinSlashCommand(cmd, runtime));
+	const hidden = cfgCommandsHidden.get(runtime.ctx);
+	return BUILTIN_SLASH_COMMAND_DEFS.map(cmd => ({
+		...materializeTuiBuiltinSlashCommand(cmd, runtime),
+		hidden: hidden.includes(cmd.name),
+	}));
 }
 
 /**

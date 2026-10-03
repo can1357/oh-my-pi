@@ -1,6 +1,7 @@
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import type { SkillsSettings } from "../extensibility/settings";
+import type { Settings } from "../config/settings";
+import { cfgCommandsHidden, type SkillsSettings } from "../extensibility/settings";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
@@ -20,6 +21,7 @@ export interface InternalAvailableSlashCommand {
 }
 
 export interface AvailableCommandsSession {
+	readonly settings: Settings;
 	readonly extensionRunner?: ExtensionRunner;
 	readonly customCommands: ReadonlyArray<LoadedCustomCommand>;
 	readonly mcpPromptCommands?: ReadonlyArray<LoadedCustomCommand>;
@@ -43,8 +45,9 @@ export async function buildAvailableSlashCommands(
 		commands.push(command);
 	};
 
+	const hidden = cfgCommandsHidden.get(session);
 	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
-		if (!command.handle) continue;
+		if (!command.handle || hidden.includes(command.name)) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
 			name: command.name,
@@ -54,12 +57,10 @@ export async function buildAvailableSlashCommands(
 			subcommands: command.subcommands,
 			source: "builtin",
 		});
-		// ACP dispatch resolves builtin aliases before `session.prompt()` sees the
-		// input, so a custom/file command sharing an alias would be advertised but
-		// never run. Reserve aliases here too; TUI-only builtins are skipped above,
-		// so their aliases stay available.
-		for (const alias of command.aliases ?? []) seenNames.add(alias);
 	}
+	// ACP dispatch resolves builtin names and aliases (hidden too) before `session.prompt()`,
+	// so a custom/file command sharing one would be advertised but never run.
+	for (const name of ACP_BUILTIN_RESERVED_NAMES) seenNames.add(name);
 
 	if (session.skillsSettings?.enableSkillCommands) {
 		for (const skill of session.skills) {

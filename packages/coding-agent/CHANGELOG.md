@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `commands.hidden` to hide listed built-in slash commands (e.g. `[security, goal, guided-goal]`) from the palette, autocomplete, and ACP command list; typed commands still run ([#14152](https://github.com/can1357/oh-my-pi/pull/14152) by [@sethmorton](https://github.com/sethmorton))
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

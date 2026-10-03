@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SlashCommand.hidden`: the command is left out of name suggestions, and typing its exact name submits it as typed instead of completing to a fuzzy match ([#14152](https://github.com/can1357/oh-my-pi/pull/14152) by [@sethmorton](https://github.com/sethmorton))
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

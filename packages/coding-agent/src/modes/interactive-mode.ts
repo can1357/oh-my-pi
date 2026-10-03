@@ -2408,7 +2408,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.subscribeCommandMetadataChanged(() => {
 				// Skills/commands rediscovery (live `skills.*`/`commands.*`/extension edits,
 				// `/move`, manage_skill, MCP prompts) lands here; rebuild the picker from session state.
-				this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 				this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
 				this.ui.requestRender();
 			}),
@@ -2600,8 +2599,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * the session's current file-based slash commands and prompt templates.
 	 */
 	#rebuildSlashCommandAutocomplete(basePath: string): void {
-		if (theme.getSymbolPreset() !== this.#slashIconPreset)
-			this.#pendingSlashCommands = this.#buildPendingSlashCommands();
+		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 		const fileCommands = this.session.slashCommands;
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
 		const promptIcon = getSlashCommandTypeIcon("prompt");

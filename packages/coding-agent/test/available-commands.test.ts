@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
+import { buildTuiBuiltinSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 
 describe("buildAvailableSlashCommands", () => {
 	test("returns RPC-safe command metadata with stable sources", async () => {
@@ -11,6 +15,7 @@ describe("buildAvailableSlashCommands", () => {
 			command: { name: "server:prompt", description: "MCP prompt" },
 		};
 		const session = {
+			settings: Settings.isolated(),
 			extensionRunner: {
 				getRegisteredCommands: () => [{ name: "ext:hello", description: "Extension hello" }],
 			},
@@ -68,6 +73,7 @@ describe("buildAvailableSlashCommands", () => {
 
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
@@ -96,6 +102,7 @@ describe("buildAvailableSlashCommands", () => {
 
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
@@ -112,6 +119,7 @@ describe("buildAvailableSlashCommands", () => {
 	test("classifies MCP prompts by path and bundled custom commands as custom", async () => {
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [
 					{
 						path: "mcp:server/prompt",
@@ -141,6 +149,7 @@ describe("buildAvailableSlashCommands", () => {
 	test("keeps legacy custom command fixtures without a path classified as custom", async () => {
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [{ command: { name: "legacy", description: "Legacy fixture" } }],
 				skills: [],
 				sessionManager: { getCwd: () => process.cwd() },
@@ -159,6 +168,7 @@ describe("buildAvailableSlashCommands", () => {
 		const fileCommands = [{ name: "models", description: "My models note", content: "body", source: "test" }];
 		const commands = await buildAvailableSlashCommands(
 			{
+				settings: Settings.isolated(),
 				customCommands: [{ command: { name: "plugin", description: "My plugin helper" } }],
 				skills: [],
 				sessionManager: { getCwd: () => "/tmp" },
@@ -173,4 +183,31 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName.plugins.source).toBe("builtin");
 		expect(byName.plugins.aliases).toEqual(["plugin"]);
 	});
+
+	test("hides commands.hidden builtins from ACP while keeping their names reserved", async () => {
+		const commands = await buildAvailableSlashCommands(
+			{
+				settings: Settings.isolated({ "commands.hidden": ["security", "plugins"] }),
+				customCommands: [{ command: { name: "security" } }, { command: { name: "plugin" } }],
+				skills: [],
+				sessionManager: { getCwd: () => process.cwd() },
+				setSlashCommands() {},
+			} as never,
+			async () => [],
+		);
+		const names = commands.map(command => command.name);
+		// Typed `/security` and `/plugin` still run the builtin, so no shadow may be advertised.
+		expect(names).not.toContain("security");
+		expect(names).not.toContain("plugins");
+		expect(names).not.toContain("plugin");
+		expect(names).toContain("model");
+	});
+});
+
+test("TUI palette omits hidden builtins but keeps an exact typed name", async () => {
+	const ctx = { settings: Settings.isolated({ "commands.hidden": ["goal"] }) } as InteractiveModeContext;
+	const commands = buildTuiBuiltinSlashCommands({ ctx });
+	expect(commands.filter(command => command.hidden).map(command => command.name)).toEqual(["goal"]);
+	// Enter applies the top match; `/goal` must not be rewritten to another command.
+	expect(new CombinedAutocompleteProvider([...commands]).trySyncSlashCompletion("/goal")).toBeNull();
 });

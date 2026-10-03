@@ -945,6 +945,15 @@ searxng:
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
+### Commands
+
+`commands.hidden` (default `[]`) lists built-in command names, without `/`, to hide (with their aliases) from the palette and ACP/RPC command list. Hidden commands still run when typed.
+
+```yaml
+commands:
+  hidden: [security, goal, guided-goal]
+```
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

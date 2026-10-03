@@ -15,7 +15,7 @@ import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
-import { cfgSkillsCustomDirectories } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import { cfgCommandsHidden, cfgSkillsCustomDirectories } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 
 function createIsolatedSkillsSettings(extensions: string[] = []): Settings {
 	return Settings.isolated({
@@ -273,6 +273,22 @@ This skill is added after session creation.
 		unsubscribe();
 
 		expect(session.systemPrompt.join("\n")).toContain("live-custom-skill");
+	});
+
+	it("a live commands.hidden edit notifies command pickers without restart", async () => {
+		const settings = createIsolatedSkillsSettings();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+		});
+		const announced = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribeCommandMetadataChanged(() => announced.resolve());
+		cfgCommandsHidden.set(settings, ["goal"]);
+		await announced.promise;
+		unsubscribe();
 	});
 
 	it("manage_skill hot-registers managed skills in the active session", async () => {
