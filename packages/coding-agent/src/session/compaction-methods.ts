@@ -40,14 +40,12 @@ export const COMPACTION_METHOD_CHOICES = [
 /** One selectable automatic context-maintenance method. */
 export type CompactionMethod = (typeof COMPACTION_METHOD_CHOICES)[number]["value"];
 
-/** Default fallback order: server-native first, portable summary last. */
-export const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = [
-	"remote",
-	"snapcompact",
-	"handoff",
-	"shake",
-	"soft",
-];
+/**
+ * Default fallback order: server-native first, portable summary last.
+ * Snapcompact is opt-in: it archives visible history only, so models whose
+ * reasoning is elided from replay lose too much to make it a sane default.
+ */
+export const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = ["remote", "handoff", "shake", "soft"];
 
 const COMPACTION_METHODS: Record<CompactionMethod, true> = {
 	remote: true,

@@ -152,7 +152,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		});
 	});
 
-	it("uses snapcompact for a non-OpenAI vision model under the default preference order", async () => {
+	it("does not use snapcompact for a vision model under the default preference order", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			methodOrder: null,
@@ -162,9 +162,9 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 
 		const result = await harness.awaitCompactionEnd();
 
-		expect(result).toEqual({ action: "snapcompact", errorMessage: undefined });
-		expect(compactionModule.compact).not.toHaveBeenCalled();
-		expect(harness.sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(true);
+		// Under the old default, snapcompact was the first eligible method here.
+		expect(result.action).not.toBe("snapcompact");
+		expect(harness.sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
 	});
 
 	it("uses OpenAI server compaction before local fallback methods by default", async () => {
@@ -184,7 +184,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	it("falls through from a failed OpenAI server compaction to snapcompact", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "openai", id: "gpt-5" },
-			methodOrder: null,
+			methodOrder: ["remote", "snapcompact", "soft"],
 		});
 		session = harness.session;
 		vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("server compaction unavailable"));

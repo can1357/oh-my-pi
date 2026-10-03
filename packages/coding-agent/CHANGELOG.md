@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Snapcompact is no longer in the default compaction chain (now server → handoff → shake → soft); add `snapcompact` to `compaction.methodOrder` to opt back in ([#14255](https://github.com/can1357/oh-my-pi/pull/14255) by [@H4vC](https://github.com/H4vC))
+
 ## [18.6.0] - 2026-10-03
 
 ### Added
