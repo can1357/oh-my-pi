@@ -8,6 +8,7 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
+import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -69,10 +70,10 @@ export function formatTaskResultSummary(
 		id: result.id,
 		status,
 		duration: formatDuration(options.totalDurationMs),
-		abortReason: result.aborted ? result.abortReason : undefined,
-		error,
+		abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
+		error: error === undefined ? undefined : escapeHarnessTags(error),
 		resumable,
-		preview,
+		preview: escapeHarnessTags(preview),
 		truncated,
 		meta: result.outputMeta
 			? {
@@ -80,6 +81,6 @@ export function formatTaskResultSummary(
 					charSize: formatBytes(result.outputMeta.charCount),
 				}
 			: undefined,
-		mergeSummary: options.mergeSummary ?? "",
+		mergeSummary: options.mergeSummary === undefined ? "" : escapeHarnessTags(options.mergeSummary),
 	});
 }

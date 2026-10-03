@@ -1721,8 +1721,8 @@ describe("Anthropic request fingerprint alignment", () => {
 	it("keeps OAuth tool names behind the proxy prefix with eager streaming and strict flags", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "run commands",
+				name: "edit",
+				description: "edit files",
 				strict: true,
 				parameters: {
 					type: "object",
@@ -1740,7 +1740,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			tools?: Array<{ name?: string; strict?: boolean; eager_input_streaming?: boolean; cache_control?: unknown }>;
 		};
 
-		expect(payload.tools?.[0]?.name).toBe(`${claudeToolPrefix}bash`);
+		expect(payload.tools?.[0]?.name).toBe(`${claudeToolPrefix}edit`);
 		expect(payload.tools?.[0]?.strict).toBe(true);
 		expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
 		// Sole tool is also the last tool, so it carries the head breakpoint.
@@ -1795,7 +1795,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 	it("marks only the Anthropic strict allowlist strict", async () => {
 		const tools: Tool[] = [
-			...(["bash", "python", "edit", "find"] as const).map(name => ({
+			...(["python", "edit", "find"] as const).map(name => ({
 				name,
 				description: `${name} tool`,
 				strict: true,
@@ -1805,7 +1805,9 @@ describe("Anthropic request fingerprint alignment", () => {
 					required: ["requiredValue"],
 				} as TJsonSchema,
 			})),
-			...(["write", "grep", "read", "task", "todo", "web_search", "ast_grep"] as const).map(name => ({
+			// `bash` is off the allowlist: strict decoding fixes property order, which made
+			// its `timeout` unreachable once a call had written `async`.
+			...(["bash", "write", "grep", "read", "task", "todo", "web_search", "ast_grep"] as const).map(name => ({
 				name,
 				description: `${name} tool`,
 				strict: true,
@@ -1831,15 +1833,15 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		const strictNames = (payload.tools ?? []).filter(tool => tool.strict === true).map(tool => tool.name);
 
-		expect(strictNames).toEqual(["bash", "python", "edit", "find"]);
-		expect(payload.tools?.find(tool => tool.name === "bash")?.input_schema?.required).toEqual(["requiredValue"]);
+		expect(strictNames).toEqual(["python", "edit", "find"]);
+		expect(payload.tools?.find(tool => tool.name === "edit")?.input_schema?.required).toEqual(["requiredValue"]);
 	});
 
 	it("marks regular two-field Zod object tools strict", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "bash tool",
+				name: "edit",
+				description: "edit tool",
 				strict: true,
 				parameters: arkType({
 					command: "string",
@@ -1864,18 +1866,18 @@ describe("Anthropic request fingerprint alignment", () => {
 			}>;
 		};
 
-		const bashTool = payload.tools?.find(tool => tool.name === "bash");
+		const editTool = payload.tools?.find(tool => tool.name === "edit");
 
-		expect(bashTool?.strict).toBe(true);
-		expect(Object.keys(bashTool?.input_schema?.properties ?? {})).toEqual(["command", "cwd"]);
-		expect(bashTool?.input_schema?.required).toEqual(["command", "cwd"]);
+		expect(editTool?.strict).toBe(true);
+		expect(Object.keys(editTool?.input_schema?.properties ?? {})).toEqual(["command", "cwd"]);
+		expect(editTool?.input_schema?.required).toEqual(["command", "cwd"]);
 	});
 
 	it("does not mark allowlisted Anthropic tools strict when schemas contain open object maps", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "bash tool",
+				name: "edit",
+				description: "edit tool",
 				strict: true,
 				parameters: {
 					type: "object",
@@ -1917,11 +1919,11 @@ describe("Anthropic request fingerprint alignment", () => {
 			}>;
 		};
 
-		const bashTool = payload.tools?.find(tool => tool.name === "bash");
+		const editTool = payload.tools?.find(tool => tool.name === "edit");
 		const pythonTool = payload.tools?.find(tool => tool.name === "python");
-		const env = bashTool?.input_schema?.properties?.env as { additionalProperties?: unknown } | undefined;
+		const env = editTool?.input_schema?.properties?.env as { additionalProperties?: unknown } | undefined;
 
-		expect(bashTool?.strict).toBeUndefined();
+		expect(editTool?.strict).toBeUndefined();
 		expect(env?.additionalProperties).toEqual({ type: "string" });
 		expect(pythonTool?.strict).toBe(true);
 		expect(pythonTool?.input_schema?.required).toEqual(["requiredValue"]);
@@ -1930,8 +1932,8 @@ describe("Anthropic request fingerprint alignment", () => {
 	it("honors strict=false and skips non-allowlisted Anthropic tools", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "bash tool",
+				name: "edit",
+				description: "edit tool",
 				strict: false,
 				parameters: {
 					type: "object",

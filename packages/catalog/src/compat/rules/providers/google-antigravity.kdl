@@ -64,7 +64,11 @@ provider "google-antigravity" {
 	models "gemini-3-pro" {
 		thinking-mode "google-level"
 	}
-	models "gemini-3-pro-image" {
+	// Antigravity discovery lists image SKUs beside chat models with no output
+	// modality, so they would build as chat. Accounts advertise either SKU in
+	// `imageGenerationModelIds` (gemini-3.1-flash-image replaced
+	// gemini-3-pro-image on some accounts, #11106).
+	models "gemini-3-pro-image" "gemini-3.1-flash-image" {
 		kind "image"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

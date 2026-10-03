@@ -1163,6 +1163,23 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Write a commit object for `tree` on `parents` without moving any ref or
+	/// touching the index/worktree (`git commit-tree`).
+	#[napi]
+	pub fn commit_tree(
+		&self,
+		tree: String,
+		parents: Vec<String>,
+		message: String,
+		author: Option<VcsCommitAuthor>,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		let author: Option<core::CommitAuthor> = author.map(Into::into);
+		blocking("vcs.commitTree", self.inner.clone(), signal, move |r| {
+			r.commit_tree(&tree, &parents, &message, author.as_ref())
+		})
+	}
+
 	/// Checkout revision.
 	#[napi]
 	pub fn checkout(&self, rev: String, signal: Option<Unknown>) -> Promise<()> {

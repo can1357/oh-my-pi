@@ -179,11 +179,12 @@ import {
 	isRecord,
 	logger,
 	parseJsonWithRepair,
-	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
+import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
@@ -225,7 +226,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
-import { formatConnectEndStreamError } from "./connect-error-detail";
+import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -612,7 +613,17 @@ function classifyConnectError(error: Record<string, unknown>): Error {
 	if (structured) return classifyCursorStructuredError(structured);
 	const code = typeof error.code === "string" ? error.code : "unknown";
 	const message = typeof error.message === "string" ? error.message : "Unknown error";
-	return new ConnectEndStreamError(`Connect error ${code}: ${message}`, formatConnectEndStreamError(error));
+	const endStreamError = new ConnectEndStreamError(
+		`Connect error ${code}: ${message}`,
+		formatConnectEndStreamError(error),
+	);
+	// Without a decodable binary detail, Cursor's retry verdict survives only in
+	// the detail's debug JSON; the classification text drops it, so carry it as
+	// a structured flag.
+	if (hasRetryableCursorErrorDetail(error.details)) {
+		AIError.attach(endStreamError, AIError.create(AIError.Flag.Transient));
+	}
+	return endStreamError;
 }
 
 function parseConnectEndStream(data: Uint8Array): Error | null {
@@ -4442,7 +4453,7 @@ export function flushOpenToolCalls(
 		const idx = output.content.indexOf(block);
 		const partialJson = block[kStreamingPartialJson];
 		if (partialJson !== undefined) {
-			block.arguments = parseStreamingJson(partialJson);
+			block.arguments = parseToolCallArguments(partialJson);
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
@@ -5188,13 +5199,22 @@ export function processInteractionUpdate(
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
 				const partial = settled[kStreamingPartialJson];
 				if (partial) {
-					settled.arguments = parseStreamingJson(partial);
+					settled.arguments = parseToolCallArguments(partial);
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
-				settled.arguments = mergeCursorMcpToolCallArgs(
-					settled.arguments as Record<string, unknown> | undefined,
-					decodedArgs,
-				);
+				if (!isRecord(settled.arguments) || !("__parseError" in settled.arguments)) {
+					settled.arguments = mergeCursorMcpToolCallArgs(settled.arguments, decodedArgs);
+				} else if (
+					decodedArgs &&
+					Object.keys(decodedArgs).length > 0 &&
+					classifyJsonPrefix(partial ?? "") !== "prefix"
+				) {
+					// A buffer that is not a cut-off prefix (e.g. a rewritten snapshot appended
+					// as `{...}{...}`) still has an authoritative completion frame: use it alone,
+					// and let validation reject any oversized key it omitted (#2615). A cut-off
+					// buffer stays refused, since the frame may omit or share its truncation.
+					settled.arguments = decodedArgs;
+				}
 			} else if (settled[kStreamingBlockKind] === "connect-scm") {
 				// The authoritative outcome arrives only here, on the completion's
 				// `ConnectScmResult` oneof. The block was stamped resolved at start,
@@ -5331,7 +5351,9 @@ export function processInteractionUpdate(
  * summed 22 against a final 36 — and never report input, cache, or reasoning
  * tokens, so every bucket the final frame reports replaces the streamed
  * estimate. Unreported counters decode as `undefined`; a frame that reports
- * nothing at all leaves the streamed totals untouched.
+ * nothing at all leaves the streamed totals untouched. `inputTokens` counts the
+ * whole prompt, cache hits and writes included, so fresh input is what remains
+ * after both are taken out.
  */
 function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	const input = Number(update.inputTokens ?? 0n);
@@ -5340,7 +5362,7 @@ function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
 	const cacheWrite = Number(update.cacheWriteTokens ?? 0n);
 	const reasoning = Number(update.reasoningTokens ?? 0n);
 	if (input <= 0 && output <= 0 && cacheRead <= 0 && cacheWrite <= 0) return;
-	if (input > 0) usage.input = input;
+	if (input > 0) usage.input = Math.max(input - cacheRead - cacheWrite, 0);
 	if (output > 0) usage.output = output;
 	if (cacheRead > 0) usage.cacheRead = cacheRead;
 	if (cacheWrite > 0) usage.cacheWrite = cacheWrite;
@@ -5554,18 +5576,33 @@ function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | 
 	);
 }
 
-function buildCursorAssistantContent(
-	msg: AssistantMessage,
-	targetModelId: string | undefined,
-): CursorRootPromptAssistantContentPart[] {
-	const content: CursorRootPromptAssistantContentPart[] = [];
+interface CursorAssistantStep {
+	content: CursorRootPromptAssistantContentPart[];
+	/** Raw (un-normalized) ids of the calls this round issued, in order. */
+	callIds: string[];
+}
+
+/**
+ * Split one assistant message into the model rounds it recorded. A Cursor
+ * server turn persists as a single message whose tool calls interleave with
+ * the text and reasoning that followed each result; a round ends at a call
+ * followed by anything other than another call. Consecutive calls stay in one
+ * round — they were issued together. Hidden reasoning still marks a boundary.
+ */
+function buildCursorAssistantSteps(msg: AssistantMessage, targetModelId: string | undefined): CursorAssistantStep[] {
+	const steps: CursorAssistantStep[] = [];
+	let step: CursorAssistantStep = { content: [], callIds: [] };
 	const replayThinking = canReplayCursorThinking(msg, targetModelId);
 	for (const item of msg.content) {
+		if (item.type !== "toolCall" && step.callIds.length > 0) {
+			steps.push(step);
+			step = { content: [], callIds: [] };
+		}
 		if (item.type === "text") {
-			if (item.text) content.push({ type: "text", text: item.text });
+			if (item.text) step.content.push({ type: "text", text: item.text });
 		} else if (item.type === "thinking") {
 			if (replayThinking && item.thinking) {
-				content.push({
+				step.content.push({
 					type: "reasoning",
 					text: item.thinking,
 					providerOptions: { cursor: { modelName: msg.model } },
@@ -5579,15 +5616,17 @@ function buildCursorAssistantContent(
 			// gets the whole Run rejected as opaque resource_exhausted. Sanitize the
 			// id everywhere it reaches the wire; the tool-result side normalizes the
 			// same id identically, so the call/result pairing stays intact.
-			content.push({
+			step.content.push({
 				type: "tool-call",
 				toolCallId: normalizeToolCallId(item.id),
 				toolName: item.name,
 				args: normalizeCursorMcpArguments(item.arguments),
 			});
+			step.callIds.push(item.id);
 		}
 	}
-	return content;
+	steps.push(step);
+	return steps.filter(({ content }) => content.length > 0);
 }
 
 function assertCursorKimiK3HistoryReplayable(
@@ -5700,25 +5739,61 @@ function buildRootPromptMessagesJson(
 ): Uint8Array[] {
 	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const { pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
+	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
 		entries.push(storeCursorBlob(blobStore, bytes));
 	};
+	// Results already replayed under the step that issued their call; the
+	// message-order pass below skips them.
+	const emittedResults = new Set<string>();
+	// Emit even when the result text is empty: the assistant `tool-call` is
+	// already in history, so dropping the pair would replay an orphaned call.
+	const pushToolResult = (result: ToolResultMessage) => {
+		const toolCallId = normalizeToolCallId(result.toolCallId);
+		pushJson({
+			role: "tool",
+			id: toolCallId,
+			content: [
+				{
+					type: "tool-result",
+					toolName: result.toolName,
+					toolCallId,
+					result: toolResultToText(result),
+					...(result.isError ? { isError: true } : {}),
+				},
+			],
+		});
+		emittedResults.add(result.toolCallId);
+	};
 
-	for (let i = 0; i < messages.length; i++) {
-		if (i === activeUserMessageIndex) break;
+	for (let i = 0; i < historyEnd; i++) {
 		const msg = messages[i];
 		if (msg.role === "user" || msg.role === "developer") {
 			const content = buildCursorRootPromptContent(msg.content);
 			if (content.length === 0) continue;
 			pushJson({ role: "user", content });
 		} else if (msg.role === "assistant") {
-			const content = buildCursorAssistantContent(msg, targetModelId);
-			if (content.length === 0) continue;
-			pushJson({ role: "assistant", content });
+			const steps = buildCursorAssistantSteps(msg, targetModelId);
+			for (const [stepIndex, step] of steps.entries()) {
+				pushJson({ role: "assistant", content: step.content });
+				// The final step's results stay in message order below: they are
+				// what the following turn responds to, and may arrive out of order.
+				if (stepIndex === steps.length - 1) continue;
+				// Replay this round's results in the order they arrived: calls issued
+				// together can finish out of call order.
+				const roundCallIds = new Set(step.callIds);
+				for (let j = i + 1; j < historyEnd; j++) {
+					const later = messages[j];
+					if (later.role !== "toolResult" || !roundCallIds.has(later.toolCallId)) continue;
+					if (emittedResults.has(later.toolCallId)) continue;
+					const result = toolResults.get(later.toolCallId);
+					if (result) pushToolResult(result);
+				}
+			}
 		} else if (msg.role === "toolResult") {
+			if (emittedResults.has(msg.toolCallId)) continue;
 			if (!pairedToolCallIds.has(msg.toolCallId)) {
 				pushJson({
 					role: "assistant",
@@ -5726,22 +5801,7 @@ function buildRootPromptMessagesJson(
 				});
 				continue;
 			}
-			// Emit even when the result text is empty: the assistant `tool-call` is
-			// already in history, so dropping the pair would replay an orphaned call.
-			const toolCallId = normalizeToolCallId(msg.toolCallId);
-			pushJson({
-				role: "tool",
-				id: toolCallId,
-				content: [
-					{
-						type: "tool-result",
-						toolName: msg.toolName,
-						toolCallId,
-						result: toolResultToText(msg),
-						...(msg.isError ? { isError: true } : {}),
-					},
-				],
-			});
+			pushToolResult(msg);
 		}
 	}
 

@@ -1,6 +1,6 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
-import { collapseVariants, type EffortVariantFamily } from "../compat/collapse";
+import { collapseVariants, type EffortVariantFamily, reviewedVariantFamilyId } from "../compat/collapse";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { classifyModel } from "../compat/taxonomy";
@@ -577,14 +577,15 @@ function normalizeRichCursorModels(
 			const first = entries[0];
 			if (!first) continue;
 			const dimensions = cursorLaneParameters(first.parameters);
-			const laneId = cursorLaneId(
+			const richLaneId = cursorLaneId(
 				baseId,
 				dimensions,
 				parameterDefaults,
 				first.variant?.isMaxMode === true,
 				claimedLaneIds,
 			);
-			const laneName = cursorLaneName(details, laneId, baseId);
+			const laneName = cursorLaneName(details, richLaneId, baseId);
+			const laneId = reviewedCursorLaneId(entries, claimedLaneIds) ?? richLaneId;
 			normalized.push(
 				...buildRichCursorLane(
 					details,
@@ -704,6 +705,28 @@ function cursorLaneId(
 	}
 	claimed.add(candidate);
 	return candidate;
+}
+
+/**
+ * The reviewed collapse family owning a lane's legacy slugs, when exactly one
+ * family claims any of them (slugs no family lists, e.g. a newly added tier,
+ * stay in the lane). `AvailableModels` names Grok 4.5/4.6 `grok-4.6` while its
+ * slugs are `cursor-grok-4.6-*`; reusing the family id keeps the lane id equal
+ * to the `GetUsableModels`-only fallback and the bundled catalog, so a selector
+ * survives whichever RPC answered.
+ */
+function reviewedCursorLaneId(entries: readonly NormalizedRichVariant[], claimed: Set<string>): string | undefined {
+	let familyId: string | undefined;
+	for (const entry of entries) {
+		const slug = entry.variant?.legacySlug?.trim();
+		const owner = slug ? reviewedVariantFamilyId("cursor", slug) : undefined;
+		if (owner === undefined) continue;
+		if (familyId !== undefined && owner !== familyId) return undefined;
+		familyId = owner;
+	}
+	if (familyId === undefined || claimed.has(familyId)) return undefined;
+	claimed.add(familyId);
+	return familyId;
 }
 
 function sanitizeCursorLanePart(value: string): string {

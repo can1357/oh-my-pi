@@ -77,12 +77,17 @@ export class ArtifactManager {
 	readonly #dir: string;
 	#dirCreated = false;
 	#initPromise: Promise<void> | null = null;
+	readonly #ready: Promise<void> | undefined;
 
 	/**
 	 * @param dir Directory that will hold artifact files. Created lazily on first save.
+	 * @param ready Settles once `dir` is seeded (a session move copying the previous
+	 *   session's artifacts in the background). Id scans and lookups wait for it,
+	 *   so new ids never collide with copied ones. Must not reject.
 	 */
-	constructor(dir: string) {
+	constructor(dir: string, ready?: Promise<void>) {
 		this.#dir = dir;
+		this.#ready = ready;
 	}
 
 	/**
@@ -94,6 +99,7 @@ export class ArtifactManager {
 	}
 
 	async #ensureDir(): Promise<void> {
+		await this.#ready;
 		if (!this.#dirCreated) {
 			await fs.mkdir(this.#dir, { recursive: true });
 			this.#dirCreated = true;
@@ -170,6 +176,7 @@ export class ArtifactManager {
 	 * Returns empty array if directory doesn't exist.
 	 */
 	async listFiles(): Promise<string[]> {
+		await this.#ready;
 		try {
 			return await fs.readdir(this.#dir);
 		} catch {

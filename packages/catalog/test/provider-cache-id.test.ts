@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { PROVIDER_DESCRIPTORS, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 
 test("lightweight cache resolver matches every descriptor default", () => {
 	for (const descriptor of PROVIDER_DESCRIPTORS) {
@@ -93,4 +94,15 @@ test("cursor cache scope survives access-token refresh for the same account", ()
 	const before = scope(jwt({ sub: "auth0|user_a", exp: 1_900_000_000, iat: 1_800_000_000 }));
 	expect(scope(jwt({ sub: "auth0|user_a", exp: 1_900_086_400, iat: 1_800_086_400 }))).toBe(before);
 	expect(scope(jwt({ sub: "auth0|user_b", exp: 1_900_000_000, iat: 1_800_000_000 }))).not.toBe(before);
+});
+
+test("Codex cache scope follows a gateway baseUrl but keeps the official namespace (#13830)", () => {
+	const official = resolveModelCacheProviderId("openai-codex");
+	// Pre-existing official caches stay readable whether or not the registry passes the bundled baseUrl.
+	expect(resolveModelCacheProviderId("openai-codex", { baseUrl: "https://chatgpt.com/backend-api/" })).toBe(official);
+	const gateway = openaiCodexModelManagerOptions({ baseUrl: "https://codex-proxy.example/backend-api" });
+	expect(gateway.cacheProviderId).toBe(
+		resolveModelCacheProviderId("openai-codex", { baseUrl: "https://codex-proxy.example/backend-api/" }),
+	);
+	expect(gateway.cacheProviderId).not.toBe(official);
 });

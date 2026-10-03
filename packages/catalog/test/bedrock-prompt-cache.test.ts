@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { buildGeneratedModel } from "../scripts/generate-models";
 
 function bedrockSpec(
 	overrides: Partial<ModelSpec<"bedrock-converse-stream">> = {},
@@ -84,7 +85,7 @@ describe("Bedrock prompt-cache compat", () => {
 				minimumTokens: 1024,
 				supportsLongRetention: false,
 			},
-			{ id: "anthropic.claude-fable-5", minimumTokens: 1024, supportsLongRetention: true },
+			{ id: "anthropic.claude-fable-5", minimumTokens: 1024, supportsLongRetention: true, rejectsSampling: true },
 			{
 				id: "anthropic.claude-haiku-4-5-20251001-v1:0",
 				minimumTokens: 4096,
@@ -106,8 +107,18 @@ describe("Bedrock prompt-cache compat", () => {
 				supportsLongRetention: true,
 			},
 			{ id: "anthropic.claude-opus-4-6-v1", minimumTokens: 4096, supportsLongRetention: false },
-			{ id: "global.anthropic.claude-opus-4-7", minimumTokens: 4096, supportsLongRetention: true },
-			{ id: "us.anthropic.claude-opus-4-8", minimumTokens: 4096, supportsLongRetention: true },
+			{
+				id: "global.anthropic.claude-opus-4-7",
+				minimumTokens: 4096,
+				supportsLongRetention: true,
+				rejectsSampling: true,
+			},
+			{
+				id: "us.anthropic.claude-opus-4-8",
+				minimumTokens: 4096,
+				supportsLongRetention: true,
+				rejectsSampling: true,
+			},
 			{
 				id: "anthropic.claude-sonnet-4-20250514-v1:0",
 				minimumTokens: 1024,
@@ -119,10 +130,16 @@ describe("Bedrock prompt-cache compat", () => {
 				supportsLongRetention: true,
 			},
 			{ id: "anthropic.claude-sonnet-4-6", minimumTokens: 1024, supportsLongRetention: false },
-			{ id: "us.anthropic.claude-sonnet-5", minimumTokens: 4096, supportsLongRetention: true },
+			{
+				id: "us.anthropic.claude-sonnet-5",
+				minimumTokens: 4096,
+				supportsLongRetention: true,
+				rejectsSampling: true,
+			},
 		] as const;
 
-		for (const { id, minimumTokens, supportsLongRetention } of cases) {
+		for (const testCase of cases) {
+			const { id, minimumTokens, supportsLongRetention } = testCase;
 			const model = buildModel(bedrockSpec({ id }));
 			expect(model.compat).toEqual({
 				promptCacheMode: minimumTokens === 0 ? "none" : "explicit",
@@ -136,6 +153,8 @@ describe("Bedrock prompt-cache compat", () => {
 				// Converse positions content blocks by wire index, so a block can land
 				// above already-rendered text; the TUI must not retire streamed rows early.
 				streamRevision: "possible",
+				// Adaptive Claude rejects temperature/top_p on every host (class rule).
+				...("rejectsSampling" in testCase ? { supportsSamplingParams: false } : {}),
 			});
 			if (minimumTokens === 0) {
 				expect(model.promptCache).toBeUndefined();
@@ -143,6 +162,25 @@ describe("Bedrock prompt-cache compat", () => {
 				expect(model.promptCache).toEqual(supportsLongRetention ? { short: 300, long: 3600 } : { short: 300 });
 			}
 		}
+	});
+
+	test("generation recomputes lifetimes from current policy instead of a previous snapshot row", () => {
+		const stale = { short: 999, long: 9999 };
+		const cached = buildGeneratedModel(bedrockSpec({ promptCache: stale, promptCacheConfig: stale }));
+		expect(cached.promptCache).toEqual({ short: 300 });
+		expect(cached.promptCacheConfig).toBeUndefined();
+
+		const uncached = buildGeneratedModel({
+			...bedrockSpec(),
+			id: "gpt-5.2",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			promptCache: stale,
+			promptCacheConfig: stale,
+		});
+		expect(uncached.promptCache).toBeUndefined();
+		expect(uncached.promptCacheConfig).toBeUndefined();
 	});
 
 	test("keeps Bedrock Converse cache, pricing, and limit rules on Bedrock Runtime", () => {

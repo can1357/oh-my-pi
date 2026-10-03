@@ -5,6 +5,7 @@ import { Legend, Sparkline, TimeChart, useHiddenSeries } from "../charts";
 import { buildColorLookup, OTHER_COLOR } from "../data/colors";
 import {
 	formatCompact,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
@@ -96,7 +97,7 @@ export function ToolsRoute({ active, range }: ToolsRouteProps) {
 								<Stat
 									label="Error rate"
 									title="Tool results that came back flagged as errors"
-									value={formatPercent(t.calls > 0 ? t.errors / t.calls : 0)}
+									value={formatErrorRate(t.calls > 0 ? t.errors / t.calls : 0)}
 									hint={`${formatInteger(t.calls - t.errors)} succeeded`}
 									spark={view.totalErrors}
 									sparkColor="var(--bad)"
@@ -389,7 +390,7 @@ function buildToolColumns(
 				<span className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
 					<span className="num dim">{formatInteger(row.errors)}</span>
 					<Badge tone={row.errors > 0 ? errorRateTone(row.errorRate) : "neutral"} mono>
-						{formatPercent(row.errorRate)}
+						{formatErrorRate(row.errorRate)}
 					</Badge>
 				</span>
 			),
@@ -519,7 +520,7 @@ function ToolModelTable({
 					<span className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
 						<span className="num dim">{formatInteger(row.errors)}</span>
 						<Badge tone={row.errors > 0 ? errorRateTone(row.errorRate) : "neutral"} mono>
-							{formatPercent(row.errorRate)}
+							{formatErrorRate(row.errorRate)}
 						</Badge>
 					</span>
 				),

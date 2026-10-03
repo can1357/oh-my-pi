@@ -55,6 +55,24 @@ describe("native backend", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("renders a credit-blocked change once the oldest frame stalls, without any ack", async () => {
+		const stream = new Probe(md("one", { stream: true }));
+		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
+		const h = harness;
+		const id = nativeComponentId(stream);
+		stream.current = md("one two", { stream: true });
+		await h.render();
+		stream.current = md("one two three", { stream: true });
+		await h.render();
+		const sent = h.frames.length;
+
+		h.stall(4999);
+		expect(h.frames.length).toBe(sent);
+		h.stall(1);
+		expect(h.frames.length).toBe(sent + 1);
+		expect(h.byId(id)?.p).toEqual({ text: "one two three", stream: true });
+	});
+
 	it("routes pointer events to the component that described the node, with its keypath and item key", async () => {
 		const other = new Probe(node("text", { text: "other" }));
 		const target = new Probe(
