@@ -303,6 +303,8 @@ export interface AdvisorNote {
 /** Details payload on the batched `advisor` custom message rendered in the transcript. */
 export interface AdvisorMessageDetails {
 	notes: AdvisorNote[];
+	/** Provider-facing role selected at delivery. Legacy advisor records default to developer. */
+	messageRole?: "user" | "developer";
 }
 
 /** Custom message type for supervised process completions. */

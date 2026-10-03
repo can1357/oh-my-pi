@@ -4,9 +4,12 @@ import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
 	convertToLlm,
+	didSessionMessagesChange,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	wrapSteeringForModel,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { isUserTurnInitiator } from "@oh-my-pi/pi-tui/chat/messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 
 function expectAttribution(message: Message | undefined, expected: "user" | "agent" | undefined): void {
@@ -135,6 +138,92 @@ describe("convertToLlm custom message mapping", () => {
 		expect(converted[0]?.role).toBe("developer");
 		expectAttribution(converted[0], undefined);
 		expect(inferCopilotInitiator(converted)).toBe("agent");
+	});
+
+	it("replays legacy and saved advisor roles before and after compaction without initiating user turns", async () => {
+		const manager = SessionManager.inMemory();
+		try {
+			const firstKeptId = manager.appendCustomMessageEntry("advisor", "legacy", true, { notes: [] });
+			manager.appendCustomMessageEntry("advisor", "ordinary", true, { notes: [], messageRole: "user" });
+			manager.appendCustomMessageEntry("advisor", "elevated", true, { notes: [], messageRole: "developer" });
+			const messages = manager.buildSessionContext().messages;
+			const converted = convertToLlm(messages);
+			expect(converted.map(message => message.role)).toEqual(["developer", "user", "developer"]);
+			for (const message of messages) {
+				if (message.role !== "custom") throw new Error("Expected saved advisor card");
+				expect(message.customType).toBe("advisor");
+				expect(message.attribution).toBe("agent");
+				expect(isUserTurnInitiator(message)).toBe(false);
+			}
+			for (const message of converted) expectAttribution(message, "agent");
+			expect(inferCopilotInitiator(converted)).toBe("agent");
+			manager.appendCompaction("Earlier work summarized", undefined, firstKeptId, 1000);
+			const retained = manager
+				.buildSessionContext()
+				.messages.filter(message => message.role === "custom" && message.customType === "advisor");
+			const compacted = convertToLlm(retained);
+			expect(compacted.map(message => message.role)).toEqual(["developer", "user", "developer"]);
+			for (const message of compacted) expectAttribution(message, "agent");
+			expect(inferCopilotInitiator(compacted)).toBe("agent");
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("defaults malformed or missing advisor role metadata to developer with agent attribution", () => {
+		for (const details of [undefined, null, "user", [], {}, { messageRole: "system" }, { messageRole: 1 }]) {
+			const converted = convertToLlm([
+				{ role: "custom", customType: "advisor", content: "review", display: true, details, timestamp: 1 },
+			]);
+			expect(converted[0]?.role).toBe("developer");
+			expectAttribution(converted[0], "agent");
+			expect(inferCopilotInitiator(converted)).toBe("agent");
+		}
+	});
+
+	it("does not apply advisor role metadata to unrelated custom messages", () => {
+		const converted = convertToLlm([
+			{
+				role: "custom",
+				customType: "async-result",
+				content: "result",
+				display: true,
+				details: { messageRole: "user" },
+				timestamp: 1,
+			},
+		]);
+		expect(converted[0]?.role).toBe("developer");
+		expectAttribution(converted[0], undefined);
+	});
+
+	it("compares saved advisor roles during working-history maintenance", () => {
+		const legacy: AgentMessage = {
+			role: "custom",
+			customType: "advisor",
+			content: "review",
+			display: true,
+			timestamp: 1,
+		};
+		const ordinary: AgentMessage = { ...legacy, details: { notes: [], messageRole: "user" } };
+		const elevated: AgentMessage = { ...legacy, details: { notes: [], messageRole: "developer" } };
+		expect(didSessionMessagesChange([legacy], [elevated])).toBe(false);
+		expect(didSessionMessagesChange([legacy], [ordinary])).toBe(true);
+	});
+
+	it("ignores advisor role metadata when comparing unrelated custom and hook history", () => {
+		for (const role of ["custom", "hookMessage"] as const) {
+			const message: AgentMessage = {
+				role,
+				customType: "context",
+				content: "context",
+				display: false,
+				timestamp: 1,
+			};
+			const ordinary = { ...message, details: { messageRole: "user" } };
+			const elevated = { ...message, details: { messageRole: "developer" } };
+			expect(didSessionMessagesChange([message], [ordinary])).toBe(false);
+			expect(didSessionMessagesChange([ordinary], [elevated])).toBe(false);
+		}
 	});
 
 	it("maps file mention reminders to developer role", () => {
@@ -321,6 +410,42 @@ describe("convertToLlm custom message mapping", () => {
 			throw new Error("Expected user custom images");
 		}
 		expect(converted[1].content.filter(content => content.type === "image")).toEqual([image]);
+	});
+
+	it("keeps explicitly user-role advisor text and images together", () => {
+		const image: ImageContent = { type: "image", data: "YWR2aXNvcg==", mimeType: "image/png" };
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text: "Advisor body" }, image];
+		const converted = convertToLlm([
+			{
+				role: "custom",
+				customType: "advisor",
+				content,
+				display: true,
+				details: { notes: [], messageRole: "user" },
+				timestamp: 1,
+			},
+		]);
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("user");
+		expect(converted[0]?.content).toBe(content);
+		expectAttribution(converted[0], "agent");
+	});
+
+	it("keeps saved developer advisor images agent-attributed when legacy attribution is missing", () => {
+		const image: ImageContent = { type: "image", data: "YWR2aXNvcg==", mimeType: "image/png" };
+		const converted = convertToLlm([
+			{
+				role: "custom",
+				customType: "advisor",
+				content: [{ type: "text", text: "Advisor body" }, image],
+				display: true,
+				details: { notes: [], messageRole: "developer" },
+				timestamp: 1,
+			},
+		]);
+		expect(converted.map(message => message.role)).toEqual(["developer", "user"]);
+		for (const message of converted) expectAttribution(message, "agent");
+		expect(inferCopilotInitiator(converted)).toBe("agent");
 	});
 });
 

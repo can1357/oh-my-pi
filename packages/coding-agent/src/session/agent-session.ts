@@ -8059,10 +8059,9 @@ export class AgentSession implements SettingsScope {
 		// queued follow-up waits for an explicit resume — even if an interleaving IRC wake turn has
 		// since left a provider-valid tail.
 		if (this.#advisors.autoResumeSuppressed) return false;
-		// Follow-up-only resume has no steer to inject, so Agent.continue() continues from the
-		// existing context tail — which must itself be a valid provider tail. An injected
-		// non-conversational tail (advisor card → `developer`, bash/python execution) would make
-		// the first model call invalid, so leave the follow-up queued for the next explicit resume.
+		// Follow-up-only resume has no steer to inject. Keep the existing conversational-tail
+		// gate independent of provider-facing role: preserved advisor/custom/execution records
+		// never authorize a new turn merely because their conversion uses a user role.
 		const messages = this.agent.state.messages;
 		const last = messages[messages.length - 1];
 		return last?.role === "assistant" || last?.role === "toolResult";

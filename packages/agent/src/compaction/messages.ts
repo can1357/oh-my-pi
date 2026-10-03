@@ -200,6 +200,14 @@ function isCoreCompactionMessage(message: AgentMessage): message is AgentMessage
 	);
 }
 
+/** Advisor role is saved with each card; legacy or malformed cards use developer. */
+export function customMessageLlmRole(message: CustomMessage | HookMessage): "user" | "developer" {
+	if (message.customType !== "advisor") return "developer";
+	const details = message.details;
+	if (details === null || typeof details !== "object" || Array.isArray(details)) return "developer";
+	return "messageRole" in details && details.messageRole === "user" ? "user" : "developer";
+}
+
 /**
  * Transform a single core-domain agent message to its LLM form; `undefined`
  * drops it from the provider request.
@@ -220,9 +228,9 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 						? [{ type: "text" as const, text: message.content }]
 						: message.content;
 				return {
-					role: "developer",
+					role: customMessageLlmRole(message),
 					content,
-					attribution: message.attribution,
+					attribution: message.attribution ?? (message.customType === "advisor" ? "agent" : undefined),
 					timestamp: message.timestamp,
 				};
 			}
