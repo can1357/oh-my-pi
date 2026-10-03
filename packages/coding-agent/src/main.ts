@@ -187,6 +187,8 @@ import {
 	cfgTuiResizeScrollback,
 	cfgTuiSpinnerInterval,
 	cfgTuiMaxFps,
+	cfgDisplayShimmer,
+	cfgTuiMotion,
 	cfgUpdateChannel,
 } from "./modes/settings";
 import {
@@ -2067,6 +2069,12 @@ export async function runRootCommand(
 		}
 		if (parsedArgs.maxFps !== undefined) {
 			cfgTuiMaxFps.override(settingsInstance, parsedArgs.maxFps);
+		}
+		if (parsedArgs.motion !== undefined) {
+			cfgTuiMotion.override(settingsInstance, parsedArgs.motion);
+		}
+		if (parsedArgs.shimmer !== undefined) {
+			cfgDisplayShimmer.override(settingsInstance, parsedArgs.shimmer);
 		}
 
 		await logger.time(

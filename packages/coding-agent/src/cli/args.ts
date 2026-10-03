@@ -4,8 +4,10 @@
 import * as path from "node:path";
 import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { MotionMode } from "../config/motion-presets";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ApprovalMode } from "../tools/approval";
+import type { ShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -98,6 +100,10 @@ export interface Args {
 	spinnerInterval?: number;
 	/** `--max-fps <n>`: ephemeral `tui.maxFps` override — the ceiling on how often the TUI repaints. */
 	maxFps?: number;
+	/** `--motion <full|reduced|none>`: ephemeral `tui.motion` override — one switch over every animation. */
+	motion?: MotionMode;
+	/** `--shimmer <classic|kitt|disabled>`: ephemeral `display.shimmer` override. */
+	shimmer?: ShimmerMode;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
 	autoApprove?: boolean;

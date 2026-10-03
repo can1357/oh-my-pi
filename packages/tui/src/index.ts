@@ -20,6 +20,7 @@ export * from "./components/layout/stack";
 export * from "./components/loader";
 export * from "./spinner-clock";
 export * from "./frame-rate";
+export * from "./motion-effects";
 export * from "./components/markdown";
 export * from "./components/menu-selection";
 export * from "./components/metric";
