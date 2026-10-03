@@ -273,18 +273,13 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FI
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
 const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
-/**
- * The server's experimental native turn lane refuses `response.steer` with
- * this code, then drops the in-flight response and closes the socket.
- */
-const CODEX_NATIVE_LANE_STEER_REJECTED_CODE = "unsupported_native_inflight_message";
 // The native-lane steering rejection is replayable: the session stops steering
 // first, so the replay cannot trip it again.
 const CODEX_RETRYABLE_EVENT_CODES = new Set([
 	"model_error",
 	"server_error",
 	"internal_error",
-	CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
+	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
 ]);
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
@@ -2749,7 +2744,7 @@ class CodexStreamProcessor {
 		if (
 			!state ||
 			!(error instanceof CodexProviderStreamError) ||
-			error.code !== CODEX_NATIVE_LANE_STEER_REJECTED_CODE
+			error.code !== AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE
 		) {
 			return;
 		}
@@ -4083,7 +4078,7 @@ class CodexWebSocketConnection {
 				}
 				// The native lane answers `response.steer` with a plain `error` that
 				// also ends the response: refuse the submission, then fail the stream.
-				if (parsed.type === "error" && parsed.code === CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
+				if (parsed.type === "error" && parsed.code === AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
 					this.#refuseSteerWaiters(parsed.code, typeof parsed.message === "string" ? parsed.message : undefined);
 				}
 				this.#push(parsed);

@@ -2604,6 +2604,12 @@ export class TurnRecovery {
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		// A Codex steering rejection answers our own `response.steer`, not the
+		// model's health, and the provider already stopped steering the session:
+		// replay on the same model while same-model retries remain. Once the
+		// budget is spent, the chain keeps its last-resort consult.
+		const sameModelSteerReplay =
+			!retryBudgetExhausted && AIError.isCodexSteerRejection({ api: currentModel?.api, errorMessage });
 		const effectiveUsageLimitWaitMs =
 			usageLimitWaitMs ??
 			(siblingAvailabilityWaitMs === undefined
@@ -2632,6 +2638,7 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
+				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
 				!(retryBudgetExhausted && classifierRefusal) &&
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
