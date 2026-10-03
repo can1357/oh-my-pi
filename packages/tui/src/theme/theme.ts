@@ -5,6 +5,7 @@ import type { Terminal, TerminalAppearance } from "../terminal";
 import { colorLuma } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { hasTerminalMultiplexerSession } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
 import {
@@ -52,7 +53,7 @@ function shouldUseMacOSAppearanceFallback(): boolean {
 	// Zellij currently breaks OSC 11 passthrough on macOS, so terminal-derived
 	// appearance cannot be trusted there. Fall back to host macOS appearance
 	// without letting it override valid terminal signals elsewhere.
-	return process.platform === "darwin" && !!Bun.env.ZELLIJ;
+	return process.platform === "darwin" && hasTerminalMultiplexerSession("zellij");
 }
 
 function detectTerminalBackground(): "dark" | "light" {

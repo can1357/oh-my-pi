@@ -1,3 +1,4 @@
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, oneLineId, runStep } from "./shared";
 import type { TerminalLaunchBackend } from "./types";
@@ -11,6 +12,10 @@ function escapeTmuxArgument(value: string): string {
 }
 
 export const launchTmux: TerminalLaunchBackend<"tmux"> = async (request, { environment: env, runCli }) => {
+	const inTmux = hasTerminalMultiplexerSession("tmux", env);
+	if (!inTmux && !request.target) {
+		throw launchError(request, "capability", "tmux launch requires an active TMUX session or an explicit target.");
+	}
 	const operation = request.placement === "pane" ? "split-window" : "new-window";
 	let target: string | undefined;
 	if (request.placement === "pane") {

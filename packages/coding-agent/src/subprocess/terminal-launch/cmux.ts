@@ -17,14 +17,14 @@ function cmuxId(value: Record<string, unknown>, ...keys: string[]): string | und
 }
 
 export const launchCmux: TerminalLaunchBackend<"cmux"> = async (request, { environment: env, runCli }) => {
+	if (!env.CMUX_WORKSPACE_ID && !env.CMUX_SURFACE_ID && !request.target) {
+		throw launchError(request, "capability", "CMUX launch requires a CMUX context or explicit target ID.");
+	}
 	if (request.placement === "pane") {
 		// An explicit surface is authoritative; never combine it with a different
 		// ambient workspace target.
 		const workspace = request.target ? undefined : env.CMUX_WORKSPACE_ID;
 		const surface = request.target ?? env.CMUX_SURFACE_ID;
-		if (!workspace && !surface) {
-			throw launchError(request, "target", "CMUX split requires a workspace or target surface ID.");
-		}
 		const shellCommand = `cd ${quotePosixArgument(request.cwd)} && ${quotePosixArgv(request.command)}`;
 		const focusArgs = request.focus === undefined ? [] : ["--focus", String(request.focus)];
 		const argv = ["cmux", "--json", "new-split", request.direction ?? "right"];

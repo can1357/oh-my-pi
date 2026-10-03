@@ -3,8 +3,6 @@ import * as desktopNotify from "@oh-my-pi/pi-tui/desktop-notify";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import {
 	getTerminalInfo,
-	isInsideTmux,
-	isInsideZellij,
 	isOsc99Supported,
 	NotifyProtocol,
 	setOsc99Supported,
@@ -196,14 +194,6 @@ describe("terminal notifications", () => {
 		}
 	});
 
-	it("isInsideTmux reads the TMUX env fresh on each call", () => {
-		expect(isInsideTmux()).toBe(false);
-		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
-		expect(isInsideTmux()).toBe(true);
-		delete Bun.env.TMUX;
-		expect(isInsideTmux()).toBe(false);
-	});
-
 	it("wraps an OSC payload in tmux's DCS passthrough envelope with doubled ESCs", () => {
 		const payload = "\x1b]99;;Hello\x1b\\";
 		expect(wrapTmuxPassthrough(payload)).toBe("\x1bPtmux;\x1b\x1b]99;;Hello\x1b\x1b\\\x1b\\");
@@ -322,6 +312,22 @@ describe("terminal notifications", () => {
 
 		expect(spawn).not.toHaveBeenCalled();
 		expect(writes).toEqual(["\x1b]99;;no pane\x1b\\"]);
+	});
+
+	it("falls through an incomplete Herdr session to a concrete cmux surface", () => {
+		Bun.env.HERDR_ENV = "1";
+		delete Bun.env.HERDR_PANE_ID;
+		Bun.env.CMUX_SURFACE_ID = "123e4567-e89b-12d3-a456-426614174000";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification("ping");
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		const argv = (spawn.mock.calls[0]?.[0] as unknown as { cmd?: string[] } | undefined)?.cmd;
+		expect(argv?.[0]).toBe("cmux");
+		expect(stdout).not.toHaveBeenCalled();
 	});
 
 	it("routes to the Herdr pane, not the cmux surface it was launched inside", () => {
@@ -508,14 +514,6 @@ describe("terminal notifications", () => {
 		TERMINAL.sendNotification("ping");
 
 		expect(writes).toEqual(["\x1b]99;;ping\x1b\\"]);
-	});
-
-	it("isInsideZellij reads the ZELLIJ env fresh on each call", () => {
-		expect(isInsideZellij()).toBe(false);
-		Bun.env.ZELLIJ = "0";
-		expect(isInsideZellij()).toBe(true);
-		delete Bun.env.ZELLIJ;
-		expect(isInsideZellij()).toBe(false);
 	});
 
 	it("under Zellij, OSC-protocol sendNotification appends a plain BEL (no DCS wrap)", () => {

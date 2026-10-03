@@ -1,5 +1,5 @@
 import { ptree } from "@oh-my-pi/pi-utils";
-import { isInsideHerdr, type TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { type TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import {
 	terminalLaunchCapabilities,
 	TerminalLaunchError,
@@ -151,38 +151,6 @@ export function validateRequest(value: unknown): asserts value is TerminalLaunch
 		}
 	} else if (request.shellGrammar !== undefined) {
 		fail("shell-grammar", `${multiplexer} launch does not use a shell-grammar assertion.`);
-	}
-}
-
-export function requireCapability(request: TerminalLaunchRequest, env: NodeJS.ProcessEnv): void {
-	switch (request.multiplexer) {
-		case "tmux":
-			if (!env.TMUX && !request.target) {
-				throw launchError(
-					request,
-					"capability",
-					"tmux launch requires an active TMUX session or an explicit target.",
-				);
-			}
-			if (request.placement === "pane" && !(request.target ?? (env.TMUX ? env.TMUX_PANE : undefined))) {
-				throw launchError(request, "target", "tmux split-window requires a target pane ID or TMUX_PANE.");
-			}
-			return;
-		case "zellij":
-			if (!env.ZELLIJ) throw launchError(request, "capability", "zellij launch requires an active Zellij session.");
-			return;
-		case "herdr":
-			if (!isInsideHerdr(env)) {
-				throw launchError(request, "capability", "Herdr launch requires an active Herdr pane or workspace.");
-			}
-			return;
-		case "cmux":
-			if (!env.CMUX_WORKSPACE_ID && !env.CMUX_SURFACE_ID && !request.target) {
-				throw launchError(request, "capability", "CMUX launch requires a CMUX context or explicit target ID.");
-			}
-			return;
-		default:
-			return assertNever(request);
 	}
 }
 

@@ -1,8 +1,12 @@
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
 import type { TerminalLaunchBackend } from "./types";
 
 export const launchHerdr: TerminalLaunchBackend<"herdr"> = async (request, { environment: env, runCli }) => {
+	if (!hasTerminalMultiplexerSession("herdr", env)) {
+		throw launchError(request, "capability", "Herdr launch requires an active Herdr pane or workspace.");
+	}
 	const shellCommand = quotePosixArgv(request.command);
 	const focusArgs = request.focus === undefined ? [] : [request.focus ? "--focus" : "--no-focus"];
 	if (request.placement === "pane") {

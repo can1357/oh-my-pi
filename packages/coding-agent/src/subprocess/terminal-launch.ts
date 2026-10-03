@@ -1,4 +1,4 @@
-import { assertNever, processCli, requireCapability, validateRequest } from "./terminal-launch/shared";
+import { assertNever, processCli, validateRequest } from "./terminal-launch/shared";
 import { launchCmux } from "./terminal-launch/cmux";
 import { launchHerdr } from "./terminal-launch/herdr";
 import { launchTmux } from "./terminal-launch/tmux";
@@ -18,7 +18,6 @@ export function createTerminalLauncher(dependencies: TerminalLaunchDependencies 
 	return async (request: TerminalLaunchRequest): Promise<TerminalLaunchResult> => {
 		validateRequest(request);
 		const context = { environment: environment(), runCli };
-		requireCapability(request, context.environment);
 		switch (request.multiplexer) {
 			case "tmux":
 				return launchTmux(request, context);

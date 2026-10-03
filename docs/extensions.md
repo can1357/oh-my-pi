@@ -821,6 +821,12 @@ derived from the canonical multiplexer taxonomy and only supports tmux, Zellij,
 Herdr, and CMUX; screen and wmux are recognized by the taxonomy but explicitly
 unsupported by this launcher.
 
+Provider-specific session detection is centralized in
+`@oh-my-pi/pi-tui/terminal-multiplexer`: `hasTerminalMultiplexerSession(provider,
+env)` checks explicit session markers, while `classifyTerminalMultiplexer(env)`
+selects the current screen-grid owner and can fall back to `TERM`. A classified
+owner does not prove that a nested provider session or a native pane ID exists.
+
 The TUI host injects this capability; extensions do not need to import dispatcher
 code to use it.
 
