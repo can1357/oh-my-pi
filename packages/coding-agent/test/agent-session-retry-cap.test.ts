@@ -27,6 +27,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
@@ -195,11 +196,11 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
-	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
+	it("waits past retry.maxDelayMs when usage-report correlation misses a provider reset", async () => {
 		// Contract: with the opt-in set, a provider-stated usage-limit reset
-		// sleeps until the reset instead of failing fast. Uses Z.AI's English
-		// code-1308 shape: a timezone-naive Beijing reset timestamp plus a
-		// shorter retry-after-ms, with one credential so rotation cannot save it.
+		// sleeps until the reset even when usage-report correlation has no
+		// outcome for the failed message. Uses Z.AI's English code-1308 shape:
+		// a timezone-naive Beijing reset timestamp plus a shorter retry-after-ms.
 		const model = getBundledModel("zai", "glm-5.3");
 		if (!model) {
 			throw new Error("Expected bundled Z.AI test model to exist");
@@ -245,6 +246,7 @@ describe("AgentSession retry delay cap", () => {
 			settings,
 			modelRegistry,
 		});
+		vi.spyOn(TurnRecovery.prototype, "recordUsageLimitOutcome").mockResolvedValue(false);
 
 		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
