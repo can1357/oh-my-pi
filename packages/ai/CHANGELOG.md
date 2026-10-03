@@ -4,7 +4,7 @@
 
 ### Added
 
-- Running sessions can now move back to a preferred account once it recovers: set `reclaimAbovePct` on its `auth.accountPolicies` entry, and sessions automatically pinned to a lower-priority account return on their next request once the preferred account has at least that much quota left. Opt-in; the value must be above the account's reserve, and explicitly chosen accounts never move
+- Running sessions can now move back to a preferred account once it recovers: set `reclaimAbovePct` on its `auth.accountPolicies` entry, and sessions automatically pinned to a lower-priority account return on their next request once the preferred account has at least that much quota left. Opt-in; the value must be above the account's reserve, and explicitly chosen accounts never move ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
