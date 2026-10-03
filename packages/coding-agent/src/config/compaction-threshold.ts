@@ -66,7 +66,36 @@ export interface ModelCompactionThreshold {
 	threshold: CompactionThresholdPair;
 }
 
-const GLOB_METACHARACTERS = /[*?[\]{}!]/;
+const GLOB_METACHARACTERS = /[*?[\]{}!\\]/;
+
+/**
+ * Why `selector` is not a well-formed glob, or `undefined` when it is. `Bun.Glob` compiles any
+ * string, so an unterminated `[` class or `{` group, a stray `}`, or a dangling `\` would otherwise
+ * silently match nothing or match more than written.
+ */
+function globSyntaxError(selector: string): string | undefined {
+	let braceDepth = 0;
+	for (let i = 0; i < selector.length; i++) {
+		const char = selector[i];
+		if (char === "\\") {
+			if (++i >= selector.length) return "it ends with an unescaped backslash";
+		} else if (char === "[") {
+			let end = i + 1;
+			if (selector[end] === "!" || selector[end] === "^") end++;
+			// The first member may itself be `]`; the class must hold at least one member.
+			end++;
+			while (end < selector.length && selector[end] !== "]") end += selector[end] === "\\" ? 2 : 1;
+			if (end >= selector.length) return "it has an unterminated character class `[`";
+			i = end;
+		} else if (char === "{") {
+			braceDepth++;
+		} else if (char === "}") {
+			if (braceDepth === 0) return "it has a `}` without a matching `{`";
+			braceDepth--;
+		}
+	}
+	return braceDepth > 0 ? "it has an unterminated brace group `{`" : undefined;
+}
 
 /**
  * Validate `compaction.modelThresholds` (model selector → token count or percentage) in declaration
@@ -80,6 +109,12 @@ export function validateModelCompactionThresholds(value: unknown): ModelCompacti
 		if (!selector) {
 			throw new Error(
 				`Invalid compaction.modelThresholds: model selectors must be non-empty (e.g. "anthropic/claude-opus-5" or "openai-codex/*"), got "${rawSelector}".`,
+			);
+		}
+		const syntaxError = globSyntaxError(selector);
+		if (syntaxError) {
+			throw new Error(
+				`Invalid compaction.modelThresholds: model selector "${rawSelector}" is malformed: ${syntaxError}.`,
 			);
 		}
 		thresholds.push({

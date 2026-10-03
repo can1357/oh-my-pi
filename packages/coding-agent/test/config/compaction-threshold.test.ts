@@ -134,8 +134,31 @@ describe("compaction.modelThresholds", () => {
 		expect(match(undefined, astra)).toBeUndefined();
 	});
 
-	it("accepts selectors for models that are not currently available", () => {
-		expect(validateModelCompactionThresholds({ "future-provider/unreleased-model": 1000 })).toHaveLength(1);
+	it("accepts well-formed selectors for models that are not currently available", () => {
+		const thresholds = {
+			"future-provider/unreleased-model": 1000,
+			"openai-codex/gpt-9-{astra,sol}": "40%",
+			"anthropic/claude-[!h]*": 2000,
+			"anthropic/claude-\\*": 3000,
+		};
+		expect(validateModelCompactionThresholds(thresholds)).toHaveLength(4);
+		expect(match(thresholds, { provider: "openai-codex", id: "gpt-9-sol" })?.thresholdPercent).toBe(40);
+	});
+
+	const malformedSelectors: [string, string][] = [
+		["anthropic/[", "unterminated character class"],
+		["anthropic/{claude-opus-5,claude-sonnet-5", "unterminated brace group"],
+		["anthropic/claude-opus-5\\", "unescaped backslash"],
+		["anthropic/claude}", "without a matching"],
+	];
+
+	it("rejects malformed glob selectors instead of silently matching nothing or too much", () => {
+		for (const [selector, reason] of malformedSelectors) {
+			expect(() => validateModelCompactionThresholds({ [selector]: 1000 })).toThrow(
+				`model selector "${selector}" is malformed: it`,
+			);
+			expect(() => validateModelCompactionThresholds({ [selector]: 1000 })).toThrow(reason);
+		}
 	});
 
 	it("rejects malformed maps, selectors and entries with the offending setting path", () => {
@@ -165,6 +188,21 @@ describe("compaction.modelThresholds", () => {
 		expect(() => cfgCompactionModelThresholds.set(settings, { "anthropic/*": -1 })).toThrow(
 			'compaction.modelThresholds["anthropic/*"]',
 		);
+		for (const [selector, reason] of malformedSelectors) {
+			expect(() => cfgCompactionModelThresholds.set(settings, { [selector]: 1000 })).toThrow(reason);
+		}
 		expect(cfgCompactionModelThresholds.get(settings)).toEqual({});
+	});
+
+	it("rejects malformed glob selectors while loading settings", async () => {
+		await withConfigDirs(async ({ agentDir, cwd }) => {
+			for (const [selector, reason] of malformedSelectors) {
+				await Bun.write(
+					path.join(agentDir, "config.yml"),
+					JSON.stringify({ compaction: { modelThresholds: { [selector]: 1000 } } }),
+				);
+				await expect(Settings.loadReadOnly({ agentDir, cwd })).rejects.toThrow(reason);
+			}
+		});
 	});
 });
