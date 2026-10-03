@@ -39,6 +39,7 @@ export type KnownProvider =
 	| "huggingface"
 	| "kilo"
 	| "kimi-code"
+	| "kiro"
 	| "litellm"
 	| "lm-studio"
 	| "local"

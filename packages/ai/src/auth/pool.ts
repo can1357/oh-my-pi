@@ -1,3 +1,4 @@
+import { extractKiroProfileSegment } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
@@ -27,11 +28,36 @@ const MAX_PENDING_DISABLED_EVENTS = 32;
 function fingerprintOAuthBearer(bearer: string): string {
 	return Bun.SHA256.hash(bearer, "base64url");
 }
+/**
+ * Strip broker-invisible secrets from a credential before it crosses the wire.
+ * OAuth refresh tokens become the sentinel; the Kiro OIDC client secret is a
+ * refresh-capable secret too, so it is dropped while the non-secret client
+ * binding (client id, token endpoint, region) survives for routing.
+ *
+ * Every path that hands a credential to the auth-broker (snapshot, upsert, and
+ * the forced-refresh response) must route through this helper; a site that
+ * spreads the credential and overrides only `refresh` still ships the secret.
+ */
+export function redactCredentialForWire(credential: AuthCredential): SnapshotCredential {
+	if (credential.type === "api_key") return credential;
+	const { kiroClientSecret: _kiroClientSecret, ...withoutSecrets } = credential;
+	return { ...withoutSecrets, refresh: REMOTE_REFRESH_SENTINEL };
+}
 
 /** One stored credential row as cached in memory. */
 export type StoredCredential = { id: number; credential: AuthCredential };
 
-/** {@link CredentialDisabledEvent} for a torn-down row, carrying the account identity it was signed in as. */
+/**
+ * {@link CredentialDisabledEvent} for a torn-down row, carrying the account identity it was signed in as.
+ *
+ * Kiro stores its profile ARN in `orgId`, and that ARN embeds the AWS account
+ * id. Events are logged to disk and replayed to hosts, so the ARN is reduced
+ * to its trailing segment. A row whose `orgId` is not a parseable Kiro profile
+ * ARN yields no `orgId` at all rather than the raw value: `orgName` still
+ * names the row, and a malformed ARN is exactly the case that must not be
+ * echoed. Only the interactive device flow validates the ARN, so unvalidated
+ * rows (API-key logins, `credentials.set`, older writes) reach here too.
+ */
 export function credentialDisabledEvent(
 	provider: string,
 	row: StoredCredential,
@@ -42,7 +68,13 @@ export function credentialDisabledEvent(
 	if (credential.type === "oauth") {
 		if (credential.email) event.email = credential.email;
 		if (credential.accountId) event.accountId = credential.accountId;
-		if (credential.orgId) event.orgId = credential.orgId;
+		if (credential.orgId) {
+			if (provider !== "kiro") event.orgId = credential.orgId;
+			else {
+				const segment = extractKiroProfileSegment(credential.orgId);
+				if (segment) event.orgId = segment;
+			}
+		}
 		if (credential.orgName) event.orgName = credential.orgName;
 	}
 	return event;
@@ -52,7 +84,9 @@ export function credentialDisabledEvent(
 export function authCredentialEquals(left: AuthCredential, right: AuthCredential): boolean {
 	if (left.type !== right.type) return false;
 	if (left.type === "api_key") {
-		return right.type === "api_key" && left.key === right.key;
+		// Kiro resolves a runtime endpoint per login; the same key bytes against a
+		// different endpoint are a different credential.
+		return right.type === "api_key" && left.key === right.key && left.apiEndpoint === right.apiEndpoint;
 	}
 	if (right.type !== "oauth") return false;
 	return (
@@ -706,8 +740,7 @@ export class CredentialPool implements CredentialsApi {
 		for (const [provider, stored] of this.#data) {
 			for (const entry of stored) {
 				const credential = entry.credential;
-				const redacted: SnapshotCredential =
-					credential.type === "api_key" ? credential : { ...credential, refresh: REMOTE_REFRESH_SENTINEL };
+				const redacted = redactCredentialForWire(credential);
 				entries.push({
 					id: entry.id,
 					provider,
@@ -782,8 +815,7 @@ export class CredentialPool implements CredentialsApi {
 		this.reset(provider);
 		return stored.map(entry => {
 			const persisted = entry.credential;
-			const redacted: SnapshotCredential =
-				persisted.type === "api_key" ? persisted : { ...persisted, refresh: REMOTE_REFRESH_SENTINEL };
+			const redacted = redactCredentialForWire(persisted);
 			return {
 				id: entry.id,
 				provider: entry.provider,

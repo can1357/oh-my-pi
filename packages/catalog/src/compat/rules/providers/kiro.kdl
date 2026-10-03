@@ -1,0 +1,7 @@
+provider "kiro" {
+    default-model "auto"
+    env "KIRO_API_KEY"
+    dynamic-models-authoritative #true
+    skip-cross-provider-reference-fills #true
+    discovery label="Kiro" oauth-provider="kiro"
+}

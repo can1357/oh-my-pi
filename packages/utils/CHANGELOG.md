@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `readBoundedJson` and `readBoundedBytes` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

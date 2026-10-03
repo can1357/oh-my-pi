@@ -1,8 +1,10 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import type { KiroDiscoveryCredential } from "../discovery/kiro";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { KIRO_API_KEY_PREFIX } from "../wire/kiro";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -12,6 +14,60 @@ import {
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
 	baseUrl?: string;
+}
+
+/** Parse the structured Kiro credential projection used by discovery and transport. */
+export function parseKiroDiscoveryCredential(value: string): KiroDiscoveryCredential {
+	const trimmed = value.trim();
+	try {
+		const parsed: unknown = JSON.parse(trimmed);
+		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+			const record = parsed as Record<string, unknown>;
+			if (typeof record.token === "string" && record.token.length > 0) {
+				const apiEndpoint = typeof record.apiEndpoint === "string" ? record.apiEndpoint : undefined;
+				// Kiro API keys are always `ksk_…` (enforced by `normalizeApiKey` on the
+				// auth side), so the token shape distinguishes an API key from an OAuth
+				// bearer. Builder ID bearers carry no profile ARN, so the presence of a
+				// profile alone cannot decide this.
+				if (!record.token.startsWith(KIRO_API_KEY_PREFIX)) {
+					const profileArn =
+						typeof record.profileArn === "string" && record.profileArn.length > 0 ? record.profileArn : undefined;
+					const loginId =
+						typeof record.loginId === "string" && record.loginId.length > 0 ? record.loginId : undefined;
+					return {
+						type: "oauth",
+						token: record.token,
+						...(profileArn ? { profileArn } : {}),
+						...(apiEndpoint ? { apiEndpoint } : {}),
+						...(loginId ? { loginId } : {}),
+					};
+				}
+				return {
+					type: "api_key",
+					token: record.token,
+					...(apiEndpoint ? { apiEndpoint } : {}),
+				};
+			}
+		}
+	} catch {
+		// Raw KIRO_API_KEY values are not JSON-wrapped.
+	}
+	return { type: "api_key", token: trimmed };
+}
+
+/** Resolve the privacy-safe cache namespace for one Kiro discovery credential. */
+export function resolveKiroModelCacheProviderId(apiKey?: string): string {
+	if (!apiKey) return "kiro";
+	const credential = parseKiroDiscoveryCredential(apiKey);
+	const identity =
+		credential.type === "oauth"
+			? // One login may share its profile or endpoint with another account, so
+				// scope the namespace to the stamped login id. The id survives
+				// access-token rotation but resets on re-login, which trades one
+				// model-list refetch for never serving another account's catalog.
+				`oauth\u0000${credential.loginId ?? credential.profileArn ?? ""}\u0000${credential.apiEndpoint ?? ""}`
+			: `api_key\u0000${credential.token}\u0000${credential.apiEndpoint ?? ""}`;
+	return `kiro:models-v1:${Bun.hash(identity).toString(36)}`;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -26,6 +82,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	// resolveKiroModelCacheProviderId hashes the credential (oauth profileArn or
+	// api key + endpoint) into the namespace, so a synchronous bare-provider
+	// read would leak another credential's catalog or hide the scoped one.
+	kiro: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -100,6 +160,8 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
 			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "kiro":
+			return resolveKiroModelCacheProviderId(options.apiKey);
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor": {

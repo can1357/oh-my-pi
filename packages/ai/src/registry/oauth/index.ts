@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { assertNotNativeKiroRegistration } from "../../api-registry";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -33,6 +34,7 @@ const customOAuthProviders = new Map<string, OAuthProviderInterface>();
  * Register a custom OAuth provider.
  */
 export function registerOAuthProvider(provider: OAuthProviderInterface): void {
+	assertNotNativeKiroRegistration(provider.id);
 	customOAuthProviders.set(provider.id, provider);
 }
 
@@ -143,6 +145,10 @@ export async function getOAuthApiKey(
 			? JSON.stringify({
 					apiEndpoint: creds.apiEndpoint,
 					token: creds.access,
+					// Kiro: login stores the profile ARN in `orgId`; discovery
+					// (ListAvailableModels) and the runtime stream both require it
+					// as `profileArn`. Other structured consumers ignore the key.
+					...(creds.orgId ? { profileArn: creds.orgId } : {}),
 					enterpriseUrl: creds.enterpriseUrl,
 					projectId: creds.projectId,
 					refreshToken: creds.refresh,

@@ -239,6 +239,15 @@ describe("auth-broker public wire schemas", () => {
 		reject(wireSchemas.credentialUploadRequestSchema, { provider: "", credential: REAL_OAUTH });
 	});
 
+	test("carries endpoint-bearing API keys across broker writes and snapshots", () => {
+		// Kiro persists the validated runtime route with the key; a broker that
+		// rejected it would strand remote clients on the wrong region.
+		const endpointKey = { ...API_KEY, apiEndpoint: "https://runtime.us-east-1.kiro.dev/" };
+		expect(accept(wireSchemas.apiKeyCredentialSchema, endpointKey)).toEqual(endpointKey);
+		expect(accept(wireSchemas.writableAuthCredentialSchema, endpointKey)).toEqual(endpointKey);
+		expect(accept(wireSchemas.snapshotCredentialSchema, endpointKey)).toEqual(endpointKey);
+	});
+
 	test("preserves fixed envelopes, integer fields, discriminators, and block alias identity", () => {
 		expect(wireSchemas.credentialBlockRequestSchema).toBe(wireSchemas.credentialBlockSnapshotSchema);
 		accept(wireSchemas.credentialBlockRequestSchema, {

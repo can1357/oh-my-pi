@@ -4,6 +4,8 @@ import { apiRouteFor } from "../compat/behavior";
 import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { fetchKiroModels } from "../discovery/kiro";
+
 import {
 	type FactoryDroidModelDiscoveryOptions,
 	factoryDroidSeedModels,
@@ -16,7 +18,7 @@ import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { toModelSpec } from "./bundled-references";
-import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { parseKiroDiscoveryCredential, resolveModelCacheProviderId } from "./cache-provider-id";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -447,6 +449,32 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 			: undefined),
 	};
 }
+// ---------------------------------------------------------------------------
+// Kiro
+// ---------------------------------------------------------------------------
+
+export interface KiroModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+}
+
+export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): ModelManagerOptions<"kiro-api"> {
+	return {
+		providerId: "kiro",
+		staticModels: [],
+		dynamicModelsAuthoritative: true,
+		cacheProviderId: resolveModelCacheProviderId("kiro", { apiKey: config.apiKey }),
+		...(config.apiKey
+			? {
+					fetchDynamicModels: async () => {
+						const credential = parseKiroDiscoveryCredential(config.apiKey as string);
+						return fetchKiroModels({ credential, fetch: config.fetch });
+					},
+				}
+			: undefined),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

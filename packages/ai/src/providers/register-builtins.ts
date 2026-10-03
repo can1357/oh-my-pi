@@ -23,6 +23,7 @@ import * as DevinProvider from "./devin";
 import * as GoogleProvider from "./google";
 import * as GoogleGeminiCliProvider from "./google-gemini-cli";
 import * as GoogleVertexProvider from "./google-vertex";
+import * as KiroProvider from "./kiro/index";
 import * as OllamaProvider from "./ollama";
 import * as OpenAICodexResponsesProvider from "./openai-codex-responses";
 import * as OpenAICompletionsProvider from "./openai-completions";
@@ -259,6 +260,12 @@ export const streamGoogleGeminiCli = createProviderStream<"google-gemini-cli">(
 /** Stream the Vertex API through the shared watchdog. */
 export const streamGoogleVertex = createProviderStream<"google-vertex">((model, context, options) =>
 	GoogleVertexProvider.streamGoogleVertex(model, context, options),
+);
+
+/** Stream Kiro with provider-owned timeout handling. */
+export const streamKiro = createProviderStream<"kiro-api">(
+	(model, context, options) => KiroProvider.streamKiro(model, context, options),
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
 
 /** Stream Codex with provider-owned timeout handling. */

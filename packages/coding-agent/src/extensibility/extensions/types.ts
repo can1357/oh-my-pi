@@ -969,7 +969,12 @@ export interface CredentialDisabledEvent {
 	/** Account identity recorded on the disabled OAuth credential, when the provider supplied one. */
 	email?: string;
 	accountId?: string;
-	/** Organization/workspace the credential was scoped to. */
+	/**
+	 * Organization/workspace the credential was scoped to. Kiro stores its AWS
+	 * profile ARN here, which embeds the account id, so it is reported as the
+	 * profile's trailing segment instead — and omitted when the stored value is
+	 * not a parseable profile ARN.
+	 */
 	orgId?: string;
 	orgName?: string;
 }
