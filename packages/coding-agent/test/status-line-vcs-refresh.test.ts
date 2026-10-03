@@ -783,6 +783,28 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		// never resolve, so this cold paint cannot fire #onBranchChange itself.
 		component.getTopBorder(80);
 
+		// Bun initializes watchFile's first stat asynchronously without emitting
+		// a change. Observe a real stat callback before replacing HEAD so the
+		// first rename cannot become the watcher's silent initial baseline.
+		const headPath = path.join(repoDir, ".git", "HEAD");
+		const priming = Promise.withResolvers<void>();
+		let primed = false;
+		const onPrimingChange = () => {
+			primed = true;
+			priming.resolve();
+		};
+		nodeFs.watchFile(headPath, { interval: vcs.HEAD_WATCH_INTERVAL_MS }, onPrimingChange);
+		try {
+			for (let attempt = 0; attempt < 10 && !primed; attempt++) {
+				const timestamp = new Date((attempt + 1) * 1000);
+				await fs.utimes(headPath, timestamp, timestamp);
+				await Promise.race([priming.promise, Bun.sleep(vcs.HEAD_WATCH_INTERVAL_MS)]);
+			}
+			expect(primed).toBe(true);
+		} finally {
+			nodeFs.unwatchFile(headPath, onPrimingChange);
+		}
+
 		const switchTo = async (branchName: string) => {
 			const gitDir = path.join(repoDir, ".git");
 			const headLock = path.join(gitDir, "HEAD.lock");

@@ -25,6 +25,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	const editor = {
 		onSubmit: undefined as undefined | ((t: string) => Promise<void>),
 		getText: () => text,
+		getExpandedText: () => text,
 		setText: (t: string) => {
 			text = t;
 		},
@@ -86,6 +87,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		},
 		ui: { requestRender: vi.fn() },
 		compactionQueuedMessages: [],
+		queueCompactionMessage: vi.fn(),
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
@@ -528,5 +530,62 @@ describe("yield queue list parsing", () => {
 		expect(splitQueuedMessages("1. first\n3. third")).toEqual(["1. first\n3. third"]);
 		expect(isQueuedMessageList("1. first\n2. second\n3. third\n4.")).toBe(true);
 		expect(splitQueuedMessages("1. first\n2. second\n3. third\n4.")).toEqual(["first", "second", "third"]);
+	});
+});
+
+describe("input controller — unknown slash commands (#14123)", () => {
+	it.each([false, true])(
+		"rejects unknown commands before idle/streaming provider dispatch (%s)",
+		async isStreaming => {
+			const { ctx, editor, prompt, onInputCallback } = makeCtx(isStreaming);
+			controllerFor(ctx);
+			await editor.onSubmit?.("/foobar");
+			expect(ctx.showError).toHaveBeenCalled();
+			expect(prompt).not.toHaveBeenCalled();
+			expect(onInputCallback).not.toHaveBeenCalled();
+			expect(ctx.locallySubmittedUserSignatures.size).toBe(0);
+		},
+	);
+
+	it("rejects arguments for a builtin that accepts none instead of prompting the provider", async () => {
+		const { ctx, editor, prompt, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+		await editor.onSubmit?.("/hotkeys invalid");
+		expect(ctx.showError).toHaveBeenCalled();
+		expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+
+	it("keeps an invalid jobs subcommand local", async () => {
+		const { ctx, editor, prompt, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+		await editor.onSubmit?.("/jobs foo");
+		expect(ctx.showStatus).toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+});
+
+describe("invalid slash follow-ups", () => {
+	it("rejects an unknown Ctrl+Enter draft before the compaction queue", async () => {
+		const { ctx, editor, prompt } = makeCtx(true);
+		Object.defineProperty(ctx.session, "isCompacting", { value: true });
+		const controller = controllerFor(ctx);
+		editor.setText("/foobar");
+		await controller.handleFollowUp();
+		expect(ctx.showError).toHaveBeenCalled();
+		expect(ctx.queueCompactionMessage).not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("/foobar");
+	});
+
+	it("allows discovered file commands to reach the existing expansion path", async () => {
+		const { ctx, editor, onInputCallback } = makeCtx();
+		ctx.fileSlashCommands.add("team:review");
+		controllerFor(ctx);
+		await editor.onSubmit?.("/team:review changes");
+		expect(ctx.showError).not.toHaveBeenCalled();
+		expect(onInputCallback).toHaveBeenCalled();
 	});
 });

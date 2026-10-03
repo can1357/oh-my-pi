@@ -205,6 +205,7 @@ describe("loop mode interjections", () => {
 
 	it("parks the loop when a direct submission is consumed locally", async () => {
 		const { ctx, setLoopPrompt, pauseLoop, prompt, getLoopPrompt } = createLoopContext({ isStreaming: false });
+		ctx.fileSlashCommands.add("void-cmd");
 		prompt.mockResolvedValueOnce(false);
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();

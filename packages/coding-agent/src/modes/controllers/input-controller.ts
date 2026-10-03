@@ -44,7 +44,11 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	getBuiltinSlashCommandUsageError,
+	lookupBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
@@ -997,6 +1001,7 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
+			const submittedImageLinks = inputImageLinks;
 
 			if (runner?.hasHandlers("input")) {
 				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
@@ -1010,6 +1015,20 @@ export class InputController {
 				}
 				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 				hasInputImages = (inputImages?.length ?? 0) > 0;
+			}
+			if (this.#rejectInvalidSlashCommand(text)) {
+				// Enter clears text but leaves its attachments live. Detach that
+				// snapshot before restoring the transformed draft alongside newer input.
+				if (
+					submittedImages?.length &&
+					submittedImages.every((image, index) => this.ctx.editor.pendingImages[index] === image)
+				) {
+					const newerText = shiftImageMarkers(this.ctx.editor.getExpandedText(), -submittedImages.length);
+					this.#dropSubmittedPending(submittedImages, submittedImageLinks);
+					this.ctx.editor.setCollapsedText(newerText);
+				}
+				restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
+				return;
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
 			const draftDetached =
@@ -1391,6 +1410,24 @@ export class InputController {
 			}
 		}
 		return undefined;
+	}
+
+	/** Reject command typos locally, after input hooks get their chance to rewrite them. */
+	#rejectInvalidSlashCommand(text: string): boolean {
+		if (!text.startsWith("/")) return false;
+		const parsed = parseSlashCommand(text);
+		const usageError = parsed ? getBuiltinSlashCommandUsageError(parsed) : undefined;
+		const token = text.slice(1).split(/\s/, 1)[0];
+		if (
+			!usageError &&
+			((parsed && lookupBuiltinSlashCommand(parsed.name)) ||
+				isKnownSkillCommand(this.ctx, text) ||
+				this.#isKnownNonBuiltinSlashCommandToken(token))
+		) {
+			return false;
+		}
+		this.ctx.showError(usageError ?? `Unknown command: ${text.split(/\s/, 1)[0]}`);
+		return true;
 	}
 
 	/** Whether `token` names a skill, file, extension, custom, or prompt-template command. */
@@ -1892,6 +1929,11 @@ export class InputController {
 				this.ctx.showError(error instanceof Error ? error.message : String(error));
 				return;
 			}
+		}
+
+		if (this.#rejectInvalidSlashCommand(text)) {
+			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
+			return;
 		}
 
 		// Compaction first: while compacting, free text gets queued via

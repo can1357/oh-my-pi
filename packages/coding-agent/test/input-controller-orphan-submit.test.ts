@@ -333,6 +333,8 @@ describe("InputController orphaned submit", () => {
 			expect(sessionManager.getSessionName()).toBeUndefined();
 			expect(session.messages).toEqual([]);
 
+			// This fixture forwards a registered file command, rather than an unknown typo.
+			ctx.fileSlashCommands.add("custom-prompt");
 			const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(true);
 			for (const forwardedText of ["inspect the widgets", "/custom-prompt inspect the widgets"]) {
 				titleSpy.mockClear();
