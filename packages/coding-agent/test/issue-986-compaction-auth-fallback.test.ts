@@ -96,10 +96,15 @@ describe("issue #986 compaction auth fallback", () => {
 
 	async function createAutoNativeFallbackSession(options?: {
 		sameProviderNativeEnabled?: boolean;
+		sameProviderContextWindow?: number;
 		includeSoftFallback?: boolean;
 	}) {
 		const currentModel = getBundledModel("openai", "gpt-5");
-		const sameProviderBase = getBundledModel("openai", "gpt-5-mini");
+		const bundledSameProvider = getBundledModel("openai", "gpt-5-mini");
+		const sameProviderBase =
+			bundledSameProvider && options?.sameProviderContextWindow !== undefined
+				? { ...bundledSameProvider, contextWindow: options.sameProviderContextWindow }
+				: bundledSameProvider;
 		const sameProviderModel =
 			sameProviderBase && options?.sameProviderNativeEnabled === false
 				? { ...sameProviderBase, remoteCompaction: { ...sameProviderBase.remoteCompaction, enabled: false } }
@@ -198,6 +203,58 @@ describe("issue #986 compaction auth fallback", () => {
 
 		await triggerAutoCompaction();
 
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+	});
+
+	function nativeWindowRefusal(model: { provider: string; id: string }): compactionModule.NativeCompactionError {
+		return new compactionModule.NativeCompactionError(
+			AIError.attach(
+				new Error(`Remote compaction input exceeds the context window of ${model.provider}/${model.id}`),
+				AIError.create(AIError.Flag.ContextOverflow),
+			),
+		);
+	}
+
+	it.each(["auto", "manual"] as const)(
+		"does not resend an over-window native input to a same-provider candidate with no larger window (%s)",
+		async trigger => {
+			const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+			expect(sameProviderModel.contextWindow).toBe(currentModel.contextWindow);
+			const attemptedModels: string[] = [];
+			vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
+				attemptedModels.push(`${model.provider}/${model.id}`);
+				throw nativeWindowRefusal(model);
+			});
+
+			if (trigger === "auto") await triggerAutoCompaction();
+			else await session.compact().catch(() => undefined);
+
+			expect(attemptedModels).toEqual([`${currentModel.provider}/${currentModel.id}`]);
+		},
+	);
+
+	it("still tries a same-provider candidate with a larger window after an over-window refusal", async () => {
+		const { currentModel, sameProviderModel } = await createAutoNativeFallbackSession({
+			sameProviderContextWindow: 1_000_000,
+		});
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.id === currentModel.id) throw nativeWindowRefusal(model);
+			return {
+				summary: "larger-window summary",
+				shortSummary: "larger-window",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		const result = await session.compact();
+
+		expect(result.summary).toBe("larger-window summary");
 		expect(attemptedModels).toEqual([
 			`${currentModel.provider}/${currentModel.id}`,
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,

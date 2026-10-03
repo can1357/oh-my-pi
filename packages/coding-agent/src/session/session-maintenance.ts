@@ -168,6 +168,17 @@ function canUseLiveProviderNativeCompaction(
 }
 
 /**
+ * Window a deterministic over-window native refusal rules out: the prepared
+ * input cannot fit any later candidate whose window is no larger, so sending
+ * it again only repeats the refusal.
+ */
+function nativeOverflowWindow(error: NativeCompactionError, candidate: Model): number | undefined {
+	if (candidate.contextWindow === null) return undefined;
+	const id = AIError.classify(error.cause, candidate.api);
+	return AIError.is(id, AIError.Flag.ContextOverflow) ? candidate.contextWindow : undefined;
+}
+
+/**
  * Whether `candidate` is actually selectable for `reason` on `model` — mirrors the
  * per-candidate availability check in {@link SessionMaintenance.runAutoCompaction}'s
  * method-order loop so every caller agrees with what would really be selected.
@@ -3404,8 +3415,21 @@ export class SessionMaintenance {
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+		let refusedWindow: number | undefined;
 
 		for (const candidate of candidates) {
+			if (
+				refusedWindow !== undefined &&
+				candidate.contextWindow !== null &&
+				candidate.contextWindow <= refusedWindow
+			) {
+				logger.debug("Skipping native compaction candidate that cannot fit the refused input", {
+					model: `${candidate.provider}/${candidate.id}`,
+					contextWindow: candidate.contextWindow,
+					refusedWindow,
+				});
+				continue;
+			}
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
 			if (
@@ -3457,6 +3481,8 @@ export class SessionMaintenance {
 				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
 				if (error instanceof NativeCompactionError) {
 					nativeCompactionFailure ??= { error, provider: candidate.provider };
+					const overflowWindow = nativeOverflowWindow(error, candidate);
+					if (overflowWindow !== undefined) refusedWindow = Math.max(refusedWindow ?? 0, overflowWindow);
 					continue;
 				}
 				throw error;
@@ -4783,6 +4809,7 @@ export class SessionMaintenance {
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 				let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+				let refusedWindow: number | undefined;
 				codexCompaction = createCodexCompactionContext({
 					trigger: "auto",
 					reason: "context_limit",
@@ -4794,6 +4821,18 @@ export class SessionMaintenance {
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
+					if (
+						refusedWindow !== undefined &&
+						candidate.contextWindow !== null &&
+						candidate.contextWindow <= refusedWindow
+					) {
+						logger.debug("Skipping native compaction candidate that cannot fit the refused input", {
+							model: `${candidate.provider}/${candidate.id}`,
+							contextWindow: candidate.contextWindow,
+							refusedWindow,
+						});
+						continue;
+					}
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
 					if (
@@ -4894,6 +4933,10 @@ export class SessionMaintenance {
 								if (error instanceof NativeCompactionError) {
 									nativeCompactionFailure ??= { error, provider: candidate.provider };
 									lastError = nativeCompactionFailure.error;
+									const overflowWindow = nativeOverflowWindow(error, candidate);
+									if (overflowWindow !== undefined) {
+										refusedWindow = Math.max(refusedWindow ?? 0, overflowWindow);
+									}
 								} else {
 									lastError = error;
 								}
