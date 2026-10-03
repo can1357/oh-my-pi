@@ -2719,9 +2719,9 @@ export class AcpAgent implements Agent {
 				env: this.#toNameValueMap(server.env),
 			};
 		}
-		if (server.type === "http") {
+		if (server.type === "http" || server.type === "streamable-http") {
 			return {
-				type: "http",
+				type: server.type,
 				url: server.url,
 				headers: this.#toNameValueMap(server.headers),
 			};

@@ -63,8 +63,8 @@ function parseMCPServers(
 			env: serverConfig.env as Record<string, string> | undefined,
 			url: serverConfig.url as string | undefined,
 			headers: serverConfig.headers as Record<string, string> | undefined,
-			transport: ["stdio", "sse", "http"].includes(serverConfig.type as string)
-				? (serverConfig.type as "stdio" | "sse" | "http")
+			transport: ["stdio", "sse", "http", "streamable-http"].includes(serverConfig.type as string)
+				? (serverConfig.type as "stdio" | "sse" | "http" | "streamable-http")
 				: undefined,
 			timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),

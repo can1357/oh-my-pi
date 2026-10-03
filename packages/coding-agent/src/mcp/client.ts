@@ -11,9 +11,11 @@ import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
 import type {
+	MCPClientCapabilities,
 	MCPGetPromptParams,
 	MCPGetPromptResult,
 	MCPHttpServerConfig,
+	MCPImplementation,
 	MCPInitializeParams,
 	MCPInitializeResult,
 	MCPPrompt,
@@ -31,6 +33,7 @@ import type {
 	MCPServerConnection,
 	MCPSseServerConfig,
 	MCPStdioServerConfig,
+	MCPStreamableHttpServerConfig,
 	MCPToolCallParams,
 	MCPToolCallResult,
 	MCPToolDefinition,
@@ -77,12 +80,39 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 		case "stdio":
 			return createStdioTransport(config as MCPStdioServerConfig);
 		case "http":
-			return createHttpTransport(config as MCPHttpServerConfig);
+		case "streamable-http":
+			return createHttpTransport(config as MCPHttpServerConfig | MCPStreamableHttpServerConfig);
 		case "sse":
 			return createSseTransport(config as MCPSseServerConfig);
 		default:
 			throw new Error(`Unknown server type: ${serverType}`);
 	}
+}
+
+/** A transport that can pick its wire era before the handshake (modern HTTP). */
+interface EraNegotiatingTransport extends MCPTransport {
+	negotiate(
+		clientInfo: MCPImplementation,
+		capabilities: MCPClientCapabilities,
+		options?: { signal?: AbortSignal },
+	): Promise<void>;
+}
+
+function supportsEraNegotiation(transport: MCPTransport): transport is EraNegotiatingTransport {
+	return "negotiate" in transport && typeof transport.negotiate === "function";
+}
+
+/**
+ * Run the modern-era probe on a `streamable-http` endpoint before the
+ * handshake. Transports without era support (stdio, plain HTTP, SSE) no-op.
+ */
+async function negotiateMCPHttpEra(transport: MCPTransport, signal?: AbortSignal): Promise<void> {
+	if (!supportsEraNegotiation(transport)) return;
+	await transport.negotiate(
+		CLIENT_INFO,
+		{ roots: { listChanged: false } },
+		{ ...(signal !== undefined && { signal }) },
+	);
 }
 
 /**
@@ -96,6 +126,8 @@ async function initializeConnection(
 		onInitialized?: () => void | Promise<void>;
 	},
 ): Promise<MCPInitializeResult> {
+	await negotiateMCPHttpEra(transport, options?.signal);
+
 	const params: MCPInitializeParams = {
 		protocolVersion: MCP_PROTOCOL_VERSION,
 		capabilities: {

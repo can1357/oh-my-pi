@@ -240,7 +240,8 @@ describe("parseAgentPluginMcp", () => {
 		if (result.status !== "ok") return;
 		expect(result.servers.map(server => server.name).sort()).toEqual(["https", "loopback", "loopback-ip"]);
 		const https = result.servers.find(server => server.name === "https");
-		expect(https?.transport).toBe("http");
+		// Agent Plugins §7.2 pins `streamable-http` to the modern 2026 era.
+		expect(https?.transport).toBe("streamable-http");
 		expect(https?.headers).toEqual({ "X-Tenant": "t" });
 		expect(result.servers.find(server => server.name === "loopback-ip")?.transport).toBe("sse");
 	});
@@ -350,7 +351,7 @@ describe("agent-plugins discovery", () => {
 		expect((await fs.stat(pluginData)).isDirectory()).toBe(true);
 
 		const api = mcps.all.find(server => server.name === "std-plugin:api");
-		expect(api?.transport).toBe("http");
+		expect(api?.transport).toBe("streamable-http");
 		expect(api?.url).toBe("https://deploy.example.com/mcp");
 	});
 

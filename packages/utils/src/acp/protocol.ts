@@ -205,7 +205,12 @@ export interface AuthenticateResponse extends Meta {}
 /** ACP MCP server configuration. */
 export type McpServer = (
 	| { type?: "stdio"; name: string; command: string; args?: string[]; env: Array<{ name: string; value: string }> }
-	| { type: "http" | "sse" | "acp"; name: string; url: string; headers: Array<{ name: string; value: string }> }
+	| {
+			type: "http" | "streamable-http" | "sse" | "acp";
+			name: string;
+			url: string;
+			headers: Array<{ name: string; value: string }>;
+	  }
 ) &
 	Meta;
 /** Session mode descriptor. */

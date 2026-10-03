@@ -52,12 +52,13 @@ import {
 	searchSmitheryRegistry,
 	toConfigName,
 } from "../../mcp/smithery-registry";
-import type {
-	MCPAuthChallenge,
-	MCPAuthConfig,
-	MCPConfigFile,
-	MCPServerConfig,
-	MCPServerConnection,
+import {
+	type MCPAuthChallenge,
+	type MCPAuthConfig,
+	type MCPConfigFile,
+	type MCPServerConfig,
+	type MCPServerConnection,
+	isRemoteMCPConfig,
 } from "../../mcp/types";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
@@ -348,7 +349,7 @@ export class MCPOAuthCancelledError extends Error {
 const MCP_OAUTH_USER_CANCEL_REASON = "MCP OAuth flow cancelled by user";
 
 type MCPAddScope = "user" | "project";
-type MCPAddTransport = "http" | "sse";
+type MCPAddTransport = "http" | "streamable-http" | "sse";
 
 type MCPAddParsed = {
 	initialName?: string;
@@ -580,8 +581,8 @@ export class MCPCommandController {
 			}
 			if (argToken === "--transport") {
 				const value = tokens[i + 1];
-				if (!value || (value !== "http" && value !== "sse")) {
-					return { scope, error: "Invalid --transport value. Use http or sse." };
+				if (!value || (value !== "http" && value !== "streamable-http" && value !== "sse")) {
+					return { scope, error: "Invalid --transport value. Use http, streamable-http, or sse." };
 				}
 				transport = value;
 				i += 2;
@@ -629,7 +630,7 @@ export class MCPCommandController {
 			normalizedUrl = `https://${normalizedUrl}`;
 		}
 		const config: MCPServerConfig = {
-			type: useHttpTransport ? "http" : "sse",
+			type: useHttpTransport ? "http" : transport === "streamable-http" ? "streamable-http" : "sse",
 			url: normalizedUrl,
 			headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
 		};
@@ -729,7 +730,7 @@ export class MCPCommandController {
 
 			// Quick-add with URL should still perform auth detection and OAuth flow,
 			// matching wizard behavior. Command quick-add intentionally skips this.
-			if (!parsed.isCommandQuickAdd && (finalConfig.type === "http" || finalConfig.type === "sse")) {
+			if (!parsed.isCommandQuickAdd && isRemoteMCPConfig(finalConfig)) {
 				try {
 					await this.#handleTestConnection(finalConfig);
 				} catch (error) {
@@ -1250,7 +1251,7 @@ export class MCPCommandController {
 		// unauthenticated preflight below spawns the child, which happily reuses
 		// its own cached tokens (e.g. mcp-remote's machine-wide ~/.mcp-auth) and
 		// produces the misleading "reauthorization is not required".
-		if (config.type !== "http" && config.type !== "sse") {
+		if (!isRemoteMCPConfig(config)) {
 			const remoteUrl = config.args?.find(arg => /^https?:\/\//.test(arg));
 			const httpHint = `{ "type": "http", "url": ${JSON.stringify(remoteUrl ?? "<remote url>")} }`;
 			const usesMcpRemote = [config.command, ...(config.args ?? [])].some(part => part?.includes("mcp-remote"));
@@ -1295,7 +1296,7 @@ export class MCPCommandController {
 		const authResult = analyzeAuthError(authError, "url" in config ? config.url : undefined);
 		let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
 
-		if (!oauth && (config.type === "http" || config.type === "sse") && config.url) {
+		if (!oauth && isRemoteMCPConfig(config) && config.url) {
 			oauth = await discoverOAuthEndpoints(config.url, authResult.authServerUrl, authResult.resourceMetadataUrl, {
 				protectedScopes: authResult.scopes,
 			});
@@ -1947,7 +1948,7 @@ export class MCPCommandController {
 			// discovery expands `${...}` URL values before MCPManager looks up the
 			// deterministic credential row, so unauth must clear that same key.
 			let removedUrlKeyedCredential = false;
-			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
+			if (isRemoteMCPConfig(found.config) && found.config.url) {
 				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(
 					authStorage,
 					mcpOAuthCredentialIdsForServerUrl(found.config.url),
@@ -2016,8 +2017,7 @@ export class MCPCommandController {
 			// Use the same env-expanded config shape runtime discovery passes to
 			// MCPManager; the raw file value may contain `${...}` placeholders.
 			const oauth = await this.#resolveOAuthEndpointsFromServer(runtimeBaseConfig, options.authChallenge);
-			const serverUrl =
-				runtimeBaseConfig.type === "http" || runtimeBaseConfig.type === "sse" ? runtimeBaseConfig.url : undefined;
+			const serverUrl = isRemoteMCPConfig(runtimeBaseConfig) ? runtimeBaseConfig.url : undefined;
 			// Client credentials drive the token exchange, so they must come from the
 			// env-expanded runtime config; `found.config`/`currentAuth` may still hold
 			// `${...}` placeholders (the wizard writes the secret to auth.clientSecret).
