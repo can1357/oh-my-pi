@@ -5,6 +5,10 @@ provider "kimi-code" {
 	discovery label="Kimi Code" {
 		env "KIMI_API_KEY"
 	}
+	// The reviewed short K3 deployment id has no vendor/family taxonomy.
+	models "k3" {
+		role-preset-priority { slow 10; }
+	}
 
 	class "kimi" {
 		// Replaces the native Kimi provider thinking-format branch.

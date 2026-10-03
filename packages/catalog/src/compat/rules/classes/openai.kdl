@@ -1,6 +1,50 @@
 // Model-lineage compat for "openai"; regenerated from the frozen census using class taxonomy selectors.
 
 class "openai" {
+	// Spark taxonomy includes arbitrary suffix SKUs; exact residues preserve
+	// reviewed candidates without making custom/preview spellings eligible.
+	family "codex-spark" {
+		revision "=5.3" {
+			models "gpt-5.3-codex-spark" "openai/gpt-5.3-codex-spark" {
+				role-preset-priority { smol 10; }
+			}
+		}
+	}
+	// GPT taxonomy has no Luna/Sol/Mini or base-only family. Exact residue
+	// selectors keep other GPT SKUs and older mini generations ineligible.
+	models "gpt-5.6-luna" "openai/gpt-5.6-luna" {
+		role-preset-priority { smol 30; }
+	}
+	models "gpt-5.4-mini" "openai/gpt-5.4-mini" {
+		role-preset-priority { smol 32; }
+	}
+	models "gpt-5.6-sol" "openai/gpt-5.6-sol" {
+		role-preset-priority { slow 1; }
+	}
+	models "gpt-5.5" "openai/gpt-5.5" {
+		role-preset-priority { slow 21; }
+	}
+	on "openai-codex" {
+		family "codex-spark" {
+			revision "=5.3" {
+				models "gpt-5.3-codex-spark" {
+					role-preset-priority { smol 9; }
+				}
+			}
+		}
+		models "gpt-5.6-luna" {
+			role-preset-priority { smol 29; }
+		}
+		models "gpt-5.4-mini" {
+			role-preset-priority { smol 31; }
+		}
+		models "gpt-5.6-sol" {
+			role-preset-priority { slow 0; }
+		}
+		models "gpt-5.5" {
+			role-preset-priority { slow 20; }
+		}
+	}
 	// Replaces the o-series mandatory-reasoning fallback.
 	family "o-series" {
 		thinking-requires-effort #true

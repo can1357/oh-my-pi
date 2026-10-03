@@ -1195,6 +1195,7 @@ function resolveNestedRolePatterns(
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
 	visited: Set<string>,
+	normalizeLiteralModelPattern: ((pattern: string) => string | undefined) | undefined,
 ): string[] {
 	const resolved: string[] = [];
 	for (const pattern of normalizeModelPatternList(value)) {
@@ -1205,15 +1206,20 @@ function resolveNestedRolePatterns(
 			continue;
 		}
 		if (visited.has(aliasRole)) {
+			// A configured cycle (e.g. smol = "@slow", slow = "@smol") loops back to a
+			// role already being resolved: substitute the revisited role's own built-in
+			// priority chain so the alias still yields a model of the intended class,
+			// rather than the current recursion frame's chain (which would swap the
+			// roles' model classes) or collapsing to nothing.
+			const revisitDefaults = isModelRole(aliasRole) ? rolePriorityDefaults(aliasRole) : roleDefaults;
 			resolved.push(
 				...(thinkingLevel
-					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
-					: roleDefaults),
+					? revisitDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
+					: revisitDefaults),
 			);
 			continue;
 		}
-
-		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited), normalizeLiteralModelPattern);
 		if (recursed) resolved.push(...recursed);
 	}
 	return resolved;
@@ -1225,15 +1231,53 @@ function resolveDefaultInheritedPatterns(
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
 	visited: Set<string>,
+	normalizeLiteralModelPattern: ((pattern: string) => string | undefined) | undefined,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
-	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited);
+
+	const resolved: string[] = [];
+	for (const pattern of normalizeModelPatternList(configuredDefault)) {
+		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
+			pattern,
+			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+			MAX_THINKING_SUFFIX_OPTIONS,
+		);
+		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
+		if (aliasRole && visited.has(aliasRole)) {
+			// Cycle (self-alias like modelRoles.default = "@smol", or tiny → smol
+			// → default = "@tiny") would loop back to a visited role: fall back
+			// to the built-in chain instead of leaking the unresolved alias.
+			resolved.push(
+				...(thinkingLevel
+					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
+					: roleDefaults),
+			);
+			continue;
+		}
+		if (aliasRole) {
+			// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
+			// concrete model patterns instead of another role alias.
+			const recursed = resolveConfiguredRolePattern(
+				pattern,
+				settings,
+				new Set(visited),
+				normalizeLiteralModelPattern,
+			);
+			if (recursed && recursed.length > 0) {
+				resolved.push(...recursed);
+				continue;
+			}
+		}
+		resolved.push(pattern);
+	}
+	return resolved;
 }
 
 function resolveConfiguredRolePattern(
 	value: string,
 	settings?: ModelRoleLookup,
 	visited: Set<string> = new Set(),
+	normalizeLiteralModelPattern?: (pattern: string) => string | undefined,
 ): string[] | undefined {
 	const normalized = value.trim();
 	if (!normalized) return undefined;
@@ -1253,13 +1297,39 @@ function resolveConfiguredRolePattern(
 		!configuredFallback ||
 		(configuredFallback.configuredOnly && !settings?.getModelRole(configuredFallback.role)?.trim())
 			? undefined
-			: resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback.role), settings, new Set(visited));
+			: (
+					resolveConfiguredRolePattern(
+						formatModelRoleAlias(configuredFallback.role),
+						settings,
+						new Set(visited),
+						normalizeLiteralModelPattern,
+					) ?? []
+				).flatMap(pattern => {
+					const { base, level } = splitThinkingSuffix(
+						pattern,
+						modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+						MAX_THINKING_SUFFIX_OPTIONS,
+					);
+					const patternRole = getModelRoleAlias(base, settings);
+					if (!patternRole || !visited.has(patternRole)) return [pattern];
+					// Cyclic fallback alias (e.g. smol = "@tiny:high" while resolving
+					// @tiny): expand to the built-in chain, preserving the requested
+					// thinking level instead of dropping the suffix.
+					return level ? roleDefaults.map(defaultPattern => `${defaultPattern}:${level}`) : [];
+				});
 	const resolved = configured
-		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited)
+		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited, normalizeLiteralModelPattern)
 		: fallbackPatterns
 			? fallbackPatterns
 			: isModelRole(role)
-				? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
+				? resolveDefaultInheritedPatterns(
+						role,
+						configuredDefault,
+						roleDefaults,
+						settings,
+						visited,
+						normalizeLiteralModelPattern,
+					)
 				: roleDefaults;
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
@@ -1268,31 +1338,61 @@ function resolveConfiguredRolePattern(
 		return undefined;
 	}
 
-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
+	return thinkingLevel
+		? resolved.map(pattern => {
+				const prefixLength = modelRoleAliasPrefixLength(pattern);
+				const base =
+					prefixLength === undefined
+						? pattern
+						: splitThinkingSuffix(pattern, prefixLength, MAX_THINKING_SUFFIX_OPTIONS).base;
+				const literalPattern = normalizeLiteralModelPattern?.(base);
+				const resolvedBase = literalPattern ?? splitThinkingSuffix(base, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+				return `${resolvedBase}:${thinkingLevel}`;
+			})
+		: resolved;
 }
 
 /**
  * Expand a role alias like "@smol" to the configured model string.
  */
-export function expandRoleAlias(value: string, settings?: ModelRoleLookup): string {
+export function expandRoleAlias(
+	value: string,
+	settings?: ModelRoleLookup,
+	availableModels?: readonly Model<Api>[],
+): string {
 	const normalized = value.trim();
-	if (normalized === DEFAULT_MODEL_ROLE) {
-		return settings?.getModelRole("default") ?? value;
-	}
+	const source = normalized === DEFAULT_MODEL_ROLE ? (settings?.getModelRole("default") ?? value) : value;
+	return resolveConfiguredModelPatterns(source, settings, { availableModels })[0] ?? value;
+}
 
-	const resolved = resolveConfiguredRolePattern(value, settings)?.[0];
-	return resolved ?? value;
+export interface ConfiguredModelPatternOptions {
+	/**
+	 * Available models, used to canonicalize a configured selector whose id
+	 * legitimately ends in an effort token (`nanogpt/coding-router:low`) before
+	 * an outer alias effort (`@smol:high`) is applied. Callers that know their
+	 * candidate set MUST pass it; otherwise the literal suffix is stripped as
+	 * if it were an inner effort and a different model resolves.
+	 */
+	availableModels?: readonly Model<Api>[];
+	/** Pre-built normalizer; takes precedence over {@link availableModels}. */
+	normalizeLiteralModelPattern?: (pattern: string) => string | undefined;
 }
 
 export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
 	settings?: ModelRoleLookup,
+	options?: ConfiguredModelPatternOptions,
 ): string[] {
 	const patterns = normalizeModelPatternList(value);
-	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
-		return resolved ?? [];
-	});
+	const normalizeLiteralModelPattern =
+		options?.normalizeLiteralModelPattern ??
+		(options?.availableModels ? createLiteralModelPatternNormalizer(options.availableModels) : undefined);
+	// Alias recursion (and its cycle-to-role-defaults fallback) lives inside
+	// resolveConfiguredRolePattern via resolveNestedRolePatterns, so this only
+	// expands each top-level pattern once.
+	return patterns.flatMap(
+		pattern => resolveConfiguredRolePattern(pattern, settings, new Set(), normalizeLiteralModelPattern) ?? [],
+	);
 }
 export interface AgentModelPatternResolutionOptions {
 	/** Highest-priority request selector, when supplied by a caller. */
@@ -1302,6 +1402,8 @@ export interface AgentModelPatternResolutionOptions {
 	settings?: Settings;
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
+	/** Available models used to preserve literal effort-like model IDs. */
+	availableModels?: readonly Model<Api>[];
 }
 
 interface EffectiveAgentModelSelection {
@@ -1320,10 +1422,11 @@ function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
 	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
+	const resolutionOptions = { availableModels: options.availableModels };
 	const inheritSessionModel = (requested?: SessionModelInheritance): EffectiveAgentModelSelection => {
 		const active = activeModelPattern?.trim();
 		const fallback = active || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-		const patterns = resolveConfiguredModelPatterns(fallback, settings);
+		const patterns = resolveConfiguredModelPatterns(fallback, settings, resolutionOptions);
 		const level = requested?.level;
 		if (level) return { patterns: patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) };
 		return active ? { patterns, inheritsLiveThinkingLevel: true } : { patterns };
@@ -1336,7 +1439,7 @@ function resolveEffectiveAgentModelSelection(
 		const inheritance = matchSessionInheritedPattern(pattern);
 		if (!inheritance) {
 			everyRequestPatternInheritsLiveLevel = false;
-			return resolveConfiguredModelPatterns(pattern, settings);
+			return resolveConfiguredModelPatterns(pattern, settings, resolutionOptions);
 		}
 		if (!requestedInheritance) requestSource = index === 0 ? undefined : patterns.slice(0, index);
 		requestedInheritance = true;
@@ -1350,13 +1453,13 @@ function resolveEffectiveAgentModelSelection(
 			: { source: requestSource, patterns: requestPatterns };
 	}
 
-	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
+	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings, resolutionOptions);
 	if (overridePatterns.length > 0) {
 		return { source: settingsOverride, patterns: overridePatterns };
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
-	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
+	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings, resolutionOptions);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
 	const agentInheritance = singleAgentPattern
 		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
@@ -1481,6 +1584,26 @@ export interface ResolvedModelRoleValue {
 	warning: string | undefined;
 }
 
+function createLiteralModelPatternNormalizer(
+	availableModels: readonly Model<Api>[],
+): (pattern: string) => string | undefined {
+	const literalModelPatterns = new Map<string, string | undefined>();
+	const addLiteralModelPattern = (pattern: string, canonical: string): void => {
+		const key = pattern.toLowerCase();
+		if (!literalModelPatterns.has(key)) {
+			literalModelPatterns.set(key, canonical);
+		} else if (literalModelPatterns.get(key) !== canonical) {
+			literalModelPatterns.set(key, undefined);
+		}
+	};
+	for (const model of availableModels) {
+		const selector = formatModelString(model);
+		addLiteralModelPattern(selector, selector);
+		addLiteralModelPattern(model.id, model.id);
+	}
+	return pattern => literalModelPatterns.get(pattern.trim().toLowerCase());
+}
+
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
@@ -1500,7 +1623,9 @@ export function resolveModelRoleValue(
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
-	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings);
+	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings, {
+		normalizeLiteralModelPattern: createLiteralModelPatternNormalizer(availableModels),
+	});
 	if (!effectivePatterns || effectivePatterns.length === 0) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
@@ -1536,6 +1661,8 @@ export function resolveModelRoleValue(
 
 interface ExplicitThinkingSelectorOptions {
 	isLiteralModelId?: (provider: string, id: string) => boolean;
+	/** Candidate set used when expanding role aliases, so literal effort-like ids survive. */
+	availableModels?: readonly Model<Api>[];
 }
 
 function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
@@ -1568,7 +1695,7 @@ export function extractExplicitThinkingSelector(
 		) {
 			return maxSelector;
 		}
-		const expanded = expandRoleAlias(current, settings).trim();
+		const expanded = expandRoleAlias(current, settings, options?.availableModels).trim();
 		if (!expanded || expanded === current) break;
 		if (expanded === DEFAULT_MODEL_ROLE) return undefined;
 		current = expanded;
@@ -1613,7 +1740,7 @@ export function resolveModelFromSettings(options: {
 	for (const role of roles) {
 		const configured = settings.getModelRole(role);
 		if (!configured) continue;
-		const expanded = expandRoleAlias(configured, settings).trim();
+		const expanded = expandRoleAlias(configured, settings, availableModels).trim();
 		if (expanded.includes("/")) {
 			sawConfiguredProviderQualifiedRole = true;
 		}
@@ -1708,9 +1835,6 @@ export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 /**
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
- *
- * Providers disabled through settings are removed before matching so ordered
- * overrides skip them and an all-disabled list resolves to no model.
  *
  * If the resolved subagent model has no working credentials (provider has no
  * usable auth), and the parent's active model resolves with working auth,
@@ -1812,10 +1936,10 @@ export function resolveRoleSelection(
 /**
  * Resolve the model for the `advisor` role. A configured `modelRoles.advisor`
  * wins outright (a bad override surfaces as no model rather than silently
- * running something else); when unset it uses a configured `slow` role before
- * the built-in slow priority chain. It never inherits the primary model through
- * an unconfigured `slow` role. Returns undefined only when no candidate in the
- * resolved chain is available.
+ * running something else); when unset it falls back to the `slow` priority
+ * chain via {@link ROLE_PRIORITY_ALIAS} — a strong reasoning model that, unlike
+ * the `slow` role itself, never inherits the primary's model. Returns undefined
+ * only when no candidate in the resolved chain is available.
  */
 export function resolveAdvisorRoleSelection(
 	settings: Settings,
@@ -2233,7 +2357,12 @@ function resolveCliModelInScope(
 				MAX_THINKING_SUFFIX_OPTIONS,
 			);
 			const configuredRole = getModelRoleAlias(roleAlias, settings);
-			configuredPatterns = resolveConfiguredModelPatterns([roleSelector], settings);
+			// Canonicalize literal effort-like ids against what the registry knows, so
+			// the returned patterns the deferred SDK path prefers name the same model
+			// this call resolved.
+			configuredPatterns = resolveConfiguredModelPatterns([roleSelector], settings, {
+				availableModels: availableModels.length > 0 ? availableModels : allModels,
+			});
 			const availableResolved = resolveModelRoleValue(roleSelector, availableModels, {
 				settings,
 				matchPreferences: preferences,

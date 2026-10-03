@@ -1,6 +1,35 @@
 // Model-lineage compat for "glm"; regenerated from the frozen census using class taxonomy selectors.
 
 class "glm" {
+	// Taxonomy's revision includes Flash/Air/Turbo and opaque derivatives;
+	// exact residues preserve the reviewed base/Flash role candidate set.
+	models "glm-5.3-flash" "z-ai/glm-5.3-flash" "zai/glm-5.3-flash" {
+		role-preset-priority { smol 14; }
+	}
+	models "glm-5.3" "z-ai/glm-5.3" "zai/glm-5.3" {
+		role-preset-priority { slow 15; }
+	}
+	on "zai" {
+		models "glm-5.3-flash" {
+			role-preset-priority { smol 13; }
+		}
+		models "glm-5.3" {
+			role-preset-priority { slow 14; }
+		}
+	}
+	// These Cerebras deployment spellings were individually curated, not
+	// a general recommendation for all GLM 4.x or all "zai-glm" prefixes.
+	on "cerebras" {
+		models "zai-glm-4.7" {
+			role-preset-priority { smol 21; }
+		}
+		models "zai-glm-4.6" {
+			role-preset-priority { smol 22; }
+		}
+		models "zai-glm" {
+			role-preset-priority { smol 23; }
+		}
+	}
 	// Replaces provider-keyed GLM 5+ coding-plan stream-idle dispatch.
 	on "zhipu-coding-plan" "opencode-go" "opencode-zen" {
 		revision ">=5" {

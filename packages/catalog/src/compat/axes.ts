@@ -412,6 +412,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		set: "catalog",
 		shape: "scalar",
 	},
+	"role-preset-priority": { key: "rolePresetPriority", set: "catalog", shape: "object" },
 	"supports-assistant-prefill": { key: "supportsAssistantPrefill", set: "catalog", shape: "scalar" },
 	/**
 	 * Ordered Anthropic model ids forwarded as the server-side `fallbacks`

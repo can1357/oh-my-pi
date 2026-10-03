@@ -88,6 +88,7 @@ export function createAgentsHubDeps(
 				settings,
 				activeModelPattern,
 				fallbackModelPattern: defaultModelPattern,
+				availableModels: modelRegistry.getAvailable(),
 			}),
 		resolvePatterns: patterns => {
 			if (patterns.length === 0) return undefined;
@@ -142,6 +143,7 @@ export function createAgentsHubDeps(
 			const patterns = resolveConfiguredModelPatterns(
 				activeModelPattern ?? defaultModelPattern ?? settings.getModelRole("default"),
 				settings,
+				{ availableModels: modelRegistry.getAvailable() },
 			);
 			const { model } = resolveModelOverride(patterns, modelRegistry, settings);
 			const selectedModel = model ?? modelRegistry.getAvailable()[0];

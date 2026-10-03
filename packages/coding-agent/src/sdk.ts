@@ -1061,8 +1061,14 @@ export async function resolvePrewalkTarget(
 	{
 		deferUnregistered = false,
 		beforeRefresh,
-	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void> } = {},
+		refreshPatterns,
+	}: {
+		deferUnregistered?: boolean;
+		beforeRefresh?: () => Promise<void>;
+		refreshPatterns?: () => readonly string[];
+	} = {},
 ): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean }> {
+	let candidatePatterns = patterns;
 	let refreshedProviders: Set<string> | undefined;
 	const resolveCandidate = (pattern: string) => resolveCliModel({ cliModel: pattern, modelRegistry, preferences });
 	let authenticated: ResolveCliModelResult | undefined;
@@ -1073,7 +1079,9 @@ export async function resolvePrewalkTarget(
 
 	// Each provider-qualified candidate gets its scoped discovery opportunity
 	// before advancing to the next candidate in the configured role chain.
-	for (const pattern of patterns) {
+	for (let index = 0; index < candidatePatterns.length; index++) {
+		const pattern = candidatePatterns[index];
+		if (!pattern) continue;
 		disabledProvider = undefined;
 		let candidate = resolveCandidate(pattern);
 		lastResolution = candidate;
@@ -1109,7 +1117,10 @@ export async function resolvePrewalkTarget(
 		(refreshedProviders ??= new Set()).add(requestedProvider);
 		await beforeRefresh?.();
 		await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
-		candidate = resolveCandidate(pattern);
+		candidatePatterns = refreshPatterns?.() ?? candidatePatterns;
+		const refreshedPattern = candidatePatterns[index];
+		if (!refreshedPattern) continue;
+		candidate = resolveCandidate(refreshedPattern);
 		lastResolution = candidate;
 		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
 			disabledProvider = candidate.model.provider;
@@ -1123,7 +1134,8 @@ export async function resolvePrewalkTarget(
 	}
 
 	if (deferred) return { warnings: [], deferred: true };
-	const resolved = authenticated ?? firstUnauthenticated ?? lastResolution ?? resolveCandidate(patterns[0] ?? target);
+	const resolved =
+		authenticated ?? firstUnauthenticated ?? lastResolution ?? resolveCandidate(candidatePatterns[0] ?? target);
 	const warnings = resolved.warning ? [resolved.warning] : [];
 	if (resolved.error || !resolved.model) {
 		warnings.push(
@@ -2872,7 +2884,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							},
 						];
 					}
-					return resolveConfiguredModelPatterns([trimmedSelector], settings).map(pattern => ({
+					return resolveConfiguredModelPatterns([trimmedSelector], settings, { availableModels }).map(pattern => ({
 						pattern,
 						retryFallback: undefined,
 					}));
