@@ -211,14 +211,14 @@ export class Win32InputModeDecoder {
 	}
 
 	/**
-	 * Release held VT text as-is. The caller invokes this once no further bytes
-	 * arrived in time, so a lone relayed ESC still acts as the Escape key.
+	 * Release held VT text once no further bytes arrive. A bare ESC pair is two
+	 * Escape keys, like StdinBuffer, not an incomplete Alt prefix.
 	 */
 	flushPendingSequence(): string[] {
 		if (this.#pendingVt.length === 0) return [];
 		const pending = this.#pendingVt;
 		this.#pendingVt = "";
-		return [pending];
+		return pending === "\x1b\x1b" ? ["\x1b", "\x1b"] : [pending];
 	}
 
 	/**

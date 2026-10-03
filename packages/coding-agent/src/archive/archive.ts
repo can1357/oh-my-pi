@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatAge, formatCount } from "@oh-my-pi/pi-utils";
-import { type HistoryEntry, HistoryStorage } from "../session/history-storage";
+import { type HistoryEntry, HistoryStorage, type HistoryScope } from "../session/history-storage";
 import { listSessionRecaps, type SessionRecap } from "../session/session-index";
 import {
 	findSessionFiles,
@@ -154,7 +154,11 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	const recaps = listSessionRecaps({ sessionIds: [info.id] })
 		.map(toArchiveRecap)
 		.reverse();
-	const prompts = HistoryStorage.open().getRecent(limit, { sessionId: info.id }).map(toArchivePrompt).reverse();
+	// Same reason as `archivePrompts`: an unreadable store must not throw out of an
+	// archive view.
+	const prompts = safeRecent(HistoryStorage.open(), limit, { kind: "session", value: info.id })
+		.map(toArchivePrompt)
+		.reverse();
 	const record: ArchiveSessionDetail = {
 		...toArchiveSession(info, recaps.at(-1)?.text),
 		parent: info.parentSessionPath,
@@ -182,15 +186,28 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	return { text: lines.join("\n"), records: record };
 }
 
-/** Prompt history of one project (`cwd`) or every project, newest first; `query` switches to token search. */
+/** `getRecent` on an unusable store degrades to no prompts rather than throwing. */
+function safeRecent(history: HistoryStorage, limit: number, scope: HistoryScope) {
+	try {
+		return history.getRecent(limit, scope);
+	} catch {
+		return [];
+	}
+}
+
 export function archivePrompts(
 	query: string | undefined,
 	cwd: string | undefined,
 	limit: number,
 ): ArchiveView<ArchivePrompt[]> {
 	const history = HistoryStorage.open();
-	const filter = { cwd };
-	const entries = query ? history.search(query, limit, filter) : history.getRecent(limit, filter);
+	// `HistoryScope` narrows by kind; omitting it would read every project, so an
+	// absent `cwd` is stated as the `global` scope. Only `undefined` means "every
+	// project" — an empty `cwd` is a lookup that matches nothing.
+	const scope: HistoryScope = cwd === undefined ? { kind: "global" } : { kind: "cwd", value: cwd };
+	// `getRecent` throws when the store is unusable, unlike the pre-scope read that
+	// degraded to no rows; an archive view with no prompts is the honest answer here.
+	const entries = query ? history.search(query, limit, scope) : safeRecent(history, limit, scope);
 	const records = entries.map(toArchivePrompt);
 	const subject = query ? `${scopeLabel(cwd)} matching ${JSON.stringify(query)}` : scopeLabel(cwd);
 	if (records.length === 0) return { text: `No prompts ${subject}.`, records };

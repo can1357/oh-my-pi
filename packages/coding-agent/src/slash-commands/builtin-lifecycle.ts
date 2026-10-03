@@ -731,7 +731,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
+			// The submit path already filed the text under its source cwd before dispatch.
+			// Recording again here would count it twice; recording after handleMoveCommand
+			// would also replace the source provenance with the destination.
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},
@@ -766,7 +768,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
+			// Same as `/move`: the submit path already filed it under the source context.
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleWorktreeCommand(command.args || undefined);
 		},

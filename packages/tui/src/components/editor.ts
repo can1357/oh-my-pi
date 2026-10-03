@@ -97,6 +97,9 @@ function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEdito
 const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
 const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 
+/** Prompt-history capacity: entries kept for Up/Down, and the window loaded from storage. */
+const HISTORY_LIMIT = 100;
+
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
 };
@@ -730,6 +733,9 @@ export class Editor implements Component, Focusable {
 	#history: LocalHistoryEntry[] = [];
 	#historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	#historyStorage?: HistoryStorage;
+	// Names the data set behind #historyStorage; a change re-seeds #history on the next browse.
+	#historySourceKey?: () => string;
+	#historySourceKeyValue?: string;
 	// Recalled payloads outlive browsing when an edit resets #historyIndex.
 	#historyDraftActive = false;
 
@@ -756,7 +762,7 @@ export class Editor implements Component, Focusable {
 	disableSubmit: boolean = false;
 	/** Base editors accept native edits, not atomic sends. Implementations that
 	 *  handle `send` override this readiness check for their submission path. */
-	protected get nativeSendable(): boolean {
+	get nativeSendable(): boolean {
 		return false;
 	}
 	/** Placeholder painted right-aligned on the cursor row while the editor is empty and no
@@ -973,21 +979,92 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	/** Loads persistent prompts for navigation and enables future persistence. */
-	setHistoryStorage(storage: HistoryStorage): void {
+	/**
+	 * Loads persistent prompts for navigation and enables future persistence.
+	 *
+	 * `sourceKey` names the data set behind `storage` (for a host, the resolved recall
+	 * scope). When it changes — a new conversation, another project, a settings change —
+	 * the editor re-seeds its list from `storage` at the start of the next navigation.
+	 * Omit it and the list stays fixed for the editor's lifetime.
+	 */
+	setHistoryStorage(storage: HistoryStorage, sourceKey?: () => string): void {
 		this.#historyStorage = storage;
-		const recent = storage.getRecent(100);
-		this.#history = recent.map(entry => ({ text: entry.prompt }));
+		this.#historySourceKey = sourceKey;
+		this.#historySourceKeyValue = undefined;
+		this.#rehydrateHistory();
+	}
+
+	/**
+	 * Re-seed the persistent list when the host's data set changed. While the key holds,
+	 * keep both the list and the browse pointer. A real change replaces the persistent entries
+	 * and restarts browsing, but the editor's own drafts (`Ctrl+C`) are carried over: they
+	 * were never part of the data set that changed, and stay recallable until process exit.
+	 *
+	 * Returns false when the data set could not be read: the list still holds the context the
+	 * user left, so callers that would expose it — browsing, and filing a new entry — must skip
+	 * this call instead of serving that context under the new key.
+	 */
+	#rehydrateHistory(): boolean {
+		let key: string;
+		let recent: HistoryEntry[];
+		try {
+			// The source key may itself query storage to resolve repository membership.
+			key = this.#historySourceKey?.() ?? "";
+			if (key === this.#historySourceKeyValue) return true;
+			const storage = this.#historyStorage;
+			// Without persistent storage the list is the editor's own: never drop it.
+			if (!storage) {
+				this.#historySourceKeyValue = key;
+				return true;
+			}
+			this.#retireHistorySelection();
+			// A failed resolution or read leaves the key alone so the next browse retries,
+			// without exposing the list from the context it was replacing.
+			recent = storage.getRecent(HISTORY_LIMIT);
+		} catch (error) {
+			this.#retireHistorySelection();
+			logger.warn("History re-seed failed", { error: String(error) });
+			return false;
+		}
+		// Nothing below can fail, so the list and the key it belongs to change together.
+		this.#historySourceKeyValue = key;
+		const drafts = this.#history.filter(entry => entry.draft !== undefined);
+		// Recalled draft payloads live in the editor, not in the list; with no draft carried
+		// over there is nothing left to restore, so the flag must not survive the re-seed.
+		if (drafts.length === 0) this.#historyDraftActive = false;
+		this.#history = [...drafts, ...recent.map(entry => ({ text: entry.prompt }))].slice(0, HISTORY_LIMIT);
+		return true;
+	}
+
+	#retireHistorySelection(): void {
+		// Only a live browse pointer owns the buffer; edits make it the user's draft.
+		if (this.#historyIndex === -1) return;
 		this.#historyIndex = -1;
+		if (this.#historyDraftActive) {
+			this.clearPasteState();
+			this.restoreHistoryState();
+		}
+		this.#setTextInternal("");
 	}
 
 	/**
 	 * Add a prompt to history for up/down arrow navigation.
-	 * Called after successful submission.
+	 *
+	 * Records under the context active at the call: a host that dispatches a command able to
+	 * switch the conversation or move the working directory calls this before dispatch, so the
+	 * entry is filed — in storage and in this list — where the prompt was typed.
 	 */
 	addToHistory(text: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
+
+		// A command can switch the conversation or the working directory without a browse in
+		// between: re-seed first, so the entry is filed under the context active now rather than
+		// the one the list was seeded for. Returning to a context then re-seeds again, because
+		// the stored key is the context this submission moved to. A failed seed leaves the stale
+		// list in place, and coming back to that context re-seeds nothing (its key was restored),
+		// so the entry must stay out of the list: the write below already filed it in storage.
+		const seeded = this.#rehydrateHistory();
 
 		const stor = this.#historyStorage;
 		if (stor) {
@@ -995,6 +1072,7 @@ export class Editor implements Component, Focusable {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}
+		if (!seeded) return;
 
 		// Don't add consecutive submitted duplicates; a draft owns separate state.
 		const previous = this.#history[0];
@@ -1012,15 +1090,15 @@ export class Editor implements Component, Focusable {
 			const value = this.#pastes.get(id);
 			if (value !== undefined) pastes.set(id, value);
 		}
-		this.#pushHistory({
-			text,
-			draft: {
-				pastes,
-				atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
-				pasteCounter: this.#pasteCounter,
-				restore,
-			},
-		});
+		const draft = {
+			pastes,
+			atoms: new Map([...this.#atoms].filter(([label]) => text.includes(label))),
+			pasteCounter: this.#pasteCounter,
+			restore,
+		};
+		// Snapshot before a re-seed can release the selected draft's live payloads.
+		this.#rehydrateHistory();
+		this.#pushHistory({ text, draft });
 	}
 
 	/** Release the current draft's expansion payloads without touching history. */
@@ -1038,7 +1116,7 @@ export class Editor implements Component, Focusable {
 
 	#pushHistory(entry: LocalHistoryEntry): void {
 		this.#history.unshift(entry);
-		if (this.#history.length > 100) this.#history.pop();
+		if (this.#history.length > HISTORY_LIMIT) this.#history.pop();
 	}
 
 	#isEditorEmpty(): boolean {
@@ -1058,6 +1136,9 @@ export class Editor implements Component, Focusable {
 	}
 
 	#navigateHistory(direction: 1 | -1): void {
+		// A failed re-seed leaves the list on the context the user left: browsing it would recall
+		// another project's prompt, which is the isolation this list exists to keep.
+		if (!this.#rehydrateHistory()) return;
 		this.#resetKillSequence();
 		if (this.#history.length === 0) return;
 		const newIndex = this.#historyIndex - direction; // Up(-1) increases index, Down(1) decreases

@@ -1,92 +1,109 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { HistoryEntry, HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
+import { HistorySearchComponent, type HistorySearchScope } from "@oh-my-pi/pi-tui/overlays/history-search";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 beforeAll(async () => {
 	await initTheme();
 });
 
-const NOW_SECONDS = Math.floor(Date.now() / 1000);
-
-function makeEntry(id: number, prompt: string, ageSeconds = 0): HistoryEntry {
-	return { id, prompt, created_at: NOW_SECONDS - ageSeconds, useCount: 1 };
-}
-
-/** Minimal in-memory stand-in matching the two methods the component touches. */
-function fakeStorage(entries: HistoryEntry[]): HistoryStorage {
-	const tokenize = (q: string) =>
-		q
-			.toLowerCase()
-			.split(/[^\p{L}\p{N}]+/u)
-			.filter(Boolean);
+function source(label: string, prompts: string[]): HistorySearchScope {
+	const entries = prompts.map(prompt => ({ prompt, created_at: 1 }));
 	return {
-		getRecent: (limit: number) => entries.slice(0, limit),
-		search: (query: string, limit: number) => {
-			const tokens = tokenize(query);
-			return entries.filter(e => tokens.every(t => e.prompt.toLowerCase().includes(t))).slice(0, limit);
-		},
-	} as unknown as HistoryStorage;
+		label,
+		getRecent: limit => entries.slice(0, limit),
+		search: (query, limit) => entries.filter(entry => entry.prompt.includes(query)).slice(0, limit),
+	};
 }
 
-function render(component: HistorySearchComponent, width = 80): { raw: string; plain: string } {
-	const lines = component.render(width);
-	const raw = lines.join("\n");
-	return { raw, plain: Bun.stripANSI(raw) };
-}
-
-function type(component: HistorySearchComponent, text: string): void {
-	for (const char of text) component.handleInput(char);
+function render(component: HistorySearchComponent): string {
+	return Bun.stripANSI(component.render(80).join("\n"));
 }
 
 describe("HistorySearchComponent", () => {
-	it("paints the selected row with the selectedBg highlight bar and a relative timestamp", () => {
+	it("cycles bound sources in both directions while retaining the query and resetting selection", () => {
+		const selected: string[] = [];
 		const component = new HistorySearchComponent(
-			fakeStorage([makeEntry(1, "deploy the release"), makeEntry(2, "older prompt", 7200)]),
-			() => {},
+			[
+				source("conversation", ["deploy session first", "deploy session second", "unrelated"]),
+				source("folder", ["deploy folder first", "deploy folder second"]),
+				source("everywhere", ["deploy global"]),
+			],
+			prompt => selected.push(prompt),
 			() => {},
 		);
-
-		const { raw, plain } = render(component);
-
-		expect(plain).toContain("deploy the release");
-		// First (default-selected) row carries the selection background.
-		const selectedRow = raw.split("\n").find(line => line.includes("deploy the release"));
-		expect(selectedRow).toContain(theme.getBgAnsi("selectedBg"));
-		// Fresh entry renders the compact "now" age marker.
-		expect(plain).toContain("now");
+		for (const char of "deploy") component.handleInput(char);
+		expect(render(component)).not.toContain("unrelated");
+		component.handleInput("\x1b[B");
+		component.handleInput("\r");
+		component.handleInput("\t");
+		expect(render(component)).toContain("deploy folder first");
+		expect(render(component)).not.toContain("deploy session");
+		component.handleInput("\r");
+		component.handleInput("\x1b[Z");
+		component.handleInput("\r");
+		component.handleInput("\x1b[Z");
+		component.handleInput("\r");
+		expect(selected).toEqual([
+			"deploy session second",
+			"deploy folder first",
+			"deploy session first",
+			"deploy global",
+		]);
 	});
 
-	it("highlights the matched query tokens within results", () => {
+	it("clears stale selectable results on read failure and retries on the next input", () => {
+		let fail = false;
+		const selected: string[] = [];
+		const backing = source("folder", ["deploy release"]);
 		const component = new HistorySearchComponent(
-			fakeStorage([makeEntry(1, "deploy the needle rollback"), makeEntry(2, "routine status update")]),
-			() => {},
+			[
+				{
+					...backing,
+					search: (query, limit) => {
+						if (fail) throw new Error("read failed");
+						return backing.search(query, limit);
+					},
+				},
+			],
+			prompt => selected.push(prompt),
 			() => {},
 		);
-
-		type(component, "needle");
-
-		const { raw, plain } = render(component);
-		expect(plain).toContain("deploy the needle rollback");
-		expect(plain).not.toContain("routine status update");
-		// The matched substring is wrapped in the accent color.
-		expect(raw).toContain(theme.fg("accent", "needle"));
+		fail = true;
+		component.handleInput("d");
+		component.handleInput("\r");
+		expect(selected).toEqual([]);
+		expect(render(component)).not.toContain("deploy release");
+		fail = false;
+		component.handleInput("e");
+		component.handleInput("\r");
+		expect(selected).toEqual(["deploy release"]);
 	});
 
-	it("distinguishes an empty query from an unmatched query", () => {
-		const empty = new HistorySearchComponent(
-			fakeStorage([]),
+	it("moves the query cursor with Left/Right instead of cycling the scope", () => {
+		const component = new HistorySearchComponent(
+			[source("folder", ["abc folder"]), source("conversation", ["abc conversation"])],
 			() => {},
 			() => {},
 		);
-		expect(render(empty).plain).toContain("No history yet");
 
-		const unmatched = new HistorySearchComponent(
-			fakeStorage([makeEntry(1, "deploy the release")]),
-			() => {},
-			() => {},
-		);
-		type(unmatched, "zzzz");
-		expect(render(unmatched).plain).toContain("No matching history");
+		// Left/Right belong to the query field, not the scope ring: `handleTabSwitchKey` would
+		// consume them and cycle the scope, so the insertion below would land at the end of the
+		// query and the title would move off the initial scope.
+		for (const char of "abc") component.handleInput(char);
+		expect(component.title).toBe("History (folder)");
+		expect(render(component)).toContain("abc folder");
+
+		component.handleInput("\x1b[D"); // Left
+		component.handleInput("z");
+
+		expect(component.title).toBe("History (folder)");
+		expect(render(component)).not.toContain("abc folder");
+
+		// Right must move the cursor back toward the end: typing then appends ("abzcy"),
+		// where an unhandled Right would leave the cursor before "c" and yield "abzyc".
+		component.handleInput("\x1b[C"); // Right
+		component.handleInput("y");
+		expect(component.title).toBe("History (folder)");
+		expect(render(component)).toContain("abzcy");
 	});
 });

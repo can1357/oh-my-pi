@@ -1002,7 +1002,7 @@ export class CustomEditor extends Editor {
 		this.#shimmerTimer.unref?.();
 	}
 	/** Editing is available during bootstrap; atomic sends wait until submission is wired and enabled. */
-	protected override get nativeSendable(): boolean {
+	override get nativeSendable(): boolean {
 		return this.onSubmit !== undefined && !this.disableSubmit;
 	}
 	/** Viewing a subagent, the draft goes to it: the placeholder names it. */

@@ -37,6 +37,10 @@ export function isEmptyCherryPick(error) {
 export function git(dir) {
 	return api().vcsGitDiscover(dir);
 }
+/** Initialize a non-bare checkout; returns a lazily opened repository handle. */
+export function initGit(dir) {
+	return api().vcsGitInit(dir);
+}
 /** Discover the repository owning `dir`; `null` outside any repository. */
 export function repo(dir) {
 	return api().vcsDiscover(dir);

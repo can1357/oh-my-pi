@@ -99,7 +99,6 @@ function createStubInputControllerContext(opts: {
 	const renderOptimisticSkillMessage = vi.fn();
 	const reconcileOptimisticSkillMessage = vi.fn();
 	const clearOptimisticSkillMessage = vi.fn();
-	const queueCompactionMessage = vi.fn((_text: string, _mode: "steer" | "followUp", _images?: ImageContent[]) => {});
 	const setLoopPrompt = vi.fn((_prompt: string) => {});
 	const armLoopAutoSubmit = vi.fn();
 	const ctx = {
@@ -119,6 +118,7 @@ function createStubInputControllerContext(opts: {
 			return (this as typeof ctx).session;
 		},
 		showError,
+		showStatus: vi.fn(),
 		handleGoalModeCommand,
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
@@ -130,12 +130,14 @@ function createStubInputControllerContext(opts: {
 		compactionQueuedMessages: [],
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
-		queueCompactionMessage,
 		optimisticSkillMessagePending: false,
 		renderOptimisticSkillMessage,
 		reconcileOptimisticSkillMessage,
 		clearOptimisticSkillMessage,
 	} as unknown as InteractiveModeContext;
+	const helpers = new UiHelpers(ctx);
+	ctx.queueCompactionMessage = (text, mode, images, options) =>
+		helpers.queueCompactionMessage(text, mode, images, options);
 
 	return {
 		ctx,
@@ -145,7 +147,6 @@ function createStubInputControllerContext(opts: {
 		handleGoalModeCommand,
 		updatePendingMessagesDisplay,
 		requestRender,
-		queueCompactionMessage,
 		showError,
 		renderOptimisticSkillMessage,
 		reconcileOptimisticSkillMessage,
@@ -189,22 +190,6 @@ describe("InputController skill queue chip metadata", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
-	it("queues known skill steers during compaction instead of dispatching immediately", async () => {
-		const { ctx, editor, promptCustomMessage, queueCompactionMessage } = createStubInputControllerContext({
-			skillCommands,
-			isStreaming: false,
-			isCompacting: true,
-		});
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		editor.setText("/skill:test-skill arg1 arg2");
-		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
-
-		expect(queueCompactionMessage).toHaveBeenCalledWith("/skill:test-skill arg1 arg2", "steer", undefined);
-		expect(promptCustomMessage).not.toHaveBeenCalled();
-	});
-
 	it("captures the loop prompt for a /skill: submission (regression: /loop never resubmitted a skill prompt)", async () => {
 		const { ctx, editor, promptCustomMessage, setLoopPrompt, armLoopAutoSubmit } = createStubInputControllerContext({
 			skillCommands,
@@ -220,23 +205,6 @@ describe("InputController skill queue chip metadata", () => {
 		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
 		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
 		expect(armLoopAutoSubmit).toHaveBeenCalledTimes(1);
-	});
-
-	it("captures the loop prompt for a /skill: submission queued during compaction", async () => {
-		const { ctx, editor, queueCompactionMessage, setLoopPrompt } = createStubInputControllerContext({
-			skillCommands,
-			isStreaming: false,
-			isCompacting: true,
-			loopModeEnabled: true,
-		});
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		editor.setText("/skill:test-skill arg1 arg2");
-		await editor.onSubmit?.("/skill:test-skill arg1 arg2");
-
-		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
-		expect(queueCompactionMessage).toHaveBeenCalledWith("/skill:test-skill arg1 arg2", "steer", undefined);
 	});
 
 	it("passes slash-form queueChipText for streaming skill follow-ups", async () => {

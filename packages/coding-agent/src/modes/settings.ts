@@ -3,6 +3,7 @@ import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings"
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { type HistoryScopeKind, HISTORY_SCOPE_KINDS } from "../session/history-storage";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
@@ -22,6 +23,22 @@ import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
 // ────────────────────────────────────────────────────────────────────────
+/** Submenu rows for the history-scope enums. Title Case, like every other option in this file:
+ * `HISTORY_SCOPE_LABELS` is the Ctrl+R panel's wording and reads mid-sentence
+ * (`History (this session)`), so it cannot be reused as a column value here. */
+const HISTORY_SCOPE_OPTION_LABELS: Record<HistoryScopeKind, string> = {
+	session: "This Session",
+	cwd: "Current Folder",
+	repo: "This Repository",
+	global: "All Projects",
+};
+const HISTORY_SCOPE_OPTIONS: ReadonlyArray<{ value: HistoryScopeKind; label: string }> = HISTORY_SCOPE_KINDS.map(
+	kind => ({
+		value: kind,
+		label: HISTORY_SCOPE_OPTION_LABELS[kind],
+	}),
+);
+
 // General settings (no UI)
 // ────────────────────────────────────────────────────────────────────────
 export const cfgSetupVersion = register({ id: "setupVersion", type: "number", default: 0 });
@@ -809,6 +826,38 @@ export const cfgLoopConditionTimeoutMs = register({
 });
 
 // Input and startup
+export const cfgHistoryScope = register({
+	id: "history.scope",
+	type: "enum",
+	values: HISTORY_SCOPE_KINDS,
+	default: "global",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Prompt History Scope",
+		get description() {
+			return `Which prompts the ${formatKeyHint("up")} arrow recalls: all projects by default, or this session, the current folder or this repository (worktrees included; outside a repository it reads the current folder)`;
+		},
+		options: HISTORY_SCOPE_OPTIONS,
+	},
+});
+
+export const cfgHistorySearchScope = register({
+	id: "history.searchScope",
+	type: "enum",
+	values: HISTORY_SCOPE_KINDS,
+	default: "global",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "History Search Scope",
+		get description() {
+			return `Which scope ${formatKeyHint("ctrl+r")} opens on: this session, the current folder, this repository or all projects; outside a repository the repository scope reads the current folder; ${formatKeyHints(["tab", "shift+tab"])} change it while the panel is open`;
+		},
+		options: HISTORY_SCOPE_OPTIONS,
+	},
+});
+
 export const cfgComposerRecallClearedDrafts = register({
 	id: "composer.recallClearedDrafts",
 	type: "boolean",

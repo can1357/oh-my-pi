@@ -194,6 +194,24 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(out).toContain("\x1b[>1u");
 	});
 
+	it("keeps both relayed Escape keys actionable before the next real key", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;2c");
+
+		const escape = "\x1b[0;0;27;1;0;1_";
+		process.stdin.emit("data", `${escape}${escape}\x1b[88;45;120;1;0;1_`);
+
+		expect(recorder.received.map(key => (matchesKey(key, "escape") ? "interrupt" : key))).toEqual([
+			"interrupt",
+			"interrupt",
+			"x",
+		]);
+	});
+
 	it("releases a relayed lone Escape after a single wait window", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
 		const recorder = new InputRecorder();

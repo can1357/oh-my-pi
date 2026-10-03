@@ -204,6 +204,8 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		requestRender: vi.fn(),
 		requestComponentRender: vi.fn(),
 		setFocus: vi.fn(),
+		getFocused: vi.fn((): Component | null => (ctx.editorContainer.children[0] as Component | null) ?? null),
+		hasOverlay: vi.fn(() => false),
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,
 	};
@@ -219,6 +221,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		pendingMessagesContainer: new Container(),
 		todoContainer: new Container(),
 		editor: { getText: () => "", setText: vi.fn(), onEscape: undefined },
+		isGuidedGoalInterviewActive: vi.fn(() => false),
 		statusLine: {
 			invalidate: vi.fn(),
 			markActivityStart: vi.fn(),

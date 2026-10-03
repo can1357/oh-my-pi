@@ -59,6 +59,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import { HISTORY_SCOPE_LABELS, type HistoryScope } from "../../session/history-storage";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
@@ -125,6 +126,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import { historyScopeRing } from "../history-scope";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
@@ -133,6 +135,7 @@ import { cfgBranchSummaryEnabled } from "../../session/context-settings";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
 import {
+	cfgHistorySearchScope,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
@@ -504,7 +507,11 @@ export class SelectorController {
 
 		this.showSelector(done => {
 			const component = new HistorySearchComponent(
-				historyStorage,
+				this.#historyScopeRing().map(scope => ({
+					label: HISTORY_SCOPE_LABELS[scope.kind],
+					getRecent: (limit: number) => historyStorage.getRecent(limit, scope),
+					search: (query: string, limit: number) => historyStorage.search(query, limit, scope),
+				})),
 				prompt => {
 					done();
 					this.ctx.editor.setText(prompt);
@@ -516,6 +523,20 @@ export class SelectorController {
 				},
 			);
 			return { component, focus: component };
+		});
+	}
+
+	/**
+	 * Scope ring for history search: the resolved start scope first, then the remaining
+	 * scopes in canonical (narrowest-first) order, wrapped — a rotation, not an
+	 * ordering by width. The conversation id comes from the session manager — the
+	 * provider-side `AgentSession.sessionId` is not what prompts are stored under — and
+	 * the directory is the one prompts are written with.
+	 */
+	#historyScopeRing(): HistoryScope[] {
+		return historyScopeRing(cfgHistorySearchScope.get(this.ctx.settings), {
+			sessionId: this.ctx.sessionManager.getSessionId(),
+			cwd: getProjectDir(),
 		});
 	}
 
