@@ -98,6 +98,7 @@
 ### Changed
 
 - Advisor notes merge at final boundaries with age markers and at most one permitted continuation per batch; advisor continuations no longer trigger recursive reviews ([#12387](https://github.com/can1357/oh-my-pi/pull/12387) by [@olegpulatov](https://github.com/olegpulatov)).
+- An explicit Mnemopi save through the extension `memory.save` API is now stored as `stated` rather than as `unknown`, the label automatic transcript retention writes, so it ranks as a deliberate memory ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
