@@ -892,6 +892,10 @@
 ### Removed
 
 - Removed the built-in `rs-parking-lot` rule; Rust edits using `std::sync::{Mutex, RwLock}` with `.lock().unwrap()` are no longer steered to `parking_lot`
+- Removed the bash tool's `env` parameter; services inherit the configured shell environment
+### Fixed
+
+- Fixed sessions stopping where the assistant wrote a tool call as literal text in its reply instead of emitting it — nothing ran and the session idled; the reply now gets a corrective note naming the unexecuted tools and the turn continues so the call can be re-emitted properly
 
 ## [18.11.2] - 2026-10-16
 
