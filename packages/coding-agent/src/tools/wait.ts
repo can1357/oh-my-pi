@@ -19,10 +19,9 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
 
-import { cfgLaunchEnabled } from "./settings";
+import { cfgLaunchEnabled, cfgWaitMaxMs } from "./settings";
 
 const waitSchema = type({});
-const WAIT_MAX_MS = 30 * 60_000;
 const PROGRESS_INTERVAL_MS = 500;
 
 interface WaitMessaging {
@@ -119,7 +118,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					.catch(() => null)
 			: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, WAIT_MAX_MS);
+		const maxMs = cfgWaitMaxMs.get(this.session.settings);
+		const timer = maxMs > 0 ? setTimeout(timedOut, maxMs) : undefined;
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
