@@ -33,6 +33,8 @@ import {
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	sanitizeCarriageReturns,
+	sanitizeDisplayLines,
 	shortenEmbeddedPaths,
 	shortenPath,
 	shortenToolArgumentPaths,
@@ -542,15 +544,10 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 
 /** One renderable frame section: optional label, body rows, leading divider. */
 type TaskRenderSection = { label?: string; content: readonly string[]; separator?: boolean };
-type AssignmentSectionRenderer = (width: number) => TaskRenderSection;
-
-// Default output-block layout is: left border + one-cell content inset + right
-// border. Render markdown at that inner width so the output block does not need
-// to rewrap already-rendered assignment lines.
-const ASSIGNMENT_FRAME_INSET = 3;
+type AssignmentSectionRenderer = (contentWidth: number) => TaskRenderSection;
 
 /**
- * Build the assignment section (the markdown brief handed to the subagent).
+ * Build the assignment section (the brief handed to the subagent).
  * Rendered in both the streaming call preview and the result frame so the
  * brief stays visible for the whole task lifecycle — not just until the first
  * progress snapshot replaces the call view.
@@ -561,11 +558,12 @@ function createAssignmentSectionRenderer(
 ): AssignmentSectionRenderer | undefined {
 	// `renderResult` receives the raw tool args (unlike `renderCall`, which is
 	// fed through `repairTaskParams`), so undo any per-field double-encoding
-	// here too. The repair is idempotent on already-clean text.
-	const assignment = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	).trim();
-	if (!assignment) return undefined;
+	// here too. The repair is idempotent on already-clean text. Sanitization
+	// happens inside the markdown section renderer, which must see the raw `\r`
+	// runs first — `sanitizeText` drops `\r` outright and would merge the words
+	// around it (`Retry\rnow` -> `Retrynow`).
+	const assignment = repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : "");
+	if (!assignment.trim()) return undefined;
 	return createMarkdownSectionRenderer(assignment, theme);
 }
 
@@ -578,18 +576,36 @@ function createContextSectionRenderer(
 	args: Partial<TaskParams> | undefined,
 	theme: Theme,
 ): AssignmentSectionRenderer | undefined {
-	const context = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.context === "string" ? args.context : ""),
-	).trim();
-	if (!context) return undefined;
+	// Same raw-`\r` requirement as the assignment brief: the section renderer
+	// owns sanitization so CR runs survive as word separators.
+	const context = repairDoubleEncodedJsonString(typeof args?.context === "string" ? args.context : "");
+	if (!context.trim()) return undefined;
 	return createMarkdownSectionRenderer(context, theme);
 }
 
+/**
+ * Build a section that renders a brief/context payload as markdown in
+ * literal-math mode: headings/lists/code/links typeset, but the payload-
+ * mutation paths are gone — `$…$`/`$$…$$` spans and `\(...\)` BRE groups render
+ * byte-literal (no mathSpanAt consumption, no latexToUnicode, no `_r`
+ * subscript mapping, no math smart-punct, no backslash-escape smartening), and
+ * long paragraphs wrap across rows instead of clipping. `\r` runs follow the
+ * parameter convention (`sanitizeCarriageReturns`: CR runs are word separators,
+ * not progress overwrites), so no payload word is dropped.
+ */
 function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSectionRenderer {
-	const markdown = new Markdown(text, 0, 0, getMarkdownTheme(), {
-		color: line => theme.fg("muted", line),
-	});
-	return width => ({ content: markdown.render(Math.max(1, width - ASSIGNMENT_FRAME_INSET)) });
+	const markdown = new Markdown(
+		sanitizeDisplayLines(sanitizeCarriageReturns(text)).join("\n").trim(),
+		0,
+		0,
+		getMarkdownTheme(),
+		{ color: line => theme.fg("muted", line) },
+		2,
+		{ literalMath: true },
+	);
+	// Render at the frame's inner width so the output block's wrap pass is a
+	// no-op over the already-laid-out rows.
+	return contentWidth => ({ content: markdown.render(Math.max(1, contentWidth)) });
 }
 
 /**
@@ -610,7 +626,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 	);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
 	const contextSection = createContextSectionRenderer(args, theme);
-	return framedToolCard(theme, ({ width }) => {
+	return framedToolCard(theme, ({ contentWidth }) => {
 		const sections: TaskRenderSection[] = [];
 
 		// The call preview only exists to surface the dispatched agent while the
@@ -624,9 +640,9 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 			// call view. This also matches the schema's field order (`context`
 			// streams before `tasks`), so the streaming preview grows
 			// append-only instead of inserting agent rows above the
-			// already-rendered markdown and pushing it down on every item.
-			if (contextSection) sections.push(contextSection(width));
-			if (assignmentSection) sections.push(assignmentSection(width));
+			// already-rendered brief rows and pushing it down on every item.
+			if (contextSection) sections.push(contextSection(contentWidth));
+			if (assignmentSection) sections.push(assignmentSection(contentWidth));
 			const callLines = renderTaskCallLines(args, theme);
 			// Guarded: an empty trailing section would still draw its divider.
 			if (callLines.length > 0) sections.push({ separator: true, content: callLines });
@@ -1317,11 +1333,11 @@ export function renderResult(
 					},
 					theme,
 				);
-		return framedToolCard(theme, ({ width }) => ({
+		return framedToolCard(theme, ({ width, contentWidth }) => ({
 			header,
 			sections: [
-				...(contextSection ? [contextSection(width)] : []),
-				...(assignmentSection ? [assignmentSection(width)] : []),
+				...(contextSection ? [contextSection(contentWidth)] : []),
+				...(assignmentSection ? [assignmentSection(contentWidth)] : []),
 				...(text ? [{ separator: true, content: [theme.fg("dim", truncateToWidth(text, width))] }] : []),
 			],
 			phase: errored ? "error" : "success",
@@ -1479,8 +1495,8 @@ export function renderResult(
 			return {
 				header,
 				sections: [
-					...(contextSection ? [contextSection(width)] : []),
-					...(assignmentSection ? [assignmentSection(width)] : []),
+					...(contextSection ? [contextSection(contentWidth)] : []),
+					...(assignmentSection ? [assignmentSection(contentWidth)] : []),
 					{ separator: true, content: [theme.fg("dim", truncateToWidth(text, width))] },
 				],
 				phase,
@@ -1509,8 +1525,8 @@ export function renderResult(
 		return {
 			header,
 			sections: [
-				...(contextSection ? [contextSection(width)] : []),
-				...(assignmentSection ? [assignmentSection(width)] : []),
+				...(contextSection ? [contextSection(contentWidth)] : []),
+				...(assignmentSection ? [assignmentSection(contentWidth)] : []),
 				...(lines.length > 0 ? [{ separator: true, content: lines }] : []),
 			],
 			phase,

@@ -796,17 +796,52 @@ function lheadingPossible(src: string): boolean {
 	return false;
 }
 
-markdownParser.use({
-	tokenizer: {
-		// `false` → marked falls back to the built-in tokenizer;
-		// `undefined` → no token here, built-in never runs.
-		lheading(src: string): Tokens.Heading | undefined | false {
-			return lheadingPossible(src) ? false : undefined;
-		},
-		// Strikethrough is `strikethroughExtension`'s: marked's own looser rule never runs.
-		del: () => undefined,
+// `false` → marked falls back to the built-in tokenizer;
+// `undefined` → no token here, built-in never runs.
+const perfTokenizerOverrides = {
+	lheading(src: string): Tokens.Heading | undefined | false {
+		return lheadingPossible(src) ? false : undefined;
 	},
+	// Strikethrough is `strikethroughExtension`'s: marked's own looser rule never runs.
+	del: () => undefined,
+};
+
+markdownParser.use({ tokenizer: perfTokenizerOverrides });
+
+// ---------------------------------------------------------------------------
+// Literal-math mode
+// ---------------------------------------------------------------------------
+// Opt-in per component (task brief/context echoes): the same markdown
+// typesetting with every payload-mutation path removed. No math extension is
+// registered, so `$…$`, `$$…$$`, `\[…\]`, `\(…\)` and bare `\begin{…}` spans
+// fall through to plain text — no mathSpanAt consumption, no latexToUnicode,
+// no `\(...\)` BRE-group conversion, no `_r`-style subscript mapping, no math
+// smart-punct. Headings/lists/code/links (and the escape rule's competition
+// below) keep typesetting.
+//
+// `literalEscapeExtension` additionally runs before marked's escape tokenizer
+// so backslash-escaped punctuation (`\(` BRE groups, `\$`) keeps its bytes
+// instead of being smartened away (`\(` -> `(`) — the echo must be
+// byte-recoverable even mid-paragraph.
+const LITERAL_ESCAPE_REGEX = /^\\[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/;
+const literalEscapeExtension: TokenizerAndRendererExtension = {
+	name: "literalEscape",
+	level: "inline",
+	tokenizer(src: string) {
+		const match = LITERAL_ESCAPE_REGEX.exec(src);
+		if (!match) return undefined;
+		return { type: "text", raw: match[0], text: match[0] };
+	},
+	renderer(token) {
+		return typeof token.text === "string" ? token.text : "";
+	},
+};
+
+const literalMathParser = new Marked();
+literalMathParser.use({
+	extensions: [customHrExtension, literalEscapeExtension, boundedAutolinkExtension, strikethroughExtension],
 });
+literalMathParser.use({ tokenizer: perfTokenizerOverrides });
 
 // ---------------------------------------------------------------------------
 // Sticky clones of marked's pathological block rules
@@ -1045,8 +1080,8 @@ function inlineHasOpen(tokens: readonly Token[]): boolean {
 /** Isolated inline lex of a same-line delta. A single-line delta has no block
  * structure, so the isolated inline pass equals the full lex's inline pass
  * (marked's paragraph tokens run the same `inlineTokens` entry point). */
-function lexInlineTokens(text: string): Token[] {
-	return new Lexer(markdownParser.defaults).inlineTokens(text);
+function lexInlineTokens(text: string, parser: Marked): Token[] {
+	return new Lexer(parser.defaults).inlineTokens(text);
 }
 
 // A reference-link definition (`[label]: dest`) resolves across the whole
@@ -1285,14 +1320,14 @@ const WINDOWED_LEX_MIN_BYTES = 16 * 1024;
  * ({@link firstProbeSize}); a tail with no blank line left (e.g. one long
  * tight list) goes to the lexer whole.
  */
-function lexWindowed(text: string): TokensList {
-	const lexer = new Lexer(markdownParser.defaults);
+function lexWindowed(text: string, parser: Marked): TokensList {
+	const lexer = new Lexer(parser.defaults);
 	const mathBlocks = new MathBlockScan(text);
 	let offset = 0;
 	while (offset < text.length) {
 		let end = text.length;
 		for (let size = firstProbeSize(text, offset); offset + size < text.length;) {
-			const boundary = probeBoundary(text, offset, size, mathBlocks);
+			const boundary = probeBoundary(text, offset, size, mathBlocks, parser);
 			if (boundary.end > 0) {
 				end = boundary.end;
 				break;
@@ -1336,8 +1371,14 @@ function nextProbeSize(text: string, offset: number, size: number, blockEnd: num
  * `text.slice(offset, offset + size)`, from a throwaway block-only lex of the
  * window. `mathBlocks` holds the display-math blocks of all of `text`.
  */
-function probeBoundary(text: string, offset: number, size: number, mathBlocks: MathBlockScan): BlockBoundary {
-	const probe = new Lexer(markdownParser.defaults);
+function probeBoundary(
+	text: string,
+	offset: number,
+	size: number,
+	mathBlocks: MathBlockScan,
+	parser: Marked,
+): BlockBoundary {
+	const probe = new Lexer(parser.defaults);
 	probe.blockTokens(text.slice(offset, offset + size), probe.tokens);
 	return stableBlockBoundary(text, offset, probe.tokens, { window: { end: offset + size, mathBlocks } });
 }
@@ -1346,11 +1387,11 @@ function probeBoundary(text: string, offset: number, size: number, mathBlocks: M
  * Lex a whole document, windowing anything large enough for the quadratic scan
  * to bite. `links` holds every reference definition, at any nesting depth.
  */
-function lexDocument(text: string): TokensList {
+function lexDocument(text: string, parser: Marked = markdownParser): TokensList {
 	// A CR shifts every `raw` span (marked normalizes CRLF before tokenizing), so
 	// window offsets would address the wrong characters — lex those in one pass.
-	if (text.length < WINDOWED_LEX_MIN_BYTES || text.includes("\r")) return markdownParser.lexer(text);
-	return lexWindowed(text);
+	if (text.length < WINDOWED_LEX_MIN_BYTES || text.includes("\r")) return parser.lexer(text);
+	return lexWindowed(text, parser);
 }
 
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
@@ -1761,6 +1802,7 @@ interface RenderSignature {
 	paddingX: number;
 	paddingY: number;
 	codeBlockIndent: number;
+	literalMath: boolean;
 	themeId: number;
 	defaultTextStyleId: number;
 	imageProtocol: string;
@@ -1909,6 +1951,10 @@ export class Markdown implements Component {
 	#defaultStylePrefix?: string;
 	/** Number of spaces used to indent code block content. */
 	#codeBlockIndent: number;
+	/** Literal-math mode: math spans and escape smartening stay byte-literal. */
+	#literalMath: boolean;
+	/** Mode-selected parser (module-level `markdownParser` unless literal-math). */
+	#parser: Marked;
 
 	// Cache for rendered output. Cached arrays are shared and returned by
 	// reference (render contract: results are component-owned and immutable to
@@ -1995,6 +2041,7 @@ export class Markdown implements Component {
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
 		codeBlockIndent: number = 2,
+		options?: { literalMath?: boolean },
 	) {
 		this.#text = normalizeOsc8Terminators(text);
 		this.#oscPartialEscape = trailingOsc8Partial(this.#text);
@@ -2006,6 +2053,8 @@ export class Markdown implements Component {
 		this.#symbolsProbe = theme.symbols ? "" : [quoteBorder, hrChar, colorSwatch, ...Object.values(table)].join("");
 		this.#defaultTextStyle = defaultTextStyle;
 		this.#codeBlockIndent = Math.max(0, Math.floor(codeBlockIndent));
+		this.#literalMath = options?.literalMath === true;
+		this.#parser = this.#literalMath ? literalMathParser : markdownParser;
 	}
 	/** Return bounded source text and layout state for debug inspection. */
 	debugState(): Record<string, unknown> {
@@ -2016,6 +2065,7 @@ export class Markdown implements Component {
 			paddingX: this.#paddingX,
 			paddingY: this.#paddingY,
 			codeBlockIndent: this.#codeBlockIndent,
+			literalMath: this.#literalMath,
 			ignoreTight: this.#ignoreTight,
 		};
 	}
@@ -2221,7 +2271,7 @@ export class Markdown implements Component {
 		this.#lastScanValid = true;
 		this.#appendOnlySinceLastScan = true;
 		if (canStream && hasPrefix) {
-			const tailTokens = lexDocument(refDefText);
+			const tailTokens = lexDocument(refDefText, this.#parser);
 			// HAS_REF_DEF sees top-level definition lines only. A definition nested
 			// in a quote or list item still registers for the whole document and
 			// can resolve a reference in the frozen prefix, which was lexed
@@ -2233,7 +2283,7 @@ export class Markdown implements Component {
 				return tokens;
 			}
 		}
-		const tokens = lexDocument(text);
+		const tokens = lexDocument(text, this.#parser);
 		// A definition frozen into the prefix would be missing from every later
 		// tail lex, so a full lex that registered any definition freezes nothing.
 		if (canStream && retainPrefix && Object.keys(tokens.links).length === 0) {
@@ -2489,7 +2539,7 @@ export class Markdown implements Component {
 						// "x!" + "[a](u)": cold lexes text("x") + image(alt); the splice would
 						// keep "x!" + a styled link byte-run.
 						(deltaTabs.startsWith("[") && recipe.rowRaw.endsWith("!")));
-				const deltaTokens = markerDelta && !hardDelta ? lexInlineTokens(deltaTabs) : null;
+				const deltaTokens = markerDelta && !hardDelta ? lexInlineTokens(deltaTabs, this.#parser) : null;
 				if (
 					seamSafe &&
 					!lineStartHazard &&
@@ -2676,6 +2726,7 @@ export class Markdown implements Component {
 			paddingX,
 			paddingY: this.#paddingY,
 			codeBlockIndent: this.#codeBlockIndent,
+			literalMath: this.#literalMath,
 			themeId: objectId(this.#theme),
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
@@ -2692,7 +2743,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.literalMath ? 1 : 0}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -2763,6 +2814,7 @@ export class Markdown implements Component {
 		if (cache.paddingX !== signature.paddingX) return undefined;
 		if (cache.paddingY !== signature.paddingY) return undefined;
 		if (cache.codeBlockIndent !== signature.codeBlockIndent) return undefined;
+		if (cache.literalMath !== signature.literalMath) return undefined;
 		if (cache.themeId !== signature.themeId) return undefined;
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
@@ -2853,6 +2905,7 @@ export class Markdown implements Component {
 		if (cache.paddingX !== signature.paddingX) return start;
 		if (cache.paddingY !== signature.paddingY) return start;
 		if (cache.codeBlockIndent !== signature.codeBlockIndent) return start;
+		if (cache.literalMath !== signature.literalMath) return start;
 		if (cache.themeId !== signature.themeId) return start;
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
 		if (cache.imageProtocol !== signature.imageProtocol) return start;
@@ -3121,6 +3174,7 @@ export class Markdown implements Component {
 			cache.paddingX === signature.paddingX &&
 			cache.paddingY === signature.paddingY &&
 			cache.codeBlockIndent === signature.codeBlockIndent &&
+			cache.literalMath === signature.literalMath &&
 			cache.themeId === signature.themeId &&
 			cache.defaultTextStyleId === signature.defaultTextStyleId &&
 			cache.imageProtocol === signature.imageProtocol &&

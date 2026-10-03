@@ -15,6 +15,7 @@ import {
 	type NativeOutputBlockSection,
 	outputBlockContentWidth,
 	type OutputBlockOptions,
+	renderVerbatimRows,
 } from "./output-block";
 import { renderStatusLine, type StatusLineOptions } from "./status-line";
 import type { State } from "./types";
@@ -34,6 +35,10 @@ export interface ToolCardSection {
 	label?: string;
 	content: ToolCardContent;
 	separator?: boolean;
+	/** Echo rows for raw tool payloads: one source line per row, never re-wrapped. */
+	verbatim?: boolean;
+	/** Verbatim overflow policy: expanded wraps across marked rows, collapsed clips with `…`. */
+	expanded?: boolean;
 }
 
 /** Snapshot returned by a ToolCard builder on each render. */
@@ -174,7 +179,13 @@ export class ToolCard implements Component {
 			nextChildSet.add(component);
 			nextChildren.push(component);
 		};
-		const sections: Array<{ label?: string; lines: readonly string[]; separator?: boolean }> = [];
+		const sections: Array<{
+			label?: string;
+			lines: readonly string[];
+			separator?: boolean;
+			verbatim?: boolean;
+			expanded?: boolean;
+		}> = [];
 		if (snapshot.body) {
 			const body = resolveContent(snapshot.body, contentWidth);
 			sections.push({ lines: body.lines });
@@ -182,7 +193,13 @@ export class ToolCard implements Component {
 		}
 		for (const section of snapshot.sections ?? []) {
 			const resolved = resolveContent(section.content, contentWidth);
-			sections.push({ label: section.label, lines: resolved.lines, separator: section.separator });
+			sections.push({
+				label: section.label,
+				lines: resolved.lines,
+				separator: section.separator,
+				verbatim: section.verbatim,
+				expanded: section.expanded,
+			});
 			retainChild(resolved.component);
 		}
 		if (snapshot.footer) {
@@ -207,7 +224,9 @@ export class ToolCard implements Component {
 					return (
 						previous?.label === section.label &&
 						previous.lines === section.lines &&
-						previous.separator === section.separator
+						previous.separator === section.separator &&
+						previous.verbatim === section.verbatim &&
+						previous.expanded === section.expanded
 					);
 				});
 			const reusableOptions =
@@ -244,7 +263,17 @@ export class ToolCard implements Component {
 		for (const section of sections) {
 			if (section.separator && lines.length > 0) lines.push("");
 			if (section.label) lines.push(section.label);
-			lines.push(...section.lines);
+			// Verbatim payload-echo rows survive the plain variant too: each source
+			// line becomes recoverable rows (expanded: marked soft-wrap continuations;
+			// collapsed: byte-prefix + `…`) already sized to the text's content width,
+			// so the wrap pass below can't re-flow (or right-trim) a row that fits.
+			lines.push(
+				...(section.verbatim
+					? section.lines.flatMap(line =>
+							renderVerbatimRows(line, defaultContentWidth, this.#theme, section.expanded === true),
+						)
+					: section.lines),
+			);
 		}
 		const text = lines.join("\n");
 		const key = `${width}:${text.length}:${Bun.hash(text).toString(36)}:${state ?? "info"}:${snapshot.applyBg ?? true}`;
