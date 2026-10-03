@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgCompaction, compactionSettingsForModel } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -690,6 +690,34 @@ describe("persisted subagent revival", () => {
 		expect(resolveThresholdTokens(200_000, revivedCompaction)).toBe(144_000);
 		expect(shouldCompact(130_000, 200_000, revivedCompaction)).toBe(false);
 		expect(shouldCompact(144_001, 200_000, revivedCompaction)).toBe(true);
+	});
+
+	it("keeps the persisted agent threshold ahead of compaction.modelThresholds after revival", async () => {
+		const cwd = makeTempDir("@pi-compaction-model-threshold-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			compactionThreshold: { thresholdPercent: 72, thresholdTokens: -1 },
+		});
+		const parentSettings = Settings.isolated({
+			"compaction.thresholdPercent": 45,
+			"compaction.modelThresholds": { "anthropic/*": 50_000 },
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings: parentSettings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const revivedSettings = capturedOptions?.settings;
+		if (!revivedSettings) throw new Error("Expected revived child settings");
+		const model = { provider: "anthropic", id: "claude-sonnet-4-5" };
+		expect(resolveThresholdTokens(200_000, compactionSettingsForModel(revivedSettings, model))).toBe(144_000);
+		const grandchild = executorModule.createSubagentSettings(revivedSettings);
+		expect(resolveThresholdTokens(200_000, compactionSettingsForModel(grandchild, model))).toBe(50_000);
 	});
 
 	it("pins the persisted concrete model when the default role is revived", async () => {

@@ -1,8 +1,17 @@
+import type { Model } from "@oh-my-pi/pi-ai";
+import {
+	type CompactionThresholdOverride,
+	findModelCompactionThreshold,
+	hasAgentCompactionThreshold,
+	validateModelCompactionThresholds,
+} from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, CompactionThresholdOverride> = {};
 
 export const cfgWorkspaceAdditionalDirectories = register({
 	id: "workspace.additionalDirectories",
@@ -151,6 +160,21 @@ export const cfgCompactionThresholdTokens = register({
 		],
 	},
 });
+
+/**
+ * Per-model compaction trigger: model selector (`provider/id` or bare id, globs allowed) → token
+ * count or `"N%"`. A matching entry replaces `thresholdTokens`/`thresholdPercent` as a unit; see
+ * {@link compactionSettingsForModel}. Config-file only.
+ */
+export const cfgCompactionModelThresholds = register({
+	id: "compaction.modelThresholds",
+	type: "record",
+	default: EMPTY_MODEL_COMPACTION_THRESHOLDS,
+	validate: validateModelCompactionThresholds,
+});
+
+/** {@link cfgCompactionModelThresholds} validated and compiled, in declaration order. */
+const compactionModelThresholds = cfgCompactionModelThresholds.map(validateModelCompactionThresholds);
 
 export const cfgCompactionHandoffSaveToDisk = register({
 	id: "compaction.handoffSaveToDisk",
@@ -325,6 +349,22 @@ export const cfgCompaction = combine({
 
 /** Configured compaction policy ({@link cfgCompaction}). */
 export type CompactionSettings = SettingValueOf<typeof cfgCompaction>;
+
+/**
+ * Compaction policy for a session whose active model is `model`: the matching
+ * `compaction.modelThresholds` entry replaces both global threshold fields, else the globals apply.
+ * A subagent pinned by `task.agentCompactionThresholdOverrides` keeps its per-agent trigger.
+ * Resolve at each decision so `/model`, role switches and context promotion take effect.
+ */
+export function compactionSettingsForModel(
+	settings: Settings,
+	model: Pick<Model, "provider" | "id"> | null | undefined,
+): CompactionSettings {
+	const configured = cfgCompaction.get(settings);
+	if (!model || hasAgentCompactionThreshold(settings)) return configured;
+	const threshold = findModelCompactionThreshold(compactionModelThresholds.get(settings), model);
+	return threshold ? { ...configured, ...threshold } : configured;
+}
 
 // Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 export const cfgSnapcompactSystemPrompt = register({

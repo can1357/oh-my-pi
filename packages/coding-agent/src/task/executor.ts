@@ -39,7 +39,11 @@ import {
 	resolveSubagentServiceTier,
 	type ServiceTierInheritSettingValue,
 } from "../config/service-tier";
-import type { CompactionThresholdPair } from "../config/compaction-threshold";
+import {
+	type CompactionThresholdPair,
+	hasAgentCompactionThreshold,
+	pinAgentCompactionThreshold,
+} from "../config/compaction-threshold";
 import { type OverlayLayers, Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -1008,7 +1012,7 @@ interface SubagentChainSettings extends Settings {
 }
 
 /** Settings overrides applying an exact-name compaction threshold entry to one subagent. */
-export function compactionThresholdSettings(
+function compactionThresholdSettings(
 	threshold: CompactionThresholdPair | undefined,
 ): Readonly<Record<string, unknown>> | undefined {
 	return threshold === undefined
@@ -1019,10 +1023,21 @@ export function compactionThresholdSettings(
 			};
 }
 
+/** Spawn-time inputs to {@link createSubagentSettings} that are not plain settings overrides. */
+export interface SubagentSettingsOptions {
+	/** The parent session's live service tiers, matched by `tier.subagent: inherit`. */
+	inheritedServiceTier?: ServiceTierByFamily | null;
+	/**
+	 * The agent's `task.agentCompactionThresholdOverrides` entry: it becomes the session's whole
+	 * trigger, so `compaction.modelThresholds` does not replace it.
+	 */
+	agentCompactionThreshold?: CompactionThresholdPair;
+}
+
 export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
-	inheritedServiceTier?: ServiceTierByFamily | null,
+	{ inheritedServiceTier, agentCompactionThreshold }: SubagentSettingsOptions = {},
 ): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
@@ -1040,6 +1055,7 @@ export function createSubagentSettings(
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
 	const subagentSettings: SubagentChainSettings = baseSettings.overlay({
 		...compactionThresholdSettings(inheritedRootThresholds),
+		...compactionThresholdSettings(agentCompactionThreshold),
 		// A subagent's thinking level is chosen at spawn (agent definition, `effort`, or this
 		// snapshot of the parent default); a later parent default edit must not re-steer it.
 		defaultThinkingLevel: cfgDefaultThinkingLevel.get(baseSettings),
@@ -1071,6 +1087,7 @@ export function createSubagentSettings(
 		...overrides,
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
+	if (agentCompactionThreshold) pinAgentCompactionThreshold(subagentSettings);
 	return subagentSettings;
 }
 
@@ -3617,15 +3634,22 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: CompactionThresholdPair | undefined;
+	agentThresholdPinned: boolean;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
-	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
+	return {
+		parent,
+		layers: settings.overlayLayers(),
+		rootThresholds: settings[kRootCompactionThresholds],
+		agentThresholdPinned: hasAgentCompactionThreshold(settings),
+	};
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
+	if (recipe.agentThresholdPinned) pinAgentCompactionThreshold(settings);
 	return settings;
 }
 
@@ -3768,7 +3792,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
-			...compactionThresholdSettings(options.compactionThresholdOverride),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
@@ -3777,7 +3800,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
 				: undefined),
 		},
-		options.parentServiceTier,
+		{
+			inheritedServiceTier: options.parentServiceTier,
+			agentCompactionThreshold: options.compactionThresholdOverride,
+		},
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));

@@ -241,8 +241,10 @@ The `Alt+P` task model pick is session-only; saving a model in `/agents` replace
 
 Compaction triggers are separate from model and service-tier selection: an exact, case-sensitive
 `task.agentCompactionThresholdOverrides[agentName]` entry (`90000` or `"80%"`) replaces the
-`compaction.threshold*` settings for that agent only; agents without an entry, including agents it
-spawns, use the main session's thresholds. See [Settings](./settings.md#context-compaction-and-memory).
+`compaction.threshold*` settings and any `compaction.modelThresholds` match for that agent only. Agents
+without an entry, including agents it spawns, use the main session's thresholds: the
+`compaction.modelThresholds` entry for their active model, else the globals. See
+[Settings](./settings.md#context-compaction-and-memory).
 
 Service-tier precedence is independent of model selection: an exact, case-sensitive
 `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves

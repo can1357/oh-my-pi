@@ -768,6 +768,7 @@ memory:
 | `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance. |
 | `compaction.thresholdPercent` | number  | `-1`                                     | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
 | `compaction.thresholdTokens`  | number  | `-1`                                     | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
+| `compaction.modelThresholds` | record | `{}` | Model selector → compaction trigger for whichever model is active: a positive token count (`600000`) or a percentage string (`"40%"`). See below. |
 | `task.agentCompactionThresholdOverrides` | record | `{}` | Exact-name task/eval agent → compaction trigger: a positive token count (`90000`) or a percentage string (`"80%"`). See below. |
 | `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
 | `compaction.keepRecentTokens` | number  | `20000`                                  | Recent-history token budget for summary compaction.                                                                                                                                                                                                           |
@@ -796,8 +797,24 @@ task:
 - Keys are exact, case-sensitive agent names (`scout` does not match `Scout`).
 - A number is a fixed token trigger (positive integer); a `"N%"` string is a percentage of the context window, `0 < N ≤ 100`. An entry replaces both `compaction.thresholdTokens` and `compaction.thresholdPercent` for that agent.
 - `null` clears an entry set by a lower-priority settings layer. Any other value fails settings load.
-- Agents without an entry — including agents spawned by an overridden agent — use the main session's `compaction.*` thresholds. The main session and Vibe workers are unaffected.
+- Agents without an entry — including agents spawned by an overridden agent — use the main session's `compaction.*` thresholds, including `compaction.modelThresholds`. The main session and Vibe workers are unaffected.
+- An agent's entry beats `compaction.modelThresholds`, whatever model the agent runs on.
 - The resolved trigger is stored with the subagent session and reused when it is revived.
+
+Per-model compaction triggers. These apply to the main session, advisors and subagents, and are resolved against the active model at each decision, so `/model`, role switches and context promotion pick up the new model's trigger. This compacts Opus at 600,000 tokens, every `openai-codex` model at 40% of its window, and everything else at 85%:
+
+```yaml
+compaction:
+  thresholdPercent: 85
+  modelThresholds:
+    "anthropic/claude-opus-5-5": 600000
+    "openai-codex/*": "40%"
+```
+
+- A selector is `provider/id` or a bare model id, case-insensitive, with globs allowed. It matches the same way `enabledModels` globs do. Selectors are syntax-checked only, so an entry for a model that is not currently available is kept.
+- An exact `provider/id` selector wins, then an exact bare id, then the first matching glob in declaration order.
+- Values follow `task.agentCompactionThresholdOverrides`: a positive integer token count, or `"N%"` with `0 < N ≤ 100`. A matching entry replaces both `compaction.thresholdTokens` and `compaction.thresholdPercent`, so a global token limit does not override a per-model percentage. Token entries are clamped below the model's context window.
+- Models with no matching entry use the global thresholds. `null` clears an entry set by a lower-priority settings layer. Any other value fails settings load.
 
 ### Appearance and terminal
 
