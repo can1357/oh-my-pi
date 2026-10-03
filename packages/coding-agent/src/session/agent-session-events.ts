@@ -5,6 +5,7 @@ import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
+import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { CustomMessage } from "./messages";
@@ -81,6 +82,7 @@ export type AgentSessionEvent =
 			resolved?: Effort;
 	  }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| { type: "persona_changed"; personaName: string | null; source?: AgentSource }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, dequeue on
 	// delivery, remove, clear/restore, or session switch), never on a no-op

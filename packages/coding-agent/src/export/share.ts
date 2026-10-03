@@ -297,7 +297,11 @@ function redactShareEntry(
 ): SessionEntry {
 	switch (entry.type) {
 		case "message":
-			return { ...entry, message: redactShareMessage(o, entry.message, sharedRegexSecretValues) };
+			return {
+				...entry,
+				message: redactShareMessage(o, entry.message, sharedRegexSecretValues),
+				agent: entry.agent === undefined ? undefined : o.obfuscate(entry.agent),
+			};
 		case "compaction":
 			return {
 				...entry,
@@ -331,6 +335,8 @@ function redactShareEntry(
 				...entry,
 				label: entry.label === undefined ? undefined : o.obfuscate(entry.label, sharedRegexSecretValues),
 			};
+		case "persona_change":
+			return { ...entry, personaName: entry.personaName === null ? null : o.obfuscate(entry.personaName) };
 		case TITLE_CHANGE_ENTRY_TYPE:
 			return {
 				...entry,

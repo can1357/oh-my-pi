@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
@@ -11,6 +11,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -39,9 +40,16 @@ describe("AgentSession model persistence", () => {
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-model-persistence-");
+		// createStartupResumeSession below drives createAgentSession's real startup
+		// persona-loading path (added for the primary-persona-at-startup feature).
+		// Without stubbing discoverAgents, it reads the developer's real
+		// ~/.omp/agent/agents/*.md files and silently overrides the model these
+		// tests assert on. Force "no agents found" so startup never loads a persona.
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		if (session) {
 			await session.dispose();
 			session = undefined;

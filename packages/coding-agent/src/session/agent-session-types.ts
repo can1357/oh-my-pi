@@ -23,7 +23,6 @@ import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import type { AgentDefinition } from "../task/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
@@ -41,6 +40,7 @@ import type { SkillDescriptionCatalog } from "../extensibility/skill-description
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { AgentDefinition, PersonaStamp } from "../task/types";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
@@ -362,6 +362,14 @@ export interface AgentSessionConfig {
 	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
+	/**
+	 * Optional resolver called by switchSession() after loading a session to restore the
+	 * active persona. Receives the last persisted persona name (from getLastAgentName())
+	 * and the session's cwd; must return the AgentDefinition to apply (or null for none).
+	 * When absent, switchSession() leaves the active persona unchanged — callers must
+	 * handle restoration themselves or accept the stale persona.
+	 */
+	resolvePersona?: (name: PersonaStamp, cwd: string) => Promise<AgentDefinition | null>;
 	/** Config problems collected during WATCHDOG.yml discovery. */
 	advisorConfigWarnings?: string[];
 	/** Disconnect the MCP manager owned by this session during disposal. */

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +19,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function createUsage(): Usage {
@@ -306,7 +307,17 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		}
 	});
 
+	beforeEach(() => {
+		// createSessionHarness drives createAgentSession's real startup persona-loading
+		// path (added for the primary-persona-at-startup feature). Without stubbing
+		// discoverAgents, it reads the developer's real ~/.omp/agent/agents/*.md files
+		// and silently overrides the model these tests assert on. Force "no agents
+		// found" so startup never loads a persona.
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+	});
+
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		while (sessions.length > 0) {
 			await sessions.pop()?.dispose();
 		}
