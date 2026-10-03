@@ -1675,7 +1675,16 @@ export async function compact(
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
-		const messages = (summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages);
+		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
+		const messages = convertToLlm(remoteMessages);
+		// Replacement history keeps what the user wrote. Summaries, archive
+		// migrations, and custom/hook messages can serialize as user-role items
+		// too, so pick the user's own messages before serialization erases that,
+		// then serialize each one exactly as the request does.
+		const userMessages = convertToLlm(
+			[...messagesToSummarize, ...turnPrefixMessages, ...recentMessages].filter(message => message.role === "user"),
+		);
+		const retainedUserItems: unknown[] = [...(previousReplacementHistory ?? [])];
 		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
 		let codexBody: OpenAICodexCompactionBody | undefined;
 		let remoteHistory: Array<Record<string, unknown>>;
@@ -1715,8 +1724,19 @@ export async function compact(
 			}
 			remoteHistory = stripOpenAIResponsesOutputOnlyStatusesForReplay(nativeInput);
 			codexBody.input = remoteHistory;
+			for (const message of userMessages) {
+				const userBody = await buildTransformedCodexRequestBody(
+					model,
+					{ messages: [message] },
+					{ responsesLite: model.useResponsesLite },
+				);
+				retainedUserItems.push(...(userBody.input ?? []));
+			}
 		} else {
 			remoteHistory = buildOpenAiResponsesCompactionInput(messages, model, previousReplacementHistory);
+			for (const message of userMessages) {
+				retainedUserItems.push(...buildOpenAiResponsesCompactionInput([message], model, undefined));
+			}
 		}
 		if (remoteHistory.length > 0) {
 			try {
@@ -1754,6 +1774,7 @@ export async function compact(
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
+					retainedUserItems,
 				};
 				const request = codexBody
 					? buildCompactionV2RequestFromBody(model, { ...codexBody, input: trimmed.input }, requestOptions)

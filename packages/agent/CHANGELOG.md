@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI and Codex Remote Compaction V2 dropping all of your recent messages: they are now kept verbatim next to the compaction summary, up to the 64k-token budget ([#14247](https://github.com/can1357/oh-my-pi/pull/14247) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
