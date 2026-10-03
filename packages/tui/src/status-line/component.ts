@@ -14,6 +14,8 @@ import {
 	type ComposerStyle,
 	claudeComposerStyle,
 	padding,
+	motionEffectsEnabled,
+	onMotionEffectsChange,
 	spinnerAnimated,
 	spinnerClockTick,
 	truncateToWidth,
@@ -637,6 +639,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#brandWorking = false;
 	/** Frame timer driving repaints while the brand fade is unsettled. */
 	#brandFadeTimer: NodeJS.Timeout | undefined;
+	/** Drops the decorative-motion subscription on dispose. */
+	readonly #unsubscribeMotionEffects: () => void;
 	/** One wall-clock wakeup for the active model's next tariff change, including while idle. */
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
@@ -755,6 +759,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		private readonly host: StatusLineHost<TSession>,
 	) {
 		this.#settings = host.getSettings();
+		// A live switch to reduced/none motion stops an in-flight blink or fade at once, matching the
+		// spinner clock and frame ceiling, which also take effect on change.
+		this.#unsubscribeMotionEffects = onMotionEffectsChange(enabled => {
+			if (enabled) return;
+			this.#stopSpeculationBlink();
+			this.#stopBrandFadeTimer();
+			this.#brandFade = null;
+			this.invalidate();
+		});
 	}
 
 	#gitEnabled(): boolean {
@@ -1182,6 +1195,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#unsubscribeMotionEffects();
 		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
@@ -1202,8 +1216,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * the first render after speculation leaves the running state.
 	 */
 	#syncSpeculationBlink(state: "idle" | "running" | "armed"): void {
-		// A TSP terminal pulses the icon itself (`fx: "pulse"`).
-		if (state === "running" && !this.#disposed && !isNativeRendering()) {
+		// A TSP terminal pulses the icon itself (`fx: "pulse"`); `tui.motion` may switch the blink off.
+		if (state === "running" && !this.#disposed && !isNativeRendering() && motionEffectsEnabled()) {
 			this.#speculationBlinkTimer ??= setInterval(() => {
 				this.#speculationBlinkOn = !this.#speculationBlinkOn;
 				this.invalidate();
@@ -1237,13 +1251,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const now = Date.now();
 		if (working !== this.#brandWorking) {
 			const previousTargetHex = this.#brandWorking ? workingHex : idleHex;
-			this.#brandFade = {
-				fromHex: this.#sampleBrandHex(previousTargetHex, now),
-				toHex: working ? workingHex : idleHex,
-				startedAt: now,
-			};
 			this.#brandWorking = working;
-			this.#startBrandFadeTimer();
+			// With decorative motion off the brand snaps to its settled color; otherwise it eases over.
+			if (motionEffectsEnabled()) {
+				this.#brandFade = {
+					fromHex: this.#sampleBrandHex(previousTargetHex, now),
+					toHex: working ? workingHex : idleHex,
+					startedAt: now,
+				};
+				this.#startBrandFadeTimer();
+			} else {
+				this.#brandFade = null;
+			}
 		}
 		const hex = this.#sampleBrandHex(working ? workingHex : idleHex, now);
 		return getSessionAccentAnsi(hex) ?? theme.getFgAnsi(working ? "accent" : "dim");
@@ -1274,8 +1293,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#startBrandFadeTimer(): void {
-		// The native brand segment is a terminal-clocked spinner; nothing to repaint.
-		if (this.#brandFadeTimer || this.#disposed || isNativeRendering()) return;
+		// The native brand segment is a terminal-clocked spinner; nothing to repaint. With decorative
+		// motion off the brand settles on its final color in the next ordinary paint.
+		if (this.#brandFadeTimer || this.#disposed || isNativeRendering() || !motionEffectsEnabled()) return;
 		this.#brandFadeTimer = setInterval(() => {
 			const fade = this.#brandFade;
 			if (!fade || Date.now() - fade.startedAt >= BRAND_FADE_MS) this.#stopBrandFadeTimer();

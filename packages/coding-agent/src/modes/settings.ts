@@ -1,4 +1,12 @@
-import { combine, effect, register, type Setting } from "../config/registry";
+import { type AnySetting, combine, Derived, effect, register, type Setting } from "../config/registry";
+import type { Settings } from "../config/settings";
+import {
+	type ExplicitMotionSettings,
+	MOTION_MODES,
+	type MotionMode,
+	type MotionSettings,
+	resolveMotion,
+} from "../config/motion-presets";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
@@ -16,9 +24,10 @@ import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-acti
 import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
+import { type ShimmerMode, setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 import { DEFAULT_MAX_FPS, parseMaxFps, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
+import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
 import { DEFAULT_SPINNER_INTERVAL_MS, parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
@@ -511,9 +520,6 @@ export const cfgTuiSpinnerInterval = register({
 		],
 	},
 });
-// The TUI's shared spinner clock (Loader rows, tool cards, status-line brand) follows the setting
-// live; the terminal-title spinner reads it in interactive mode beside the other title settings.
-effect(cfgTuiSpinnerInterval, setSpinnerInterval);
 
 export const cfgTuiMaxFps = register({
 	id: "tui.maxFps",
@@ -539,8 +545,6 @@ export const cfgTuiMaxFps = register({
 		],
 	},
 });
-// The TUI render scheduler and its animation timers follow the ceiling live.
-effect(cfgTuiMaxFps, setMaxFps);
 
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
@@ -591,6 +595,7 @@ export const cfgDisplayShimmer = register({
 	type: "enum",
 	values: ["classic", "kitt", "disabled"] as const,
 	default: "classic",
+	env: "PI_SHIMMER",
 	ui: {
 		tab: "appearance",
 		group: "Display",
@@ -603,7 +608,76 @@ export const cfgDisplayShimmer = register({
 		],
 	},
 });
-effect(cfgDisplayShimmer, setShimmerMode);
+
+export const cfgTuiMotion = register({
+	id: "tui.motion",
+	type: "enum",
+	values: MOTION_MODES,
+	default: "full",
+	env: "PI_MOTION",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Motion",
+		description:
+			"One switch over every animation: spinner cadence, repaint ceiling, shimmer, and decorative blink/fade. A setting you set explicitly (spinner interval, max fps, shimmer) still wins over the preset. For many panes, a shared screen, or reduced-motion needs",
+		options: [
+			{ value: "full", label: "Full", description: "Every animation at its own setting (default)" },
+			{
+				value: "reduced",
+				label: "Reduced",
+				description: "Spinners at 250 ms, 4 fps ceiling, no shimmer, no blink/fade",
+			},
+			{
+				value: "none",
+				label: "None",
+				description: "Static spinners and title, 4 fps ceiling, no shimmer, no blink/fade",
+			},
+		],
+	},
+});
+
+/**
+ * The effective animation settings: `tui.motion`'s preset, overridden by each governed setting the
+ * user set explicitly (file, flag, or env). One derivation drives the TUI clocks and the shimmer so
+ * the preset and the explicit knobs can never fight.
+ */
+class ResolvedMotion extends Derived<MotionSettings> {
+	readonly #sources: readonly AnySetting[] = [cfgTuiMotion, cfgTuiSpinnerInterval, cfgTuiMaxFps, cfgDisplayShimmer];
+
+	get sources(): readonly AnySetting[] {
+		return this.#sources;
+	}
+
+	inputs(settings: Settings): readonly unknown[] {
+		return [
+			cfgTuiMotion.get(settings),
+			cfgTuiSpinnerInterval.isConfigured(settings) ? cfgTuiSpinnerInterval.get(settings) : undefined,
+			cfgTuiMaxFps.isConfigured(settings) ? cfgTuiMaxFps.get(settings) : undefined,
+			cfgDisplayShimmer.isConfigured(settings) ? cfgDisplayShimmer.get(settings) : undefined,
+		];
+	}
+
+	compute(inputs: readonly unknown[]): MotionSettings {
+		const [mode, spinnerInterval, maxFps, shimmer] = inputs as [
+			MotionMode,
+			number | undefined,
+			number | undefined,
+			ShimmerMode | undefined,
+		];
+		const explicit: ExplicitMotionSettings = { spinnerInterval, maxFps, shimmer };
+		return resolveMotion(mode, explicit);
+	}
+}
+
+/** Effective animation settings; the terminal-title spinner reads its period from here too. */
+export const cfgMotionResolved: Derived<MotionSettings> = new ResolvedMotion();
+effect(cfgMotionResolved, motion => {
+	setSpinnerInterval(motion.spinnerInterval);
+	setMaxFps(motion.maxFps);
+	setShimmerMode(motion.shimmer);
+	setMotionEffects(motion.effects);
+});
 
 export const cfgDisplayPinnedAgents = register({
 	id: "display.pinnedAgents",
