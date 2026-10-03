@@ -3,9 +3,9 @@ import type { AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-c
 import type { Model } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
-import { once } from "@oh-my-pi/pi-utils";
+import { logger, once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
-import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import type { EvalPreludeCell, EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
@@ -129,6 +129,8 @@ export function createComputerPrelude(
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
+	// Cells whose code reached the desktop; only these are settled.
+	const cells = new WeakSet<EvalPreludeCell>();
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
 		close: async () => {
@@ -154,9 +156,27 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
+			if (context.cell && (parsed.action === "run" || parsed.action === "call")) cells.add(context.cell);
 			return await invokeComputer(session, controller, parsed, context, lifetime);
 		},
 		status: describeComputerCall,
+		settleCell: async (cell, { output }) => {
+			if (!cells.has(cell) || closed || !controller.settle) return undefined;
+			cells.delete(cell);
+			try {
+				const text = await controller.settle(buildComputerSnapshot(session, true), output, cell.signal);
+				return text === undefined ? undefined : { text };
+			} catch (error) {
+				// Cancellation of the turn needs no report; anything else leaves the
+				// model without its post-input observation, so it is told to look.
+				if (cell.signal.aborted) return undefined;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.debug("Computer cell settle failed", { error: message });
+				return {
+					text: `No post-input report for this cell (${message}); read the windows it touched before continuing.`,
+				};
+			}
+		},
 	};
 }
 

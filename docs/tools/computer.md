@@ -116,7 +116,15 @@ On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) t
 
 On macOS, `setValue(value)` on a popup button (`popupbutton`) chooses the menu option titled exactly `value`: it opens a closed menu, presses the option, and confirms the choice by reading the popup's value back. No match, or several options with that title, throws with the available option titles, and a menu the call opened is closed again.
 
-AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. A window AX snapshot advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
+AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. A window AX snapshot, and each post-input report of the window, advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
+
+### What a cell's input left behind
+
+Mutating helpers return nothing; the Eval cell that called them reports their effect once, after its own output. The prelude's `settleCell` hook asks the worker to settle. Every window the cell sent input to (window input, and element actions on refs the session read from that window), and every window where a ref-addressed call failed, is re-read once, no sooner than 500 ms after the cell's last input, with the options of the model's last `ax()` of that window. Desktop-root input counts for the window it reaches when sent: pointer input for the topmost window under the pointer (its desktop-screenshot pixels mapped through that screenshot's display regions; a window covering a whole display, such as the macOS Dock's overlay, is passed over), keys for the focused window. Elements from `elementAt` and `focusedElement` belong to the window at their point and the focused window. Input whose window stays unknown is shown on the window focused at settle time.
+
+Each window prints as `window "<id>" <app> "<title>" after <inputs> — <summary>:` (the id JSON-quoted, exactly as `desktop.window()` takes it) followed by its current tree in full (the native walk caps it at 800 nodes), rows marked against the tree the model last received for the window (the last `ax()` tree a cell printed, or its last report): `~` changed (with `(was: …)`), `+` added, and a `removed:` line for rows that disappeared. Native object addresses in values (`<AXUIElement 0x…>`) are ignored when comparing. An identical tree is reported as `no accessibility change visible … s after the input (the app may still be working)`: one sample, not a verdict. The single read keeps refs from the tree the model held before the cell valid (the native registry keeps one previous generation) and the printed refs live.
+
+A window whose `ax()` tree the cell printed after its last input is not re-read; a tree the cell's code read without printing it does not count as seen. Windows the input opened (of the processes it addressed, or newly focused), closed, or focused follow as one line each. Cells whose code never reached the desktop, and cancelled cells, report nothing; a settle that fails says so in the cell (`No post-input report for this cell (…)`). Reads past a 10 s budget are skipped and each skipped window is named.
 
 ### Clipboard
 
@@ -138,8 +146,9 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 5. Each run installs a run-scoped `desktop` facade plus `wait`/`assert`. AsyncLocalStorage prevents leaked asynchronous work from borrowing a later run's signal or read-only policy.
 6. Native operations execute in the worker. Runtime `tool.*` calls cross back through the supervisor into the owning session tool bridge and inherit cancellation.
 7. At run end, pending work is aborted, clone-safe displays/return value and capabilities return to the host, and the worker remains alive.
-8. A run timeout is followed by a 750 ms supervisor grace period. If the worker does not finish, it is terminated with `computer worker restarted; captures and ax refs were reset`; a later call starts a fresh worker.
-9. Session cleanup sends `close`, waits up to 1.5 seconds, then force-terminates as a bounded fallback. Owner-scoped cleanup closes every registered computer controller.
+8. When an Eval cell that made computer calls ends, the host sends one `settle` request (15-second budget, same abort and restart handling as a run); the worker re-reads what the cell's input touched and returns the report appended to the cell's output.
+9. A run timeout is followed by a 750 ms supervisor grace period. If the worker does not finish, it is terminated with `computer worker restarted; captures and ax refs were reset`; a later call starts a fresh worker.
+10. Session cleanup sends `close`, waits up to 1.5 seconds, then force-terminates as a bounded fallback. Owner-scoped cleanup closes every registered computer controller.
 
 ## Side effects
 
@@ -160,7 +169,7 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above.
 
-Recover by refreshing the exact target screenshot after coordinate-frame errors, taking a new AX snapshot after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. After `BackgroundUnavailable`, prefer AX; use `takeover: true` only for the refused call when supported. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
+Recover by refreshing the exact target screenshot after coordinate-frame errors, using the tree the cell's report prints (or a new AX snapshot) after `StaleRef`, and inspecting `desktop.capabilities()` for platform/permission failures. After `BackgroundUnavailable`, prefer AX; use `takeover: true` only for the refused call when supported. After partial-delivery or restoration errors, inspect the target before retrying because input may already have landed.
 
 ## Platform constraints
 
