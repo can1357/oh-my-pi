@@ -4,7 +4,8 @@ through the native function-calling interface. Text is not a call: nothing in
 that markup was executed.
 {{#if toolNames}}The following calls did not run:
 {{#each toolNames}}- {{this}}
-{{/each}}{{/if}}{{#if incomplete}}An incomplete call envelope was also present (cut in transit); emit that call complete this time.
+{{/each}}{{/if}}{{#if omittedCount}}- …and {{omittedCount}} more tool calls also written as text
+{{/if}}{{#if incomplete}}An incomplete call envelope was also present (cut in transit); emit that call complete this time.
 {{/if}}Re-emit each intended call now through the native function-calling
 interface, with arguments as a JSON object matching the tool schema. No prose,
 no transcription. If the markup was quoted or explanatory rather than an

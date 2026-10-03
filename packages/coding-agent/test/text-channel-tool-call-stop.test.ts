@@ -14,7 +14,7 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 // Envelope tag spellings assembled at runtime: literal tag sequences corrupt
 // the tool-call parameter transport.
-const T = String.fromCharCode(60);
+const T = "<";
 const envelope = (name: string) => `${T}function=${name}>${T}parameter=i>retry${T}/parameter>${T}/function>`;
 
 const recordToolSchema = type({ value: type("string") });
@@ -171,19 +171,18 @@ describe("text-channel tool call recovery", () => {
 		expect(judge).not.toHaveBeenCalled();
 	});
 
-	it("reports a truncated envelope as incomplete and still continues", async () => {
+	it("ignores a truncated envelope and leaves the turn to the stop chain", async () => {
 		const { session, mock } = await createHarness([
 			envelopeStop(`Cut in transit: ${T}function=write>${T}parameter=i>retry`),
-			{ content: ["done now"], stopReason: "stop" },
 		]);
 
 		await session.prompt("do the thing");
 		await session.waitForIdle();
 
-		expect(mock.calls).toHaveLength(2);
-		const reminders = correctiveReminders(session.agent.state.messages);
-		expect(reminders).toHaveLength(1);
-		expect(reminders[0]).toContain("incomplete call envelope");
+		// No complete call: nothing to name, so no corrective note and no
+		// auto-continue from this handler; the turn settles as a plain stop.
+		expect(mock.calls).toHaveLength(1);
+		expect(correctiveReminders(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("names unknown tools in the reminder without dispatching anything", async () => {

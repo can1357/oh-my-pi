@@ -2,8 +2,8 @@
  * Detects tool calls the model transcribed as literal text in an assistant
  * message instead of emitting as structured `toolCall` blocks. A text channel
  * "envelope" is the foreign chat-template spelling: an open tag carrying
- * `function=NAME`, parameter pairs, and a matching close tag. Such text is
- * displayed to the user but never dispatched, which stalls the session at
+ * `function=NAME`, `parameter=NAME` pairs, and a matching close tag. Such text
+ * is displayed to the user but never dispatched, which stalls the session at
  * "the call announced in prose".
  *
  * The scan is deliberately shallow: envelope-level structure and tool names
@@ -12,14 +12,21 @@
  * parameters — so any consumer that parsed values would silently corrupt
  * arguments. Feedback only needs names.
  *
- * Note: angle-bracket tag spellings are assembled from a fragment so this file
- * never contains a literal envelope tag sequence; such sequences inside
- * tool-call parameter values corrupt the parameter transport.
+ * Detection requires at least one COMPLETE call envelope (open tag with a
+ * `parameter=NAME` pair before its close tag). Bare mentions of the grammar in
+ * prose or code spans — documenting or reviewing this markup — must not fire:
+ * fenced blocks and inline code spans are stripped first, and an unclosed open
+ * tag alone is never enough evidence.
  */
 
-const TAG_START = "<";
-const TOOL_CALL_OPEN = `${TAG_START}function=`;
-const TOOL_CALL_CLOSE = `${TAG_START}/function>`;
+const TOOL_CALL_OPEN = "<" + "function=";
+const TOOL_CALL_CLOSE = "<" + "/" + "function>";
+const PARAM_OPEN = "<" + "parameter=";
+const PARAM_CLOSE = "<" + "/" + "parameter>";
+
+/** Fenced blocks (```/~~~) and inline code spans carry examples, not calls. */
+const FENCED_BLOCK_RE = /(```|~~~)[\s\S]*?\1[^\S\n]*(?:\n|$)/g;
+const INLINE_CODE_RE = /`[^`\n]*`/g;
 
 /** Cap the scan: a terminal text part can carry arbitrary megabytes. */
 const SCAN_LIMIT = 256 * 1024;
@@ -34,20 +41,24 @@ export interface TextChannelToolCall {
 }
 
 export interface TextChannelToolCallDetection {
-	/** Complete envelopes (open + close pair) in emission order. */
+	/** Complete envelopes (open + close tag with a parameter pair) in order. */
 	complete: readonly TextChannelToolCall[];
-	/** True when an open tag never reaches its close tag (call cut in transit). */
+	/**
+	 * True when an open tag never reaches a complete form (cut in transit).
+	 * Annotation only: a detection fires on `complete` alone.
+	 */
 	incomplete: boolean;
 }
 
 /**
- * Returns undefined when the text carries no envelope markup at all. A
- * complete entry requires a close tag before the next open tag, so a quoted
- * unclosed fragment cannot swallow the envelope that follows it; the fragment
- * is then reported through `incomplete` instead.
+ * Returns undefined when the text carries no complete call envelope. A
+ * complete entry requires a close tag before the next open tag and at least
+ * one `parameter=NAME` pair, so a quoted unclosed fragment cannot swallow the
+ * envelope that follows it and prose mentions of the bare grammar never fire.
  */
 export function detectTextChannelToolCalls(text: string): TextChannelToolCallDetection | undefined {
-	const haystack = text.length > SCAN_LIMIT ? text.slice(0, SCAN_LIMIT) : text;
+	const scannable = text.replace(FENCED_BLOCK_RE, "\n").replace(INLINE_CODE_RE, " ");
+	const haystack = scannable.length > SCAN_LIMIT ? scannable.slice(0, SCAN_LIMIT) : scannable;
 	const complete: TextChannelToolCall[] = [];
 	let incomplete = false;
 	let cursor = 0;
@@ -55,11 +66,7 @@ export function detectTextChannelToolCalls(text: string): TextChannelToolCallDet
 		const open = haystack.indexOf(TOOL_CALL_OPEN, cursor);
 		if (open === -1) break;
 		const nameStart = open + TOOL_CALL_OPEN.length;
-		// Bound the name at the next tag start too, so an emission missing the
-		// open tag's terminator cannot swallow following tags into the name.
-		const tagEnd = haystack.indexOf(">", nameStart);
-		const nextTagStart = haystack.indexOf(TAG_START, nameStart);
-		const nameEnd = tagEnd === -1 ? nextTagStart : nextTagStart === -1 ? tagEnd : Math.min(tagEnd, nextTagStart);
+		const nameEnd = haystack.indexOf(">", nameStart);
 		if (nameEnd === -1) {
 			incomplete = true;
 			break;
@@ -75,6 +82,14 @@ export function detectTextChannelToolCalls(text: string): TextChannelToolCallDet
 			continue;
 		}
 		cursor = close + TOOL_CALL_CLOSE.length;
+		const paramOpen = haystack.indexOf(PARAM_OPEN, nameEnd);
+		const paramClose = haystack.indexOf(PARAM_CLOSE, nameEnd);
+		if (paramOpen === -1 || paramOpen > close || paramClose === -1 || paramClose > close) {
+			// Open + close without a parameter pair is not a call envelope (the
+			// observed grammar always carries `parameter=NAME` pairs).
+			incomplete = true;
+			continue;
+		}
 		const name = haystack.slice(nameStart, nameEnd).trim().replace(NON_TEXT_CHARS_RE, "").slice(0, MAX_NAME_LENGTH);
 		if (name.length > 0) {
 			complete.push({ name });
@@ -82,7 +97,7 @@ export function detectTextChannelToolCalls(text: string): TextChannelToolCallDet
 			incomplete = true;
 		}
 	}
-	if (complete.length === 0 && !incomplete) return undefined;
+	if (complete.length === 0) return undefined;
 	return { complete, incomplete };
 }
 

@@ -1,16 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { detectTextChannelToolCalls, textChannelToolCallNames } from "../src/session/text-channel-tool-call";
 
-// Envelope tag spellings are assembled at runtime from a char code so test
-// payloads never contain literal tag sequences (they corrupt the tool-call
-// parameter transport). Grammar: an open tag function=NAME terminated by the
-// angle bracket, parameter=KEY pairs wrapped in parameter close tags, and a
-// function close tag.
-const T = String.fromCharCode(60);
-const OPEN = `${T}function=`;
-const CLOSE = `${T}/function>`;
-const P_OPEN = `${T}parameter=`;
-const P_CLOSE = `${T}/parameter>`;
+// Tag spellings are assembled from fragments (the transport corrupts literal
+// tag sequences inside tool-call parameter values — see the module doc).
+const OPEN = "<" + "function=";
+const CLOSE = "<" + "/" + "function>";
+const P_OPEN = "<" + "parameter=";
+const P_CLOSE = "<" + "/" + "parameter>";
 const TAG_END = ">";
 
 function param(key: string, value: string): string {
@@ -26,6 +22,26 @@ describe("detectTextChannelToolCalls", () => {
 		expect(detectTextChannelToolCalls("Just prose about function=NAME envelopes.")).toBeUndefined();
 	});
 
+	it("does not fire on a bare grammar mention in inline code", () => {
+		const text = "Qwen3-Coder's chat template wraps calls as `<function=NAME>` blocks.";
+		expect(detectTextChannelToolCalls(text)).toBeUndefined();
+	});
+
+	it("does not fire on a fenced example containing a complete envelope", () => {
+		const text = "Example format:\n```xml\n" + envelope("read") + "\n```\nThat is the shape.";
+		expect(detectTextChannelToolCalls(text)).toBeUndefined();
+	});
+
+	it("requires a parameter pair: open+close without one is not a call", () => {
+		const detection = detectTextChannelToolCalls(`odd: ${OPEN}read${TAG_END}${CLOSE}`);
+		expect(detection).toBeUndefined();
+	});
+
+	it("ignores a truncated envelope with no complete call", () => {
+		const detection = detectTextChannelToolCalls(`${OPEN}write${TAG_END}${param("i", "cut off here")}`);
+		expect(detection).toBeUndefined();
+	});
+
 	it("detects a complete envelope and its tool name", () => {
 		const detection = detectTextChannelToolCalls(`Doing it now: ${envelope("write")}`);
 		expect(detection?.complete.map(call => call.name)).toEqual(["write"]);
@@ -36,12 +52,6 @@ describe("detectTextChannelToolCalls", () => {
 		const detection = detectTextChannelToolCalls(`${envelope("write")} ${envelope("bash")} ${envelope("write")}`);
 		expect(detection?.complete.map(call => call.name)).toEqual(["write", "bash", "write"]);
 		expect(textChannelToolCallNames(detection!)).toEqual(["write", "bash"]);
-	});
-
-	it("reports an open tag without a close as incomplete and executes nothing", () => {
-		const detection = detectTextChannelToolCalls(`${OPEN}write${TAG_END}${param("i", "cut off here")}`);
-		expect(detection?.complete).toEqual([]);
-		expect(detection?.incomplete).toBe(true);
 	});
 
 	it("does not let a quoted unclosed fragment swallow the real envelope after it", () => {
@@ -66,15 +76,16 @@ describe("detectTextChannelToolCalls", () => {
 
 	it("strips control characters from names and caps their length", () => {
 		const longName = "a".repeat(100);
-		const detection = detectTextChannelToolCalls(`${OPEN}${longName}${TAG_END}${CLOSE}`);
+		const detection = detectTextChannelToolCalls(`${OPEN}${longName}${TAG_END}${param("i", "v")}${CLOSE}`);
 		expect(detection?.complete[0]?.name).toHaveLength(64);
-		const stripped = detectTextChannelToolCalls(`${OPEN}wri${String.fromCharCode(0)}te${TAG_END}${CLOSE}`);
+		const stripped = detectTextChannelToolCalls(
+			`${OPEN}wri${String.fromCharCode(7)}te${TAG_END}${param("i", "v")}${CLOSE}`,
+		);
 		expect(stripped?.complete[0]?.name).toBe("write");
 	});
 
-	it("treats an empty name as incomplete rather than a call", () => {
-		const detection = detectTextChannelToolCalls(`${OPEN}${TAG_END}${CLOSE}`);
-		expect(detection?.complete).toEqual([]);
-		expect(detection?.incomplete).toBe(true);
+	it("treats an empty name as no call", () => {
+		const detection = detectTextChannelToolCalls(`${OPEN}${TAG_END}${param("i", "v")}${CLOSE}`);
+		expect(detection).toBeUndefined();
 	});
 });
