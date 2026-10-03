@@ -50,6 +50,7 @@ export interface Args {
 	thinking?: ConfiguredThinkingLevel;
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;
+	mailbox?: boolean;
 	advisor?: boolean;
 	externalThinking?: boolean;
 	continue?: boolean;
@@ -324,6 +325,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPty = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
+		} else if (arg === "--mailbox") {
+			result.mailbox = true;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
 		} else if (arg === "--external-thinking") {

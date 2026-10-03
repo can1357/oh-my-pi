@@ -56,6 +56,8 @@ import {
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import { mailboxConversationSuffix } from "../../mailbox/protocol";
+import { MailboxService } from "../../mailbox/service";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
@@ -179,6 +181,8 @@ type ManagedSessionRecord = {
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
 	lifetimeUnsubscribe: (() => void) | undefined;
+	mailboxUnbind: (() => void) | undefined;
+	mailboxSessionId: string | undefined;
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -1324,6 +1328,7 @@ export class AcpAgent implements Agent {
 		try {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
+			this.#syncMailboxTarget(record);
 			this.#sessions.set(session.sessionId, record);
 			return record;
 		} catch (error) {
@@ -1351,11 +1356,56 @@ export class AcpAgent implements Agent {
 			promptEventHandlers: new Set(),
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
+			mailboxUnbind: undefined,
+			mailboxSessionId: undefined,
 		};
 	}
 
+	#syncMailboxTarget(record: ManagedSessionRecord): void {
+		const session = record.session;
+		if (record.closedError || record.mailboxSessionId === session.sessionId) return;
+		const agentId = session.getAgentId();
+		if (!agentId) return;
+		record.mailboxUnbind?.();
+		record.mailboxUnbind = undefined;
+		const previousSessionId = record.mailboxSessionId;
+		record.mailboxSessionId = undefined;
+		record.mailboxUnbind = MailboxService.global().bindTarget({
+			agentId,
+			conversation: mailboxConversationSuffix(session.sessionId),
+			// Builtins receive this same per-conversation Settings instance.
+			settings: session.settings,
+			receive: true,
+			describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+		});
+		record.mailboxSessionId = session.sessionId;
+		if (previousSessionId && this.#sessions.get(previousSessionId) === record) {
+			this.#sessions.delete(previousSessionId);
+			this.#sessions.set(session.sessionId, record);
+		}
+	}
+
 	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
+		if (record.closedError) return;
+		this.#syncMailboxTarget(record);
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
+			if (isPromptTurnInFlight(record.promptTurn)) return;
+			const delivery = this.#emitLiveSessionEvent(record, event).then(async () => {
+				if (event.type === "agent_end") {
+					await this.#flushMissedFinalAssistantText(record, event);
+					await this.#emitEndOfTurnUpdates(record);
+					record.liveMessageId = undefined;
+					record.liveMessageProgress = undefined;
+				}
+			});
+			record.promptEventHandlers.add(delivery);
+			try {
+				await delivery;
+			} catch (error) {
+				logger.warn("ACP idle event handler failed", { sessionId: record.session.sessionId, error });
+			} finally {
+				record.promptEventHandlers.delete(delivery);
+			}
 			return;
 		}
 		// Config delivery is part of command completion, even though the
@@ -1418,6 +1468,28 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		this.#syncMailboxTarget(record);
+		await this.#emitLiveSessionEvent(record, event, promptTurn);
+
+		if (event.type === "agent_end") {
+			await this.#flushMissedFinalAssistantText(record, event);
+			await this.#flushUnreportedTurnError(record, event);
+			await this.#emitEndOfTurnUpdates(record);
+			await this.#waitForAcpPromptIdle(record);
+			record.liveMessageId = undefined;
+			record.liveMessageProgress = undefined;
+			this.#finishPrompt(record, {
+				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
+				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
+			});
+		}
+	}
+
+	async #emitLiveSessionEvent(
+		record: ManagedSessionRecord,
+		event: AgentSessionEvent,
+		promptTurn?: PromptTurnState,
+	): Promise<void> {
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
 			record.toolArgsById.set(event.toolCallId, event.args);
 		}
@@ -1444,7 +1516,7 @@ export class AcpAgent implements Agent {
 			resolveImageData: resolveImageDataForAcp,
 		})) {
 			const delivery = this.#connection.sessionUpdate(notification);
-			if (streamedAssistantError) {
+			if (streamedAssistantError && promptTurn) {
 				// Resolves true only once the error chunk actually reached the
 				// client — a failed delivery keeps the agent_end fallback armed.
 				const outcome = delivery.then(
@@ -1460,19 +1532,6 @@ export class AcpAgent implements Agent {
 			record.toolArgsById.delete(event.toolCallId);
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
-
-		if (event.type === "agent_end") {
-			await this.#flushMissedFinalAssistantText(record, event);
-			await this.#flushUnreportedTurnError(record, event);
-			await this.#emitEndOfTurnUpdates(record);
-			await this.#waitForAcpPromptIdle(record);
-			record.liveMessageId = undefined;
-			record.liveMessageProgress = undefined;
-			this.#finishPrompt(record, {
-				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
-				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
-			});
-		}
 	}
 
 	/**
@@ -1585,8 +1644,8 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Reset live-message tracking once the assistant `message_end` is handled.
-	 * The `agent_end` reset happens inside the `agent_end` branch of
-	 * `#handlePromptEvent` — after `#flushMissedFinalAssistantText` — so a
+	 * Prompt and idle `agent_end` handlers reset after
+	 * `#flushMissedFinalAssistantText`, so a
 	 * `message_end` that arrives during the end-of-turn waits maps against the
 	 * real progress instead of resurrecting a fresh one (which would double-emit
 	 * the final answer).
@@ -2616,6 +2675,7 @@ export class AcpAgent implements Agent {
 				waitForIdle: () => record.session.agent.waitForIdle(),
 				newSession: async options => {
 					const success = await record.session.newSession({ parentSession: options?.parentSession });
+					this.#syncMailboxTarget(record);
 					if (success && options?.setup) {
 						await options.setup(record.session.sessionManager);
 					}
@@ -2623,6 +2683,7 @@ export class AcpAgent implements Agent {
 				},
 				branch: async entryId => {
 					const result = await record.session.branch(entryId);
+					this.#syncMailboxTarget(record);
 					return { cancelled: result.cancelled };
 				},
 				navigateTree: async (targetId, options) => {
@@ -2631,10 +2692,12 @@ export class AcpAgent implements Agent {
 				},
 				switchSession: async sessionPath => {
 					const success = await record.session.switchSession(sessionPath);
+					this.#syncMailboxTarget(record);
 					return { cancelled: !success };
 				},
 				reload: async () => {
 					await record.session.reload();
+					this.#syncMailboxTarget(record);
 				},
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
@@ -2768,6 +2831,9 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.lifetimeUnsubscribe = undefined;
+		record.mailboxUnbind?.();
+		record.mailboxUnbind = undefined;
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();

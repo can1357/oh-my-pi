@@ -38,6 +38,7 @@ import {
 	type SkillPromptInput,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { MailboxService } from "../../mailbox/service";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -1229,7 +1230,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const stdout = process.platform === "win32" ? fs.createWriteStream("", { fd: 1, autoClose: false }) : process.stdout;
 	const outputWriter = new RpcOutputWriter(stdout, failure => {
 		logger.error("RPC output delivery failed", { error: String(failure) });
-		void session.dispose().finally(() => process.exit(1));
+		void session.dispose().finally(async () => {
+			await MailboxService.global().close();
+			process.exit(1);
+		});
 	});
 	outputWriter.write(
 		frameEncoder.encodeFrames({
@@ -1589,11 +1593,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			} catch {
 				// A mirror that cannot be written must not cost the exit code.
 			}
+			await MailboxService.global().close();
 			process.exit(1);
 		}
 		// A failure that already reported and then recovered still leaves its notice
 		// queued here, so the success path drains the same queue before it exits.
 		await outputWriter.close();
+		await MailboxService.global().close();
 		process.exit(0);
 	};
 

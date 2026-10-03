@@ -75,6 +75,7 @@ import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybindin
 import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { formatMailboxState, type MailboxTargetState } from "../mailbox/service";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -7188,6 +7189,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showStatus(message: string, options?: { dim?: boolean }): void {
 		this.#uiHelpers.showStatus(message, options);
+	}
+
+	showMailboxState(state: MailboxTargetState): void {
+		this.showStatus(formatMailboxState(state));
+		this.statusLine.setPeersStatus(
+			state.enabled ? { address: state.address, receiving: state.receiving } : undefined,
+		);
+		this.statusLine.invalidate();
+		this.ui.requestRender();
 	}
 
 	showError(message: string): void {

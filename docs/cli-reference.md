@@ -78,6 +78,7 @@ Argument handling:
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
+| `--mailbox` | Enable cross-process peer messaging for this process; in print mode, also receive messages. See [Cross-process peers](./agent-hub.md#cross-process-peers). |
 
 #### Session history
 

@@ -8,6 +8,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { MailboxService } from "../mailbox/service";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
@@ -41,6 +42,8 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 	/** Manager returned by session creation; only print mode waits for its servers. */
 	mcpManager?: MCPManager;
+	/** Stops accepting peer messages before the final response is captured. */
+	unbindMailboxTarget?: () => void;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -122,6 +125,8 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		return await runPrintModeCore(session, options, () => signalReason !== undefined);
 	} finally {
 		cancelSignalTeardown();
+		options.unbindMailboxTarget?.();
+		if (options.unbindMailboxTarget) await MailboxService.global().whenSettled();
 	}
 }
 
@@ -275,42 +280,69 @@ async function runPrintModeCore(
 		wroteTextWorkingIndicator = true;
 	};
 
-	// Send initial message with attachments
-	if (!strictMCPFailure && initialMessage !== undefined) {
-		writeTextWorkingIndicator();
-		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
-	}
+	// An IRC wake can already own the session. Queue behind it, then drain every
+	// tracked turn before reading this prompt's answer, rather than the wake's.
+	const dispatch = async (label: string, text: string, images?: ImageContent[]): Promise<void> => {
+		await logger.time(label, () => session.prompt(text, { images, streamingBehavior: "followUp" }));
+		while (session.isStreaming) await session.waitForIdle();
+		// Hidden next-turn reminders legitimately outlive the final prompt.
+		if (session.getQueuedMessages().followUp.length > 0) {
+			throw new Error("print mode: the prompt was queued behind another turn and never dispatched");
+		}
+	};
 
-	// Send remaining messages
-	if (!strictMCPFailure) {
-		for (const message of messages) {
+	let assistantMsg: AgentMessage | undefined;
+	let terminalFailure = false;
+	try {
+		// Send initial message with attachments
+		if (!strictMCPFailure && initialMessage !== undefined) {
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
-			await logger.time("print:prompt:next", () => session.prompt(message));
+			await dispatch("print:prompt:initial", initialMessage, initialImages);
 		}
+
+		// Send remaining messages
+		if (!strictMCPFailure) {
+			for (const message of messages) {
+				writeTextWorkingIndicator();
+				if (mode === "text") session.setTextOutputCommitted(false);
+				await dispatch("print:prompt:next", message);
+			}
+		}
+
+		while (session.isStreaming) await session.waitForIdle();
+		// Admission cutoff: no remote wake may change the final answer after this point.
+		options.unbindMailboxTarget?.();
+
+		// From this point onward a late blocker must be recorded without starting a
+		// primary turn whose response print mode would never emit.
+		session.prepareForHeadlessAdvisorDrain();
+
+		// Read via the session accessor, not the raw state tail: a classifier
+		// refusal is pruned from active context at settle, and an aborted turn
+		// can trail synthetic tool results — both would hide the terminal
+		// assistant message (and its error) from a last-element read.
+		assistantMsg = session.getLastAssistantMessage();
+		// The terminal stop reason decides the process exit code in every output
+		// mode: `--mode json` used to report success for the same turn-fatal error
+		// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
+		// transitions) and aborts initiated by signal teardown stay non-fatal here;
+		// postmortem owns the signal-specific exit code (130/143/129).
+		terminalFailure =
+			!strictMCPFailure &&
+			assistantMsg !== undefined &&
+			(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+			!isSilentAbort(assistantMsg) &&
+			!signalTeardownActive();
+	} catch (error) {
+		options.unbindMailboxTarget?.();
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }).catch(disposeError => {
+			logger.error("print mode: dispose after a failed run also failed", {
+				error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+			});
+		});
+		throw error;
 	}
-
-	// From this point onward a late blocker must be recorded without starting a
-	// primary turn whose response print mode would never emit.
-	session.prepareForHeadlessAdvisorDrain();
-
-	// Read via the session accessor, not the raw state tail: a classifier
-	// refusal is pruned from active context at settle, and an aborted turn
-	// can trail synthetic tool results — both would hide the terminal
-	// assistant message (and its error) from a last-element read.
-	const assistantMsg = session.getLastAssistantMessage();
-	// The terminal stop reason decides the process exit code in every output
-	// mode: `--mode json` used to report success for the same turn-fatal error
-	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
-	// transitions) and aborts initiated by signal teardown stay non-fatal here;
-	// postmortem owns the signal-specific exit code (130/143/129).
-	const terminalFailure =
-		!strictMCPFailure &&
-		assistantMsg !== undefined &&
-		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-		!isSilentAbort(assistantMsg) &&
-		!signalTeardownActive();
 
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and

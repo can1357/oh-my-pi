@@ -8,6 +8,9 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { mailboxConversationSuffix } from "@oh-my-pi/pi-coding-agent/mailbox/protocol";
+import { MailboxService, type MailboxTarget } from "@oh-my-pi/pi-coding-agent/mailbox/service";
+import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -129,8 +132,9 @@ class FakeAgentSession {
 	disposed = false;
 	fastMode = false;
 	forcedToolChoice: string | undefined;
+	settingsOverride: Settings | undefined;
 	get settings(): Settings {
-		return Settings.instance;
+		return this.settingsOverride ?? Settings.instance;
 	}
 	promptCalls: string[] = [];
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
@@ -163,6 +167,10 @@ class FakeAgentSession {
 			},
 		};
 		this.model = models[0];
+	}
+
+	getAgentId(): string | undefined {
+		return undefined;
 	}
 
 	get sessionName(): string {
@@ -471,6 +479,7 @@ const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 afterEach(async () => {
 	vi.useRealTimers();
+	vi.restoreAllMocks();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -490,6 +499,7 @@ async function createHarness(
 	options: {
 		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
 		clientCapabilities?: ClientCapabilities;
+		settings?: Settings;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 	} = {},
@@ -528,6 +538,7 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		session.settingsOverride = options.settings;
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -565,6 +576,184 @@ async function advanceBootstrapGuard(): Promise<void> {
 }
 
 describe("ACP agent", () => {
+	it("streams an idle peer wake to its conversation and unbinds it on close without duplicating prompt output", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		vi.spyOn(FakeAgentSession.prototype, "getAgentId").mockReturnValue("acp:peer-wake");
+		const unbind = vi.fn();
+		vi.spyOn(MailboxService.prototype, "bindTarget").mockReturnValue(unbind);
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			harness.updates.length = 0;
+			const session = harness.findSession(created.sessionId)!;
+			for (const listener of session.listeners()) listener({ type: "agent_start" });
+			// IRC wakes own the AgentSession turn, not an ACP session/prompt request.
+			await session.prompt("incoming peer message");
+			await Promise.resolve();
+			await Promise.resolve();
+			const idleChunks = harness.updates.filter(update => update.update.sessionUpdate === "agent_message_chunk");
+			expect(idleChunks).toEqual([
+				{
+					sessionId: created.sessionId,
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						content: { type: "text", text: "pong" },
+						messageId: expect.any(String),
+					},
+				},
+			]);
+			const toolArgs = { path: "result.txt" };
+			for (const listener of session.listeners()) listener({ type: "agent_start" });
+			for (const listener of session.listeners()) {
+				listener({
+					type: "tool_execution_start",
+					toolCallId: "wake-tool",
+					toolName: "read",
+					args: toolArgs,
+				} as AgentSessionEvent);
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "wake-tool",
+					toolName: "read",
+					result: { content: [{ type: "text", text: "peer result" }] },
+					isError: false,
+				} as AgentSessionEvent);
+			}
+			await Promise.resolve();
+			const toolUpdates = harness.updates.filter(
+				update => update.update.sessionUpdate === "tool_call" || update.update.sessionUpdate === "tool_call_update",
+			);
+			expect(toolUpdates.map(update => [update.sessionId, update.update.sessionUpdate])).toEqual([
+				[created.sessionId, "tool_call"],
+				[created.sessionId, "tool_call_update"],
+			]);
+			harness.updates.length = 0;
+			const response = await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "client turn" }],
+			});
+			expect(response.stopReason).toBe("end_turn");
+			expect(harness.updates.filter(update => update.update.sessionUpdate === "agent_message_chunk")).toHaveLength(
+				1,
+			);
+			const staleListeners = session.listeners();
+			await harness.agent.closeSession({ sessionId: created.sessionId });
+			expect(unbind).toHaveBeenCalledTimes(1);
+			harness.updates.length = 0;
+			for (const listener of staleListeners) {
+				listener({
+					type: "message_update",
+					message: makeAssistantMessage("late wake"),
+					assistantMessageEvent: { type: "text_delta", delta: "late wake" },
+				} as AgentSessionEvent);
+			}
+			expect(harness.updates).toEqual([]);
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("uses the conversation's Settings for /peers overrides and moves its peer address after a session switch", async () => {
+		const conversationSettings = Settings.isolated({});
+		const harness = await createHarness({ settings: conversationSettings });
+		vi.useFakeTimers();
+		vi.spyOn(FakeAgentSession.prototype, "getAgentId").mockReturnValue("acp:settings-scope");
+		const targets: MailboxTarget[] = [];
+		const unbinds: Array<() => void> = [];
+		const enabledChanges: boolean[] = [];
+		vi.spyOn(MailboxService.prototype, "bindTarget").mockImplementation(target => {
+			targets.push(target);
+			const stopListening = cfgIrcCrossProcess.listen(target.settings, enabled => {
+				enabledChanges.push(enabled);
+			});
+			const unbind = vi.fn(stopListening);
+			unbinds.push(unbind);
+			return unbind;
+		});
+		vi.spyOn(MailboxService.prototype, "whenSettled").mockResolvedValue(undefined);
+		vi.spyOn(MailboxService.prototype, "state").mockImplementation(() =>
+			cfgIrcCrossProcess.get(conversationSettings)
+				? { enabled: true, address: "project-12345678.87654321", receiving: true }
+				: { enabled: false },
+		);
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/peers on" }],
+			});
+			expect(enabledChanges).toEqual([true]);
+			expect(cfgIrcCrossProcess.get(Settings.instance)).toBe(false);
+			expect(
+				harness.updates.some(
+					notification =>
+						notification.sessionId === created.sessionId &&
+						notification.update.sessionUpdate === "agent_message_chunk" &&
+						notification.update.content.type === "text" &&
+						notification.update.content.text.includes("Peers: on"),
+				),
+			).toBe(true);
+			const session = harness.findSession(created.sessionId)!;
+			await session.newSession();
+			// Live events also reconcile transitions initiated outside ACP requests.
+			session.setThinkingLevel("high");
+			expect(unbinds[0]).toHaveBeenCalledTimes(1);
+			expect(targets.map(target => target.conversation)).toEqual([
+				mailboxConversationSuffix(created.sessionId),
+				mailboxConversationSuffix(session.sessionId),
+			]);
+			await harness.agent.setSessionMode({ sessionId: session.sessionId, modeId: "default" });
+			await expect(
+				harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" }),
+			).rejects.toThrow("Unsupported ACP session");
+			await harness.agent.closeSession({ sessionId: session.sessionId });
+			expect(unbinds[1]).toHaveBeenCalledTimes(1);
+		} finally {
+			await harness.agent.dispose();
+			conversationSettings.cancelPendingSaves();
+		}
+	});
+
+	it("addresses loaded and forked conversations using their prepared session identities", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		vi.spyOn(FakeAgentSession.prototype, "getAgentId").mockImplementation(function (this: FakeAgentSession) {
+			return `acp:${this.sessionId}`;
+		});
+		const conversations: Array<string | null> = [];
+		vi.spyOn(MailboxService.prototype, "bindTarget").mockImplementation(target => {
+			conversations.push(target.conversation);
+			return () => {};
+		});
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "persist this conversation" }],
+			});
+			const forked = await harness.agent.unstable_forkSession({
+				sessionId: created.sessionId,
+				cwd: harness.cwdA,
+				mcpServers: [],
+			});
+			await harness.agent.closeSession({ sessionId: created.sessionId });
+			await harness.agent.loadSession({
+				sessionId: created.sessionId,
+				cwd: harness.cwdA,
+				mcpServers: [],
+			});
+			expect(conversations).toEqual([
+				mailboxConversationSuffix(created.sessionId),
+				mailboxConversationSuffix(forked.sessionId),
+				mailboxConversationSuffix(created.sessionId),
+			]);
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
 	it("supports multiple live ACP sessions with model and lifecycle handlers", async () => {
 		const harness = await createHarness();
 		const first = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });

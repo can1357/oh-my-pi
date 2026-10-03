@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ## [18.6.0] - 2026-10-03
+### Added
+
+- Added a `peers` status-line segment that shows this process's cross-process peer address while peer messaging is on.
 
 ### Fixed
 

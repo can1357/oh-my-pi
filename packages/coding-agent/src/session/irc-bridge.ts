@@ -176,12 +176,12 @@ export class IrcBridge {
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
-		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
+		const appendIdle = !streaming && (this.#host.planModeEnabled() || msg.noWake === true);
+		const fromParent = msg.remote !== true && AgentRegistry.global().get(msg.to)?.parentId === msg.from;
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent and mid-turn asides have no such relay.
-		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
+		const relayOnStop = !streaming && !appendIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -204,6 +204,7 @@ export class IrcBridge {
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
+				...(msg.remote !== undefined ? { remote: msg.remote } : {}),
 				...(fromParent ? { fromParent: true } : {}),
 			},
 			attribution: "agent",
@@ -224,7 +225,7 @@ export class IrcBridge {
 			}
 			return "injected";
 		}
-		if (this.#host.planModeEnabled()) {
+		if (appendIdle) {
 			this.#host.agent.appendMessage(record);
 			this.#host.sessionManager.appendCustomMessageEntry(
 				record.customType,

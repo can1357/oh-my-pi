@@ -9,6 +9,8 @@ import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { formatMailboxState, MailboxService } from "../mailbox/service";
+import { cfgIrcCrossProcess } from "../modes/settings";
 import type { InteractiveModeContext } from "../modes/types";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "@oh-my-pi/pi-tui/overlays/copy-targets";
@@ -59,6 +61,48 @@ function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: 
 }
 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "peers",
+		icon: "inbox",
+		description: "Discover and message other omp processes on this machine",
+		acpDescription: "Toggle cross-process peers",
+		acpInputHint: "[on|off|status|list]",
+		subcommands: [
+			{ name: "on", description: "Enable cross-process peers for this session" },
+			{ name: "off", description: "Disable cross-process peers for this session" },
+			{ name: "status", description: "Show cross-process peer status" },
+			{ name: "list", description: "List other omp processes with peers on" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => `Peers: ${cfgIrcCrossProcess.get(runtime.ctx.settings) ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase() || "status";
+			if (arg !== "on" && arg !== "off" && arg !== "status" && arg !== "list") {
+				return usage("Usage: /peers [on|off|status|list]", runtime);
+			}
+			if (arg === "on" || arg === "off") {
+				cfgIrcCrossProcess.override(runtime.settings, arg === "on");
+			}
+			const mailbox = MailboxService.global();
+			await mailbox.whenSettled();
+			if (arg === "list") {
+				const peers = await mailbox.listPeers();
+				await runtime.output(
+					peers.length
+						? peers
+								.map(
+									peer =>
+										`${peer.address}  ${peer.cwd}${peer.title ? `  "${peer.title}"` : ""}  ${peer.busy ? "busy" : "idle"}`,
+								)
+								.join("\n")
+						: "No other omp processes have peers on.",
+				);
+			} else {
+				await runtime.output(formatMailboxState(mailbox.state(runtime.session.getAgentId() ?? "Main")));
+			}
+			return commandConsumed();
+		},
+	},
 	{
 		name: "advisor",
 		icon: "advisor",

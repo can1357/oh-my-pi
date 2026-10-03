@@ -86,6 +86,10 @@ class ReplayTestSession {
 		this.sessionId = this.sessionManager.getSessionId();
 	}
 
+	getAgentId(): undefined {
+		return undefined;
+	}
+
 	getAvailableModels(): Model[] {
 		return [TEST_MODEL];
 	}

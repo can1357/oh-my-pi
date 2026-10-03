@@ -66,6 +66,7 @@ function createDelayedSession(
 	const session = {
 		state: { messages },
 		getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		sessionManager: {
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
@@ -300,6 +301,7 @@ describe("print mode working indicator", () => {
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			sessionManager: {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
@@ -363,6 +365,7 @@ describe("print mode working indicator", () => {
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			sessionManager: {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
@@ -409,6 +412,7 @@ describe("print mode working indicator", () => {
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			sessionManager: {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),

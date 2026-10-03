@@ -82,6 +82,9 @@ export const launchHelp = {
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
 		}),
+		mailbox: Flags.boolean({
+			description: "Enable cross-process peer messaging for this process (print mode: also receive messages)",
+		}),
 		advisor: Flags.boolean({
 			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),

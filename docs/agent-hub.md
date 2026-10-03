@@ -105,6 +105,30 @@ Advisor transcript files (`__advisor*.jsonl`) appear as `advisor`-kind rows unde
 
 Collab does not replicate advisor rows or serve their transcripts to guests; the host also rejects advisor chat, revive, and kill requests by id.
 
+## Cross-process peers
+
+Main agents in separate omp processes on the same machine and OS user can message each other. Turn it on with any of:
+
+- **Cross-Process Peers** in `/settings` (Interaction → Agent), saved as `irc.crossProcess`;
+- `/peers on` for this process only (`/peers off` turns this process off even when the setting is saved on);
+- `--mailbox` at launch.
+
+Once a process is on, omp prints `Peers: on — this session is <address>` and the footer shows `peers:<address>`. The address is the cwd name plus eight hex characters (`oh-my-pi-a5ad716a`). It stays fixed for the life of the process, including across `/new`, resume, and fork.
+
+- `/peers list` shows the other processes that have peers on; `/peers status` shows this process's state.
+- `read history://` lists peers under **Peers (other omp processes)**.
+- `write agent://<address>` sends to a peer. A peer receives it exactly like a subagent message to Main: an aside at the next step boundary while busy, a new turn while idle, and appended without a turn in plan mode.
+- A reply sent during a turn that a peer message started is delivered without waking the recipient, so two idle sessions cannot ping-pong.
+- Only main agents publish and send. Subagents keep their in-process messaging and never see peers.
+
+Mode notes:
+
+- **Print** (`-p`, `--mode json`, piped stdin): can send, but does not receive unless launched with `--mailbox`.
+- **RPC**: incoming messages arrive as `irc_message` events, followed by the turn they start.
+- **ACP**: each editor conversation is a separate peer at `<address>.<8 hex>`; `/peers on` applies to the conversation it runs in.
+
+Each process serves its own endpoint: a named pipe on Windows, a Unix socket elsewhere. Discovery metadata lives in `~/.omp/run/irc-peers/`, which is private to your OS user. Every request carries the publishing process's random bearer token from that metadata. A process that dies without cleaning up is pruned the next time anyone lists peers.
+
 ## Related surfaces
 
 Agent Hub is the human-facing live session view. Adjacent commands and internal URLs serve narrower purposes:

@@ -62,6 +62,10 @@ class FakeAgentSession {
 		this.agent = { sessionId: this.sessionId, waitForIdle: async () => {} };
 	}
 
+	getAgentId(): undefined {
+		return undefined;
+	}
+
 	get sessionName(): string {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}

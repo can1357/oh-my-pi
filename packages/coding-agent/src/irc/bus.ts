@@ -15,6 +15,11 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
+export interface IrcRemoteRouter {
+	handles(to: string): boolean;
+	send(message: IrcMessage): Promise<IrcDeliveryReceipt>;
+}
+
 interface IrcWaiter {
 	from?: string;
 	resolve: (msg: IrcMessage) => void;
@@ -45,12 +50,17 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
+	#remoteRouter: IrcRemoteRouter | null = null;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	setRemoteRouter(router: IrcRemoteRouter | null): void {
+		this.#remoteRouter = router;
 	}
 
 	/**
@@ -97,6 +107,7 @@ export class IrcBus {
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
+			if (this.#remoteRouter?.handles(message.to)) return this.#remoteRouter.send(message);
 			return {
 				to: message.to,
 				outcome: "failed",

@@ -21,6 +21,10 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
+	/** Arrived from another omp process (set by MailboxService inbound). */
+	remote?: boolean;
+	/** Deliver without starting a wake turn (relay-hop guard). */
+	noWake?: boolean;
 }
 
 /** Delivery outcome for one peer recipient. */

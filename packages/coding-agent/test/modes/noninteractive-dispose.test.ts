@@ -122,6 +122,7 @@ describe("print mode disposes the session before terminating", () => {
 				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => abortedMsg,
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,

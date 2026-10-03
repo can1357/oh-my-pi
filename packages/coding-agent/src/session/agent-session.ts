@@ -1196,6 +1196,13 @@ export class AgentSession implements SettingsScope {
 		return false;
 	}
 
+	#remoteWakeTurn: object | undefined;
+
+	/** Whether the current wake turn was started by another omp process. */
+	isRemoteWakeTurn(): boolean {
+		return this.#remoteWakeTurn !== undefined;
+	}
+
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
 	 *  route here. Wrapped in #beginInFlight/#endInFlight so the turn is tracked and its settle
 	 *  re-drains anything that stranded during it. A user interrupt may have intentionally left a
@@ -1225,6 +1232,7 @@ export class AgentSession implements SettingsScope {
 		// deferred wake runs no turn, so observing it would capture the next
 		// turn's yield/output and relay it as this wake's reply.
 		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
+		let remoteWakeTurn: object | undefined;
 		this.#resetPromptMaintenanceState();
 		// Capture the generation before the wake so its post-prompt recovery wait
 		// bails the instant an abort (which bumps #promptGeneration) supersedes
@@ -1265,9 +1273,22 @@ export class AgentSession implements SettingsScope {
 				} catch (error) {
 					logger.warn("IRC wake turn observer failed to start", { error: String(error) });
 				}
+				if (
+					records.some(
+						record =>
+							record.role === "custom" &&
+							record.details !== null &&
+							typeof record.details === "object" &&
+							Reflect.get(record.details, "remote") === true,
+					)
+				) {
+					remoteWakeTurn = {};
+					this.#remoteWakeTurn = remoteWakeTurn;
+				}
 				return this.agent.prompt(records);
 			})
 			.catch(error => {
+				if (remoteWakeTurn && this.#remoteWakeTurn === remoteWakeTurn) this.#remoteWakeTurn = undefined;
 				if (error instanceof AgentBusyError) {
 					// Lost the prompt race after passing the checks above: an
 					// ordinary running turn takes these as asides, but a pooled
@@ -1285,6 +1306,7 @@ export class AgentSession implements SettingsScope {
 				logger.warn("IRC wake turn failed", { error: String(error) });
 			})
 			.finally(async () => {
+				if (remoteWakeTurn && this.#remoteWakeTurn === remoteWakeTurn) this.#remoteWakeTurn = undefined;
 				try {
 					await this.#waitForPostPromptRecovery(generation);
 				} catch (error) {
@@ -3156,6 +3178,7 @@ export class AgentSession implements SettingsScope {
 			}
 			return processing;
 		}
+		this.#remoteWakeTurn = undefined;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
 		try {

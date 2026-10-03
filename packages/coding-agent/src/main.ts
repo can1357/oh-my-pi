@@ -71,7 +71,9 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { IrcBus } from "./irc/bus";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { MailboxService } from "./mailbox/service";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -146,6 +148,7 @@ import {
 	cfgColorBlindMode,
 	cfgComposerShape,
 	cfgImagesAutoResize,
+	cfgIrcCrossProcess,
 	cfgMarketplaceAutoUpdate,
 	cfgSetupVersion,
 	cfgShowHardwareCursor,
@@ -672,6 +675,17 @@ async function runInteractiveMode(
 				autoStartCollab: joinLink === undefined,
 			}),
 		);
+		session.addDisposer(
+			MailboxService.global().bindTarget({
+				agentId: session.getAgentId() ?? "Main",
+				conversation: null,
+				settings: session.settings,
+				receive: true,
+				describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+				notify: state => mode.showMailboxState(state),
+			}),
+		);
+		await MailboxService.global().whenSettled();
 		startDeferredStartupWork?.();
 
 		if (setupWizard && playStartupSplash) {
@@ -1914,6 +1928,10 @@ export async function runRootCommand(
 		if (parsedArgs.hideThinking) {
 			cfgHideThinkingBlock.override(settingsInstance, true);
 		}
+		// Apply --mailbox CLI flag (ephemeral, not persisted)
+		if (parsedArgs.mailbox) {
+			cfgIrcCrossProcess.override(settingsInstance, true);
+		}
 		// Apply --advisor CLI flag (ephemeral, not persisted)
 		if (parsedArgs.advisor) {
 			cfgAdvisorEnabled.override(settingsInstance, true);
@@ -2246,6 +2264,8 @@ export async function runRootCommand(
 			) {
 				process.exit(2);
 			}
+			MailboxService.global().initialize(cwd);
+			IrcBus.global().setRemoteRouter(MailboxService.global());
 			const createAcpSession = createAcpSessionFactory({
 				baseOptions: sessionOptions,
 				settings: settingsInstance,
@@ -2405,6 +2425,8 @@ export async function runRootCommand(
 				// runInteractiveMode validates once init has painted the first frame.
 				deferRetryFallbackValidation: isInteractive,
 			});
+			MailboxService.global().initialize(cwd);
+			IrcBus.global().setRemoteRouter(MailboxService.global());
 
 			const sessionToolNames = session.getAllToolNames();
 			try {
@@ -2518,6 +2540,16 @@ export async function runRootCommand(
 			}
 
 			if (mode === "rpc" || mode === "rpc-ui") {
+				session.addDisposer(
+					MailboxService.global().bindTarget({
+						agentId: session.getAgentId() ?? "Main",
+						conversation: null,
+						settings: settingsInstance,
+						receive: true,
+						describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+					}),
+				);
+				await MailboxService.global().whenSettled();
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
@@ -2590,6 +2622,14 @@ export async function runRootCommand(
 				// long `-p` run's subagents do not keep growing it.
 				if (!$env.PI_TIMING) logger.endTiming();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
+				const unbindMailboxTarget = MailboxService.global().bindTarget({
+					agentId: session.getAgentId() ?? "Main",
+					conversation: null,
+					settings: settingsInstance,
+					receive: parsedArgs.mailbox === true,
+					describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+				});
+				await MailboxService.global().whenSettled();
 				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,
@@ -2598,6 +2638,7 @@ export async function runRootCommand(
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
 					mcpManager,
+					unbindMailboxTarget,
 				});
 				if ($env.PI_TIMING) {
 					logger.printTimings();

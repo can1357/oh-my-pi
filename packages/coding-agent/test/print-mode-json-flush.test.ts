@@ -42,6 +42,7 @@ function createFlushHarness(): FlushHarness {
 		},
 		settings: Settings.isolated(),
 		getLastAssistantMessage: () => undefined,
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		extensionRunner: undefined,
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			subscriber = listener;
