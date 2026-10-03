@@ -1,0 +1,50 @@
+// Catalog entry for "infron": Infron (infron.ai) is an OpenAI-compatible
+// inference gateway serving chat completions at llm.onerouter.pro/v1. Its
+// public /v1/models roster interleaves chat models with embeddings, rerankers,
+// image/video/audio SKUs, and search tools; the discovery mapper keeps only
+// rows marked `category_type: "LLM"`.
+
+provider "infron" {
+	default-model "z-ai/glm-5.2"
+	env "INFRON_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Infron" allow-unauthenticated=#true
+
+	// Bundled fallback so the provider is usable before the first authoritative
+	// discovery call. Prices are the gateway's `min_prompt_price` /
+	// `min_completion_price` ($/M tokens). Rows whose reported
+	// `max_output_tokens` equals the context ceiling carry no real output cap,
+	// so `max-tokens` is omitted for those.
+	seed api="openai-completions" base-url="https://llm.onerouter.pro/v1" bundle="fallback" {
+		model "z-ai/glm-5.2" name="GLM 5.2" {
+			reasoning #true
+			input "text"
+			cost input=0.55 output=1.9255 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=128000
+		}
+		model "openai/gpt-5.5" name="GPT-5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=2.5 output=15 cache-read=0 cache-write=0
+			limits context=1050000 max-tokens=128000
+		}
+		model "anthropic/claude-sonnet-5" name="Claude Sonnet 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=2 output=10 cache-read=0 cache-write=0
+			limits context=1000000
+		}
+		model "deepseek/deepseek-v4-flash" name="DeepSeek V4 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0.069 output=0.1375 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=384000
+		}
+		model "moonshotai/kimi-k3" name="Kimi K3" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.4135 output=7.0665 cache-read=0 cache-write=0
+			limits context=1048576
+		}
+	}
+}
