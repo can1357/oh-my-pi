@@ -60,9 +60,8 @@ export function validateAgentCompactionThresholdOverrides(value: unknown): Recor
 export interface ModelCompactionThreshold {
 	/** Lowercased selector. */
 	selector: string;
-	/** Selector has no glob metacharacters: it names one model by `provider/id` or bare id. */
-	exact: boolean;
-	glob: Bun.Glob;
+	/** Compiled selector, or `undefined` when it has no glob metacharacters and can only match literally. */
+	glob: Bun.Glob | undefined;
 	threshold: CompactionThresholdPair;
 }
 
@@ -119,8 +118,7 @@ export function validateModelCompactionThresholds(value: unknown): ModelCompacti
 		}
 		thresholds.push({
 			selector,
-			exact: !GLOB_METACHARACTERS.test(selector),
-			glob: new Bun.Glob(selector),
+			glob: GLOB_METACHARACTERS.test(selector) ? new Bun.Glob(selector) : undefined,
 			threshold: parseEntry(`compaction.modelThresholds["${rawSelector}"]`, entry),
 		});
 	}
@@ -128,8 +126,10 @@ export function validateModelCompactionThresholds(value: unknown): ModelCompacti
 }
 
 /**
- * The `compaction.modelThresholds` entry for `model`: an exact `provider/id` selector, else an exact
- * bare id, else the first declared matching glob. `undefined` when none matches.
+ * The `compaction.modelThresholds` entry for `model`: a selector equal to its `provider/id`, else
+ * one equal to its bare id, else the first declared matching glob. Literal equality is checked for
+ * every selector, so an id containing glob characters (`glm-5.2-highspeed[1m]`) is still matched
+ * exactly. `undefined` when none matches.
  */
 export function findModelCompactionThreshold(
 	thresholds: readonly ModelCompactionThreshold[],
@@ -141,12 +141,9 @@ export function findModelCompactionThreshold(
 	let bareExact: ModelCompactionThreshold | undefined;
 	let firstGlob: ModelCompactionThreshold | undefined;
 	for (const entry of thresholds) {
-		if (entry.exact) {
-			if (entry.selector === fullId) return entry.threshold;
-			if (entry.selector === id) bareExact ??= entry;
-		} else if (firstGlob === undefined && modelMatchesGlob(entry.glob, model)) {
-			firstGlob = entry;
-		}
+		if (entry.selector === fullId) return entry.threshold;
+		if (entry.selector === id) bareExact ??= entry;
+		else if (firstGlob === undefined && entry.glob && modelMatchesGlob(entry.glob, model)) firstGlob = entry;
 	}
 	return (bareExact ?? firstGlob)?.threshold;
 }

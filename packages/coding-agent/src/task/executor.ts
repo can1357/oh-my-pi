@@ -1023,16 +1023,21 @@ function compactionThresholdSettings(
 			};
 }
 
-/**
- * Settings for a subagent session. `agentCompactionThreshold` is the agent's
- * `task.agentCompactionThresholdOverrides` entry: it becomes the session's whole trigger, so
- * `compaction.modelThresholds` does not replace it.
- */
+/** Spawn-time inputs to {@link createSubagentSettings} that are not plain settings overrides. */
+export interface SubagentSettingsOptions {
+	/** The parent session's live service tiers, matched by `tier.subagent: inherit`. */
+	inheritedServiceTier?: ServiceTierByFamily | null;
+	/**
+	 * The agent's `task.agentCompactionThresholdOverrides` entry: it becomes the session's whole
+	 * trigger, so `compaction.modelThresholds` does not replace it.
+	 */
+	agentCompactionThreshold?: CompactionThresholdPair;
+}
+
 export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
-	inheritedServiceTier?: ServiceTierByFamily | null,
-	agentCompactionThreshold?: CompactionThresholdPair,
+	{ inheritedServiceTier, agentCompactionThreshold }: SubagentSettingsOptions = {},
 ): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
@@ -3795,8 +3800,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
 				: undefined),
 		},
-		options.parentServiceTier,
-		options.compactionThresholdOverride,
+		{
+			inheritedServiceTier: options.parentServiceTier,
+			agentCompactionThreshold: options.compactionThresholdOverride,
+		},
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));

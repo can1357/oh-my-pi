@@ -128,6 +128,13 @@ describe("compaction.modelThresholds", () => {
 		expect(match({ "*opus*": 1000 }, opus)?.thresholdTokens).toBe(1000);
 	});
 
+	it("matches a model id containing glob characters exactly, ahead of globs", () => {
+		const highspeed = { provider: "zhipu-coding-plan", id: "glm-5.2-highspeed[1m]" };
+		const thresholds = { "zhipu-coding-plan/*": 1000, "zhipu-coding-plan/glm-5.2-highspeed[1m]": "40%" };
+		expect(match(thresholds, highspeed)?.thresholdPercent).toBe(40);
+		expect(match({ "*": 1000, "glm-5.2-highspeed[1m]": "40%" }, highspeed)?.thresholdPercent).toBe(40);
+	});
+
 	it("returns no entry for unmatched models and cleared entries", () => {
 		expect(match({ "anthropic/*": "50%" }, astra)).toBeUndefined();
 		expect(match({ "openai-codex/gpt-6-astra": null }, astra)).toBeUndefined();

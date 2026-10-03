@@ -84,9 +84,8 @@ describe("compaction.modelThresholds", () => {
 			"compaction.modelThresholds": { "anthropic/*": 600_000 },
 		});
 
-		const pinned = createSubagentSettings(parent, undefined, undefined, {
-			thresholdPercent: 25,
-			thresholdTokens: -1,
+		const pinned = createSubagentSettings(parent, undefined, {
+			agentCompactionThreshold: { thresholdPercent: 25, thresholdTokens: -1 },
 		});
 		expect(thresholdFor(pinned, claude)).toBe(250_000);
 
