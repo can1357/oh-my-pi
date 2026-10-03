@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added exact per-model alternate-currency rate cards (`cost-patch { currency-cards { … } }` KDL axis, `ModelCost.currencyCards`), and published DeepSeek's native CNY table for `deepseek-flash`/`deepseek-v4-flash` (¥2 input, ¥8 output, ¥0.04 cached) and `deepseek-v4-pro` (¥9 / ¥27 / ¥0.30, plus the CNY mirror of the 2026-09-14 flash-price switch). Alternate cards are copied from the vendor's published table, never derived from the USD card by an exchange rate.
+
 ## [18.5.0] - 2026-10-03
 
 ### Added

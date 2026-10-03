@@ -10,8 +10,8 @@
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
-import { materializeTimeBasedCost } from "./pricing";
-import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
+import { materializeCurrencyCards, materializeTimeBasedCost } from "./pricing";
+import { type Api, isCurrencyCode, MODEL_KINDS, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -219,6 +219,15 @@ export function applyCatalogCorrections(
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+		// Alternate-currency cards are exact vendor tables, admitted only when the
+		// code is supported and every rate is a clean non-negative number.
+		const currency = Reflect.get(patch, "currency");
+		if (currency !== undefined) {
+			if (!isCurrencyCode(currency)) throw new Error(`Invalid cost-patch currency: ${String(currency)}`);
+			model.cost.currency = currency;
+		}
+		const currencyCards = objectPayload(Reflect.get(patch, "currencyCards"));
+		if (currencyCards !== undefined) model.cost.currencyCards = materializeCurrencyCards(currencyCards);
 	}
 	const fallback = objectPayload(catalog.costFallback);
 	if (fallback !== undefined) {

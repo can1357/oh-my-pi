@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
+import { getTimeBasedPricingPeriod, modelCurrency } from "@oh-my-pi/pi-catalog/models";
 import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
 import {
 	formatDuration,
@@ -781,19 +781,35 @@ const tokenRateSegment: StatusLineSegment = {
 
 /** Billing summary for the `cost` segment, or undefined when there is nothing to bill. */
 function costSummary(ctx: SegmentContext): string | undefined {
-	const { cost, premiumRequests } = ctx.usageStats;
-	// `cost` folds in completed task results; show the session's own spend and
-	// the subagent tree separately. The hub-projected tree total also covers
-	// grandchildren and running/async agents, but it lags persisted-roster
-	// hydration after resume, so the task-result sum is its floor.
-	const taskResultCost = ctx.usageStats.subagentCost ?? 0;
-	const ownCost = Math.max(0, cost - taskResultCost);
-	const subagentCost = Math.max(ctx.subagentTreeCost ?? 0, taskResultCost);
+	const { cost, premiumRequests, costByCurrency } = ctx.usageStats;
 	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 	const state = ctx.session.state;
 	const pricingPeriod = state.model?.cost
 		? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
 		: undefined;
+	// The model's base card is the source of truth for the numbers in `cost`.
+	const baseCurrency = state.model?.cost ? modelCurrency(state.model.cost) : "USD";
+	const preferred = ctx.costCurrency ?? baseCurrency;
+	const preferredCost = preferred === baseCurrency ? cost : costByCurrency?.[preferred];
+	// A model that publishes no card in the preferred currency keeps its base
+	// card, so a symbol is never applied to amounts from a different card.
+	const currency = preferredCost === undefined ? baseCurrency : preferred;
+	// `cost` folds in completed task results; show the session's own spend and
+	// the subagent tree separately. The hub-projected tree total also covers
+	// grandchildren and running/async agents, but it lags persisted-roster
+	// hydration after resume, so the task-result sum is its floor.
+	//
+	// The tree projection is base-currency only, so an alternate-currency chip
+	// uses the task-result subtotal carried through the same per-currency map
+	// instead of the tree floor; own spend stays exact in that currency.
+	const displayTotal = preferredCost ?? cost;
+	const taskResultCost =
+		currency === baseCurrency
+			? (ctx.usageStats.subagentCost ?? 0)
+			: (ctx.usageStats.subagentCostByCurrency?.[currency] ?? 0);
+	const ownCost = Math.max(0, displayTotal - taskResultCost);
+	const subagentCost =
+		currency === baseCurrency ? Math.max(ctx.subagentTreeCost ?? 0, taskResultCost) : taskResultCost;
 	const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 	// Resolve the advisor subscription flag lazily: with no active advisor
 	// it walks the whole model catalog (getAvailable → hasAuth per provider
@@ -807,8 +823,14 @@ function costSummary(ctx: SegmentContext): string | undefined {
 			premiumRequests,
 			fractionDigits: 2,
 			pricingPeriod,
+			currency,
+			// Advisor spend is accumulated in the catalog's canonical base card.
 			advisor: advisorCost
-				? { cost: advisorCost, usingSubscription: ctx.session.isAdvisorUsingSubscription?.() ?? false }
+				? {
+						cost: advisorCost,
+						usingSubscription: ctx.session.isAdvisorUsingSubscription?.() ?? false,
+						currency: baseCurrency,
+					}
 				: undefined,
 		},
 		theme,

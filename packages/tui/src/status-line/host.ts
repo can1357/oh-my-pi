@@ -1,6 +1,6 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import type { Model } from "@oh-my-pi/pi-catalog/types";
+import type { CurrencyCode, Model } from "@oh-my-pi/pi-catalog/types";
 import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineSettings } from "./types";
 
@@ -47,6 +47,9 @@ export interface StatusLineSession {
 			cost: number;
 			/** Portion of `cost` carried by completed subagent task results. */
 			subagentCost?: number;
+			costByCurrency?: Partial<Record<CurrencyCode, number>>;
+			/** Portion of `costByCurrency` carried by completed subagent task results. */
+			subagentCostByCurrency?: Partial<Record<CurrencyCode, number>>;
 		};
 	};
 	modelRegistry: {

@@ -633,6 +633,10 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
+	// Currency travels with the card it names: an existing alternate card must not
+	// be dropped (or its code swapped) just because discovery overlaid the rates.
+	const currency = dynamicModel.cost.currency ?? existingModel.cost.currency;
+	const currencyCards = dynamicModel.cost.currencyCards ?? existingModel.cost.currencyCards;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
 	const dynamicHeaders = dynamicModel.resolveHeaders ?? dynamicModel.headers;
 	let resolveHeaders = dynamicModel.resolveHeaders ?? existingModel.resolveHeaders;
@@ -662,6 +666,8 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
 			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
 			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
+			...(currency ? { currency } : {}),
+			...(currencyCards ? { currencyCards } : {}),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},

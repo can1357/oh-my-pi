@@ -270,4 +270,41 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.cacheRead).toBe(200);
 		expect(usage.cost).toBeCloseTo(18, 8);
 	});
+
+	it("accumulates each record's alternate-currency spend without touching the base ledger", () => {
+		// Contract: a record priced through DeepSeek's CNY card carries
+		// `costByCurrency.CNY`; the session sums it per code so the status line can
+		// show ¥ without repricing history, while `cost` stays the base-currency view.
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		for (const timestamp of [2, 3]) {
+			session.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "hi" }],
+				api: "openai-completions",
+				provider: "deepseek",
+				model: "deepseek-v4-flash",
+				usage: {
+					input: 1_000_000,
+					output: 1_000_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2_000_000,
+					cost: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0, total: 1.5 },
+					costByCurrency: {
+						USD: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0, total: 1.5 },
+						CNY: { input: 2, output: 8, cacheRead: 0, cacheWrite: 0, total: 10 },
+					},
+				},
+				stopReason: "stop",
+				timestamp,
+			});
+		}
+
+		const usage = session.getUsageStatistics();
+		expect(usage.cost).toBeCloseTo(3, 8);
+		expect(usage.costByCurrency?.USD).toBeCloseTo(3, 8);
+		expect(usage.costByCurrency?.CNY).toBeCloseTo(20, 8);
+	});
 });

@@ -1,4 +1,5 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { CurrencyCode } from "@oh-my-pi/pi-catalog/types";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
@@ -56,6 +57,9 @@ export interface StatusLineSettings {
 	/** Replace the model-segment icon with the thinking-level glyph and drop the
 	 *  " · <level>" suffix, so the thinking level reads as a single compact icon. */
 	compactThinkingLevel?: boolean;
+	/** `cost.displayCurrency`: ISO 4217 code session cost readouts prefer. A model
+	 *  without an exact card in this currency keeps its base card and symbol. */
+	costCurrency?: CurrencyCode;
 	/** How the gap line between the left and right groups reacts to context
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
@@ -83,6 +87,8 @@ export interface SegmentContext {
 	focusedAgentId?: string | undefined;
 	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */
 	sessionAccent?: boolean;
+	/** Effective `cost.displayCurrency`; currency session cost readouts prefer. */
+	costCurrency?: CurrencyCode;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
 	activeRepo: ActiveRepoContext | null;
@@ -140,6 +146,10 @@ export interface SegmentContext {
 		cost: number;
 		/** Portion of `cost` carried by completed subagent task results. */
 		subagentCost?: number;
+		/** Session spend per ISO 4217 code, when the model publishes alternate cards. */
+		costByCurrency?: Partial<Record<CurrencyCode, number>>;
+		/** Portion of `costByCurrency` carried by completed subagent task results. */
+		subagentCostByCurrency?: Partial<Record<CurrencyCode, number>>;
 		tokensPerSecond: number | null;
 	};
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */

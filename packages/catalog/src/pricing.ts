@@ -1,4 +1,12 @@
-import type { EffectiveTokenCost, LongContextTokenCost, PeakPricingWindow, TimeBasedCost, TokenCost } from "./types";
+import type {
+	CurrencyCode,
+	EffectiveTokenCost,
+	LongContextTokenCost,
+	PeakPricingWindow,
+	TimeBasedCost,
+	TokenCost,
+} from "./types";
+import { isCurrencyCode } from "./types";
 import { isRecord } from "./utils";
 
 function nonnegative(value: unknown): value is number {
@@ -26,6 +34,14 @@ function isLongContext(value: unknown): value is LongContextTokenCost {
 	);
 }
 
+/** Validate a serialized alternate-currency map before admitting a cached model row. */
+function isCurrencyCards(value: unknown): value is Partial<Record<CurrencyCode, TokenCost>> {
+	return (
+		isRecord(value) &&
+		Object.entries(value).every(([code, card]) => isCurrencyCode(code) && isRecord(card) && isRates(card))
+	);
+}
+
 function isPeakWindow(value: unknown): value is PeakPricingWindow {
 	return (
 		isRecord(value) &&
@@ -50,7 +66,8 @@ function isEffectiveRate(value: unknown): value is EffectiveTokenCost {
 		typeof value.effectiveFrom === "number" &&
 		Number.isSafeInteger(value.effectiveFrom) &&
 		Math.abs(value.effectiveFrom) <= 8_640_000_000_000_000 &&
-		(value.longContext === undefined || isLongContext(value.longContext))
+		(value.longContext === undefined || isLongContext(value.longContext)) &&
+		(value.currencyCards === undefined || isCurrencyCards(value.currencyCards))
 	);
 }
 
@@ -86,6 +103,24 @@ function namedEntries(value: unknown, field: string): unknown[] {
 	return Object.values(value);
 }
 
+/**
+ * KDL `currency-cards` children are named records keyed by lowercase ISO code;
+ * normalize each into an exact four-rate card and reject unsupported codes.
+ * Cards are copied from the vendor's published table — never FX-derived.
+ */
+export function materializeCurrencyCards(value: unknown): Partial<Record<CurrencyCode, TokenCost>> {
+	if (!isRecord(value)) throw new Error("Invalid currency-cards: expected named objects");
+	const cards: Partial<Record<CurrencyCode, TokenCost>> = {};
+	for (const [name, entry] of Object.entries(value)) {
+		const code = name.toUpperCase();
+		if (!isCurrencyCode(code)) throw new Error(`Invalid currency-cards: unsupported currency "${name}"`);
+		const card = payload(entry, ["input", "output", "cacheRead", "cacheWrite"], "currency-card");
+		if (!isRates(card)) throw new Error(`Invalid currency-card rates for ${code}`);
+		cards[code] = { input: card.input, output: card.output, cacheRead: card.cacheRead, cacheWrite: card.cacheWrite };
+	}
+	return cards;
+}
+
 /** KDL object children are named records; normalize them once while constructing the model. */
 export function materializeTimeBasedCost(value: unknown): TimeBasedCost {
 	const source = payload(value, ["offPeakMultiplier", "peakWindows", "effectiveRates"], "schedule");
@@ -102,7 +137,7 @@ export function materializeTimeBasedCost(value: unknown): TimeBasedCost {
 			: namedEntries(source.effectiveRates, "effective-rates").map(entry => {
 					const rate = payload(
 						entry,
-						["effectiveFrom", "input", "output", "cacheRead", "cacheWrite", "longContext"],
+						["effectiveFrom", "input", "output", "cacheRead", "cacheWrite", "longContext", "currencyCards"],
 						"effective-rate",
 					);
 					const date = rate.effectiveFrom;
@@ -123,7 +158,9 @@ export function materializeTimeBasedCost(value: unknown): TimeBasedCost {
 							"long-context",
 						);
 					}
-					return { ...rate, effectiveFrom };
+					const currencyCards =
+						rate.currencyCards === undefined ? undefined : materializeCurrencyCards(rate.currencyCards);
+					return { ...rate, effectiveFrom, ...(currencyCards && { currencyCards }) };
 				});
 	const schedule = {
 		offPeakMultiplier: source.offPeakMultiplier,

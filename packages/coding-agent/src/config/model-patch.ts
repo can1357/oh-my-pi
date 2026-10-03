@@ -295,6 +295,12 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 			output: patch.cost.output ?? base.cost.output,
 			cacheRead: patch.cost.cacheRead ?? base.cost.cacheRead,
 			cacheWrite: patch.cost.cacheWrite ?? base.cost.cacheWrite,
+			...((patch.cost.currency ?? base.cost.currency)
+				? { currency: patch.cost.currency ?? base.cost.currency }
+				: {}),
+			...((patch.cost.currencyCards ?? base.cost.currencyCards)
+				? { currencyCards: patch.cost.currencyCards ?? base.cost.currencyCards }
+				: {}),
 			...(longContext ? { longContext } : {}),
 		};
 	}

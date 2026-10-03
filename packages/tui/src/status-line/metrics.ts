@@ -1,7 +1,10 @@
 import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
+import type { CurrencyCode } from "@oh-my-pi/pi-catalog/types";
 import type { Theme } from "../theme";
 
 export { normalizePremiumRequests } from "@oh-my-pi/pi-utils";
+
+const CURRENCY_SYMBOLS: Record<CurrencyCode, string> = { USD: "$", CNY: "¥" };
 
 /** Inputs whose differences are intentionally preserved between current status segments and the legacy footer. */
 export interface BillingSummaryOptions {
@@ -12,25 +15,35 @@ export interface BillingSummaryOptions {
 	readonly pricingPeriod?: "peak" | "off-peak";
 	/** Subagent-tree spend, rendered `(+…)` after the session's own spend; `cost` excludes it. */
 	readonly subagentCost?: number;
+	/** ISO 4217 code shared by `cost` and `subagentCost`; omitted means `"USD"`. */
+	readonly currency?: CurrencyCode;
 	readonly advisor?: {
 		readonly cost: number;
 		readonly usingSubscription: boolean;
+		/** ISO 4217 code of the advisor amount; omitted means the summary's `currency`. */
+		readonly currency?: CurrencyCode;
 	};
 }
 
-type BillingUnit = "metered" | "subscription";
+/**
+ * Identity used by the print-the-unit-at-most-once rule. A metered amount's
+ * unit is its currency code (so `$` and `¥` each print on their first amount),
+ * while subscription spend has a single unit of its own.
+ */
+type BillingUnit = "subscription" | CurrencyCode;
 
-/** `showUnit: false` omits the `$`/subscription symbol when the summary already printed it. */
+/** `showUnit: false` omits the `$`/`¥`/subscription symbol when the summary already printed that unit. */
 function formatSpend(
 	amount: number,
 	usingSubscription: boolean,
 	fractionDigits: number,
 	uiTheme: Theme,
 	showUnit: boolean,
+	currency: CurrencyCode,
 ): string {
 	const formatted = amount.toFixed(fractionDigits);
 	if (!showUnit) return formatted;
-	if (!usingSubscription) return `$${formatted}`;
+	if (!usingSubscription) return `${CURRENCY_SYMBOLS[currency]}${formatted}`;
 	if (uiTheme.getSymbolPreset() === "nerd") {
 		const icon = uiTheme.icon.subscription;
 		return icon ? `${icon} ${formatted}` : `S${formatted}`;
@@ -44,8 +57,9 @@ function formatAdvisorSpend(
 	fractionDigits: number,
 	uiTheme: Theme,
 	showUnit: boolean,
+	currency: CurrencyCode,
 ): string {
-	const spend = formatSpend(amount, usingSubscription, fractionDigits, uiTheme, showUnit);
+	const spend = formatSpend(amount, usingSubscription, fractionDigits, uiTheme, showUnit, currency);
 	const icon = uiTheme.icon.advisor;
 	return icon && icon !== "(adv)" ? `${icon} ${spend}` : `${spend} (adv)`;
 }
@@ -53,8 +67,8 @@ function formatAdvisorSpend(
 /**
  * Shared billing metric presentation. Callers select precision explicitly so
  * the legacy footer keeps three decimals while current status segments keep two.
- * A unit symbol (`$` or the subscription mark) is printed at most once; later
- * amounts billed the same way render bare.
+ * A unit symbol (`$`, `¥` or the subscription mark) is printed at most once per
+ * unit; later amounts billed the same way render bare.
  */
 export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Theme): string | undefined {
 	const premiumRequests = normalizePremiumRequests(options.premiumRequests);
@@ -72,10 +86,11 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	}
 
 	const parts: string[] = [];
+	const currency = options.currency ?? "USD";
 	let shownUnit: BillingUnit | undefined;
-	const primaryUnit: BillingUnit = options.usingSubscription ? "subscription" : "metered";
+	const primaryUnit: BillingUnit = options.usingSubscription ? "subscription" : currency;
 	if (options.cost || options.pricingPeriod || subagentCost) {
-		parts.push(formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme, true));
+		parts.push(formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme, true, currency));
 		shownUnit = primaryUnit;
 	} else if (options.usingSubscription) {
 		parts.push(
@@ -89,7 +104,8 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 	if (premiumRequests) parts.push(`★ ${formatNumber(premiumRequests)}`);
 	if (advisorCost && options.advisor) {
 		const prefix = parts.length > 0 ? "+ " : "";
-		const advisorUnit: BillingUnit = options.advisor.usingSubscription ? "subscription" : "metered";
+		const advisorCurrency = options.advisor.currency ?? currency;
+		const advisorUnit: BillingUnit = options.advisor.usingSubscription ? "subscription" : advisorCurrency;
 		parts.push(
 			`${prefix}${formatAdvisorSpend(
 				advisorCost,
@@ -97,6 +113,7 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 				options.fractionDigits,
 				uiTheme,
 				shownUnit !== advisorUnit,
+				advisorCurrency,
 			)}`,
 		);
 	}

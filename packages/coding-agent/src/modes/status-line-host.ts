@@ -8,6 +8,7 @@ import { GH_COMMAND_TIMEOUT_MS, github } from "../utils/github";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
+	cfgCostDisplayCurrency,
 	cfgGitEnabled,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
@@ -44,6 +45,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		transparent: cfgStatusLineTransparent.get(settings),
 		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
 		contextLine: cfgStatusLineContextLine.get(settings),
+		costCurrency: cfgCostDisplayCurrency.get(settings),
 	}),
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),

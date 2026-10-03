@@ -141,6 +141,15 @@ export type Provider = string;
 /** Token budgets for each thinking level (token-based providers only) */
 export type ThinkingBudgets = { [key in Effort]?: number };
 
+/** Monetary components of one billed usage record in a single currency. */
+export interface UsageCost {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	total: number;
+}
+
 export interface Usage {
 	/** Non-cached conversation input tokens (matches the bucket the provider bills as new input). */
 	input: number;
@@ -199,13 +208,15 @@ export interface Usage {
 		/** Final committed ACU cost, when reported. */
 		acuCost?: number;
 	};
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
+	cost: UsageCost;
+	/**
+	 * The same usage priced through every currency card the model publishes, at
+	 * the same request timestamp. `cost` stays the base-currency view; this map
+	 * carries alternate currencies (e.g. DeepSeek's exact CNY card) so display
+	 * layers never have to convert money themselves. Absent when the model
+	 * publishes no alternate card.
+	 */
+	costByCurrency?: Partial<Record<CurrencyCode, UsageCost>>;
 }
 
 export type OpenAIReasoningFormat =
@@ -1195,6 +1206,19 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+/**
+ * ISO 4217 codes omp can display. Vendors publish separate, exact rate cards
+ * per currency (they are not related by one FX rate), so a card is always
+ * denominated in exactly one of these and the code travels with its numbers.
+ */
+export const CURRENCY_CODES = ["USD", "CNY"] as const;
+export type CurrencyCode = (typeof CURRENCY_CODES)[number];
+
+/** True when `value` is a supported ISO 4217 currency code. */
+export function isCurrencyCode(value: unknown): value is CurrencyCode {
+	return typeof value === "string" && (CURRENCY_CODES as readonly string[]).includes(value);
+}
+
 /** Per-million-token rates for one model pricing tier. */
 export interface TokenCost {
 	input: number;
@@ -1229,6 +1253,8 @@ export interface PeakPricingWindow {
 export interface EffectiveTokenCost extends TokenCost {
 	effectiveFrom: number;
 	longContext?: LongContextTokenCost;
+	/** Exact equivalent of this dated card in other currencies, keyed by ISO 4217 code. */
+	currencyCards?: Readonly<Partial<Record<CurrencyCode, TokenCost>>>;
 }
 
 /** Scheduled discounts applied after selecting the effective rate card and context tier. */
@@ -1247,6 +1273,15 @@ export type ModelPromptCache = Partial<Record<"short" | "long", number>>;
 
 /** Base token rates plus optional long-context and time-based pricing. */
 export interface ModelCost extends TokenCost {
+	/** ISO 4217 code for the base rates. Defaults to `"USD"`. */
+	currency?: CurrencyCode;
+	/**
+	 * Exact vendor-published rate card in another currency, keyed by ISO 4217
+	 * code. A card is copied from the vendor's published table, never derived
+	 * from the base rates by an exchange rate. Alternate cards are flat: the
+	 * long-context tier applies only to the base card.
+	 */
+	currencyCards?: Readonly<Partial<Record<CurrencyCode, TokenCost>>>;
 	longContext?: LongContextTokenCost;
 	timeBased?: TimeBasedCost;
 }
