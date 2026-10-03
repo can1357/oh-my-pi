@@ -15,6 +15,7 @@ import pytest
 from pydantic import SecretStr
 
 from robomp.config import Settings
+from robomp import git_ops
 from robomp.git_ops import HeadDriftError
 from robomp.github_client import (
     CommentInfo,
@@ -665,10 +666,27 @@ async def test_error_decode_github_422() -> None:
 # 4 + 5. ProxyGitTransport push (happy + HEAD drift)
 # ============================================================================
 
-
-def test_proxy_git_transport_push_happy(proxy_settings: Settings, upstream_repo: Path) -> None:
+def test_proxy_git_transport_push_happy(
+    proxy_settings: Settings, upstream_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     branch = "farm/abc/feat"
-    _, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    repo_dir, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    # Remote auth only accepts https://github.com origins now, so the staged
+    # workspace carries the pinned URL and the redirected git op pushes to
+    # the local upstream instead.
+    _git(["-C", str(repo_dir), "remote", "set-url", "origin", "https://github.com/octo/widget"], repo_dir)
+
+    def fake_git_push(path: Path, **kwargs: object) -> git_ops.PushResult:
+        return git_ops.push(
+            path,
+            branch=str(kwargs["branch"]),
+            expected_head=str(kwargs["expected_head"]),
+            token=None,
+            remote_url=str(upstream_repo),
+            auth_url=None,
+        )
+
+    monkeypatch.setattr("robomp.proxy.server.git_push", fake_git_push)
     app = create_proxy_app(proxy_settings)
     app.state.settings = proxy_settings
     _attach_gh(app, lambda _: httpx.Response(500, json={"message": "should not be hit"}))
@@ -690,9 +708,26 @@ def test_proxy_git_transport_push_happy(proxy_settings: Settings, upstream_repo:
     assert _bare_has_branch(upstream_repo, branch)
 
 
-def test_proxy_git_transport_push_head_drift(proxy_settings: Settings, upstream_repo: Path) -> None:
+def test_proxy_git_transport_push_head_drift(
+    proxy_settings: Settings, upstream_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     branch = "farm/abc/drift"
-    _, _ = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    repo_dir, _ = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    # Remote auth only accepts https://github.com origins now; see the happy
+    # path test — the redirected git op pushes to the local upstream.
+    _git(["-C", str(repo_dir), "remote", "set-url", "origin", "https://github.com/octo/widget"], repo_dir)
+
+    def fake_git_push(path: Path, **kwargs: object) -> git_ops.PushResult:
+        return git_ops.push(
+            path,
+            branch=str(kwargs["branch"]),
+            expected_head=str(kwargs["expected_head"]),
+            token=None,
+            remote_url=str(upstream_repo),
+            auth_url=None,
+        )
+
+    monkeypatch.setattr("robomp.proxy.server.git_push", fake_git_push)
     app = create_proxy_app(proxy_settings)
     app.state.settings = proxy_settings
     _attach_gh(app, lambda _: httpx.Response(500, json={"message": "should not be hit"}))
