@@ -762,7 +762,7 @@ export const cfgRetryUsageReservePct = register({
 export const cfgRetryUsageReservePolicy = register({
 	id: "retry.usageReservePolicy",
 	type: "enum",
-	values: ["confirm", "auto", "fail-closed"] as const,
+	values: ["confirm", "auto", "fail-closed", "spend"] as const,
 	default: "confirm",
 	ui: {
 		tab: "model",
@@ -785,6 +785,11 @@ export const cfgRetryUsageReservePolicy = register({
 				value: "fail-closed",
 				label: "Fail closed",
 				description: "Do not spend reserve quota or select a fallback",
+			},
+			{
+				value: "spend",
+				label: "Spend reserve",
+				description: "Allow reserve quota while retaining depleted-account preflight",
 			},
 		],
 	},
