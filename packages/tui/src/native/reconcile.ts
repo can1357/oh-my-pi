@@ -32,6 +32,7 @@ import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollB
 import { type Component, Container, CURSOR_MARKER } from "../tui";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
+import { quietMotion } from "./quiet";
 import { isNativeSettled } from "./settle";
 
 /** The regions a frame fills. */
@@ -908,7 +909,7 @@ export class Reconciler {
 		const inherited = describe === Container.prototype.describe && comp.render !== Container.prototype.render;
 		if (describe && !inherited) {
 			const node = describe.call(comp, this.#cx!);
-			if (node) return node;
+			if (node) return quietMotion(node);
 		}
 		this.#rows++;
 		const cols = Math.max(1, this.#cx!.cols);
