@@ -500,9 +500,14 @@ export const cfgTuiSpinnerInterval = register({
 	type: "number",
 	default: DEFAULT_SPINNER_INTERVAL_MS,
 	env: "PI_SPINNER_INTERVAL",
-	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured.
+	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured. A
+	// quoted number (`spinnerInterval: "250"`) is rejected here: the number-typed setting would
+	// otherwise read it as its default while still counting as explicitly configured.
 	validate: raw => {
-		if (raw !== undefined && raw !== null) parseSpinnerInterval(raw);
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number")
+			throw new Error(`tui.spinnerInterval must be a number of milliseconds, got ${JSON.stringify(raw)}.`);
+		parseSpinnerInterval(raw);
 	},
 	normalize: parseSpinnerInterval,
 	ui: {
@@ -526,9 +531,13 @@ export const cfgTuiMaxFps = register({
 	type: "number",
 	default: DEFAULT_MAX_FPS,
 	env: "PI_MAX_FPS",
-	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured.
+	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured; a
+	// quoted number is rejected for the same reason as `tui.spinnerInterval`.
 	validate: raw => {
-		if (raw !== undefined && raw !== null) parseMaxFps(raw);
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number")
+			throw new Error(`tui.maxFps must be a number of frames per second, got ${JSON.stringify(raw)}.`);
+		parseMaxFps(raw);
 	},
 	normalize: parseMaxFps,
 	ui: {

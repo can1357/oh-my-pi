@@ -78,6 +78,24 @@ describe("tui.motion", () => {
 		});
 	});
 
+	it("notifies listeners when only a knob's provenance changes (explicit default under `none`)", async () => {
+		// `Settings` used to notify on value changes alone; `80` set explicitly equals the default, so
+		// the resolved spinner interval moved 0 → 80 with no event and the live clocks stayed static.
+		const settings = Settings.isolated();
+		cfgTuiMotion.override(settings, "none");
+		const seen: number[] = [];
+		const stop = cfgMotionResolved.listen(settings, motion => {
+			seen.push(motion.spinnerInterval);
+		});
+		cfgTuiSpinnerInterval.override(settings, DEFAULT_SPINNER_INTERVAL_MS);
+		await Bun.sleep(0);
+		expect(seen).toEqual([DEFAULT_SPINNER_INTERVAL_MS]);
+		cfgTuiSpinnerInterval.clearOverride(settings);
+		await Bun.sleep(0);
+		expect(seen).toEqual([DEFAULT_SPINNER_INTERVAL_MS, 0]);
+		stop();
+	});
+
 	describe("loaded from disk", () => {
 		let tempDir: TempDir;
 		let agentDir: string;
@@ -106,6 +124,16 @@ describe("tui.motion", () => {
 			});
 			await Bun.write(configPath, YAML.stringify({ tui: { maxFps: 0 } }));
 			await expect(Settings.loadIsolated({ cwd, agentDir })).rejects.toThrow("Max frames per second");
+		});
+
+		it("rejects quoted numbers instead of reading them as an explicit default", async () => {
+			// A number-typed setting reads a string as its default, and the preset would then treat
+			// that default as an explicit override: `spinnerInterval: "250"` under `none` animated at 80.
+			const configPath = path.join(agentDir, "config.yml");
+			await Bun.write(configPath, YAML.stringify({ tui: { motion: "none", spinnerInterval: "250" } }));
+			await expect(Settings.loadIsolated({ cwd, agentDir })).rejects.toThrow("tui.spinnerInterval must be a number");
+			await Bun.write(configPath, YAML.stringify({ tui: { maxFps: "15" } }));
+			await expect(Settings.loadIsolated({ cwd, agentDir })).rejects.toThrow("tui.maxFps must be a number");
 		});
 	});
 });
