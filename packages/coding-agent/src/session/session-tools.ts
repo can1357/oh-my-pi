@@ -5,6 +5,7 @@ import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { isRecord, logger, prompt, stringProperty, structuredCloneJSON, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -53,6 +54,7 @@ import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extens
 import {
 	cfgExternalThinking,
 	cfgIncludeModelInPrompt,
+	cfgInlineToolDescriptors,
 	cfgProvidersOpenaiCodexCodeMode,
 	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgSkillful,
@@ -818,7 +820,13 @@ export class SessionTools {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
 		if (cfgIncludeModelInPrompt.get(this.#host.settings)) return formatModelString(activeModel);
-		return `delegation-bias:${resolveDelegationBias(activeModel)}`;
+		// The inline-descriptor decision is per model and selects both the prompt's
+		// tool catalog and provider-side description pruning (see `sdk.ts`).
+		const inlineDescriptors = shouldInlineToolDescriptors(
+			cfgInlineToolDescriptors.get(this.#host.settings),
+			activeModel.id,
+		);
+		return `delegation-bias:${resolveDelegationBias(activeModel)}|inline-descriptors:${inlineDescriptors}`;
 	}
 
 	/** Rebuilds model-dependent tool prompts after a model change. */
