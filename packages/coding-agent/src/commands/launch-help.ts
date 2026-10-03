@@ -107,6 +107,10 @@ export const launchHelp = {
 			description:
 				"Milliseconds between spinner frames (working row, tool cards, status line, terminal title; default 80; 0 = static). Overrides tui.spinnerInterval for this run; PI_SPINNER_INTERVAL takes precedence",
 		}),
+		"max-fps": Flags.string({
+			description:
+				"Ceiling on how often the TUI repaints, in frames per second (default 30; 1-120). Keystroke echo keeps the full rate. Overrides tui.maxFps for this run; PI_MAX_FPS takes precedence",
+		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),

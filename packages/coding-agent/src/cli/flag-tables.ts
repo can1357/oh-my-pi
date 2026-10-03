@@ -31,6 +31,7 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { parseMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
 import { parseSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
@@ -173,6 +174,13 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			result.spinnerInterval = parseSpinnerInterval(value);
 		} catch (error) {
 			throw new CliUsageError(`--spinner-interval: ${(error as Error).message}`);
+		}
+	},
+	"--max-fps": (result, value) => {
+		try {
+			result.maxFps = parseMaxFps(value);
+		} catch (error) {
+			throw new CliUsageError(`--max-fps: ${(error as Error).message}`);
 		}
 	},
 	"--api-key": (result, value) => {

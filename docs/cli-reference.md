@@ -146,6 +146,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--advisor` | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md). |
 | `--max-time <duration>` | Stop the session after this duration (e.g. `600`, `10m`, `1h`). |
 | `--spinner-interval <ms>` | Milliseconds between spinner frames while the agent works — the working row, live tool cards, the status-line brand spinner, and the terminal title (default `80`; `0` shows static glyphs). Overrides `tui.spinnerInterval` for this run; `PI_SPINNER_INTERVAL`, when set, takes precedence over both. |
+| `--max-fps <n>` | Ceiling on how often the TUI repaints, in frames per second (default `30`; `1`–`120`). Animations and streaming text coalesce into frames no closer than this; keystroke echo keeps the full rate. Overrides `tui.maxFps` for this run; `PI_MAX_FPS`, when set, takes precedence over both. |
 
 #### Extensions, hooks, skills, and rules
 

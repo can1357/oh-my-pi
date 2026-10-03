@@ -4,6 +4,7 @@ import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { describeShimmer, type ShimmerPalette, shimmerEnabled } from "../theme/shimmer";
+import { minFrameIntervalMs } from "../frame-rate";
 import { spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import type { TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
@@ -321,10 +322,17 @@ export class Loader extends Text {
 	/**
 	 * Tick cadence: shimmer drives a 30 Hz repaint; otherwise the row changes when the glyph advances
 	 * on the shared spinner clock, or — with a static spinner — once a second for its dynamic label.
+	 * Never faster than a frame can land under the `tui.maxFps` ceiling: a tick that cannot paint is
+	 * pure CPU.
 	 */
 	#tickIntervalMs(): number {
-		if (this.messageColorFn.animated === true) return RENDER_INTERVAL_MS;
-		return spinnerAnimated() ? spinnerInterval() : STATIC_REFRESH_MS;
+		const base =
+			this.messageColorFn.animated === true
+				? RENDER_INTERVAL_MS
+				: spinnerAnimated()
+					? spinnerInterval()
+					: STATIC_REFRESH_MS;
+		return Math.max(base, minFrameIntervalMs());
 	}
 
 	stop() {
