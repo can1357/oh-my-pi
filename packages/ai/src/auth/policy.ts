@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	AuthAccountPolicies,
@@ -23,6 +24,8 @@ export function matchesAuthAccountSelector(selector: AuthAccountSelector, identi
 export class AccountPolicies {
 	#accountPolicies: AuthAccountPolicies;
 	#defaultReservePct: number;
+	/** Unmatched-policy warnings already logged, so per-request validation stays quiet. */
+	#warnedUnmatched = new Set<string>();
 
 	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
 		AccountPolicies.#validateAccountPolicyConfiguration(policies);
@@ -49,6 +52,7 @@ export class AccountPolicies {
 		storedCredentials: ReadonlyMap<string, readonly AuthCredential[]> = new Map(),
 	): void {
 		const next = new AccountPolicies(policies, defaultReservePct);
+		next.#warnedUnmatched = this.#warnedUnmatched;
 		for (const [provider, credentials] of storedCredentials) next.validateFor(provider, credentials);
 		this.#accountPolicies = next.#accountPolicies;
 		this.#defaultReservePct = next.#defaultReservePct;
@@ -105,6 +109,13 @@ export class AccountPolicies {
 		}
 	}
 
+	/**
+	 * Check the policies for `provider` against its visible OAuth credentials.
+	 *
+	 * A policy whose account is not among them (disabled, logged out, or hidden by an
+	 * account-pool filter) is inert: it matches nothing at selection time, so it only
+	 * warns once. Ambiguous or overlapping selectors still throw.
+	 */
 	validateFor(provider: string, credentials: readonly AuthCredential[]): void {
 		const policies = this.#accountPolicies
 			.map((policy, index) => ({ policy, index }))
@@ -125,7 +136,12 @@ export class AccountPolicies {
 			}
 			const path = `auth.accountPolicies[${index}].account`;
 			if (matches.length === 0) {
-				throw new AIError.ConfigurationError(`${path} matches no stored OAuth account for ${provider}`);
+				const key = `${provider}\0${index}\0${JSON.stringify(policy.account)}`;
+				if (!this.#warnedUnmatched.has(key)) {
+					this.#warnedUnmatched.add(key);
+					logger.warn("Account policy matches no stored OAuth account; ignoring it", { provider, path });
+				}
+				continue;
 			}
 			if (matches.length > 1) {
 				throw new AIError.ConfigurationError(

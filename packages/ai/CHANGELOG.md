@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Fixed omp failing to start, select an account, or log in whenever an `auth.accountPolicies` entry named an account that is disabled, logged out, or hidden from this client by an auth-broker account pool. Such a policy is now ignored with one warning in the log, and the remaining policies keep routing. A selector that matches no account because of a typo is likewise only logged instead of stopping startup ([#14233](https://github.com/can1357/oh-my-pi/pull/14233) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Antigravity chat and image requests sending an outdated client version when the model list came from cache, which could make newer models such as Claude Opus 5.5 unavailable.
 - When a DeepSeek model writes a broken DSML tool call (for example with the opening `<｜DSML｜tool_calls>` and `<｜DSML｜invoke>` tags missing), its closing tags are now kept in the streamed text instead of being dropped. This lets the agent remove exactly the broken call while keeping any text after it ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
 
