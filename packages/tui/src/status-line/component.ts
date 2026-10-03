@@ -1358,7 +1358,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * the first render after speculation leaves the running state.
 	 */
 	#syncSpeculationBlink(state: "idle" | "running" | "armed"): void {
-		// A TSP terminal pulses the icon itself (`fx: "pulse"`); `tui.motion` may switch the blink off.
+		// A TSP terminal pulses the icon itself (`fx: "pulse"`, dropped by `quietMotion` when effects are
+		// off); here `tui.motion` switches the JS blink off.
 		if (state === "running" && !this.#disposed && !isNativeRendering() && motionEffectsEnabled()) {
 			this.#speculationBlinkTimer ??= setInterval(() => {
 				this.#speculationBlinkOn = !this.#speculationBlinkOn;
@@ -2922,11 +2923,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#focusedAgentId === undefined &&
 			(leftSegments.includes("pi") || rightSegments.includes("pi"))
 		) {
-			// The brand spinner follows the shared clock (a constant tick when spinners are static); a
-			// brand fade still repaints on its own frame cadence.
-			return !spinnerAnimated() && this.#brandFade !== null
-				? Math.floor(nowMs / BRAND_FADE_FRAME_MS)
-				: spinnerClockTick(nowMs);
+			// The brand spinner follows the shared clock. With a static spinner the brand's elapsed
+			// timer still advances once a second, and a brand fade repaints on its own frame cadence.
+			if (spinnerAnimated()) return spinnerClockTick(nowMs);
+			return this.#brandFade !== null ? Math.floor(nowMs / BRAND_FADE_FRAME_MS) : Math.floor(nowMs / 1_000);
 		}
 		const includesTime = leftSegments.includes("time") || rightSegments.includes("time");
 		if (
