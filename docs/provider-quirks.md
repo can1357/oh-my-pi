@@ -1190,6 +1190,21 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Fallback discovery & display names (`packages/catalog/src/provider-models/openai-compat.ts`)**: If rich endpoints fail, discovery falls back to `/v1/models` (`fetchOpenAICompatibleModels`), applies the same mode filtering, and resolves specs against `models.dev` references. Strips reseller multiplier suffixes (e.g., `(1.5x usage)`) from display names.
 - **Compatibility overrides (`packages/catalog/src/provider-models/openai-compat.ts`)**: Hardcodes `compat.supportsStore: false` and `compat.supportsDeveloperRole: false` for all resolved models.
 
+## LithosAI (`lithosai`)
+LithosAI runs a hosted inference engine at `https://api.lithosai.cloud/v1`, serving open-weight models (Kimi K3, DeepSeek V4.1 Flash, GLM-5.3) through the OpenAI Chat Completions transport.
+
+### Special casings
+- **Roster-only discovery**: `lithosAiModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) fetches `GET /v1/models` with the stored key. Rows carry `{id, object, created, owned_by}` and nothing else, so no limits, tariffs, or capability flags are derived; every row keeps the discovery defaults and inherits the provider-wide wire shape from `packages/catalog/src/compat/rules/providers/lithosai.kdl`. The roster names each model family in base, `-fast`, `-ultra`, and `-ultra-chat` tiers, and no rule here names one.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/lithosai.kdl`. Environment keys: `LITHOSAI_API_KEY`. Validation uses `models-endpoint` against `https://api.lithosai.cloud/v1/models`, which answers 401 `invalid API key` without a valid key (observed 2026-10-03) and 200 for a valid key even when the organization's prepaid balance is empty.
+- **Credential-scoped cache**: `lithosai` is listed in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS` (`packages/catalog/src/provider-models/cache-provider-id.ts`), so the authoritative roster is namespaced by both the credential and the normalized endpoint — a second organization's key, or a self-hosted engine, never reads another namespace's rows.
+
+### Catalog model handling
+- **Provider entry (`lithosai`)**: `packages/catalog/src/compat/rules/providers/lithosai.kdl` declares default model `moonshotai/Kimi-K3`. Environment keys: `LITHOSAI_API_KEY`.
+- **No `discovery` node**: the roster is organization-scoped and needs a live credential, so a catalog regeneration must never freeze one account's snapshot into `models.json`; `dynamic-models-authoritative` prunes rows the endpoint drops.
+- Runtime manager: `lithosAiModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## LM Studio (`lm-studio`)
 LM Studio is a local OpenAI-compatible model server running on user hardware (defaulting to `http://127.0.0.1:1234/v1`). It uses the [OpenAI Chat Completions](#openai-chat-completions) transport (`api: "openai-completions"`) to stream chat completions and tool calls.
 

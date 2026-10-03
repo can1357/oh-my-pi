@@ -3,6 +3,7 @@ import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { LITHOSAI_API_BASE_URL, normalizeLithosAiBaseUrl } from "../wire/lithosai";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -26,6 +27,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	// LithosAI's roster is documented as "the models your organization can
+	// call": two keys from different organizations need not see the same ids,
+	// so the namespace must be resolved with the credential.
+	lithosai: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -154,6 +159,23 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const canonical =
 				providerId === "singularityapi-tech" ? SINGULARITYAPI_TECH_API_BASE_URL : SINGULARITYAPI_DEV_API_BASE_URL;
 			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "lithosai": {
+			// The roster is organization-scoped, and a self-hosted engine
+			// publishes its own. Discovery is authoritative, so a shared
+			// namespace would serve the previous organization's roster for the
+			// full TTL — including ids the current key cannot call. Hashing the
+			// pair means switching either re-runs discovery instead.
+			//
+			// Both call paths must land on one namespace: `ModelRegistry`
+			// resolves this provider through the credential-scoped hydration
+			// pass (it is in CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS), while
+			// discovery hashes the `/v1`-suffixed endpoint
+			// `lithosAiModelManagerOptions` passes — which is why both
+			// normalize through `normalizeLithosAiBaseUrl`.
+			const baseUrl = normalizeLithosAiBaseUrl(options.baseUrl ?? LITHOSAI_API_BASE_URL);
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}

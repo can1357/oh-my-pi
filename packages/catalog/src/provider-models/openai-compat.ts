@@ -55,6 +55,7 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { normalizeLithosAiBaseUrl } from "../wire/lithosai";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -7778,4 +7779,49 @@ export function singularityApiTechModelManagerOptions(
 	config?: SingularityApiModelManagerConfig,
 ): ModelManagerOptions<Api> {
 	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
+}
+
+// ---------------------------------------------------------------------------
+// LithosAI
+// ---------------------------------------------------------------------------
+
+export interface LithosAiModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * `lithosai` — LithosAI's hosted inference engine (`api.lithosai.cloud`), an
+ * OpenAI-compatible chat-completions endpoint over open-weight models served
+ * at full precision.
+ *
+ * `GET /v1/models` is the only catalog source. It is credential-scoped ("Lists
+ * the models your organization can call") and answers 401 `invalid API key`
+ * without a credential, so discovery runs only when a key is configured and
+ * the authoritative cache is keyed on both the credential and the endpoint.
+ * The rows it serves are bare `{id, object, created, owned_by}` records — no
+ * limits, tariffs, or capability metadata — so discovered models keep the
+ * discovery defaults and the reviewed KDL rules own the wire shape.
+ */
+export function lithosAiModelManagerOptions(
+	config?: LithosAiModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeLithosAiBaseUrl(config?.baseUrl);
+	return {
+		providerId: "lithosai",
+		cacheProviderId: resolveModelCacheProviderId("lithosai", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "lithosai",
+					baseUrl,
+					apiKey,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }

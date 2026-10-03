@@ -1,0 +1,22 @@
+// LithosAI keys are created at console.lithosai.cloud/keys and shown once, and
+// they are org-scoped: every key in an organization draws on the same rate
+// limits and the same prepaid balance, so a key separates attribution rather
+// than budget.
+//
+// Validation probes the non-billable `GET /v1/models`. A missing, malformed, or
+// revoked key answers 401 `invalid API key` (observed 2026-10-03), so a bogus
+// key is rejected without spending; the same probe answers 200 for a valid key
+// on an organization with an empty balance, so login succeeds before the
+// account can pay for inference — an out-of-credit account fails later, at
+// inference, with 402 `insufficient_quota` and `x-should-retry: false`.
+auth "lithosai" {
+	name "LithosAI"
+	env "LITHOSAI_API_KEY"
+	login "api-key" {
+		auth-url "https://console.lithosai.cloud/keys"
+		instructions "Create an API key on the LithosAI console's API Keys page"
+		prompt "Paste your LithosAI API key"
+		normalize "strip-bearer"
+		validate "models-endpoint" label="LithosAI" url="https://api.lithosai.cloud/v1/models"
+	}
+}

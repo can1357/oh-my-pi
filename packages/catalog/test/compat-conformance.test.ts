@@ -31,6 +31,11 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// lanes), so no rows are frozen into models.json.
 	"singularityapi-dev",
 	"singularityapi-tech",
+	// LithosAI's roster is organization-scoped and answers 401 without a
+	// credential, so every row — the ids alone; the endpoint publishes no
+	// limits, tariffs, or capability metadata — comes from the live snapshot
+	// via `lithosAiModelManagerOptions` and nothing is frozen into models.json.
+	"lithosai",
 	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
 	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
 	"litellm",

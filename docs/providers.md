@@ -190,6 +190,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
 | `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
 | `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
+| `lithosai`                       | `LITHOSAI_API_KEY`                                                            |
 
 Vertex ADC availability accepts project aliases `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or `GCLOUD_PROJECT`, and location aliases `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, or `VERTEX_LOCATION`.
 
@@ -205,7 +206,9 @@ SingularityAPI sells two unrelated products behind one brand, so OMP models them
 
 `singularityapi-tech` is the reserved DeepSeek lanes gateway. Usage bills against a booked reservation slot rather than prepaid credit, so a valid key with no active slot answers 403 until you book one at `https://app.singularityapi.tech`. Create an `sk-...` key there (or run `/login singularityapi-tech`), set `SINGULARITYAPI_TECH_API_KEY`, and the lane roster is discovered live from `https://api.singularityapi.tech/v1/models`.
 
-OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+`lithosai` is LithosAI's hosted inference engine, an OpenAI-compatible chat-completions endpoint at `https://api.lithosai.cloud/v1` serving open-weight models (Kimi K3, DeepSeek V4.1 Flash, GLM-5.3) at full precision. Create a key on the [API Keys](https://console.lithosai.cloud/keys) page (or run `/login lithosai`) and set `LITHOSAI_API_KEY`. The roster is organization-scoped and discovered live from `https://api.lithosai.cloud/v1/models`, which publishes model ids only, so those ids carry no context window or pricing until the endpoint reports them.
+
+OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, `/login singularityapi-dev`, `/login singularityapi-tech`, and `/login lithosai` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
 ### `.env` discovery and precedence
 
