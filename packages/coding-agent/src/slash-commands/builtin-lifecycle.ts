@@ -3,9 +3,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { cfgStartupScratchDir } from "../modes/settings";
 import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { buildReplanTitleContext, USER_INTERRUPT_LABEL } from "../session/messages";
@@ -21,7 +23,7 @@ import {
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { isLowSignalTitleInput } from "../tiny/text";
-import { resolveToCwd } from "../tools/path-utils";
+import { resolveToCwd, stripOuterDoubleQuotes } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -35,6 +37,42 @@ import type {
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
+}
+
+async function applyScratchCommand(
+	settings: Settings,
+	args: string,
+	cwd: string,
+): Promise<{ ok: boolean; message: string }> {
+	const arg = stripOuterDoubleQuotes(args.trim());
+	if (arg === "off") {
+		cfgStartupScratchDir.unset(settings);
+		await settings.flush();
+		return { ok: true, message: "Scratch directory cleared; launches from ~ use the default temp directory." };
+	}
+	if (arg === "status") {
+		const scratchDir = cfgStartupScratchDir.get(settings);
+		return {
+			ok: true,
+			message: scratchDir
+				? `Scratch directory: ${scratchDir}`
+				: "Scratch directory not set; launches from ~ use the default temp directory.",
+		};
+	}
+	const resolved = resolveToCwd(arg || cwd, cwd);
+	try {
+		if (!(await fs.stat(resolved)).isDirectory()) {
+			return { ok: false, message: `Not a directory: ${resolved}` };
+		}
+	} catch {
+		return { ok: false, message: `Directory does not exist: ${resolved}` };
+	}
+	cfgStartupScratchDir.set(settings, resolved);
+	await settings.flush();
+	return {
+		ok: true,
+		message: `Scratch directory set to ${resolved}; omp will start there when launched from ~.`,
+	};
 }
 
 /** Null reports no usable title; undefined silently discards an invalidated request. */
@@ -734,6 +772,31 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			runtime.ctx.editor.addToHistory(command.text);
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
+		},
+	},
+	{
+		name: "scratch",
+		icon: "folderMove",
+		description: "Set the directory omp starts in when launched from ~",
+		acpDescription: "Set the startup scratch directory",
+		inlineHint: "[<path>|off|status]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const result = await applyScratchCommand(runtime.settings, command.args, runtime.cwd);
+			if (!result.ok) return usage(result.message, runtime);
+			await runtime.output(result.message);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.addToHistory(command.text);
+			const result = await applyScratchCommand(
+				runtime.ctx.settings,
+				command.args,
+				runtime.ctx.sessionManager.getCwd(),
+			);
+			if (result.ok) runtime.ctx.showStatus(result.message);
+			else runtime.ctx.showError(result.message);
+			clearSubmittedText(runtime);
 		},
 	},
 	{
