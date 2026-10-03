@@ -701,7 +701,7 @@ export class SessionAdvisors {
 			// The merge window covers only this callback. With advisor.syncBacklog
 			// off the review drain can still emit after it returns; those late notes
 			// deliver individually through #routeAdvice, and `#terminalUnwindActive`
-			// (held until the next real agent start), not the merge window, is what
+			// (held until the next primary turn starts), not the merge window, is what
 			// keeps them from steering finished work — only a blocker or an
 			// agent-end reviewer's concern may still request a continuation.
 			if (!terminalBoundary) this.#terminalUnwindActive = false;
@@ -2582,13 +2582,14 @@ export class SessionAdvisors {
 		this.#preserveTerminalYieldAdvice = true;
 	}
 
-	/** Clear terminal-unwind delivery only when a real primary run starts. */
+	/** Clear terminal-unwind delivery when a new primary run starts. */
 	onPrimaryAgentStart(): void {
 		this.#terminalUnwindActive = false;
 	}
 
-	/** Restore normal advisor routing when a kept-alive subagent starts new work. */
+	/** Restore normal advisor routing when the primary starts or continues work. */
 	onPrimaryTurnStart(): void {
+		this.#terminalUnwindActive = false;
 		if (!this.#preserveTerminalYieldAdvice) return;
 		this.#preserveTerminalYieldAdvice = false;
 		this.#preserveAdvisorAdvice = false;

@@ -74,6 +74,8 @@ import {
 } from "./hub-frame";
 import { renderSegmentTrack } from "../chrome/segment-track";
 
+const MODEL_HUB_BODY_MIN_WIDTH = 28;
+
 /**
  * A row of the Roles view: a role, a model/wildcard chain-key header, one of a
  * chain's fallback entries, or the trailing "+ New role…". Fallback rows under
@@ -376,6 +378,7 @@ export class ModelHubComponent implements Component {
 		{ min: 18, max: 26 },
 		(width, rows) => this.#renderSidebar(width, rows),
 		this.#renderBodyPane,
+		{ bodyMinWidth: MODEL_HUB_BODY_MIN_WIDTH, preserveSidebar: true },
 	);
 	#lockedLoginLine: number | null = null;
 	#rolesRowStart = 1;
@@ -775,8 +778,20 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	/**
+	 * Push the active scope's items into the browser. While assigning a role,
+	 * the role's `accepts` predicate is re-applied here so a scope hop
+	 * (provider/all/recent) can never surface a model the role rejects — role
+	 * resolution and the runtime candidate pool filter the same way, so an
+	 * unaccepted pick would persist a selector that never resolves.
+	 */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
-		this.#candidateItems = [...items];
+		const assigning = this.#assigning;
+		const scoped =
+			assigning?.kind === "role"
+				? items.filter(item => this.#settings.getRoleInfo(assigning.role).accepts(item.model))
+				: items;
+		this.#candidateItems = [...scoped];
 		this.#applyModelKind();
 	}
 
@@ -1526,9 +1541,7 @@ export class ModelHubComponent implements Component {
 		this.#assigning = { kind: "role", role };
 		this.#focus = "scope";
 		this.#browser.setShowProvider(true);
-		this.#setCandidateItems(
-			this.#availableItems.filter(item => this.#settings.getRoleInfo(role).accepts(item.model)),
-		);
+		this.#setCandidateItems(this.#availableItems);
 		this.#browser.setQuery("");
 		const current = this.#roles[role];
 		if (current) {
