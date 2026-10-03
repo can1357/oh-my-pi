@@ -21,7 +21,7 @@ import {
 } from "../session/session-worktree";
 import type { SessionWorktree } from "../worktree/backend";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import { resolveToCwd, stripOuterDoubleQuotes } from "../tools/path-utils";
+import { expandTilde, resolveToCwd, stripOuterDoubleQuotes } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -127,15 +127,21 @@ async function applyScratchCommand(
 		return { ok: true, message: "Scratch directory cleared; launches from ~ use the default temp directory." };
 	}
 	if (arg === "status") {
-		const scratchDir = cfgStartupScratchDir.get(settings);
+		// Startup reads only the global/profile config (cli/startup-cwd.ts), so report that layer,
+		// not the merged value a project `.omp/config.yml` could shadow.
+		const startup = settings.getGlobalSettings().startup;
+		const scratchDir =
+			startup !== null && typeof startup === "object" && "scratchDir" in startup ? startup.scratchDir : undefined;
 		return {
 			ok: true,
-			message: scratchDir
-				? `Scratch directory: ${scratchDir}`
-				: "Scratch directory not set; launches from ~ use the default temp directory.",
+			message:
+				typeof scratchDir === "string" && scratchDir.trim()
+					? `Scratch directory: ${scratchDir}`
+					: "Scratch directory not set; launches from ~ use the default temp directory.",
 		};
 	}
-	const resolved = resolveToCwd(arg || cwd, cwd);
+	// Not resolveToCwd: its bare-`/` workspace alias is for tool inputs; here `/` means the filesystem root.
+	const resolved = path.resolve(cwd, expandTilde(arg || cwd));
 	try {
 		if (!(await fs.stat(resolved)).isDirectory()) {
 			return { ok: false, message: `Not a directory: ${resolved}` };
